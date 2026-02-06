@@ -552,6 +552,119 @@ pub extern "C" fn rt_msync_wrapper(address: i64, size: i64, is_async: bool) -> b
     rt_msync(address, size, flags) == 0
 }
 
+/// Read entire file as text using mmap - convenience wrapper
+/// Opens file, mmaps, copies to string, munmaps, closes fd
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_mmap_read_text(
+    path_ptr: *const c_char, path_len: usize,
+) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+
+    let path_slice = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path_cstr = match CString::new(path_slice) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Open file read-only
+    let fd = open(path_cstr.as_ptr() as *const i8, libc::O_RDONLY, 0);
+    if fd < 0 { return std::ptr::null_mut(); }
+
+    // Get file size via fstat
+    let mut stat_buf: libc::stat = std::mem::zeroed();
+    if libc::fstat(fd, &mut stat_buf) < 0 {
+        close(fd);
+        return std::ptr::null_mut();
+    }
+    let size = stat_buf.st_size as usize;
+
+    // Handle empty file
+    if size == 0 {
+        close(fd);
+        return CString::new("").ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut());
+    }
+
+    // Memory map the file
+    let mapped = mmap(
+        std::ptr::null_mut(),
+        size as size_t,
+        libc::PROT_READ,
+        libc::MAP_PRIVATE,
+        fd,
+        0,
+    );
+    close(fd);
+
+    if mapped == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+
+    // Copy mapped data to a String
+    let slice = std::slice::from_raw_parts(mapped as *const u8, size);
+    let result = String::from_utf8_lossy(slice).into_owned();
+
+    munmap(mapped, size as size_t);
+
+    CString::new(result).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
+/// Read entire file as bytes using mmap - convenience wrapper
+/// Returns newline-separated byte values as text (runtime parses as [i64])
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_mmap_read_bytes(
+    path_ptr: *const c_char, path_len: usize,
+) -> *mut c_char {
+    if path_ptr.is_null() { return std::ptr::null_mut(); }
+
+    let path_slice = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path_cstr = match CString::new(path_slice) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    // Open file read-only
+    let fd = open(path_cstr.as_ptr() as *const i8, libc::O_RDONLY, 0);
+    if fd < 0 { return std::ptr::null_mut(); }
+
+    // Get file size via fstat
+    let mut stat_buf: libc::stat = std::mem::zeroed();
+    if libc::fstat(fd, &mut stat_buf) < 0 {
+        close(fd);
+        return std::ptr::null_mut();
+    }
+    let size = stat_buf.st_size as usize;
+
+    // Handle empty file
+    if size == 0 {
+        close(fd);
+        return CString::new("").ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut());
+    }
+
+    // Memory map the file
+    let mapped = mmap(
+        std::ptr::null_mut(),
+        size as size_t,
+        libc::PROT_READ,
+        libc::MAP_PRIVATE,
+        fd,
+        0,
+    );
+    close(fd);
+
+    if mapped == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+
+    // Copy bytes and format as comma-separated values for runtime array parsing
+    let slice = std::slice::from_raw_parts(mapped as *const u8, size);
+    let byte_strs: Vec<String> = slice.iter().map(|b| b.to_string()).collect();
+    let result = byte_strs.join(",");
+
+    munmap(mapped, size as size_t);
+
+    CString::new(result).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())
+}
+
 // =============================================================================
 // Directory Creation
 // =============================================================================

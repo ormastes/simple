@@ -4,7 +4,7 @@
 
 use lib.execution.mod.{ExecutionConfig, TestExecutor, ExecutionResult}
 use lib.qemu.mod.{QemuArch, QemuConfig, QemuInstance}
-use lib.qemu.semihosting.{SemihostConfig, qemu_semihost_config}
+use lib.qemu.semihosting.{SemihostConfig}
 use app.io.mod.{file_read, file_exists, file_delete, file_write}
 
 # Result from semihosting execution
@@ -71,28 +71,42 @@ impl SemihostExecutor:
 
     # Execute and capture output
     me execute_and_capture() -> Result<SemihostResult, text>:
-        # Create QEMU config with semihosting
-        val config = qemu_semihost_config(self.arch, self.binary, self.output_file)
+        # Build QEMU command with output redirection
+        val qemu_cmd = match self.arch:
+            QemuArch.RiscV32: "qemu-system-riscv32"
+            QemuArch.RiscV64: "qemu-system-riscv64"
+            QemuArch.X86_64: "qemu-system-x86_64"
+            QemuArch.Arm: "qemu-system-arm"
+            _: return Err("Unsupported architecture")
 
-        # Start QEMU
-        val instance = QemuInstance.start(config)?
-        self.qemu_instance = instance
+        val machine = match self.arch:
+            QemuArch.RiscV32: "virt"
+            QemuArch.RiscV64: "virt"
+            QemuArch.X86_64: "pc"
+            QemuArch.Arm: "virt"
+            _: "virt"
 
-        # Wait for execution to complete (timeout: 10 seconds)
+        # Build command with stdout/stderr redirected to output file
+        val cmd = "timeout 5 {qemu_cmd} -M {machine} -bios none -kernel {self.binary} -nographic -semihosting-config enable=on,target=native > {self.output_file} 2>&1; echo $? > {self.output_file}.exit"
+
+        # Execute
         val start_time = timestamp_now()
-        val exit_result = instance.wait_exit(10000)?
+        val exec_result = shell(cmd)
         val duration_ms = timestamp_now() - start_time
+
+        # Read exit code
+        val exit_code = self.read_exit_code()
 
         # Read captured output
         val stdout = self.read_output_file()?
 
         # Create result
         Ok(SemihostResult(
-            exit_code: exit_result,
+            exit_code: exit_code,
             stdout: stdout,
             stderr: "",
             duration_ms: duration_ms,
-            success: exit_result == 0
+            success: exit_code == 0
         ))
 
     # Read output from file
@@ -109,6 +123,15 @@ impl SemihostExecutor:
         else:
             Ok(content)
 
+    # Read exit code from file
+    fn read_exit_code() -> i32:
+        val exit_file = "{self.output_file}.exit"
+        if not file_exists(exit_file):
+            return 0
+
+        val content = file_read(exit_file).trim()
+        parse_i32(content)
+
     # Cleanup resources
     me cleanup():
         # Stop QEMU if running
@@ -117,9 +140,13 @@ impl SemihostExecutor:
             instance.stop()
             self.qemu_instance = nil
 
-        # Delete output file
+        # Delete output files
         if file_exists(self.output_file):
             file_delete(self.output_file)
+
+        val exit_file = "{self.output_file}.exit"
+        if file_exists(exit_file):
+            file_delete(exit_file)
 
 # Helper functions
 
@@ -161,6 +188,9 @@ fn parse_i64(s: text) -> i64:
         result = -result
 
     result
+
+fn parse_i32(s: text) -> i32:
+    parse_i64(s) as i32
 
 # Shell command helper
 class ProcessResult:
