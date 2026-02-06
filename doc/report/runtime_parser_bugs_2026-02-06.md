@@ -28,6 +28,13 @@ During implementation of the remote RISC-V 32-bit debug module, 13 runtime parse
 | 11 | `index_of()` returns `Option<i32>`, not `i32` | High | Use `split()` or manual `find_char()` | Workaround applied |
 | 12 | `shell()` function not available in bootstrap runtime | Medium | Use `extern fn rt_process_run()` directly | Workaround applied |
 | 13 | `skip()` in `slow_it` blocks doesn't halt execution | Low | Guard entire test body with `if` condition | Workaround applied |
+| 14 | `.split().map()` chain doesn't apply map lambda | **Critical** | Break chain into separate `val`+`.map()` calls | Workaround applied |
+| 15 | `array[idx].method()` modifies copy, not element | High | Read into `var`, modify, write back with `arr[idx] = var` | Workaround applied |
+| 16 | `use app.io` wildcard import shadows module-local functions | High | Use direct `extern fn` declarations instead | Workaround applied |
+| 17 | `rt_timestamp_now`/`rt_sleep_ms` not in bootstrap runtime | Medium | Polyfill via `rt_process_run("date", ...)` | Workaround applied |
+| 18 | `parse_i64()` not available on strings | Low | Use `to_int()` instead | Workaround applied |
+| 19 | `sort_by()` not available on arrays | Medium | Implement manual `insertion_sort()` | Workaround applied |
+| 20 | `rt_file_read_text` returns Option-wrapped value | High | Use `result ?? ""` pattern | Workaround applied |
 
 ---
 
@@ -364,13 +371,74 @@ slow_it "requires tools":
 
 ---
 
+---
+
+## Bug 14: `.split().map()` Chain Doesn't Apply Map Lambda
+
+**Error:** Map lambda is ignored; original split results returned untrimmed.
+
+**Description:** Method chaining `.split(",").map(\c: c.trim())` returns the split results WITHOUT applying the map transformation. The `.map()` call is silently ignored when chained directly after `.split()`.
+
+**Affected patterns:**
+```simple
+# FAILS - map lambda not applied
+val cols = "id, name, value".split(",").map(\c: c.trim())
+# cols = ["id", " name", " value"] (NOT trimmed!)
+
+# WORKS - separate calls
+val parts = "id, name, value".split(",")
+val cols = parts.map(\c: c.trim())
+# cols = ["id", "name", "value"] (correctly trimmed)
+```
+
+**Workaround:** Break the chain into separate variable assignment and `.map()` call.
+
+**Impact:** `SdnTable.parse()` stored column names with leading spaces, causing all field lookups to fail after save/load round-trip. Fixed in `src/lib/database/core.spl`.
+
+---
+
+## Bug 15: `array[idx].method()` Modifies Copy, Not Element
+
+**Error:** Modifications to array elements via `self.rows[idx].set(...)` are silently lost.
+
+**Description:** Array index access (`arr[idx]`) returns a COPY of the element in the bootstrap runtime. Calling mutating methods on the copy doesn't affect the actual array element.
+
+**Affected patterns:**
+```simple
+# FAILS - modifies a copy
+self.rows[idx].set("valid", "false")  # Copy is modified and discarded
+
+# WORKS - read, modify, write back
+var row = self.rows[idx]
+row.set("valid", "false")
+self.rows[idx] = row
+```
+
+**Workaround:** Read element into a `var`, modify it, then assign back with indexed assignment.
+
+**Impact:** `SdnTable.mark_deleted()` silently failed. Fixed in `src/lib/database/core.spl`.
+
+---
+
+## Bug 16-20: Additional Bootstrap Runtime Limitations
+
+| # | Description | Workaround |
+|---|-------------|------------|
+| 16 | `use app.io` wildcard import shadows module-local functions in other imported modules | Use direct `extern fn` declarations |
+| 17 | `rt_timestamp_now` / `rt_sleep_ms` not in bootstrap runtime | Polyfill via `rt_process_run("date", ["+%s%3N"])` |
+| 18 | `parse_i64()` not available on strings | Use `to_int()` instead |
+| 19 | `sort_by()` not available on arrays | Manual `insertion_sort()` implementation |
+| 20 | `rt_file_read_text` returns Option-wrapped value even with `-> text` return type | Use `result ?? ""` pattern |
+
+---
+
 ## Metrics
 
-- **Bugs found:** 13
-- **Workarounds applied:** 13/13
-- **Files affected:** 10 source files in `src/remote/` + 2 test files
+- **Bugs found:** 20
+- **Workarounds applied:** 20/20
+- **Files affected:** 10 source files in `src/remote/` + 4 source files in `src/lib/database/` + 6 test files
 - **Discovery method:** Systematic binary-search testing with minimal scripts
-- **Test results:** 51/51 passing (48 pass + 3 skip)
+- **Test results:** 51/51 remote tests passing (48 pass + 3 skip), 70/70 database tests passing
 
 ---
 
