@@ -18,6 +18,36 @@ use simple_parser::Parser;
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::NoGcAllocator;
 
+/// Execution mode for the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// JIT compilation with interpreter fallback (default in Stage 2+)
+    Jit,
+    /// Force interpreter only (--interpret flag)
+    Interpret,
+    /// Force Cranelift JIT backend
+    CraneliftJit,
+    /// Force LLVM JIT backend
+    LlvmJit,
+}
+
+impl ExecutionMode {
+    /// Parse from string (CLI flag or env var).
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "interpret" | "interpreter" => ExecutionMode::Interpret,
+            "cranelift" => ExecutionMode::CraneliftJit,
+            "llvm" => ExecutionMode::LlvmJit,
+            "jit" | "auto" | _ => ExecutionMode::Jit,
+        }
+    }
+
+    /// Check if this mode uses JIT.
+    pub fn is_jit(&self) -> bool {
+        !matches!(self, ExecutionMode::Interpret)
+    }
+}
+
 /// Core execution engine for Simple code
 /// Handles GC allocation, compilation, loading, and execution
 pub struct ExecCore {
@@ -26,6 +56,8 @@ pub struct ExecCore {
     pub gc_runtime: Option<Arc<GcRuntime>>,
     /// Runtime symbol provider for JIT compilation
     pub symbol_provider: Arc<dyn RuntimeSymbolProvider>,
+    /// Execution mode (JIT vs interpreter)
+    pub execution_mode: ExecutionMode,
 }
 
 impl ExecCore {
@@ -37,11 +69,16 @@ impl ExecCore {
     /// Create with a GC runtime and custom symbol provider
     pub fn with_gc_and_provider(gc: GcRuntime, provider: Arc<dyn RuntimeSymbolProvider>) -> Self {
         let gc = Arc::new(gc);
+        // Check SIMPLE_EXECUTION_MODE env var for default mode
+        let mode = std::env::var("SIMPLE_EXECUTION_MODE")
+            .map(|s| ExecutionMode::from_str(&s))
+            .unwrap_or(ExecutionMode::Interpret); // Stage 1: interpreter default
         Self {
             loader: SmfLoader::new(),
             gc_alloc: gc.clone(),
             gc_runtime: Some(gc),
             symbol_provider: provider,
+            execution_mode: mode,
         }
     }
 
@@ -62,7 +99,13 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::new()),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
+            execution_mode: ExecutionMode::Interpret,
         }
+    }
+
+    /// Set the execution mode.
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.execution_mode = mode;
     }
 
     /// Create with verbose GC logging
@@ -106,6 +149,7 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::with_memory_limit(limit_bytes)),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
+            execution_mode: ExecutionMode::Interpret,
         }
     }
 
@@ -116,6 +160,7 @@ impl ExecCore {
             gc_alloc: Arc::new(NoGcAllocator::with_memory_config(config)),
             gc_runtime: None,
             symbol_provider: default_runtime_provider(),
+            execution_mode: ExecutionMode::Interpret,
         }
     }
 
@@ -495,23 +540,99 @@ impl ExecCore {
         Ok(exit_code)
     }
 
-    /// Run a file, auto-detecting type by extension (.spl or .smf)
+    /// Run a file, auto-detecting type by extension (.spl or .smf).
+    ///
+    /// Dispatches to JIT or interpreter based on `execution_mode`.
+    /// When in JIT mode, falls back to interpreter on JIT failure.
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match extension {
             "smf" => self.run_smf(path),
             "spl" | "simple" | "sscript" | "" => {
-                let out_path = self.get_build_path_for_source(path)?;
-                self.compile_file(path, &out_path)?;
-                let module = self.load_module(&out_path)?;
-                self.execute_and_gc(&module)
+                if self.execution_mode.is_jit() {
+                    // Try JIT first, fall back to interpreter on failure
+                    match self.run_file_jit(path) {
+                        Ok(exit_code) => Ok(exit_code),
+                        Err(jit_err) => {
+                            eprintln!(
+                                "[INFO] JIT compilation failed, falling back to interpreter: {}",
+                                jit_err
+                            );
+                            self.run_file_interpreted(path)
+                        }
+                    }
+                } else {
+                    // Interpreter path (current default)
+                    let out_path = self.get_build_path_for_source(path)?;
+                    self.compile_file(path, &out_path)?;
+                    let module = self.load_module(&out_path)?;
+                    self.execute_and_gc(&module)
+                }
             }
             other => Err(format!(
                 "unsupported file extension '.{}': expected '.spl', '.simple', '.sscript', or '.smf'",
                 other
             )),
         }
+    }
+
+    /// Run a .spl file using JIT compilation via ExecutionManager.
+    ///
+    /// Parses → HIR → MIR → JIT compile → execute.
+    /// Falls back to interpreter for code without `fn main()`.
+    pub fn run_file_jit(&self, path: &Path) -> Result<i32, String> {
+        use simple_compiler::codegen::{ExecutionManager, LocalExecutionManager, JitBackend};
+        use simple_compiler::hir;
+        use simple_compiler::interpreter::evaluate_module;
+        use simple_compiler::mir::lower_to_mir;
+
+        // Read and parse source
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+        let mut parser = Parser::new(&source);
+        let parse_result = parser.parse();
+        self.display_error_hints(&parser, &source);
+        let ast = parse_result.map_err(|e| format!("parse error: {}", e))?;
+
+        // Lower to HIR
+        let hir_module = hir::lower(&ast)
+            .map_err(|e| format!("HIR lowering error: {}", e))?;
+
+        // Lower to MIR
+        let mir_module = lower_to_mir(&hir_module)
+            .map_err(|e| format!("MIR lowering error: {}", e))?;
+
+        // Check for main function
+        let has_main = mir_module.functions.iter().any(|f| f.name == "main");
+
+        if !has_main {
+            // No main function - use interpreter for module-level code
+            let exit_code = evaluate_module(&ast.items)
+                .map_err(|e| format!("{}", e))?;
+            self.collect_gc();
+            return Ok(exit_code);
+        }
+
+        // Select JIT backend based on execution mode
+        let jit_backend = match self.execution_mode {
+            ExecutionMode::CraneliftJit => JitBackend::Cranelift,
+            ExecutionMode::LlvmJit => JitBackend::Llvm,
+            _ => JitBackend::Auto,
+        };
+
+        // Create execution manager and compile
+        let mut em = LocalExecutionManager::with_provider(
+            jit_backend,
+            self.symbol_provider.clone(),
+        )?;
+
+        em.compile_module(&mir_module)?;
+
+        // Execute main
+        let exit_code = em.execute("main", &[])?;
+        self.collect_gc();
+        Ok(exit_code as i32)
     }
 
     /// Get the build path for a compiled SMF file

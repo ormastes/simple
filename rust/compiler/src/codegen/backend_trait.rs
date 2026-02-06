@@ -30,6 +30,12 @@ pub enum BackendKind {
     Cranelift,
     /// LLVM backend (broader target support, including 32-bit)
     Llvm,
+    /// Cranelift JIT backend (in-process, ~72us compile time)
+    CraneliftJit,
+    /// LLVM JIT backend (in-process, broader target support)
+    LlvmJit,
+    /// Auto-select best JIT backend for the host
+    AutoJit,
     /// Vulkan backend (GPU kernel compilation via SPIR-V)
     #[cfg(feature = "vulkan")]
     Vulkan,
@@ -68,6 +74,34 @@ impl BackendKind {
     /// Force LLVM backend
     pub fn force_llvm() -> Self {
         BackendKind::Llvm
+    }
+
+    /// Select the best JIT backend for the current host.
+    ///
+    /// Prefers Cranelift on 64-bit hosts (~72us compile time).
+    /// Falls back to LLVM JIT on 32-bit/WASM hosts or when Cranelift
+    /// doesn't support the target.
+    pub fn for_jit() -> Self {
+        #[cfg(target_pointer_width = "64")]
+        {
+            BackendKind::CraneliftJit
+        }
+        #[cfg(not(target_pointer_width = "64"))]
+        {
+            #[cfg(feature = "llvm")]
+            {
+                BackendKind::LlvmJit
+            }
+            #[cfg(not(feature = "llvm"))]
+            {
+                BackendKind::CraneliftJit
+            }
+        }
+    }
+
+    /// Check if this is a JIT backend kind.
+    pub fn is_jit(&self) -> bool {
+        matches!(self, BackendKind::CraneliftJit | BackendKind::LlvmJit | BackendKind::AutoJit)
     }
 
     /// Select the appropriate backend for GPU kernel compilation

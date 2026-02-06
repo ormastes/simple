@@ -50,6 +50,14 @@ impl CompilerPipeline {
                         .to_string(),
                 ))
             }
+            BackendKind::CraneliftJit | BackendKind::LlvmJit | BackendKind::AutoJit => {
+                // JIT backends are for in-process execution, not AOT compilation.
+                // Fall back to Cranelift AOT for object code generation.
+                let codegen = Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                codegen
+                    .compile_module(mir_module)
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))
+            }
         }
     }
 }
