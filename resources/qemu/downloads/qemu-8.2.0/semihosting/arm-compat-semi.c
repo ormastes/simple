@@ -206,6 +206,9 @@ static int get_string_by_id(CPUState *cs, uint32_t string_id,
             return -1;
         }
 
+        fprintf(stderr, "  [DEBUG] Entry %d: addr=0x%lx, id=%u, len=%u, params=%u\n",
+                i, (unsigned long)entry_addr, id, length, params);
+
         if (id == string_id) {
             /* Found! Read string text */
             size_t read_len = (length < bufsize) ? length : (bufsize - 1);
@@ -217,8 +220,8 @@ static int get_string_by_id(CPUState *cs, uint32_t string_id,
             return 0;  /* Success */
         }
 
-        /* Move to next entry: header (12) + text (aligned to 4) */
-        entry_addr += 12 + ((length + 3) & ~3);
+        /* Move to next entry: align position after header + text to 4-byte boundary */
+        entry_addr = ((entry_addr + 12 + length) + 3) & ~3;
     }
 
     /* String ID not found */
@@ -959,10 +962,20 @@ void do_common_semihosting(CPUState *cs)
         if (nr >= TARGET_SYS_WRITE_HANDLE && nr <= TARGET_SYS_WRITE_HANDLE_PN) {
             char text_buffer[1024];
             char format_buffer[1024];
-            uint32_t string_id = args;
+            uint32_t string_id;
             uint32_t params[16];  /* Max 16 parameters */
             int param_count = 0;
             int i;
+
+            /* For parameterized versions, args points to [string_id, param1, param2, ...] */
+            /* For simple version (0x100), args IS the string_id */
+            if (nr == TARGET_SYS_WRITE_HANDLE) {
+                string_id = args;  /* Direct value */
+            } else {
+                /* Read string ID from parameter block */
+                GET_ARG(0);
+                string_id = arg0;
+            }
 
             /* Load table on first use */
             if (!g_string_table.loaded) {
@@ -991,9 +1004,9 @@ void do_common_semihosting(CPUState *cs)
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P1:
-                /* 1 parameter */
-                GET_ARG(0);
-                params[0] = arg0;
+                /* 1 parameter - args points to [string_id, param1] */
+                GET_ARG(1);  /* Skip arg0 (string_id), read param1 */
+                params[0] = arg1;
                 param_count = 1;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
@@ -1003,11 +1016,11 @@ void do_common_semihosting(CPUState *cs)
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P2:
-                /* 2 parameters */
-                GET_ARG(0);
-                GET_ARG(1);
-                params[0] = arg0;
-                params[1] = arg1;
+                /* 2 parameters - args points to [string_id, param1, param2] */
+                GET_ARG(1);  /* param1 */
+                GET_ARG(2);  /* param2 */
+                params[0] = arg1;
+                params[1] = arg2;
                 param_count = 2;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
@@ -1017,13 +1030,13 @@ void do_common_semihosting(CPUState *cs)
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P3:
-                /* 3 parameters */
-                GET_ARG(0);
-                GET_ARG(1);
-                GET_ARG(2);
-                params[0] = arg0;
-                params[1] = arg1;
-                params[2] = arg2;
+                /* 3 parameters - args points to [string_id, param1, param2, param3] */
+                GET_ARG(1);  /* param1 */
+                GET_ARG(2);  /* param2 */
+                GET_ARG(3);  /* param3 */
+                params[0] = arg1;
+                params[1] = arg2;
+                params[2] = arg3;
                 param_count = 3;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
