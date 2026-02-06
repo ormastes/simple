@@ -1,0 +1,209 @@
+# Trace32 Native Client
+# For real Trace32 hardware: uses t32rem CLI tool via shell().
+# Provides unique features not available through GDB (flash, trace, coverage).
+
+use app.io.{shell, ProcessResult}
+use remote.types.DebugConfig
+
+# Trace32 native client using t32rem CLI
+class Trace32NativeClient:
+    t32rem_path: text       # Path to t32rem executable
+    host: text              # Trace32 API host
+    port: i32               # Trace32 API port (default: 20000)
+    connected: bool
+
+impl Trace32NativeClient:
+    static fn connect(config: DebugConfig) -> Result<Trace32NativeClient, text>:
+        # Find t32rem binary
+        val t32rem_path = Trace32NativeClient.find_t32rem()
+        if t32rem_path.len() == 0:
+            return Err("t32rem not found - install Trace32 PowerView")
+
+        val client = Trace32NativeClient(
+            t32rem_path: t32rem_path,
+            host: config.host,
+            port: config.port,
+            connected: false
+        )
+
+        # Test connection
+        val test_result = client.cmd("VERSION.HARDWARE()")
+        match test_result:
+            Ok(_):
+                client.connected = true
+                Ok(client)
+            Err(e):
+                Err("Trace32 connection test failed: {e}")
+
+    # Find t32rem binary on the system
+    static fn find_t32rem() -> text:
+        # Check common Trace32 installation paths
+        val paths = [
+            "/opt/t32/bin/pc_linux64/t32rem",
+            "/opt/t32/bin/pc_linux/t32rem",
+            "{shell("echo $HOME").stdout.trim()}/t32/bin/pc_linux64/t32rem"
+        ]
+
+        for path in paths:
+            val check = shell("test -x '{path}'")
+            if check.exit_code == 0:
+                return path
+
+        # Try PATH
+        val which = shell("which t32rem 2>/dev/null")
+        if which.exit_code == 0:
+            return which.stdout.trim()
+
+        ""
+
+    # Send a command to Trace32 via t32rem
+    fn cmd(command: text) -> Result<text, text>:
+        val result = shell("{self.t32rem_path} {self.host}:{self.port} {command}")
+        if result.exit_code != 0:
+            return Err("t32rem error: {result.stderr}")
+        Ok(result.stdout.trim())
+
+    # Send multiple commands in sequence
+    fn cmds(commands: [text]) -> Result<text, text>:
+        var last_output = ""
+        for command in commands:
+            last_output = self.cmd(command)?
+        Ok(last_output)
+
+    # --- System Commands ---
+
+    fn system_up() -> Result<text, text>:
+        self.cmd("SYStem.Up")
+
+    fn system_reset() -> Result<text, text>:
+        self.cmd("SYStem.RESetTarget")
+
+    fn system_mode_attach() -> Result<text, text>:
+        self.cmd("SYStem.Mode Attach")
+
+    # --- Flash Programming (Trace32-unique, rank 0) ---
+
+    fn flash_program(elf_path: text, addr: i64) -> Result<text, text>:
+        # Standard Trace32 flash programming sequence
+        self.cmds([
+            "FLASH.ReProgram ALL",
+            "Data.LOAD.Elf {elf_path} 0x{addr}",
+            "FLASH.ReProgram OFF"
+        ])
+
+    fn flash_erase() -> Result<text, text>:
+        self.cmd("FLASH.Erase ALL")
+
+    fn flash_program_verify(elf_path: text, addr: i64) -> Result<text, text>:
+        self.cmds([
+            "FLASH.ReProgram ALL",
+            "Data.LOAD.Elf {elf_path} 0x{addr}",
+            "FLASH.ReProgram OFF",
+            "Data.LOAD.Elf {elf_path} 0x{addr} /ComPare"
+        ])
+
+    # --- Trace Capture (Trace32-unique, rank 0) ---
+
+    fn trace_capture_start() -> Result<text, text>:
+        self.cmds([
+            "Trace.Init",
+            "Trace.Method Analyzer",
+            "Trace.ON"
+        ])
+
+    fn trace_capture_stop() -> Result<text, text>:
+        self.cmd("Trace.OFF")?
+        val raw = self.cmd("Trace.List")?
+        Ok(raw)
+
+    fn trace_list() -> Result<text, text>:
+        self.cmd("Trace.List")
+
+    fn trace_chart() -> Result<text, text>:
+        self.cmd("Trace.Chart")
+
+    fn trace_flow() -> Result<text, text>:
+        self.cmd("Trace.Flow")
+
+    # --- Coverage Collection (Trace32-unique, rank 0) ---
+
+    fn coverage_collect() -> Result<text, text>:
+        self.cmds([
+            "COVerage.Init",
+            "COVerage.ON"
+        ])?
+        # Coverage runs during program execution
+        # Caller should run the program, then call coverage_results()
+        Ok("coverage started")
+
+    fn coverage_results() -> Result<text, text>:
+        self.cmd("COVerage.OFF")?
+        self.cmd("COVerage.ListFunc")
+
+    fn coverage_report() -> Result<text, text>:
+        self.cmd("COVerage.ListModule")
+
+    # --- Profiling (Trace32-unique, rank 0) ---
+
+    fn profile_sample() -> Result<text, text>:
+        self.cmds([
+            "Analyzer.AutoFocus"
+        ])?
+        val raw = self.cmd("Analyzer.List")?
+        Ok(raw)
+
+    fn profile_timing() -> Result<text, text>:
+        self.cmd("Perf.ListFunc")
+
+    # --- Execution Control ---
+
+    fn go() -> Result<text, text>:
+        self.cmd("Go")
+
+    fn break_() -> Result<text, text>:
+        self.cmd("Break")
+
+    fn step() -> Result<text, text>:
+        self.cmd("Step")
+
+    fn step_over() -> Result<text, text>:
+        self.cmd("Step.Over")
+
+    # --- Breakpoints ---
+
+    fn break_set_addr(addr: i64) -> Result<text, text>:
+        self.cmd("Break.Set 0x{addr} /Program")
+
+    fn break_set_func(func_name: text) -> Result<text, text>:
+        self.cmd("Break.Set {func_name} /Program")
+
+    fn break_delete_all() -> Result<text, text>:
+        self.cmd("Break.Delete /ALL")
+
+    # --- Memory ---
+
+    fn data_dump(addr: i64, end_addr: i64) -> Result<text, text>:
+        self.cmd("Data.dump 0x{addr}--0x{end_addr}")
+
+    fn data_load_elf(elf_path: text) -> Result<text, text>:
+        self.cmd("Data.LOAD.Elf {elf_path}")
+
+    # --- Registers ---
+
+    fn register_view() -> Result<text, text>:
+        self.cmd("Register.view /SpotLight")
+
+    fn register_set(name: text, value: i64) -> Result<text, text>:
+        self.cmd("Register.Set {name} 0x{value}")
+
+    # --- Symbol Loading ---
+
+    fn symbol_load(elf_path: text) -> Result<text, text>:
+        self.cmd("sYmbol.LOAD.ELF {elf_path}")
+
+    # --- Disconnect ---
+
+    fn disconnect():
+        if self.connected:
+            # No explicit disconnect needed for t32rem
+            self.connected = false

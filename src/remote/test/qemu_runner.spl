@@ -1,0 +1,162 @@
+# QEMU Test Runner
+# Manages QEMU instances for integration testing of remote debug features.
+
+use app.io.{shell, ProcessResult}
+
+# QEMU instance controller
+class QemuRunner:
+    pid: text               # QEMU process PID
+    gdb_port: i32           # GDB stub port
+    binary_path: text       # ELF binary being run
+    machine: text           # QEMU machine type
+    running: bool
+
+impl QemuRunner:
+    # Start QEMU with a RISC-V 32 binary, halted, with GDB stub
+    static fn start(elf_path: text, port: i32) -> Result<QemuRunner, text>:
+        # Verify QEMU is available
+        val check = shell("which qemu-system-riscv32 2>/dev/null")
+        if check.exit_code != 0:
+            return Err("qemu-system-riscv32 not found - install with: apt install qemu-system-misc")
+
+        # Verify ELF exists
+        val elf_check = shell("test -f '{elf_path}'")
+        if elf_check.exit_code != 0:
+            return Err("ELF binary not found: {elf_path}")
+
+        # Start QEMU in background:
+        # -machine virt: RISC-V virt machine
+        # -nographic: no GUI
+        # -kernel: load ELF as kernel
+        # -S: start halted (wait for debugger)
+        # -gdb tcp::port: enable GDB stub
+        val cmd = "qemu-system-riscv32 -machine virt -nographic -kernel {elf_path} -S -gdb tcp::{port}"
+        val start_result = shell("{cmd} &")
+        if start_result.exit_code != 0:
+            return Err("failed to start QEMU: {start_result.stderr}")
+
+        # Give QEMU time to start
+        shell("sleep 0.5")
+
+        # Get QEMU PID
+        val pid_result = shell("pgrep -f 'qemu-system-riscv32.*-gdb tcp::{port}' | tail -1")
+        val pid = pid_result.stdout.trim()
+
+        if pid.len() == 0:
+            return Err("QEMU process not found - may have failed to start")
+
+        # Verify GDB port is listening
+        val port_check = shell("timeout 3 bash -c 'while ! ss -tlnp | grep -q :{port}; do sleep 0.1; done' 2>/dev/null")
+        if port_check.exit_code != 0:
+            # Try to continue anyway - port check may not work in all environments
+            pass
+
+        Ok(QemuRunner(
+            pid: pid,
+            gdb_port: port,
+            binary_path: elf_path,
+            machine: "virt",
+            running: true
+        ))
+
+    # Start with custom QEMU arguments
+    static fn start_custom(elf_path: text, port: i32, extra_args: text) -> Result<QemuRunner, text>:
+        val cmd = "qemu-system-riscv32 -machine virt -nographic -kernel {elf_path} -S -gdb tcp::{port} {extra_args}"
+        val start_result = shell("{cmd} &")
+        if start_result.exit_code != 0:
+            return Err("failed to start QEMU: {start_result.stderr}")
+
+        shell("sleep 0.5")
+
+        val pid_result = shell("pgrep -f 'qemu-system-riscv32.*-gdb tcp::{port}' | tail -1")
+        val pid = pid_result.stdout.trim()
+
+        Ok(QemuRunner(
+            pid: pid,
+            gdb_port: port,
+            binary_path: elf_path,
+            machine: "virt",
+            running: true
+        ))
+
+    # Stop QEMU
+    fn stop():
+        if self.running:
+            shell("kill {self.pid} 2>/dev/null")
+            # Wait for cleanup
+            shell("sleep 0.2")
+            # Force kill if still running
+            shell("kill -9 {self.pid} 2>/dev/null")
+            self.running = false
+
+    # Check if QEMU is still running
+    fn is_running() -> bool:
+        if not self.running:
+            return false
+        val check = shell("kill -0 {self.pid} 2>/dev/null")
+        check.exit_code == 0
+
+    # Wait for QEMU to exit with timeout
+    fn wait_exit(timeout_ms: i32) -> Result<i32, text>:
+        val timeout_sec = timeout_ms / 1000
+        val wait_result = shell("timeout {timeout_sec} tail --pid={self.pid} -f /dev/null 2>/dev/null")
+        if wait_result.exit_code == 124:
+            return Err("QEMU did not exit within {timeout_ms}ms")
+        self.running = false
+        Ok(0)
+
+    # Get QEMU monitor output (if any)
+    fn monitor_output() -> text:
+        # QEMU writes to stdout which we redirected
+        ""
+
+# Build a RISC-V 32 test binary from assembly
+fn build_rv32_test(asm_path: text, output_path: text) -> Result<text, text>:
+    # Check for cross-compiler
+    val gcc = find_rv32_gcc()
+    if gcc.len() == 0:
+        return Err("RISC-V cross-compiler not found. Install: apt install gcc-riscv64-unknown-elf")
+
+    # Assemble and link
+    val result = shell("{gcc} -nostdlib -march=rv32imac -mabi=ilp32 -o {output_path} {asm_path}")
+    if result.exit_code != 0:
+        return Err("build failed: {result.stderr}")
+
+    Ok(output_path)
+
+# Find RISC-V 32 GCC
+fn find_rv32_gcc() -> text:
+    val candidates = [
+        "riscv32-unknown-elf-gcc",
+        "riscv64-unknown-elf-gcc"  # Can cross-compile to rv32
+    ]
+
+    for candidate in candidates:
+        val check = shell("which {candidate} 2>/dev/null")
+        if check.exit_code == 0:
+            return check.stdout.trim()
+
+    ""
+
+# Check if QEMU RISC-V 32 is available
+fn is_qemu_available() -> bool:
+    val check = shell("which qemu-system-riscv32 2>/dev/null")
+    check.exit_code == 0
+
+# Check if RISC-V cross-compiler is available
+fn is_rv32_gcc_available() -> bool:
+    find_rv32_gcc().len() > 0
+
+# Check if GDB multiarch is available
+fn is_gdb_available() -> bool:
+    val candidates = [
+        "riscv32-unknown-elf-gdb",
+        "riscv64-unknown-elf-gdb",
+        "gdb-multiarch",
+        "gdb"
+    ]
+    for candidate in candidates:
+        val check = shell("which {candidate} 2>/dev/null")
+        if check.exit_code == 0:
+            return true
+    false
