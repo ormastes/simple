@@ -175,39 +175,30 @@ impl JitInterpreterBackend:
                     print "[jit] MIR lowering failed for {fn_.name}, will interpret: {err_msg}"
                 return Ok(())
 
-        # Step 2: Serialize MIR to string
-        # NOTE: This is the missing piece - MIR serialization
-        # For now, we skip JIT compilation in Auto/Hybrid mode
-        # TODO: Implement serialize_mir_to_json(mir_fn) or serialize_mir_to_binary(mir_fn)
-        if self.config.mode == JitMode.AlwaysJit:
-            return Err(BackendError.not_implemented(
-                "MIR serialization not yet implemented - cannot JIT compile"
-            ))
-        else:
-            if self.config.verbose:
-                print "[jit] MIR serialization not yet implemented, will interpret: {fn_.name}"
-            return Ok(())
+        # Step 2: Serialize MIR to JSON
+        val mir_data = serialize_mir_function(mir_fn)
+
+        if self.config.verbose:
+            print "[jit] Serialized MIR for {fn_.name} ({mir_data.len()} bytes)"
 
         # Step 3: Get execution manager and compile
-        # (This code is ready but unreachable until MIR serialization is implemented)
-        # val mir_data = serialize_mir_to_json(mir_fn)  # TODO
-        # val em = self.ensure_exec_manager()?
-        # val compile_result = em.compile(mir_data)
-        #
-        # match compile_result:
-        #     case Ok(_):
-        #         self.jit_compiled = self.jit_compiled.insert(fn_.name)
-        #         if self.config.verbose:
-        #             print "[jit] Successfully compiled: {fn_.name}"
-        #         Ok(())
-        #     case Err(msg):
-        #         if self.config.mode == JitMode.AlwaysJit:
-        #             Err(BackendError.compile_error("JIT compilation failed: {msg}", Some(fn_.span)))
-        #         else:
-        #             # In Auto/Hybrid mode, just log and continue with interpretation
-        #             if self.config.verbose:
-        #                 print "[jit] Compilation failed for {fn_.name}, will interpret: {msg}"
-        #             Ok(())
+        val em = self.ensure_exec_manager()?
+        val compile_result = em.compile(mir_data)
+
+        match compile_result:
+            case Ok(_):
+                self.jit_compiled = self.jit_compiled.insert(fn_.name)
+                if self.config.verbose:
+                    print "[jit] Successfully compiled: {fn_.name}"
+                Ok(())
+            case Err(msg):
+                if self.config.mode == JitMode.AlwaysJit:
+                    Err(BackendError.compile_error("JIT compilation failed: {msg}", Some(fn_.span)))
+                else:
+                    # In Auto/Hybrid mode, just log and continue with interpretation
+                    if self.config.verbose:
+                        print "[jit] Compilation failed for {fn_.name}, will interpret: {msg}"
+                    Ok(())
 
     me try_jit_execute(fn_name: text, args: [Value]) -> Result<Value, BackendError>?:
         """Try to execute via JIT. Returns None if not JIT-compiled.

@@ -297,28 +297,14 @@ val interner = StringInterner.with_capacity(100)
 **⚠️ CAUTION: Do NOT call `.new()` methods**
 
 ```simple
-# ❌ WRONG - Don't do this:
-val p = Point.new(3, 4)
-val cache = Cache.new()
-val interner = StringInterner.new()
-
-# ✅ CORRECT - Do this instead:
-val p = Point(x: 3, y: 4)                                              # Direct construction
-val cache = Cache(items: {})                                           # Direct construction
-val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)   # Direct construction
-
-# ✅ OR use named factories when helpful:
-val center = Point.origin()
-val cache = Cache.empty()
-val interner = StringInterner.with_capacity(100)
+# ❌ WRONG:  Point.new(3, 4), Cache.new(), StringInterner.new()
+# ✅ CORRECT: Point(x: 3, y: 4), Cache(items: {}), Point.origin()
 ```
 
 Why `.new()` is wrong in Simple:
 - Direct construction `ClassName(field: value)` is built-in - no method needed
-- `.new()` adds unnecessary indirection
-- It's not the Simple idiom (this is Java/Rust/Python-style, not Simple)
-- Use named factories `ClassName.factory_name()` instead when you need custom initialization
-- Return type is automatically inferred - just use `static fn factory_name()` with no explicit return type
+- `.new()` adds unnecessary indirection - not the Simple idiom
+- Use named factories `ClassName.factory_name()` for custom initialization
 
 **Methods (can be in class body OR impl block):**
 ```simple
@@ -399,20 +385,9 @@ fn main():
 
 ### SFFI (Simple FFI) - Pure Simple Approach
 
-All FFI is Simple-first using the two-tier pattern:
-
-```simple
-# Tier 1: Extern declaration (in src/app/io/mod.spl)
-extern fn rt_file_read_text(path: text) -> text
-
-# Tier 2: Simple-friendly wrapper
-fn file_read(path: text) -> text:
-    rt_file_read_text(path)
-```
-
-- ✅ **Main SFFI module**: `src/app/io/mod.spl` (all extern fn declarations)
-- ✅ **All wrappers in Simple** - No Rust code needed
-- 📖 **SFFI Skill**: See `/sffi` for complete patterns and type conversions
+- ✅ All FFI uses the **two-tier pattern** (`extern fn` + wrapper) - see [SFFI Wrappers](#sffi-wrappers-simple-ffi---simple-first-approach) section for details
+- ✅ **Main SFFI module**: `src/app/io/mod.spl`
+- 📖 **SFFI Skill**: See `/sffi` for complete patterns
 
 ### Tests
 - ❌ **NEVER add `#[ignore]`** without user approval
@@ -437,30 +412,19 @@ fn file_read(path: text) -> text:
 
 ### Question Mark (`?`) Usage
 - ❌ **NEVER use `?` in method/function/variable names** - unlike Ruby
-- ✅ **`?` is an operator only**:
-  - `result?` - Try operator (unwrap or propagate error)
-  - `T?` - Optional type
-  - `expr?.field` - Optional chaining
-  - `expr ?? default` - Null coalescing
-  - `expr.?` - Existence check (is present/non-empty)
-- ✅ **Prefer `.?` over `is_*` predicates**: `opt.?` instead of `opt.is_some()`
+- ✅ **`?` is an operator only**: `result?` (try), `T?` (optional type), `?.` (chaining), `??` (coalescing), `.?` (existence)
+- ✅ **Prefer `.?` over `is_*` predicates** - see Syntax Quick Reference above for full `.?` examples
 - 📖 **Design Decision**: See `doc/design/question_mark_design_decision.md`
-- 📖 **Refactoring Guide**: See `doc/research/exists_check_refactoring.md`
 
-### Caret Operator (`^`) and Math Blocks
-- ✅ **Inside `m{}` blocks**: `^` is power operator (e.g., `m{ x^2 + y^2 }`)
-- ❌ **Outside `m{}` blocks**: `^` produces lexer error
-- ✅ **For exponentiation outside m{}**: Use `**` (e.g., `2 ** 3` for 2³)
-- ✅ **For XOR**: Use `xor` keyword (e.g., `5 xor 3` for bitwise XOR)
-
-### Math Language Features
+### Math Language Features and Caret Operator (`^`)
+- ✅ **`m{}` math blocks**: `^` is power operator inside (e.g., `m{ x^2 + y^2 }`)
+- ❌ **Outside `m{}` blocks**: `^` produces lexer error - use `**` instead (e.g., `2 ** 3` for 2³)
 - ✅ **`xor` keyword**: Bitwise XOR operator (e.g., `5 xor 3` → 6)
 - ✅ **`@` operator**: Matrix multiplication (e.g., `A @ B`)
 - ✅ **Dotted operators**: Element-wise broadcasting
   - `.+` broadcast add, `.-` broadcast sub
   - `.*` broadcast mul, `./` broadcast div
   - `.^` broadcast power
-- ✅ **`m{}` math blocks**: Enable `^` as power operator
   ```simple
   # Normal code uses **
   val result = x ** 2
@@ -709,7 +673,6 @@ bin/simple build --help
 ```bash
 bin/simple script.spl               # Run a Simple file
 bin/simple mcp server               # Start MCP server
-bin/simple test                     # Run all tests
 ```
 
 ### Development (Pure Simple - No Rust)
@@ -763,11 +726,6 @@ bin/simple_runtime -> ../release/simple-0.4.0-beta/bin/simple_runtime
 | Pre-built Runtime | 27 MB | `release/simple-0.4.0-beta/bin/` | Included in distribution |
 | Simple Source | 4.2 MB | `src/` | Pure Simple code |
 | **Total System** | **31.2 MB** | - | Runtime + Source |
-
-**Rust Source Removed (2026-02-06):**
-- ❌ Deleted `rust/` (23 GB)
-- ❌ Deleted `build/rust/` (1.2 GB)
-- ✅ **Space freed: 24.2 GB**
 
 **UPX Compression Library:**
 
@@ -912,25 +870,6 @@ bin/simple build rust test --doc 2>&1 | grep " ... ignored$" | wc -l
 | `--only-slow` | Run only slow_it() tests | Run long tests separately |
 | `--only-skipped` | Run only skip-tagged tests | Check unimplemented features |
 | `--tag=name` | Filter by tag | Run specific test categories |
-
-### Examples
-
-```bash
-# Development workflow
-bin/simple test                    # All tests: Rust + Simple/SSpec (excludes slow)
-bin/simple test --no-rust-tests    # Quick feedback (Simple/SSpec only)
-bin/simple test --only-slow        # Before commit (run slow tests)
-bin/simple build rust test --doc   # Verify doc examples
-
-# Investigation
-bin/simple test --list --show-tags           # See all tests with tags
-bin/simple test --only-skipped --list        # See unimplemented features
-bin/simple build rust test --doc -p simple-driver 2>&1 | grep ignored   # Check ignored doc-tests
-
-# Targeted testing
-bin/simple test my_feature         # Run tests matching "my_feature"
-bin/simple test --tag=integration  # Run integration tests only
-```
 
 ### Test Statistics
 
