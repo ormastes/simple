@@ -1,0 +1,140 @@
+# Dynamic stats implementation using shell commands
+
+use app.io.mod (process_run, file_exists)
+
+# Helper to run shell command and get output
+fn run_cmd(cmd: text) -> text:
+    val result = process_run("sh", ["-c", cmd])
+    val stdout = result.0
+    val stderr = result.1
+    val exit_code = result.2
+    if exit_code == 0:
+        stdout.trim()
+    else:
+        "0"
+
+# Count files with find command
+fn count_files(pattern: text) -> i64:
+    val cmd = "find {pattern} -name '*.spl' 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Count lines of code
+fn count_lines(pattern: text) -> i64:
+    val cmd = "find {pattern} -name '*.spl' -exec cat {{}} \\; 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Count pattern in file
+fn count_in_file(file: text, pattern: text) -> i64:
+    if not file_exists(file):
+        return 0
+    val cmd = "grep -c '{pattern}' {file} 2>/dev/null || echo 0"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Extract test count from test_result.md
+fn get_test_count() -> i64:
+    if not file_exists("doc/test/test_result.md"):
+        return 0
+    val cmd = "grep '^\\*\\*Total Tests:\\*\\*' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Extract pass count from test_result.md
+fn get_pass_count() -> i64:
+    if not file_exists("doc/test/test_result.md"):
+        return 0
+    val cmd = "grep '| ✅ Passed |' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Check if flag is present
+fn has_flag(args: [text], flag: text) -> bool:
+    var i = 0
+    while i < args.len():
+        if args[i] == flag:
+            return true
+        i = i + 1
+    false
+
+# Main entry point
+fn run_stats(args: [text]):
+    val is_brief = has_flag(args, "--brief")
+    val is_verbose = has_flag(args, "--verbose")
+
+    print "========================================="
+    print "Simple Project Statistics"
+    print "========================================="
+    print ""
+    if not is_brief:
+        print "Collecting data..."
+        print ""
+
+    # File counts
+    val total_src = count_files("src")
+    val app_files = count_files("src/app")
+    val lib_files = count_files("src/lib")
+    val std_files = count_files("src/std")
+    val test_files = count_files("test")
+
+    print "Files:"
+    print "  Total:   {total_src} source files"
+    print "    app:   {app_files} files"
+    print "    lib:   {lib_files} files"
+    print "    std:   {std_files} files"
+    print "  Tests:   {test_files} test files"
+    print ""
+
+    # Line counts
+    val total_lines = count_lines("src")
+    if total_lines > 0:
+        print "Lines of Code:"
+        print "  Total:   {total_lines} lines"
+        print ""
+
+    # Test statistics
+    val test_count = get_test_count()
+    val pass_count = get_pass_count()
+    if test_count > 0:
+        val pass_rate = (pass_count * 100) / test_count
+        print "Tests:"
+        print "  Total:   {test_count} tests"
+        print "  Passed:  {pass_count} ({pass_rate}%)"
+        if pass_count == test_count:
+            print "  Status:  ✅ ALL PASSING"
+        print ""
+
+    # Feature counts
+    val feat_complete = count_in_file("doc/feature/feature_db.sdn", ", complete,")
+    val feat_progress = count_in_file("doc/feature/feature_db.sdn", ", in_progress,")
+    val feat_planned = count_in_file("doc/feature/feature_db.sdn", ", planned,")
+    val feat_total = feat_complete + feat_progress + feat_planned
+
+    if feat_total > 0:
+        print "Features:"
+        print "  Total:       {feat_total} features"
+        print "  Complete:    {feat_complete}"
+        print "  In Progress: {feat_progress}"
+        print "  Planned:     {feat_planned}"
+        print ""
+
+    if not is_brief:
+        print "Documentation:"
+        print "  Features:   doc/feature/feature.md"
+        print "  Tests:      doc/test/test_result.md"
+        print "  Bugs:       doc/bug/bug_report.md"
+        print "  Pending:    doc/feature/pending_feature.md"
+        print ""
+
+    if is_verbose:
+        print "Directories scanned:"
+        print "  - src/app (application code)"
+        print "  - src/lib (library code)"
+        print "  - src/std (standard library)"
+        print "  - test (test files)"
+        print ""
+
+    print "========================================="
+
+export run_stats

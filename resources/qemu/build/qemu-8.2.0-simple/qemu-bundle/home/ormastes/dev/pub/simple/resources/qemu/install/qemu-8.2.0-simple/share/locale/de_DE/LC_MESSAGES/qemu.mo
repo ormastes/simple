@@ -1,1 +1,0 @@
-/home/ormastes/dev/pub/simple/resources/qemu/build/qemu-8.2.0-simple/po/de_DE/LC_MESSAGES/qemu.mo
