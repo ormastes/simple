@@ -343,12 +343,35 @@ See `/coding` skill for full details.
 - ❌ **NEVER create branches** - work directly on `main`
 - ✅ Always use `jj bookmark set main -r @` then `jj git push --bookmark main`
 
-### Scripts
-- ❌ **NEVER write Python/Bash** - use Simple (`.spl`) for all scripts
-- ✅ **Exception**: Bash (`.sh`) is ONLY allowed for bootstrapping scripts when Simple runtime doesn't exist:
-  - GitHub Actions first-time builds (`script/build-bootstrap.sh`)
-  - External installer scripts for users without Simple (`script/install.sh`)
-  - These should be minimal wrappers that call Simple scripts when available
+### Scripts and Executable Files
+
+- ✅ **USE Simple (.spl)** for ALL scripts and automation
+- ❌ **NEVER use Python (.py)** - migrate to Simple
+- ❌ **NEVER use Bash (.sh)** - except for 3 bootstrap scripts below
+
+**Bootstrap Exceptions (ONLY these 3 files allowed as .sh):**
+1. `script/build-bootstrap.sh` - GitHub Actions first build
+2. `script/build-full.sh` - Release package builder
+3. `script/install.sh` - End-user installer (no Simple runtime)
+
+These scripts run BEFORE Simple runtime exists, so they must be Bash.
+
+**All other scripts must be Simple:**
+- Build utilities: `src/app/build/*.spl`
+- Verification: `src/app/verify/*.spl`
+- Code generation: `src/app/doc/*.spl`
+- Testing: `src/app/test/*.spl`
+- Version control wrappers: `script/jj-wrappers/*.sh` (kept for compatibility)
+
+**Executable Scripts:**
+Use `#!/usr/bin/env simple` shebang and `chmod +x`:
+```simple
+#!/usr/bin/env simple
+use app.io
+
+fn main():
+    # Script logic here
+```
 
 ### Rust Files and SFFI (Simple FFI)
 - ❌ **NEVER write `.rs` files manually** - all FFI is Simple-first

@@ -1,0 +1,167 @@
+#!/usr/bin/env simple
+# Example: Unified QEMU Runner
+#
+# Demonstrates using the unified QEMU library for different scenarios:
+# 1. Remote debugging (GDB stub)
+# 2. Bare-metal testing (test harness)
+# 3. Multi-architecture support
+
+use lib.qemu.{QemuArch, QemuConfig, QemuInstance, is_qemu_available, interpret_exit_code}
+
+# ===========================================================================
+# Example 1: Remote Debugging
+# ===========================================================================
+
+fn example_remote_debug():
+    print "Example 1: Remote Debugging with GDB"
+    print "======================================"
+
+    # Create config for remote debugging
+    val config = QemuConfig.for_remote_debug(
+        QemuArch.RiscV32,
+        "test/remote/fixtures/hello_rv32.elf",
+        1234  # GDB port
+    )
+
+    # Start QEMU
+    print "Starting QEMU with GDB stub on port 1234..."
+    val result = QemuInstance.start(config)
+
+    match result:
+        case Ok(instance):
+            print "✓ QEMU started (PID: {instance.get_pid()})"
+            print "  Connect with: gdb-multiarch -ex 'target remote :1234'"
+
+            # Simulate debugging session
+            print "  Waiting 5 seconds (connect GDB now)..."
+            shell("sleep 5")
+
+            # Stop QEMU
+            var inst = instance
+            inst.stop()
+            print "✓ QEMU stopped"
+
+        case Err(msg):
+            print "✗ Failed to start QEMU: {msg}"
+
+# ===========================================================================
+# Example 2: Bare-Metal Testing
+# ===========================================================================
+
+fn example_baremetal_test():
+    print ""
+    print "Example 2: Bare-Metal Testing"
+    print "=============================="
+
+    # Create config for test runner
+    val config = QemuConfig.for_test_runner(
+        QemuArch.X86,
+        "test/baremetal/hello_x86.elf"
+    )
+
+    # Start QEMU
+    print "Starting QEMU for x86 bare-metal test..."
+    val result = QemuInstance.start(config)
+
+    match result:
+        case Ok(instance):
+            print "✓ QEMU started (PID: {instance.get_pid()})"
+
+            # Wait for test to complete
+            print "  Running test (timeout: 10s)..."
+            val exit_result = instance.wait_exit(10000)
+
+            match exit_result:
+                case Ok(exit_code):
+                    print "  QEMU exited with code: {exit_code}"
+
+                    # Interpret exit code
+                    val interpretation = interpret_exit_code(exit_code, true)
+                    if interpretation.success:
+                        print "✓ {interpretation.message}"
+                    else:
+                        print "✗ {interpretation.message}"
+
+                case Err(msg):
+                    print "✗ {msg}"
+
+        case Err(msg):
+            print "✗ Failed to start QEMU: {msg}"
+
+# ===========================================================================
+# Example 3: Multi-Architecture Support
+# ===========================================================================
+
+fn example_multi_arch():
+    print ""
+    print "Example 3: Multi-Architecture Support"
+    print "======================================"
+
+    val architectures = [
+        (QemuArch.X86, "x86"),
+        (QemuArch.X86_64, "x86_64"),
+        (QemuArch.ARM32, "ARM (Cortex-M)"),
+        (QemuArch.ARM64, "AArch64"),
+        (QemuArch.RiscV32, "RISC-V 32-bit"),
+        (QemuArch.RiscV64, "RISC-V 64-bit")
+    ]
+
+    print "Checking QEMU availability:"
+    for (arch, name) in architectures:
+        val available = is_qemu_available(arch)
+        val status = if available: "✓" else: "✗"
+        val cmd = arch.qemu_command()
+        print "  {status} {name:20} ({cmd})"
+
+# ===========================================================================
+# Example 4: Custom Configuration
+# ===========================================================================
+
+fn example_custom_config():
+    print ""
+    print "Example 4: Custom Configuration"
+    print "==============================="
+
+    # Create custom config
+    var config = QemuConfig.for_test_runner(
+        QemuArch.ARM32,
+        "firmware.elf"
+    )
+
+    # Customize settings
+    config.machine = "lm3s6965evb"  # Stellaris LM3S6965 (Cortex-M3)
+    config.memory = "16M"
+    config.timeout_ms = 60000  # 1 minute timeout
+    config.extra_args = ["-semihosting-config", "enable=on,target=native"]
+
+    print "Custom config for ARM Cortex-M3:"
+    print "  Machine: {config.machine}"
+    print "  Memory: {config.memory}"
+    print "  Timeout: {config.timeout_ms}ms"
+    print "  Extra args: {config.extra_args.join(' ')}"
+
+    # Build command args
+    val args = config.build_args()
+    print "  QEMU args: {args.join(' ')}"
+
+# ===========================================================================
+# Main
+# ===========================================================================
+
+fn main():
+    print "Unified QEMU Runner Examples"
+    print "=============================\n"
+
+    # Run examples
+    example_multi_arch()
+
+    # Uncomment to run interactive examples (requires test binaries):
+    # example_remote_debug()
+    # example_baremetal_test()
+
+    example_custom_config()
+
+    print ""
+    print "Done!"
+
+use app.io.shell

@@ -1,0 +1,323 @@
+# Cross-Platform Path Utilities
+#
+# Enhanced path handling that works across Windows, Linux, macOS.
+
+use std.platform.{
+    is_windows, is_unix, dir_sep, normalize_path,
+    is_absolute, home_dir
+}
+use app.io.{rt_file_exists, rt_dir_exists}
+
+# ===========================================================================
+# Path Class
+# ===========================================================================
+
+class Path:
+    """Cross-platform path handling."""
+    path: text
+
+impl Path:
+    # Create path from string
+    static fn new(path: text) -> Path:
+        Path(path: path)
+
+    # Create from components
+    static fn from_parts(parts: [text]) -> Path:
+        val sep = dir_sep()
+        Path(path: parts.join(sep))
+
+    # Get path as string
+    fn to_string() -> text:
+        self.path
+
+    # Normalize path for current platform
+    fn normalize() -> Path:
+        Path(path: normalize_path(self.path))
+
+    # Join with another path component
+    fn join(other: text) -> Path:
+        val sep = dir_sep()
+
+        # Handle empty cases
+        if self.path == "":
+            return Path.new(other)
+        if other == "":
+            return self
+
+        # Remove trailing separator from base
+        var base = self.path
+        if base.ends_with(sep):
+            base = base.substring(0, base.len() - sep.len())
+
+        # Remove leading separator from other
+        var component = other
+        if component.starts_with(sep):
+            component = component.substring(sep.len())
+
+        Path(path: "{base}{sep}{component}")
+
+    # Join multiple components
+    fn join_many(components: [text]) -> Path:
+        var result = self
+        for component in components:
+            result = result.join(component)
+        result
+
+    # Get parent directory
+    fn parent() -> Path?:
+        val sep = dir_sep()
+        val last_sep = self.path.rfind(sep)
+
+        if last_sep < 0:
+            return None
+
+        if last_sep == 0:
+            # Root directory
+            return Some(Path.new(sep))
+
+        Some(Path.new(self.path.substring(0, last_sep)))
+
+    # Get file name (last component)
+    fn file_name() -> text:
+        val sep = dir_sep()
+        val last_sep = self.path.rfind(sep)
+
+        if last_sep < 0:
+            return self.path
+
+        self.path.substring(last_sep + sep.len())
+
+    # Get file stem (name without extension)
+    fn file_stem() -> text:
+        val name = self.file_name()
+        val last_dot = name.rfind(".")
+
+        if last_dot <= 0:  # No extension or starts with dot
+            return name
+
+        name.substring(0, last_dot)
+
+    # Get file extension
+    fn extension() -> text:
+        val name = self.file_name()
+        val last_dot = name.rfind(".")
+
+        if last_dot < 0 or last_dot == name.len() - 1:
+            return ""
+
+        name.substring(last_dot + 1)
+
+    # Check if path is absolute
+    fn is_absolute() -> bool:
+        is_absolute(self.path)
+
+    # Check if path exists
+    fn exists() -> bool:
+        rt_file_exists(self.path) or rt_dir_exists(self.path)
+
+    # Check if path is a file
+    fn is_file() -> bool:
+        rt_file_exists(self.path)
+
+    # Check if path is a directory
+    fn is_dir() -> bool:
+        rt_dir_exists(self.path)
+
+    # Get absolute path
+    fn absolute() -> Path:
+        if self.is_absolute():
+            return self
+
+        # TODO: Implement proper absolute path resolution
+        # For now, prepend current directory
+        val cwd = get_current_dir()
+        cwd.join(self.path)
+
+    # Make path relative to base
+    fn relative_to(base: Path) -> Path?:
+        # TODO: Implement proper relative path calculation
+        # For now, return self if it starts with base
+        if self.path.starts_with(base.path):
+            val relative = self.path.substring(base.path.len())
+            return Some(Path.new(relative))
+        None
+
+    # With new file name
+    fn with_file_name(name: text) -> Path:
+        match self.parent():
+            case Some(parent):
+                parent.join(name)
+            case None:
+                Path.new(name)
+
+    # With new extension
+    fn with_extension(ext: text) -> Path:
+        val stem = self.file_stem()
+        val new_name = if ext == "":
+            stem
+        else:
+            "{stem}.{ext}"
+        self.with_file_name(new_name)
+
+# ===========================================================================
+# Path Utilities
+# ===========================================================================
+
+# Get current working directory
+fn get_current_dir() -> Path:
+    use app.io.rt_env_get
+
+    # Try PWD environment variable
+    val pwd = rt_env_get("PWD")
+    if pwd != "":
+        return Path.new(pwd)
+
+    # Fallback to platform-specific
+    if is_windows():
+        val cd = rt_env_get("CD")
+        if cd != "":
+            return Path.new(cd)
+
+    # Last resort
+    Path.new(".")
+
+# Get home directory path
+fn get_home_dir() -> Path:
+    Path.new(home_dir())
+
+# Get temporary directory path
+fn get_temp_dir() -> Path:
+    use std.platform.temp_dir
+    Path.new(temp_dir())
+
+# Join path components
+fn join_paths(parts: [text]) -> Path:
+    Path.from_parts(parts)
+
+# Check if path matches pattern
+fn matches_pattern(path: text, pattern: text) -> bool:
+    # Simple glob matching
+    # TODO: Implement full glob pattern matching
+
+    # Exact match
+    if pattern == path:
+        return true
+
+    # Wildcard at end
+    if pattern.ends_with("*"):
+        val prefix = pattern.substring(0, pattern.len() - 1)
+        return path.starts_with(prefix)
+
+    # Wildcard at start
+    if pattern.starts_with("*"):
+        val suffix = pattern.substring(1)
+        return path.ends_with(suffix)
+
+    false
+
+# ===========================================================================
+# Path Conversion
+# ===========================================================================
+
+# Convert Unix path to Windows
+fn unix_to_windows(path: text) -> text:
+    path.replace("/", "\\")
+
+# Convert Windows path to Unix
+fn windows_to_unix(path: text) -> text:
+    path.replace("\\", "/")
+
+# Ensure path uses native separators
+fn to_native_separators(path: text) -> text:
+    if is_windows():
+        unix_to_windows(path)
+    else:
+        windows_to_unix(path)
+
+# ===========================================================================
+# Directory Operations
+# ===========================================================================
+
+class Directory:
+    """Directory operations."""
+    path: Path
+
+impl Directory:
+    static fn new(path: Path) -> Directory:
+        Directory(path: path)
+
+    # Create directory
+    fn create() -> bool:
+        use app.io.rt_dir_create
+        rt_dir_create(self.path.to_string())
+
+    # Create directory and all parents
+    fn create_all() -> bool:
+        use app.io.shell
+
+        val path_str = self.path.to_string()
+
+        if is_windows():
+            val result = shell("mkdir \"{path_str}\" 2>nul")
+            result.exit_code == 0
+        else:
+            val result = shell("mkdir -p \"{path_str}\" 2>/dev/null")
+            result.exit_code == 0
+
+    # List directory contents
+    fn list() -> [text]:
+        use app.io.rt_dir_list
+        rt_dir_list(self.path.to_string())
+
+    # List with full paths
+    fn list_paths() -> [Path]:
+        val entries = self.list()
+        entries.map(\name: self.path.join(name))
+
+    # Check if directory exists
+    fn exists() -> bool:
+        self.path.is_dir()
+
+# ===========================================================================
+# File Operations
+# ===========================================================================
+
+class File:
+    """File operations."""
+    path: Path
+
+impl File:
+    static fn new(path: Path) -> File:
+        File(path: path)
+
+    # Check if file exists
+    fn exists() -> bool:
+        self.path.is_file()
+
+    # Read entire file
+    fn read() -> text:
+        use app.io.rt_file_read_text
+        rt_file_read_text(self.path.to_string())
+
+    # Write entire file
+    fn write(content: text) -> bool:
+        use app.io.rt_file_write_text
+        rt_file_write_text(self.path.to_string(), content)
+
+    # Copy file
+    fn copy_to(dest: Path) -> bool:
+        use app.io.rt_file_copy
+        rt_file_copy(self.path.to_string(), dest.to_string())
+
+    # Delete file
+    fn delete() -> bool:
+        use app.io.shell
+
+        val path_str = self.path.to_string()
+
+        if is_windows():
+            val result = shell("del /f \"{path_str}\" 2>nul")
+            result.exit_code == 0
+        else:
+            val result = shell("rm -f \"{path_str}\" 2>/dev/null")
+            result.exit_code == 0
