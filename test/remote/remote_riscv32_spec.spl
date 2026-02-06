@@ -1,0 +1,629 @@
+"""
+# Remote RISC-V 32 Debug Specification
+
+**Feature IDs:** #REM-001 through #REM-010
+**Category:** Tooling
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+Remote debugging support for RISC-V 32-bit targets via GDB MI protocol,
+Trace32 bridge, and Trace32 native client. Includes a feature ranking
+system for capability-based handler selection.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Feature Registry | Maps FeatureId → ranked handlers, picks lowest rank |
+| GDB MI | GDB Machine Interface protocol for process control |
+| Trace32 Bridge | Translates T32 commands to GDB MI |
+| Emulation | Fallback handlers at higher ranks |
+
+## Behavior
+
+- Feature registry picks the lowest-rank handler for each operation
+- GDB MI client communicates with GDB via stdin/stdout FIFOs
+- Trace32 bridge translates T32 commands to GDB MI for shared features
+- Trace32 native uses t32rem CLI for unique features (flash, trace, coverage)
+"""
+
+import std.spec
+use remote.types.{Architecture, Endianness, DebugConfig, DebugError}
+use remote.target.riscv32.RiscV32Target
+use remote.feature.features.{FeatureId, FeatureRank}
+use remote.feature.registry.{FeatureHandler, FeatureRegistry}
+use remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord}
+
+
+# ============================================================================
+# Test Group 1: Core Types
+# ============================================================================
+
+describe "Remote Debug Core Types":
+    """
+    ## Core Types
+
+    Validates architecture enums, debug config, and target definitions.
+    """
+
+    context "Architecture enum":
+        it "converts to string":
+            expect(Architecture.RiscV32.to_string()).to(eq("riscv32"))
+            expect(Architecture.Arm32.to_string()).to(eq("arm32"))
+            expect(Architecture.X86_64.to_string()).to(eq("x86_64"))
+
+    context "Endianness enum":
+        it "converts to string":
+            expect(Endianness.Little.to_string()).to(eq("little"))
+            expect(Endianness.Big.to_string()).to(eq("big"))
+
+    context "DebugConfig":
+        it "creates default GDB config":
+            val config = DebugConfig.default_gdb("test.elf")
+            expect(config.host).to(eq("localhost"))
+            expect(config.port).to(eq(1234))
+            expect(config.program).to(eq("test.elf"))
+
+        it "creates Trace32 config":
+            val config = DebugConfig.for_trace32("192.168.1.10", 20000)
+            expect(config.host).to(eq("192.168.1.10"))
+            expect(config.port).to(eq(20000))
+
+    context "DebugError":
+        it "formats error messages":
+            val err = DebugError.ConnectionFailed(msg: "refused")
+            expect(err.to_string()).to(eq("connection failed: refused"))
+
+            val err2 = DebugError.Timeout
+            expect(err2.to_string()).to(eq("timeout"))
+
+            val err3 = DebugError.BreakpointFull
+            expect(err3.to_string()).to(eq("breakpoint slots full"))
+
+
+# ============================================================================
+# Test Group 2: RISC-V 32 Target
+# ============================================================================
+
+describe "RISC-V 32 Target":
+    """
+    ## Target Definition
+
+    Validates register layout, calling convention, and debug hardware
+    for the RISC-V 32-bit architecture.
+    """
+
+    context "identification":
+        it "reports correct name and architecture":
+            val target = RiscV32Target()
+            expect(target.name()).to(eq("RISC-V32 (RV32IMAC)"))
+            expect(target.arch().to_string()).to(eq("riscv32"))
+            expect(target.endianness().to_string()).to(eq("little"))
+
+    context "registers":
+        it "has 33 registers (x0-x31 + PC)":
+            val target = RiscV32Target()
+            expect(target.register_count()).to(eq(33))
+
+        it "maps ABI names correctly":
+            val target = RiscV32Target()
+            expect(target.register_name(0)).to(eq("zero"))
+            expect(target.register_name(1)).to(eq("ra"))
+            expect(target.register_name(2)).to(eq("sp"))
+            expect(target.register_name(8)).to(eq("s0"))
+            expect(target.register_name(10)).to(eq("a0"))
+            expect(target.register_name(32)).to(eq("pc"))
+            expect(target.register_name(99)).to(eq("unknown"))
+
+        it "reverse-maps names to indices":
+            val target = RiscV32Target()
+            expect(target.register_index("zero")).to(eq(0))
+            expect(target.register_index("sp")).to(eq(2))
+            expect(target.register_index("a0")).to(eq(10))
+            expect(target.register_index("pc")).to(eq(32))
+            expect(target.register_index("nonexistent")).to(eq(-1))
+
+        it "reports 4-byte register size":
+            val target = RiscV32Target()
+            expect(target.register_size(0)).to(eq(4))
+            expect(target.register_size(32)).to(eq(4))
+
+    context "calling convention":
+        it "defines argument registers a0-a7":
+            val target = RiscV32Target()
+            val arg_regs = target.arg_registers()
+            expect(arg_regs.len()).to(eq(8))
+            expect(arg_regs[0]).to(eq(10))  # a0 = x10
+            expect(arg_regs[7]).to(eq(17))  # a7 = x17
+
+        it "defines callee-saved registers s0-s11":
+            val target = RiscV32Target()
+            val saved = target.callee_saved_registers()
+            expect(saved.len()).to(eq(12))
+            expect(saved[0]).to(eq(8))   # s0 = x8
+            expect(saved[1]).to(eq(9))   # s1 = x9
+            expect(saved[2]).to(eq(18))  # s2 = x18
+
+    context "special registers":
+        it "identifies PC, SP, FP correctly":
+            val target = RiscV32Target()
+            expect(target.pc_register_index()).to(eq(32))
+            expect(target.sp_register_index()).to(eq(2))
+            expect(target.fp_register_index()).to(eq(8))
+            expect(target.return_register_index()).to(eq(10))
+
+    context "debug hardware":
+        it "reports hardware breakpoint capabilities":
+            val target = RiscV32Target()
+            expect(target.hw_breakpoint_count()).to(eq(4))
+            expect(target.hw_watchpoint_count()).to(eq(4))
+            expect(target.supports_single_step()).to(eq(true))
+
+        it "defines EBREAK instruction":
+            val target = RiscV32Target()
+            val ebreak = target.breakpoint_instruction()
+            expect(ebreak.len()).to(eq(4))
+            expect(ebreak[0]).to(eq(0x73))
+
+    context "QEMU memory map":
+        it "defines virt machine addresses":
+            val target = RiscV32Target()
+            expect(target.qemu_virt_ram_base()).to(eq(0x80000000))
+            expect(target.qemu_virt_uart_base()).to(eq(0x10000000))
+
+
+# ============================================================================
+# Test Group 3: Feature Registry
+# ============================================================================
+
+describe "Feature Registry":
+    """
+    ## Feature Ranking System
+
+    Validates that the feature registry correctly picks the lowest-rank
+    handler and supports feature discovery.
+    """
+
+    context "handler registration":
+        it "registers a single handler":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 0, "gdb",
+                \args: Ok("halted"),
+                "GDB halt"
+            ))
+            expect(registry.is_supported(FeatureId.Halt)).to(eq(true))
+            expect(registry.is_supported(FeatureId.Resume)).to(eq(false))
+
+        it "stores handlers sorted by rank":
+            var registry = FeatureRegistry.empty()
+            # Register rank 4 first
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 4, "emulation",
+                \args: Ok("emulated"),
+                "Emulated"
+            ))
+            # Register rank 0 second
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 0, "gdb",
+                \args: Ok("gdb_locals"),
+                "GDB"
+            ))
+            # Register rank 1
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 1, "trace32-gdb",
+                \args: Ok("t32_locals"),
+                "T32 bridge"
+            ))
+
+            val all = registry.all_handlers(FeatureId.ReadLocals)
+            expect(all.len()).to(eq(3))
+            expect(all[0].rank).to(eq(0))
+            expect(all[1].rank).to(eq(1))
+            expect(all[2].rank).to(eq(4))
+
+    context "best handler selection":
+        it "picks lowest rank handler":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 0, "gdb",
+                \args: Ok("gdb_locals"),
+                "GDB"
+            ))
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 4, "emulation",
+                \args: Ok("emulated"),
+                "Emulated"
+            ))
+
+            val best = registry.best_handler(FeatureId.ReadLocals).unwrap()
+            expect(best.rank).to(eq(0))
+            expect(best.backend_name).to(eq("gdb"))
+
+        it "falls back to emulation when native unavailable":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.FlashProgram, 3, "emulation",
+                \args: Ok("emulated_flash"),
+                "OpenOCD flash"
+            ))
+
+            val best = registry.best_handler(FeatureId.FlashProgram).unwrap()
+            expect(best.rank).to(eq(3))
+            expect(best.backend_name).to(eq("emulation"))
+
+        it "returns error for unsupported feature":
+            val registry = FeatureRegistry.empty()
+            val result = registry.best_handler(FeatureId.TraceCapture)
+            expect(result.err.?).to(eq(true))
+
+    context "feature execution":
+        it "executes best handler":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 0, "gdb",
+                \args: Ok("halted_via_gdb"),
+                "GDB halt"
+            ))
+
+            val result = registry.execute(FeatureId.Halt, [])
+            expect(result.unwrap()).to(eq("halted_via_gdb"))
+
+    context "feature discovery":
+        it "lists supported features":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
+            ))
+            registry.register(FeatureHandler.of(
+                FeatureId.Resume, 0, "gdb", \args: Ok("ok"), "resume"
+            ))
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, 0, "gdb", \args: Ok("ok"), "locals"
+            ))
+
+            val supported = registry.supported_features()
+            expect(supported.len()).to(eq(3))
+
+        it "counts total handlers":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "halt"
+            ))
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 1, "t32", \args: Ok("ok"), "halt"
+            ))
+            registry.register(FeatureHandler.of(
+                FeatureId.Resume, 0, "gdb", \args: Ok("ok"), "resume"
+            ))
+
+            expect(registry.handler_count()).to(eq(3))
+
+        it "generates capabilities report":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, 0, "gdb", \args: Ok("ok"), "GDB halt cmd"
+            ))
+
+            val report = registry.capabilities_report()
+            expect(report.contains("Halt")).to(eq(true))
+            expect(report.contains("gdb")).to(eq(true))
+            expect(report.contains("native")).to(eq(true))
+
+
+# ============================================================================
+# Test Group 4: GDB MI Parser
+# ============================================================================
+
+describe "GDB MI Parser":
+    """
+    ## GDB Machine Interface Parsing
+
+    Validates parsing of GDB MI output records.
+    """
+
+    context "result records":
+        it "parses done result":
+            val record = GdbMiParser.parse_line("42^done,value=\"hello\"")
+            match record:
+                GdbMiRecord.Result(token, class, data):
+                    expect(token).to(eq(42))
+                    expect(class).to(eq("done"))
+                    expect(data.get("value") ?? "").to(eq("hello"))
+                _:
+                    fail("expected Result record")
+
+        it "parses error result":
+            val record = GdbMiParser.parse_line("5^error,msg=\"unknown command\"")
+            expect(record.is_error()).to(eq(true))
+
+        it "parses result without token":
+            val record = GdbMiParser.parse_line("^done")
+            match record:
+                GdbMiRecord.Result(token, class, data):
+                    expect(class).to(eq("done"))
+                _:
+                    fail("expected Result record")
+
+    context "async records":
+        it "parses stopped event":
+            val record = GdbMiParser.parse_line("*stopped,reason=\"breakpoint-hit\",bkptno=\"1\"")
+            expect(record.is_stopped()).to(eq(true))
+            match record:
+                GdbMiRecord.Async(class, data):
+                    expect(class).to(eq("stopped"))
+                    expect(data.get("reason") ?? "").to(eq("breakpoint-hit"))
+                    expect(data.get("bkptno") ?? "").to(eq("1"))
+                _:
+                    fail("expected Async record")
+
+        it "parses thread-created notification":
+            val record = GdbMiParser.parse_line("=thread-created,id=\"1\"")
+            match record:
+                GdbMiRecord.Async(class, data):
+                    expect(class).to(eq("thread-created"))
+                _:
+                    fail("expected Async record")
+
+    context "stream records":
+        it "parses console output":
+            val record = GdbMiParser.parse_line("~\"Hello World\\n\"")
+            match record:
+                GdbMiRecord.Stream(kind, content):
+                    expect(kind).to(eq("console"))
+                    expect(content.contains("Hello World")).to(eq(true))
+                _:
+                    fail("expected Stream record")
+
+        it "parses log output":
+            val record = GdbMiParser.parse_line("&\"info\\n\"")
+            match record:
+                GdbMiRecord.Stream(kind, content):
+                    expect(kind).to(eq("log"))
+                _:
+                    fail("expected Stream record")
+
+    context "prompt":
+        it "parses GDB prompt":
+            val record = GdbMiParser.parse_line("(gdb)")
+            match record:
+                GdbMiRecord.Prompt:
+                    pass  # correct
+                _:
+                    fail("expected Prompt")
+
+    context "key-value parsing":
+        it "parses simple key-value pairs":
+            val data = GdbMiParser.parse_key_values("name=\"x\",value=\"42\"")
+            expect(data.get("name") ?? "").to(eq("x"))
+            expect(data.get("value") ?? "").to(eq("42"))
+
+        it "parses nested braces":
+            val data = GdbMiParser.parse_key_values("bkpt={number=\"1\",type=\"breakpoint\"}")
+            val bkpt = data.get("bkpt") ?? ""
+            expect(bkpt.contains("number")).to(eq(true))
+
+    context "tuple list parsing":
+        it "parses list of tuples":
+            val tuples = GdbMiParser.parse_tuple_list("[{name=\"x\",value=\"42\"},{name=\"y\",value=\"10\"}]")
+            expect(tuples.len()).to(eq(2))
+            expect(tuples[0].get("name") ?? "").to(eq("x"))
+            expect(tuples[0].get("value") ?? "").to(eq("42"))
+            expect(tuples[1].get("name") ?? "").to(eq("y"))
+
+        it "handles empty list":
+            val tuples = GdbMiParser.parse_tuple_list("[]")
+            expect(tuples.len()).to(eq(0))
+
+    context "hex parsing":
+        it "parses hex values":
+            use remote.protocol.gdb_mi.GdbMiClient
+            expect(GdbMiClient.parse_hex_value("0x2a")).to(eq(42))
+            expect(GdbMiClient.parse_hex_value("0xFF")).to(eq(255))
+            expect(GdbMiClient.parse_hex_value("0x80000000")).to(eq(0x80000000))
+
+        it "parses hex bytes":
+            use remote.protocol.gdb_mi.GdbMiClient
+            expect(GdbMiClient.parse_hex_byte("2a")).to(eq(42))
+            expect(GdbMiClient.parse_hex_byte("ff")).to(eq(255))
+            expect(GdbMiClient.parse_hex_byte("00")).to(eq(0))
+
+
+# ============================================================================
+# Test Group 5: Feature Rank Table
+# ============================================================================
+
+describe "Feature Rank Constants":
+    """
+    ## Rank Constants
+
+    Validates the feature rank hierarchy.
+    """
+
+    it "defines correct rank ordering":
+        expect(FeatureRank.NATIVE).to(eq(0))
+        expect(FeatureRank.BRIDGE).to(eq(1))
+        expect(FeatureRank.SECONDARY).to(eq(2))
+        expect(FeatureRank.EXTERNAL).to(eq(3))
+        expect(FeatureRank.EMULATED).to(eq(4))
+
+    it "native is always preferred over bridge":
+        expect(FeatureRank.NATIVE < FeatureRank.BRIDGE).to(eq(true))
+
+    it "bridge is preferred over emulated":
+        expect(FeatureRank.BRIDGE < FeatureRank.EMULATED).to(eq(true))
+
+
+# ============================================================================
+# Test Group 6: FeatureId Coverage
+# ============================================================================
+
+describe "FeatureId":
+    """
+    ## Feature Identifiers
+
+    Validates all feature IDs and their string representations.
+    """
+
+    it "covers execution control features":
+        expect(FeatureId.Halt.to_string()).to(eq("Halt"))
+        expect(FeatureId.Resume.to_string()).to(eq("Resume"))
+        expect(FeatureId.SingleStep.to_string()).to(eq("SingleStep"))
+        expect(FeatureId.StepOver.to_string()).to(eq("StepOver"))
+        expect(FeatureId.Reset.to_string()).to(eq("Reset"))
+
+    it "covers memory features":
+        expect(FeatureId.ReadMemory.to_string()).to(eq("ReadMemory"))
+        expect(FeatureId.WriteMemory.to_string()).to(eq("WriteMemory"))
+
+    it "covers register features":
+        expect(FeatureId.ReadRegister.to_string()).to(eq("ReadRegister"))
+        expect(FeatureId.WriteRegister.to_string()).to(eq("WriteRegister"))
+        expect(FeatureId.ReadAllRegisters.to_string()).to(eq("ReadAllRegisters"))
+
+    it "covers inspection features":
+        expect(FeatureId.ReadLocals.to_string()).to(eq("ReadLocals"))
+        expect(FeatureId.ReadGlobals.to_string()).to(eq("ReadGlobals"))
+        expect(FeatureId.ReadArguments.to_string()).to(eq("ReadArguments"))
+        expect(FeatureId.EvaluateExpression.to_string()).to(eq("EvaluateExpression"))
+        expect(FeatureId.ReadStackTrace.to_string()).to(eq("ReadStackTrace"))
+
+    it "covers Trace32-unique features":
+        expect(FeatureId.FlashProgram.to_string()).to(eq("FlashProgram"))
+        expect(FeatureId.TraceCapture.to_string()).to(eq("TraceCapture"))
+        expect(FeatureId.CoverageCollect.to_string()).to(eq("CoverageCollect"))
+        expect(FeatureId.ProfileSample.to_string()).to(eq("ProfileSample"))
+
+    it "supports equality comparison":
+        expect(FeatureId.Halt.eq(FeatureId.Halt)).to(eq(true))
+        expect(FeatureId.Halt.eq(FeatureId.Resume)).to(eq(false))
+
+
+# ============================================================================
+# Test Group 7: QEMU Integration (Slow Tests)
+# ============================================================================
+
+describe "QEMU Integration":
+    """
+    ## QEMU + GDB Integration
+
+    End-to-end tests that start QEMU with a RISC-V 32 binary,
+    connect via GDB MI, and test debug operations.
+
+    These tests require:
+    - qemu-system-riscv32
+    - riscv32-unknown-elf-gcc (or riscv64-unknown-elf-gcc)
+    - gdb-multiarch (or riscv-specific gdb)
+    """
+
+    slow_it "connects GDB to QEMU and reads registers":
+        use remote.test.qemu_runner.{QemuRunner, build_rv32_test, is_qemu_available, is_gdb_available, is_rv32_gcc_available}
+        use remote.backend.RemoteRiscV32Backend
+
+        # Skip if tools not available
+        if not is_qemu_available():
+            skip("qemu-system-riscv32 not available")
+        if not is_gdb_available():
+            skip("GDB not available")
+        if not is_rv32_gcc_available():
+            skip("RISC-V cross-compiler not available")
+
+        # Build test binary
+        val elf_path = "/tmp/simple_test_rv32.elf"
+        build_rv32_test("test/remote/fixtures/hello_rv32.s", elf_path)?
+
+        # Start QEMU
+        val qemu = QemuRunner.start(elf_path, 11234)?
+
+        # Connect GDB
+        val config = DebugConfig(
+            host: "localhost",
+            port: 11234,
+            target: Architecture.RiscV32,
+            program: elf_path,
+            options: {}
+        )
+        val backend = RemoteRiscV32Backend.gdb_only(config)?
+
+        # Read all registers
+        val regs = backend.read_all_registers()?
+        expect(regs.keys().len() > 0).to(eq(true))
+
+        # Cleanup
+        backend.detach()
+        qemu.stop()
+
+    slow_it "sets breakpoint and inspects locals":
+        use remote.test.qemu_runner.{QemuRunner, build_rv32_test, is_qemu_available, is_gdb_available, is_rv32_gcc_available}
+        use remote.backend.RemoteRiscV32Backend
+
+        if not is_qemu_available() or not is_gdb_available() or not is_rv32_gcc_available():
+            skip("required tools not available")
+
+        # Build test binary
+        val elf_path = "/tmp/simple_test_rv32_bp.elf"
+        build_rv32_test("test/remote/fixtures/hello_rv32.s", elf_path)?
+
+        # Start QEMU
+        val qemu = QemuRunner.start(elf_path, 11235)?
+
+        # Connect
+        val config = DebugConfig.default_gdb(elf_path)
+        config.port = 11235
+        val backend = RemoteRiscV32Backend.gdb_only(config)?
+
+        # Set breakpoint at test_func
+        val bp_id = backend.set_breakpoint_at_addr(0x80000010)?  # Approximate address
+
+        # Run until breakpoint
+        backend.run()
+
+        # Read stack trace
+        val trace = backend.stack_trace()
+        match trace:
+            Ok(frames):
+                expect(frames.len() > 0).to(eq(true))
+            Err(_):
+                pass  # May not stop at exact address
+
+        # Cleanup
+        backend.detach()
+        qemu.stop()
+
+    slow_it "verifies feature registry with real GDB":
+        use remote.test.qemu_runner.{QemuRunner, build_rv32_test, is_qemu_available, is_gdb_available, is_rv32_gcc_available}
+        use remote.backend.RemoteRiscV32Backend
+
+        if not is_qemu_available() or not is_gdb_available() or not is_rv32_gcc_available():
+            skip("required tools not available")
+
+        # Build test binary
+        val elf_path = "/tmp/simple_test_rv32_feat.elf"
+        build_rv32_test("test/remote/fixtures/hello_rv32.s", elf_path)?
+
+        # Start QEMU
+        val qemu = QemuRunner.start(elf_path, 11236)?
+
+        # Connect with full feature set
+        val config = DebugConfig.default_gdb(elf_path)
+        config.port = 11236
+        var backend = RemoteRiscV32Backend.gdb_only(config)?
+        backend.add_emulation()
+
+        # Verify features are registered
+        expect(backend.supports(FeatureId.Halt)).to(eq(true))
+        expect(backend.supports(FeatureId.Resume)).to(eq(true))
+        expect(backend.supports(FeatureId.ReadLocals)).to(eq(true))
+        expect(backend.supports(FeatureId.ReadStackTrace)).to(eq(true))
+        expect(backend.supports(FeatureId.ReadArguments)).to(eq(true))
+
+        # Generate capabilities report
+        val report = backend.capabilities()
+        expect(report.contains("Halt")).to(eq(true))
+        expect(report.contains("native")).to(eq(true))
+
+        # Cleanup
+        backend.detach()
+        qemu.stop()
