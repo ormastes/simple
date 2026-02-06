@@ -1,0 +1,307 @@
+# GDB Machine Interface Response Parser
+# Parses GDB MI output records into structured data.
+#
+# GDB MI output format:
+#   Result:  "42^done,key=value,..."
+#   Async:   "*stopped,reason=\"breakpoint-hit\",..."
+#   Stream:  "~\"output text\""
+#   Prompt:  "(gdb)"
+
+# Parsed GDB MI record
+enum GdbMiRecord:
+    Result(token: i32, class: text, data: Dict<text, text>)
+    Async(class: text, data: Dict<text, text>)
+    Stream(kind: text, content: text)
+    Prompt
+    Unknown(raw: text)
+
+    fn is_result() -> bool:
+        match self:
+            Result(_, _, _): true
+            _: false
+
+    fn is_done() -> bool:
+        match self:
+            Result(_, class, _): class == "done"
+            _: false
+
+    fn is_error() -> bool:
+        match self:
+            Result(_, class, _): class == "error"
+            _: false
+
+    fn is_stopped() -> bool:
+        match self:
+            Async(class, _): class == "stopped"
+            _: false
+
+# GDB MI variable object (for structured variable inspection)
+class GdbVariable:
+    name: text
+    value: text
+    type_name: text
+    num_children: i32
+    has_more: bool
+
+    static fn of(name: text, value: text, type_name: text) -> GdbVariable:
+        GdbVariable(
+            name: name,
+            value: value,
+            type_name: type_name,
+            num_children: 0,
+            has_more: false
+        )
+
+# GDB MI parser
+class GdbMiParser:
+
+impl GdbMiParser:
+    # Parse a single line of GDB MI output
+    static fn parse_line(line: text) -> GdbMiRecord:
+        val trimmed = line.trim()
+
+        if trimmed == "(gdb)" or trimmed == "(gdb) ":
+            return GdbMiRecord.Prompt
+
+        if trimmed.len() == 0:
+            return GdbMiRecord.Unknown(raw: "")
+
+        # Stream records: ~"text", @"text", &"text"
+        val first = trimmed[0]
+        if first == "~" or first == "@" or first == "&":
+            val kind = match first:
+                "~": "console"
+                "@": "target"
+                "&": "log"
+                _: "unknown"
+            val content = GdbMiParser.unescape_string(trimmed[1:])
+            return GdbMiRecord.Stream(kind: kind, content: content)
+
+        # Async records: *stopped,reason=..., =thread-created,..., +download,...
+        if first == "*" or first == "=" or first == "+":
+            val rest = trimmed[1:]
+            val (class, data) = GdbMiParser.parse_class_and_data(rest)
+            return GdbMiRecord.Async(class: class, data: data)
+
+        # Result records: [token]^class,key=value,...
+        if trimmed.contains("^"):
+            val caret_pos = trimmed.index_of("^")
+            val token_str = trimmed[:caret_pos]
+            val rest = trimmed[caret_pos + 1:]
+            val token = if token_str.len() > 0:
+                token_str.parse_int() ?? -1
+            else:
+                -1
+            val (class, data) = GdbMiParser.parse_class_and_data(rest)
+            return GdbMiRecord.Result(token: token, class: class, data: data)
+
+        GdbMiRecord.Unknown(raw: trimmed)
+
+    # Parse "class,key=value,..." into (class, dict)
+    static fn parse_class_and_data(raw: text) -> (text, Dict<text, text>):
+        val comma_pos = raw.index_of(",")
+        if comma_pos < 0:
+            return (raw, {})
+
+        val class = raw[:comma_pos]
+        val rest = raw[comma_pos + 1:]
+        val data = GdbMiParser.parse_key_values(rest)
+        (class, data)
+
+    # Parse "key=value,key=value,..." into a dict
+    # Handles nested structures by treating them as raw strings
+    static fn parse_key_values(raw: text) -> Dict<text, text>:
+        var result: Dict<text, text> = {}
+        var pos = 0
+        val len = raw.len()
+
+        while pos < len:
+            # Find key
+            val eq_pos = GdbMiParser.find_char(raw, '=', pos)
+            if eq_pos < 0:
+                break
+
+            val key = raw[pos:eq_pos].trim()
+            pos = eq_pos + 1
+
+            if pos >= len:
+                break
+
+            # Parse value
+            val ch = raw[pos]
+            if ch == '"':
+                # Quoted string
+                val end = GdbMiParser.find_closing_quote(raw, pos + 1)
+                val value = GdbMiParser.unescape_mi_string(raw[pos + 1:end])
+                result[key] = value
+                pos = end + 1
+            elif ch == '{':
+                # Tuple
+                val end = GdbMiParser.find_matching_brace(raw, pos)
+                result[key] = raw[pos:end + 1]
+                pos = end + 1
+            elif ch == '[':
+                # List
+                val end = GdbMiParser.find_matching_bracket(raw, pos)
+                result[key] = raw[pos:end + 1]
+                pos = end + 1
+            else:
+                # Unquoted value - read until comma or end
+                val comma = GdbMiParser.find_char(raw, ',', pos)
+                if comma < 0:
+                    result[key] = raw[pos:]
+                    pos = len
+                else:
+                    result[key] = raw[pos:comma]
+                    pos = comma
+
+            # Skip comma separator
+            if pos < len and raw[pos] == ',':
+                pos = pos + 1
+
+        result
+
+    # Parse a GDB MI list of tuples: [{name="x",value="42"},{name="y",value="10"}]
+    static fn parse_tuple_list(raw: text) -> [Dict<text, text>]:
+        var result: [Dict<text, text>] = []
+        val trimmed = raw.trim()
+
+        # Remove outer brackets if present
+        var inner = trimmed
+        if inner.starts_with("["):
+            inner = inner[1:]
+        if inner.ends_with("]"):
+            inner = inner[:inner.len() - 1]
+
+        if inner.trim().len() == 0:
+            return result
+
+        # Split by top-level tuples
+        var pos = 0
+        val len = inner.len()
+        while pos < len:
+            # Skip whitespace and commas
+            while pos < len and (inner[pos] == ',' or inner[pos] == ' '):
+                pos = pos + 1
+
+            if pos >= len:
+                break
+
+            if inner[pos] == '{':
+                val end = GdbMiParser.find_matching_brace(inner, pos)
+                val tuple_str = inner[pos + 1:end]
+                val data = GdbMiParser.parse_key_values(tuple_str)
+                result.push(data)
+                pos = end + 1
+            else:
+                break
+
+        result
+
+    # Unescape a GDB MI quoted string: remove surrounding quotes and unescape
+    static fn unescape_string(raw: text) -> text:
+        var s = raw.trim()
+        if s.starts_with("\""):
+            s = s[1:]
+        if s.ends_with("\""):
+            s = s[:s.len() - 1]
+        GdbMiParser.unescape_mi_string(s)
+
+    # Unescape MI string escape sequences
+    static fn unescape_mi_string(raw: text) -> text:
+        var result = raw
+        result = result.replace("\\\"", "\"")
+        result = result.replace("\\n", "\n")
+        result = result.replace("\\t", "\t")
+        result = result.replace("\\\\", "\\")
+        result
+
+    # Find char at top level (not inside quotes/braces/brackets)
+    static fn find_char(raw: text, ch: text, start: i32) -> i32:
+        var pos = start
+        var in_quote = false
+        var depth = 0
+        val len = raw.len()
+
+        while pos < len:
+            val c = raw[pos]
+            if in_quote:
+                if c == '\\':
+                    pos = pos + 1  # skip escaped char
+                elif c == '"':
+                    in_quote = false
+            else:
+                if c == '"':
+                    in_quote = true
+                elif c == '{' or c == '[':
+                    depth = depth + 1
+                elif c == '}' or c == ']':
+                    depth = depth - 1
+                elif c == ch and depth == 0:
+                    return pos
+            pos = pos + 1
+
+        -1
+
+    # Find closing quote (handles escapes)
+    static fn find_closing_quote(raw: text, start: i32) -> i32:
+        var pos = start
+        val len = raw.len()
+        while pos < len:
+            val c = raw[pos]
+            if c == '\\':
+                pos = pos + 1  # skip escaped char
+            elif c == '"':
+                return pos
+            pos = pos + 1
+        len  # fallback: end of string
+
+    # Find matching closing brace
+    static fn find_matching_brace(raw: text, start: i32) -> i32:
+        var depth = 0
+        var pos = start
+        var in_quote = false
+        val len = raw.len()
+        while pos < len:
+            val c = raw[pos]
+            if in_quote:
+                if c == '\\':
+                    pos = pos + 1
+                elif c == '"':
+                    in_quote = false
+            else:
+                if c == '"':
+                    in_quote = true
+                elif c == '{':
+                    depth = depth + 1
+                elif c == '}':
+                    depth = depth - 1
+                    if depth == 0:
+                        return pos
+            pos = pos + 1
+        len - 1
+
+    # Find matching closing bracket
+    static fn find_matching_bracket(raw: text, start: i32) -> i32:
+        var depth = 0
+        var pos = start
+        var in_quote = false
+        val len = raw.len()
+        while pos < len:
+            val c = raw[pos]
+            if in_quote:
+                if c == '\\':
+                    pos = pos + 1
+                elif c == '"':
+                    in_quote = false
+            else:
+                if c == '"':
+                    in_quote = true
+                elif c == '[':
+                    depth = depth + 1
+                elif c == ']':
+                    depth = depth - 1
+                    if depth == 0:
+                        return pos
+            pos = pos + 1
+        len - 1

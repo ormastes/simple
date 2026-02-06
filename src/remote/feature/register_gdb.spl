@@ -1,0 +1,192 @@
+# GDB Feature Registration
+# Registers all GDB MI handlers at rank 0 (native).
+
+use remote.feature.features.{FeatureId, FeatureRank}
+use remote.feature.registry.{FeatureHandler, FeatureRegistry}
+use remote.protocol.gdb_mi.GdbMiClient
+use app.debug.coordinator.VarInfo
+
+# Register all GDB MI features at rank 0
+fn register_gdb_features(registry: FeatureRegistry, gdb: GdbMiClient):
+    # Execution control
+    registry.register(FeatureHandler.of(
+        FeatureId.Halt, FeatureRank.NATIVE, "gdb",
+        \args: gdb.halt(),
+        "GDB -exec-interrupt"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.Resume, FeatureRank.NATIVE, "gdb",
+        \args: gdb.resume(),
+        "GDB -exec-continue"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SingleStep, FeatureRank.NATIVE, "gdb",
+        \args: gdb.single_step(),
+        "GDB -exec-step"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.StepOver, FeatureRank.NATIVE, "gdb",
+        \args: gdb.step_over(),
+        "GDB -exec-next"
+    ))
+
+    # Memory
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadMemory, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_memory(gdb, args),
+        "GDB -data-read-memory-bytes"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteMemory, FeatureRank.NATIVE, "gdb",
+        \args: gdb_write_memory(gdb, args),
+        "GDB -data-write-memory-bytes"
+    ))
+
+    # Registers
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadRegister, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_register(gdb, args),
+        "GDB -data-list-register-values"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.WriteRegister, FeatureRank.NATIVE, "gdb",
+        \args: gdb_write_register(gdb, args),
+        "GDB register write"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadAllRegisters, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_all_registers(gdb),
+        "GDB -data-list-register-values x"
+    ))
+
+    # Breakpoints
+    registry.register(FeatureHandler.of(
+        FeatureId.SetBreakpoint, FeatureRank.NATIVE, "gdb",
+        \args: gdb_set_breakpoint(gdb, args),
+        "GDB -break-insert"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ClearBreakpoint, FeatureRank.NATIVE, "gdb",
+        \args: gdb_clear_breakpoint(gdb, args),
+        "GDB -break-delete"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SetWatchpoint, FeatureRank.NATIVE, "gdb",
+        \args: gdb_set_watchpoint(gdb, args),
+        "GDB -break-watch"
+    ))
+
+    # Inspection
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadLocals, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_locals(gdb),
+        "GDB -stack-list-locals --all-values"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadArguments, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_arguments(gdb),
+        "GDB -stack-list-arguments"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadGlobals, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_globals(gdb),
+        "GDB -symbol-list-variables + evaluate"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.EvaluateExpression, FeatureRank.NATIVE, "gdb",
+        \args: gdb_evaluate(gdb, args),
+        "GDB -data-evaluate-expression"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ReadStackTrace, FeatureRank.NATIVE, "gdb",
+        \args: gdb_read_stack_trace(gdb),
+        "GDB -stack-list-frames"
+    ))
+
+# --- Handler adapters (convert [text] args to typed calls) ---
+
+fn gdb_read_memory(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("ReadMemory requires [addr, size]")
+    val addr = args[0].parse_int() ?? 0
+    val size = args[1].parse_int() ?? 0
+    val bytes = gdb.read_memory(addr, size)?
+    Ok(bytes.map(\b: "{b}").join(","))
+
+fn gdb_write_memory(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteMemory requires [addr, hex_data...]")
+    val addr = args[0].parse_int() ?? 0
+    var data: [i32] = []
+    for i in 1..args.len():
+        data.push(args[i].parse_int() ?? 0)
+    gdb.write_memory(addr, data)
+
+fn gdb_read_register(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ReadRegister requires [name]")
+    val value = gdb.read_register(args[0])?
+    Ok("{value}")
+
+fn gdb_write_register(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("WriteRegister requires [name, value]")
+    val value = args[1].parse_int() ?? 0
+    gdb.write_register(args[0], value)
+
+fn gdb_read_all_registers(gdb: GdbMiClient) -> Result<text, text>:
+    val regs = gdb.read_all_registers()?
+    var parts: [text] = []
+    for key in regs.keys():
+        parts.push("{key}={regs[key]}")
+    Ok(parts.join(","))
+
+fn gdb_set_breakpoint(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetBreakpoint requires [location]")
+    val id = gdb.set_breakpoint(args[0])?
+    Ok("{id}")
+
+fn gdb_clear_breakpoint(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("ClearBreakpoint requires [id]")
+    val id = args[0].parse_int() ?? 0
+    gdb.delete_breakpoint(id)
+
+fn gdb_set_watchpoint(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SetWatchpoint requires [expr, access?]")
+    val access = if args.len() > 1: args[1] else: "write"
+    val id = gdb.set_watchpoint(args[0], access)?
+    Ok("{id}")
+
+fn gdb_read_locals(gdb: GdbMiClient) -> Result<text, text>:
+    val vars = gdb.read_locals()?
+    Ok(serialize_vars(vars))
+
+fn gdb_read_arguments(gdb: GdbMiClient) -> Result<text, text>:
+    val vars = gdb.read_arguments()?
+    Ok(serialize_vars(vars))
+
+fn gdb_read_globals(gdb: GdbMiClient) -> Result<text, text>:
+    val vars = gdb.read_globals()?
+    Ok(serialize_vars(vars))
+
+fn gdb_evaluate(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("EvaluateExpression requires [expr]")
+    gdb.evaluate(args[0])
+
+fn gdb_read_stack_trace(gdb: GdbMiClient) -> Result<text, text>:
+    val frames = gdb.stack_trace()?
+    var parts: [text] = []
+    for f in frames:
+        parts.push("{f.index}:{f.function_name}:{f.file}:{f.line}")
+    Ok(parts.join(";"))
+
+# Serialize VarInfo list to a text format
+fn serialize_vars(vars: [VarInfo]) -> text:
+    var parts: [text] = []
+    for v in vars:
+        parts.push("{v.name}={v.value}:{v.type_name}")
+    parts.join(";")
