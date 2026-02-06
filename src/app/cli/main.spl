@@ -10,7 +10,7 @@
 #   simple -c "code"    - Run code string
 
 use app.cli_util (get_cli_args)
-use app.io.mod (file_exists, file_write, dir_create, cwd, cli_file_exists, cli_read_file,
+use app.io.mod (file_exists, file_write, dir_create, cwd, env_get, cli_file_exists, cli_read_file,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
     cli_run_migrate, cli_run_mcp, cli_run_diff, cli_constr, cli_run_query, cli_info,
@@ -108,6 +108,11 @@ fn print_help():
     print "  --gc-log       Enable verbose GC logging"
     print "  --gc-off       Disable garbage collection"
     print ""
+    print "Execution Mode:"
+    print "  --backend=auto|cranelift|llvm  Select JIT backend (default: auto)"
+    print "  --interpret                    Force interpreter mode (no JIT)"
+    print "  SIMPLE_EXECUTION_MODE env var  jit|interpret|cranelift|llvm"
+    print ""
     print "Fault Detection:"
     print "  --stack-overflow-detection     Enable recursion depth check"
     print "  --no-stack-overflow-detection  Disable recursion depth check"
@@ -182,6 +187,8 @@ struct GlobalFlags:
     timeout_secs: i64
     execution_limit: i64
     stack_overflow_detection: bool
+    backend: text        # "auto", "cranelift", "llvm" - JIT backend selection
+    force_interpret: bool  # --interpret flag to force interpreter mode
 
 fn parse_global_flags(args: [str]) -> GlobalFlags:
     var gc_log = false
@@ -192,6 +199,8 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
     var execution_limit = 0
     var stack_overflow_detection = false
     var has_stack_overflow_flag = false
+    var backend = "auto"
+    var force_interpret = false
 
     var i = 0
     while i < args.len():
@@ -202,6 +211,13 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
             gc_off = true
         elif arg == "--notui":
             use_notui = true
+        elif arg == "--interpret":
+            force_interpret = true
+        elif arg.starts_with("--backend="):
+            backend = arg[10:]
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
         elif arg == "--stack-overflow-detection":
             stack_overflow_detection = true
             has_stack_overflow_flag = true
@@ -228,9 +244,22 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
             execution_limit = args[i].to_int()
         i = i + 1
 
+    # Check SIMPLE_EXECUTION_MODE env var as fallback
+    if not force_interpret and backend == "auto":
+        val env_mode = env_get("SIMPLE_EXECUTION_MODE")
+        if env_mode == "interpret":
+            force_interpret = true
+        elif env_mode == "cranelift":
+            backend = "cranelift"
+        elif env_mode == "llvm":
+            backend = "llvm"
+        elif env_mode == "jit":
+            backend = "auto"
+
     GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
         max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
-        execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection)
+        execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection,
+        backend: backend, force_interpret: force_interpret)
 
 fn apply_fault_detection(flags: GlobalFlags):
     if flags.max_recursion_depth > 0:
@@ -249,10 +278,10 @@ fn filter_internal_flags(args: [str]) -> [str]:
     for arg in args:
         if skip_next:
             skip_next = false
-        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit":
+        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit" or arg == "--backend":
             skip_next = true
-        elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection":
-            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit="):
+        elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret":
+            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--backend="):
                 result.push(arg)
     result
 
