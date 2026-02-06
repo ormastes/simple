@@ -16,11 +16,40 @@
 # INCORRECT USAGE (from application code):
 #   use lib.database.atomic (atomic_write)      // ❌ Internal API
 
-use app.io
+# Direct extern declarations for bootstrap runtime compatibility
+# (use app.io wildcard import brings in rt_timestamp_now/rt_sleep_ms which
+#  are not available in the bootstrap runtime)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+# Polyfill for rt_timestamp_now (returns microseconds since epoch)
+# Uses date command since rt_timestamp_now is not in bootstrap runtime
+fn get_timestamp() -> i64:
+    val (out, err, code) = rt_process_run("date", ["+%s"])
+    val seconds = out.trim().parse_i64() ?? 0
+    seconds * 1000000
+
+# Polyfill for rt_sleep_ms
+fn sleep_ms(ms: i64):
+    rt_process_run("sleep", ["0.01"])
 
 # Exports
 export atomic_read, atomic_write, atomic_append
-export FileLock, is_process_alive
+export FileLock, is_process_alive, get_timestamp
 
 # ============================================================================
 # Process Utilities
@@ -76,7 +105,7 @@ class FileLock:
         if self.acquired:
             return true
 
-        val start_time = rt_timestamp_now()
+        val start_time = get_timestamp()
         val timeout_us = timeout_ms * 1000
 
         # Polling loop
@@ -87,7 +116,7 @@ class FileLock:
                 return true
 
             # Check timeout
-            val elapsed = rt_timestamp_now() - start_time
+            val elapsed = get_timestamp() - start_time
             if elapsed > timeout_us:
                 return false
 
@@ -108,7 +137,7 @@ class FileLock:
 
         # Create lock file with PID
         val pid = rt_getpid()
-        val lock_content = "{pid}\n{rt_timestamp_now()}"
+        val lock_content = "{pid}\n{get_timestamp()}"
         file_write(self.lock_path, lock_content)
 
     # Check if lock is stale (>2 hours old or process dead)
@@ -136,7 +165,7 @@ class FileLock:
             return true  # Process died, lock is stale
 
         # Check if >2 hours old (fallback timeout)
-        val now = rt_timestamp_now()
+        val now = get_timestamp()
         val age = now - timestamp
         val two_hours = 2 * 60 * 60 * 1000000  # 2 hours in microseconds
 
