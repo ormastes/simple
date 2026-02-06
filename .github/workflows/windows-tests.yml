@@ -1,0 +1,480 @@
+name: Windows Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+    inputs:
+      run_slow_tests:
+        description: 'Run slow tests'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================================================
+  # Windows x64 Tests (Native)
+  # ============================================================================
+  windows-x64:
+    name: Windows x64 Tests
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: rust
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: x86_64-pc-windows-msvc
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: windows-x64-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: rust/target
+        key: windows-x64-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install QEMU
+      run: |
+        choco install qemu --no-progress -y
+        $env:PATH = "C:\Program Files\qemu;$env:PATH"
+        qemu-system-i386 --version
+        qemu-system-x86_64 --version
+        qemu-system-arm --version
+        qemu-system-riscv32 --version
+      shell: pwsh
+      working-directory: .
+
+    - name: Verify MSVC linker
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) {
+          & $vswhere -latest -property installationPath
+          Write-Host "MSVC link.exe available"
+        } else {
+          Write-Host "MSVC not found, will use lld-link"
+        }
+      shell: pwsh
+      working-directory: .
+
+    - name: Build Rust runtime
+      run: cargo build --profile bootstrap
+      working-directory: rust
+
+    - name: Run Rust tests
+      run: cargo test --workspace
+      working-directory: rust
+
+    - name: Test Simple platform detection
+      run: |
+        $env:PATH = "${{ github.workspace }}\bin;$env:PATH"
+        simple -c "use std.platform; print platform_name()"
+        simple -c "use std.platform; print dir_sep()"
+      shell: pwsh
+      working-directory: .
+
+    - name: Test cross-platform paths
+      run: |
+        simple -c "use std.fs.path; val p = Path.new('C:/Users/Test').normalize(); print p.to_string()"
+      shell: pwsh
+      working-directory: .
+
+    - name: Test Windows command resolution
+      run: |
+        simple -c "use std.platform; print resolve_command('notepad')"
+      shell: pwsh
+      working-directory: .
+
+    - name: Test shell execution
+      run: |
+        simple -c "use app.io; val r = shell('echo test'); print r.stdout"
+      shell: pwsh
+      working-directory: .
+
+    - name: Run Simple tests
+      run: simple test --no-rust-tests
+      shell: pwsh
+      working-directory: .
+
+    - name: Test linker auto-detection
+      run: |
+        simple -c "use compiler.linker.link; val linker = auto_detect_linker(); print linker.name()"
+      shell: pwsh
+      working-directory: .
+
+    - name: Build example with MSVC
+      run: |
+        simple build examples/hello.spl -o hello.exe
+        if (Test-Path hello.exe) {
+          Write-Host "Build successful with Windows linker"
+          .\hello.exe
+        }
+      shell: pwsh
+      working-directory: .
+
+  # ============================================================================
+  # Windows ARM64 Cross-Compilation
+  # ============================================================================
+  windows-arm64:
+    name: Windows ARM64 Cross-Compile
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: rust
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain with ARM64 target
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: aarch64-pc-windows-msvc
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: windows-arm64-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: rust/target
+        key: windows-arm64-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Build for ARM64
+      run: cargo build --target aarch64-pc-windows-msvc --profile bootstrap
+      working-directory: rust
+
+    - name: Verify ARM64 binary
+      run: |
+        $binary = "target\aarch64-pc-windows-msvc\bootstrap\simple_runtime.exe"
+        if (Test-Path $binary) {
+          Write-Host "ARM64 binary built successfully"
+          $size = (Get-Item $binary).Length / 1MB
+          Write-Host "Binary size: $size MB"
+        } else {
+          Write-Host "ARM64 binary not found"
+          exit 1
+        }
+      working-directory: rust
+
+    - name: Upload ARM64 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: simple-runtime-windows-arm64
+        path: rust/target/aarch64-pc-windows-msvc/bootstrap/simple_runtime.exe
+        retention-days: 7
+
+  # ============================================================================
+  # Cross-Platform Build Matrix
+  # ============================================================================
+  cross-platform-matrix:
+    name: Cross-Platform (${{ matrix.os }} - ${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+            platform: linux-x86_64
+
+          # macOS Intel
+          - os: macos-13
+            arch: x86_64
+            target: x86_64-apple-darwin
+            platform: darwin-x86_64
+
+          # macOS Apple Silicon
+          - os: macos-latest
+            arch: aarch64
+            target: aarch64-apple-darwin
+            platform: darwin-aarch64
+
+          # Windows
+          - os: windows-latest
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: ${{ matrix.target }}
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          rust/target
+        key: ${{ matrix.platform }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install QEMU (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc
+        qemu-system-i386 --version
+        qemu-system-riscv32 --version
+
+    - name: Install QEMU (macOS)
+      if: startsWith(matrix.os, 'macos')
+      run: |
+        brew install qemu
+        qemu-system-i386 --version
+        qemu-system-riscv32 --version
+
+    - name: Install QEMU (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        choco install qemu --no-progress -y
+        $env:PATH = "C:\Program Files\qemu;$env:PATH"
+        qemu-system-i386 --version
+      shell: pwsh
+
+    - name: Build runtime
+      run: cargo build --target ${{ matrix.target }} --profile bootstrap
+      working-directory: rust
+
+    - name: Test platform detection
+      if: matrix.os != 'windows-latest'
+      run: |
+        export PATH="$PWD/bin:$PATH"
+        simple -c "use std.platform; print platform_name()"
+        simple -c "use std.platform; print dir_sep()"
+
+    - name: Test platform detection (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        $env:PATH = "${{ github.workspace }}\bin;$env:PATH"
+        simple -c "use std.platform; print platform_name()"
+      shell: pwsh
+
+    - name: Run platform-specific tests
+      if: matrix.os != 'windows-latest'
+      run: simple test test/platform/ --no-rust-tests || echo "Platform tests may not exist yet"
+
+    - name: Run platform-specific tests (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        simple test test/platform/ --no-rust-tests
+      shell: pwsh
+      continue-on-error: true
+
+  # ============================================================================
+  # QEMU Boot Tests (All Platforms)
+  # ============================================================================
+  qemu-boot-tests:
+    name: QEMU Boot Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install QEMU (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-system-x86 qemu-system-arm qemu-system-misc
+        qemu-system-i386 --version
+        qemu-system-arm --version
+        qemu-system-riscv32 --version
+
+    - name: Install QEMU (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install qemu
+        qemu-system-i386 --version
+        qemu-system-arm --version
+        qemu-system-riscv32 --version
+
+    - name: Install QEMU (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        choco install qemu --no-progress -y
+        $env:PATH = "C:\Program Files\qemu;$env:PATH"
+        qemu-system-i386 --version
+        qemu-system-arm --version
+        qemu-system-riscv32 --version
+      shell: pwsh
+
+    - name: Build runtime
+      run: cargo build --profile bootstrap
+      working-directory: rust
+
+    - name: Run QEMU boot tests (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        export PATH="$PWD/bin:$PATH"
+        simple test test/baremetal/boot_test_spec.spl || echo "Boot tests may not all pass yet"
+      continue-on-error: true
+
+    - name: Run QEMU boot tests (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        $env:PATH = "${{ github.workspace }}\bin;C:\Program Files\qemu;$env:PATH"
+        simple test test/baremetal/boot_test_spec.spl
+      shell: pwsh
+      continue-on-error: true
+
+  # ============================================================================
+  # Linker Integration Tests
+  # ============================================================================
+  linker-tests:
+    name: Linker Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install linkers (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        # Install mold (fastest)
+        wget -q https://github.com/rui314/mold/releases/download/v2.4.0/mold-2.4.0-x86_64-linux.tar.gz
+        tar xzf mold-2.4.0-x86_64-linux.tar.gz
+        sudo cp mold-2.4.0-x86_64-linux/bin/mold /usr/local/bin/
+        sudo cp mold-2.4.0-x86_64-linux/libexec/mold/ld.mold /usr/local/bin/
+        mold --version
+
+        # lld should be available
+        sudo apt-get update
+        sudo apt-get install -y lld
+        lld --version
+
+    - name: Install linkers (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        # ld is built-in on macOS
+        ld -v
+
+    - name: Verify linkers (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        # Check for MSVC link.exe
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vswhere) {
+          Write-Host "MSVC available"
+        }
+
+        # Check for lld-link (if LLVM installed)
+        $lldLink = (Get-Command lld-link -ErrorAction SilentlyContinue)
+        if ($lldLink) {
+          Write-Host "lld-link available"
+        } else {
+          Write-Host "lld-link not available (expected)"
+        }
+      shell: pwsh
+
+    - name: Build runtime
+      run: cargo build --profile bootstrap
+      working-directory: rust
+
+    - name: Test linker auto-detection (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        export PATH="$PWD/bin:$PATH"
+        simple -c "use compiler.linker.link; val linker = auto_detect_linker(); print get_linker_info()"
+
+    - name: Test linker auto-detection (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        $env:PATH = "${{ github.workspace }}\bin;$env:PATH"
+        simple -c "use compiler.linker.link; val linker = auto_detect_linker(); print get_linker_info()"
+      shell: pwsh
+
+    - name: Build test binary (Unix)
+      if: matrix.os != 'windows-latest'
+      run: |
+        export PATH="$PWD/bin:$PATH"
+        simple build examples/hello.spl -o hello
+        ./hello
+
+    - name: Build test binary (Windows)
+      if: matrix.os == 'windows-latest'
+      run: |
+        $env:PATH = "${{ github.workspace }}\bin;$env:PATH"
+        simple build examples/hello.spl -o hello.exe
+        .\hello.exe
+      shell: pwsh
+
+  # ============================================================================
+  # Summary Job
+  # ============================================================================
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [windows-x64, windows-arm64, cross-platform-matrix, qemu-boot-tests, linker-tests]
+    if: always()
+
+    steps:
+    - name: Check results
+      run: |
+        echo "Windows x64 tests: ${{ needs.windows-x64.result }}"
+        echo "Windows ARM64 cross-compile: ${{ needs.windows-arm64.result }}"
+        echo "Cross-platform matrix: ${{ needs.cross-platform-matrix.result }}"
+        echo "QEMU boot tests: ${{ needs.qemu-boot-tests.result }}"
+        echo "Linker tests: ${{ needs.linker-tests.result }}"
+
+        if [ "${{ needs.windows-x64.result }}" != "success" ]; then
+          echo "❌ Windows x64 tests failed"
+          exit 1
+        fi
+
+        if [ "${{ needs.windows-arm64.result }}" != "success" ]; then
+          echo "❌ Windows ARM64 cross-compile failed"
+          exit 1
+        fi
+
+        echo "✅ All critical tests passed"

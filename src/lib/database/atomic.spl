@@ -28,7 +28,9 @@ extern fn rt_getpid() -> i64
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn file_read(path: text) -> text:
-    rt_file_read_text(path)
+    # Bootstrap runtime wraps rt_file_read_text result in Option
+    val result = rt_file_read_text(path)
+    result ?? ""
 fn file_write(path: text, content: text) -> bool:
     rt_file_write_text(path, content)
 fn file_exists(path: text) -> bool:
@@ -37,11 +39,11 @@ fn file_delete(path: text) -> bool:
     rt_file_delete(path)
 
 # Polyfill for rt_timestamp_now (returns microseconds since epoch)
-# Uses date command since rt_timestamp_now is not in bootstrap runtime
+# Uses date +%s%3N for millisecond precision since rt_timestamp_now is not in bootstrap runtime
 fn get_timestamp() -> i64:
-    val (out, err, code) = rt_process_run("date", ["+%s"])
-    val seconds = out.trim().parse_i64() ?? 0
-    seconds * 1000000
+    val (out, err, code) = rt_process_run("date", ["+%s%3N"])
+    val ms = out.trim().to_int() ?? 0
+    ms * 1000  # Convert milliseconds to microseconds
 
 # Polyfill for rt_sleep_ms
 fn sleep_ms(ms: i64):
@@ -121,7 +123,7 @@ class FileLock:
                 return false
 
             # Sleep 10ms before retry
-            rt_sleep_ms(10)
+            sleep_ms(10)
 
         false
 
@@ -155,10 +157,10 @@ class FileLock:
 
         # Parse PID and timestamp
         val pid_str = lines[0].trim()
-        val pid = pid_str.parse_i64() ?? 0
+        val pid = pid_str.to_int() ?? 0
 
         val timestamp_str = lines[1].trim()
-        val timestamp = timestamp_str.parse_i64() ?? 0
+        val timestamp = timestamp_str.to_int() ?? 0
 
         # Check if process is still alive
         if pid > 0 and not is_process_alive(pid):
@@ -190,6 +192,10 @@ class FileLock:
 
 # Read file with lock
 fn atomic_read(path: text) -> text?:
+    # Fast path: if file doesn't exist, no need to acquire lock
+    if not file_exists(path):
+        return None
+
     var lock = FileLock.for_file(path)
     if not lock.acquire():
         return None
