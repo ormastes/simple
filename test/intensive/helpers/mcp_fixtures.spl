@@ -213,6 +213,8 @@ fn build_bugdb_stats_json(total: i64, open: i64, critical: i64) -> text:
 
 fn extract_json_string(json: text, key: text) -> text:
     # Simple extraction (not a full JSON parser)
+    # NOTE: Uses str_char_at() instead of json_rest[i] to avoid
+    # "cannot convert enum to int" runtime bug with character indexing.
     val key_pattern = "\"{key}\":"
     val start_idx = str_find(json, key_pattern)
     if start_idx < 0:
@@ -221,16 +223,21 @@ fn extract_json_string(json: text, key: text) -> text:
     val value_start = start_idx + key_pattern.length()
     val json_rest = str_substring(json, value_start, json.length())
 
-    # Skip whitespace
+    # Skip whitespace using str_char_at (returns text, not char enum)
     var i = 0
-    while i < json_rest.length() and (json_rest[i] == ' ' or json_rest[i] == '\t' or json_rest[i] == '\n'):
-        i = i + 1
+    while i < json_rest.length():
+        val ch = str_char_at(json_rest, i)
+        if ch == " " or ch == "\t" or ch == "\n":
+            i = i + 1
+        else:
+            break
 
     if i >= json_rest.length():
         return ""
 
     # Check if value is a string (starts with ")
-    if json_rest[i] == '"':
+    val first_ch = str_char_at(json_rest, i)
+    if first_ch == "\"":
         val end_idx = str_find(str_substring(json_rest, i + 1, json_rest.length()), "\"")
         if end_idx < 0:
             return ""
@@ -238,7 +245,12 @@ fn extract_json_string(json: text, key: text) -> text:
 
     ""
 
+fn is_digit_char(ch: text) -> bool:
+    ch == "0" or ch == "1" or ch == "2" or ch == "3" or ch == "4" or ch == "5" or ch == "6" or ch == "7" or ch == "8" or ch == "9"
+
 fn extract_json_number(json: text, key: text) -> i64:
+    # NOTE: Uses str_char_at() instead of json_rest[i] to avoid
+    # "cannot convert enum to int" runtime bug with character indexing.
     val key_pattern = "\"{key}\":"
     val start_idx = str_find(json, key_pattern)
     if start_idx < 0:
@@ -247,18 +259,26 @@ fn extract_json_number(json: text, key: text) -> i64:
     val value_start = start_idx + key_pattern.length()
     val json_rest = str_substring(json, value_start, json.length())
 
-    # Skip whitespace and extract number
+    # Skip whitespace
     var i = 0
-    while i < json_rest.length() and (json_rest[i] == ' ' or json_rest[i] == '\t'):
-        i = i + 1
+    while i < json_rest.length():
+        val ch = str_char_at(json_rest, i)
+        if ch == " " or ch == "\t":
+            i = i + 1
+        else:
+            break
 
     var num_str = ""
-    while i < json_rest.length() and (json_rest[i] >= '0' and json_rest[i] <= '9'):
-        num_str = num_str + json_rest[i]
-        i = i + 1
+    while i < json_rest.length():
+        val ch = str_char_at(json_rest, i)
+        if is_digit_char(ch):
+            num_str = num_str + ch
+            i = i + 1
+        else:
+            break
 
     if num_str.length() > 0:
-        str_to_int(num_str)
+        num_str.to_int()
     else:
         0
 
