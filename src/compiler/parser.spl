@@ -1283,12 +1283,35 @@ impl Parser:
     me parse_set_literal() -> Expr:
         """Parse set literal s{elem1, elem2, ...}.
 
-        Note: The 's{' has already been consumed by the lexer,
-        which returns a SetLitStart token. We need to advance
-        past the SetLitStart token and then parse elements until }.
+        Called from BlockStart case (for lexer-based approach).
         """
         val start = self.current.span
-        self.advance()  # Consume SetLitStart token
+        self.advance()  # Consume BlockStart token
+
+        # Check for empty set: s{}
+        if self.check(TokenKind.RBrace):
+            self.advance()
+            return Expr(kind: ExprKind.SetLit([]), span: start.merge(self.previous.span))
+
+        # Parse elements (comma-separated expressions)
+        var elements: [Expr] = []
+        elements = elements.push(self.parse_expr())
+
+        while self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.RBrace):
+                break  # Trailing comma
+            elements = elements.push(self.parse_expr())
+
+        self.expect(TokenKind.RBrace, "expected '}' after set elements")
+        Expr(kind: ExprKind.SetLit(elements), span: start.merge(self.previous.span))
+
+    me parse_set_literal_after_s(start: Span) -> Expr:
+        """Parse set literal after seeing 's' identifier.
+
+        The 's' has been consumed, now we expect {elem1, elem2, ...}
+        This is the parser-only approach that works with existing tokens.
+        """
+        self.advance()  # Consume LBrace
 
         # Check for empty set: s{}
         if self.check(TokenKind.RBrace):
