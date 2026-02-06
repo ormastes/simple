@@ -36,6 +36,9 @@ struct Lexer:
     raw_block_start: i64           # Start position of raw block payload
     block_brace_depth: i64         # Brace depth tracking for blocks
 
+    # Unified registry (blocks + literals)
+    unified_registry: UnifiedRegistry?  # Registry for both blocks and literals (lazy-loaded)
+
 impl Lexer:
     static fn new(source: text) -> Lexer:
         Lexer(
@@ -58,7 +61,9 @@ impl Lexer:
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
-            block_brace_depth: 0
+            block_brace_depth: 0,
+            # Unified registry (lazy-loaded)
+            unified_registry: nil
         )
 
     static fn with_registry(source: text, registry: BlockRegistry) -> Lexer:
@@ -82,7 +87,8 @@ impl Lexer:
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
-            block_brace_depth: 0
+            block_brace_depth: 0,
+            unified_registry: nil
         )
 
     # ========================================================================
@@ -601,7 +607,12 @@ impl Lexer:
             self.advance()  # Consume 'r'
             return self.scan_string()
 
-        # Try to detect a registered block: kind{
+        # PRIORITY 1: Try to detect a literal prefix: s{, sorted{, etc.
+        val literal_result = self.try_scan_literal_start(start, line, col)
+        if literal_result.?:
+            return literal_result.unwrap()
+
+        # PRIORITY 2: Try to detect a registered block: m{, loss{, etc.
         val block_result = self.try_scan_block_start(start, line, col)
         if block_result.?:
             return block_result.unwrap()
@@ -679,6 +690,56 @@ impl Lexer:
 
         # Return BlockStart token with the block kind
         Some(Token.new(TokenKind.BlockStart, Span.new(start, self.pos, line, col), ident))
+
+    me try_scan_literal_start(start: i64, line: i64, col: i64) -> Token?:
+        """Try to detect and handle a literal prefix followed by {.
+
+        Returns Some(Token) if a literal prefix was detected, None otherwise.
+        Literals have higher priority than blocks to avoid conflicts.
+
+        Examples: s{1, 2, 3}, sorted{10, 5, 3}
+        """
+        val lbrace = r"{".char_at(0)
+
+        # Peek ahead to find the identifier
+        var peek_pos = self.pos
+        while peek_pos < self.source.len():
+            val c = self.source[peek_pos]
+            if is_ident_char(c):
+                peek_pos = peek_pos + 1
+            else:
+                break
+
+        if peek_pos == self.pos:
+            return None  # No identifier found
+
+        val ident = self.source[self.pos:peek_pos]
+
+        # Check if followed by {
+        if peek_pos >= self.source.len() or self.source[peek_pos] != lbrace:
+            return None  # Not followed by {
+
+        # Check if this identifier is a registered literal prefix
+        # TODO: Implement get_unified_registry() method
+        # For now, check if it's "s" (hardcoded set literal prefix)
+        if ident == "s":
+            # Consume the identifier + {
+            while self.pos < peek_pos:
+                self.advance()
+            self.advance()  # Consume {
+
+            # Return SetLitStart token
+            return Some(Token.new(TokenKind.SetLitStart, Span.new(start, self.pos, line, col), ident))
+
+        # Check unified registry (when implemented)
+        # val registry = self.get_unified_registry()
+        # if registry.is_literal_prefix(ident):
+        #     while self.pos < peek_pos:
+        #         self.advance()
+        #     self.advance()  # Consume {
+        #     return Some(Token.new(TokenKind.LiteralStart(ident), Span.new(start, self.pos, line, col), ident))
+
+        None
 
     # ========================================================================
     # Block Mode Methods
