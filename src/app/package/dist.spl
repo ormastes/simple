@@ -1,0 +1,426 @@
+# Distribution Package Builder
+#
+# Creates Rust-free distribution packages for all platforms.
+# Users see: 100% Simple source code + pre-compiled runtime binary.
+
+use std.platform.{platform_name, platform_triple, is_windows, dir_sep, exe_ext}
+use app.io.{
+    shell, rt_file_exists, rt_dir_create, rt_file_copy, rt_file_read_text,
+    rt_file_write_text, rt_dir_list, rt_env_get
+}
+
+# ===========================================================================
+# Platform Configuration
+# ===========================================================================
+
+enum Platform:
+    LinuxX64
+    LinuxArm64
+    DarwinX64       # macOS Intel
+    DarwinArm64     # macOS Apple Silicon
+    WindowsX64
+    WindowsArm64
+
+impl Platform:
+    fn name() -> text:
+        match self:
+            case Platform.LinuxX64: "linux-x86_64"
+            case Platform.LinuxArm64: "linux-aarch64"
+            case Platform.DarwinX64: "darwin-x86_64"
+            case Platform.DarwinArm64: "darwin-arm64"
+            case Platform.WindowsX64: "windows-x86_64"
+            case Platform.WindowsArm64: "windows-aarch64"
+
+    fn triple() -> text:
+        match self:
+            case Platform.LinuxX64: "x86_64-unknown-linux-gnu"
+            case Platform.LinuxArm64: "aarch64-unknown-linux-gnu"
+            case Platform.DarwinX64: "x86_64-apple-darwin"
+            case Platform.DarwinArm64: "aarch64-apple-darwin"
+            case Platform.WindowsX64: "x86_64-pc-windows-msvc"
+            case Platform.WindowsArm64: "aarch64-pc-windows-msvc"
+
+    fn is_current() -> bool:
+        self.name() == platform_name()
+
+    static fn all() -> [Platform]:
+        [
+            Platform.LinuxX64,
+            Platform.LinuxArm64,
+            Platform.DarwinX64,
+            Platform.DarwinArm64,
+            Platform.WindowsX64,
+            Platform.WindowsArm64
+        ]
+
+    static fn current() -> Platform:
+        val name = platform_name()
+        match name:
+            case "linux-x86_64": Platform.LinuxX64
+            case "linux-arm64" | "linux-aarch64": Platform.LinuxArm64
+            case "darwin-x86_64": Platform.DarwinX64
+            case "darwin-arm64": Platform.DarwinArm64
+            case "windows-x86_64": Platform.WindowsX64
+            case "windows-arm64" | "windows-aarch64": Platform.WindowsArm64
+            case _: Platform.LinuxX64  # Default
+
+# ===========================================================================
+# Distribution Configuration
+# ===========================================================================
+
+class DistConfig:
+    version: text
+    target_dir: text
+    source_dir: text
+
+    # Build configuration
+    profile: text          # "bootstrap", "release-opt", etc.
+    strip_binaries: bool
+    compress_upx: bool
+
+    # Package types to build
+    build_bootstrap: bool  # Minimal runtime package
+    build_full: bool       # Full source + runtime
+    build_source: bool     # Source-only (no binaries)
+
+impl DistConfig:
+    static fn default() -> DistConfig:
+        DistConfig(
+            version: "0.5.0",
+            target_dir: "dist",
+            source_dir: ".",
+            profile: "bootstrap",
+            strip_binaries: true,
+            compress_upx: false,  # Optional, requires upx installed
+            build_bootstrap: true,
+            build_full: true,
+            build_source: false
+        )
+
+    static fn from_args(args: [text]) -> DistConfig:
+        var config = DistConfig.default()
+
+        # Parse command-line arguments
+        var i = 0
+        while i < args.len():
+            val arg = args[i]
+
+            if arg == "--version":
+                i = i + 1
+                if i < args.len():
+                    config.version = args[i]
+            elif arg == "--target-dir":
+                i = i + 1
+                if i < args.len():
+                    config.target_dir = args[i]
+            elif arg == "--profile":
+                i = i + 1
+                if i < args.len():
+                    config.profile = args[i]
+            elif arg == "--no-strip":
+                config.strip_binaries = false
+            elif arg == "--compress":
+                config.compress_upx = true
+            elif arg == "--bootstrap-only":
+                config.build_bootstrap = true
+                config.build_full = false
+                config.build_source = false
+            elif arg == "--full-only":
+                config.build_bootstrap = false
+                config.build_full = true
+                config.build_source = false
+            elif arg == "--source-only":
+                config.build_bootstrap = false
+                config.build_full = false
+                config.build_source = true
+
+            i = i + 1
+
+        config
+
+# ===========================================================================
+# Distribution Builder
+# ===========================================================================
+
+class DistBuilder:
+    config: DistConfig
+    platforms: [Platform]
+
+impl DistBuilder:
+    static fn new(config: DistConfig) -> DistBuilder:
+        DistBuilder(
+            config: config,
+            platforms: Platform.all()
+        )
+
+    # Build all platforms
+    fn build_all() -> Result<[text], text>:
+        var packages: [text] = []
+
+        print "Building distribution packages..."
+        print "  Version: {self.config.version}"
+        print "  Profile: {self.config.profile}"
+        print "  Output: {self.config.target_dir}"
+        print ""
+
+        # Create output directory
+        val result = rt_dir_create(self.config.target_dir)
+        if not result:
+            return Err("Failed to create target directory: {self.config.target_dir}")
+
+        # Build for each platform
+        for platform in self.platforms:
+            print "Building {platform.name()}..."
+
+            val build_result = self.build_platform(platform)
+            match build_result:
+                case Ok(pkg_paths):
+                    packages = packages.concat(pkg_paths)
+                    print "  ✓ Built {pkg_paths.len()} package(s)"
+                case Err(msg):
+                    print "  ✗ Failed: {msg}"
+                    # Continue with other platforms
+
+        print ""
+        print "Done! Built {packages.len()} package(s) in {self.config.target_dir}/"
+
+        Ok(packages)
+
+    # Build for specific platform
+    fn build_platform(platform: Platform) -> Result<[text], text>:
+        var packages: [text] = []
+
+        # Find or build runtime binary
+        val runtime_path = self.find_runtime_binary(platform)
+        if runtime_path.len() == 0:
+            return Err("Runtime binary not found for {platform.name()}")
+
+        # Build bootstrap package (runtime + minimal Simple code)
+        if self.config.build_bootstrap:
+            val bootstrap = self.build_bootstrap_package(platform, runtime_path)
+            match bootstrap:
+                case Ok(path):
+                    packages.push(path)
+                case Err(msg):
+                    return Err(msg)
+
+        # Build full package (runtime + all Simple source)
+        if self.config.build_full:
+            val full = self.build_full_package(platform, runtime_path)
+            match full:
+                case Ok(path):
+                    packages.push(path)
+                case Err(msg):
+                    return Err(msg)
+
+        # Build source package (no runtime)
+        if self.config.build_source:
+            val source = self.build_source_package(platform)
+            match source:
+                case Ok(path):
+                    packages.push(path)
+                case Err(msg):
+                    return Err(msg)
+
+        Ok(packages)
+
+    # Find runtime binary for platform
+    fn find_runtime_binary(platform: Platform) -> text:
+        # Check standard locations
+        val profile = self.config.profile
+        val triple = platform.triple()
+
+        val candidates = [
+            "rust/target/{triple}/{profile}/simple_runtime",
+            "rust/target/{triple}/{profile}/simple_runtime.exe",
+            "rust/target/{profile}/simple_runtime",
+            "rust/target/{profile}/simple_runtime.exe",
+            "bin/bootstrap/simple_runtime",
+            "bin/bootstrap/simple_runtime.exe"
+        ]
+
+        for candidate in candidates:
+            if rt_file_exists(candidate):
+                return candidate
+
+        ""  # Not found
+
+    # Build bootstrap package
+    fn build_bootstrap_package(platform: Platform, runtime_path: text) -> Result<text, text>:
+        val pkg_name = "simple-bootstrap-{self.config.version}-{platform.name()}.tar.gz"
+        val pkg_path = "{self.config.target_dir}/{pkg_name}"
+
+        # Create staging directory
+        val stage_dir = "{self.config.target_dir}/stage-bootstrap-{platform.name()}"
+        rt_dir_create(stage_dir)
+
+        # Copy runtime binary
+        rt_dir_create("{stage_dir}/bin")
+        val bin_name = if platform.name().starts_with("windows"): "simple_runtime.exe" else: "simple_runtime"
+        rt_file_copy(runtime_path, "{stage_dir}/bin/{bin_name}")
+
+        # Strip if requested
+        if self.config.strip_binaries and not platform.name().starts_with("windows"):
+            shell("strip {stage_dir}/bin/{bin_name}")
+
+        # Compress with UPX if requested
+        if self.config.compress_upx:
+            val upx_result = shell("upx --best --lzma {stage_dir}/bin/{bin_name} 2>/dev/null")
+            if upx_result.exit_code != 0:
+                print "  Warning: UPX compression failed, continuing without compression"
+
+        # Copy minimal Simple source (lib/std, examples)
+        self.copy_directory_recursive("lib", "{stage_dir}/lib")
+        self.copy_directory_recursive("examples", "{stage_dir}/examples")
+
+        # Copy README and LICENSE
+        if rt_file_exists("README.md"):
+            rt_file_copy("README.md", "{stage_dir}/README.md")
+        if rt_file_exists("LICENSE"):
+            rt_file_copy("LICENSE", "{stage_dir}/LICENSE")
+
+        # Create archive
+        val tar_cmd = "tar -czf {pkg_path} -C {stage_dir} ."
+        val tar_result = shell(tar_cmd)
+        if tar_result.exit_code != 0:
+            return Err("Failed to create archive: {tar_result.stderr}")
+
+        # Cleanup staging
+        shell("rm -rf {stage_dir}")
+
+        Ok(pkg_path)
+
+    # Build full package
+    fn build_full_package(platform: Platform, runtime_path: text) -> Result<text, text>:
+        val pkg_name = "simple-full-{self.config.version}-{platform.name()}.tar.gz"
+        val pkg_path = "{self.config.target_dir}/{pkg_name}"
+
+        # Create staging directory
+        val stage_dir = "{self.config.target_dir}/stage-full-{platform.name()}"
+        rt_dir_create(stage_dir)
+
+        # Copy runtime binary
+        rt_dir_create("{stage_dir}/bin")
+        val bin_name = if platform.name().starts_with("windows"): "simple_runtime.exe" else: "simple_runtime"
+        rt_file_copy(runtime_path, "{stage_dir}/bin/{bin_name}")
+
+        # Strip if requested
+        if self.config.strip_binaries and not platform.name().starts_with("windows"):
+            shell("strip {stage_dir}/bin/{bin_name}")
+
+        # Copy all Simple source (EXCLUDING rust/)
+        self.copy_directory_recursive("src", "{stage_dir}/src")
+        self.copy_directory_recursive("lib", "{stage_dir}/lib")
+        self.copy_directory_recursive("examples", "{stage_dir}/examples")
+        self.copy_directory_recursive("doc", "{stage_dir}/doc")
+
+        # Copy project files
+        if rt_file_exists("README.md"):
+            rt_file_copy("README.md", "{stage_dir}/README.md")
+        if rt_file_exists("LICENSE"):
+            rt_file_copy("LICENSE", "{stage_dir}/LICENSE")
+        if rt_file_exists("CHANGELOG.md"):
+            rt_file_copy("CHANGELOG.md", "{stage_dir}/CHANGELOG.md")
+        if rt_file_exists("simple.sdn"):
+            rt_file_copy("simple.sdn", "{stage_dir}/simple.sdn")
+
+        # Create archive
+        val tar_cmd = "tar -czf {pkg_path} -C {stage_dir} ."
+        val tar_result = shell(tar_cmd)
+        if tar_result.exit_code != 0:
+            return Err("Failed to create archive: {tar_result.stderr}")
+
+        # Cleanup staging
+        shell("rm -rf {stage_dir}")
+
+        Ok(pkg_path)
+
+    # Build source package (no binaries)
+    fn build_source_package(platform: Platform) -> Result<text, text>:
+        val pkg_name = "simple-src-{self.config.version}.tar.gz"
+        val pkg_path = "{self.config.target_dir}/{pkg_name}"
+
+        # Skip if already built
+        if rt_file_exists(pkg_path):
+            return Ok(pkg_path)
+
+        # Create staging directory
+        val stage_dir = "{self.config.target_dir}/stage-src"
+        rt_dir_create(stage_dir)
+
+        # Copy all source (including rust/)
+        self.copy_directory_recursive("src", "{stage_dir}/src")
+        self.copy_directory_recursive("lib", "{stage_dir}/lib")
+        self.copy_directory_recursive("rust", "{stage_dir}/rust")
+        self.copy_directory_recursive("test", "{stage_dir}/test")
+        self.copy_directory_recursive("examples", "{stage_dir}/examples")
+        self.copy_directory_recursive("doc", "{stage_dir}/doc")
+
+        # Copy project files
+        val project_files = ["README.md", "LICENSE", "CHANGELOG.md", "simple.sdn", "Cargo.toml"]
+        for file in project_files:
+            if rt_file_exists(file):
+                rt_file_copy(file, "{stage_dir}/{file}")
+
+        # Create archive
+        val tar_cmd = "tar -czf {pkg_path} -C {stage_dir} ."
+        val tar_result = shell(tar_cmd)
+        if tar_result.exit_code != 0:
+            return Err("Failed to create archive: {tar_result.stderr}")
+
+        # Cleanup staging
+        shell("rm -rf {stage_dir}")
+
+        Ok(pkg_path)
+
+    # Copy directory recursively
+    fn copy_directory_recursive(src: text, dest: text):
+        # TODO: Implement proper recursive copy
+        # For now, use shell command
+        shell("mkdir -p {dest}")
+        shell("cp -r {src}/* {dest}/ 2>/dev/null")
+
+    # Generate checksums
+    fn generate_checksums(packages: [text]):
+        print ""
+        print "Generating checksums..."
+
+        for pkg in packages:
+            val checksum_path = "{pkg}.sha256"
+            val sha_result = shell("sha256sum {pkg} > {checksum_path}")
+            if sha_result.exit_code == 0:
+                print "  ✓ {checksum_path}"
+            else:
+                print "  ✗ Failed to generate checksum for {pkg}"
+
+# ===========================================================================
+# CLI Entry Point
+# ===========================================================================
+
+fn main(args: [text]):
+    # Parse configuration
+    val config = DistConfig.from_args(args)
+
+    # Create builder
+    val builder = DistBuilder.new(config)
+
+    # Build all platforms
+    val result = builder.build_all()
+
+    match result:
+        case Ok(packages):
+            # Generate checksums
+            builder.generate_checksums(packages)
+
+            print ""
+            print "Success! Built {packages.len()} package(s):"
+            for pkg in packages:
+                print "  - {pkg}"
+
+        case Err(msg):
+            print "Error: {msg}"
+            exit(1)
+
+fn exit(code: i32):
+    # TODO: Implement exit
+    pass

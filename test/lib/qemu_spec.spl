@@ -1,0 +1,215 @@
+# QEMU Unified Library Tests
+#
+# Tests for the unified QEMU runner library (lib/qemu/mod.spl)
+
+use sspec.{describe, it, expect}
+use lib.qemu.{
+    QemuArch, QemuConfig, QemuInstance,
+    is_qemu_available, find_gdb, interpret_exit_code, ExitCodeResult
+}
+
+describe "QEMU Unified Library":
+    describe "QemuArch":
+        it "converts from string correctly":
+            expect(QemuArch.from_string("x86")).to_equal(QemuArch.X86)
+            expect(QemuArch.from_string("i386")).to_equal(QemuArch.X86)
+            expect(QemuArch.from_string("i686")).to_equal(QemuArch.X86)
+            expect(QemuArch.from_string("x86_64")).to_equal(QemuArch.X86_64)
+            expect(QemuArch.from_string("amd64")).to_equal(QemuArch.X86_64)
+            expect(QemuArch.from_string("arm")).to_equal(QemuArch.ARM32)
+            expect(QemuArch.from_string("arm32")).to_equal(QemuArch.ARM32)
+            expect(QemuArch.from_string("cortex-m")).to_equal(QemuArch.ARM32)
+            expect(QemuArch.from_string("arm64")).to_equal(QemuArch.ARM64)
+            expect(QemuArch.from_string("aarch64")).to_equal(QemuArch.ARM64)
+            expect(QemuArch.from_string("riscv32")).to_equal(QemuArch.RiscV32)
+            expect(QemuArch.from_string("rv32")).to_equal(QemuArch.RiscV32)
+            expect(QemuArch.from_string("riscv64")).to_equal(QemuArch.RiscV64)
+            expect(QemuArch.from_string("rv64")).to_equal(QemuArch.RiscV64)
+
+        it "returns correct QEMU command":
+            expect(QemuArch.X86.qemu_command()).to_equal("qemu-system-i386")
+            expect(QemuArch.X86_64.qemu_command()).to_equal("qemu-system-x86_64")
+            expect(QemuArch.ARM32.qemu_command()).to_equal("qemu-system-arm")
+            expect(QemuArch.ARM64.qemu_command()).to_equal("qemu-system-aarch64")
+            expect(QemuArch.RiscV32.qemu_command()).to_equal("qemu-system-riscv32")
+            expect(QemuArch.RiscV64.qemu_command()).to_equal("qemu-system-riscv64")
+
+        it "returns correct default machine":
+            expect(QemuArch.X86.default_machine()).to_equal("pc")
+            expect(QemuArch.X86_64.default_machine()).to_equal("pc")
+            expect(QemuArch.ARM32.default_machine()).to_equal("lm3s6965evb")
+            expect(QemuArch.ARM64.default_machine()).to_equal("virt")
+            expect(QemuArch.RiscV32.default_machine()).to_equal("virt")
+            expect(QemuArch.RiscV64.default_machine()).to_equal("virt")
+
+        it "returns correct default memory":
+            expect(QemuArch.X86.default_memory()).to_equal("128M")
+            expect(QemuArch.ARM32.default_memory()).to_equal("16M")
+
+    describe "QemuConfig":
+        it "creates config for remote debugging":
+            val config = QemuConfig.for_remote_debug(
+                QemuArch.RiscV32,
+                "test.elf",
+                1234
+            )
+
+            expect(config.arch).to_equal(QemuArch.RiscV32)
+            expect(config.binary_path).to_equal("test.elf")
+            expect(config.gdb_enabled).to_be(true)
+            expect(config.gdb_port).to_equal(1234)
+            expect(config.gdb_wait).to_be(true)
+            expect(config.serial_stdio).to_be(false)
+            expect(config.debug_exit).to_be(false)
+
+        it "creates config for test runner":
+            val config = QemuConfig.for_test_runner(
+                QemuArch.X86,
+                "test.elf"
+            )
+
+            expect(config.arch).to_equal(QemuArch.X86)
+            expect(config.binary_path).to_equal("test.elf")
+            expect(config.gdb_enabled).to_be(false)
+            expect(config.serial_stdio).to_be(true)
+            expect(config.debug_exit).to_be(true)
+            expect(config.no_reboot).to_be(true)
+
+        it "builds correct arguments for remote debug":
+            val config = QemuConfig.for_remote_debug(
+                QemuArch.RiscV32,
+                "test.elf",
+                1234
+            )
+            val args = config.build_args()
+
+            # Should contain core args
+            expect(args).to_contain("-machine")
+            expect(args).to_contain("virt")
+            expect(args).to_contain("-kernel")
+            expect(args).to_contain("test.elf")
+
+            # Should contain GDB args
+            expect(args).to_contain("-gdb")
+            expect(args).to_contain("tcp::1234")
+            expect(args).to_contain("-S")  # Start halted
+
+            # Should contain display args
+            expect(args).to_contain("-nographic")
+
+        it "builds correct arguments for test runner":
+            val config = QemuConfig.for_test_runner(
+                QemuArch.X86,
+                "test.elf"
+            )
+            val args = config.build_args()
+
+            # Should contain serial stdio
+            expect(args).to_contain("-serial")
+            expect(args).to_contain("stdio")
+
+            # Should contain debug exit device (x86 only)
+            expect(args).to_contain("-device")
+            expect(args).to_contain("isa-debug-exit,iobase=0xf4,iosize=0x04")
+
+            # Should NOT contain GDB args
+            expect(args).not.to_contain("-gdb")
+            expect(args).not.to_contain("-S")
+
+        it "includes extra arguments":
+            var config = QemuConfig.for_test_runner(
+                QemuArch.ARM32,
+                "firmware.elf"
+            )
+            config.extra_args = ["-semihosting-config", "enable=on"]
+
+            val args = config.build_args()
+            expect(args).to_contain("-semihosting-config")
+            expect(args).to_contain("enable=on")
+
+    describe "Exit Code Interpretation":
+        it "interprets debug exit codes correctly":
+            # With debug-exit device: actual_code = (exit_code << 1) | 1
+            val success = interpret_exit_code(1, true)
+            expect(success.success).to_be(true)
+            expect(success.message).to_contain("passed")
+
+            val failure = interpret_exit_code(3, true)
+            expect(failure.success).to_be(false)
+            expect(failure.message).to_contain("failed")
+
+            val unknown = interpret_exit_code(5, true)
+            expect(unknown.success).to_be(false)
+
+        it "interprets normal exit codes correctly":
+            val success = interpret_exit_code(0, false)
+            expect(success.success).to_be(true)
+
+            val timeout = interpret_exit_code(124, false)
+            expect(timeout.success).to_be(false)
+            expect(timeout.message).to_contain("Timeout")
+
+            val killed = interpret_exit_code(137, false)
+            expect(killed.success).to_be(false)
+            expect(killed.message).to_contain("SIGKILL")
+
+    describe "Toolchain Detection":
+        it "detects QEMU availability":
+            # This test depends on system installation
+            # Just check it doesn't crash
+            val _ = is_qemu_available(QemuArch.X86)
+            val _ = is_qemu_available(QemuArch.RiscV32)
+
+        it "finds GDB for architectures":
+            # This test depends on system installation
+            # Just check it returns a string (may be empty)
+            val gdb = find_gdb(QemuArch.RiscV32)
+            expect(gdb).to_be_instance_of(text)
+
+    describe "Integration Tests":
+        # These tests require QEMU to be installed
+        # Mark as slow tests since they spawn processes
+
+        slow_it "starts and stops QEMU instance":
+            # Skip if QEMU not available
+            if not is_qemu_available(QemuArch.RiscV32):
+                skip("QEMU RISC-V 32 not installed")
+
+            # Create a minimal test binary (would need real ELF)
+            # For now, skip this test if binary doesn't exist
+            val test_binary = "test/remote/fixtures/hello_rv32.elf"
+            use app.io.shell
+            val check = shell("test -f '{test_binary}'")
+            if check.exit_code != 0:
+                skip("Test binary not found: {test_binary}")
+
+            # Create config
+            val config = QemuConfig.for_remote_debug(
+                QemuArch.RiscV32,
+                test_binary,
+                12345
+            )
+
+            # Start QEMU
+            val result = QemuInstance.start(config)
+            match result:
+                case Ok(instance):
+                    # Verify it's running
+                    expect(instance.is_running()).to_be(true)
+
+                    # Get PID
+                    val pid = instance.get_pid()
+                    expect(pid.len()).to_be_greater_than(0)
+
+                    # Stop it
+                    var inst = instance
+                    inst.stop()
+
+                    # Give it time to stop
+                    shell("sleep 0.3")
+
+                    # Verify it stopped
+                    expect(inst.is_running()).to_be(false)
+
+                case Err(msg):
+                    fail("Failed to start QEMU: {msg}")

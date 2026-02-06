@@ -1,0 +1,246 @@
+# Windows Platform Tests
+#
+# Tests specific to Windows platform.
+# These tests only run when is_windows() == true.
+
+use sspec.{describe, it, expect, skip}
+use std.platform.{is_windows, normalize_windows_path, resolve_command}
+use std.fs.path.Path
+use compiler.linker.msvc.{
+    find_visual_studio, find_link_exe,
+    is_msvc_available, is_lld_link_available,
+    auto_detect_windows_linker, WindowsLinkerType
+}
+
+# Skip all tests if not on Windows
+fn skip_if_not_windows():
+    if not is_windows():
+        skip("Tests only run on Windows")
+
+describe "Windows Platform":
+    describe "Path Handling":
+        it "normalizes forward slashes to backslashes" when: is_windows():
+            skip_if_not_windows()
+
+            val path = normalize_windows_path("C:/Program Files/Simple/bin")
+            expect(path).to_equal("C:\\Program Files\\Simple\\bin")
+
+        it "handles drive letters correctly" when: is_windows():
+            skip_if_not_windows()
+
+            val path = normalize_windows_path("D:/Documents/file.txt")
+            expect(path).to_equal("D:\\Documents\\file.txt")
+
+        it "handles UNC paths" when: is_windows():
+            skip_if_not_windows()
+
+            val path = normalize_windows_path("//server/share/folder/file.txt")
+            expect(path).to_equal("\\\\server\\share\\folder\\file.txt")
+
+        it "handles mixed separators" when: is_windows():
+            skip_if_not_windows()
+
+            val path = normalize_windows_path("C:\\Users/Name\\Documents/file.txt")
+            expect(path).to_equal("C:\\Users\\Name\\Documents\\file.txt")
+
+        it "detects absolute paths with drive letters" when: is_windows():
+            skip_if_not_windows()
+
+            val path = Path.new("C:\\Windows\\System32")
+            expect(path.is_absolute()).to_be(true)
+
+            val relative = Path.new("folder\\file.txt")
+            expect(relative.is_absolute()).to_be(false)
+
+        it "detects UNC paths as absolute" when: is_windows():
+            skip_if_not_windows()
+
+            val path = Path.new("\\\\server\\share\\file.txt")
+            expect(path.is_absolute()).to_be(true)
+
+    describe "Command Resolution":
+        it "adds .exe extension automatically" when: is_windows():
+            skip_if_not_windows()
+
+            val cmd = resolve_command("notepad")
+            expect(cmd).to_contain(".exe")
+
+        it "finds system commands" when: is_windows():
+            skip_if_not_windows()
+
+            val cmd = resolve_command("cmd")
+            # Should find cmd.exe in Windows\System32
+            expect(cmd.len()).to_be_greater_than(0)
+
+        it "handles already-exe commands" when: is_windows():
+            skip_if_not_windows()
+
+            val cmd = resolve_command("cmd.exe")
+            expect(cmd).to_equal("cmd.exe")  # Already has .exe
+
+        it "handles .bat and .cmd files" when: is_windows():
+            skip_if_not_windows()
+
+            val bat = resolve_command("test.bat")
+            expect(bat).to_equal("test.bat")  # Don't add .exe to .bat
+
+            val cmd = resolve_command("test.cmd")
+            expect(cmd).to_equal("test.cmd")  # Don't add .exe to .cmd
+
+    describe "MSVC Linker Detection":
+        it "detects Visual Studio installation" when: is_windows():
+            skip_if_not_windows()
+
+            val vs_path = find_visual_studio()
+            # May or may not be installed
+            match vs_path:
+                case Some(path):
+                    expect(path.len()).to_be_greater_than(0)
+                    expect(path).to_contain("Microsoft Visual Studio")
+                case None:
+                    # Not installed - that's okay
+                    pass
+
+        it "finds link.exe if available" when: is_windows():
+            skip_if_not_windows()
+
+            val link = find_link_exe()
+            match link:
+                case Some(path):
+                    expect(path).to_contain("link.exe")
+                    expect(path.len()).to_be_greater_than(0)
+                case None:
+                    # Not installed - that's okay
+                    pass
+
+        it "reports MSVC availability correctly" when: is_windows():
+            skip_if_not_windows()
+
+            val available = is_msvc_available()
+            val link = find_link_exe()
+
+            match link:
+                case Some(_):
+                    expect(available).to_be(true)
+                case None:
+                    expect(available).to_be(false)
+
+        it "detects lld-link if available" when: is_windows():
+            skip_if_not_windows()
+
+            val available = is_lld_link_available()
+            # May or may not be installed - just check it doesn't crash
+            val _ = available
+
+        it "auto-detects appropriate linker" when: is_windows():
+            skip_if_not_windows()
+
+            val linker = auto_detect_windows_linker()
+
+            # Should return one of the linker types
+            val name = linker.to_string()
+            expect(name.len()).to_be_greater_than(0)
+
+            # Verify it's a valid linker type
+            val is_valid = match linker:
+                case WindowsLinkerType.Msvc: true
+                case WindowsLinkerType.LldLink: true
+                case WindowsLinkerType.Lld: true
+
+            expect(is_valid).to_be(true)
+
+    describe "File System Operations":
+        it "creates directories with backslashes" when: is_windows():
+            skip_if_not_windows()
+
+            use std.platform.temp_dir
+            use std.fs.path.{Path, Directory}
+
+            val temp = temp_dir()
+            val test_dir = Path.new(temp).join("simple_windows_test")
+
+            val dir = Directory.new(test_dir)
+            val created = dir.create()
+
+            if created:
+                expect(dir.exists()).to_be(true)
+
+                # Cleanup
+                use app.io.shell
+                shell("rmdir /s /q \"{test_dir.to_string()}\" 2>nul")
+
+        it "handles paths with spaces" when: is_windows():
+            skip_if_not_windows()
+
+            val path = Path.new("C:\\Program Files\\Simple Language\\bin\\simple.exe")
+            expect(path.file_name()).to_equal("simple.exe")
+            expect(path.file_stem()).to_equal("simple")
+            expect(path.extension()).to_equal("exe")
+
+    describe "Environment Variables":
+        it "reads Windows environment variables" when: is_windows():
+            skip_if_not_windows()
+
+            use app.io.rt_env_get
+
+            # SystemRoot should always exist on Windows
+            val systemroot = rt_env_get("SystemRoot")
+            expect(systemroot.len()).to_be_greater_than(0)
+            expect(systemroot).to_contain("Windows")
+
+        it "reads USERPROFILE" when: is_windows():
+            skip_if_not_windows()
+
+            use app.io.rt_env_get
+
+            val userprofile = rt_env_get("USERPROFILE")
+            expect(userprofile.len()).to_be_greater_than(0)
+            expect(userprofile).to_contain("Users")
+
+        it "reads TEMP directory" when: is_windows():
+            skip_if_not_windows()
+
+            use app.io.rt_env_get
+
+            val temp = rt_env_get("TEMP")
+            expect(temp.len()).to_be_greater_than(0)
+
+    describe "Line Endings":
+        it "uses CRLF on Windows" when: is_windows():
+            skip_if_not_windows()
+
+            use std.platform.line_ending
+
+            val le = line_ending()
+            expect(le).to_equal("\r\n")
+
+        it "normalizes line endings to CRLF" when: is_windows():
+            skip_if_not_windows()
+
+            use std.platform.normalize_line_endings
+
+            val unix_text = "Line 1\nLine 2\nLine 3"
+            val normalized = normalize_line_endings(unix_text)
+            expect(normalized).to_equal("Line 1\r\nLine 2\r\nLine 3")
+
+            val mixed_text = "Line 1\r\nLine 2\nLine 3"
+            val normalized2 = normalize_line_endings(mixed_text)
+            expect(normalized2).to_equal("Line 1\r\nLine 2\r\nLine 3")
+
+    describe "Integration Tests":
+        slow_it "builds simple program on Windows" when: is_windows():
+            skip_if_not_windows()
+
+            # This would test actual compilation
+            # Requires full compiler infrastructure
+            skip("Full compilation test - requires compiler setup")
+
+        slow_it "runs MSVC linker" when: is_windows():
+            skip_if_not_windows()
+
+            if not is_msvc_available():
+                skip("MSVC not installed")
+
+            # This would test actual linking
+            # Requires object files
+            skip("Linker test - requires object files")

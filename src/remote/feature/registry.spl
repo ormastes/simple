@@ -6,17 +6,17 @@ use remote.feature.features.{FeatureId, FeatureRank}
 
 # A registered handler for a single feature
 class FeatureHandler:
-    feature: FeatureId
+    feat: FeatureId
     rank: i32
     backend_name: text
-    handler_fn: fn(args: [text]) -> Result<text, text>
+    handler_fn: fn([text]) -> Result<text, text>
     description: text
 
-    static fn of(feature: FeatureId, rank: i32, backend_name: text,
-                 handler_fn: fn(args: [text]) -> Result<text, text>,
+    static fn of(feat: FeatureId, rank: i32, backend_name: text,
+                 handler_fn: fn([text]) -> Result<text, text>,
                  description: text) -> FeatureHandler:
         FeatureHandler(
-            feature: feature,
+            feat: feat,
             rank: rank,
             backend_name: backend_name,
             handler_fn: handler_fn,
@@ -32,43 +32,43 @@ class FeatureRegistry:
 
 impl FeatureRegistry:
     # Register a handler. Inserted sorted by rank (ascending).
+    # BUG-RT-002: Dict.get() returns raw value, not Option. Use nil check.
     me register(handler: FeatureHandler):
-        val key = handler.feature.to_string()
-        match self.handlers.get(key):
-            Some(existing):
-                # Insert sorted by rank
-                var list = existing
-                var inserted = false
-                var result: [FeatureHandler] = []
-                for h in list:
-                    if not inserted and handler.rank < h.rank:
-                        result.push(handler)
-                        inserted = true
-                    result.push(h)
-                if not inserted:
+        val key = handler.feat.to_string()
+        val existing = self.handlers.get(key)
+        if existing != nil:
+            # Insert sorted by rank
+            var list = existing
+            var inserted = false
+            var result: [FeatureHandler] = []
+            for h in list:
+                if not inserted and handler.rank < h.rank:
                     result.push(handler)
-                self.handlers[key] = result
-            None:
-                self.handlers[key] = [handler]
+                    inserted = true
+                result.push(h)
+            if not inserted:
+                result.push(handler)
+            self.handlers[key] = result
+        else:
+            self.handlers[key] = [handler]
 
     # Return the lowest-rank (best) handler for a feature
-    fn best_handler(feature: FeatureId) -> Result<FeatureHandler, text>:
-        val key = feature.to_string()
-        match self.handlers.get(key):
-            Some(list):
-                if list.len() > 0:
-                    Ok(list[0])
-                else:
-                    Err("no handler for feature: {key}")
-            None:
-                Err("no handler for feature: {key}")
+    fn best_handler(feat: FeatureId) -> Result<FeatureHandler, text>:
+        val key = feat.to_string()
+        val list = self.handlers.get(key)
+        if list != nil and list.len() > 0:
+            Ok(list[0])
+        else:
+            Err("no handler for feature: {key}")
 
     # Return all handlers for a feature, sorted by rank
-    fn all_handlers(feature: FeatureId) -> [FeatureHandler]:
-        val key = feature.to_string()
-        match self.handlers.get(key):
-            Some(list): list
-            None: []
+    fn all_handlers(feat: FeatureId) -> [FeatureHandler]:
+        val key = feat.to_string()
+        val list = self.handlers.get(key)
+        if list != nil:
+            list
+        else:
+            []
 
     # Return all features that have at least one handler
     fn supported_features() -> [text]:
@@ -80,16 +80,19 @@ impl FeatureRegistry:
         result
 
     # Check if a feature is supported
-    fn is_supported(feature: FeatureId) -> bool:
-        val key = feature.to_string()
-        match self.handlers.get(key):
-            Some(list): list.len() > 0
-            None: false
+    fn is_supported(feat: FeatureId) -> bool:
+        val key = feat.to_string()
+        val list = self.handlers.get(key)
+        if list != nil:
+            list.len() > 0
+        else:
+            false
 
     # Execute the best handler for a feature
-    fn execute(feature: FeatureId, args: [text]) -> Result<text, text>:
-        val handler = self.best_handler(feature)?
-        handler.handler_fn(args)
+    fn execute(feat: FeatureId, args: [text]) -> Result<text, text>:
+        val handler = self.best_handler(feat)?
+        val callback = handler.handler_fn
+        callback(args)
 
     # Generate a human-readable capabilities report
     fn capabilities_report() -> text:

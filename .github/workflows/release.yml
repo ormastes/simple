@@ -55,15 +55,37 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
+            rust_target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            rust_target: aarch64-unknown-linux-gnu
+            cross_compile: true
+
+          # macOS platforms
           - os: macos-latest
             platform: darwin-arm64
             target: aarch64-apple-darwin
-          - os: macos-15  # Intel Mac (cross-compile)
+            rust_target: aarch64-apple-darwin
+          - os: macos-15  # Intel Mac
             platform: darwin-x86_64
             target: x86_64-apple-darwin
+            rust_target: x86_64-apple-darwin
+
+          # Windows platforms
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            rust_target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            platform: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            rust_target: aarch64-pc-windows-msvc
+            cross_compile: true
 
     runs-on: ${{ matrix.os }}
 
@@ -75,13 +97,28 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-          target: ${{ matrix.target }}
+          target: ${{ matrix.rust_target }}
 
       - name: Install dependencies (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.platform == 'linux-aarch64'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Install UPX (compression)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest' || matrix.os == 'macos-15'
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y upx-ucl
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install upx
+          fi
 
       - name: Download previous Simple runtime (for self-hosting build)
         run: |
@@ -168,12 +205,31 @@ jobs:
           echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
           echo "✓ Bootstrap runtime built with cargo"
 
-      - name: Build bootstrap package
+      - name: Build Rust runtime
         run: |
-          chmod +x script/build-bootstrap.sh
-          ./script/build-bootstrap.sh
+          cd rust
+          cargo build --profile bootstrap --target ${{ matrix.rust_target }}
+          cd ..
         env:
-          TARGET: ${{ matrix.target }}
+          CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
+
+      - name: Build distribution package
+        run: |
+          # Use Simple packaging script
+          if [ -n "$SIMPLE_RUNTIME" ]; then
+            $SIMPLE_RUNTIME script/package-dist.spl \
+              --platform=${{ matrix.platform }} \
+              --profile=bootstrap \
+              --bootstrap-only \
+              --compress
+          else
+            # Fallback: use shell script if Simple runtime not available
+            chmod +x script/build-bootstrap.sh
+            ./script/build-bootstrap.sh
+          fi
+        env:
+          TARGET: ${{ matrix.rust_target }}
+          PLATFORM: ${{ matrix.platform }}
           SIMPLE_RUNTIME: ${{ env.SIMPLE_RUNTIME }}
 
       - name: Calculate checksums

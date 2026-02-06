@@ -20,7 +20,34 @@ use app.io
 
 # Exports
 export atomic_read, atomic_write, atomic_append
-export FileLock
+export FileLock, is_process_alive
+
+# ============================================================================
+# Process Utilities
+# ============================================================================
+
+# Check if a process is alive (cross-platform)
+fn is_process_alive(pid: i64) -> bool:
+    if pid <= 0:
+        return false
+
+    # Method 1: Linux /proc filesystem (fast)
+    val proc_path = "/proc/{pid}"
+    if file_exists(proc_path):
+        return true
+
+    # Method 2: ps command (portable fallback for macOS/BSD/Unix)
+    # Using -p flag which works on Linux, macOS, BSD
+    val (stdout, stderr, exit_code) = rt_process_run("ps", ["-p", "{pid}", "-o", "pid="])
+
+    # ps returns 0 if process exists, non-zero if not found
+    if exit_code == 0:
+        # Double-check: ps output should contain the PID
+        val output = stdout.trim()
+        output.len() > 0
+    else:
+        # /proc doesn't exist and ps failed - process is dead
+        false
 
 # ============================================================================
 # FileLock - File-based locking mechanism
@@ -97,11 +124,18 @@ class FileLock:
         if lines.len() < 2:
             return true
 
-        # Parse timestamp
+        # Parse PID and timestamp
+        val pid_str = lines[0].trim()
+        val pid = pid_str.parse_i64() ?? 0
+
         val timestamp_str = lines[1].trim()
         val timestamp = timestamp_str.parse_i64() ?? 0
 
-        # Check if >2 hours old
+        # Check if process is still alive
+        if pid > 0 and not is_process_alive(pid):
+            return true  # Process died, lock is stale
+
+        # Check if >2 hours old (fallback timeout)
         val now = rt_timestamp_now()
         val age = now - timestamp
         val two_hours = 2 * 60 * 60 * 1000000  # 2 hours in microseconds
@@ -109,8 +143,6 @@ class FileLock:
         if age > two_hours:
             return true
 
-        # TODO: Check if process is still alive
-        # For now, rely on timestamp only
         false
 
     # Release lock

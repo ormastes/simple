@@ -4,7 +4,7 @@
 
 use app.io.{shell, process_run, ProcessResult}
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
-use remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable}
+use remote.protocol.gdb_mi_parser.{GdbMiParser, GdbMiRecord, GdbVariable, parse_hex_value, parse_hex_byte, hex_char_value}
 use remote.types.{DebugConfig, DebugError}
 
 # GDB MI client controlling a GDB process
@@ -276,7 +276,7 @@ class GdbMiClient:
             var i = 0
             while i + 1 < contents.len():
                 val hex_byte = contents[i:i + 2]
-                val byte_val = GdbMiClient.parse_hex_byte(hex_byte)
+                val byte_val = parse_hex_byte(hex_byte)
                 result.push(byte_val)
                 i = i + 2
         Ok(result)
@@ -298,9 +298,11 @@ class GdbMiClient:
         # First get register number from name
         # Use -data-list-register-names to find index
         val all_regs = self.read_all_registers()?
-        match all_regs.get(name):
-            Some(value): Ok(value)
-            None: Err("unknown register: {name}")
+        val value = all_regs.get(name)
+        if value != nil:
+            Ok(value)
+        else:
+            Err("unknown register: {name}")
 
     fn read_all_registers() -> Result<Dict<text, i64>, text>:
         # Get register names
@@ -316,7 +318,8 @@ class GdbMiClient:
         var names: [text] = []
         val names_inner = names_raw.trim()
         val ni = if names_inner.starts_with("["): names_inner[1:] else: names_inner
-        val nj = if ni.ends_with("]"): ni[:ni.len() - 1] else: ni
+        val ni_len = ni.len()
+        val nj = if ni.ends_with("]"): ni[0:ni_len - 1] else: ni
         for part in nj.split(","):
             val name = part.trim()
             val unquoted = if name.starts_with("\""): name[1:name.len() - 1] else: name
@@ -327,7 +330,7 @@ class GdbMiClient:
         for vt in value_tuples:
             val number = (vt.get("number") ?? "-1").parse_int() ?? -1
             val value_str = vt.get("value") ?? "0"
-            val value = GdbMiClient.parse_hex_value(value_str)
+            val value = parse_hex_value(value_str)
             if number >= 0 and number < names.len():
                 val reg_name = names[number]
                 if reg_name.len() > 0:
@@ -344,7 +347,8 @@ class GdbMiClient:
         var idx = 0
         val ni = names_raw.trim()
         val inner = if ni.starts_with("["): ni[1:] else: ni
-        val inner2 = if inner.ends_with("]"): inner[:inner.len() - 1] else: inner
+        val inner_len = inner.len()
+        val inner2 = if inner.ends_with("]"): inner[0:inner_len - 1] else: inner
         for part in inner2.split(","):
             val n = part.trim().replace("\"", "")
             if n == name:
@@ -413,7 +417,7 @@ class GdbMiClient:
         var result = 0
         for ch in hex:
             result = result * 16
-            result = result + GdbMiClient.hex_char_value(ch)
+            result = result + hex_char_value(ch)
         result
 
     static fn parse_hex_value(raw: text) -> i64:
@@ -423,7 +427,7 @@ class GdbMiClient:
         var result: i64 = 0
         for ch in s:
             result = result * 16
-            result = result + GdbMiClient.hex_char_value(ch)
+            result = result + hex_char_value(ch)
         result
 
     static fn hex_char_value(ch: text) -> i64:

@@ -154,68 +154,70 @@ impl Loader:
 # QEMU Loader Implementation
 # =========================================================================
 
+use lib.qemu.{QemuArch, QemuConfig, QemuInstance}
+
+# Store QEMU instance per PID for tracking
+var qemu_instances: Dict<i32, QemuInstance> = {}
+var next_mock_pid: i32 = 10000
+
 fn qemu_start(config: LoaderConfig) -> LoaderResult:
-    # Get QEMU command for architecture
-    val qemu_cmd = get_qemu_command(config.target_arch)
-
-    # Build arguments
-    # In real implementation, would use process_run FFI
-    # For now, return simulated result
-
-    # Check if binary exists (would use file_exists FFI)
+    # Check if binary exists
     if config.binary_path == "":
         return LoaderResult_failure("No binary path specified")
 
-    # Simulated success for testing
-    LoaderResult_success(12345, "stdio")
+    # Parse architecture
+    val arch = QemuArch.from_string(config.target_arch)
+
+    # Create QEMU config for test runner
+    var qemu_config = QemuConfig.for_test_runner(arch, config.binary_path)
+    qemu_config.timeout_ms = config.timeout_ms
+
+    # Parse extra args if provided
+    if config.extra_args != "":
+        val args_list = config.extra_args.split(" ").filter(\s: s.len() > 0)
+        qemu_config.extra_args = args_list
+
+    # Start QEMU instance
+    val result = QemuInstance.start(qemu_config)
+    match result:
+        case Ok(instance):
+            # Convert PID string to int for tracking
+            val pid_int = parse_pid(instance.get_pid())
+
+            # Store instance for later
+            qemu_instances[pid_int] = instance
+
+            LoaderResult_success(pid_int, "stdio")
+
+        case Err(msg):
+            LoaderResult_failure(msg)
 
 fn qemu_stop(pid: i32):
-    # Would use process_kill FFI
-    pass
+    # Find and stop the QEMU instance
+    if qemu_instances.contains(pid):
+        var instance = qemu_instances[pid]
+        instance.stop()
+        qemu_instances.remove(pid)
 
 fn qemu_wait(pid: i32, timeout_ms: i64) -> i32:
-    # Would use process_wait FFI
-    0
-
-fn get_qemu_command(arch: text) -> text:
-    if arch == "x86" or arch == "i686":
-        "qemu-system-i386"
-    elif arch == "x86_64":
-        "qemu-system-x86_64"
-    elif arch == "arm" or arch == "arm32" or arch == "cortex-m":
-        "qemu-system-arm"
-    elif arch == "arm64" or arch == "aarch64":
-        "qemu-system-aarch64"
-    elif arch == "riscv32":
-        "qemu-system-riscv32"
-    elif arch == "riscv64":
-        "qemu-system-riscv64"
+    # Find and wait for the QEMU instance
+    if qemu_instances.contains(pid):
+        val instance = qemu_instances[pid]
+        val result = instance.wait_exit(timeout_ms)
+        match result:
+            case Ok(exit_code):
+                exit_code
+            case Err(_):
+                124  # Timeout exit code
     else:
-        "qemu-system-i386"  # Default
+        0  # Already exited
 
-fn get_qemu_args(config: LoaderConfig) -> [text]:
-    var args: [text] = []
-
-    args.push("-kernel")
-    args.push(config.binary_path)
-
-    # Serial output to stdio
-    args.push("-serial")
-    args.push("stdio")
-
-    # Debug exit device (QEMU x86)
-    if config.target_arch == "x86" or config.target_arch == "i686" or config.target_arch == "x86_64":
-        args.push("-device")
-        args.push("isa-debug-exit,iobase=0xf4,iosize=0x04")
-
-    # No display
-    args.push("-display")
-    args.push("none")
-
-    # Don't reboot on triple fault
-    args.push("-no-reboot")
-
-    args
+fn parse_pid(pid_str: text) -> i32:
+    var result: i32 = 0
+    for c in pid_str:
+        if c >= '0' and c <= '9':
+            result = result * 10 + (c.to_i32() - 48)
+    result
 
 # =========================================================================
 # OpenOCD Loader Implementation (stub)
@@ -251,27 +253,9 @@ fn serial_start(config: LoaderConfig) -> LoaderResult:
 # Exit Code Interpretation
 # =========================================================================
 
-class ExitCodeResult:
-    success: bool
-    message: text
-
-fn ExitCodeResult_success(msg: text) -> ExitCodeResult:
-    ExitCodeResult(success: true, message: msg)
-
-fn ExitCodeResult_failure(msg: text) -> ExitCodeResult:
-    ExitCodeResult(success: false, message: msg)
+use lib.qemu.{ExitCodeResult, interpret_exit_code}
 
 fn qemu_exit_code_to_result(exit_code: i32) -> ExitCodeResult:
-    # QEMU isa-debug-exit encodes: actual_code = (exit_code << 1) | 1
-    # So exit(0) -> QEMU exits with 1
-    #    exit(1) -> QEMU exits with 3
-    if exit_code == 1:
-        ExitCodeResult_success("Tests passed")
-    elif exit_code == 3:
-        ExitCodeResult_failure("Tests failed")
-    elif exit_code == 124:
-        ExitCodeResult_failure("Timeout")
-    elif exit_code == 137:
-        ExitCodeResult_failure("Killed (SIGKILL)")
-    else:
-        ExitCodeResult_failure("Unknown exit code: {exit_code}")
+    # Use unified exit code interpretation
+    # Most test binaries use debug-exit device
+    interpret_exit_code(exit_code, true)

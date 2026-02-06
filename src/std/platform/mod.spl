@@ -1,0 +1,288 @@
+# Platform Abstraction Module
+#
+# Cross-platform utilities for:
+# - OS detection (Windows, Linux, macOS, FreeBSD)
+# - Path handling (separators, normalization)
+# - Platform-specific behaviors
+
+use std.common.target.{TargetOS, TargetArch}
+
+# ===========================================================================
+# Platform Detection
+# ===========================================================================
+
+# Check if running on Windows
+fn is_windows() -> bool:
+    TargetOS.host() == TargetOS.Windows
+
+# Check if running on Unix-like system
+fn is_unix() -> bool:
+    match TargetOS.host():
+        case TargetOS.Linux | TargetOS.MacOS | TargetOS.FreeBSD:
+            true
+        case _:
+            false
+
+# Check if running on macOS
+fn is_macos() -> bool:
+    TargetOS.host() == TargetOS.MacOS
+
+# Check if running on Linux
+fn is_linux() -> bool:
+    TargetOS.host() == TargetOS.Linux
+
+# Check if running on FreeBSD
+fn is_freebsd() -> bool:
+    TargetOS.host() == TargetOS.FreeBSD
+
+# Check if running on x86_64
+fn is_x86_64() -> bool:
+    TargetArch.host() == TargetArch.X86_64
+
+# Check if running on ARM64/AArch64
+fn is_arm64() -> bool:
+    match TargetArch.host():
+        case TargetArch.ARM64 | TargetArch.AArch64:
+            true
+        case _:
+            false
+
+# ===========================================================================
+# Path Separators
+# ===========================================================================
+
+# Get directory separator for current platform
+fn dir_sep() -> text:
+    TargetOS.host().dir_separator()
+
+# Get path separator (for PATH environment variable)
+fn path_sep() -> text:
+    TargetOS.host().path_separator()
+
+# Get executable extension for current platform
+fn exe_ext() -> text:
+    TargetOS.host().executable_extension()
+
+# Get library extension for current platform
+fn lib_ext() -> text:
+    TargetOS.host().library_extension()
+
+# ===========================================================================
+# Path Normalization
+# ===========================================================================
+
+# Normalize path for current platform
+fn normalize_path(path: text) -> text:
+    val os = TargetOS.host()
+    if os == TargetOS.Windows:
+        normalize_windows_path(path)
+    else:
+        path  # Unix paths don't need normalization
+
+# Normalize Windows path
+fn normalize_windows_path(path: text) -> text:
+    # Convert forward slashes to backslashes
+    var normalized = path.replace("/", "\\")
+
+    # Handle drive letters: C:/ → C:\
+    if normalized.len() >= 2 and normalized[1] == ':':
+        normalized = normalized[0:2] + normalized[2:].replace("/", "\\")
+
+    # Handle UNC paths: //server/share → \\server\share
+    if normalized.starts_with("//"):
+        normalized = "\\\\" + normalized[2:].replace("/", "\\")
+
+    normalized
+
+# Join path components with platform separator
+fn join_path(parts: [text]) -> text:
+    val sep = dir_sep()
+    parts.join(sep)
+
+# Get absolute path
+fn absolute_path(path: text) -> text:
+    # TODO: Implement proper absolute path resolution
+    # For now, just normalize
+    normalize_path(path)
+
+# ===========================================================================
+# Platform String Representation
+# ===========================================================================
+
+# Get platform name (e.g., "linux-x86_64", "darwin-arm64", "windows-x86_64")
+fn platform_name() -> text:
+    val os_name = match TargetOS.host():
+        case TargetOS.Windows: "windows"
+        case TargetOS.Linux: "linux"
+        case TargetOS.MacOS: "darwin"
+        case TargetOS.FreeBSD: "freebsd"
+        case _: "unknown"
+
+    val arch_name = match TargetArch.host():
+        case TargetArch.X86_64: "x86_64"
+        case TargetArch.ARM64 | TargetArch.AArch64: "arm64"
+        case TargetArch.X86: "i686"
+        case TargetArch.ARM: "arm"
+        case _: "unknown"
+
+    "{os_name}-{arch_name}"
+
+# Get platform triple (Rust-style)
+fn platform_triple() -> text:
+    val os = TargetOS.host()
+    val arch = TargetArch.host()
+
+    match (os, arch):
+        case (TargetOS.Linux, TargetArch.X86_64):
+            "x86_64-unknown-linux-gnu"
+        case (TargetOS.Linux, TargetArch.ARM64):
+            "aarch64-unknown-linux-gnu"
+        case (TargetOS.MacOS, TargetArch.X86_64):
+            "x86_64-apple-darwin"
+        case (TargetOS.MacOS, TargetArch.ARM64):
+            "aarch64-apple-darwin"
+        case (TargetOS.Windows, TargetArch.X86_64):
+            "x86_64-pc-windows-msvc"
+        case (TargetOS.Windows, TargetArch.ARM64):
+            "aarch64-pc-windows-msvc"
+        case _:
+            "unknown-unknown-unknown"
+
+# Parse platform name to TargetOS and TargetArch
+fn parse_platform(name: text) -> (TargetOS, TargetArch):
+    val parts = name.split("-")
+    if parts.len() < 2:
+        return (TargetOS.Linux, TargetArch.X86_64)  # Default
+
+    val os_str = parts[0]
+    val arch_str = parts[1]
+
+    val os = match os_str:
+        case "linux": TargetOS.Linux
+        case "darwin" | "macos": TargetOS.MacOS
+        case "windows" | "win32": TargetOS.Windows
+        case "freebsd": TargetOS.FreeBSD
+        case _: TargetOS.Linux
+
+    val arch = match arch_str:
+        case "x86_64" | "amd64": TargetArch.X86_64
+        case "arm64" | "aarch64": TargetArch.ARM64
+        case "i686" | "x86": TargetArch.X86
+        case "arm": TargetArch.ARM
+        case _: TargetArch.X86_64
+
+    (os, arch)
+
+# ===========================================================================
+# Command Resolution (Windows-specific)
+# ===========================================================================
+
+# Resolve command path (adds .exe on Windows, searches PATH)
+fn resolve_command(cmd: text) -> text:
+    use app.io.{rt_env_get, rt_file_exists}
+
+    if not is_windows():
+        return cmd  # Unix: use PATH directly
+
+    # Windows: add .exe if missing
+    var resolved = cmd
+    if not cmd.ends_with(".exe") and not cmd.ends_with(".bat") and not cmd.ends_with(".cmd"):
+        resolved = "{cmd}.exe"
+
+    # Check if absolute path
+    if is_absolute_windows(resolved):
+        return resolved
+
+    # Search in PATH
+    val path_env = rt_env_get("PATH")
+    val paths = path_env.split(path_sep())
+
+    for dir in paths:
+        val candidate = join_path([dir, resolved])
+        if rt_file_exists(candidate):
+            return candidate
+
+    cmd  # Return original if not found
+
+# Check if path is absolute (Windows)
+fn is_absolute_windows(path: text) -> bool:
+    # C:\... or \\server\share
+    (path.len() >= 3 and path[1] == ':') or path.starts_with("\\\\")
+
+# Check if path is absolute (Unix)
+fn is_absolute_unix(path: text) -> bool:
+    path.starts_with("/")
+
+# Check if path is absolute (cross-platform)
+fn is_absolute(path: text) -> bool:
+    if is_windows():
+        is_absolute_windows(path)
+    else:
+        is_absolute_unix(path)
+
+# ===========================================================================
+# Environment Variables
+# ===========================================================================
+
+# Get home directory
+fn home_dir() -> text:
+    use app.io.rt_env_get
+
+    if is_windows():
+        val userprofile = rt_env_get("USERPROFILE")
+        if userprofile != "":
+            return userprofile
+        # Fallback: %HOMEDRIVE%%HOMEPATH%
+        val drive = rt_env_get("HOMEDRIVE")
+        val path = rt_env_get("HOMEPATH")
+        if drive != "" and path != "":
+            return "{drive}{path}"
+        "C:\\Users\\Default"
+    else:
+        val home = rt_env_get("HOME")
+        if home != "":
+            return home
+        "/tmp"  # Fallback
+
+# Get temporary directory
+fn temp_dir() -> text:
+    use app.io.rt_env_get
+
+    if is_windows():
+        val temp = rt_env_get("TEMP")
+        if temp != "":
+            return temp
+        val tmp = rt_env_get("TMP")
+        if tmp != "":
+            return tmp
+        "C:\\Temp"
+    else:
+        val tmpdir = rt_env_get("TMPDIR")
+        if tmpdir != "":
+            return tmpdir
+        "/tmp"
+
+# ===========================================================================
+# Line Endings
+# ===========================================================================
+
+# Get line ending for current platform
+fn line_ending() -> text:
+    if is_windows():
+        "\r\n"
+    else:
+        "\n"
+
+# Normalize line endings for current platform
+fn normalize_line_endings(text: text) -> text:
+    val target = line_ending()
+
+    # First normalize all to \n
+    var normalized = text.replace("\r\n", "\n")
+    normalized = normalized.replace("\r", "\n")
+
+    # Then convert to target
+    if target == "\r\n":
+        normalized.replace("\n", "\r\n")
+    else:
+        normalized

@@ -54,6 +54,7 @@ class GdbVariable:
 
 # GDB MI parser
 class GdbMiParser:
+    _unused: i32
 
 impl GdbMiParser:
     # Parse a single line of GDB MI output
@@ -86,12 +87,12 @@ impl GdbMiParser:
         # Result records: [token]^class,key=value,...
         if trimmed.contains("^"):
             val caret_pos = trimmed.index_of("^")
-            val token_str = trimmed[:caret_pos]
+            val token_str = trimmed[0:caret_pos]
             val rest = trimmed[caret_pos + 1:]
-            val token = if token_str.len() > 0:
-                token_str.parse_int() ?? -1
-            else:
-                -1
+            # BUG-RT: if-else expression with parse_int() causes type mismatch
+            var token = -1
+            if token_str.len() > 0:
+                token = token_str.parse_int() ?? -1
             val (cls, data) = GdbMiParser.parse_class_and_data(rest)
             return GdbMiRecord.Result(token: token, cls: cls, data: data)
 
@@ -103,7 +104,7 @@ impl GdbMiParser:
         if comma_pos < 0:
             return (raw, {})
 
-        val cls = raw[:comma_pos]
+        val cls = raw[0:comma_pos]
         val rest = raw[comma_pos + 1:]
         val data = GdbMiParser.parse_key_values(rest)
         (cls, data)
@@ -171,7 +172,7 @@ impl GdbMiParser:
         if inner.starts_with("["):
             inner = inner[1:]
         if inner.ends_with("]"):
-            inner = inner[:inner.len() - 1]
+            inner = inner[0:inner.len() - 1]
 
         if inner.trim().len() == 0:
             return result
@@ -204,7 +205,8 @@ impl GdbMiParser:
         if s.starts_with("\""):
             s = s[1:]
         if s.ends_with("\""):
-            s = s[:s.len() - 1]
+            val slen = s.len()
+            s = s[0:slen - 1]
         GdbMiParser.unescape_mi_string(s)
 
     # Unescape MI string escape sequences
@@ -305,3 +307,49 @@ impl GdbMiParser:
                         return pos
             pos = pos + 1
         len - 1
+
+# --- Hex Utility Functions ---
+# Standalone functions for hex parsing, accessible from tests
+
+fn hex_char_value(ch: text) -> i64:
+    match ch:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        "a": 10
+        "A": 10
+        "b": 11
+        "B": 11
+        "c": 12
+        "C": 12
+        "d": 13
+        "D": 13
+        "e": 14
+        "E": 14
+        "f": 15
+        "F": 15
+        _: 0
+
+fn parse_hex_byte(hex: text) -> i32:
+    var result = 0
+    for ch in hex:
+        result = result * 16
+        result = result + hex_char_value(ch)
+    result
+
+fn parse_hex_value(raw: text) -> i64:
+    var str_val = raw.trim()
+    if str_val.starts_with("0x") or str_val.starts_with("0X"):
+        str_val = str_val[2:]
+    var result: i64 = 0
+    for ch in str_val:
+        result = result * 16
+        result = result + hex_char_value(ch)
+    result
