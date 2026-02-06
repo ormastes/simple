@@ -10,6 +10,7 @@ class StringMetadata:
     id: i32
     text: text
     param_count: i32
+    param_names: [text]      # NEW: Variable names from {name} patterns
     format_types: [i32]
     source_file: text
     source_line: i32
@@ -20,6 +21,7 @@ impl StringMetadata:
             id: id,
             text: text,
             param_count: params,
+            param_names: [],     # NEW: Empty by default
             format_types: [],
             source_file: "",
             source_line: 0
@@ -60,13 +62,19 @@ impl StringExtractor:
         # Check if this node is a print call
         if self.is_print_call(node):
             val string_literal = self.extract_string_literal(node)
-            val params = self.count_format_params(string_literal)
+
+            # Extract parameter info (count, names, normalized text)
+            val param_info = self.extract_format_params(string_literal)
+            val param_count = param_info.0
+            val param_names = param_info.1
+            val normalized_text = param_info.2
 
             val metadata = StringMetadata.create(
                 self.next_id,
-                string_literal,
-                params
+                normalized_text,  # Use normalized {} format
+                param_count
             )
+            metadata.param_names = param_names  # Store parameter names
             metadata.source_file = node.source_file ?? ""
             metadata.source_line = node.source_line ?? 0
 
@@ -111,24 +119,46 @@ impl StringExtractor:
 
         ""
 
-    # Count format parameters in string (Simple uses {} syntax)
-    fn count_format_params(text: text) -> i32:
-        var count = 0
+    # Extract parameter names and count from format string
+    # Supports both {} and {name} syntax
+    # Returns: (param_count, param_names, normalized_text)
+    fn extract_format_params(text: text) -> (i32, [text], text):
+        var param_names = []
+        var normalized = ""
         var i = 0
 
         while i < text.len():
-            # Look for {} pairs
             if text[i:i+1] == "{":
-                # Check next char
-                if i + 1 < text.len():
-                    if text[i+1:i+2] == "}":
-                        count = count + 1
-                        i = i + 2
-                        continue
+                # Find closing }
+                var j = i + 1
+                while j < text.len() and text[j:j+1] != "}":
+                    j = j + 1
 
+                if j < text.len():
+                    # Extract parameter name (or empty for {})
+                    val param_text = text[i+1:j]
+
+                    if param_text.len() > 0:
+                        # Named parameter: {name}
+                        param_names.push(param_text)
+                    else:
+                        # Positional parameter: {}
+                        param_names.push("")
+
+                    # Normalize to {} for runtime
+                    normalized = normalized + "{}"
+                    i = j + 1
+                    continue
+
+            normalized = normalized + text[i:i+1]
             i = i + 1
 
-        count
+        (param_names.len(), param_names, normalized)
+
+    # Count format parameters in string (Simple uses {} syntax)
+    fn count_format_params(text: text) -> i32:
+        val result = self.extract_format_params(text)
+        result.0  # Return count
 
 # Generate SMF subset file from extraction result
 fn generate_smf_subset(
@@ -160,6 +190,21 @@ fn generate_smf_subset(
         sdn = sdn + "  - id: {string.id}\n"
         sdn = sdn + "    text: \"{escape_string(string.text)}\"\n"
         sdn = sdn + "    params: {string.param_count}\n"
+
+        # Add parameter names if any
+        if string.param_names.len() > 0:
+            sdn = sdn + "    param_names: ["
+            var first = true
+            for name in string.param_names:
+                if not first:
+                    sdn = sdn + ", "
+                if name.len() > 0:
+                    sdn = sdn + "\"{name}\""
+                else:
+                    sdn = sdn + "\"\""  # Empty string for positional {}
+                first = false
+            sdn = sdn + "]\n"
+
         sdn = sdn + "    format_types: []\n"
 
         if string.source_file.len() > 0:
