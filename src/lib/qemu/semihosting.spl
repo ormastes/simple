@@ -1,0 +1,120 @@
+# QEMU Semihosting Configuration
+#
+# Adds semihosting support to QEMU execution.
+# Captures semihosting output to file or stdout.
+
+use lib.qemu.mod.{QemuConfig, QemuArch}
+
+# Semihosting output mode
+enum SemihostOutputMode:
+    Stdio       # Output to stdout/stderr
+    File        # Output to file
+    CharDev     # Output to character device
+    Native      # Native semihosting (default)
+
+# Semihosting configuration
+class SemihostConfig:
+    enabled: bool
+    output_mode: SemihostOutputMode
+    output_file: text?              # File path if mode is File
+    chardev_id: text?               # Chardev ID if mode is CharDev
+
+impl SemihostConfig:
+    # Default: enabled with native target
+    static fn default() -> SemihostConfig:
+        SemihostConfig(
+            enabled: true,
+            output_mode: SemihostOutputMode.Native,
+            output_file: nil,
+            chardev_id: nil
+        )
+
+    # Output to file
+    static fn to_file(file_path: text) -> SemihostConfig:
+        SemihostConfig(
+            enabled: true,
+            output_mode: SemihostOutputMode.File,
+            output_file: file_path,
+            chardev_id: nil
+        )
+
+    # Output to stdout
+    static fn to_stdio() -> SemihostConfig:
+        SemihostConfig(
+            enabled: true,
+            output_mode: SemihostOutputMode.Stdio,
+            output_file: nil,
+            chardev_id: nil
+        )
+
+    # Build QEMU command-line arguments
+    fn to_qemu_args() -> [text]:
+        if not self.enabled:
+            return []
+
+        var args: [text] = []
+
+        # Basic semihosting enable
+        match self.output_mode:
+            SemihostOutputMode.Native:
+                args.push("-semihosting-config")
+                args.push("enable=on,target=native")
+
+            SemihostOutputMode.Stdio:
+                args.push("-semihosting-config")
+                args.push("enable=on,target=native")
+
+            SemihostOutputMode.File:
+                # Redirect output to file via serial
+                args.push("-semihosting-config")
+                args.push("enable=on,target=native")
+                if self.output_file.?:
+                    args.push("-serial")
+                    args.push("file:{self.output_file.unwrap()}")
+
+            SemihostOutputMode.CharDev:
+                args.push("-semihosting-config")
+                args.push("enable=on,target=native")
+                if self.chardev_id.?:
+                    args.push("-chardev")
+                    args.push("id={self.chardev_id.unwrap()}")
+
+        args
+
+# Extension to QemuConfig
+impl QemuConfig:
+    # Add semihosting support
+    fn with_semihosting(semihost_config: SemihostConfig) -> QemuConfig:
+        # Create new config with semihosting args
+        var new_args = self.extra_args.clone()
+
+        # Add semihosting arguments
+        val semihost_args = semihost_config.to_qemu_args()
+        for arg in semihost_args:
+            new_args.push(arg)
+
+        QemuConfig(
+            arch: self.arch,
+            binary: self.binary,
+            machine: self.machine,
+            memory_mb: self.memory_mb,
+            gdb_port: self.gdb_port,
+            enable_gdb: self.enable_gdb,
+            nographic: self.nographic,
+            extra_args: new_args,
+            stdio_mode: self.stdio_mode,
+            debug_exit: self.debug_exit
+        )
+
+    # Convenience: enable semihosting with file output
+    fn with_semihost_file(output_file: text) -> QemuConfig:
+        self.with_semihosting(SemihostConfig.to_file(output_file))
+
+    # Convenience: enable semihosting with stdio
+    fn with_semihost_stdio() -> QemuConfig:
+        self.with_semihosting(SemihostConfig.to_stdio())
+
+# Helper: Create QEMU config for semihosting test
+fn qemu_semihost_config(arch: QemuArch, binary: text, output_file: text) -> QemuConfig:
+    QemuConfig.for_test_runner(arch, binary)
+        .with_semihost_file(output_file)

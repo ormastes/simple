@@ -43,6 +43,34 @@ fn find_simple_binary() -> text:
     # Fallback to debug (will fail if it doesn't exist, but that's expected)
     "./rust/target/debug/simple_runtime"
 
+fn extract_error_message(output: text) -> text:
+    # Extract first meaningful error message from test output
+    val lines = output.split("\n")
+    var error_lines: [text] = []
+
+    for line in lines:
+        val clean = strip_ansi(line).trim()
+
+        # Look for error patterns
+        if clean.contains("semantic:") or clean.contains("parse error:") or clean.contains("compile failed:") or clean.contains("ERROR:"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:  # Limit to first 3 error lines
+                break
+        elif clean.starts_with("Error:") or clean.starts_with("error:"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:
+                break
+        elif clean.contains("unsupported path call:") or clean.contains("not found"):
+            error_lines.push(clean)
+            if error_lines.len() >= 3:
+                break
+
+    # Join error lines with semicolon separator
+    if error_lines.len() > 0:
+        error_lines[0:3].join("; ")
+    else:
+        ""
+
 fn parse_test_output(output: text) -> (i64, i64, i64):
     var total_passed = 0
     var total_failed = 0
@@ -118,10 +146,19 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         if exit_code == 0:
             return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, duration_ms: duration_ms, error: "", timed_out: false)
         else:
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, duration_ms: duration_ms, error: "Process exited with code {exit_code}", timed_out: false)
+            # Extract error message from output
+            val extracted_error = extract_error_message(combined)
+            val error_msg = if extracted_error != "":
+                extracted_error
+            else:
+                "Process exited with code {exit_code}"
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, duration_ms: duration_ms, error: error_msg, timed_out: false)
 
+    # Extract error messages when tests fail
     var error = ""
-    if exit_code != 0 and failed == 0:
+    if failed > 0:
+        error = extract_error_message(combined)
+    elif exit_code != 0:
         error = "Process exited with code {exit_code}"
 
     TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, duration_ms: duration_ms, error: error, timed_out: false)
