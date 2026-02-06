@@ -61,6 +61,23 @@ echo ""
 # Step 2: Create assembly that passes parameter VALUES
 echo "→ Step 2: Creating assembly with parameter values..."
 cat > test.s << 'EOF'
+.section .data
+.align 4
+params_1:
+    .word 1               # String ID
+    .word 42              # Parameter: name
+
+params_2:
+    .word 2               # String ID
+    .word 100             # Parameter: username
+    .word 25              # Parameter: age
+
+params_3:
+    .word 3               # String ID
+    .word 255             # Parameter: r
+    .word 128             # Parameter: g
+    .word 64              # Parameter: b
+
 .section .text
 .global _start
 
@@ -74,25 +91,18 @@ cat > test.s << 'EOF'
 
 _start:
     # Test 1: Single parameter {name}
-    # Simulating: name = "Alice" (but we can't pass strings yet, so use number)
-    li a0, 0x101        # SYS_WRITE_HANDLE_P1 (1 param)
-    li a1, 1            # String ID
-    li a2, 42           # Parameter value (simulating name)
+    li a0, 0x101                # SYS_WRITE_HANDLE_P1
+    la a1, params_1
     semihost_call
 
     # Test 2: Two parameters {username}, {age}
-    li a0, 0x102        # SYS_WRITE_HANDLE_P2 (2 params)
-    li a1, 2            # String ID
-    li a2, 100          # username value
-    li a3, 25           # age value
+    li a0, 0x102                # SYS_WRITE_HANDLE_P2
+    la a1, params_2
     semihost_call
 
     # Test 3: Three parameters {r}, {g}, {b}
-    li a0, 0x103        # SYS_WRITE_HANDLE_P3 (3 params)
-    li a1, 3            # String ID
-    li a2, 255          # r value
-    li a3, 128          # g value
-    li a4, 64           # b value
+    li a0, 0x103                # SYS_WRITE_HANDLE_P3
+    la a1, params_3
     semihost_call
 
     # Exit
@@ -173,6 +183,8 @@ SECTIONS
     .text : { *(.text) }
     . = 0x80000100;
     .smt : { *(.smt) }
+    . = 0x80001000;
+    .data : { *(.data) }
 }
 EOF
 
