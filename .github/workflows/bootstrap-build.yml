@@ -1,0 +1,231 @@
+name: Bootstrap Multi-Platform Build
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - '.github/workflows/bootstrap-build.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-bootstrap:
+    name: Build Bootstrap - ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux platforms
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+          - platform: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            cross: true
+
+          - platform: linux-riscv64
+            os: ubuntu-latest
+            target: riscv64gc-unknown-linux-gnu
+            cross: true
+
+          # macOS platforms
+          - platform: macos-x86_64
+            os: macos-13  # Intel mac
+            target: x86_64-apple-darwin
+
+          - platform: macos-arm64
+            os: macos-14  # Apple Silicon
+            target: aarch64-apple-darwin
+
+          # Windows platforms
+          - platform: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
+
+          - platform: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            cross: true
+            ext: .exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build bootstrap runtime
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }} --profile bootstrap
+          fi
+        shell: bash
+
+      - name: Prepare bootstrap binary
+        run: |
+          mkdir -p bin/bootstrap/${{ matrix.platform }}
+
+          # Copy binary with correct name
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            cp target/${{ matrix.target }}/release/simple_runtime.exe \
+               bin/bootstrap/${{ matrix.platform }}/simple.exe
+          else
+            cp target/${{ matrix.target }}/release/simple_runtime \
+               bin/bootstrap/${{ matrix.platform }}/simple
+          fi
+
+          # Make executable
+          chmod +x bin/bootstrap/${{ matrix.platform }}/simple${{ matrix.ext }}
+
+          # Show size
+          ls -lh bin/bootstrap/${{ matrix.platform }}/
+        shell: bash
+
+      - name: Test bootstrap binary
+        if: matrix.cross != true
+        run: |
+          # Create test file
+          cat > test_bootstrap.spl << 'EOF'
+          fn main():
+              print "Bootstrap test passed!"
+              print "Platform: ${{ matrix.platform }}"
+          EOF
+
+          # Run test
+          bin/bootstrap/${{ matrix.platform }}/simple${{ matrix.ext }} test_bootstrap.spl
+        shell: bash
+
+      - name: Upload bootstrap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-${{ matrix.platform }}
+          path: bin/bootstrap/${{ matrix.platform }}/simple${{ matrix.ext }}
+          retention-days: 30
+
+  create-release-package:
+    name: Create Multi-Platform Release
+    needs: build-bootstrap
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all bootstrap binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: bin/bootstrap/
+
+      - name: Reorganize bootstrap binaries
+        run: |
+          cd bin/bootstrap
+          for platform in linux-x86_64 linux-arm64 linux-riscv64 macos-x86_64 macos-arm64 windows-x86_64 windows-arm64; do
+            if [ -d "bootstrap-$platform" ]; then
+              mkdir -p "$platform"
+              mv "bootstrap-$platform"/* "$platform/"
+              rmdir "bootstrap-$platform"
+              ls -lh "$platform/"
+            fi
+          done
+
+      - name: Create release package
+        run: |
+          # Copy source and documentation
+          mkdir -p release/simple-multi-platform
+          cp -r src release/simple-multi-platform/
+          cp -r doc release/simple-multi-platform/
+          cp -r bin release/simple-multi-platform/
+          cp README.md CLAUDE.md release/simple-multi-platform/
+
+          # Create package info
+          cat > release/simple-multi-platform/PLATFORMS.md << 'EOF'
+          # Simple Language - Multi-Platform Bootstrap
+
+          This package includes bootstrap binaries for multiple platforms:
+
+          ## Linux
+          - `bin/bootstrap/linux-x86_64/simple` - Intel/AMD 64-bit
+          - `bin/bootstrap/linux-arm64/simple` - ARM 64-bit
+          - `bin/bootstrap/linux-riscv64/simple` - RISC-V 64-bit
+
+          ## macOS
+          - `bin/bootstrap/macos-x86_64/simple` - Intel Mac
+          - `bin/bootstrap/macos-arm64/simple` - Apple Silicon (M1/M2/M3)
+
+          ## Windows
+          - `bin/bootstrap/windows-x86_64/simple.exe` - Intel/AMD 64-bit
+          - `bin/bootstrap/windows-arm64/simple.exe` - ARM 64-bit
+
+          ## Usage
+
+          The `bin/simple` wrapper automatically detects your platform and uses
+          the appropriate bootstrap binary.
+
+          ```bash
+          ./bin/simple --version
+          ./bin/simple your_script.spl
+          ```
+
+          ## Direct Usage
+
+          You can also run the bootstrap binary directly:
+
+          ```bash
+          # Linux x86_64
+          ./bin/bootstrap/linux-x86_64/simple your_script.spl
+
+          # macOS ARM64
+          ./bin/bootstrap/macos-arm64/simple your_script.spl
+
+          # Windows x86_64
+          .\bin\bootstrap\windows-x86_64\simple.exe your_script.spl
+          ```
+          EOF
+
+          # Create tarball
+          cd release
+          tar czf simple-multi-platform-$(date +%Y%m%d).tar.gz simple-multi-platform/
+          ls -lh *.tar.gz
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: simple-multi-platform-release
+          path: release/*.tar.gz
+          retention-days: 90
+
+      - name: Show package summary
+        run: |
+          echo "## Multi-Platform Package Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Bootstrap Binaries Built" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for platform in bin/bootstrap/*/; do
+            if [ -d "$platform" ]; then
+              echo "- \`$(basename $platform)\`: $(ls -lh $platform/simple* 2>/dev/null | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Package Size" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -lh release/*.tar.gz >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

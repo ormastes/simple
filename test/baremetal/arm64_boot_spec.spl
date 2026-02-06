@@ -1,0 +1,108 @@
+# ARM64 (AArch64) Bare-Metal Boot Tests
+#
+# Tests ARM64 bare-metal boot functionality:
+# - Exception vector table
+# - EL1/EL2/EL3 setup
+# - Stack pointer alignment
+# - Jump to kernel_main
+#
+# These tests verify the ARM64 boot infrastructure works correctly.
+
+use std.spec
+use src.baremetal.arm64.test_support.{
+    create_vector_table, validate_vector_table,
+    check_vbar_alignment, check_exception_level, check_el_transition,
+    check_stack_alignment, get_stack_pointer, STACK_SIZE,
+    EL3, EL2, EL1, EL0
+}
+
+# ===========================================================================
+# Boot Code Tests
+# ===========================================================================
+
+describe "ARM64 Boot Code":
+    it "generates valid exception vector table":
+        val vt = create_vector_table()
+
+        # Validate vector table structure
+        expect(validate_vector_table(vt)).to_be(true)
+
+        # Check that handlers are non-zero
+        expect(vt.sync_current_sp0.handler != 0).to_be(true)
+        expect(vt.irq_current_spx.handler != 0).to_be(true)
+        expect(vt.sync_lower64.handler != 0).to_be(true)
+
+        # ARM64 has 16 exception vectors
+        # 4 exception types × 4 sources = 16 entries
+        # Each entry is 128 bytes (total 2KB)
+
+    it "checks vector table alignment":
+        # VBAR must be 2KB aligned
+        val vbar_addr = 0x40001000  # Example aligned address
+        expect(check_vbar_alignment(vbar_addr)).to_be(true)
+        expect(check_vbar_alignment(0x40000800)).to_be(true)
+
+        # Unaligned addresses should fail
+        expect(check_vbar_alignment(0x40000001)).to_be(false)
+        expect(check_vbar_alignment(0x40000100)).to_be(false)
+
+    it "sets up exception levels correctly":
+        # Boot typically starts at EL3 (highest privilege)
+        # Then transitions: EL3 → EL2 → EL1 → EL0
+
+        # Verify exception level values
+        expect(check_exception_level(EL3)).to_be(true)
+        expect(check_exception_level(EL2)).to_be(true)
+        expect(check_exception_level(EL1)).to_be(true)
+        expect(check_exception_level(EL0)).to_be(true)
+
+        # Verify valid transitions (can only go down)
+        expect(check_el_transition(EL3, EL2)).to_be(true)
+        expect(check_el_transition(EL2, EL1)).to_be(true)
+        expect(check_el_transition(EL1, EL0)).to_be(true)
+
+        # Invalid transitions (cannot go up)
+        expect(check_el_transition(EL1, EL2)).to_be(false)
+        expect(check_el_transition(EL0, EL1)).to_be(false)
+
+    it "maintains stack pointer alignment":
+        # AArch64 requires 16-byte stack alignment
+        val sp = get_stack_pointer()
+
+        expect(check_stack_alignment(sp)).to_be(true)
+        expect(sp % 16).to_equal(0)
+
+        # Stack size should be reasonable
+        expect(STACK_SIZE >= 16384).to_be(true)  # At least 16KB
+        expect(STACK_SIZE % 16).to_equal(0)      # Must be 16-byte aligned
+
+# ===========================================================================
+# QEMU Boot Tests
+# ===========================================================================
+
+use src.lib.qemu.boot_runner.{run_boot_test, BootTestConfig}
+use src.lib.qemu.mod.{QemuArch}
+
+@slow
+describe "ARM64 QEMU Boot":
+    slow_it "boots on virt machine":
+        # Test with a minimal ARM64 kernel
+        # Note: Would need examples/baremetal/hello_arm64.elf
+        val kernel_path = "examples/baremetal/hello_arm64.elf"
+
+        # Create config for ARM64
+        var config = BootTestConfig.new(QemuArch.ARM64, kernel_path)
+        config.set_machine("virt")
+        config.expect_output("Hello")
+        config.set_timeout(5000)
+
+        # TODO: Build example kernel first
+        # For now, skip if kernel doesn't exist
+        pass
+
+    slow_it "handles exceptions correctly":
+        # TODO: Test exception handling
+        # - Synchronous exceptions
+        # - IRQ/FIQ
+        # Requires test kernel with exception handlers
+        pass

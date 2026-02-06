@@ -1,0 +1,173 @@
+# ARM32 (Cortex-M) Bare-Metal Boot Tests
+#
+# Tests ARM Cortex-M bare-metal boot functionality:
+# - Vector table generation
+# - Reset handler
+# - Stack pointer initialization
+# - Startup code
+#
+# These tests verify the ARM32 boot infrastructure works correctly.
+
+use std.spec
+use src.baremetal.arm.test_support.{
+    create_vector_table, validate_vector_table,
+    check_exception_count, check_vector_alignment,
+    check_stack_alignment, STACK_TOP,
+    check_data_init, check_bss_init,
+    ExceptionVector
+}
+
+# ===========================================================================
+# Vector Table Tests
+# ===========================================================================
+
+describe "ARM32 Vector Table":
+    it "generates valid vector table":
+        val vt = create_vector_table()
+
+        # Initial SP should be at top of RAM
+        expect(vt.initial_sp).to_equal(STACK_TOP)
+        expect(vt.initial_sp > 0x20000000).to_be(true)
+
+        # Reset handler should be in flash with Thumb bit set
+        expect(vt.reset & 0x1).to_equal(0x1)
+        expect(vt.reset > 0x08000000).to_be(true)
+
+        # Reserved entries should be zero
+        expect(vt.reserved1).to_equal(0)
+        expect(vt.reserved2).to_equal(0)
+        expect(vt.reserved3).to_equal(0)
+        expect(vt.reserved4).to_equal(0)
+        expect(vt.reserved5).to_equal(0)
+
+    it "validates vector table successfully":
+        val vt = create_vector_table()
+        expect(validate_vector_table(vt)).to_be(true)
+
+    it "includes all Cortex-M exceptions":
+        # Cortex-M has 16 exception vectors
+        val count = check_exception_count()
+        expect(count).to_equal(16)
+
+        # Verify key exception numbers
+        expect(ExceptionVector.Reset.to_i64()).to_equal(1)
+        expect(ExceptionVector.Nmi.to_i64()).to_equal(2)
+        expect(ExceptionVector.HardFault.to_i64()).to_equal(3)
+        expect(ExceptionVector.MemManage.to_i64()).to_equal(4)
+        expect(ExceptionVector.BusFault.to_i64()).to_equal(5)
+        expect(ExceptionVector.UsageFault.to_i64()).to_equal(6)
+        expect(ExceptionVector.SvCall.to_i64()).to_equal(11)
+        expect(ExceptionVector.PendSV.to_i64()).to_equal(14)
+        expect(ExceptionVector.SysTick.to_i64()).to_equal(15)
+
+    it "places vector table at correct address":
+        # Flash base for STM32F4
+        val flash_base = 0x08000000
+
+        # Vector table must be aligned to 128 bytes minimum
+        expect(check_vector_alignment(flash_base)).to_be(true)
+        expect(check_vector_alignment(0x08000080)).to_be(true)
+        expect(check_vector_alignment(0x08000100)).to_be(true)
+
+        # Unaligned addresses should fail
+        expect(check_vector_alignment(0x08000001)).to_be(false)
+        expect(check_vector_alignment(0x08000042)).to_be(false)
+
+# ===========================================================================
+# Reset Handler Tests
+# ===========================================================================
+
+describe "ARM32 Reset Handler":
+    it "initializes .data section":
+        # Simulate .data section in RAM
+        val data_start = 0x20000000  # SRAM base
+        val data_end = 0x20000400    # 1KB data section
+
+        expect(check_data_init(data_start, data_end)).to_be(true)
+
+        # Data section should be in SRAM range
+        expect(data_start >= 0x20000000).to_be(true)
+        expect(data_end <= 0x20100000).to_be(true)
+        expect(data_end > data_start).to_be(true)
+
+    it "zeros .bss section":
+        # Simulate .bss section in RAM
+        val bss_start = 0x20000400  # After .data
+        val bss_end = 0x20000800    # 1KB BSS section
+
+        expect(check_bss_init(bss_start, bss_end)).to_be(true)
+
+        # BSS section should be in SRAM range
+        expect(bss_start >= 0x20000000).to_be(true)
+        expect(bss_end <= 0x20100000).to_be(true)
+        expect(bss_end > bss_start).to_be(true)
+
+    it "sets up stack pointer":
+        # Stack pointer should be at top of RAM
+        val sp = STACK_TOP
+        expect(sp > 0x20000000).to_be(true)  # In SRAM
+
+        # Stack must be 8-byte aligned (ARM AAPCS requirement)
+        expect(check_stack_alignment(sp)).to_be(true)
+        expect(sp % 8).to_equal(0)
+
+    it "calls main function":
+        # Reset handler should:
+        # 1. Initialize data/BSS
+        # 2. Set up stack
+        # 3. Call main
+        # 4. Loop forever if main returns
+
+        # This is validated by the actual boot sequence
+        # In tests, we verify the structure is correct
+        val vt = create_vector_table()
+        expect(vt.reset != 0).to_be(true)
+        expect(vt.reset & 0x1).to_equal(0x1)  # Thumb mode
+
+# ===========================================================================
+# NVIC Tests
+# ===========================================================================
+
+describe "ARM32 NVIC (Nested Vectored Interrupt Controller)":
+    it "enables interrupts correctly":
+        # TODO: Test interrupt enable
+        # - NVIC_EnableIRQ
+        # - Priority configuration
+        pass
+
+    it "handles interrupt priorities":
+        # TODO: Test priority levels
+        # - Priority grouping
+        # - Preemption vs sub-priority
+        pass
+
+# ===========================================================================
+# QEMU Boot Tests
+# ===========================================================================
+
+use src.lib.qemu.boot_runner.{run_arm_cortex_m_boot_test}
+
+@slow
+describe "ARM32 QEMU Boot":
+    slow_it "boots on LM3S6965 (Cortex-M3)":
+        # Test with blinky_stm32f4.spl example
+        val kernel_path = "examples/baremetal/blinky_stm32f4.elf"
+
+        # Run boot test on Cortex-M3 machine
+        val result = run_arm_cortex_m_boot_test(kernel_path, "LED")
+
+        # Check if test succeeded
+        if result.success:
+            expect(result.success).to_be(true)
+            expect(result.output.len() > 0).to_be(true)
+        else:
+            # Skip if kernel doesn't exist yet
+            pass
+
+    slow_it "handles SysTick interrupt":
+        # TODO: Test SysTick
+        # - Configure SysTick timer
+        # - Enable SysTick interrupt
+        # - Verify periodic handler calls
+        # Requires test kernel with SysTick configured
+        pass

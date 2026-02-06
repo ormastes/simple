@@ -19,6 +19,7 @@ use backend_types.*
 # Import submodules
 mod backend.env
 mod backend.interpreter
+mod backend.jit_interpreter
 mod backend.compiler
 mod backend.sdn
 
@@ -27,6 +28,7 @@ use backend.env.{EvalContext, Environment, empty_env_scope, HirVisitor}
 
 # Re-export backend implementations
 use backend.interpreter.InterpreterBackendImpl
+use backend.jit_interpreter.{JitInterpreterBackend, JitInterpreterConfig, JitMode}
 use backend.compiler.CompilerBackendImpl
 use backend.sdn.SdnBackendImpl
 
@@ -38,20 +40,31 @@ pub fn create_backend(kind: BackendKind) -> Backend:
     """Create a backend by kind."""
     match kind:
         case Interpreter:
-            InterpreterBackendImpl()
+            # Default to JIT-enabled interpreter for better performance
+            JitInterpreterBackend.default()
         case Compiler:
             CompilerBackendImpl()
         case Sdn:
             SdnBackendImpl()
         case CraneliftJit:
-            # JIT uses the compiler backend (Cranelift)
-            CompilerBackendImpl()
+            # JIT interpreter with Cranelift backend
+            JitInterpreterBackend.new(JitInterpreterConfig(
+                mode: JitMode.AlwaysJit,
+                backend: "cranelift",
+                jit_threshold: 0,
+                verbose: false
+            ))
         case LlvmJit:
-            # JIT uses the compiler backend (LLVM selected at runtime)
-            CompilerBackendImpl()
+            # JIT interpreter with LLVM backend
+            JitInterpreterBackend.new(JitInterpreterConfig(
+                mode: JitMode.AlwaysJit,
+                backend: "llvm",
+                jit_threshold: 0,
+                verbose: false
+            ))
         case AutoJit:
-            # Auto-select JIT backend
-            CompilerBackendImpl()
+            # Auto-select JIT backend (hybrid mode)
+            JitInterpreterBackend.new(JitInterpreterConfig.auto_jit())
         case Custom(name):
             # Try to resolve from DI container
             val container = get_container()
@@ -59,8 +72,8 @@ pub fn create_backend(kind: BackendKind) -> Backend:
             if result.is_ok():
                 result.unwrap()
             else:
-                # Fall back to interpreter
-                InterpreterBackendImpl()
+                # Fall back to JIT interpreter
+                JitInterpreterBackend.default()
 
 pub fn get_backend() -> Backend:
     """Get the backend from DI container."""
@@ -69,8 +82,8 @@ pub fn get_backend() -> Backend:
     if result.is_ok():
         result.unwrap()
     else:
-        # Default to interpreter
-        InterpreterBackendImpl()
+        # Default to JIT interpreter
+        JitInterpreterBackend.default()
 
 # ============================================================================
 # Exports
@@ -83,4 +96,5 @@ export Value, EnumPayloadValue, FunctionValue, ClosureValue, ObjectValue
 export EvalContext, Environment
 export HirVisitor
 export create_backend, get_backend
-export InterpreterBackendImpl, CompilerBackendImpl, SdnBackendImpl
+export InterpreterBackendImpl, JitInterpreterBackend, JitInterpreterConfig, JitMode
+export CompilerBackendImpl, SdnBackendImpl

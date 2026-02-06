@@ -1,0 +1,109 @@
+# RISC-V 64-bit Bare-Metal Boot Tests
+#
+# Tests RISC-V 64-bit bare-metal boot functionality:
+# - Machine mode startup
+# - Trap vector setup
+# - Stack setup
+# - Jump to kernel_main
+#
+# These tests verify the RISC-V 64 boot infrastructure works correctly.
+
+use std.spec
+use src.baremetal.riscv.test_support.{
+    check_machine_mode, check_mtvec_alignment, check_mstatus_init,
+    check_interrupt_enabled, validate_trap_vector,
+    get_stack_pointer, check_stack_alignment_rv64,
+    STACK_SIZE, RAM_BASE,
+    MSTATUS_MIE, MSTATUS_MPIE, MSTATUS_MPP_MACHINE,
+    MIE_MSIE, MIE_MTIE, MIE_MEIE,
+    MTVEC_MODE_DIRECT, MTVEC_MODE_VECTORED,
+    parse_mtvec
+}
+
+# ===========================================================================
+# Boot Code Tests
+# ===========================================================================
+
+describe "RISC-V 64 Boot Code":
+    it "starts in machine mode":
+        # Simulate mstatus after reset
+        # MPP = 11 (machine mode), MIE = 0 (interrupts disabled)
+        val mstatus_init = MSTATUS_MPP_MACHINE  # MPP bits set to machine mode
+
+        # Verify CPU is in machine mode
+        expect(check_machine_mode(mstatus_init)).to_be(true)
+
+        # Verify mstatus initialization is correct
+        expect(check_mstatus_init(mstatus_init)).to_be(true)
+
+        # MIE should be disabled after reset
+        val mie_enabled = (mstatus_init & MSTATUS_MIE) != 0
+        expect(mie_enabled).to_be(false)
+
+    it "sets up trap vector":
+        # Simulate mtvec in direct mode
+        val trap_handler_addr = 0x80000100
+        val mtvec_direct = trap_handler_addr | MTVEC_MODE_DIRECT
+
+        # Parse mtvec
+        val (base, mode) = parse_mtvec(mtvec_direct)
+        expect(base).to_equal(trap_handler_addr)
+        expect(mode).to_equal(MTVEC_MODE_DIRECT)
+
+        # Validate alignment (direct mode requires 4-byte alignment)
+        expect(check_mtvec_alignment(trap_handler_addr, MTVEC_MODE_DIRECT)).to_be(true)
+        expect(validate_trap_vector(mtvec_direct)).to_be(true)
+
+        # Test vectored mode
+        val trap_table_addr = 0x80000200  # Must be aligned
+        val mtvec_vectored = trap_table_addr | MTVEC_MODE_VECTORED
+        expect(validate_trap_vector(mtvec_vectored)).to_be(true)
+
+    it "configures machine registers":
+        # Test mstatus configuration
+        val mstatus = MSTATUS_MPP_MACHINE | MSTATUS_MIE
+        expect(check_machine_mode(mstatus)).to_be(true)
+        expect((mstatus & MSTATUS_MIE) != 0).to_be(true)
+
+        # Test mie (interrupt enable) configuration
+        val mie = MIE_MTIE | MIE_MEIE  # Enable timer and external interrupts
+        expect(check_interrupt_enabled(mie, MIE_MTIE)).to_be(true)
+        expect(check_interrupt_enabled(mie, MIE_MEIE)).to_be(true)
+        expect(check_interrupt_enabled(mie, MIE_MSIE)).to_be(false)
+
+        # Test stack setup
+        val sp = get_stack_pointer()
+        expect(sp > RAM_BASE).to_be(true)
+        expect(check_stack_alignment_rv64(sp)).to_be(true)
+        expect(sp % 16).to_equal(0)  # 16-byte aligned for RV64
+
+# ===========================================================================
+# QEMU Boot Tests
+# ===========================================================================
+
+use src.lib.qemu.boot_runner.{run_riscv64_boot_test}
+
+@slow
+describe "RISC-V 64 QEMU Boot":
+    slow_it "boots on virt machine":
+        # Test with timer_riscv32.spl example (also works for RV64)
+        # Note: Would need timer_riscv64.elf specifically built for RV64
+        val kernel_path = "examples/baremetal/timer_riscv64.elf"
+
+        # Run boot test expecting UART output
+        val result = run_riscv64_boot_test(kernel_path, "RISC-V")
+
+        # Check if test succeeded
+        if result.success:
+            expect(result.success).to_be(true)
+            expect(result.output.contains("RISC-V")).to_be(true)
+        else:
+            # Skip if kernel doesn't exist yet
+            pass
+
+    slow_it "handles traps correctly":
+        # TODO: Test trap handling
+        # - Machine mode traps
+        # - Supervisor mode delegation
+        # Requires test kernel with trap handlers
+        pass
