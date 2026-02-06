@@ -6,6 +6,8 @@ import dap.protocol as protocol
 import dap.transport as transport
 import dap.breakpoints as breakpoints
 import runtime.hooks.{InterpreterHookContext, StackFrame, Variable, VariableScope, ExecutionState, EvalResult}
+import remote.backend.RemoteRiscV32Backend
+import app.debug.coordinator.{VarInfo, FrameInfo}
 
 # Launch configuration parsed from DAP launch request
 class LaunchConfig:
@@ -130,7 +132,8 @@ class DapServer:
     launch_config: LaunchConfig
     debug_context: DebugContext
     step_mode: Option<StepMode>   # Current stepping mode
-    hook_context: InterpreterHookContext   # NEW: Interpreter hook context for debugging
+    hook_context: InterpreterHookContext   # Interpreter hook context for debugging
+    remote_backend: Option<RemoteRiscV32Backend>  # Remote debug backend (GDB/Trace32)
 
     static fn new() -> DapServer:
         DapServer(
@@ -142,7 +145,23 @@ class DapServer:
             launch_config: LaunchConfig.default(),
             debug_context: DebugContext.new(),
             step_mode: None,
-            hook_context: InterpreterHookContext.create()
+            hook_context: InterpreterHookContext.create(),
+            remote_backend: None
+        )
+
+    # Create a DAP server with a remote backend
+    static fn with_remote(backend: RemoteRiscV32Backend) -> DapServer:
+        DapServer(
+            state: DebuggerState.Uninitialized,
+            breakpoint_manager: breakpoints.BreakpointManager.new(),
+            current_thread_id: 1,
+            current_frame_id: 1,
+            stop_reason: None,
+            launch_config: LaunchConfig.default(),
+            debug_context: DebugContext.new(),
+            step_mode: None,
+            hook_context: InterpreterHookContext.create(),
+            remote_backend: Some(backend)
         )
 
 # Step mode for stepping commands
@@ -296,22 +315,38 @@ impl DapServer:
 
     # Handle stackTrace request
     fn handle_stack_trace(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
-        # Get stack frames from hook context
-        val frames = self.hook_context.stack_frames()
-
         var stack_frames: [Dict] = []
         var frame_id = self.current_frame_id
 
-        for frame in frames:
-            val protocol_frame = protocol.StackFrame.new(
-                frame_id,
-                frame.name,
-                frame.line,
-                frame.column
-            ).with_source(frame.file)
-
-            stack_frames.push(protocol_frame.to_json())
-            frame_id = frame_id + 1
+        # Check remote backend first
+        match self.remote_backend:
+            Some(backend):
+                val remote_frames = backend.stack_trace()
+                match remote_frames:
+                    Ok(frames):
+                        for f in frames:
+                            val protocol_frame = protocol.StackFrame.new(
+                                frame_id,
+                                f.function_name,
+                                f.line,
+                                f.column
+                            ).with_source(f.file)
+                            stack_frames.push(protocol_frame.to_json())
+                            frame_id = frame_id + 1
+                    Err(_):
+                        pass
+            None:
+                # Get stack frames from hook context
+                val frames = self.hook_context.stack_frames()
+                for frame in frames:
+                    val protocol_frame = protocol.StackFrame.new(
+                        frame_id,
+                        frame.name,
+                        frame.line,
+                        frame.column
+                    ).with_source(frame.file)
+                    stack_frames.push(protocol_frame.to_json())
+                    frame_id = frame_id + 1
 
         # Fallback if no frames
         if stack_frames.len() == 0:
@@ -338,11 +373,21 @@ impl DapServer:
         val local_scope = protocol.Scope.new("Local", 1)
         val global_scope = protocol.Scope.new("Global", 2)
 
+        var scopes = [
+            local_scope.to_json(),
+            global_scope.to_json()
+        ]
+
+        # Add Registers scope for remote targets
+        match self.remote_backend:
+            Some(_):
+                val register_scope = protocol.Scope.new("Registers", 3)
+                scopes.push(register_scope.to_json())
+            None:
+                pass
+
         val body = {
-            "scopes": [
-                local_scope.to_json(),
-                global_scope.to_json()
-            ]
+            "scopes": scopes
         }
 
         transport.write_response(request_seq, true, command, Some(body))?
@@ -359,14 +404,25 @@ impl DapServer:
 
                 var variables: [Dict] = []
 
-                # Variables reference 1 = local scope, 2 = global scope
+                # Variables reference 1 = local scope, 2 = global scope, 3 = registers (remote)
                 if variables_reference == 1:
-                    # Get local variables from hook context (frame 0 = current frame)
-                    val vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
-
-                    for v in vars:
-                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
-                        variables.push(protocol_var.to_json())
+                    # Check remote backend first
+                    match self.remote_backend:
+                        Some(backend):
+                            val remote_vars = backend.locals()
+                            match remote_vars:
+                                Ok(vars):
+                                    for v in vars:
+                                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type_name)
+                                        variables.push(protocol_var.to_json())
+                                Err(_):
+                                    pass
+                        None:
+                            # Get local variables from hook context (frame 0 = current frame)
+                            val vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
+                            for v in vars:
+                                val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
+                                variables.push(protocol_var.to_json())
 
                     # Placeholder if no variables
                     if variables.len() == 0:
@@ -377,12 +433,23 @@ impl DapServer:
                         variables.push(placeholder.to_json())
 
                 elif variables_reference == 2:
-                    # Get global variables from hook context
-                    val vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
-
-                    for v in vars:
-                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
-                        variables.push(protocol_var.to_json())
+                    # Check remote backend first
+                    match self.remote_backend:
+                        Some(backend):
+                            val remote_vars = backend.read_arguments()
+                            match remote_vars:
+                                Ok(vars):
+                                    for v in vars:
+                                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type_name)
+                                        variables.push(protocol_var.to_json())
+                                Err(_):
+                                    pass
+                        None:
+                            # Get global variables from hook context
+                            val vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
+                            for v in vars:
+                                val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
+                                variables.push(protocol_var.to_json())
 
                     # Placeholder if no variables
                     if variables.len() == 0:
@@ -392,10 +459,47 @@ impl DapServer:
                         ).with_type("")
                         variables.push(placeholder.to_json())
 
+                elif variables_reference == 3:
+                    # Register scope (remote targets only)
+                    match self.remote_backend:
+                        Some(backend):
+                            val regs_result = backend.read_all_registers()
+                            match regs_result:
+                                Ok(regs):
+                                    for name in regs.keys():
+                                        val value = "0x{regs[name]}"
+                                        val protocol_var = protocol.Variable.new(name, value).with_type("u32")
+                                        variables.push(protocol_var.to_json())
+                                Err(_):
+                                    val placeholder = protocol.Variable.new(
+                                        "(registers unavailable)",
+                                        ""
+                                    ).with_type("")
+                                    variables.push(placeholder.to_json())
+                        None:
+                            pass
+
                 else:
-                    # Nested variable inspection (for objects, arrays, etc.)
-                    # Will be implemented when needed
-                    pass
+                    # Nested variable inspection (for objects, arrays, structs)
+                    match self.remote_backend:
+                        Some(backend):
+                            # Use GDB variable objects for recursive expansion
+                            match backend.gdb:
+                                Some(gdb):
+                                    val children = gdb.list_children("{variables_reference}")
+                                    match children:
+                                        Ok(child_list):
+                                            for child in child_list:
+                                                var pvar = protocol.Variable.new(child.name, child.value).with_type(child.type_name)
+                                                if child.num_children > 0:
+                                                    pvar = pvar.with_children(child.name.hash())
+                                                variables.push(pvar.to_json())
+                                        Err(_):
+                                            pass
+                                None:
+                                    pass
+                        None:
+                            pass
 
                 val body = {
                     "variables": variables
@@ -559,6 +663,37 @@ impl DapServer:
 
         Ok(nil)
 
+    # Handle evaluate request
+    fn handle_evaluate(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
+        match arguments:
+            None:
+                return Err("Missing arguments for evaluate")
+            Some(args):
+                val expression = args.get("expression")?
+
+                var result_value = ""
+                var result_type = ""
+
+                match self.remote_backend:
+                    Some(backend):
+                        val eval_result = backend.evaluate(expression)
+                        match eval_result:
+                            Ok(value):
+                                result_value = value
+                            Err(e):
+                                result_value = "<error: {e}>"
+                    None:
+                        # Use hook context for local evaluation
+                        result_value = "<evaluation not available>"
+
+                val body = {
+                    "result": result_value,
+                    "variablesReference": 0
+                }
+
+                transport.write_response(request_seq, true, command, Some(body))?
+                Ok(nil)
+
     # Handle disconnect request
     fn handle_disconnect(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling disconnect request")
@@ -618,6 +753,8 @@ impl DapServer:
                 self.handle_step_in(request.id, request.command, request.arguments)
             case "stepOut":
                 self.handle_step_out(request.id, request.command, request.arguments)
+            case "evaluate":
+                self.handle_evaluate(request.id, request.command, request.arguments)
             case "disconnect":
                 self.handle_disconnect(request.id, request.command, request.arguments)
             case _:
