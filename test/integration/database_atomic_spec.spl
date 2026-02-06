@@ -3,7 +3,18 @@
 # Tests atomic file operations and locking mechanisms
 
 use lib.database.atomic.{atomic_read, atomic_write, atomic_append, FileLock}
-use app.io.{file_exists, file_delete, file_read, rt_timestamp_now}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_timestamp_now() -> i64
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+fn file_read(path: text) -> text:
+    rt_file_read_text(path)
 
 describe "Atomic File Operations":
     it "writes file atomically":
@@ -70,7 +81,7 @@ describe "Atomic File Operations":
             file_delete(lock_path)
 
         # Create lock
-        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        var lock = FileLock.for_file(resource)
         val acquired = lock.acquire()
         assert acquired
         assert file_exists(lock_path)
@@ -85,10 +96,10 @@ describe "Atomic File Operations":
 
         # Create old lock (2.5 hours ago)
         val two_hours_ago = rt_timestamp_now() - (2 * 60 * 60 * 1000000) - (30 * 60 * 1000000)
-        atomic_write(lock_path, "{two_hours_ago}")
+        atomic_write(lock_path, "99999\n{two_hours_ago}")
 
         # Try to acquire lock
-        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        var lock = FileLock.for_file(resource)
         val acquired = lock.acquire()
 
         # Should succeed because lock is stale
@@ -101,14 +112,18 @@ describe "Atomic File Operations":
         val resource = "/tmp/test_fresh_lock.txt"
         val lock_path = "{resource}.lock"
 
+        # Clean up if exists
+        if file_exists(lock_path):
+            file_delete(lock_path)
+
         # Create lock 1
-        val lock1 = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        var lock1 = FileLock.for_file(resource)
         val acquired1 = lock1.acquire()
         assert acquired1
 
-        # Try to acquire lock 2 (should fail)
-        val lock2 = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
-        val acquired2 = lock2.acquire()
+        # Try to acquire lock 2 with short timeout (should fail)
+        var lock2 = FileLock.for_file(resource)
+        val acquired2 = lock2.try_acquire(100)
         assert not acquired2
 
         # Release lock 1
@@ -156,8 +171,12 @@ describe "Lock File Format":
         val resource = "/tmp/test_lock_format.txt"
         val lock_path = "{resource}.lock"
 
+        # Clean up if exists
+        if file_exists(lock_path):
+            file_delete(lock_path)
+
         # Acquire lock
-        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        var lock = FileLock.for_file(resource)
         lock.acquire()
 
         # Read lock file
@@ -173,17 +192,19 @@ describe "Lock File Format":
         val resource = "/tmp/test_overwrite_lock.txt"
         val lock_path = "{resource}.lock"
 
-        # Create stale lock
+        # Create stale lock (PID + old timestamp)
         val old_time = rt_timestamp_now() - (3 * 60 * 60 * 1000000)
-        atomic_write(lock_path, "{old_time}")
+        atomic_write(lock_path, "99999\n{old_time}")
 
         # Acquire should overwrite
-        val lock = FileLock(resource: resource, lock_path: lock_path, locked_at: rt_timestamp_now())
+        var lock = FileLock.for_file(resource)
         lock.acquire()
 
-        # Lock file should have new timestamp
+        # Lock file should have new timestamp (PID\ntimestamp format)
         val lock_content = file_read(lock_path)
-        val lock_time = lock_content.to_int() ?? 0
+        assert lock_content.contains("\n")
+        val lock_lines = lock_content.split("\n")
+        val lock_time = lock_lines[1].trim().to_int() ?? 0
         assert lock_time > old_time
 
         # Cleanup
