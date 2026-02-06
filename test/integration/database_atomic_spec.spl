@@ -2,19 +2,24 @@
 #
 # Tests atomic file operations and locking mechanisms
 
-use lib.database.atomic.{atomic_read, atomic_write, atomic_append, FileLock}
+use lib.database.atomic.{atomic_read, atomic_write, atomic_append, FileLock, get_timestamp}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
-extern fn rt_timestamp_now() -> i64
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 fn file_exists(path: text) -> bool:
     rt_file_exists(path)
 fn file_delete(path: text) -> bool:
     rt_file_delete(path)
 fn file_read(path: text) -> text:
-    rt_file_read_text(path)
+    val result = rt_file_read_text(path)
+    result ?? ""
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
 
 describe "Atomic File Operations":
     it "writes file atomically":
@@ -95,7 +100,7 @@ describe "Atomic File Operations":
         val lock_path = "{resource}.lock"
 
         # Create old lock (2.5 hours ago)
-        val two_hours_ago = rt_timestamp_now() - (2 * 60 * 60 * 1000000) - (30 * 60 * 1000000)
+        val two_hours_ago = get_timestamp() - (2 * 60 * 60 * 1000000) - (30 * 60 * 1000000)
         atomic_write(lock_path, "99999\n{two_hours_ago}")
 
         # Try to acquire lock
@@ -193,7 +198,7 @@ describe "Lock File Format":
         val lock_path = "{resource}.lock"
 
         # Create stale lock (PID + old timestamp)
-        val old_time = rt_timestamp_now() - (3 * 60 * 60 * 1000000)
+        val old_time = get_timestamp() - (3 * 60 * 60 * 1000000)
         atomic_write(lock_path, "99999\n{old_time}")
 
         # Acquire should overwrite

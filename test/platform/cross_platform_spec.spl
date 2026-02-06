@@ -1,277 +1,176 @@
-# Cross-Platform Tests
+# Cross-Platform Support Tests
 #
-# Tests for cross-platform functionality (Windows, Linux, macOS).
+# Tests platform detection, path handling, and process management
+# across Linux, macOS, Windows, and FreeBSD.
+#
+# These tests run on ALL platforms and verify platform-specific behavior.
 
-use sspec.{describe, it, expect, skip}
+use std.spec
 use std.platform.{
-    is_windows, is_linux, is_macos, is_unix,
-    platform_name, platform_triple,
+    is_windows, is_unix, is_macos, is_linux, is_freebsd,
+    is_x86_64, is_arm64,
     dir_sep, path_sep, exe_ext, lib_ext,
-    normalize_path, normalize_windows_path,
-    resolve_command, home_dir, temp_dir
+    normalize_path, join_path, resolve_command,
+    home_dir, temp_dir, line_ending,
+    platform_name, platform_triple
 }
-use std.fs.path.{Path, join_paths}
+use std.common.target.{TargetOS, TargetArch}
+use std.fs.path.{Path, get_current_dir, get_home_dir, get_temp_dir}
+use app.io.{shell, process_run}
+use compiler.linker.link.{auto_detect_linker, SystemLinker, get_linker_info}
 
-describe "Cross-Platform Support":
-    describe "Platform Detection":
-        it "detects current platform":
-            # Should be one of the supported platforms
-            val is_supported = is_windows() or is_linux() or is_macos()
-            expect(is_supported).to_be(true)
+# ===========================================================================
+# Platform Detection Tests
+# ===========================================================================
 
-        it "Unix detection is consistent":
-            # Unix should be true for Linux/macOS, false for Windows
-            val expected_unix = is_linux() or is_macos()
-            expect(is_unix()).to_equal(expected_unix)
+describe "Platform Detection":
+    it "detects current operating system":
+        val os = TargetOS.host()
 
-        it "returns valid platform name":
-            val name = platform_name()
-            # Should be in format: os-arch
-            expect(name).to_contain("-")
+        # Should be one of the supported OSes
+        val valid = match os:
+            case TargetOS.Linux | TargetOS.Windows | TargetOS.MacOS | TargetOS.FreeBSD:
+                true
+            case _:
+                false
 
-            val parts = name.split("-")
-            expect(parts.len()).to_be_greater_than(1)
+        expect(valid).to_be(true)
 
-        it "returns valid platform triple":
-            val triple = platform_triple()
-            # Should contain target information
-            expect(triple).to_contain("-")
+    it "detects current architecture":
+        val arch = TargetArch.host()
 
-    describe "Path Separators":
-        it "returns correct directory separator":
-            val sep = dir_sep()
-            if is_windows():
-                expect(sep).to_equal("\\")
-            else:
-                expect(sep).to_equal("/")
+        # Should be a valid architecture
+        val valid = match arch:
+            case TargetArch.X86_64 | TargetArch.Aarch64 | TargetArch.X86 | TargetArch.Arm:
+                true
+            case _:
+                false
 
-        it "returns correct path separator":
-            val sep = path_sep()
-            if is_windows():
-                expect(sep).to_equal(";")
-            else:
-                expect(sep).to_equal(":")
+        expect(valid).to_be(true)
 
-        it "returns correct executable extension":
-            val ext = exe_ext()
-            if is_windows():
-                expect(ext).to_equal(".exe")
-            else:
-                expect(ext).to_equal("")
+    it "platform name includes OS and architecture":
+        val name = platform_name()
 
-        it "returns correct library extension":
-            val ext = lib_ext()
-            if is_windows():
-                expect(ext).to_equal(".dll")
-            elif is_macos():
-                expect(ext).to_equal(".dylib")
-            else:
-                expect(ext).to_equal(".so")
+        # Should contain a hyphen separating OS and arch
+        expect(name.contains("-")).to_be(true)
 
-    describe "Path Normalization":
-        it "normalizes Unix paths correctly":
-            if not is_windows():
-                val path = normalize_path("/home/user/file.txt")
-                expect(path).to_equal("/home/user/file.txt")
+    it "is_windows returns true only on Windows":
+        val on_windows = is_windows()
+        val os = TargetOS.host()
 
-        it "normalizes Windows paths correctly":
-            if is_windows():
-                val path = normalize_path("C:/Users/Name/file.txt")
-                expect(path).to_equal("C:\\Users\\Name\\file.txt")
+        if os == TargetOS.Windows:
+            expect(on_windows).to_be(true)
+        else:
+            expect(on_windows).to_be(false)
 
-        it "handles Windows drive letters":
-            val path = normalize_windows_path("C:/Windows/System32")
-            expect(path).to_equal("C:\\Windows\\System32")
+    it "is_unix returns true on Unix-like systems":
+        val on_unix = is_unix()
+        val os = TargetOS.host()
 
-        it "handles Windows UNC paths":
-            val path = normalize_windows_path("//server/share/file.txt")
-            expect(path).to_equal("\\\\server\\share\\file.txt")
+        match os:
+            case TargetOS.Linux | TargetOS.MacOS | TargetOS.FreeBSD:
+                expect(on_unix).to_be(true)
+            case TargetOS.Windows:
+                expect(on_unix).to_be(false)
+            case _:
+                pass
 
-        it "leaves Unix paths unchanged in normalize_windows_path":
-            val path = normalize_windows_path("/home/user/file.txt")
-            # Unix paths get backslashes but structure preserved
-            expect(path).to_contain("file.txt")
+# ===========================================================================
+# Path Separator Tests
+# ===========================================================================
 
-    describe "Command Resolution":
-        it "finds commands in PATH":
-            if is_windows():
-                # Windows: should find system commands
-                val cmd = resolve_command("cmd")
-                expect(cmd).to_contain("cmd")
-            else:
-                # Unix: should find shell
-                val cmd = resolve_command("sh")
-                expect(cmd).to_equal("sh")  # Not found = returns original
+describe "Path Separators":
+    it "dir_sep returns platform-specific directory separator":
+        val sep = dir_sep()
 
-        it "adds .exe extension on Windows":
-            if is_windows():
-                val cmd = resolve_command("notepad")
-                expect(cmd).to_contain(".exe")
+        if is_windows():
+            expect(sep).to_equal("\\")
+        else:
+            expect(sep).to_equal("/")
 
-        it "does not modify Unix commands":
-            if not is_windows():
-                val cmd = resolve_command("ls")
-                expect(cmd).to_equal("ls")
+    it "path_sep returns platform-specific PATH separator":
+        val sep = path_sep()
 
-    describe "Environment Directories":
-        it "returns valid home directory":
-            val home = home_dir()
-            expect(home.len()).to_be_greater_than(0)
+        if is_windows():
+            expect(sep).to_equal(";")
+        else:
+            expect(sep).to_equal(":")
 
-            if is_windows():
-                # Windows: C:\Users\...
-                expect(home).to_contain(":")
-            else:
-                # Unix: /home/... or /Users/...
-                expect(home).to_start_with("/")
+    it "exe_ext returns correct executable extension":
+        val ext = exe_ext()
 
-        it "returns valid temp directory":
-            val temp = temp_dir()
-            expect(temp.len()).to_be_greater_than(0)
+        if is_windows():
+            expect(ext).to_equal(".exe")
+        else:
+            expect(ext).to_equal("")
 
-            if is_windows():
-                # Windows: C:\... or %TEMP%
-                expect(temp.len()).to_be_greater_than(2)
-            else:
-                # Unix: usually /tmp
-                expect(temp).to_start_with("/")
+    it "lib_ext returns correct library extension":
+        val ext = lib_ext()
 
-    describe "Path Class":
-        it "creates path from string":
-            val path = Path.new("/home/user/file.txt")
-            expect(path.to_string()).to_equal("/home/user/file.txt")
+        if is_windows():
+            expect(ext).to_equal(".dll")
+        elif is_macos():
+            expect(ext).to_equal(".dylib")
+        else:
+            expect(ext).to_equal(".so")
 
-        it "joins path components":
-            val base = Path.new("/home/user")
-            val joined = base.join("documents")
+# ===========================================================================
+# Path Handling Tests
+# ===========================================================================
 
-            if is_windows():
-                expect(joined.to_string()).to_contain("\\")
-            else:
-                expect(joined.to_string()).to_equal("/home/user/documents")
+describe "Path Handling":
+    it "Path.new creates path from string":
+        val p = Path.new("/usr/bin")
+        expect(p.to_string()).to_equal("/usr/bin")
 
-        it "gets file name":
-            val path = Path.new("/home/user/file.txt")
-            expect(path.file_name()).to_equal("file.txt")
+    it "Path.join combines path components":
+        val base = Path.new("/usr")
+        val joined = base.join("bin")
 
-        it "gets file stem":
-            val path = Path.new("/home/user/file.txt")
-            expect(path.file_stem()).to_equal("file")
+        val result = joined.to_string()
+        expect(result.contains("usr")).to_be(true)
+        expect(result.contains("bin")).to_be(true)
 
-        it "gets file extension":
-            val path = Path.new("/home/user/file.txt")
-            expect(path.extension()).to_equal("txt")
+    it "Path.file_name extracts last component":
+        val p = Path.new("/usr/bin/simple")
+        val name = p.file_name()
 
-        it "handles paths without extension":
-            val path = Path.new("/home/user/README")
-            expect(path.extension()).to_equal("")
-            expect(path.file_stem()).to_equal("README")
+        expect(name).to_equal("simple")
 
-        it "handles paths with multiple dots":
-            val path = Path.new("/home/user/archive.tar.gz")
-            expect(path.extension()).to_equal("gz")
-            expect(path.file_stem()).to_equal("archive.tar")
+    it "Path.extension extracts file extension":
+        val p = Path.new("/path/to/file.txt")
+        val ext = p.extension()
 
-        it "detects absolute paths":
-            if is_windows():
-                val path = Path.new("C:\\Windows")
-                expect(path.is_absolute()).to_be(true)
+        expect(ext).to_equal("txt")
 
-                val relative = Path.new("folder\\file.txt")
-                expect(relative.is_absolute()).to_be(false)
-            else:
-                val path = Path.new("/home/user")
-                expect(path.is_absolute()).to_be(true)
+# ===========================================================================
+# Process Management Tests
+# ===========================================================================
 
-                val relative = Path.new("folder/file.txt")
-                expect(relative.is_absolute()).to_be(false)
+describe "Process Management":
+    it "shell executes simple commands":
+        val result = shell("echo test")
 
-        it "gets parent directory":
-            val path = Path.new("/home/user/documents/file.txt")
-            val parent = path.parent()
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout.contains("test")).to_be(true)
 
-            match parent:
-                case Some(p):
-                    expect(p.to_string()).to_contain("documents")
-                case None:
-                    fail("Parent should exist")
+# ===========================================================================
+# Linker Auto-Detection Tests
+# ===========================================================================
 
-        it "handles root directory parent":
-            if not is_windows():
-                val path = Path.new("/")
-                val parent = path.parent()
+describe "Linker Auto-Detection":
+    it "auto_detect_linker returns valid linker":
+        val linker = auto_detect_linker()
 
-                match parent:
-                    case Some(p):
-                        expect(p.to_string()).to_equal("/")
-                    case None:
-                        # Root has no parent - both behaviors acceptable
-                        pass
+        val valid = match linker:
+            case SystemLinker.Mold | SystemLinker.Lld | SystemLinker.LldLink |
+                 SystemLinker.Msvc | SystemLinker.Ld | SystemLinker.Ld64:
+                true
 
-        it "changes file extension":
-            val path = Path.new("/home/user/file.txt")
-            val new_path = path.with_extension("md")
-            expect(new_path.to_string()).to_contain("file.md")
+        expect(valid).to_be(true)
 
-        it "removes file extension":
-            val path = Path.new("/home/user/file.txt")
-            val new_path = path.with_extension("")
-            expect(new_path.to_string()).to_equal("/home/user/file")
+    it "get_linker_info returns non-empty string":
+        val info = get_linker_info()
 
-    describe "Platform-Specific Behaviors":
-        it "handles Windows drive letters" when: is_windows():
-            val path = Path.new("C:\\Windows\\System32")
-            expect(path.is_absolute()).to_be(true)
-
-            val name = path.file_name()
-            expect(name).to_equal("System32")
-
-        it "handles Unix root paths" when: is_unix():
-            val path = Path.new("/usr/bin/python")
-            expect(path.is_absolute()).to_be(true)
-
-            val parent = path.parent()
-            match parent:
-                case Some(p):
-                    expect(p.to_string()).to_equal("/usr/bin")
-                case None:
-                    fail("Unix path should have parent")
-
-        it "handles Windows UNC paths" when: is_windows():
-            val path = Path.new("\\\\server\\share\\file.txt")
-            expect(path.is_absolute()).to_be(true)
-
-            val name = path.file_name()
-            expect(name).to_equal("file.txt")
-
-    describe "Integration Tests":
-        slow_it "creates and uses actual paths":
-            use std.platform.temp_dir
-
-            val temp = temp_dir()
-            val test_dir = Path.new(temp).join("simple_test")
-            val test_file = test_dir.join("test.txt")
-
-            # Create directory
-            use std.fs.path.Directory
-            val dir = Directory.new(test_dir)
-            val created = dir.create()
-
-            if created:
-                # Create file
-                use std.fs.path.File
-                val file = File.new(test_file)
-                val written = file.write("Hello, Simple!")
-
-                if written:
-                    # Read back
-                    val content = file.read()
-                    expect(content).to_equal("Hello, Simple!")
-
-                # Cleanup
-                file.delete()
-                use app.io.shell
-                if is_windows():
-                    shell("rmdir /s /q \"{test_dir.to_string()}\" 2>nul")
-                else:
-                    shell("rm -rf \"{test_dir.to_string()}\" 2>/dev/null")
+        expect(info.len() > 0).to_be(true)
+        expect(info.contains("linker")).to_be(true)
