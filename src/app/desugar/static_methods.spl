@@ -37,6 +37,7 @@ fn desugar_static_methods(source: text) -> text:
         if impl_info.is_impl:
             val type_name = impl_info.type_name
             val trait_name = impl_info.trait_name
+            val type_params = impl_info.type_params
             val impl_indent = get_indent(line)
 
             # Collect the entire impl block
@@ -57,7 +58,7 @@ fn desugar_static_methods(source: text) -> text:
                     break
 
             # Process the impl block: extract static methods, keep instance methods
-            val processed = process_impl_block(type_name, trait_name, impl_indent, impl_lines)
+            val processed = process_impl_block(type_name, trait_name, type_params, impl_indent, impl_lines)
 
             # Add hoisted static functions BEFORE the impl block
             for hoisted_line in processed.hoisted_lines:
@@ -87,11 +88,12 @@ struct ImplInfo:
     is_impl: bool
     type_name: text
     trait_name: text  # empty if inherent impl
+    type_params: text  # generic parameters like "<T>" or "<K, V>"
 
 fn parse_impl_header(trimmed: text) -> ImplInfo:
     # Match "impl TypeName:" or "impl Trait for TypeName:"
     if not trimmed.starts_with("impl "):
-        return ImplInfo(is_impl: false, type_name: "", trait_name: "")
+        return ImplInfo(is_impl: false, type_name: "", trait_name: "", type_params: "")
 
     # Remove trailing ':'
     var header = trimmed
@@ -109,14 +111,17 @@ fn parse_impl_header(trimmed: text) -> ImplInfo:
         val trait_part = for_parts[0]
         val trait_name = trait_part.trim()
         val type_part = for_parts[1]
-        val type_name = type_part.trim()
-        # Strip generic parameters from type name
-        val type_name = strip_generics(type_name)
-        return ImplInfo(is_impl: true, type_name: type_name, trait_name: trait_name)
+        val type_name_with_params = type_part.trim()
+        # Extract type parameters before stripping
+        val type_params = extract_generics(type_name_with_params)
+        val type_name = strip_generics(type_name_with_params)
+        return ImplInfo(is_impl: true, type_name: type_name, trait_name: trait_name, type_params: type_params)
 
-    # Inherent impl: "impl TypeName"
-    val type_name = strip_generics(header.trim())
-    ImplInfo(is_impl: true, type_name: type_name, trait_name: "")
+    # Inherent impl: "impl TypeName" or "impl TypeName<T>"
+    val type_name_with_params = header.trim()
+    val type_params = extract_generics(type_name_with_params)
+    val type_name = strip_generics(type_name_with_params)
+    ImplInfo(is_impl: true, type_name: type_name, trait_name: "", type_params: type_params)
 
 # Split "Trait for Type" on first " for " occurrence
 # BUG-14 workaround: Don't chain .split().map()
@@ -155,6 +160,40 @@ fn strip_generics(name: text) -> text:
         return name[0:angle]
     name
 
+# Extract generic parameters: "Foo<T, U>" -> "<T, U>"
+fn extract_generics(name: text) -> text:
+    var angle_start = -1
+    var ni = 0
+    val nlen = name.len()
+
+    # Find opening <
+    while ni < nlen:
+        val ch = name[ni:ni + 1]
+        if ch == "<":
+            angle_start = ni
+            break
+        ni = ni + 1
+
+    if angle_start < 0:
+        return ""  # No generics
+
+    # Find closing > (handle nested <>)
+    var depth = 0
+    var ci = angle_start
+    while ci < nlen:
+        val ch = name[ci:ci + 1]
+        if ch == "<":
+            depth = depth + 1
+        elif ch == ">":
+            depth = depth - 1
+            if depth == 0:
+                # Found matching >
+                return name[angle_start:ci + 1]
+        ci = ci + 1
+
+    # No matching >, return what we have
+    name[angle_start:]
+
 # ================================================================
 # Impl Block Processing
 # ================================================================
@@ -163,7 +202,7 @@ struct ProcessedImpl:
     hoisted_lines: [text]       # Static methods as module-level functions
     remaining_lines: [text]     # Impl block with only instance methods
 
-fn process_impl_block(type_name: text, trait_name: text, impl_indent: i64,
+fn process_impl_block(type_name: text, trait_name: text, type_params: text, impl_indent: i64,
                       impl_lines: [text]) -> ProcessedImpl:
     # Parse the impl block into individual methods
     val methods = extract_methods(impl_lines, impl_indent)
@@ -174,7 +213,7 @@ fn process_impl_block(type_name: text, trait_name: text, impl_indent: i64,
     for method in methods:
         if method.is_static:
             # Hoist this static method as a module-level function
-            val hoisted_lines = hoist_static_method(type_name, method, impl_indent)
+            val hoisted_lines = hoist_static_method(type_name, type_params, method, impl_indent)
             for hl in hoisted_lines:
                 hoisted.push(hl)
             hoisted.push("")  # blank line between hoisted functions
@@ -312,7 +351,7 @@ fn parse_method_header(trimmed: text) -> MethodInfo:
 # ================================================================
 
 # Transform a static method into a module-level function
-fn hoist_static_method(type_name: text, method: MethodBlock, impl_indent: i64) -> [text]:
+fn hoist_static_method(type_name: text, type_params: text, method: MethodBlock, impl_indent: i64) -> [text]:
     var result = []
     val method_indent = impl_indent + 4
     val body_indent = method_indent + 4
@@ -326,14 +365,39 @@ fn hoist_static_method(type_name: text, method: MethodBlock, impl_indent: i64) -
     if def_line.starts_with("static "):
         def_line = def_line[7:]
 
-    # Replace "fn name" with "fn TypeName__name"
+    # Replace "fn name" with "fn TypeName__name<T>" (preserving type params)
     if def_line.starts_with("fn "):
         val rest = def_line[3:]
-        def_line = "fn {type_name}__{rest}"
+        # Insert type parameters after function name but before parameters
+        # rest looks like: "method_name(args) -> ReturnType:"
+        # We need: "TypeName__method_name<T>(args) -> ReturnType:"
+        if type_params != "":
+            # Find where to insert type params (before '(' or ':')
+            var insert_pos = -1
+            var ci = 0
+            val rlen = rest.len()
+            while ci < rlen:
+                val ch = rest[ci:ci + 1]
+                if ch == "(" or ch == "<" or ch == ":":
+                    insert_pos = ci
+                    break
+                ci = ci + 1
+
+            if insert_pos > 0:
+                val name_part = rest[0:insert_pos]
+                val rest_part = rest[insert_pos:]
+                def_line = "fn {type_name}__{name_part}{type_params}{rest_part}"
+            else:
+                def_line = "fn {type_name}__{rest}"
+        else:
+            def_line = "fn {type_name}__{rest}"
     elif def_line.starts_with("me "):
         # Static me methods don't make much sense, but handle them
         val rest = def_line[3:]
-        def_line = "fn {type_name}__{rest}"
+        if type_params != "":
+            def_line = "fn {type_name}__{rest}{type_params}"
+        else:
+            def_line = "fn {type_name}__{rest}"
 
     # Add at module level (no indent)
     result.push(def_line)

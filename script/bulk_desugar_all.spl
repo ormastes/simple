@@ -1,0 +1,114 @@
+# Bulk Desugaring Script - Phase 3B
+#
+# Systematically desugar all files with static method issues.
+# Processes both library source files and test files.
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+use app.desugar.static_methods (desugar_static_methods)
+use app.desugar.rewriter (rewrite_static_calls)
+
+# Target files with static method issues (from test failures database)
+val TARGET_FILES = [
+    # Lazy sequences
+    "src/app/interpreter.lazy/lazy_seq.spl",
+    "test/app/interpreter/lazy/lazy_seq_spec.spl",
+
+    # Cache and heap management
+    "src/app/interpreter.cache/cache.spl",
+    "src/app/interpreter.heap/heap.spl",
+    "src/app/interpreter.heap/actor_heap.spl",
+    "test/app/interpreter/cache/cache_spec.spl",
+    "test/app/interpreter/heap/heap_spec.spl",
+
+    # Resource management
+    "src/lib/resource/registry.spl",
+    "test/lib/resource/registry_spec.spl",
+
+    # Database libraries
+    "src/lib/database/core.spl",
+    "src/lib/database/query.spl",
+    "test/lib/database_spec.spl",
+
+    # Test infrastructure
+    "src/lib/test/database.spl",
+    "test/lib/test/database_spec.spl",
+]
+
+fn desugar_file(path: text, is_source: bool) -> bool:
+    """Desugar a single file.
+
+    Args:
+        path: File path to desugar
+        is_source: true for library source files (need both passes),
+                   false for test files (only need rewrite pass)
+
+    Returns: true if successful
+    """
+    if not rt_file_exists(path):
+        print "  ⚠ File not found: {path}"
+        return false
+
+    val source_opt = rt_file_read_text(path)
+    val source = source_opt ?? ""
+
+    if source == "":
+        print "  ✗ Could not read: {path}"
+        return false
+
+    var result = source
+
+    if is_source:
+        # Library source files: hoist static methods + rewrite calls
+        result = desugar_static_methods(result)
+
+    # All files: rewrite static calls
+    result = rewrite_static_calls(result)
+
+    # Write back to original file
+    if rt_file_write_text(path, result):
+        print "  ✓ Desugared: {path}"
+        return true
+    else:
+        print "  ✗ Write failed: {path}"
+        return false
+
+describe "Bulk Desugaring":
+    it "desugars all target files":
+        print ""
+        print "=== Phase 3B: Bulk Desugaring ==="
+        print ""
+
+        var success_count = 0
+        var fail_count = 0
+        var skip_count = 0
+
+        for file_path in TARGET_FILES:
+            # Determine if this is a source file or test file
+            val is_source = file_path.starts_with("src/")
+
+            if desugar_file(file_path, is_source):
+                success_count = success_count + 1
+            else:
+                if rt_file_exists(file_path):
+                    fail_count = fail_count + 1
+                else:
+                    skip_count = skip_count + 1
+
+        print ""
+        print "=== Results ==="
+        print "✓ Success: {success_count}"
+        print "✗ Failed:  {fail_count}"
+        print "⚠ Skipped: {skip_count}"
+        print ""
+
+        check(success_count > 0)
+
+        if fail_count == 0:
+            print "All files desugared successfully!"
+        else:
+            print "Some files failed - review output above"
