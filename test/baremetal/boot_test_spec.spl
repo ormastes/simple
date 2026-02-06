@@ -1,0 +1,271 @@
+# Boot Code Test Specification
+#
+# **Feature ID:** #BM-010
+# **Category:** Bare-Metal / Boot
+# **Status:** Ready (blocked by attribute syntax)
+#
+# Tests bare-metal boot code for x86, ARM, and RISC-V architectures.
+# These are integration tests that run actual kernels in QEMU.
+
+use lib.qemu.boot_runner.{run_x86_boot_test, run_arm_cortex_m_boot_test, run_riscv32_boot_test}
+use lib.qemu.{QemuArch, is_qemu_available}
+
+describe "Bare-Metal Boot Code":
+    """Integration tests for boot implementations."""
+
+    # ===========================================================================
+    # x86 Multiboot Boot Tests
+    # ===========================================================================
+
+    context "x86 Multiboot":
+        """Test x86 Multiboot-compliant boot sequence."""
+
+        before_context:
+            # Check if QEMU for x86 is available
+            if not is_qemu_available(QemuArch.X86):
+                skip_context("QEMU x86 not available - install qemu-system-i386")
+
+        slow_it "boots minimal x86 kernel":
+            """Minimal x86 kernel that prints to VGA and exits."""
+            # Build test kernel
+            val kernel_path = build_x86_test_kernel("minimal")
+
+            # Run boot test
+            val result = run_x86_boot_test(kernel_path, "Hello x86!")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Hello x86!")
+            expect(result.duration_ms).to_be_less_than(5000)
+
+        slow_it "parses multiboot info":
+            """Test that multiboot info is correctly parsed."""
+            val kernel_path = build_x86_test_kernel("multiboot_info")
+
+            val result = run_x86_boot_test(kernel_path, "Memory:")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Memory:")
+            expect(result.output).to_contain("KB")
+
+        slow_it "sets up stack correctly":
+            """Verify stack pointer is set to correct location."""
+            val kernel_path = build_x86_test_kernel("stack_test")
+
+            val result = run_x86_boot_test(kernel_path, "Stack OK")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Stack OK")
+
+        slow_it "handles VGA text mode":
+            """Test VGA text buffer writes."""
+            val kernel_path = build_x86_test_kernel("vga_test")
+
+            val result = run_x86_boot_test(kernel_path, "VGA: ")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("VGA: ")
+
+        slow_it "halts correctly on exit":
+            """Verify clean halt sequence (cli + hlt)."""
+            val kernel_path = build_x86_test_kernel("halt_test")
+
+            val result = run_x86_boot_test(kernel_path, "Halting")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Halting")
+            # Exit code should be 1 (debug-exit encodes 0 as 1)
+            expect(result.exit_code).to(eq(1))
+
+    # ===========================================================================
+    # ARM Cortex-M Boot Tests
+    # ===========================================================================
+
+    context "ARM Cortex-M Startup":
+        """Test ARM Cortex-M reset handler and initialization."""
+
+        before_context:
+            if not is_qemu_available(QemuArch.ARM32):
+                skip_context("QEMU ARM not available - install qemu-system-arm")
+
+        slow_it "boots minimal ARM kernel":
+            """Minimal ARM Cortex-M kernel."""
+            val kernel_path = build_arm_test_kernel("minimal")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "ARM started")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("ARM started")
+
+        slow_it "initializes vector table":
+            """Verify vector table is set at correct address."""
+            val kernel_path = build_arm_test_kernel("vector_table")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "Vector table OK")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Vector table OK")
+
+        slow_it "copies data from flash to RAM":
+            """Test data section initialization."""
+            val kernel_path = build_arm_test_kernel("data_init")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "Data: ")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Data: ")
+            # Should print initialized data value
+            expect(result.output).to_contain("42")
+
+        slow_it "zeros BSS section":
+            """Verify BSS is zeroed."""
+            val kernel_path = build_arm_test_kernel("bss_init")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "BSS: 0")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("BSS: 0")
+
+        slow_it "enables FPU on Cortex-M4F":
+            """Test FPU initialization."""
+            val kernel_path = build_arm_test_kernel("fpu_test")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "FPU OK")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("FPU OK")
+
+        slow_it "handles hard fault":
+            """Verify hard fault handler is called."""
+            val kernel_path = build_arm_test_kernel("hard_fault")
+
+            val result = run_arm_cortex_m_boot_test(kernel_path, "HardFault")
+
+            # Should detect hard fault
+            expect(result.output).to_contain("HardFault")
+
+    # ===========================================================================
+    # RISC-V Machine Mode Boot Tests
+    # ===========================================================================
+
+    context "RISC-V Machine Mode":
+        """Test RISC-V M-mode startup and trap handling."""
+
+        before_context:
+            if not is_qemu_available(QemuArch.RiscV32):
+                skip_context("QEMU RISC-V not available - install qemu-system-riscv32")
+
+        slow_it "boots minimal RISC-V kernel":
+            """Minimal RISC-V kernel with UART output."""
+            val kernel_path = build_riscv32_test_kernel("minimal")
+
+            val result = run_riscv32_boot_test(kernel_path, "RISC-V started")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("RISC-V started")
+
+        slow_it "initializes trap vector":
+            """Verify mtvec is set correctly."""
+            val kernel_path = build_riscv32_test_kernel("trap_vector")
+
+            val result = run_riscv32_boot_test(kernel_path, "mtvec:")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("mtvec:")
+
+        slow_it "handles machine external interrupt":
+            """Test trap handler for external interrupts."""
+            val kernel_path = build_riscv32_test_kernel("external_irq")
+
+            val result = run_riscv32_boot_test(kernel_path, "External IRQ")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("External IRQ")
+
+        slow_it "reads hart ID":
+            """Verify mhartid CSR is readable."""
+            val kernel_path = build_riscv32_test_kernel("hartid")
+
+            val result = run_riscv32_boot_test(kernel_path, "Hart 0")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("Hart 0")
+
+        slow_it "initializes UART":
+            """Test UART initialization and output."""
+            val kernel_path = build_riscv32_test_kernel("uart")
+
+            val result = run_riscv32_boot_test(kernel_path, "UART OK")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("UART OK")
+
+        slow_it "waits for interrupt (WFI)":
+            """Test WFI instruction for low-power idle."""
+            val kernel_path = build_riscv32_test_kernel("wfi")
+
+            val result = run_riscv32_boot_test(kernel_path, "WFI test")
+
+            expect(result.success).to(be_true())
+            expect(result.output).to_contain("WFI test")
+
+    # ===========================================================================
+    # Cross-Architecture Tests
+    # ===========================================================================
+
+    context "Cross-Architecture":
+        """Tests that run on multiple architectures."""
+
+        slow_it "all architectures boot hello world":
+            """Verify basic boot on all supported architectures."""
+            # x86
+            if is_qemu_available(QemuArch.X86):
+                val x86_result = run_x86_boot_test(
+                    build_x86_test_kernel("hello"),
+                    "Hello"
+                )
+                expect(x86_result.success).to(be_true())
+
+            # ARM
+            if is_qemu_available(QemuArch.ARM32):
+                val arm_result = run_arm_cortex_m_boot_test(
+                    build_arm_test_kernel("hello"),
+                    "Hello"
+                )
+                expect(arm_result.success).to(be_true())
+
+            # RISC-V
+            if is_qemu_available(QemuArch.RiscV32):
+                val rv_result = run_riscv32_boot_test(
+                    build_riscv32_test_kernel("hello"),
+                    "Hello"
+                )
+                expect(rv_result.success).to(be_true())
+
+# ===========================================================================
+# Test Kernel Builders
+# ===========================================================================
+
+# Build x86 test kernel
+fn build_x86_test_kernel(test_name: text) -> text:
+    val source_file = "test/fixtures/boot/x86_{test_name}.spl"
+    val output_file = "/tmp/x86_{test_name}.elf"
+
+    # TODO: Call Simple compiler with --bare-metal flag
+    # For now, use pre-built test binaries
+    "test/fixtures/boot/x86_{test_name}.elf"
+
+# Build ARM test kernel
+fn build_arm_test_kernel(test_name: text) -> text:
+    val source_file = "test/fixtures/boot/arm_{test_name}.spl"
+    val output_file = "/tmp/arm_{test_name}.elf"
+
+    # TODO: Call Simple compiler with --bare-metal --arch=armv7em
+    "test/fixtures/boot/arm_{test_name}.elf"
+
+# Build RISC-V 32 test kernel
+fn build_riscv32_test_kernel(test_name: text) -> text:
+    val source_file = "test/fixtures/boot/rv32_{test_name}.spl"
+    val output_file = "/tmp/rv32_{test_name}.elf"
+
+    # TODO: Call Simple compiler with --bare-metal --arch=riscv32
+    "test/fixtures/boot/rv32_{test_name}.elf"
