@@ -301,11 +301,13 @@ impl TreeSitter:
                     val f = self.parse_function_outline(is_public, false, doc)
                     f.is_static = true
                     TopLevelItem.Function(f)
+                elif self.check(TokenKind.Ident) and self.current.text == "assert":
+                    TopLevelItem.StaticAssert(self.parse_static_assert_outline())
                 else:
-                    self.error("expected 'fn' after 'static'")
+                    self.error("expected 'fn' or 'assert' after 'static'")
                     self.synchronize()
                     TopLevelItem.Error(ParseError(
-                        message: "expected 'fn' after 'static'",
+                        message: "expected 'fn' or 'assert' after 'static'",
                         span: self.current.span,
                         severity: ErrorSeverity.Error
                     ))
@@ -1373,6 +1375,36 @@ impl TreeSitter:
             span: merge_spans(start, self.previous.span)
         )
 
+    me parse_static_assert_outline() -> StaticAssertOutline:
+        """Parse static assertion outline.
+
+        Syntax:
+            static assert <condition>
+            static assert <condition>, "message"
+        """
+        val start = self.current.span  # Current token is 'assert'
+        self.advance()  # Consume 'assert'
+
+        # Parse condition expression
+        val condition_start = self.current.span.start
+        self.skip_expression()
+        val condition_span = Span.new(condition_start, self.previous.span.end, 0, 0)
+
+        # Optional error message after comma
+        var message: text? = nil
+        if self.match_token(TokenKind.Comma):
+            if self.check(TokenKind.String):
+                message = Some(self.current.text)
+                self.advance()
+
+        self.skip_newlines()
+
+        StaticAssertOutline(
+            condition_span: condition_span,
+            message: message,
+            span: merge_spans(start, self.previous.span)
+        )
+
     # ========================================================================
     # Block Skipping (for body spans)
     # ========================================================================
@@ -1655,6 +1687,7 @@ enum TopLevelItem:
     Impl(ImplOutline)
     TypeAlias(TypeAliasOutline)
     Const(ConstOutline)
+    StaticAssert(StaticAssertOutline)
     Error(ParseError)
 
 # ============================================================================
