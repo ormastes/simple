@@ -1,0 +1,91 @@
+# Simple CLI - yank command
+# Mark a package version as yanked in the registry
+
+use app.cli_util (get_cli_args)
+use app.package.registry.config (default_config)
+use app.package.registry.auth (has_credentials, print_auth_error, get_token)
+use app.package.registry.index (fetch_index_entry, find_version)
+
+use app.io.mod (process_run, process_output)
+
+fn print_help():
+    print "Usage: simple yank <package> <version> [options]"
+    print ""
+    print "Mark a version as yanked (not recommended for new installs)."
+    print "Yanked versions remain downloadable but won't be selected by default."
+    print ""
+    print "Options:"
+    print "  --undo          Undo a yank"
+    print "  --token=TOKEN   Override auth token"
+    print "  -h, --help      Show this help"
+    print ""
+    print "Examples:"
+    print "  simple yank http 1.0.0"
+    print "  simple yank http 1.0.0 --undo"
+
+fn print_error(msg: text):
+    print "error: {msg}"
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var name = ""
+    var version = ""
+    var undo = false
+    var positional = 0
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--undo":
+            undo = true
+        elif arg == "yank":
+            pass
+        elif arg.starts_with("--token="):
+            pass
+        elif positional == 0:
+            name = arg
+            positional = positional + 1
+        elif positional == 1:
+            version = arg
+            positional = positional + 1
+
+    if name == "" or version == "":
+        print_error("yank requires <package> and <version> arguments")
+        print ""
+        print_help()
+        return 1
+
+    # Check auth
+    if not has_credentials():
+        print_auth_error()
+        return 1
+
+    # Verify the version exists
+    val config = default_config()
+    val entry = fetch_index_entry(config, name)
+    val ver = find_version(entry, version)
+
+    if ver.version == "":
+        print_error("version {version} not found for package '{name}'")
+        return 1
+
+    if undo:
+        if not ver.yanked:
+            print "Version {version} of '{name}' is not yanked"
+            return 0
+        print "Unyanking {name}@{version}..."
+        # TODO: Submit PR to index repo to set yanked=false
+        print "Submitted unyank request for {name}@{version}"
+        print "This will take effect after the index repo PR is merged."
+    else:
+        if ver.yanked:
+            print "Version {version} of '{name}' is already yanked"
+            return 0
+        print "Yanking {name}@{version}..."
+        # TODO: Submit PR to index repo to set yanked=true
+        print "Submitted yank request for {name}@{version}"
+        print "This will take effect after the index repo PR is merged."
+
+    return 0

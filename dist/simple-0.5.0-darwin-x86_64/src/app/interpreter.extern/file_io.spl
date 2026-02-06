@@ -1,0 +1,694 @@
+# File I/O Extern Functions
+#
+# Comprehensive filesystem and terminal I/O operations.
+# Port of rust/compiler/src/interpreter_native_io.rs (631 lines)
+#
+# Provides Simple wrappers for:
+# - Filesystem operations (read, write, directories, metadata)
+# - File handle operations (open, seek, flush, close)
+# - Terminal operations (stdin/stdout/stderr, raw mode, TTY)
+
+from ..core import {Value, InterpreterError}
+
+export fs_exists, fs_read, fs_read_string, fs_write_string, fs_write, fs_append
+export fs_create_dir, fs_remove_file, fs_remove_dir, fs_rename, fs_copy
+export fs_metadata, fs_read_dir, fs_open
+export file_read, file_write, file_flush, file_seek, file_sync, file_close
+export stdin, stdout, stderr, is_tty
+export enable_raw_mode, disable_raw_mode, get_term_size
+export term_write, term_read, term_read_timeout, term_flush, term_poll
+
+#==============================================================================
+# FFI Declarations - Filesystem Operations
+#==============================================================================
+
+@extern("native_fs_exists")
+fn rt_fs_exists(path: text) -> bool
+
+@extern("native_fs_read")
+fn rt_fs_read(path: text) -> Value
+
+@extern("native_fs_read_string")
+fn rt_fs_read_string(path: text) -> Value
+
+@extern("native_fs_write_string")
+fn rt_fs_write_string(path: text, content: text) -> Value
+
+@extern("native_fs_write")
+fn rt_fs_write(path: text, data: [i64]) -> Value
+
+@extern("native_fs_append")
+fn rt_fs_append(path: text, data: [i64]) -> Value
+
+@extern("native_fs_create_dir")
+fn rt_fs_create_dir(path: text, recursive: bool) -> Value
+
+@extern("native_fs_remove_file")
+fn rt_fs_remove_file(path: text) -> Value
+
+@extern("native_fs_remove_dir")
+fn rt_fs_remove_dir(path: text, recursive: bool) -> Value
+
+@extern("native_fs_rename")
+fn rt_fs_rename(from: text, to: text) -> Value
+
+@extern("native_fs_copy")
+fn rt_fs_copy(from: text, to: text) -> Value
+
+@extern("native_fs_metadata")
+fn rt_fs_metadata(path: text) -> Value
+
+@extern("native_fs_read_dir")
+fn rt_fs_read_dir(path: text) -> Value
+
+@extern("native_fs_open")
+fn rt_fs_open(path: text, mode: Value) -> Value
+
+#==============================================================================
+# FFI Declarations - File Handle Operations
+#==============================================================================
+
+@extern("native_file_read")
+fn rt_file_read(handle: i64, buf_len: i64) -> Value
+
+@extern("native_file_write")
+fn rt_file_write(handle: i64, data: [i64]) -> Value
+
+@extern("native_file_flush")
+fn rt_file_flush(handle: i64) -> Value
+
+@extern("native_file_seek")
+fn rt_file_seek(handle: i64, position: i64, whence: i64) -> Value
+
+@extern("native_file_sync")
+fn rt_file_sync(handle: i64) -> Value
+
+@extern("native_file_close")
+fn rt_file_close(handle: i64) -> Value
+
+#==============================================================================
+# FFI Declarations - Terminal Operations
+#==============================================================================
+
+@extern("native_stdin")
+fn rt_stdin() -> i64
+
+@extern("native_stdout")
+fn rt_stdout() -> i64
+
+@extern("native_stderr")
+fn rt_stderr() -> i64
+
+@extern("native_is_tty")
+fn rt_is_tty(handle: i64) -> bool
+
+@extern("native_enable_raw_mode")
+fn rt_enable_raw_mode(handle: i64) -> Value
+
+@extern("native_disable_raw_mode")
+fn rt_disable_raw_mode(handle: i64) -> Value
+
+@extern("native_get_term_size")
+fn rt_get_term_size(handle: i64) -> Value
+
+@extern("native_term_write")
+fn rt_term_write(handle: i64, data: [i64]) -> Value
+
+@extern("native_term_read")
+fn rt_term_read(handle: i64, buf_len: i64) -> Value
+
+@extern("native_term_read_timeout")
+fn rt_term_read_timeout(handle: i64, buf_len: i64, timeout_ms: i64) -> Value
+
+@extern("native_term_flush")
+fn rt_term_flush(handle: i64) -> Value
+
+@extern("native_term_poll")
+fn rt_term_poll(handle: i64, timeout_ms: i64) -> Value
+
+#==============================================================================
+# Filesystem Wrapper Functions
+#==============================================================================
+
+fn fs_exists(args: [Value]) -> Result<Value, InterpreterError>:
+    """Check if a file or directory exists.
+
+    Args:
+        path: File or directory path
+
+    Returns:
+        Boolean indicating existence
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_exists expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_exists expects string path"))
+
+    Ok(Value.bool(rt_fs_exists(path)))
+
+fn fs_read(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read entire file as byte array.
+
+    Args:
+        path: File path
+
+    Returns:
+        Result<[byte], IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_read expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_read expects string path"))
+
+    Ok(rt_fs_read(path))
+
+fn fs_read_string(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read entire file as UTF-8 string.
+
+    Args:
+        path: File path
+
+    Returns:
+        Result<text, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_read_string expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_read_string expects string path"))
+
+    Ok(rt_fs_read_string(path))
+
+fn fs_write_string(args: [Value]) -> Result<Value, InterpreterError>:
+    """Write string to file (overwrites existing).
+
+    Args:
+        path: File path
+        content: String content to write
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_write_string expects 2 arguments"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_write_string expects string path"))
+    val content = args[1].as_str() ?? return Err(InterpreterError.TypeError("fs_write_string expects string content"))
+
+    Ok(rt_fs_write_string(path, content))
+
+fn fs_write(args: [Value]) -> Result<Value, InterpreterError>:
+    """Write byte array to file (overwrites existing).
+
+    Args:
+        path: File path
+        data: Byte array to write
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_write expects 2 arguments"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_write expects string path"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("fs_write expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("fs_write expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_fs_write(path, byte_array))
+
+fn fs_append(args: [Value]) -> Result<Value, InterpreterError>:
+    """Append byte array to file.
+
+    Args:
+        path: File path
+        data: Byte array to append
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_append expects 2 arguments"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_append expects string path"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("fs_append expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("fs_append expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_fs_append(path, byte_array))
+
+fn fs_create_dir(args: [Value]) -> Result<Value, InterpreterError>:
+    """Create directory.
+
+    Args:
+        path: Directory path
+        recursive: If true, create parent directories (default false)
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("fs_create_dir expects at least 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_create_dir expects string path"))
+    val recursive = if args.len() > 1: args[1].as_bool() ?? false else: false
+
+    Ok(rt_fs_create_dir(path, recursive))
+
+fn fs_remove_file(args: [Value]) -> Result<Value, InterpreterError>:
+    """Remove a file.
+
+    Args:
+        path: File path
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_remove_file expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_remove_file expects string path"))
+
+    Ok(rt_fs_remove_file(path))
+
+fn fs_remove_dir(args: [Value]) -> Result<Value, InterpreterError>:
+    """Remove a directory.
+
+    Args:
+        path: Directory path
+        recursive: If true, remove directory and contents (default false)
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("fs_remove_dir expects at least 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_remove_dir expects string path"))
+    val recursive = if args.len() > 1: args[1].as_bool() ?? false else: false
+
+    Ok(rt_fs_remove_dir(path, recursive))
+
+fn fs_rename(args: [Value]) -> Result<Value, InterpreterError>:
+    """Rename or move a file or directory.
+
+    Args:
+        from: Source path
+        to: Destination path
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_rename expects 2 arguments"))
+
+    val from = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_rename expects string paths"))
+    val to = args[1].as_str() ?? return Err(InterpreterError.TypeError("fs_rename expects string paths"))
+
+    Ok(rt_fs_rename(from, to))
+
+fn fs_copy(args: [Value]) -> Result<Value, InterpreterError>:
+    """Copy a file.
+
+    Args:
+        from: Source file path
+        to: Destination file path
+
+    Returns:
+        Result<bytes_copied, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_copy expects 2 arguments"))
+
+    val from = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_copy expects string paths"))
+    val to = args[1].as_str() ?? return Err(InterpreterError.TypeError("fs_copy expects string paths"))
+
+    Ok(rt_fs_copy(from, to))
+
+fn fs_metadata(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get file or directory metadata.
+
+    Args:
+        path: File or directory path
+
+    Returns:
+        Result<Metadata{size, is_file, is_dir, modified, ...}, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_metadata expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_metadata expects string path"))
+
+    Ok(rt_fs_metadata(path))
+
+fn fs_read_dir(args: [Value]) -> Result<Value, InterpreterError>:
+    """List directory contents.
+
+    Args:
+        path: Directory path
+
+    Returns:
+        Result<[DirEntry{name, path, is_file, is_dir}], IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("fs_read_dir expects 1 argument"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_read_dir expects string path"))
+
+    Ok(rt_fs_read_dir(path))
+
+fn fs_open(args: [Value]) -> Result<Value, InterpreterError>:
+    """Open file and return handle.
+
+    Args:
+        path: File path
+        mode: Open mode enum (Read, Write, Append, ReadWrite, etc.)
+
+    Returns:
+        Result<handle, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("fs_open expects 2 arguments"))
+
+    val path = args[0].as_str() ?? return Err(InterpreterError.TypeError("fs_open expects string path"))
+    val mode = args[1]  # Can be enum or string
+
+    Ok(rt_fs_open(path, mode))
+
+#==============================================================================
+# File Handle Wrapper Functions
+#==============================================================================
+
+fn file_read(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read from file handle.
+
+    Args:
+        handle: File handle from fs_open
+        buf_len: Buffer length (default 4096)
+
+    Returns:
+        Result<[byte], IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("file_read expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_read expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 4096 else: 4096
+
+    Ok(rt_file_read(handle, buf_len))
+
+fn file_write(args: [Value]) -> Result<Value, InterpreterError>:
+    """Write to file handle.
+
+    Args:
+        handle: File handle from fs_open
+        data: Byte array to write
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("file_write expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_write expects integer handle"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("file_write expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("file_write expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_file_write(handle, byte_array))
+
+fn file_flush(args: [Value]) -> Result<Value, InterpreterError>:
+    """Flush file handle write buffer.
+
+    Args:
+        handle: File handle from fs_open
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("file_flush expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_flush expects integer handle"))
+
+    Ok(rt_file_flush(handle))
+
+fn file_seek(args: [Value]) -> Result<Value, InterpreterError>:
+    """Seek to position in file.
+
+    Args:
+        handle: File handle from fs_open
+        position: Byte offset
+        whence: Seek mode (0=Start, 1=Current, 2=End)
+
+    Returns:
+        Result<new_position, IoError>
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("file_seek expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_seek expects integer handle"))
+    val position = args[1].as_int() ?? return Err(InterpreterError.TypeError("file_seek expects integer position"))
+    val whence = args[2].as_int() ?? 0
+
+    Ok(rt_file_seek(handle, position, whence))
+
+fn file_sync(args: [Value]) -> Result<Value, InterpreterError>:
+    """Sync file data to disk.
+
+    Args:
+        handle: File handle from fs_open
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("file_sync expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_sync expects integer handle"))
+
+    Ok(rt_file_sync(handle))
+
+fn file_close(args: [Value]) -> Result<Value, InterpreterError>:
+    """Close file handle.
+
+    Args:
+        handle: File handle from fs_open
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("file_close expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("file_close expects integer handle"))
+
+    Ok(rt_file_close(handle))
+
+#==============================================================================
+# Terminal Wrapper Functions
+#==============================================================================
+
+fn stdin(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get stdin file handle.
+
+    Returns:
+        Handle for standard input (0)
+    """
+    if args.len() != 0:
+        return Err(InterpreterError.ArityError("stdin expects 0 arguments"))
+
+    Ok(Value.int(rt_stdin()))
+
+fn stdout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get stdout file handle.
+
+    Returns:
+        Handle for standard output (1)
+    """
+    if args.len() != 0:
+        return Err(InterpreterError.ArityError("stdout expects 0 arguments"))
+
+    Ok(Value.int(rt_stdout()))
+
+fn stderr(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get stderr file handle.
+
+    Returns:
+        Handle for standard error (2)
+    """
+    if args.len() != 0:
+        return Err(InterpreterError.ArityError("stderr expects 0 arguments"))
+
+    Ok(Value.int(rt_stderr()))
+
+fn is_tty(args: [Value]) -> Result<Value, InterpreterError>:
+    """Check if file handle is a TTY (terminal).
+
+    Args:
+        handle: File handle to check
+
+    Returns:
+        Boolean indicating TTY status
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("is_tty expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("is_tty expects integer handle"))
+
+    Ok(Value.bool(rt_is_tty(handle)))
+
+fn enable_raw_mode(args: [Value]) -> Result<Value, InterpreterError>:
+    """Enable terminal raw mode (disable line buffering, echo).
+
+    Args:
+        handle: Terminal file handle
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("enable_raw_mode expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("enable_raw_mode expects integer handle"))
+
+    Ok(rt_enable_raw_mode(handle))
+
+fn disable_raw_mode(args: [Value]) -> Result<Value, InterpreterError>:
+    """Disable terminal raw mode (restore normal mode).
+
+    Args:
+        handle: Terminal file handle
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("disable_raw_mode expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("disable_raw_mode expects integer handle"))
+
+    Ok(rt_disable_raw_mode(handle))
+
+fn get_term_size(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get terminal size (columns and rows).
+
+    Args:
+        handle: Terminal file handle
+
+    Returns:
+        Result<(cols, rows), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("get_term_size expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("get_term_size expects integer handle"))
+
+    Ok(rt_get_term_size(handle))
+
+fn term_write(args: [Value]) -> Result<Value, InterpreterError>:
+    """Write to terminal.
+
+    Args:
+        handle: Terminal file handle
+        data: Byte array to write
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("term_write expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("term_write expects integer handle"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("term_write expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("term_write expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_term_write(handle, byte_array))
+
+fn term_read(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read from terminal.
+
+    Args:
+        handle: Terminal file handle
+        buf_len: Buffer length (default 1024)
+
+    Returns:
+        Result<[byte], IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("term_read expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("term_read expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 1024 else: 1024
+
+    Ok(rt_term_read(handle, buf_len))
+
+fn term_read_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read from terminal with timeout.
+
+    Args:
+        handle: Terminal file handle
+        buf_len: Buffer length (default 1024)
+        timeout_ms: Timeout in milliseconds
+
+    Returns:
+        Result<[byte], IoError>
+    """
+    if args.len() < 2:
+        return Err(InterpreterError.ArityError("term_read_timeout expects at least 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("term_read_timeout expects integer handle"))
+    val buf_len = if args.len() > 2: args[2].as_int() ?? 1024 else: 1024
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("term_read_timeout expects integer timeout"))
+
+    Ok(rt_term_read_timeout(handle, buf_len, timeout))
+
+fn term_flush(args: [Value]) -> Result<Value, InterpreterError>:
+    """Flush terminal output buffer.
+
+    Args:
+        handle: Terminal file handle
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("term_flush expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("term_flush expects integer handle"))
+
+    Ok(rt_term_flush(handle))
+
+fn term_poll(args: [Value]) -> Result<Value, InterpreterError>:
+    """Poll terminal for input availability.
+
+    Args:
+        handle: Terminal file handle
+        timeout_ms: Timeout in milliseconds (0 for immediate)
+
+    Returns:
+        Result<bool, IoError> - true if input available
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("term_poll expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("term_poll expects integer handle"))
+    val timeout = args[1].as_int() ?? 0
+
+    Ok(rt_term_poll(handle, timeout))

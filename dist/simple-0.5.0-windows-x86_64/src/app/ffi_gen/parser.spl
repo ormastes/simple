@@ -1,0 +1,310 @@
+# FFI Wrapper Generator - Parser Module
+#
+# Parses @Lib annotations and extern class declarations from Simple source code.
+# Uses line-based text scanning (no AST dependency).
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+# Represents an @Lib annotation with its associated extern class
+class LibExternSpec:
+    # @Lib annotation fields
+    lib_lang: text        # "rust", "c", "cpp"
+    lib_name: text        # crate/package name
+    lib_version: text     # version constraint
+    lib_features: [text]  # optional features list
+    lib_pkg_config: text  # optional pkg-config name (C/C++)
+    lib_link: text        # optional linker flag override
+
+    # Extern class definition
+    class_name: text
+    methods: [ExternMethodSpec]
+
+    # Source location
+    source_file: text
+    line_number: i64
+
+# Represents an extern method declaration
+class ExternMethodSpec:
+    name: text
+    kind: text            # "static", "immutable", "mutable"
+    params: [ParamSpec]
+    return_type: text
+    line_number: i64
+
+# Represents a method parameter
+class ParamSpec:
+    name: text
+    type_name: text
+
+# ============================================================================
+# String Helpers (avoid .find()/.rfind() which return Option in module context)
+# ============================================================================
+
+# Extract content between first "(" and last ")" using split
+fn extract_between_parens(line: text) -> text:
+    if not line.contains("(") or not line.contains(")"):
+        return ""
+    val parts = line.split("(")
+    if parts.len() < 2:
+        return ""
+    # Rejoin everything after first "("
+    var inner = parts[1]
+    var idx = 2
+    while idx < parts.len():
+        inner = inner + "(" + parts[idx]
+        idx = idx + 1
+    # Remove last ")"
+    if not inner.contains(")"):
+        return ""
+    val rparts = inner.split(")")
+    # Everything except the last part, rejoined with ")"
+    var result = rparts[0]
+    var j = 1
+    while j < rparts.len() - 1:
+        result = result + ")" + rparts[j]
+        j = j + 1
+    result
+
+# Extract first quoted string: finds "..." and returns content
+fn extract_first_quoted(s: text) -> text:
+    if not s.contains("\""):
+        return ""
+    val parts = s.split("\"")
+    if parts.len() < 3:
+        return ""
+    parts[1]
+
+# Extract content before first occurrence of needle
+fn before_first(s: text, needle: text) -> text:
+    if not s.contains(needle):
+        return s
+    val parts = s.split(needle)
+    parts[0]
+
+# Extract content after first occurrence of needle
+fn after_first(s: text, needle: text) -> text:
+    if not s.contains(needle):
+        return ""
+    val parts = s.split(needle)
+    if parts.len() < 2:
+        return ""
+    # Rejoin everything after first occurrence
+    var result = parts[1]
+    var idx = 2
+    while idx < parts.len():
+        result = result + needle + parts[idx]
+        idx = idx + 1
+    result
+
+# ============================================================================
+# Parser Implementation
+# ============================================================================
+
+# Parse all @Lib extern class declarations from source
+fn parse_lib_externs(source: text, file_path: text) -> [LibExternSpec]:
+    var specs: [LibExternSpec] = []
+    val lines = source.split("\n")
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i].trim()
+
+        # Look for @Lib annotation
+        if line.starts_with("@Lib("):
+            val annotation = parse_lib_annotation(line)
+            if annotation.lib_lang != "":
+                # Next non-empty line should be "extern class ..."
+                var j = i + 1
+                while j < lines.len() and lines[j].trim() == "":
+                    j = j + 1
+
+                if j < lines.len() and lines[j].trim().starts_with("extern class"):
+                    val class_line = lines[j].trim()
+                    val class_name = parse_class_name(class_line)
+
+                    # Parse methods in the class body
+                    var methods: [ExternMethodSpec] = []
+                    var k = j + 1
+                    while k < lines.len():
+                        val method_line = lines[k]
+                        # Stop at first non-indented, non-empty line
+                        if method_line.trim() != "" and not method_line.starts_with("    ") and not method_line.starts_with("\t"):
+                            break
+                        elif method_line.trim() == "":
+                            k = k + 1
+                        else:
+                            val method = parse_method_line(method_line.trim(), k + 1)
+                            if method.name != "":
+                                methods.push(method)
+                            k = k + 1
+
+                    val spec = LibExternSpec(
+                        lib_lang: annotation.lib_lang,
+                        lib_name: annotation.lib_name,
+                        lib_version: annotation.lib_version,
+                        lib_features: annotation.lib_features,
+                        lib_pkg_config: annotation.lib_pkg_config,
+                        lib_link: annotation.lib_link,
+                        class_name: class_name,
+                        methods: methods,
+                        source_file: file_path,
+                        line_number: i + 1
+                    )
+                    specs.push(spec)
+                    i = k
+                else:
+                    i = j
+            else:
+                i = i + 1
+        else:
+            i = i + 1
+
+    specs
+
+# ============================================================================
+# Annotation Parsing
+# ============================================================================
+
+# Intermediate struct for annotation fields
+class LibAnnotation:
+    lib_lang: text
+    lib_name: text
+    lib_version: text
+    lib_features: [text]
+    lib_pkg_config: text
+    lib_link: text
+
+# Parse @Lib(lang: "rust", name: "regex", version: "1.10", ...) annotation
+fn parse_lib_annotation(line: text) -> LibAnnotation:
+    var lang = ""
+    var name = ""
+    var version = ""
+    var features: [text] = []
+    var pkg_config = ""
+    var link = ""
+
+    val content = extract_between_parens(line)
+    if content == "":
+        return LibAnnotation(lib_lang: "", lib_name: "", lib_version: "", lib_features: [], lib_pkg_config: "", lib_link: "")
+
+    # Parse key: "value" pairs
+    lang = extract_field_value(content, "lang")
+    name = extract_field_value(content, "name")
+    version = extract_field_value(content, "version")
+    pkg_config = extract_field_value(content, "pkg_config")
+    link = extract_field_value(content, "link")
+    features = extract_list_field(content, "features")
+
+    LibAnnotation(lib_lang: lang, lib_name: name, lib_version: version, lib_features: features, lib_pkg_config: pkg_config, lib_link: link)
+
+# Extract a string value for a key from "key: \"value\"" format
+fn extract_field_value(content: text, key: text) -> text:
+    val search = "{key}:"
+    if not content.contains(search):
+        val search2 = "{key} :"
+        if not content.contains(search2):
+            return ""
+        val after = after_first(content, search2).trim()
+        return extract_first_quoted(after)
+
+    val after = after_first(content, search).trim()
+    extract_first_quoted(after)
+
+# Extract a list of strings from "features: [\"a\", \"b\"]" format
+fn extract_list_field(content: text, key: text) -> [text]:
+    val search = "{key}:"
+    if not content.contains(search):
+        return []
+
+    val after = after_first(content, search).trim()
+    if not after.contains("[") or not after.contains("]"):
+        return []
+
+    val bracket_content = extract_between_parens(after.replace("[", "(").replace("]", ")"))
+    var items: [text] = []
+    val parts = bracket_content.split(",")
+    for part in parts:
+        val trimmed = part.trim()
+        val extracted = extract_first_quoted(trimmed)
+        if extracted != "":
+            items.push(extracted)
+
+    items
+
+# ============================================================================
+# Class and Method Parsing
+# ============================================================================
+
+# Parse class name from "extern class ClassName:"
+fn parse_class_name(line: text) -> text:
+    val trimmed = line.trim()
+    # Remove "extern class " prefix and ":" suffix
+    var name = trimmed
+    if name.starts_with("extern class "):
+        name = name[13:]
+    if name.ends_with(":"):
+        name = name[:-1]
+    name.trim()
+
+# Parse a method line like "static fn new(pattern: text) -> Regex"
+# or "fn is_match(input: text) -> bool"
+# or "me move(dx: i64, dy: i64)"
+fn parse_method_line(line: text, line_num: i64) -> ExternMethodSpec:
+    var kind = "immutable"
+    var rest = line
+
+    if rest.starts_with("static fn "):
+        kind = "static"
+        rest = rest[10:]
+    elif rest.starts_with("me "):
+        kind = "mutable"
+        rest = rest[3:]
+    elif rest.starts_with("fn "):
+        kind = "immutable"
+        rest = rest[3:]
+    else:
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    # Extract method name (before first "(")
+    if not rest.contains("("):
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    val name = before_first(rest, "(").trim()
+    val after_name = after_first(rest, "(")
+
+    # Extract parameters (before first ")")
+    if not after_name.contains(")"):
+        return ExternMethodSpec(name: "", kind: "", params: [], return_type: "", line_number: line_num)
+
+    val params_str = before_first(after_name, ")")
+    val params = parse_params(params_str)
+
+    # Extract return type
+    val after_params = after_first(after_name, ")").trim()
+    var return_type = ""
+    if after_params.starts_with("->"):
+        return_type = after_params[2:].trim()
+        # Remove trailing colon if present
+        if return_type.ends_with(":"):
+            return_type = return_type[:-1].trim()
+
+    ExternMethodSpec(name: name, kind: kind, params: params, return_type: return_type, line_number: line_num)
+
+# Parse parameter list "name: type, name2: type2"
+fn parse_params(params_str: text) -> [ParamSpec]:
+    var params: [ParamSpec] = []
+    val trimmed = params_str.trim()
+    if trimmed == "":
+        return params
+
+    val parts = trimmed.split(",")
+    for part in parts:
+        val p = part.trim()
+        if p.contains(":"):
+            val param_name = before_first(p, ":").trim()
+            val param_type = after_first(p, ":").trim()
+            params.push(ParamSpec(name: param_name, type_name: param_type))
+
+    params

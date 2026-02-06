@@ -1,0 +1,330 @@
+# GC Safety Analysis
+#
+# Complete GC safety analysis system:
+# - Root tracking: Ensures all live objects are rooted at GC points
+# - Write barriers: Verifies barriers for incremental/generational GC
+# - Escape analysis: Determines stack vs heap allocation
+#
+# Architecture:
+# - roots.spl: GC root tracking and verification
+# - barriers.spl: Write barrier analysis
+# - escape.spl: Escape analysis for allocation optimization
+# - mod.spl: Integration and main API
+#
+# Usage:
+#   val analyzer = GcSafetyAnalyzer.create(gc_config)
+#   analyzer.analyze_function(mir_function)
+#   val report = analyzer.get_report()
+
+use compiler.gc_analysis.roots.*
+use compiler.gc_analysis.barriers.*
+use compiler.gc_analysis.escape.*
+use compiler.mir_data.*
+
+# ============================================================================
+# GC Safety Configuration
+# ============================================================================
+
+struct GcSafetyConfig:
+    """Configuration for GC safety analysis."""
+    gc_mode: GcMode
+    enable_escape_analysis: bool
+    enable_barrier_analysis: bool
+    enable_root_tracking: bool
+    stack_allocation_threshold: i64  # Max size for stack allocation
+
+impl GcSafetyConfig:
+    static fn default_config() -> GcSafetyConfig:
+        GcSafetyConfig(
+            gc_mode: GcMode.Incremental,
+            enable_escape_analysis: true,
+            enable_barrier_analysis: true,
+            enable_root_tracking: true,
+            stack_allocation_threshold: 1024  # 1KB
+        )
+
+    static fn minimal() -> GcSafetyConfig:
+        """Minimal config for stop-the-world GC."""
+        GcSafetyConfig(
+            gc_mode: GcMode.StopTheWorld,
+            enable_escape_analysis: false,
+            enable_barrier_analysis: false,
+            enable_root_tracking: true,
+            stack_allocation_threshold: 0
+        )
+
+    static fn generational() -> GcSafetyConfig:
+        """Config for generational GC."""
+        GcSafetyConfig(
+            gc_mode: GcMode.Generational,
+            enable_escape_analysis: true,
+            enable_barrier_analysis: true,
+            enable_root_tracking: true,
+            stack_allocation_threshold: 256
+        )
+
+# ============================================================================
+# Analysis Result
+# ============================================================================
+
+struct GcSafetyReport:
+    """Report from GC safety analysis."""
+    function_name: text
+    root_errors: [RootError]
+    barrier_errors: [BarrierError]
+    gc_points: [GcPoint]
+    barrier_requirements: [BarrierRequirement]
+    stack_eligible_allocations: i64
+    total_allocations: i64
+    escape_ratio: f64
+
+impl GcSafetyReport:
+    fn is_safe() -> bool:
+        """Check if analysis found no safety issues."""
+        self.root_errors.is_empty() and self.barrier_errors.is_empty()
+
+    fn error_count() -> i64:
+        """Total number of errors."""
+        self.root_errors.len() + self.barrier_errors.len()
+
+    fn format_summary() -> text:
+        var summary = "GC Safety Report for {self.function_name}:\n"
+        summary = "{summary}  GC Points: {self.gc_points.len()}\n"
+        summary = "{summary}  Barrier Requirements: {self.barrier_requirements.len()}\n"
+        summary = "{summary}  Allocations: {self.total_allocations} ({self.stack_eligible_allocations} stack-eligible)\n"
+        summary = "{summary}  Stack Allocation Ratio: {self.escape_ratio * 100.0:.1}%\n"
+
+        if self.root_errors.len() > 0:
+            summary = "{summary}  Root Errors: {self.root_errors.len()}\n"
+        if self.barrier_errors.len() > 0:
+            summary = "{summary}  Barrier Errors: {self.barrier_errors.len()}\n"
+
+        if self.is_safe():
+            summary = "{summary}  Status: SAFE\n"
+        else:
+            summary = "{summary}  Status: UNSAFE ({self.error_count()} errors)\n"
+
+        summary
+
+# ============================================================================
+# GC Safety Analyzer
+# ============================================================================
+
+class GcSafetyAnalyzer:
+    """Main GC safety analysis interface.
+
+    Analyzes MIR functions for GC safety issues.
+    """
+    config: GcSafetyConfig
+    root_analysis: RootAnalysis?
+    barrier_analysis: BarrierAnalysis?
+    escape_analysis: EscapeAnalysis?
+    gc_types: [i64]  # Type IDs that are GC-managed
+
+    static fn create(config: GcSafetyConfig) -> GcSafetyAnalyzer:
+        GcSafetyAnalyzer(
+            config: config,
+            root_analysis: nil,
+            barrier_analysis: nil,
+            escape_analysis: nil,
+            gc_types: []
+        )
+
+    me register_gc_type(type_id: i64):
+        """Register a type as GC-managed."""
+        if not self.gc_types.contains(type_id):
+            self.gc_types = self.gc_types.push(type_id)
+
+    fn is_gc_type(type_id: i64) -> bool:
+        """Check if a type is GC-managed."""
+        self.gc_types.contains(type_id)
+
+    me analyze_function(func: MirBody) -> GcSafetyReport:
+        """Analyze a MIR function for GC safety."""
+        # Initialize analyses
+        self.root_analysis = Some(RootAnalysis.create(\t: self.is_gc_type(t)))
+        self.barrier_analysis = Some(BarrierAnalysis.create(
+            self.config.gc_mode,
+            \t: self.is_gc_type(t)
+        ))
+        self.escape_analysis = Some(EscapeAnalysis.create())
+
+        # Process function
+        self.process_function(func)
+
+        # Run analyses
+        if self.config.enable_root_tracking:
+            self.root_analysis.unwrap().verify_gc_points()
+
+        if self.config.enable_barrier_analysis:
+            self.barrier_analysis.unwrap().analyze()
+
+        if self.config.enable_escape_analysis:
+            self.escape_analysis.unwrap().finalize()
+
+        # Build report
+        self.build_report(func.name)
+
+    me process_function(func: MirBody):
+        """Process a MIR function body."""
+        var point = 0
+
+        for block in func.blocks:
+            for inst in block.instructions:
+                self.process_instruction(inst, point)
+                point = point + 1
+
+            self.process_terminator(block.terminator, point)
+            point = point + 1
+
+    me process_instruction(inst: MirInst, point: i64):
+        """Process a single MIR instruction."""
+        val root_analysis = self.root_analysis.unwrap()
+        val barrier_analysis = self.barrier_analysis.unwrap()
+        val escape_analysis = self.escape_analysis.unwrap()
+
+        match inst.kind:
+            # Allocation
+            case Alloc(dest, ty, size):
+                val type_id = self.type_to_id(ty)
+                escape_analysis.record_allocation(point, type_id, dest.id)
+
+                if self.is_gc_type(type_id):
+                    root_analysis.record_gc_point(GcPoint.allocation(point))
+                    root_analysis.record_root(point, GcRoot.local(dest.id, type_id))
+
+            # Copy/Move
+            case Copy(dest, src):
+                escape_analysis.record_copy(src.id, dest.id)
+
+            case Move(dest, src):
+                escape_analysis.record_copy(src.id, dest.id)
+
+            # Field operations
+            case SetField(base, field_idx, value):
+                val base_id = self.operand_local(base)
+                val value_id = self.operand_local(value)
+
+                if base_id.? and value_id.?:
+                    escape_analysis.record_field_store(
+                        base_id.unwrap(),
+                        field_idx,
+                        value_id.unwrap(),
+                        0  # TODO: Get actual type
+                    )
+
+                    # Record write site for barrier analysis
+                    barrier_analysis.record_write(WriteSite.field_write(
+                        point, 0, field_idx, 0
+                    ))
+
+            case GetField(dest, base, field_idx):
+                val base_id = self.operand_local(base)
+                if base_id.?:
+                    escape_analysis.record_field_load(
+                        base_id.unwrap(),
+                        field_idx,
+                        dest.id,
+                        0
+                    )
+
+            # Call (potential GC point)
+            case Call(dest, callee, args, _):
+                root_analysis.record_gc_point(GcPoint.call(point))
+
+                # Arguments may escape
+                for arg in args:
+                    val arg_id = self.operand_local(arg)
+                    if arg_id.?:
+                        escape_analysis.record_call_arg(arg_id.unwrap())
+
+            case _:
+                pass
+
+    me process_terminator(term: MirTerminator, point: i64):
+        """Process a block terminator."""
+        val escape_analysis = self.escape_analysis.unwrap()
+
+        match term.kind:
+            case Return:
+                # Return value escapes
+                pass  # Would need return value info
+
+            case _:
+                pass
+
+    fn operand_local(operand: MirOperand) -> i64?:
+        """Extract local ID from operand."""
+        match operand.kind:
+            case Copy(local) | Move(local):
+                Some(local.id)
+            case _:
+                nil
+
+    fn type_to_id(ty: MirType) -> i64:
+        """Convert MIR type to type ID."""
+        # Simplified: hash the type kind
+        match ty.kind:
+            case I64: 1
+            case F64: 2
+            case Bool: 3
+            case Ptr(_, _): 100
+            case Struct(id): id + 1000
+            case _: 0
+
+    fn build_report(func_name: text) -> GcSafetyReport:
+        """Build analysis report."""
+        val root = self.root_analysis.unwrap()
+        val barrier = self.barrier_analysis.unwrap()
+        val escape = self.escape_analysis.unwrap()
+
+        GcSafetyReport(
+            function_name: func_name,
+            root_errors: root.get_errors(),
+            barrier_errors: barrier.get_errors(),
+            gc_points: root.get_gc_points(),
+            barrier_requirements: barrier.get_requirements(),
+            stack_eligible_allocations: escape.stack_eligible,
+            total_allocations: escape.total_allocations,
+            escape_ratio: escape.stack_allocation_ratio()
+        )
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn analyze_mir_function(func: MirBody, config: GcSafetyConfig) -> GcSafetyReport:
+    """Analyze a single MIR function for GC safety."""
+    var analyzer = GcSafetyAnalyzer.create(config)
+    analyzer.analyze_function(func)
+
+fn analyze_mir_module(module: MirModule, config: GcSafetyConfig) -> [GcSafetyReport]:
+    """Analyze all functions in a MIR module."""
+    var analyzer = GcSafetyAnalyzer.create(config)
+    var reports: [GcSafetyReport] = []
+
+    for name, body in module.functions:
+        val report = analyzer.analyze_function(body)
+        reports = reports.push(report)
+
+    reports
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Re-export from submodules
+export RootKind, GcRoot, RootSet from roots
+export GcPointKind, GcPoint from roots
+export RootError, RootAnalysis from roots
+
+export BarrierKind, WriteSite, BarrierRequirement from barriers
+export BarrierError, GcMode, BarrierAnalysis from barriers
+
+export EscapeState, AllocationSite, PointsToSet from escape
+export EscapeAnalysis from escape
+
+# Export this module's types
+export GcSafetyConfig, GcSafetyReport
+export GcSafetyAnalyzer
+export analyze_mir_function, analyze_mir_module

@@ -1,0 +1,90 @@
+# Lambdas
+#
+# Parses lambda expressions in all forms: backslash syntax, pipe syntax,
+# fn() syntax, and move lambdas.
+
+from token import {TokenKind}
+from ast import {Expr, Node, LambdaParam, MoveMode}
+from error import {ParseError}
+
+impl Parser:
+
+    fn parse_primary_lambda() -> Expr:
+        match self.current.kind:
+            TokenKind.Backslash:
+                self.advance()
+                self.parse_lambda_body(MoveMode.Copy)
+            TokenKind.Fn:
+                self.advance()
+                self.expect(TokenKind.LParen)
+                val params = if self.check(TokenKind.RParen):
+                    []
+                else:
+                    val (p, _) = self.parse_lambda_params()
+                    p
+                self.expect(TokenKind.RParen)
+                self.lexer.enable_forced_indentation()
+                self.expect(TokenKind.Colon)
+                val body = if self.check(TokenKind.Newline):
+                    self.advance()
+                    if self.check(TokenKind.Indent):
+                        self.advance()
+                        var statements = []
+                        while not self.check(TokenKind.Dedent) and not self.check(TokenKind.Eof):
+                            while self.check(TokenKind.Newline): self.advance()
+                            if self.check(TokenKind.Dedent) or self.check(TokenKind.Eof): break
+                            statements.push(self.parse_item())
+                            while self.check(TokenKind.Newline): self.advance()
+                        if self.check(TokenKind.Dedent): self.advance()
+                        self.lexer.disable_forced_indentation()
+                        Expr.DoBlock(statements)
+                    else:
+                        self.lexer.disable_forced_indentation()
+                        self.parse_expression()
+                else:
+                    val e = self.parse_expression()
+                    self.lexer.disable_forced_indentation()
+                    e
+                Expr.Lambda(params: params, body: body, move_mode: MoveMode.Copy, capture_all: false)
+            TokenKind.Pipe:
+                self.advance()
+                val params = self.parse_pipe_lambda_params()
+                self.expect(TokenKind.Pipe)
+                val body = self.parse_expression()
+                Expr.Lambda(params: params, body: body, move_mode: MoveMode.Copy, capture_all: false)
+            TokenKind.Move:
+                self.advance()
+                if not self.check(TokenKind.Backslash):
+                    raise ParseError.unexpected_token("'\\'",
+                        "{self.current.kind}", self.current.span)
+                self.advance()
+                self.parse_lambda_body(MoveMode.Move)
+            _:
+                raise ParseError.unexpected_token("lambda",
+                    "{self.current.kind}", self.current.span)
+
+    fn parse_lambda_body(move_mode: MoveMode) -> Expr:
+        val (params, capture_all) = self.parse_lambda_params()
+        self.lexer.enable_forced_indentation()
+        self.expect(TokenKind.Colon)
+        val body = if self.check(TokenKind.Newline):
+            self.advance()
+            if self.check(TokenKind.Indent):
+                self.advance()
+                var statements = []
+                while not self.check(TokenKind.Dedent) and not self.check(TokenKind.Eof):
+                    while self.check(TokenKind.Newline): self.advance()
+                    if self.check(TokenKind.Dedent) or self.check(TokenKind.Eof): break
+                    statements.push(self.parse_item())
+                    while self.check(TokenKind.Newline): self.advance()
+                if self.check(TokenKind.Dedent): self.advance()
+                self.lexer.disable_forced_indentation()
+                Expr.DoBlock(statements)
+            else:
+                self.lexer.disable_forced_indentation()
+                self.parse_expression()
+        else:
+            val e = self.parse_expression()
+            self.lexer.disable_forced_indentation()
+            e
+        Expr.Lambda(params: params, body: body, move_mode: move_mode, capture_all: capture_all)

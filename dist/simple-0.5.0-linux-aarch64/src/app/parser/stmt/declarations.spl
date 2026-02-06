@@ -1,0 +1,327 @@
+# Statement Parser - Declarations Module
+#
+# Parsing for variable declarations, type aliases, unit definitions,
+# extern declarations, and handle_pool statements.
+# Extracted from statements.spl (Variable Declarations section)
+
+from token import {Span, Token, TokenKind}
+from ast import {Node, Block, Expr, Pattern, Type,
+                 LetStmt, ConstStmt, StaticStmt,
+                 TypeAliasDef, UnitDef, UnitVariant, ExternDef,
+                 HandlePoolStmt}
+from error import {ParseError}
+
+export DeclarationParser
+
+impl Parser:
+    # Parse let/val/var declaration
+    # Handles: let x = expr, val x = expr, var x = expr,
+    #          mut let x = expr, shared let x = expr, ghost let x = expr
+    fn parse_let_declaration(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+
+        # Check for modifier prefixes: mut, shared, ghost
+        val modifier = None
+        if self.check(TokenKind.Mut):
+            modifier = Some("mut")
+            self.advance()
+        elif self.check(TokenKind.Shared):
+            modifier = Some("shared")
+            self.advance()
+        elif self.check(TokenKind.Ghost):
+            modifier = Some("ghost")
+            self.advance()
+
+        # Consume let/val/var keyword
+        val keyword = self.current.kind
+        val is_mutable = match keyword:
+            TokenKind.Let: false
+            TokenKind.Val: false
+            TokenKind.Var: true
+            _: return Err(ParseError.unexpected_token("let, val, or var", "{self.current.kind}", self.current.span))
+        self.advance()
+
+        # Override mutability for mut let
+        if modifier == Some("mut"):
+            is_mutable = true
+
+        # Parse pattern or identifier
+        val pattern = self.parse_optional_let_pattern()
+
+        # Optional type annotation
+        val type_ann = None
+        if self.check(TokenKind.Colon):
+            self.advance()
+            type_ann = Some(self.parse_type())
+
+        # Optional initializer
+        val init = None
+        if self.check(TokenKind.Assign):
+            self.advance()
+            init = Some(self.parse_expression())
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Let(LetStmt(
+            span: span,
+            pattern: pattern,
+            type_annotation: type_ann,
+            initializer: init,
+            is_mutable: is_mutable,
+            modifier: modifier,
+        )))
+
+    # Parse optional let pattern (identifier or destructuring)
+    fn parse_optional_let_pattern(self) -> Pattern:
+        if self.check(TokenKind.LParen):
+            self.parse_tuple_pattern()
+        elif self.check(TokenKind.LBracket):
+            self.parse_array_pattern()
+        elif self.check(TokenKind.LBrace):
+            self.parse_struct_pattern()
+        else:
+            val name = self.expect_identifier()
+            Pattern.Identifier(name)
+
+    # Parse implicit val (name = expr without keyword)
+    fn parse_implicit_val(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        val name = self.expect_identifier()
+
+        # Check for trailing underscore → implicit var (mutable)
+        val is_mutable = name.ends_with("_")
+
+        self.expect(TokenKind.Assign)
+        val init = self.parse_expression()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Let(LetStmt(
+            span: span,
+            pattern: Pattern.Identifier(name),
+            type_annotation: None,
+            initializer: Some(init),
+            is_mutable: is_mutable,
+            modifier: None,
+        )))
+
+    # Parse const declaration: const NAME = expr or const NAME: Type = expr
+    fn parse_const_declaration(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Const)
+
+        val name = self.expect_identifier()
+
+        val type_ann = None
+        if self.check(TokenKind.Colon):
+            self.advance()
+            type_ann = Some(self.parse_type())
+
+        self.expect(TokenKind.Assign)
+        val value = self.parse_expression()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Const(ConstStmt(
+            span: span,
+            name: name,
+            type_annotation: type_ann,
+            value: value,
+        )))
+
+    # Parse static declaration: static NAME = expr or static mut NAME = expr
+    fn parse_static_declaration(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Static)
+
+        val is_mutable = false
+        if self.check(TokenKind.Mut):
+            is_mutable = true
+            self.advance()
+
+        val name = self.expect_identifier()
+
+        val type_ann = None
+        if self.check(TokenKind.Colon):
+            self.advance()
+            type_ann = Some(self.parse_type())
+
+        self.expect(TokenKind.Assign)
+        val value = self.parse_expression()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.Static(StaticStmt(
+            span: span,
+            name: name,
+            type_annotation: type_ann,
+            value: value,
+            is_mutable: is_mutable,
+        )))
+
+    # Parse type alias: type Name = Type
+    fn parse_type_alias(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Type)
+
+        val name = self.expect_identifier()
+
+        # Optional generic params
+        val generics = []
+        if self.check(TokenKind.Lt):
+            generics = self.parse_generic_params()
+
+        self.expect(TokenKind.Assign)
+        val aliased_type = self.parse_type()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.TypeAlias(TypeAliasDef(
+            span: span,
+            name: name,
+            generics: generics,
+            aliased_type: aliased_type,
+        )))
+
+    # Parse unit definition: unit Name(base): variants...
+    fn parse_unit_def(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Unit)
+
+        val name = self.expect_identifier()
+
+        # Parse base unit in parens
+        val base = None
+        if self.check(TokenKind.LParen):
+            self.advance()
+            base = Some(self.expect_identifier())
+            self.expect(TokenKind.RParen)
+
+        self.expect(TokenKind.Colon)
+
+        # Parse optional arithmetic block
+        val arithmetic_block = None
+        if self.check(TokenKind.Newline):
+            self.advance()
+            if self.check(TokenKind.Indent):
+                self.advance()
+                # Check for arithmetic: keyword
+                if self.check_ident("arithmetic"):
+                    self.advance()
+                    self.expect(TokenKind.Colon)
+                    arithmetic_block = Some(self.parse_block())
+
+        # Parse variants
+        val variants = []
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.check(TokenKind.Dedent) or self.is_at_end():
+                break
+            variants.append(self.parse_unit_variant())
+            if self.check(TokenKind.Newline):
+                self.advance()
+
+        if self.check(TokenKind.Dedent):
+            self.advance()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.UnitDef(UnitDef(
+            span: span,
+            name: name,
+            base: base,
+            variants: variants,
+            arithmetic_block: arithmetic_block,
+        )))
+
+    # Parse unit variant: suffix = factor
+    fn parse_unit_variant(self) -> UnitVariant:
+        val suffix = self.expect_identifier()
+        self.expect(TokenKind.Assign)
+        val factor = self.parse_number_as_f64()
+        UnitVariant(suffix: suffix, factor: factor)
+
+    # Helper to parse a number as f64
+    fn parse_number_as_f64(self) -> f64:
+        match self.current.kind:
+            TokenKind.Float(f):
+                self.advance()
+                f
+            TokenKind.Integer(i):
+                self.advance()
+                i as f64
+            _:
+                self.error("expected number")
+
+    # Parse extern function/class: extern fn name(...) or extern class Name
+    fn parse_extern_declaration(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect(TokenKind.Extern)
+
+        if self.check(TokenKind.Fn):
+            # extern fn name(params) -> RetType
+            self.advance()
+            val name = self.expect_identifier()
+            self.expect(TokenKind.LParen)
+            val params = self.parse_param_list()
+            self.expect(TokenKind.RParen)
+
+            val return_type = None
+            if self.check(TokenKind.Arrow):
+                self.advance()
+                return_type = Some(self.parse_type())
+
+            val end_span = self.previous.span
+            val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+            Ok(Node.ExternFn(ExternDef(
+                span: span,
+                name: name,
+                params: params,
+                return_type: return_type,
+                kind: "fn",
+            )))
+
+        elif self.check(TokenKind.Class):
+            # extern class Name
+            self.advance()
+            val name = self.expect_identifier()
+
+            val end_span = self.previous.span
+            val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+            Ok(Node.ExternClass(ExternDef(
+                span: span,
+                name: name,
+                params: [],
+                return_type: None,
+                kind: "class",
+            )))
+
+        else:
+            Err(ParseError.unexpected_token("fn or class", "{self.current.kind}", self.current.span))
+
+    # Parse handle_pool statement: handle_pool name: block
+    fn parse_handle_pool(self) -> Result<Node, ParseError>:
+        val start_span = self.current.span
+        self.expect_ident_value("handle_pool")
+
+        val name = self.expect_identifier()
+        self.expect(TokenKind.Colon)
+        val body = self.parse_block()
+
+        val end_span = self.previous.span
+        val span = Span(start_span.start, end_span.end, start_span.line, start_span.column)
+
+        Ok(Node.HandlePool(HandlePoolStmt(
+            span: span,
+            name: name,
+            body: body,
+        )))

@@ -1,0 +1,101 @@
+#!/usr/bin/env simple
+# Capture bootstrap debug output for analysis
+# Migrated from script/build/capture_bootstrap_debug.sh
+
+use app.io
+use app.utils.colors (success, error, warning, info)
+
+export main, capture_bootstrap_debug
+
+fn main():
+    val result = capture_bootstrap_debug()
+    if not result:
+        exit(1)
+
+fn capture_bootstrap_debug() -> bool:
+    """Capture bootstrap debug output for analysis"""
+
+    val timestamp = format_timestamp_file()
+    val output_file = "target/bootstrap_debug_{timestamp}.log"
+
+    print info("Capturing bootstrap debug output to: {output_file}")
+    print "This will take a while..."
+    print ""
+
+    # Clean bootstrap directory
+    print "Cleaning bootstrap directory..."
+    if is_dir("target/bootstrap"):
+        dir_remove("target/bootstrap", recursive: true)
+    dir_create("target/bootstrap", recursive: true)
+
+    # Initialize output file
+    val header = "=== Running Bootstrap Stage 1 ===\n"
+    file_write(output_file, header)
+
+    # Run stage 1 only
+    print "Running bootstrap stage 1..."
+    val (stdout, stderr, code) = process_run(
+        "./target/debug/simple_old",
+        ["compile", "simple/compiler/main.spl",
+         "-o", "target/bootstrap/simple_new1",
+         "--native"]
+    )
+
+    # Append output to file
+    file_append(output_file, stdout)
+    file_append(output_file, stderr)
+
+    if code != 0:
+        print error("❌ Bootstrap stage 1 failed with exit code {code}")
+        return false
+
+    print ""
+    print "=== Extracting Debug Messages ==="
+
+    # Extract relevant debug messages
+    val content = file_read(output_file)
+    val lines = content.split("\n")
+
+    print ""
+    print "Phase 3 Debug:"
+    extract_and_print(lines, "[phase3]", 20)
+
+    print ""
+    print "Compile Debug:"
+    extract_and_print(lines, "[compile].*phase 3", 10)
+
+    print ""
+    print "AOT Debug:"
+    extract_and_print(lines, "[aot]", 10)
+
+    print ""
+    print success("✅ Full log saved to: {output_file}")
+
+    true
+
+fn extract_and_print(lines: [text], pattern: text, limit: i64):
+    """Extract lines matching pattern and print last N lines"""
+    var matched = []
+
+    for line in lines:
+        if line.contains(pattern):
+            matched = matched + [line]
+
+    # Take last 'limit' lines
+    val start = if matched.len() > limit:
+        matched.len() - limit
+    else:
+        0
+
+    for i in start..matched.len():
+        print matched[i]
+
+fn format_timestamp_file() -> text:
+    """Format timestamp for filename (YYYYMMDD_HHMMSS)"""
+    val year = timestamp_year()
+    val month = timestamp_month()
+    val day = timestamp_day()
+    val hour = timestamp_hour()
+    val minute = timestamp_minute()
+    val second = timestamp_second()
+    "{year}{month:02}{day:02}_{hour:02}{minute:02}{second:02}"

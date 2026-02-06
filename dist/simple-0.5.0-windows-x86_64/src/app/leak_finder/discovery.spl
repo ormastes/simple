@@ -1,0 +1,138 @@
+# Memory Leak Finder - Test Discovery
+#
+# Discovers test files for Simple, SDoctest, and Rust tests.
+
+use types
+use shell.*
+
+# Discovered test info
+class DiscoveredTest:
+    path: text
+    test_type: types.TestType
+    name: text    # Display name (short form)
+
+# Factory functions for creating DiscoveredTest
+fn make_simple_test(path: text) -> DiscoveredTest:
+    val name = path.split("/").last().unwrap_or(path)
+    DiscoveredTest(path: path, test_type: types.TestType.Simple, name: name)
+
+fn make_sdoctest_test(path: text) -> DiscoveredTest:
+    val name = path.split("/").last().unwrap_or(path)
+    DiscoveredTest(path: path, test_type: types.TestType.SDoctest, name: name)
+
+fn make_rust_test(name: text) -> DiscoveredTest:
+    DiscoveredTest(path: name, test_type: types.TestType.Rust, name: name)
+
+# Discover Simple test files
+fn discover_simple_tests(pattern: Option<text>) -> [DiscoveredTest]:
+    var tests: [DiscoveredTest] = []
+
+    # Walk test directory and find *_spec.spl and *_test.spl files
+    if file.exist("test"):
+        val all_files = file.find("test", "*", true)
+        for fpath in all_files:
+            if (fpath.ends_with("_spec.spl") or fpath.ends_with("_test.spl")) and matches_pattern(fpath, pattern):
+                tests.push(make_simple_test(fpath))
+
+    # Also check src/lib/std/test
+    if file.exist("src/lib/std/test"):
+        val std_files = file.find("src/lib/std/test", "*", true)
+        for fpath in std_files:
+            if (fpath.ends_with("_spec.spl") or fpath.ends_with("_test.spl")) and matches_pattern(fpath, pattern):
+                tests.push(make_simple_test(fpath))
+
+    tests
+
+# Discover SDoctest files
+fn discover_sdoctest_tests(pattern: Option<text>) -> [DiscoveredTest]:
+    var tests: [DiscoveredTest] = []
+
+    # Walk test directory and find *.sdt files
+    if file.exist("test"):
+        val all_files = file.find("test", "*", true)
+        for fpath in all_files:
+            if fpath.ends_with(".sdt") and matches_pattern(fpath, pattern):
+                tests.push(make_sdoctest_test(fpath))
+
+    # Also check doc directory
+    if file.exist("doc"):
+        val doc_files = file.find("doc", "*", true)
+        for fpath in doc_files:
+            if fpath.ends_with(".sdt") and matches_pattern(fpath, pattern):
+                tests.push(make_sdoctest_test(fpath))
+
+    tests
+
+# Discover Rust tests
+fn discover_rust_tests(pattern: Option<text>) -> [DiscoveredTest]:
+    var tests: [DiscoveredTest] = []
+
+    # Use cargo test --list to get test names
+    val result = shell.run("cargo", ["test", "--workspace", "--", "--list"])
+
+    if result.exit_code != 0:
+        print("Warning: Failed to list Rust tests: {result.stderr}")
+        return tests
+
+    # Parse test names from output
+    # Format: "test_name: test"
+    for line in result.stdout.split("\n"):
+        val line_trimmed = line.trim()
+        if line_trimmed.ends_with(": test"):
+            val test_name = line_trimmed.slice(0, line_trimmed.len() - 6)
+            if matches_pattern(test_name, pattern):
+                tests.push(make_rust_test(test_name))
+
+    tests
+
+# Discover all tests based on test type (using string comparison for cross-module compatibility)
+fn discover_tests_by_type(test_type_str: text, pattern: Option<text>) -> [DiscoveredTest]:
+    var tests: [DiscoveredTest] = []
+
+    if test_type_str == "simple":
+        tests = discover_simple_tests(pattern)
+    elif test_type_str == "sdoctest":
+        tests = discover_sdoctest_tests(pattern)
+    elif test_type_str == "rust":
+        tests = discover_rust_tests(pattern)
+    elif test_type_str == "all":
+        tests = discover_simple_tests(pattern)
+        for t in discover_sdoctest_tests(pattern):
+            tests.push(t)
+        for t in discover_rust_tests(pattern):
+            tests.push(t)
+
+    tests
+
+# Discover all tests (wrapper for enum type)
+fn discover_tests(test_type: types.TestType, pattern: Option<text>) -> [DiscoveredTest]:
+    val type_str = types.test_type_to_string(test_type)
+    discover_tests_by_type(type_str, pattern)
+
+# Check if path/name matches optional pattern
+fn matches_pattern(path: text, pattern: Option<text>) -> bool:
+    match pattern:
+        case nil: true
+        case Some(p):
+            # Simple glob matching
+            if p.contains("*"):
+                # Convert glob to simple contains check for now
+                val pattern_parts = p.split("*")
+                var matches = true
+                var remaining = path
+                for part in pattern_parts:
+                    if part == "":
+                        continue
+                    if not remaining.contains(part):
+                        matches = false
+                        break
+                    val idx = remaining.find(part)
+                    remaining = remaining.slice(idx + part.len())
+                matches
+            else:
+                # Exact substring match
+                path.contains(p)
+
+# Export functions
+export discover_tests, discover_tests_by_type, discover_simple_tests, discover_sdoctest_tests, discover_rust_tests
+export matches_pattern, make_simple_test, make_sdoctest_test, make_rust_test

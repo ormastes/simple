@@ -1,0 +1,292 @@
+# Phase 0: Plain Text Training (Korean Fluency)
+#
+# Goal: Learn Korean language patterns from plain text
+#
+# Training:
+#   Input: Base model (google/medgemma-4b-it)
+#   LoRA: Add LoRA_0 (includes embeddings for Korean tokens)
+#   Output: models/phase0/lora_0
+#
+# This is the foundation phase - learns Korean fluency.
+
+import lora_utils.{LoRAConfig, add_lora, save_lora}
+
+
+# ============================================================================
+# Configuration (inline for simplicity)
+# ============================================================================
+
+class Config:
+    """Simple configuration holder."""
+    _data: {str: any}
+
+    fn __init__(data: {str: any}):
+        self._data = data
+
+    fn get(key: str) -> any:
+        if key in self._data:
+            return self._data[key]
+        return None
+
+
+fn load_config() -> Config:
+    """Load Phase 0 configuration."""
+    return Config({
+        "project": "medgemma-korean",
+        "model": {
+            "name": "google/medgemma-4b-it",
+            "lora_r": 64,
+            "lora_alpha": 128,
+            "lora_dropout": 0.05,
+            "use_rslora": true
+        },
+        "training": {
+            "epochs": 2,
+            "batch_size": 4,
+            "learning_rate": 0.0001,
+            "max_samples": 100,
+            "device": "cuda:0"
+        },
+        "output": {
+            "lora_path": "models/phase0/lora_0"
+        },
+        "tags": ["phase0", "korean", "fluency"]
+    })
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
+fn load_plain_text_data(cfg: Config) -> [any]:
+    """Load Korean plain text data.
+
+    Args:
+        cfg: Configuration
+
+    Returns:
+        List of text samples
+    """
+    print("Loading plain text data...")
+
+    # Mock data for example - in production, load from files
+    val samples = [
+        {"text": "한국어로 된 의료 텍스트입니다."},
+        {"text": "환자의 증상을 확인합니다."},
+        {"text": "진단 결과를 분석합니다."},
+        {"text": "치료 계획을 수립합니다."},
+        {"text": "약물 처방을 검토합니다."}
+    ]
+
+    print(f"Loaded {samples.len()} samples")
+    return samples
+
+
+# ============================================================================
+# Model Setup
+# ============================================================================
+
+class MockModel:
+    """Mock model for training demonstration."""
+    name: str
+    _scale: f64
+    _learning_rate: f64
+
+    fn __init__(name: str):
+        self.name = name
+        self._scale = 1.0
+        self._learning_rate = 0.0001
+
+    fn train_step(batch: any) -> f64:
+        """Simulate training step with decreasing loss."""
+        # Simulate loss that decreases over time
+        val base_loss = 0.5 * self._scale
+        # Add some variance
+        val noise = 0.02
+        self._scale = self._scale * 0.95  # Decrease over time
+        return base_loss + noise
+
+
+fn setup_model(cfg: Config) -> MockModel:
+    """Load base model and add LoRA_0.
+
+    Args:
+        cfg: Configuration
+
+    Returns:
+        Model with LoRA_0 adapter
+    """
+    print("=" * 70)
+    print("PHASE 0: PLAIN TEXT TRAINING")
+    print("=" * 70)
+
+    # Load base model
+    val model_cfg = cfg.get("model")
+    val model_name = model_cfg["name"]
+    print(f"Loading base model: {model_name}")
+
+    val model = MockModel(model_name)
+    print("Base model loaded")
+
+    # Create LoRA config
+    val lora_config = LoRAConfig(
+        r=model_cfg["lora_r"],
+        alpha=model_cfg["lora_alpha"],
+        dropout=model_cfg["lora_dropout"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_rslora=model_cfg["use_rslora"]
+    )
+
+    # Add LoRA_0 (includes embeddings for Korean tokens)
+    print("Adding LoRA_0 adapter (includes embeddings)...")
+    add_lora(model, lora_config)
+
+    print("=" * 70)
+    return model
+
+
+# ============================================================================
+# Training State
+# ============================================================================
+
+class TrainingState:
+    """Tracks training progress."""
+    epoch: i32
+    iteration: i32
+    max_epochs: i32
+    total_loss: f64
+    batch_count: i32
+
+    fn __init__(max_epochs: i32):
+        self.epoch = 0
+        self.iteration = 0
+        self.max_epochs = max_epochs
+        self.total_loss = 0.0
+        self.batch_count = 0
+
+    fn update(loss: f64):
+        self.iteration += 1
+        self.total_loss += loss
+        self.batch_count += 1
+
+    fn epoch_loss() -> f64:
+        if self.batch_count == 0:
+            return 0.0
+        return self.total_loss / self.batch_count
+
+    fn reset_epoch():
+        self.total_loss = 0.0
+        self.batch_count = 0
+        self.epoch += 1
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn train_phase0(cfg: Config, model: MockModel, data: [any]):
+    """Train Phase 0: Plain text.
+
+    Args:
+        cfg: Configuration
+        model: Model with LoRA_0
+        data: Training data
+    """
+    print("\nStarting training...")
+
+    val training_cfg = cfg.get("training")
+    val max_epochs = training_cfg["epochs"]
+    val batch_size = training_cfg["batch_size"]
+
+    print(f"Training for {max_epochs} epochs")
+    print(f"Batch size: {batch_size}")
+    print(f"Data samples: {data.len()}")
+
+    val state = TrainingState(max_epochs)
+
+    # Training loop
+    for epoch in 0..max_epochs:
+        state.reset_epoch()
+        print(f"\n--- Epoch {epoch + 1}/{max_epochs} ---")
+
+        # Process batches
+        var batch_idx = 0
+        for sample in data:
+            val loss = model.train_step(sample)
+            state.update(loss)
+            batch_idx += 1
+
+            # Log every batch
+            if batch_idx % 2 == 0:
+                print(f"  Step {state.iteration}: loss={loss:.4f}")
+
+        # Log epoch metrics
+        val avg_loss = state.epoch_loss()
+        print(f"\nEpoch {epoch + 1} complete:")
+        print(f"  Average loss: {avg_loss:.4f}")
+        print(f"  Iterations: {state.iteration}")
+
+        # Early stopping check
+        if avg_loss < 0.01:
+            print("Loss target reached! Stopping early.")
+            break
+
+    # Save final LoRA
+    val output_cfg = cfg.get("output")
+    val output_path = output_cfg["lora_path"]
+    print(f"\nSaving LoRA_0 to: {output_path}")
+    save_lora(model, output_path)
+
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETE")
+    print("=" * 70)
+    print(f"Final loss: {state.epoch_loss():.4f}")
+    print(f"Total iterations: {state.iteration}")
+    print("LoRA_0 saved")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    """Main entry point for Phase 0 training."""
+    print("\n")
+    print("=" * 70)
+    print("         PHASE 0: PLAIN TEXT TRAINING")
+    print("=" * 70)
+    print()
+
+    # Load configuration
+    val cfg = load_config()
+    print(f"Project: {cfg.get('project')}")
+    val model_cfg = cfg.get("model")
+    print(f"Model: {model_cfg['name']}")
+    val training_cfg = cfg.get("training")
+    print(f"Device: {training_cfg['device']}")
+    print(f"Epochs: {training_cfg['epochs']}")
+    print()
+
+    # Load data
+    val train_data = load_plain_text_data(cfg)
+
+    # Setup model
+    val model = setup_model(cfg)
+
+    # Train
+    train_phase0(cfg, model, train_data)
+
+    print("\n" + "=" * 70)
+    print("PHASE 0 COMPLETE")
+    print("=" * 70)
+    val output_cfg = cfg.get("output")
+    print(f"Output: {output_cfg['lora_path']}")
+    print()
+    print("Next step: Run Phase 1 (medical dictionary)")
+    print("  ./target/release/simple example/medgemma_korean/src/train_phase1.spl")
+    print()
+
+
+# Run main
+main()

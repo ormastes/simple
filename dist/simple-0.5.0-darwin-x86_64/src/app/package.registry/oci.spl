@@ -1,0 +1,86 @@
+# OCI Client
+# GHCR push/pull operations via oras CLI
+
+use app.package.registry.types (PublishResult)
+use app.package.registry.auth (get_token)
+
+use app.io.mod (process_run, process_output, file_exists, env_get)
+
+# Check if oras CLI is available
+fn oras_available() -> bool:
+    val (_, _, exit_code) = process_run("oras", ["version"])
+    exit_code == 0
+
+fn print_oras_install_help():
+    print "error: 'oras' CLI not found"
+    print ""
+    print "Install oras:"
+    print "  Linux:  curl -LO https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz"
+    print "          tar xzf oras_1.2.0_linux_amd64.tar.gz && sudo mv oras /usr/local/bin/"
+    print "  macOS:  brew install oras"
+    print "  Windows: winget install oras"
+    print ""
+    print "See: https://oras.land/docs/installation"
+
+# Push a .spk file to GHCR
+fn push(spk_path: text, oci_ref: text) -> PublishResult:
+    if not oras_available():
+        print_oras_install_help()
+        return PublishResult(success: false, message: "oras not found", oci_ref: "", checksum: "")
+
+    val token = get_token()
+    if token == "":
+        return PublishResult(success: false, message: "not authenticated", oci_ref: "", checksum: "")
+
+    if not file_exists(spk_path):
+        return PublishResult(success: false, message: "file not found: {spk_path}", oci_ref: "", checksum: "")
+
+    # Login to GHCR
+    val (_, _, login_result) = process_run("oras", [
+        "login", "ghcr.io",
+        "--username", "simple-lang",
+        "--password", token
+    ])
+    if login_result != 0:
+        return PublishResult(success: false, message: "GHCR login failed", oci_ref: "", checksum: "")
+
+    # Push the artifact
+    val (_, _, push_result) = process_run("oras", [
+        "push", oci_ref,
+        spk_path,
+        "--artifact-type", "application/vnd.simple.package.v1+tar"
+    ])
+    if push_result != 0:
+        return PublishResult(success: false, message: "push failed", oci_ref: oci_ref, checksum: "")
+
+    # Get the digest
+    val digest = process_output("oras", ["manifest", "fetch", oci_ref, "--descriptor"])
+
+    PublishResult(success: true, message: "published", oci_ref: oci_ref, checksum: "")
+
+# Pull a package from GHCR to a local directory
+fn pull(oci_ref: text, output_dir: text) -> bool:
+    if not oras_available():
+        print_oras_install_help()
+        return false
+
+    val token = get_token()
+
+    # Build args - auth optional for public packages
+    var args = ["pull", oci_ref, "-o", output_dir]
+
+    if token != "":
+        # Login first if we have a token
+        process_run("oras", [
+            "login", "ghcr.io",
+            "--username", "simple-lang",
+            "--password", token
+        ])
+
+    val (_, _, exit_code) = process_run("oras", args)
+    exit_code == 0
+
+# Check if a specific version exists in GHCR
+fn version_exists(oci_ref: text) -> bool:
+    val (_, _, exit_code) = process_run("oras", ["manifest", "fetch", oci_ref])
+    exit_code == 0

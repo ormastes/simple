@@ -1,0 +1,123 @@
+# Identifiers
+#
+# Parses identifier expressions including keywords that can be used as identifiers,
+# struct initialization, and path expressions.
+
+from token import {TokenKind}
+from ast import {Expr, MacroArg}
+from error import {ParseError}
+
+impl Parser:
+
+    fn parse_primary_identifier() -> Expr:
+        match self.current.kind:
+            TokenKind.Result:
+                self.advance()
+                Expr.Identifier("result")
+            TokenKind.Identifier(name, _):
+                self.parse_identifier_or_struct(name)
+            TokenKind.Self_:
+                self.advance()
+                Expr.Identifier("self")
+            TokenKind.Super:
+                self.advance()
+                Expr.Identifier("super")
+            TokenKind.Out:
+                self.advance()
+                Expr.Identifier("out")
+            TokenKind.OutErr:
+                self.advance()
+                Expr.Identifier("out_err")
+            TokenKind.Type:
+                self.advance()
+                Expr.Identifier("type")
+            TokenKind.Feature: self.parse_keyword_identifier("feature")
+            TokenKind.Scenario: self.parse_keyword_identifier("scenario")
+            TokenKind.Outline: self.parse_keyword_identifier("outline")
+            TokenKind.Examples: self.parse_keyword_identifier("examples")
+            TokenKind.Given: self.parse_keyword_identifier("given")
+            TokenKind.When: self.parse_keyword_identifier("when")
+            TokenKind.Then: self.parse_keyword_identifier("then")
+            TokenKind.AndThen: self.parse_keyword_identifier("and_then")
+            TokenKind.Context: self.parse_keyword_identifier("context")
+            TokenKind.Common: self.parse_keyword_identifier("common")
+            TokenKind.Slice: self.parse_keyword_identifier("Slice")
+            TokenKind.Flat: self.parse_keyword_identifier("Flat")
+            TokenKind.Vec: self.parse_vec_keyword()
+            TokenKind.Gpu:
+                self.advance()
+                Expr.Identifier("gpu")
+            TokenKind.Alias: self.parse_keyword_identifier("alias")
+            TokenKind.Bounds: self.parse_keyword_identifier("bounds")
+            TokenKind.Default: self.parse_keyword_identifier("default")
+            TokenKind.New: self.parse_keyword_identifier("new")
+            TokenKind.Old: self.parse_keyword_identifier("old")
+            TokenKind.From: self.parse_keyword_identifier("from")
+            TokenKind.To: self.parse_keyword_identifier("to")
+            _:
+                raise ParseError.unexpected_token("identifier",
+                    "{self.current.kind}", self.current.span)
+
+    fn parse_keyword_identifier(keyword: text) -> Expr:
+        self.advance()
+        Expr.Identifier(keyword)
+
+    fn parse_identifier_or_struct(name: text) -> Expr:
+        self.advance()
+
+        # Deprecated :: path
+        if self.check(TokenKind.DoubleColon):
+            var segments = [name]
+            while self.check(TokenKind.DoubleColon):
+                self.advance()
+                val segment = self.expect_method_name()
+                segments.push(segment)
+            Expr.Path(segments)
+        # Struct init: Name { field: value }
+        elif self.check(TokenKind.LBrace) and not self.no_brace_postfix and (name[0].is_uppercase() or self.peek_is_struct_init()):
+            self.advance()  # consume '{'
+            self.skip_newlines()
+            var fields = []
+            while not self.check(TokenKind.RBrace):
+                val field_name = self.expect_identifier()
+                self.skip_newlines()
+                val value = if self.check(TokenKind.Colon) or self.check(TokenKind.Assign):
+                    self.advance()  # consume ':' or '='
+                    self.skip_newlines()
+                    self.parse_expression()
+                else:
+                    Expr.Identifier(field_name)
+                self.skip_newlines()
+                fields.push((field_name, value))
+                if not self.check(TokenKind.RBrace):
+                    self.expect(TokenKind.Comma)
+                    self.skip_newlines()
+            self.expect(TokenKind.RBrace)
+            Expr.StructInit(name: name, fields: fields)
+        else:
+            Expr.Identifier(name)
+
+    fn parse_vec_keyword() -> Expr:
+        self.advance()
+        if self.check(TokenKind.Bang):
+            self.advance()
+            val args = self.parse_macro_args()
+            Expr.MacroInvocation(name: "vec", args: args)
+        elif self.check(TokenKind.LBracket):
+            # SIMD vector literal: vec[1.0, 2.0]
+            self.advance()
+            self.skip_whitespace_tokens()
+            if self.check(TokenKind.RBracket):
+                self.advance()
+                return Expr.VecLiteral([])
+            var elements = [self.parse_expression()]
+            while self.check(TokenKind.Comma):
+                self.advance()
+                self.skip_whitespace_tokens()
+                if self.check(TokenKind.RBracket):
+                    break
+                elements.push(self.parse_expression())
+            self.expect(TokenKind.RBracket)
+            Expr.VecLiteral(elements)
+        else:
+            Expr.Identifier("vec")

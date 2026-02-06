@@ -1,0 +1,129 @@
+#!/usr/bin/env simple
+# Minimal test: Prove gradient computation works with explicit state passing
+
+use lib.pure.tensor_f64 (TensorF64, from_data, ones)
+use lib.pure.tensor_f64_ops (mul_scalar, add)
+
+# Simple approach: Just use Dict directly, no classes
+
+fn test_manual_gradient():
+    print "=== Manual Gradient Test ==="
+    print "Computing gradient of y = x * 2.0 manually"
+    print ""
+
+    # Tensors as (id, value, requires_grad, grad)
+    var values: Dict<i64, TensorF64> = {}
+    var requires_grad: Dict<i64, bool> = {}
+    var gradients: Dict<i64, TensorF64> = {}
+
+    # Create x
+    val x_id: i64 = 1
+    val x_val = from_data([3.0], [1])
+    values[x_id] = x_val
+    requires_grad[x_id] = true
+
+    print "x (id={x_id}) = {x_val.data}"
+
+    # Create y = x * 2.0
+    val y_id: i64 = 2
+    val y_val = mul_scalar(x_val, 2.0)
+    values[y_id] = y_val
+    requires_grad[y_id] = true
+
+    print "y (id={y_id}) = x * 2.0 = {y_val.data}"
+    print ""
+
+    # Backward pass: dy/dy = 1
+    val dy_dy = ones([1])
+    gradients[y_id] = dy_dy
+    print "Step 1: dy/dy = {dy_dy.data}"
+
+    # Backward through mul_scalar: dy/dx = 2.0
+    val grad_x = mul_scalar(dy_dy, 2.0)
+    gradients[x_id] = grad_x
+
+    print "Step 2: dy/dx = 2.0 * dy/dy = {grad_x.data}"
+    print ""
+
+    # Verify (grad_x already computed above)
+    val grad_val = grad_x.data[0]
+    if grad_val == 2.0:
+        print "✓ SUCCESS! Gradient computed correctly: {grad_val}"
+        return true
+    else:
+        print "✗ WRONG VALUE: expected 2.0, got {grad_val}"
+        return false
+
+fn test_chain_manual():
+    print "\n=== Manual Chain Rule Test ==="
+    print "Computing gradient of z = (x * 2.0) * 3.0"
+    print ""
+
+    var values: Dict<i64, TensorF64> = {}
+    var gradients: Dict<i64, TensorF64> = {}
+
+    # x = 5.0
+    val x_id: i64 = 1
+    val x_val = from_data([5.0], [1])
+    values[x_id] = x_val
+
+    # y = x * 2.0 = 10.0
+    val y_id: i64 = 2
+    val y_val = mul_scalar(x_val, 2.0)
+    values[y_id] = y_val
+
+    # z = y * 3.0 = 30.0
+    val z_id: i64 = 3
+    val z_val = mul_scalar(y_val, 3.0)
+    values[z_id] = z_val
+
+    print "x = {x_val.data[0]}"
+    print "y = x * 2.0 = {y_val.data[0]}"
+    print "z = y * 3.0 = {z_val.data[0]}"
+    print ""
+
+    # Backward: dz/dz = 1
+    val dz_dz = ones([1])
+    gradients[z_id] = dz_dz
+
+    # dz/dy = 3.0
+    val dz_dy = mul_scalar(dz_dz, 3.0)
+    gradients[y_id] = dz_dy
+
+    # dz/dx = dz/dy * dy/dx = 3.0 * 2.0 = 6.0
+    val dz_dx = mul_scalar(dz_dy, 2.0)
+    gradients[x_id] = dz_dx
+
+    print "dz/dz = {dz_dz.data[0]}"
+    print "dz/dy = {dz_dy.data[0]}"
+    print "dz/dx = {dz_dx.data[0]}"
+    print ""
+
+    val x_grad_val = dz_dx.data[0]
+    if x_grad_val == 6.0:
+        print "✓ SUCCESS! Chain rule works: dz/dx = 6.0"
+        return true
+    else:
+        print "✗ WRONG: expected 6.0, got {x_grad_val}"
+        return false
+
+fn main():
+    var passed = 0
+
+    if test_manual_gradient():
+        passed = passed + 1
+
+    if test_chain_manual():
+        passed = passed + 1
+
+    print "\n========================================="
+    print "RESULTS: {passed}/2 tests passed"
+    print "========================================="
+
+    if passed == 2:
+        print "✓ Manual gradient computation works!"
+        print ""
+        print "This proves that Dict-based state storage works."
+        print "Next: Wrap this in a proper autograd API."
+
+main()

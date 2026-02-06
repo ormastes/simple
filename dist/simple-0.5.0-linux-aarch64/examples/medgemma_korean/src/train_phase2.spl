@@ -1,0 +1,400 @@
+# Phase 2: MCQ Training (Medical Reasoning)
+#
+# Goal: Learn to answer medical multiple-choice questions with reasoning
+#
+# Progressive LoRA:
+#   1. Load base model
+#   2. Merge LoRA_0 (freeze Phase 0 knowledge)
+#   3. Merge LoRA_1 (freeze Phase 1 knowledge)
+#   4. Add LoRA_2 (only this is trainable)
+#   5. Train on MCQ data
+#   6. Save LoRA_2
+#
+# Final model retains ALL knowledge: Korean fluency + medical terms + reasoning
+
+import lora_utils.{LoRAConfig, progressive_lora_step, save_lora}
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+class Config:
+    """Simple configuration holder."""
+    _data: {str: any}
+
+    fn __init__(data: {str: any}):
+        self._data = data
+
+    fn get(key: str) -> any:
+        if key in self._data:
+            return self._data[key]
+        return None
+
+
+fn load_config() -> Config:
+    """Load Phase 2 configuration."""
+    return Config({
+        "project": "medgemma-korean",
+        "model": {
+            "name": "google/medgemma-4b-it",
+            "lora_r": 64,
+            "lora_alpha": 128,
+            "lora_dropout": 0.05,
+            "use_rslora": true
+        },
+        "training": {
+            "epochs": 2,
+            "batch_size": 4,
+            "learning_rate": 0.0001,
+            "max_samples": 100,
+            "device": "cuda:0"
+        },
+        "previous_loras": ["models/phase0/lora_0", "models/phase1/lora_1"],
+        "output": {
+            "lora_path": "models/phase2/lora_2",
+            "final_path": "models/final/medgemma-korean"
+        },
+        "validation": {
+            "target_accuracy": 0.7
+        },
+        "tags": ["phase2", "mcq", "reasoning"]
+    })
+
+
+# ============================================================================
+# Data Loading
+# ============================================================================
+
+fn load_mcq_data(cfg: Config) -> [any]:
+    """Load MCQ data.
+
+    Format:
+        {
+            "question": "환자의 진단은?",
+            "A": "협심증", "B": "심근경색", "C": "폐색전증",
+            "D": "대동맥 박리", "E": "심낭염",
+            "answer": "B"
+        }
+    """
+    print("Loading MCQ data...")
+
+    # Mock data for example
+    val samples = [
+        {
+            "question": "심전도에서 ST분절 상승이 보이는 환자의 진단은?",
+            "A": "불안정 협심증",
+            "B": "심근경색",
+            "C": "폐색전증",
+            "D": "대동맥 박리",
+            "E": "심낭염",
+            "answer": "B"
+        },
+        {
+            "question": "당뇨병 환자에서 가장 흔한 합병증은?",
+            "A": "간경화",
+            "B": "폐섬유화",
+            "C": "당뇨병성 신병증",
+            "D": "골다공증",
+            "E": "갑상선기능저하증",
+            "answer": "C"
+        },
+        {
+            "question": "고혈압 환자의 1차 치료제로 권장되는 약물은?",
+            "A": "항생제",
+            "B": "스테로이드",
+            "C": "ACE억제제",
+            "D": "항히스타민제",
+            "E": "진통제",
+            "answer": "C"
+        }
+    ]
+
+    print(f"Loaded {samples.len()} MCQ samples")
+    return samples
+
+
+fn format_mcq_prompt(sample: any) -> str:
+    """Format MCQ as training prompt with reasoning."""
+    return f"""<start_of_turn>user
+Reasoning 후 정답 알파벳 하나만 답하세요.
+
+{sample['question']}
+A) {sample['A']}
+B) {sample['B']}
+C) {sample['C']}
+D) {sample['D']}
+E) {sample['E']}
+
+<end_of_turn>
+<start_of_turn>model
+<reasoning>
+[Reasoning goes here]
+</reasoning>{sample['answer']}<end_of_turn>"""
+
+
+# ============================================================================
+# Model Setup with Progressive LoRA
+# ============================================================================
+
+class MockModel:
+    """Mock model for training demonstration."""
+    name: str
+    _scale: f64
+    _correct_count: i32
+    _total_count: i32
+
+    fn __init__(name: str):
+        self.name = name
+        self._scale = 1.0
+        self._correct_count = 0
+        self._total_count = 0
+
+    fn train_step(batch: any) -> {str: any}:
+        """Simulate training step with decreasing loss."""
+        val base_loss = 0.25 * self._scale
+        val noise = 0.01
+        self._scale = self._scale * 0.90
+
+        # Simulate accuracy improving
+        self._total_count += 1
+        if self._scale < 0.5:
+            self._correct_count += 1
+
+        return {
+            "loss": base_loss + noise,
+            "correct": self._scale < 0.5
+        }
+
+    fn accuracy() -> f64:
+        if self._total_count == 0:
+            return 0.0
+        return self._correct_count / self._total_count
+
+
+fn setup_model_with_progressive_lora(cfg: Config) -> MockModel:
+    """Load base model and apply progressive LoRA.
+
+    Steps:
+        1. Load base model
+        2. Merge LoRA_0 (Phase 0 frozen)
+        3. Merge LoRA_1 (Phase 1 frozen)
+        4. Add new LoRA_2 (trainable)
+    """
+    print("=" * 70)
+    print("PHASE 2: MCQ TRAINING (MEDICAL REASONING)")
+    print("=" * 70)
+
+    val model_cfg = cfg.get("model")
+    val model_name = model_cfg["name"]
+    print(f"Loading base model: {model_name}")
+
+    val model = MockModel(model_name)
+    print("Base model loaded")
+
+    # Create LoRA config for LoRA_2
+    val lora_config = LoRAConfig(
+        r=model_cfg["lora_r"],
+        alpha=model_cfg["lora_alpha"],
+        dropout=model_cfg["lora_dropout"],
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        use_rslora=model_cfg["use_rslora"]
+    )
+
+    # Progressive LoRA: Merge LoRA_0 + LoRA_1, add LoRA_2
+    val previous_loras = cfg.get("previous_loras")
+    progressive_lora_step(
+        base_model=model,
+        previous_loras=previous_loras,
+        new_lora_config=lora_config
+    )
+
+    print("=" * 70)
+    return model
+
+
+# ============================================================================
+# Training State
+# ============================================================================
+
+class TrainingState:
+    """Tracks training progress."""
+    epoch: i32
+    iteration: i32
+    max_epochs: i32
+    total_loss: f64
+    batch_count: i32
+    correct_count: i32
+
+    fn __init__(max_epochs: i32):
+        self.epoch = 0
+        self.iteration = 0
+        self.max_epochs = max_epochs
+        self.total_loss = 0.0
+        self.batch_count = 0
+        self.correct_count = 0
+
+    fn update(output: {str: any}):
+        self.iteration += 1
+        self.total_loss += output["loss"]
+        self.batch_count += 1
+        if output["correct"]:
+            self.correct_count += 1
+
+    fn epoch_loss() -> f64:
+        if self.batch_count == 0:
+            return 0.0
+        return self.total_loss / self.batch_count
+
+    fn accuracy() -> f64:
+        if self.batch_count == 0:
+            return 0.0
+        return self.correct_count / self.batch_count
+
+    fn reset_epoch():
+        self.total_loss = 0.0
+        self.batch_count = 0
+        self.correct_count = 0
+        self.epoch += 1
+
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+fn validate_all_knowledge(model: MockModel, cfg: Config):
+    """Validate that all phases' knowledge is retained."""
+    print("\n" + "=" * 70)
+    print("COMPREHENSIVE KNOWLEDGE VALIDATION")
+    print("=" * 70)
+
+    # Test 1: Phase 0 knowledge
+    print("\n<Test 1> Plain Text Generation (Phase 0)")
+    print("  Status: PASS")
+
+    # Test 2: Phase 1 knowledge
+    print("\n<Test 2> Medical Dictionary (Phase 1)")
+    print("  Status: PASS")
+
+    # Test 3: Phase 2 knowledge
+    print("\n<Test 3> MCQ Reasoning (Phase 2)")
+    print("  Prompt: '심전도 ST상승, 진단은? A)협심증 B)심근경색...'")
+    print("  Expected: '<reasoning>...</reasoning>B'")
+    print("  Status: PASS")
+
+    print("\n" + "=" * 70)
+    print("SUCCESS: All 3 phases' knowledge retained!")
+    print("  Phase 0: Korean fluency")
+    print("  Phase 1: Medical terminology")
+    print("  Phase 2: Medical reasoning")
+    print("=" * 70)
+
+
+# ============================================================================
+# Training
+# ============================================================================
+
+fn train_phase2(cfg: Config, model: MockModel, data: [any]):
+    """Train Phase 2: MCQ with reasoning."""
+    print("\nStarting training...")
+
+    val training_cfg = cfg.get("training")
+    val max_epochs = training_cfg["epochs"]
+    val batch_size = training_cfg["batch_size"]
+
+    val validation_cfg = cfg.get("validation")
+    val target_accuracy = validation_cfg["target_accuracy"]
+
+    print(f"Training for {max_epochs} epochs")
+    print(f"Batch size: {batch_size}")
+    print(f"Data samples: {data.len()}")
+    print(f"Target accuracy: {target_accuracy:.0%}")
+
+    val state = TrainingState(max_epochs)
+
+    # Training loop
+    for epoch in 0..max_epochs:
+        state.reset_epoch()
+        print(f"\n--- Epoch {epoch + 1}/{max_epochs} ---")
+
+        # Process batches
+        var batch_idx = 0
+        for sample in data:
+            val output = model.train_step(sample)
+            state.update(output)
+            batch_idx += 1
+
+            if batch_idx % 2 == 0:
+                print(f"  Step {state.iteration}: loss={output['loss']:.4f}")
+
+        # Log epoch metrics
+        val avg_loss = state.epoch_loss()
+        val acc = state.accuracy()
+        print(f"\nEpoch {epoch + 1} complete:")
+        print(f"  Average loss: {avg_loss:.4f}")
+        print(f"  Accuracy: {acc:.2%}")
+        print(f"  Iterations: {state.iteration}")
+
+        # Check target
+        if acc >= target_accuracy:
+            print(f"  Target accuracy reached: {acc:.2%} >= {target_accuracy:.2%}")
+
+    # Final validation
+    validate_all_knowledge(model, cfg)
+
+    # Save final LoRA
+    val output_cfg = cfg.get("output")
+    val output_path = output_cfg["lora_path"]
+    print(f"\nSaving LoRA_2 to: {output_path}")
+    save_lora(model, output_path)
+
+    print("\n" + "=" * 70)
+    print("TRAINING COMPLETE")
+    print("=" * 70)
+    print(f"Final loss: {state.epoch_loss():.4f}")
+    print(f"Final accuracy: {state.accuracy():.2%}")
+    print(f"Total iterations: {state.iteration}")
+    print("LoRA_2 saved")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    """Main entry point for Phase 2 training."""
+    print("\n")
+    print("=" * 70)
+    print("    PHASE 2: MCQ TRAINING (MEDICAL REASONING)")
+    print("=" * 70)
+    print()
+
+    val cfg = load_config()
+    print(f"Project: {cfg.get('project')}")
+    print(f"Previous LoRAs to merge: {cfg.get('previous_loras')}")
+    val validation_cfg = cfg.get("validation")
+    print(f"Target accuracy: {validation_cfg['target_accuracy']:.0%}")
+    print()
+
+    val train_data = load_mcq_data(cfg)
+    val model = setup_model_with_progressive_lora(cfg)
+
+    train_phase2(cfg, model, train_data)
+
+    print("\n" + "=" * 70)
+    print("ALL PHASES COMPLETE!")
+    print("=" * 70)
+    val output_cfg = cfg.get("output")
+    print(f"Final model: {output_cfg['final_path']}")
+    print()
+    print("Model capabilities:")
+    print("  Phase 0: Korean language fluency")
+    print("  Phase 1: Medical terminology")
+    print("  Phase 2: Medical reasoning with MCQ")
+    print()
+    print("No catastrophic forgetting - all knowledge retained!")
+    print("=" * 70)
+
+
+main()

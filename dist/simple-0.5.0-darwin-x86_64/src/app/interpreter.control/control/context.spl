@@ -1,0 +1,109 @@
+# Context and With Statements
+#
+# context "name": block (BDD-style)
+# context obj: block (object context)
+# with resource as name: block (context manager)
+# Port of exec_context and exec_with from interpreter_control.rs
+
+from ..core import {Interpreter, Value, InterpreterError}
+from ..expr import {evaluate}
+
+export eval_context, eval_with
+
+# ================================================================
+# Context Statement
+# ================================================================
+
+# Evaluate a context statement
+# Two modes:
+# 1. BDD-style: context "description": block (prints description, indented)
+# 2. Object context: context obj: block (sets context object for the block)
+fn eval_context(interp: Interpreter, context_expr: Expr, body: Block) -> Result<Value, InterpreterError>:
+    val context_obj = evaluate(interp, context_expr)?
+
+    match context_obj:
+        case Value.String(name):
+            eval_bdd_context(interp, name, body)
+        case Value.Symbol(name):
+            eval_bdd_context(interp, "with {name}", body)
+        case _:
+            eval_object_context(interp, context_expr, context_obj, body)
+
+# BDD-style context: prints name, increases indent, runs block
+fn eval_bdd_context(interp: Interpreter, name: text, body: Block) -> Result<Value, InterpreterError>:
+    val indent = interp.bdd_indent
+    val indent_str = "  ".repeat(indent)
+
+    print("{indent_str}{name}")
+
+    interp.bdd_indent = indent + 1
+
+    val result = interp.eval_block(body)
+
+    interp.bdd_indent = indent
+
+    result
+
+# Object context: sets context object, runs block, persists mutations
+fn eval_object_context(interp: Interpreter, context_expr: Expr, context_obj: Value, body: Block) -> Result<Value, InterpreterError>:
+    # Extract variable name if context is an identifier (for mutation persistence)
+    val var_name = match context_expr:
+        case Expr.Identifier(name): Some(name)
+        case _: None
+
+    # Save previous context
+    val prev_context = interp.context_object
+    val prev_var_name = interp.context_var_name
+
+    # Set new context
+    interp.context_object = Some(context_obj)
+    interp.context_var_name = var_name
+
+    val result = interp.eval_block(body)
+
+    # Persist mutations to the original variable
+    if var_name.?:
+        val name = var_name.unwrap()
+        if interp.context_object.?:
+            interp.env.set(name, interp.context_object.unwrap())
+
+    # Restore previous context
+    interp.context_object = prev_context
+    interp.context_var_name = prev_var_name
+
+    result
+
+# ================================================================
+# With Statement (Context Manager)
+# ================================================================
+
+# Evaluate with statement: with resource as name: body
+# Calls __enter__ before body, __exit__ after (even on error)
+fn eval_with(interp: Interpreter, resource_expr: Expr, name: text?, body: Block) -> Result<Value, InterpreterError>:
+    val resource = evaluate(interp, resource_expr)?
+
+    # Call __enter__ if it exists
+    val enter_result = interp.call_method_if_exists(resource, "__enter__", [])
+
+    # Bind the result to the name if provided
+    if name.?:
+        val binding_name = name.unwrap()
+        val bound_value = if enter_result.?: enter_result.unwrap() else: resource
+        interp.env.push_scope()
+        interp.env.define(binding_name, bound_value)
+
+    # Execute the body
+    val result = interp.eval_block(body)
+
+    # Always call cleanup (even if body failed)
+    val exc_arg = Value.nil()
+    val exit_result = interp.call_method_if_exists(resource, "__exit__", [exc_arg])
+    if not exit_result.?:
+        # No __exit__ method - try close() for Resource trait compatibility
+        interp.call_method_if_exists(resource, "close", [])
+
+    # Remove the binding if it was created
+    if name.?:
+        interp.env.pop_scope()
+
+    result

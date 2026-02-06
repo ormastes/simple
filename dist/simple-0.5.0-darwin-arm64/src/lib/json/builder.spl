@@ -1,0 +1,225 @@
+# JSON Builder - Fluent API for constructing JSON strings
+#
+# Eliminates repetitive string concatenation patterns like:
+#   var json = "{"
+#   json = json + "\"field\": \"value\","
+#   json = json + "}"
+#
+# Usage:
+#   val json = JsonBuilder.object()
+#       .field("name", "Alice")
+#       .field_int("age", 30)
+#       .field_array("tags", ["rust", "simple"])
+#       .build()
+#
+# Nested objects:
+#   val json = JsonBuilder.object()
+#       .field("user", JsonBuilder.object()
+#           .field("name", "Bob")
+#           .build_raw())
+#       .build()
+
+export JsonBuilder, JsonArrayBuilder
+export escape_json
+
+# ============================================================================
+# JsonBuilder - Object builder
+# ============================================================================
+
+class JsonBuilder:
+    parts: [text]
+    field_count: i64
+
+    # Create a new object builder
+    static fn object() -> JsonBuilder:
+        JsonBuilder(parts: [], field_count: 0)
+
+    # Add a string field
+    me field(key: text, value: text) -> JsonBuilder:
+        val escaped = escape_json(value)
+        self.parts.push("\"{key}\": \"{escaped}\"")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a raw field (already JSON-formatted value)
+    me field_raw(key: text, raw_value: text) -> JsonBuilder:
+        self.parts.push("\"{key}\": {raw_value}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add an integer field
+    me field_int(key: text, value: i64) -> JsonBuilder:
+        self.parts.push("\"{key}\": {value}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a float field
+    me field_float(key: text, value: f64) -> JsonBuilder:
+        self.parts.push("\"{key}\": {value}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a boolean field
+    me field_bool(key: text, value: bool) -> JsonBuilder:
+        val bool_str = if value: "true" else: "false"
+        self.parts.push("\"{key}\": {bool_str}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a null field
+    me field_null(key: text) -> JsonBuilder:
+        self.parts.push("\"{key}\": null")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add an optional string field (null if None)
+    me field_opt(key: text, value: text?) -> JsonBuilder:
+        match value:
+            case Some(v):
+                self.field(key, v)
+            case None:
+                self.field_null(key)
+
+    # Add an optional int field (null if None)
+    me field_opt_int(key: text, value: i64?) -> JsonBuilder:
+        match value:
+            case Some(v):
+                self.field_int(key, v)
+            case None:
+                self.field_null(key)
+
+    # Add a string array field
+    me field_array(key: text, items: [text]) -> JsonBuilder:
+        val arr = JsonArrayBuilder.new()
+        for item in items:
+            arr.item(item)
+        self.parts.push("\"{key}\": {arr.build()}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add an int array field
+    me field_int_array(key: text, items: [i64]) -> JsonBuilder:
+        val arr = JsonArrayBuilder.new()
+        for item in items:
+            arr.item_int(item)
+        self.parts.push("\"{key}\": {arr.build()}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a nested object field (takes raw JSON)
+    me field_object(key: text, nested: JsonBuilder) -> JsonBuilder:
+        self.parts.push("\"{key}\": {nested.build()}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Add a raw array field (takes JsonArrayBuilder)
+    me field_array_raw(key: text, arr: JsonArrayBuilder) -> JsonBuilder:
+        self.parts.push("\"{key}\": {arr.build()}")
+        self.field_count = self.field_count + 1
+        self
+
+    # Build the final JSON object string
+    fn build() -> text:
+        if self.parts.len() == 0:
+            return "{}"
+
+        var result = "{"
+        var first = true
+        for part in self.parts:
+            if not first:
+                result = result + ","
+            first = false
+            result = result + part
+        result = result + "}"
+        result
+
+    # Build raw (no surrounding braces) - for nested objects
+    fn build_raw() -> text:
+        if self.parts.len() == 0:
+            return ""
+
+        var result = ""
+        var first = true
+        for part in self.parts:
+            if not first:
+                result = result + ","
+            first = false
+            result = result + part
+        result
+
+# ============================================================================
+# JsonArrayBuilder - Array builder
+# ============================================================================
+
+class JsonArrayBuilder:
+    items: [text]
+
+    # Create a new array builder
+    static fn new() -> JsonArrayBuilder:
+        JsonArrayBuilder(items: [])
+
+    # Add a string item
+    me item(value: text) -> JsonArrayBuilder:
+        val escaped = escape_json(value)
+        self.items.push("\"{escaped}\"")
+        self
+
+    # Add a raw item (already JSON-formatted)
+    me item_raw(raw_value: text) -> JsonArrayBuilder:
+        self.items.push(raw_value)
+        self
+
+    # Add an integer item
+    me item_int(value: i64) -> JsonArrayBuilder:
+        self.items.push("{value}")
+        self
+
+    # Add a float item
+    me item_float(value: f64) -> JsonArrayBuilder:
+        self.items.push("{value}")
+        self
+
+    # Add a boolean item
+    me item_bool(value: bool) -> JsonArrayBuilder:
+        val bool_str = if value: "true" else: "false"
+        self.items.push(bool_str)
+        self
+
+    # Add a null item
+    me item_null() -> JsonArrayBuilder:
+        self.items.push("null")
+        self
+
+    # Add a nested object item
+    me item_object(obj: JsonBuilder) -> JsonArrayBuilder:
+        self.items.push(obj.build())
+        self
+
+    # Build the final JSON array string
+    fn build() -> text:
+        if self.items.len() == 0:
+            return "[]"
+
+        var result = "["
+        var first = true
+        for item in self.items:
+            if not first:
+                result = result + ","
+            first = false
+            result = result + item
+        result = result + "]"
+        result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Escape a string for JSON
+fn escape_json(s: text) -> text:
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result

@@ -1,0 +1,472 @@
+# Debug-Enabled QEMU Boot Runner
+#
+# Extends boot test infrastructure with GDB remote debugging support.
+# Features:
+# - Automatic GDB attach on crash
+# - Stack trace extraction
+# - Register dump on failure
+# - Breakpoint management
+# - Single-step debugging support
+
+use lib.qemu.{QemuArch, QemuConfig, QemuInstance}
+use lib.qemu.boot_runner.{BootTestConfig, BootTestResult, BootTestRunner}
+use remote.protocol.gdb_mi.{GdbMiClient, GdbMiCommand, GdbMiResponse}
+use remote.target.riscv32.{RiscV32Target}
+use app.io.{shell, ProcessResult}
+
+export DebugBootConfig, DebugBootRunner, DebugInfo
+export run_debug_boot_test
+
+# ===========================================================================
+# Debug Boot Configuration
+# ===========================================================================
+
+class DebugBootConfig:
+    """Configuration for debug-enabled boot tests."""
+    base_config: BootTestConfig
+    gdb_enabled: bool
+    gdb_port: i32
+    auto_attach_on_crash: bool
+    breakpoints: [u64]        # Breakpoints to set before running
+    single_step: bool         # Enable single-stepping
+
+impl DebugBootConfig:
+    static fn new(arch: QemuArch, kernel: text) -> DebugBootConfig:
+        DebugBootConfig(
+            base_config: BootTestConfig.new(arch, kernel),
+            gdb_enabled: false,
+            gdb_port: 1234,  # Default GDB port
+            auto_attach_on_crash: true,
+            breakpoints: [],
+            single_step: false
+        )
+
+    # Enable GDB debugging
+    me enable_debug():
+        self.gdb_enabled = true
+
+    # Set GDB port
+    me set_gdb_port(port: i32):
+        self.gdb_port = port
+
+    # Add breakpoint at address
+    me add_breakpoint(addr: u64):
+        self.breakpoints.push(addr)
+
+    # Enable single-step mode
+    me enable_single_step():
+        self.single_step = true
+
+    # Disable auto-attach on crash
+    me disable_auto_attach():
+        self.auto_attach_on_crash = false
+
+# ===========================================================================
+# Debug Information
+# ===========================================================================
+
+class DebugInfo:
+    """Debug information extracted from crash."""
+    registers: Dict<text, u64>    # Register values
+    stack_trace: [StackFrame]     # Call stack
+    fault_address: u64            # Faulting instruction
+    fault_reason: text            # Crash reason
+    available: bool               # Debug info was extracted
+
+impl DebugInfo:
+    static fn unavailable() -> DebugInfo:
+        DebugInfo(
+            registers: {},
+            stack_trace: [],
+            fault_address: 0,
+            fault_reason: "Debug info not available",
+            available: false
+        )
+
+    static fn from_gdb(regs: Dict<text, u64>, trace: [StackFrame], pc: u64, reason: text) -> DebugInfo:
+        DebugInfo(
+            registers: regs,
+            stack_trace: trace,
+            fault_address: pc,
+            fault_reason: reason,
+            available: true
+        )
+
+# Stack frame information
+class StackFrame:
+    """Single frame in call stack."""
+    frame_num: i32
+    address: u64
+    function: text
+    file: text
+    line: i32
+
+impl StackFrame:
+    fn to_string() -> text:
+        if self.file.len() > 0:
+            "#{self.frame_num} 0x{self.address:x} in {self.function} at {self.file}:{self.line}"
+        else:
+            "#{self.frame_num} 0x{self.address:x} in {self.function}"
+
+# ===========================================================================
+# Debug Boot Runner
+# ===========================================================================
+
+class DebugBootRunner:
+    """Boot test runner with GDB integration."""
+    config: DebugBootConfig
+    gdb_client: GdbMiClient?
+    qemu_instance: QemuInstance?
+
+impl DebugBootRunner:
+    static fn new(config: DebugBootConfig) -> DebugBootRunner:
+        DebugBootRunner(
+            config: config,
+            gdb_client: nil,
+            qemu_instance: nil
+        )
+
+    # Run debug-enabled boot test
+    fn run() -> (BootTestResult, DebugInfo):
+        """Run boot test with optional GDB debugging."""
+
+        if self.config.gdb_enabled:
+            self.run_with_debug()
+        else:
+            # Standard boot test without debug
+            val runner = BootTestRunner.new(self.config.base_config)
+            val result = runner.run()
+            (result, DebugInfo.unavailable())
+
+    # Run with GDB debugging enabled
+    fn run_with_debug() -> (BootTestResult, DebugInfo):
+        """Run boot test with GDB attached."""
+
+        # Build QEMU config with GDB stub
+        var qemu_config = QemuConfig.for_remote_debug(
+            self.config.base_config.arch,
+            self.config.base_config.kernel_path,
+            self.config.gdb_port
+        )
+
+        # Override with boot test settings
+        qemu_config.timeout_ms = self.config.base_config.timeout_ms
+        if self.config.base_config.machine.?:
+            qemu_config.machine = self.config.base_config.machine.unwrap()
+
+        # Start QEMU with GDB stub
+        val start_result = QemuInstance.start(qemu_config)
+        if start_result.err.?:
+            val err_msg = start_result.err.unwrap()
+            val result = BootTestResult.failure("Failed to start QEMU: {err_msg}", "", -1)
+            return (result, DebugInfo.unavailable())
+
+        self.qemu_instance = Some(start_result.ok.unwrap())
+
+        # Connect GDB
+        val gdb_result = self.connect_gdb()
+        if gdb_result.err.?:
+            val err_msg = gdb_result.err.unwrap()
+            self.cleanup()
+            val result = BootTestResult.failure("Failed to connect GDB: {err_msg}", "", -1)
+            return (result, DebugInfo.unavailable())
+
+        self.gdb_client = Some(gdb_result.ok.unwrap())
+
+        # Set breakpoints if configured
+        for bp_addr in self.config.breakpoints:
+            self.set_breakpoint(bp_addr)
+
+        # Continue execution
+        val continue_result = self.continue_execution()
+
+        # Cleanup
+        self.cleanup()
+
+        continue_result
+
+    # Connect to GDB stub
+    fn connect_gdb() -> Result<GdbMiClient, text>:
+        """Connect GDB to QEMU stub."""
+
+        # Find appropriate GDB for architecture
+        val gdb_path = self.find_gdb()
+        if gdb_path.len() == 0:
+            return Err("GDB not found for architecture {self.config.base_config.arch}")
+
+        # Create GDB MI client
+        val client_result = GdbMiClient.connect(
+            gdb_path,
+            "localhost",
+            self.config.gdb_port
+        )
+
+        client_result
+
+    # Find GDB binary for architecture
+    fn find_gdb() -> text:
+        """Find appropriate GDB for target architecture."""
+        val candidates = match self.config.base_config.arch:
+            case QemuArch.RiscV32 | QemuArch.RiscV64:
+                ["riscv32-unknown-elf-gdb", "riscv64-unknown-elf-gdb", "gdb-multiarch", "gdb"]
+            case QemuArch.ARM32 | QemuArch.ARM64:
+                ["arm-none-eabi-gdb", "aarch64-linux-gnu-gdb", "gdb-multiarch", "gdb"]
+            case QemuArch.X86 | QemuArch.X86_64:
+                ["gdb-multiarch", "gdb"]
+            case _:
+                ["gdb"]
+
+        for candidate in candidates:
+            val check = shell("which {candidate} 2>/dev/null")
+            if check.exit_code == 0:
+                return check.stdout.trim()
+
+        ""
+
+    # Set breakpoint at address
+    fn set_breakpoint(addr: u64) -> Result<(), text>:
+        """Set breakpoint at given address."""
+        if not self.gdb_client.?:
+            return Err("GDB not connected")
+
+        val gdb = self.gdb_client.unwrap()
+        val cmd = GdbMiCommand.break_insert("*0x{addr:x}")
+        val response = gdb.send_command(cmd)
+
+        if response.class == "done":
+            Ok(())
+        else:
+            Err("Failed to set breakpoint at 0x{addr:x}")
+
+    # Continue execution
+    fn continue_execution() -> (BootTestResult, DebugInfo):
+        """Continue execution and wait for halt or crash."""
+        if not self.gdb_client.?:
+            val result = BootTestResult.failure("GDB not connected", "", -1)
+            return (result, DebugInfo.unavailable())
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Continue execution
+        val cont_cmd = GdbMiCommand.exec_continue()
+        val cont_response = gdb.send_command(cont_cmd)
+
+        # Wait for stop event
+        val stop_result = self.wait_for_stop()
+
+        stop_result
+
+    # Wait for execution to stop
+    fn wait_for_stop() -> (BootTestResult, DebugInfo):
+        """Wait for program to stop (breakpoint, crash, or exit)."""
+        if not self.gdb_client.?:
+            val result = BootTestResult.failure("GDB not connected", "", -1)
+            return (result, DebugInfo.unavailable())
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Check stop reason
+        val info_result = self.get_stop_info()
+        if info_result.err.?:
+            val result = BootTestResult.failure("Failed to get stop info", "", -1)
+            return (result, DebugInfo.unavailable())
+
+        val stop_info = info_result.ok.unwrap()
+
+        # Extract debug information
+        val debug_info = self.extract_debug_info()
+
+        # Determine test result based on stop reason
+        val result = match stop_info.reason:
+            case "exited-normally":
+                BootTestResult.success("", 0)
+            case "breakpoint-hit":
+                BootTestResult.success("Breakpoint hit at 0x{stop_info.address:x}", 0)
+            case "signal-received":
+                BootTestResult.crash("", -1)
+            case _:
+                BootTestResult.failure("Unexpected stop: {stop_info.reason}", "", -1)
+
+        (result, debug_info)
+
+    # Get stop information
+    fn get_stop_info() -> Result<StopInfo, text>:
+        """Get information about why execution stopped."""
+        if not self.gdb_client.?:
+            return Err("GDB not connected")
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Query stop reason
+        # This is architecture-specific, would use GDB MI commands
+
+        Ok(StopInfo(reason: "unknown", address: 0))
+
+    # Extract debug information
+    fn extract_debug_info() -> DebugInfo:
+        """Extract registers and stack trace from stopped program."""
+        if not self.gdb_client.?:
+            return DebugInfo.unavailable()
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Get registers
+        val registers = self.read_registers()
+
+        # Get stack trace
+        val stack_trace = self.read_stack_trace()
+
+        # Get program counter
+        val pc = registers.get("pc") ?? 0
+
+        DebugInfo.from_gdb(
+            registers,
+            stack_trace,
+            pc,
+            "Execution stopped"
+        )
+
+    # Read all registers
+    fn read_registers() -> Dict<text, u64>:
+        """Read all general-purpose registers."""
+        var registers: Dict<text, u64> = {}
+
+        if not self.gdb_client.?:
+            return registers
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Use GDB MI to read registers
+        # Architecture-specific register names
+
+        match self.config.base_config.arch:
+            case QemuArch.RiscV32 | QemuArch.RiscV64:
+                # Read RISC-V registers
+                for i in 0..32:
+                    val reg_name = "x{i}"
+                    # val value = gdb.read_register(reg_name)
+                    # registers[reg_name] = value
+
+            case QemuArch.ARM32 | QemuArch.ARM64:
+                # Read ARM registers
+                for i in 0..16:
+                    val reg_name = "r{i}"
+                    # registers[reg_name] = gdb.read_register(reg_name)
+
+            case QemuArch.X86 | QemuArch.X86_64:
+                # Read x86 registers
+                val reg_names = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip"]
+                for reg_name in reg_names:
+                    # registers[reg_name] = gdb.read_register(reg_name)
+                    pass
+
+        registers
+
+    # Read stack trace
+    fn read_stack_trace() -> [StackFrame]:
+        """Read call stack backtrace."""
+        var frames: [StackFrame] = []
+
+        if not self.gdb_client.?:
+            return frames
+
+        val gdb = self.gdb_client.unwrap()
+
+        # Use GDB backtrace command
+        # val bt_cmd = GdbMiCommand.stack_list_frames()
+        # val bt_response = gdb.send_command(bt_cmd)
+
+        # Parse frames from response
+        # for i in 0..10:
+        #     frames.push(StackFrame(...))
+
+        frames
+
+    # Cleanup resources
+    fn cleanup():
+        """Clean up GDB and QEMU processes."""
+        if self.gdb_client.?:
+            var gdb = self.gdb_client.unwrap()
+            gdb.disconnect()
+            self.gdb_client = nil
+
+        if self.qemu_instance.?:
+            var qemu = self.qemu_instance.unwrap()
+            qemu.stop()
+            self.qemu_instance = nil
+
+# Stop information
+class StopInfo:
+    """Information about why execution stopped."""
+    reason: text      # "exited-normally", "breakpoint-hit", "signal-received"
+    address: u64      # Address where stopped
+    signal: text      # Signal name if signal-received
+
+# ===========================================================================
+# Convenience API
+# ===========================================================================
+
+# Run debug boot test with automatic crash analysis
+fn run_debug_boot_test(arch: QemuArch, kernel: text, expected: text) -> (BootTestResult, DebugInfo):
+    """Run boot test with GDB debugging enabled."""
+    var config = DebugBootConfig.new(arch, kernel)
+    config.base_config.expect_output(expected)
+    config.enable_debug()
+
+    val runner = DebugBootRunner.new(config)
+    runner.run()
+
+# ===========================================================================
+# Crash Analysis Utilities
+# ===========================================================================
+
+# Format debug info for display
+fn format_debug_info(info: DebugInfo) -> text:
+    """Format debug information as human-readable text."""
+    if not info.available:
+        return "Debug information not available"
+
+    var output = ""
+
+    # Fault information
+    output = output + "Fault Address: 0x{info.fault_address:x}\n"
+    output = output + "Fault Reason: {info.fault_reason}\n\n"
+
+    # Registers
+    output = output + "Registers:\n"
+    for reg_name in info.registers.keys():
+        val value = info.registers[reg_name]
+        output = output + "  {reg_name}: 0x{value:x}\n"
+
+    # Stack trace
+    if info.stack_trace.len() > 0:
+        output = output + "\nStack Trace:\n"
+        for frame in info.stack_trace:
+            output = output + "  {frame.to_string()}\n"
+
+    output
+
+# Analyze crash and suggest fixes
+fn analyze_crash(info: DebugInfo) -> text:
+    """Analyze crash and provide suggestions."""
+    if not info.available:
+        return "Cannot analyze: debug info unavailable"
+
+    var suggestions = ""
+
+    # Check for common crash patterns
+    # Null pointer dereference
+    if info.fault_address < 0x1000:
+        suggestions = suggestions + "- Possible null pointer dereference\n"
+
+    # Stack overflow (depends on architecture)
+    # ...
+
+    # Unaligned access
+    if info.fault_address % 4 != 0:
+        suggestions = suggestions + "- Possible unaligned memory access\n"
+
+    if suggestions.len() == 0:
+        suggestions = "No specific suggestions available"
+
+    suggestions

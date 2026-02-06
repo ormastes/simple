@@ -1,0 +1,426 @@
+# Definition Parser - Shared Helpers
+#
+# Shared parsing utilities for definitions:
+# - Field parsing
+# - Doc comments
+# - Spans
+# - Generic parameters/arguments
+# - Where clauses
+# - Method name detection
+# - Body parsing utilities
+
+from token import {Span, Token, TokenKind}
+from ast import {Field, DocComment, WhereClause, WhereBound, Type, Expr,
+                 Parameter, Mutability, Visibility, Decorator, InvariantBlock,
+                 MacroInvocation, MixinRef, FunctionDef}
+from error import {ParseError}
+
+export DefinitionHelpers
+
+# ============================================================================
+# Helper: constructor name detection
+# ============================================================================
+
+fn is_constructor_name(name: String) -> Bool:
+    name == "new" or name == "create" or name == "default" or name == "init" or name.starts_with("from_")
+
+# ============================================================================
+# Field Parsing (shared by struct, class, actor)
+# ============================================================================
+
+fn parse_field(self) -> Field:
+    val start_span = self.current.span
+
+    val visibility = if self.check(TokenKind.Pub):
+        self.advance()
+        Visibility.Public
+    else:
+        Visibility.Private
+
+    val mutability = if self.check(TokenKind.Mut):
+        self.advance()
+        Mutability.Mutable
+    else:
+        Mutability.Immutable
+
+    val name = self.expect_identifier()
+    self.expect(TokenKind.Colon)
+    val ty = self.parse_type()
+
+    val default = if self.check(TokenKind.Assign):
+        self.advance()
+        Some(self.parse_expression())
+    else:
+        None
+
+    if self.check(TokenKind.Newline):
+        self.advance()
+
+    Field(
+        span: self.make_span(start_span),
+        name: name,
+        ty: ty,
+        default: default,
+        mutability: mutability,
+        visibility: visibility,
+    )
+
+# ============================================================================
+# Body Parsing Helpers
+# ============================================================================
+
+fn make_span(self, start_span: Span) -> Span:
+    Span(start_span.start, self.previous.span.end, start_span.line, start_span.column)
+
+fn skip_newlines(self):
+    while self.check(TokenKind.Newline):
+        self.advance()
+
+fn consume_dedent(self):
+    if self.check(TokenKind.Dedent):
+        self.advance()
+
+fn expect_block_start(self):
+    self.expect(TokenKind.Colon)
+    self.expect(TokenKind.Newline)
+    self.expect(TokenKind.Indent)
+
+# Try to parse a docstring (first string after indent)
+fn try_parse_docstring(self) -> Option<DocComment>:
+    match self.current.kind:
+        TokenKind.String(content):
+            self.advance()
+            self.skip_newlines()
+            Some(DocComment(content: content))
+        TokenKind.FString(parts):
+            val content = parts.filter_map(\p: match p:
+                FStringToken.Literal(s): Some(s)
+                _: None
+            ).join("")
+            self.advance()
+            self.skip_newlines()
+            Some(DocComment(content: content))
+        _: None
+
+# ============================================================================
+# Generic Parameters and Arguments
+# ============================================================================
+
+# Parse generic args: <T, U>
+fn parse_generic_args(self) -> [Type]:
+    self.expect(TokenKind.Lt)
+    var args = []
+    loop:
+        args.append(self.parse_type())
+        if not self.check(TokenKind.Comma):
+            break
+        self.advance()
+    self.expect(TokenKind.Gt)
+    args
+
+# Helper: skip balanced generic args (for bounds)
+fn skip_generic_args(self):
+    var depth = 1
+    self.advance()  # consume <
+    while depth > 0 and not self.is_at_end():
+        if self.check(TokenKind.Lt):
+            depth = depth + 1
+            self.advance()
+        elif self.check(TokenKind.Gt):
+            depth = depth - 1
+            self.advance()
+        elif self.check(TokenKind.ShiftRight):
+            depth = depth - 2
+            self.advance()
+        else:
+            self.advance()
+
+# ============================================================================
+# Where Clauses
+# ============================================================================
+
+# Parse where clause: where T: Trait1 + Trait2, U: Other
+fn parse_where_clause(self) -> WhereClause:
+    if not self.check(TokenKind.Where):
+        return []
+
+    self.advance()
+    var bounds = []
+
+    loop:
+        val span = self.current.span
+        val type_param = self.expect_identifier()
+        self.expect(TokenKind.Colon)
+
+        var trait_bounds = []
+        var negative_trait_bounds = []
+        loop:
+            val is_negative = if self.check(TokenKind.Bang):
+                self.advance()
+                true
+            else:
+                false
+
+            val bound_type = self.parse_type()
+
+            if is_negative:
+                negative_trait_bounds.append(bound_type)
+            else:
+                trait_bounds.append(bound_type)
+
+            if self.check(TokenKind.Plus):
+                self.advance()
+            else:
+                break
+
+        bounds.append(WhereBound(
+            span: span,
+            type_param: type_param,
+            bounds: trait_bounds,
+            negative_bounds: negative_trait_bounds,
+        ))
+
+        if self.check(TokenKind.Comma):
+            self.advance()
+        else:
+            break
+
+    bounds
+
+# ============================================================================
+# Method Start Detection
+# ============================================================================
+
+# Helper: check if current position starts a method
+fn is_method_start(self) -> Bool:
+    self.check(TokenKind.Fn) or self.check(TokenKind.Me) or self.check(TokenKind.Async) or self.check(TokenKind.At) or self.check(TokenKind.Hash) or self.check(TokenKind.Static) or (self.check(TokenKind.Pub) and (self.peek_is(TokenKind.Fn) or self.peek_is(TokenKind.Async) or self.peek_is(TokenKind.Me)))
+
+fn is_method_start_class(self) -> Bool:
+    self.check(TokenKind.Fn) or self.check(TokenKind.Me) or self.check(TokenKind.Async) or self.check(TokenKind.At) or self.check(TokenKind.Hash) or self.check(TokenKind.Static) or (self.check(TokenKind.Pub) and (self.peek_is(TokenKind.Fn) or self.peek_is(TokenKind.Async) or self.peek_is(TokenKind.Me) or self.peek_is(TokenKind.Static)))
+
+# ============================================================================
+# Method Parsing Helpers
+# ============================================================================
+
+# Parse a method in struct/actor body, returns (FunctionDef, is_static)
+fn parse_body_method(self) -> (FunctionDef, Bool):
+    var decorators = []
+    while self.check(TokenKind.At):
+        decorators.append(self.parse_decorator())
+        self.skip_newlines()
+
+    val _is_pub = if self.check(TokenKind.Pub):
+        self.advance()
+        true
+    else:
+        false
+
+    val is_static = if self.check(TokenKind.Static):
+        self.advance()
+        true
+    else:
+        false
+
+    val item = if decorators.is_empty() and not _is_pub:
+        self.parse_item()
+    else:
+        self.parse_function_with_decorators(decorators)
+
+    match item:
+        Node.Function(f): (f, is_static)
+        _: self.error("Expected method definition")
+
+# Parse a method in class body, returns (FunctionDef, is_static)
+fn parse_class_body_method(self) -> (FunctionDef, Bool):
+    var decorators = []
+    while self.check(TokenKind.At):
+        decorators.append(self.parse_decorator())
+        self.skip_newlines()
+
+    val _is_pub = if self.check(TokenKind.Pub):
+        self.advance()
+        true
+    else:
+        false
+
+    val is_static = if self.check(TokenKind.Static):
+        self.advance()
+        true
+    else:
+        false
+
+    # Handle static async
+    val is_async_after_static = if is_static and self.check(TokenKind.Async):
+        self.advance()
+        true
+    else:
+        false
+
+    var item = if decorators.is_empty() and not _is_pub and not is_static:
+        self.parse_item()
+    else:
+        self.parse_function_with_decorators(decorators)
+
+    if is_async_after_static:
+        match item:
+            Node.Function(f): f.effects.append(Effect.Async)
+            _: ()
+
+    match item:
+        Node.Function(f): (f, is_static)
+        _: self.error("Expected method definition in class body")
+
+# Auto-inject self parameter for instance methods
+fn inject_self_if_needed(self, f: mut FunctionDef):
+    if f.params.is_empty() or f.params[0].name != "self":
+        val self_param = Parameter(
+            span: f.span,
+            name: "self",
+            ty: None,
+            default: None,
+            mutability: Mutability.Immutable,
+            inject: false,
+            variadic: false,
+            call_site_label: None,
+        )
+        f.params.insert(0, self_param)
+
+# ============================================================================
+# Macro Invocations
+# ============================================================================
+
+# Check if current position is at macro invocation (identifier followed by !)
+fn is_macro_invocation_start(self) -> Bool:
+    self.is_identifier() and self.peek_is(TokenKind.Bang)
+
+# Parse macro invocation in class body: name!(args)
+fn parse_class_body_macro_invocation(self) -> MacroInvocation:
+    val start_span = self.current.span
+    val name = self.expect_identifier()
+    self.expect(TokenKind.Bang)
+    val args = self.parse_macro_args()
+
+    if self.check(TokenKind.Newline):
+        self.advance()
+
+    MacroInvocation(
+        span: self.make_span(start_span),
+        name: name,
+        args: args,
+    )
+
+# ============================================================================
+# Indented Body Parsing
+# ============================================================================
+
+# Parse indented fields and methods (struct/actor body)
+fn parse_indented_fields_and_methods(self) -> ([Field], [FunctionDef], Option<InvariantBlock>, Option<DocComment>):
+    self.expect_block_start()
+    var fields = []
+    var methods = []
+    var invariant = None
+    var doc_comment = None
+
+    # Optional docstring
+    self.skip_newlines()
+    doc_comment = self.try_parse_docstring()
+
+    while not self.check(TokenKind.Dedent) and not self.is_at_end():
+        self.skip_newlines()
+        if self.check(TokenKind.Dedent):
+            break
+
+        if self.check(TokenKind.Invariant):
+            if invariant.?:
+                self.error("Multiple invariant blocks not allowed")
+            invariant = self.parse_invariant_block()
+        elif self.check(TokenKind.Var) and self.peek_is(TokenKind.Fn):
+            # Deprecated var fn
+            self.emit_deprecation_warning("Deprecated: `var fn` syntax",
+                "Replace `var fn method()` with `me method()`", None)
+            self.advance()
+            val item = self.parse_item()
+            match item:
+                Node.Function(f):
+                    f.is_me_method = true
+                    self.inject_self_if_needed(f)
+                    methods.append(f)
+                _: ()
+        elif self.is_method_start():
+            val (f, is_static) = self.parse_body_method()
+            f.is_static = is_static
+            if not is_static and f.name != "new":
+                self.inject_self_if_needed(f)
+            methods.append(f)
+        else:
+            fields.append(self.parse_field())
+
+    self.consume_dedent()
+    (fields, methods, invariant, doc_comment)
+
+# Parse class body: fields, methods, macros, mixins
+fn parse_class_body(self) -> ([Field], [FunctionDef], Option<InvariantBlock>, [MacroInvocation], [MixinRef], Option<DocComment>):
+    self.expect_block_start()
+    var fields = []
+    var methods = []
+    var invariant = None
+    var macro_invocations = []
+    var mixins = []
+    var doc_comment = None
+
+    self.skip_newlines()
+    doc_comment = self.try_parse_docstring()
+
+    while not self.check(TokenKind.Dedent) and not self.is_at_end():
+        self.skip_newlines()
+        if self.check(TokenKind.Dedent):
+            break
+
+        if self.check(TokenKind.Invariant):
+            if invariant.?:
+                self.error("Multiple invariant blocks not allowed")
+            invariant = self.parse_invariant_block()
+        elif self.check(TokenKind.Use):
+            # Mixin application: use MixinName
+            self.advance()
+            loop:
+                val mixin_start = self.current.span
+                val mixin_name = self.expect_identifier()
+                val type_args = if self.check(TokenKind.Lt):
+                    self.parse_generic_args()
+                else:
+                    []
+                mixins.append(MixinRef(
+                    span: self.make_span(mixin_start),
+                    name: mixin_name,
+                    type_args: type_args,
+                    overrides: [],
+                ))
+                if not self.check(TokenKind.Comma):
+                    break
+                self.advance()
+            self.skip_newlines()
+        elif self.is_method_start_class():
+            val (f, is_static) = self.parse_class_body_method()
+            f.is_static = is_static
+            if not is_static and f.name != "new":
+                self.inject_self_if_needed(f)
+            methods.append(f)
+        elif self.is_macro_invocation_start():
+            macro_invocations.append(self.parse_class_body_macro_invocation())
+        elif self.check(TokenKind.Var) and self.peek_is(TokenKind.Fn):
+            self.emit_deprecation_warning("Deprecated: `var fn` syntax",
+                "Replace `var fn method()` with `me method()`", None)
+            self.advance()
+            val item = self.parse_item()
+            match item:
+                Node.Function(f):
+                    f.is_me_method = true
+                    self.inject_self_if_needed(f)
+                    methods.append(f)
+                _: ()
+        else:
+            fields.append(self.parse_field())
+
+    self.consume_dedent()
+    (fields, methods, invariant, macro_invocations, mixins, doc_comment)

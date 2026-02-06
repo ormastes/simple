@@ -1,0 +1,378 @@
+# Module Loader - Runtime SMF loading with type inference.
+#
+# This module provides runtime module loading capabilities:
+# - Load SMF files at runtime
+# - JIT instantiation of generics via ObjTaker
+# - Module caching and hot-reload support
+# - Symbol resolution with type inference
+#
+# Uses compiler FFI (compiler_ffi module) for:
+# - Type inference (compiler_ctx.infer_types)
+# - Template instantiation (compiler_ctx.instantiate)
+# Benefits: No circular dependency, clean separation
+
+use ..loader.compiler_ffi.*
+use ..linker.obj_taker.*
+use ..linker.smf_reader.*
+use .jit_instantiator.*
+
+# ============================================================================
+# Loaded Module
+# ============================================================================
+
+struct LoadedModule:
+    """A loaded SMF module."""
+    path: text
+    reader: SmfReaderImpl
+    symbols: Dict<text, LoadedSymbol>
+    load_time: i64
+    version: i32
+
+struct LoadedSymbol:
+    """A symbol loaded into memory."""
+    name: text
+    address: i64
+    size: i64
+    ty: SymbolType
+    is_jit: bool
+
+impl LoadedModule:
+    fn get_symbol(name: text) -> LoadedSymbol?:
+        """Get a loaded symbol by name."""
+        self.symbols[name]
+
+    fn has_symbol(name: text) -> bool:
+        """Check if module has a symbol."""
+        self.symbols.contains_key(name)
+
+    fn exported_symbols() -> [LoadedSymbol]:
+        """Get all exported symbols."""
+        self.symbols.values()
+
+# ============================================================================
+# Load Result
+# ============================================================================
+
+enum LoadResult:
+    Success(module: LoadedModule)
+    AlreadyLoaded(module: LoadedModule)
+    Error(message: text)
+
+enum SymbolResult:
+    Found(symbol: LoadedSymbol, code: [u8])
+    JitCompiled(symbol: LoadedSymbol, code: [u8])
+    NotFound(name: text)
+    Error(message: text)
+
+# ============================================================================
+# Module Loader Configuration
+# ============================================================================
+
+struct ModuleLoaderConfig:
+    """Configuration for module loading."""
+    enable_jit: bool
+    enable_cache: bool
+    max_cache_size: i32
+    verbose: bool
+    hot_reload: bool
+
+impl ModuleLoaderConfig:
+    static fn default() -> ModuleLoaderConfig:
+        ModuleLoaderConfig(
+            enable_jit: true,
+            enable_cache: true,
+            max_cache_size: 100,
+            verbose: false,
+            hot_reload: false
+        )
+
+# ============================================================================
+# Module Loader
+# ============================================================================
+
+struct ModuleLoader:
+    """Runtime module loader with JIT instantiation support."""
+    # Shared compiler context (FFI handle)
+    compiler_ctx: CompilerContext
+    # ObjTaker for extraction and instantiation
+    obj_taker: ObjTaker
+    # JIT instantiator
+    jit: JitInstantiator
+    # Loaded modules cache: path -> module
+    modules: Dict<text, LoadedModule>
+    # Global symbol table: name -> (module_path, symbol)
+    global_symbols: Dict<text, (text, LoadedSymbol)>
+    # Configuration
+    config: ModuleLoaderConfig
+
+impl ModuleLoader:
+    static fn new(config: ModuleLoaderConfig) -> ModuleLoader:
+        """Create a new module loader."""
+        val compiler_ctx = CompilerContext.create()  # FFI handle
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: config.enable_cache,
+            max_cache_size: config.max_cache_size,
+            verbose: config.verbose,
+            allow_deferred: true
+        )
+        val jit_config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 50,
+            enabled: config.enable_jit,
+            verbose: config.verbose
+        )
+
+        ModuleLoader(
+            compiler_ctx: compiler_ctx,
+            obj_taker: ObjTaker.with_compiler_context(compiler_ctx, obj_taker_config),
+            jit: JitInstantiator.new(jit_config),
+            modules: {},
+            global_symbols: {},
+            config: config
+        )
+
+    static fn with_defaults() -> ModuleLoader:
+        """Create loader with default configuration."""
+        ModuleLoader.new(ModuleLoaderConfig.default())
+
+    # ========================================================================
+    # Module Loading
+    # ========================================================================
+
+    me load(path: text) -> LoadResult:
+        """Load an SMF module.
+
+        If already loaded and hot_reload is disabled, returns existing module.
+        If hot_reload is enabled, reloads the module.
+        """
+        # Check if already loaded
+        if self.modules.contains_key(path):
+            if not self.config.hot_reload:
+                return LoadResult.AlreadyLoaded(module: self.modules[path])
+            else:
+                # Unload for reload
+                self.unload(path)
+
+        if self.config.verbose:
+            print "[loader] Loading: {path}"
+
+        # Open SMF file
+        val reader_result = SmfReaderImpl.open(path)
+        if reader_result.is_err():
+            return LoadResult.Error(message: reader_result.unwrap_err())
+
+        val reader = reader_result.unwrap()
+
+        # Load metadata for JIT
+        val metadata_result = reader.read_note_sdn()
+        if metadata_result.is_ok():
+            self.jit.load_smf_metadata(path)
+
+        # Build loaded module
+        var symbols: Dict<text, LoadedSymbol> = {}
+        for smf_sym in reader.exported_symbols():
+            val loaded_sym = LoadedSymbol(
+                name: smf_sym.name,
+                address: 0,  # Will be set when actually loaded into memory
+                size: smf_sym.size,
+                ty: smf_sym.ty,
+                is_jit: false
+            )
+            symbols[smf_sym.name] = loaded_sym
+            self.global_symbols[smf_sym.name] = (path, loaded_sym)
+
+        val module = LoadedModule(
+            path: path,
+            reader: reader,
+            symbols: symbols,
+            load_time: current_time(),
+            version: 1
+        )
+
+        self.modules[path] = module
+
+        if self.config.verbose:
+            print "[loader] Loaded {symbols.len()} symbols from {path}"
+
+        LoadResult.Success(module: module)
+
+    me unload(path: text):
+        """Unload a module."""
+        if self.modules.contains_key(path):
+            val module = self.modules[path]
+
+            # Remove from global symbols
+            for (name, _) in module.symbols:
+                if self.global_symbols.contains_key(name):
+                    val (mod_path, _) = self.global_symbols[name]
+                    if mod_path == path:
+                        self.global_symbols = self.global_symbols.remove(name)
+
+            # Close reader
+            module.reader.close()
+
+            # Remove from cache
+            self.modules = self.modules.remove(path)
+
+            if self.config.verbose:
+                print "[loader] Unloaded: {path}"
+
+    me reload(path: text) -> LoadResult:
+        """Reload a module (hot reload)."""
+        self.unload(path)
+        self.load(path)
+
+    # ========================================================================
+    # Symbol Resolution
+    # ========================================================================
+
+    me resolve_symbol(name: text) -> SymbolResult:
+        """Resolve a symbol, JIT-compiling if necessary."""
+        # Check global symbol table
+        if self.global_symbols.contains_key(name):
+            val (mod_path, symbol) = self.global_symbols[name]
+            val module = self.modules[mod_path]
+
+            # Get code for symbol
+            val code_result = module.reader.read_code(SmfSymbol(
+                name: symbol.name,
+                section_index: 0,
+                offset: symbol.address,
+                size: symbol.size,
+                ty: symbol.ty,
+                binding: SymbolBinding.Global,
+                is_generic_template: false,
+                template_param_count: 0,
+                template_offset: 0
+            ))
+
+            if code_result.is_ok():
+                return SymbolResult.Found(symbol: symbol, code: code_result.unwrap())
+            else:
+                return SymbolResult.Error(message: code_result.unwrap_err())
+
+        # Try JIT instantiation
+        if self.config.enable_jit:
+            val jit_result = self.jit.try_jit_instantiate(name)
+            match jit_result:
+                case Success(code, sym_name, address):
+                    val loaded_sym = LoadedSymbol(
+                        name: sym_name,
+                        address: address ?? 0,
+                        size: code.len() as i64,
+                        ty: SymbolType.Function,
+                        is_jit: true
+                    )
+                    self.global_symbols[sym_name] = ("__jit__", loaded_sym)
+                    return SymbolResult.JitCompiled(symbol: loaded_sym, code: code)
+
+                case NotFound(n):
+                    return SymbolResult.NotFound(name: n)
+
+                case CompilationError(msg):
+                    return SymbolResult.Error(message: msg)
+
+                case _:
+                    pass
+
+        SymbolResult.NotFound(name: name)
+
+    me resolve_generic(name: text, type_args: [TypeInfo]) -> SymbolResult:
+        """Resolve a generic symbol with explicit type arguments."""
+        val mangled = mangle_name(name, type_args)
+
+        # Check if already instantiated
+        if self.global_symbols.contains_key(mangled):
+            return self.resolve_symbol(mangled)
+
+        # Find template in loaded modules
+        for (path, module) in self.modules:
+            for (sym_name, symbol) in module.symbols:
+                if sym_name == name:
+                    # Found template - instantiate with ObjTaker
+                    val result = self.obj_taker.take_with_types(
+                        module.reader,
+                        name,
+                        type_args
+                    )
+                    match result:
+                        case Code(bytes, sym, _):
+                            val loaded_sym = LoadedSymbol(
+                                name: mangled,
+                                address: 0,
+                                size: bytes.len() as i64,
+                                ty: sym.ty,
+                                is_jit: true
+                            )
+                            self.global_symbols[mangled] = (path, loaded_sym)
+                            return SymbolResult.JitCompiled(symbol: loaded_sym, code: bytes)
+
+                        case Error(msg):
+                            return SymbolResult.Error(message: msg)
+
+                        case _:
+                            pass
+
+        SymbolResult.NotFound(name: mangled)
+
+    # ========================================================================
+    # Utility
+    # ========================================================================
+
+    fn get_module(path: text) -> LoadedModule?:
+        """Get a loaded module by path."""
+        self.modules[path]
+
+    fn is_loaded(path: text) -> bool:
+        """Check if a module is loaded."""
+        self.modules.contains_key(path)
+
+    fn loaded_modules() -> [LoadedModule]:
+        """Get all loaded modules."""
+        self.modules.values()
+
+    fn stats() -> LoaderStats:
+        """Get loader statistics."""
+        LoaderStats(
+            module_count: self.modules.len(),
+            symbol_count: self.global_symbols.len(),
+            jit_stats: self.jit.stats(),
+            cache_stats: self.obj_taker.cache_stats()
+        )
+
+struct LoaderStats:
+    """Loader statistics."""
+    module_count: i32
+    symbol_count: i32
+    jit_stats: JitStats
+    cache_stats: CacheStats
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn mangle_name(base: text, type_args: [TypeInfo]) -> text:
+    """Mangle a generic name with type arguments."""
+    if type_args.is_empty():
+        return base
+
+    val args_str = type_args.map(\t: compiler_ffi.type_to_string(t)).join("_")
+    "{base}${args_str}"
+
+fn current_time() -> i64:
+    """Get current timestamp."""
+    # TODO: Implement via FFI
+    0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ModuleLoader
+export ModuleLoaderConfig
+export LoadedModule
+export LoadedSymbol
+export LoadResult
+export SymbolResult
+export LoaderStats
+export mangle_name

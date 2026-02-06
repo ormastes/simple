@@ -49,6 +49,31 @@ impl Platform:
             case Platform.WindowsX64 | Platform.WindowsArm64: ".exe"
             case _: ""
 
+    fn is_windows() -> bool:
+        match self:
+            case Platform.WindowsX64 | Platform.WindowsArm64: true
+            case _: false
+
+    fn is_macos() -> bool:
+        match self:
+            case Platform.DarwinX64 | Platform.DarwinArm64: true
+            case _: false
+
+    fn is_linux() -> bool:
+        match self:
+            case Platform.LinuxX64 | Platform.LinuxArm64: true
+            case _: false
+
+    fn archive_extension() -> text:
+        match self:
+            case Platform.WindowsX64 | Platform.WindowsArm64: ".zip"
+            case _: ".tar.gz"
+
+    fn wrapper_name() -> text:
+        match self:
+            case Platform.WindowsX64 | Platform.WindowsArm64: "simple.bat"
+            case _: "simple"
+
     static fn all() -> [Platform]:
         [
             Platform.LinuxX64,
@@ -67,13 +92,22 @@ struct DistConfig:
     version: text
     output_dir: text
     strip_binaries: bool
+    exclude_patterns: [text]  # Patterns to exclude from distribution
 
 impl DistConfig:
     static fn default() -> DistConfig:
         DistConfig(
             version: "0.5.0",
             output_dir: "dist",
-            strip_binaries: true
+            strip_binaries: true,
+            exclude_patterns: [
+                "examples/*/data/",
+                "examples/*/data/*",
+                "*.arrow",
+                "*.parquet",
+                "*.h5",
+                "*.hdf5"
+            ]
         )
 
 # ===========================================================================
@@ -94,20 +128,23 @@ class DistributionBuilder:
         print "Version: {self.config.version}"
         print ""
 
-        # Build for current platform only (for now)
-        val platform = Platform.LinuxX64
-        val result = self.build_platform(platform)
+        var success_count = 0
+        var total_count = 0
 
-        if result:
-            print ""
-            print "======================================"
-            print "Success! Distribution created"
-            print "======================================"
+        # Build for all platforms
+        for platform in Platform.all():
+            total_count = total_count + 1
+            val result = self.build_platform(platform)
+            if result:
+                success_count = success_count + 1
+
+        print ""
+        print "======================================"
+        if success_count == total_count:
+            print "Success! All {total_count} distributions created"
         else:
-            print ""
-            print "======================================"
-            print "Failed to create distribution"
-            print "======================================"
+            print "Completed: {success_count}/{total_count} distributions"
+        print "======================================"
 
     # Build distribution for a single platform
     fn build_platform(platform: Platform) -> bool:
@@ -132,64 +169,115 @@ class DistributionBuilder:
 
         # Create wrapper script
         print "  Creating wrapper script..."
-        self.create_wrapper(pkg_dir)
+        self.create_wrapper(pkg_dir, platform)
 
         # Create archive
         print "  Creating archive..."
-        self.create_archive(platform_name, pkg_dir)
+        self.create_archive(platform_name, pkg_dir, platform)
 
         true
 
     fn create_dirs(pkg_dir: text):
-        rt_dir_create(pkg_dir)
-        rt_dir_create("{pkg_dir}/bin")
-        rt_dir_create("{pkg_dir}/lib")
-        rt_dir_create("{pkg_dir}/src")
-        rt_dir_create("{pkg_dir}/examples")
+        # Use mkdir -p to create nested directories
+        rt_process_run("mkdir", ["-p", pkg_dir])
+        rt_process_run("mkdir", ["-p", "{pkg_dir}/bin"])
+        rt_process_run("mkdir", ["-p", "{pkg_dir}/lib"])
+        rt_process_run("mkdir", ["-p", "{pkg_dir}/src"])
+        rt_process_run("mkdir", ["-p", "{pkg_dir}/examples"])
 
     fn copy_runtime(platform: Platform, pkg_dir: text) -> bool:
+        # Determine runtime binary name
+        val runtime_name = "simple_runtime{platform.binary_extension()}"
+        val dst = "{pkg_dir}/bin/{runtime_name}"
+
         # Try multiple runtime locations
         val candidates = [
+            "bin/bootstrap/{runtime_name}",
             "bin/bootstrap/simple_runtime",
             "release/simple-0.4.0-beta/bin/simple_runtime",
             "bin/simple_runtime_local"
         ]
 
         for src in candidates:
-            print "    Trying: {src}"
-            val dst = "{pkg_dir}/bin/simple_runtime"
             val (stdout, stderr, exit) = rt_process_run("cp", [src, dst])
-            print "      Exit code: {exit}"
-            if stderr != "":
-                print "      Error: {stderr}"
             if exit == 0:
-                print "    Using runtime: {src}"
                 return true
 
-        print "    ERROR: No runtime binary found"
+        print "    ERROR: No runtime binary found for {platform.to_string()}"
         false
 
     fn copy_sources(pkg_dir: text):
         # Copy Simple source files only (not Rust!)
+        # Use rsync for better control over exclusions
+
+        # Copy src directories (no exclusions needed)
         rt_process_run("cp", ["-r", "src/compiler", "{pkg_dir}/src/"])
         rt_process_run("cp", ["-r", "src/app", "{pkg_dir}/src/"])
         rt_process_run("cp", ["-r", "src/lib", "{pkg_dir}/src/"])
         rt_process_run("cp", ["-r", "lib", "{pkg_dir}/"])
-        rt_process_run("cp", ["-r", "examples", "{pkg_dir}/"])
 
-    fn create_wrapper(pkg_dir: text):
-        # Create wrapper script (multiline concatenation)
-        var script = "#!/bin/sh\n"
-        script = script + "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        script = script + "exec \"$SCRIPT_DIR/simple_runtime\" \"$@\"\n"
+        # Copy examples with exclusions
+        self.copy_with_exclusions("examples", "{pkg_dir}/examples")
 
-        rt_file_write_text("{pkg_dir}/bin/simple", script)
-        rt_process_run("chmod", ["+x", "{pkg_dir}/bin/simple"])
+    fn copy_with_exclusions(src: text, dst: text):
+        # Build rsync command with exclusions
+        var cmd = "rsync -a"
 
-    fn create_archive(name: text, pkg_dir: text):
-        val archive = "{self.config.output_dir}/simple-{self.config.version}-{name}.tar.gz"
-        rt_process_run("tar", ["-czf", archive, "-C", self.config.output_dir, "simple-{self.config.version}-{name}"])
-        print "  Archive: {archive}"
+        # Add exclusion patterns
+        cmd = cmd + " --exclude='examples/*/data/'"
+        cmd = cmd + " --exclude='examples/*/data/*'"
+        cmd = cmd + " --exclude='*.arrow'"
+        cmd = cmd + " --exclude='*.parquet'"
+        cmd = cmd + " --exclude='*.h5'"
+        cmd = cmd + " --exclude='*.hdf5'"
+
+        # Add source and destination
+        cmd = cmd + " {src}/ {dst}"
+
+        # Execute rsync via shell
+        val (stdout, stderr, exit) = rt_process_run("sh", ["-c", cmd])
+        if exit != 0:
+            print "    Warning: rsync failed, falling back to cp"
+            # Fallback to cp -r if rsync not available
+            rt_process_run("cp", ["-r", src, dst])
+
+    fn create_wrapper(pkg_dir: text, platform: Platform):
+        if platform.is_windows():
+            # Windows batch file wrapper
+            var script = "@echo off\n"
+            script = script + "setlocal\n"
+            script = script + "set SCRIPT_DIR=%~dp0\n"
+            script = script + "\"%SCRIPT_DIR%simple_runtime.exe\" %*\n"
+            script = script + "endlocal\n"
+
+            rt_file_write_text("{pkg_dir}/bin/simple.bat", script)
+        else:
+            # Unix shell script wrapper
+            var script = "#!/bin/sh\n"
+            script = script + "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+            script = script + "exec \"$SCRIPT_DIR/simple_runtime\" \"$@\"\n"
+
+            rt_file_write_text("{pkg_dir}/bin/simple", script)
+            rt_process_run("chmod", ["+x", "{pkg_dir}/bin/simple"])
+
+    fn create_archive(name: text, pkg_dir: text, platform: Platform):
+        val pkg_name = "simple-{self.config.version}-{name}"
+
+        if platform.is_windows():
+            # Create .zip archive for Windows
+            # Use --symlinks to preserve symlinks without following them
+            # Use -0 for store-only (no compression) for faster creation
+            val archive = "{pkg_name}.zip"
+            val (stdout, stderr, exit) = rt_process_run("sh", ["-c", "cd {self.config.output_dir} && zip -0 -r -q --symlinks {archive} {pkg_name}"])
+            if exit == 0:
+                print "  Archive: {self.config.output_dir}/{archive}"
+            else:
+                print "  Archive failed: {stderr}"
+        else:
+            # Create .tar.gz archive for Unix
+            val archive = "{self.config.output_dir}/{pkg_name}.tar.gz"
+            rt_process_run("tar", ["-czf", archive, "-C", self.config.output_dir, pkg_name])
+            print "  Archive: {archive}"
 
 # ===========================================================================
 # Main Entry Point

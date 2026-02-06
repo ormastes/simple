@@ -1,0 +1,235 @@
+# DI Constructor Injection Validator
+#
+# Validates dependency injection rules for constructors:
+# - All-or-nothing rule: All params injectable or none
+# - No mixing @sys.inject with @inject annotations
+# - Parameter-level diagnostics
+
+export DiValidationError, DiErrorKind, DiValidator
+export validate_constructor, validate_class_injection
+
+# ============================================================================
+# Error Types
+# ============================================================================
+
+enum DiErrorKind:
+    """Types of DI validation errors."""
+    MixedInjection          # Some params have @inject, others don't
+    MixedAnnotations        # Both @sys.inject and @inject used
+    InvalidInjectionPoint   # @inject in wrong location
+    CircularDependency      # Circular dependency detected
+    AmbiguousBinding        # Multiple bindings match
+    NoBinding               # No binding found
+
+struct DiValidationError:
+    """Detailed DI validation error."""
+    kind: DiErrorKind
+    message: text
+    constructor_name: text
+    params: [text]          # Parameter names involved
+    suggestion: text?       # How to fix the error
+
+impl DiValidationError:
+    fn format() -> text:
+        """Format error for display."""
+        var msg = "DI Validation Error in {self.constructor_name}:\n"
+        msg = msg + "  {self.message}\n"
+
+        if self.params.?:
+            msg = msg + "\n  Parameters:\n"
+            for param in self.params:
+                msg = msg + "    - {param}\n"
+
+        if self.suggestion.?:
+            msg = msg + "\n  Suggestion:\n"
+            msg = msg + "    {self.suggestion.unwrap()}\n"
+
+        msg
+
+# ============================================================================
+# Constructor Parameter Info
+# ============================================================================
+
+struct ParamInfo:
+    """Information about a constructor parameter."""
+    name: text
+    type_name: text
+    has_inject: bool        # Has @inject annotation
+    is_injectable: bool     # Type is Injectable
+
+impl ParamInfo:
+    static fn create(name: text, type_name: text, has_inject: bool) -> ParamInfo:
+        ParamInfo(name: name, type_name: type_name,
+                  has_inject: has_inject, is_injectable: false)
+
+struct ConstructorInfo:
+    """Information about a constructor."""
+    class_name: text
+    has_sys_inject: bool    # Class has @sys.inject
+    params: [ParamInfo]
+
+impl ConstructorInfo:
+    static fn create(class_name: text, has_sys_inject: bool,
+                    params: [ParamInfo]) -> ConstructorInfo:
+        ConstructorInfo(class_name: class_name,
+                       has_sys_inject: has_sys_inject,
+                       params: params)
+
+    fn injectable_param_count() -> i64:
+        """Count parameters with @inject annotation."""
+        self.params.filter(\p: p.has_inject).len()
+
+    fn total_param_count() -> i64:
+        """Total parameter count."""
+        self.params.len()
+
+    fn has_mixed_injection() -> bool:
+        """Check if some params injectable, others not."""
+        val injectable = self.injectable_param_count()
+        injectable > 0 and injectable < self.total_param_count()
+
+    fn injectable_params() -> [ParamInfo]:
+        """Get parameters with @inject."""
+        self.params.filter(\p: p.has_inject)
+
+    fn non_injectable_params() -> [ParamInfo]:
+        """Get parameters without @inject."""
+        self.params.filter(\p: not p.has_inject)
+
+# ============================================================================
+# DI Validator
+# ============================================================================
+
+class DiValidator:
+    """Validates DI injection rules for constructors."""
+
+impl DiValidator:
+    static fn create() -> DiValidator:
+        DiValidator()
+
+    fn validate_constructor(ctor: ConstructorInfo) -> Result<(), DiValidationError>:
+        """Validate constructor injection rules.
+
+        Rules:
+        1. All-or-nothing: All params must be injectable or none
+        2. No mixing: Cannot use both @sys.inject and @inject
+        3. Valid injection points
+        """
+
+        # Rule 1: Check for mixed injection (some @inject, some not)
+        if ctor.has_mixed_injection():
+            val injectable = ctor.injectable_params()
+            val non_injectable = ctor.non_injectable_params()
+
+            return Err(DiValidationError(
+                kind: DiErrorKind.MixedInjection,
+                message: "Constructor has mixed injection: {injectable.len()} params with @inject, {non_injectable.len()} without",
+                constructor_name: ctor.class_name,
+                params: ctor.params.map(\p: "{p.name}: {p.type_name} {@inject: {p.has_inject}}"),
+                suggestion: Some("""Either:
+  1. Add @inject to ALL parameters
+  2. Remove @inject from ALL parameters
+  3. Use @sys.inject on the class (auto-injects all params)""")
+            ))
+
+        # Rule 2: Check for mixing @sys.inject with @inject
+        if ctor.has_sys_inject and ctor.injectable_param_count() > 0:
+            return Err(DiValidationError(
+                kind: DiErrorKind.MixedAnnotations,
+                message: "Cannot mix @sys.inject on class with @inject on parameters",
+                constructor_name: ctor.class_name,
+                params: ctor.injectable_params().map(\p: p.name),
+                suggestion: Some("""Choose ONE approach:
+  - Class-level: @sys.inject on class (removes need for param annotations)
+  - Parameter-level: @inject on each param (remove @sys.inject from class)""")
+            ))
+
+        Ok(())
+
+    fn validate_class_injection(class_name: text, has_sys_inject: bool,
+                                field_types: [text]) -> Result<(), DiValidationError>:
+        """Validate @sys.inject usage on a class.
+
+        Rules:
+        - All field types must be injectable
+        - No circular dependencies (checked separately)
+        """
+
+        # Note: Circular dependency detection happens in DependencyGraph
+        # This just validates the annotation usage is correct
+
+        if has_sys_inject and not field_types.?:
+            # @sys.inject on class with no fields is allowed (maybe future-proof)
+            pass
+
+        Ok(())
+
+    fn validate_binding(interface_type: text, impl_type: text,
+                       available_impls: [text]) -> Result<(), DiValidationError>:
+        """Validate a DI binding.
+
+        Rules:
+        - Implementation type must exist
+        - Implementation must implement interface
+        - No ambiguous bindings
+        """
+
+        if not available_impls.contains(impl_type):
+            return Err(DiValidationError(
+                kind: DiErrorKind.NoBinding,
+                message: "Implementation type '{impl_type}' not found for interface '{interface_type}'",
+                constructor_name: interface_type,
+                params: [],
+                suggestion: Some("Available implementations: {available_impls.join(", ")}")
+            ))
+
+        Ok(())
+
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+fn validate_constructor(ctor: ConstructorInfo) -> Result<(), DiValidationError>:
+    """Validate a constructor's DI rules."""
+    val validator = DiValidator.create()
+    validator.validate_constructor(ctor)
+
+fn validate_class_injection(class_name: text, has_sys_inject: bool,
+                            field_types: [text]) -> Result<(), DiValidationError>:
+    """Validate @sys.inject on a class."""
+    val validator = DiValidator.create()
+    validator.validate_class_injection(class_name, has_sys_inject, field_types)
+
+# ============================================================================
+# Diagnostic Formatting
+# ============================================================================
+
+fn format_di_error(error: DiValidationError) -> text:
+    """Format DI validation error for compiler output."""
+    error.format()
+
+fn get_error_code(kind: DiErrorKind) -> text:
+    """Get error code for diagnostic."""
+    match kind:
+        case MixedInjection: "E:DI001"
+        case MixedAnnotations: "E:DI002"
+        case InvalidInjectionPoint: "E:DI003"
+        case CircularDependency: "E:DI004"
+        case AmbiguousBinding: "E:DI005"
+        case NoBinding: "E:DI006"
+
+# ============================================================================
+# Integration with Compiler
+# ============================================================================
+
+# NOTE: This module should be called during HIR -> MIR lowering
+# when processing constructor definitions:
+#
+# Example integration:
+#   val ctor_info = extract_constructor_info(hir_class)
+#   val result = validate_constructor(ctor_info)
+#   match result:
+#       case Err(error):
+#           emit_diagnostic(get_error_code(error.kind), error.format())
+#       case Ok(()):
+#           # Continue with lowering

@@ -1,0 +1,229 @@
+# Doctest Runner
+#
+# Extracts doc comments with code blocks from Simple source files
+# and Markdown files, then runs them as test cases.
+
+use app.io.mod (file_read, file_exists, file_atomic_write, file_remove, process_run_timeout, dir_walk)
+use test_runner_types.TestFileResult
+use test_runner_execute.find_simple_binary
+
+# =========================================================================
+# Doctest Extraction
+# =========================================================================
+
+struct Doctest:
+    source_file: text
+    line_number: i64
+    code: text
+    expected_output: text
+    should_fail: bool
+
+fn extract_doctests(file_path: text) -> [Doctest]:
+    if not file_exists(file_path):
+        return []
+
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var doctests: [Doctest] = []
+    var i = 0
+    var in_doc_block = false
+    var in_code_block = false
+    var code_lines: [text] = []
+    var start_line = 0
+    var should_fail = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Detect doc comments
+        if trimmed.starts_with("///") or trimmed.starts_with("##"):
+            val doc_content = if trimmed.starts_with("///"):
+                trimmed[3:].trim()
+            else:
+                trimmed[2:].trim()
+
+            if doc_content.starts_with("```simple") or doc_content.starts_with("```spl"):
+                in_code_block = true
+                code_lines = []
+                start_line = i + 1
+                should_fail = doc_content.contains("should_fail")
+            elif doc_content == "```" and in_code_block:
+                in_code_block = false
+                if code_lines.len() > 0:
+                    doctests.push(Doctest(
+                        source_file: file_path,
+                        line_number: start_line,
+                        code: code_lines.join("\n"),
+                        expected_output: "",
+                        should_fail: should_fail
+                    ))
+            elif in_code_block:
+                code_lines.push(doc_content)
+
+        else:
+            if in_code_block:
+                in_code_block = false
+                code_lines = []
+
+        i = i + 1
+
+    doctests
+
+# =========================================================================
+# H11: Markdown Doctest Extraction
+# =========================================================================
+
+fn extract_md_doctests(file_path: text) -> [Doctest]:
+    if not file_exists(file_path):
+        return []
+
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var doctests: [Doctest] = []
+    var i = 0
+    var in_code_block = false
+    var code_lines: [text] = []
+    var start_line = 0
+    var should_fail = false
+
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+
+        if not in_code_block:
+            if trimmed.starts_with("```simple") or trimmed.starts_with("```spl"):
+                in_code_block = true
+                code_lines = []
+                start_line = i + 1
+                should_fail = trimmed.contains("should_fail")
+        else:
+            if trimmed == "```":
+                in_code_block = false
+                if code_lines.len() > 0:
+                    doctests.push(Doctest(
+                        source_file: file_path,
+                        line_number: start_line,
+                        code: code_lines.join("\n"),
+                        expected_output: "",
+                        should_fail: should_fail
+                    ))
+            else:
+                code_lines.push(lines[i])
+
+        i = i + 1
+
+    doctests
+
+fn discover_md_doctests(dir: text) -> [Doctest]:
+    var all_doctests: [Doctest] = []
+    val files = dir_walk(dir)
+    for file_path in files:
+        if file_path.ends_with(".md"):
+            val doctests = extract_md_doctests(file_path)
+            all_doctests.merge(doctests)
+    all_doctests
+
+# =========================================================================
+# Run Doctests
+# =========================================================================
+
+fn run_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
+    val doctests = extract_doctests(file_path)
+
+    if doctests.len() == 0:
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            error: "",
+            timed_out: false
+        )
+
+    val binary = find_simple_binary()
+    var passed = 0
+    var failed = 0
+    var total_duration = 0
+
+    for dt in doctests:
+        # Write temp file
+        val temp_path = "/tmp/simple_doctest_{dt.line_number}.spl"
+        file_atomic_write(temp_path, dt.code)
+
+        val result = process_run_timeout(binary, [temp_path], timeout_ms)
+        val exit_code = result.2
+
+        if dt.should_fail:
+            if exit_code != 0:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+        else:
+            if exit_code == 0:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+
+        file_remove(temp_path)
+
+    TestFileResult(
+        path: file_path,
+        passed: passed,
+        failed: failed,
+        skipped: 0,
+        duration_ms: total_duration,
+        error: "",
+        timed_out: false
+    )
+
+fn run_md_doctests(file_path: text, timeout_ms: i64) -> TestFileResult:
+    val doctests = extract_md_doctests(file_path)
+
+    if doctests.len() == 0:
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            error: "",
+            timed_out: false
+        )
+
+    val binary = find_simple_binary()
+    var passed = 0
+    var failed = 0
+
+    for dt in doctests:
+        val temp_path = "/tmp/simple_md_doctest_{dt.line_number}.spl"
+        file_atomic_write(temp_path, dt.code)
+
+        val result = process_run_timeout(binary, [temp_path], timeout_ms)
+        val exit_code = result.2
+
+        if dt.should_fail:
+            if exit_code != 0:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+        else:
+            if exit_code == 0:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+
+        file_remove(temp_path)
+
+    TestFileResult(
+        path: file_path,
+        passed: passed,
+        failed: failed,
+        skipped: 0,
+        duration_ms: 0,
+        error: "",
+        timed_out: false
+    )
+
+export Doctest, extract_doctests, extract_md_doctests, discover_md_doctests
+export run_doctests, run_md_doctests

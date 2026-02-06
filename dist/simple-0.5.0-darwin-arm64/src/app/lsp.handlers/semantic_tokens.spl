@@ -1,0 +1,209 @@
+# Semantic Tokens Handler
+# Provides syntax highlighting via LSP textDocument/semanticTokens
+
+import lsp.protocol as protocol
+import lsp.transport as transport
+import parser.treesitter.{Tree, Query, QueryCursor}
+
+# Token type mappings (LSP standard)
+enum TokenType:
+    Keyword = 0
+    Function = 1
+    Type = 2
+    Variable = 3
+    Parameter = 4
+    Property = 5
+    Number = 6
+    String = 7
+    Comment = 8
+    Operator = 9
+    Namespace = 10
+
+# Token modifiers (bitmask)
+enum TokenModifier:
+    None = 0
+    Declaration = 1
+    Definition = 2
+    Readonly = 4
+    Static = 8
+    Deprecated = 16
+    Abstract = 32
+    Async = 64
+    Modification = 128
+    Documentation = 256
+
+# Semantic token (before encoding)
+class SemanticToken:
+    line: Int
+    column: Int
+    length: Int
+    token_type: Int
+    modifiers: Int
+
+    static fn new(line: Int, column: Int, length: Int, token_type: Int, modifiers: Int) -> SemanticToken:
+        SemanticToken(
+            line: line,
+            column: column,
+            length: length,
+            token_type: token_type,
+            modifiers: modifiers
+        )
+
+# Convert tree-sitter capture name to LSP token type
+fn capture_to_token_type(capture_name: String) -> Int:
+    match capture_name:
+        case "keyword":
+            TokenType.Keyword
+        case "function":
+            TokenType.Function
+        case "function.call":
+            TokenType.Function
+        case "type":
+            TokenType.Type
+        case "variable":
+            TokenType.Variable
+        case "parameter":
+            TokenType.Parameter
+        case "property":
+            TokenType.Property
+        case "number":
+            TokenType.Number
+        case "string":
+            TokenType.String
+        case "comment":
+            TokenType.Comment
+        case "operator":
+            TokenType.Operator
+        case "namespace":
+            TokenType.Namespace
+        case _:
+            TokenType.Variable  # Default fallback
+
+# Encode tokens as LSP delta format
+# Each token: [deltaLine, deltaColumn, length, tokenType, tokenModifiers]
+fn encode_tokens(tokens: [SemanticToken]) -> [Int]:
+    var encoded: [Int] = []
+    var prev_line = 0
+    var prev_column = 0
+
+    for token in tokens:
+        # Calculate deltas
+        val delta_line = token.line - prev_line
+        val delta_column = if delta_line == 0:
+            token.column - prev_column
+        else:
+            token.column
+
+        # Append 5-element tuple
+        encoded.push(delta_line)
+        encoded.push(delta_column)
+        encoded.push(token.length)
+        encoded.push(token.token_type)
+        encoded.push(token.modifiers)
+
+        # Update previous position
+        prev_line = token.line
+        prev_column = token.column
+
+    encoded
+
+# Handle textDocument/semanticTokens/full request
+fn handle_semantic_tokens_full(tree: Tree, source: String) -> Result<Dict, String>:
+    # Create query for syntax highlighting
+    val query = Query.new("simple", "").unwrap_or_else(|e| {
+        transport.log_error("Failed to create query: {e}")
+        # Return empty query on error
+        Query.new("simple", "").unwrap()
+    })
+
+    # Execute query on tree
+    val cursor = QueryCursor.new(query, tree)
+    val matches = cursor.all_matches()
+
+    # Collect semantic tokens from captures
+    var tokens: [SemanticToken] = []
+
+    for match in matches:
+        for capture in match.captures:
+            # Get token type from capture name
+            val token_type = capture_to_token_type(capture.name)
+
+            # Get position and length from node
+            val node = capture.node
+            val start_line = node.span.start_line
+            val start_column = node.span.start_column
+            val end_byte = node.span.end_byte
+            val start_byte = node.span.start_byte
+            val length = end_byte - start_byte
+
+            # Create semantic token
+            val token = SemanticToken.new(
+                start_line,
+                start_column,
+                length,
+                token_type,
+                TokenModifier.None
+            )
+
+            tokens.push(token)
+
+    # Sort tokens by position (line, then column)
+    tokens.sort_by(|a, b| {
+        if a.line != b.line:
+            a.line - b.line
+        else:
+            a.column - b.column
+    })
+
+    # Encode to LSP delta format
+    val encoded = encode_tokens(tokens)
+
+    # Build response
+    val result = {
+        "data": encoded
+    }
+
+    Ok(result)
+
+# Handle textDocument/semanticTokens/range request
+fn handle_semantic_tokens_range(
+    tree: Tree,
+    source: String,
+    start_line: Int,
+    end_line: Int
+) -> Result<Dict, String>:
+    # Get full tokens first
+    val full_result = handle_semantic_tokens_full(tree, source)?
+
+    # Filter to range (simplified - real impl would optimize)
+    # For now, return full tokens (client will handle range)
+    Ok(full_result)
+
+# Provide token legend for LSP initialization
+fn get_token_types_legend() -> [String]:
+    [
+        "keyword",
+        "function",
+        "type",
+        "variable",
+        "parameter",
+        "property",
+        "number",
+        "string",
+        "comment",
+        "operator",
+        "namespace"
+    ]
+
+fn get_token_modifiers_legend() -> [String]:
+    [
+        "declaration",
+        "definition",
+        "readonly",
+        "static",
+        "deprecated",
+        "abstract",
+        "async",
+        "modification",
+        "documentation"
+    ]

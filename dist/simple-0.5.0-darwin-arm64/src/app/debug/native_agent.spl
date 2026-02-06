@@ -1,0 +1,205 @@
+# Native Binary Debug Backend
+# Implements DebugBackend for debugging native (ELF/Mach-O) binaries.
+# Uses ptrace FFI (shared with SMF backend) and DWARF debug info for
+# source mapping, stack unwinding, and variable inspection.
+
+use core.*
+use app.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
+
+# Ptrace FFI (same as smf_agent.spl)
+extern fn rt_ptrace_attach(pid: i64) -> i64
+extern fn rt_ptrace_detach(pid: i64) -> i64
+extern fn rt_ptrace_continue(pid: i64) -> i64
+extern fn rt_ptrace_single_step(pid: i64) -> i64
+extern fn rt_ptrace_read_memory(pid: i64, addr: i64, size: i64) -> [i64]
+extern fn rt_ptrace_write_memory(pid: i64, addr: i64, data: i64) -> i64
+extern fn rt_ptrace_get_registers(pid: i64) -> Dict<String, i64>
+extern fn rt_ptrace_wait_stop(pid: i64) -> i64
+
+# DWARF FFI declarations
+extern fn rt_dwarf_load(binary_path: String) -> i64            # -> dwarf_handle
+extern fn rt_dwarf_free(handle: i64)
+extern fn rt_dwarf_addr_to_line(handle: i64, addr: i64) -> String  # -> "file:line"
+extern fn rt_dwarf_function_at(handle: i64, addr: i64) -> String   # -> function name
+extern fn rt_dwarf_locals_at(handle: i64, addr: i64, frame_base: i64) -> [String]  # -> ["name:type:offset"]
+extern fn rt_dwarf_line_to_addr(handle: i64, file: String, line: i64) -> i64  # -> address
+
+# DWARF line info parsed
+class DwarfLineInfo:
+    file: String
+    line: Int
+    address: i64
+
+    static fn from_string(s: String) -> Option<DwarfLineInfo>:
+        val parts = s.split(":")
+        if parts.len() >= 2:
+            val file = parts[0]
+            val line = parts[1].to_int() ?? 0
+            Some(DwarfLineInfo(file: file, line: line, address: 0))
+        else:
+            None
+
+# Native Debug Backend
+class NativeBackend:
+    pid: Int
+    program_path: String
+    args: [String]
+    attached: Bool
+    dwarf_handle: i64
+    breakpoint_addrs: Dict<String, i64>
+    original_bytes: Dict<i64, i64>
+
+    static fn create() -> NativeBackend:
+        NativeBackend(
+            pid: 0,
+            program_path: "",
+            args: [],
+            attached: false,
+            dwarf_handle: 0,
+            breakpoint_addrs: {},
+            original_bytes: {}
+        )
+
+impl DebugBackend for NativeBackend:
+    fn name() -> String:
+        "native"
+
+    fn attach(program_path: String, args: [String]) -> Result<Nil, String>:
+        self.program_path = program_path
+        self.args = args
+        # Load DWARF info
+        # TODO: Replace direct FFI call with wrapper (dwarf_load) from app.io or compiler.ffi
+        self.dwarf_handle = rt_dwarf_load(program_path)
+        if self.dwarf_handle == 0:
+            return Err("Failed to load DWARF info from {program_path}")
+        # Launch or attach to native process
+        self.attached = true
+        Ok(nil)
+
+    fn detach() -> Result<Nil, String>:
+        if self.pid > 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_detach) from app.io or compiler.ffi
+            rt_ptrace_detach(self.pid)
+        if self.dwarf_handle != 0:
+            # TODO: Replace direct FFI call with wrapper (dwarf_free) from app.io or compiler.ffi
+            rt_dwarf_free(self.dwarf_handle)
+            self.dwarf_handle = 0
+        self.attached = false
+        Ok(nil)
+
+    fn run() -> Result<Nil, String>:
+        if not self.attached:
+            return Err("Not attached")
+        if self.pid > 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_continue) from app.io or compiler.ffi
+            rt_ptrace_continue(self.pid)
+        Ok(nil)
+
+    fn pause() -> Result<Nil, String>:
+        Ok(nil)
+
+    fn resume() -> Result<Nil, String>:
+        if self.pid > 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_continue) from app.io or compiler.ffi
+            rt_ptrace_continue(self.pid)
+        Ok(nil)
+
+    fn step_over() -> Result<Nil, String>:
+        # Single-step at source level using DWARF line table
+        Ok(nil)
+
+    fn step_in() -> Result<Nil, String>:
+        if self.pid > 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_single_step) from app.io or compiler.ffi
+            rt_ptrace_single_step(self.pid)
+        Ok(nil)
+
+    fn step_out() -> Result<Nil, String>:
+        # Find return address from frame, set temp breakpoint
+        Ok(nil)
+
+    fn add_breakpoint(file: String, line: Int) -> Result<Int, String>:
+        val key = "{file}:{line}"
+        # TODO: Replace direct FFI call with wrapper (dwarf_line_to_addr) from app.io or compiler.ffi
+        val addr = rt_dwarf_line_to_addr(self.dwarf_handle, file, line)
+        if addr == 0:
+            return Err("No code at {key}")
+        # Save original byte, write INT3
+        # TODO: Replace direct FFI call with wrapper (ptrace_read_memory) from app.io or compiler.ffi
+        val orig = rt_ptrace_read_memory(self.pid, addr, 1)
+        if orig.len() > 0:
+            self.original_bytes[addr] = orig[0]
+        # TODO: Replace direct FFI call with wrapper (ptrace_write_memory) from app.io or compiler.ffi
+        rt_ptrace_write_memory(self.pid, addr, 0xCC)
+        self.breakpoint_addrs[key] = addr
+        Ok(addr)
+
+    fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>:
+        val key = "{file}:{line}"
+        match self.breakpoint_addrs.get(key):
+            case Some(addr):
+                match self.original_bytes.get(addr):
+                    case Some(orig):
+                        # TODO: Replace direct FFI call with wrapper (ptrace_write_memory) from app.io or compiler.ffi
+                        rt_ptrace_write_memory(self.pid, addr, orig)
+                    case None:
+                        pass
+                self.breakpoint_addrs.remove(key)
+                Ok(nil)
+            case None:
+                Err("No breakpoint at {key}")
+
+    fn stack_trace() -> Result<[FrameInfo], String>:
+        # Walk native stack using frame pointers + DWARF unwind info
+        var frames: [FrameInfo] = []
+        if self.pid > 0 and self.dwarf_handle != 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_get_registers) from app.io or compiler.ffi
+            val regs = rt_ptrace_get_registers(self.pid)
+            val rip = regs.get("rip") ?? 0
+            # Map instruction pointer to source
+            # TODO: Replace direct FFI call with wrapper (dwarf_addr_to_line) from app.io or compiler.ffi
+            val loc_str = rt_dwarf_addr_to_line(self.dwarf_handle, rip)
+            # TODO: Replace direct FFI call with wrapper (dwarf_function_at) from app.io or compiler.ffi
+            val func_name = rt_dwarf_function_at(self.dwarf_handle, rip)
+            match DwarfLineInfo.from_string(loc_str):
+                case Some(info):
+                    frames.push(FrameInfo.of(0, func_name, info.file, info.line))
+                case None:
+                    frames.push(FrameInfo.of(0, func_name, "<unknown>", 0))
+        Ok(frames)
+
+    fn locals() -> Result<[VarInfo], String>:
+        var vars: [VarInfo] = []
+        if self.pid > 0 and self.dwarf_handle != 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_get_registers) from app.io or compiler.ffi
+            val regs = rt_ptrace_get_registers(self.pid)
+            val rip = regs.get("rip") ?? 0
+            val rbp = regs.get("rbp") ?? 0
+            # TODO: Replace direct FFI call with wrapper (dwarf_locals_at) from app.io or compiler.ffi
+            val raw = rt_dwarf_locals_at(self.dwarf_handle, rip, rbp)
+            for entry in raw:
+                # Format: "name:type:offset"
+                val parts = entry.split(":")
+                if parts.len() >= 3:
+                    vars.push(VarInfo.of(parts[0], "<memory>", parts[1]))
+        Ok(vars)
+
+    fn evaluate(expr: String) -> Result<String, String>:
+        Err("Expression evaluation not supported in native mode")
+
+    fn current_location() -> Result<LocationInfo, String>:
+        if self.pid > 0 and self.dwarf_handle != 0:
+            # TODO: Replace direct FFI call with wrapper (ptrace_get_registers) from app.io or compiler.ffi
+            val regs = rt_ptrace_get_registers(self.pid)
+            val rip = regs.get("rip") ?? 0
+            # TODO: Replace direct FFI call with wrapper (dwarf_addr_to_line) from app.io or compiler.ffi
+            val loc_str = rt_dwarf_addr_to_line(self.dwarf_handle, rip)
+            # TODO: Replace direct FFI call with wrapper (dwarf_function_at) from app.io or compiler.ffi
+            val func_name = rt_dwarf_function_at(self.dwarf_handle, rip)
+            match DwarfLineInfo.from_string(loc_str):
+                case Some(info):
+                    Ok(LocationInfo.at(info.file, info.line, func_name))
+                case None:
+                    Ok(LocationInfo.at("<unknown>", 0, func_name))
+        else:
+            Err("Not attached")

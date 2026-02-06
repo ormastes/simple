@@ -1,0 +1,892 @@
+# AST Node Types for the Simple Language Parser
+#
+# All AST types: Node, Expr, Pattern, Type, definitions, statements.
+# Port of rust/parser/src/ast/
+
+from token import {Span, NumericSuffix, FStringToken, PreLexInfo}
+
+export Node, Expr, Pattern, Type, BinOp, UnaryOp
+export FunctionDef, StructDef, ClassDef, EnumDef, TraitDef, ImplBlock
+export MixinDef, ActorDef, TypeAliasDef, ExternDef, ExternClassDef, MacroDef
+export UnitDef, UnitFamilyDef, CompoundUnitDef, HandlePoolDef, LiteralFunctionDef
+export BitfieldDef, ClassAliasDef, FunctionAliasDef, InterfaceBinding
+export LetStmt, ConstStmt, StaticStmt, AssignmentStmt, ReturnStmt
+export IfStmt, MatchStmt, ForStmt, WhileStmt, LoopStmt
+export BreakStmt, ContinueStmt, PassStmt, SkipStmt, DeferStmt, GuardStmt
+export AssertStmt, AssumeStmt, AdmitStmt, ProofHintStmt, CalcStmt, UnfoldStmt
+export ContextStmt, WithStmt, LeanBlock
+export ModDecl, UseStmt, MultiUse, CommonUseStmt, ExportUseStmt
+export AutoImportStmt, StructuredExportBlock, RequiresCapabilitiesStmt
+export Decorator, Attribute, DocComment, Parameter, Block, Field
+export EnumVariant, EnumField, MatchArm, Argument, LambdaParam
+export Visibility, Mutability, ReferenceCapability, StorageClass
+export RangeBound, MoveMode, PointerKind, AssignOp, SelfMode
+export FStringPart, MacroArg, AssociatedTypeDef, AssociatedTypeImpl
+export ModulePath, ImportTarget, StructuredExportEntry
+export WhereClause, WhereBound, GenericParam
+export Module, Effect, Capability
+export ContractBlock, ContractClause, InvariantBlock
+export ReprType, UnitReprConstraints
+export SkipBody, DeferBody, CalcStep
+export TensorMode, TensorSlice, TensorSliceContent
+export BoundsBlock
+export AopAdvice, DiBinding, ArchitectureRule, MockDecl
+
+# === Enums ===
+
+enum Visibility:
+    Public
+    Private
+
+enum Mutability:
+    Mutable
+    Immutable
+
+enum ReferenceCapability:
+    Shared
+    Exclusive
+    Isolated
+
+enum StorageClass:
+    Auto
+    Shared
+
+enum RangeBound:
+    Inclusive
+    Exclusive
+
+enum MoveMode:
+    Move
+    Copy
+
+enum SelfMode:
+    IncludeSelf
+    SkipSelf
+
+enum PointerKind:
+    Unique
+    Shared
+    Weak
+    Handle
+    Borrow
+    BorrowMut
+    RawConst
+    RawMut
+
+enum AssignOp:
+    Assign
+    AddAssign
+    SubAssign
+    MulAssign
+    DivAssign
+    ModAssign
+    SuspendAssign
+    SuspendAddAssign
+    SuspendSubAssign
+    SuspendMulAssign
+    SuspendDivAssign
+
+enum BinOp:
+    Add
+    Sub
+    Mul
+    Div
+    Mod
+    Pow
+    MatMul
+    Eq
+    NotEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+    And
+    Or
+    AndSuspend
+    OrSuspend
+    BitAnd
+    BitOr
+    BitXor
+    ShiftLeft
+    ShiftRight
+    Is
+    In
+    NotIn
+    PipeForward
+    Parallel
+
+enum UnaryOp:
+    Neg
+    Not
+    BitNot
+    Ref
+    RefMut
+    Deref
+    ChannelRecv
+    Move
+
+# === Effect and Capability ===
+
+enum Effect:
+    Pure
+    Io
+    Net
+    Fs
+    Unsafe
+    Async
+
+enum Capability:
+    Pure
+    Io
+    Net
+    Fs
+    Unsafe
+
+# === Core Structures ===
+
+struct Span:
+    start: i64
+    end: i64
+    line: i64
+    column: i64
+
+struct Decorator:
+    span: Span
+    name: Expr
+    args: [Argument]?
+
+struct Attribute:
+    span: Span
+    name: text
+    value: Expr?
+    args: [Expr]?
+
+struct DocComment:
+    content: text
+
+struct WhereBound:
+    span: Span
+    type_param: text
+    bounds: [Type]
+    negative_bounds: [Type]
+
+val WhereClause = [WhereBound]
+
+enum GenericParam:
+    TypeParam(name: text, bounds: [text], default: Type?)
+    ConstParam(name: text, ty: Type)
+
+struct Parameter:
+    span: Span
+    name: text
+    ty: Type?
+    default: Expr?
+    mutability: Mutability
+    inject: bool
+    variadic: bool
+    call_site_label: text?
+
+struct Block:
+    span: Span
+    statements: [Node]
+
+struct Field:
+    span: Span
+    name: text
+    ty: Type
+    default: Expr?
+    mutability: Mutability
+    visibility: Visibility
+
+struct EnumField:
+    name: text?
+    ty: Type
+
+struct EnumVariant:
+    span: Span
+    name: text
+    fields: [EnumField]?
+    discriminant: Expr?
+
+struct MatchArm:
+    span: Span
+    pattern: Pattern
+    guard: Expr?
+    body: Block
+
+struct Argument:
+    name: text?
+    value: Expr
+    span: Span
+    label: text?
+
+struct LambdaParam:
+    name: text
+    ty: Type?
+
+enum FStringPart:
+    Literal(text)
+    ExprPart(Expr)
+
+enum MacroArg:
+    Expr(Expr)
+
+struct AssociatedTypeDef:
+    span: Span
+    name: text
+    bounds: [text]
+    default: Type?
+
+struct AssociatedTypeImpl:
+    span: Span
+    name: text
+    ty: Type
+
+struct Module:
+    name: text?
+    items: [Node]
+
+# === Type ===
+
+enum Type:
+    Simple(text)
+    Generic(name: text, args: [Type])
+    CapabilityType(capability: ReferenceCapability, inner: Type)
+    Pointer(kind: PointerKind, inner: Type)
+    Tuple([Type])
+    Array(element: Type, size: Expr?)
+    Function(params: [Type], ret: Type?)
+    Union([Type])
+    DynTrait(text)
+    Optional(Type)
+    Constructor(target: Type, args: [Type]?)
+    Simd(lanes: i64, element: Type)
+    UnitWithRepr(name: text, representation: ReprType?, constraints: UnitReprConstraints)
+    SelfType
+    TypeBinding(name: text, value: Type)
+    ConstKeySet(keys: [text])
+    DependentKeys(source: text)
+
+enum ReprType:
+    U8
+    U16
+    U32
+    U64
+    I8
+    I16
+    I32
+    I64
+
+struct UnitReprConstraints:
+    range_start: Expr?
+    range_end: Expr?
+    checked: bool
+    saturate: bool
+    wrap: bool
+
+# === Pattern ===
+
+enum Pattern:
+    Wildcard
+    Identifier(text)
+    MutIdentifier(text)
+    MoveIdentifier(text)
+    Literal(Expr)
+    Tuple([Pattern])
+    Array([Pattern])
+    StructPattern(name: text, fields: [(text, Pattern)])
+    EnumPattern(name: text, variant: text, payload: [Pattern]?)
+    Or([Pattern])
+    Typed(pattern: Pattern, ty: Type)
+    Range(start: Expr, end: Expr, inclusive: bool)
+    Rest
+
+# === Expression ===
+
+enum Expr:
+    # Literals
+    Integer(i64)
+    Float(f64)
+    TypedInteger(i64, NumericSuffix)
+    TypedFloat(f64, NumericSuffix)
+    String(text)
+    TypedString(text, text)
+    FString(parts: [FStringPart])
+    Bool(bool)
+    Nil
+    Symbol(text)
+    I18nString(name: text, default_text: text)
+    I18nTemplate(name: text, parts: [FStringPart], args: [(text, Expr)])
+    I18nRef(text)
+
+    # Compound
+    Identifier(text)
+    Path([text])
+    Binary(op: BinOp, left: Expr, right: Expr)
+    Unary(op: UnaryOp, operand: Expr)
+    Call(callee: Expr, args: [Argument])
+    MethodCall(receiver: Expr, method: text, args: [Argument])
+    FieldAccess(receiver: Expr, field: text)
+    Index(receiver: Expr, index: Expr)
+    TupleIndex(receiver: Expr, index: i64)
+    Lambda(params: [LambdaParam], body: Expr, move_mode: MoveMode, capture_all: bool)
+    IfExpr(let_pattern: Pattern?, condition: Expr, then_branch: Expr, else_branch: Expr?)
+    MatchCase(subject: Expr, arms: [MatchArm])
+    Tuple([Expr])
+    Array([Expr])
+    ArrayRepeat(value: Expr, count: Expr)
+    VecLiteral([Expr])
+    Dict([(Expr, Expr)])
+    ListComprehension(expr: Expr, pattern: Pattern, iterable: Expr, condition: Expr?)
+    DictComprehension(key: Expr, value: Expr, pattern: Pattern, iterable: Expr, condition: Expr?)
+    Slice(receiver: Expr, start: Expr?, end: Expr?, step: Expr?)
+    Spread(Expr)
+    DictSpread(Expr)
+    StructInit(name: text, fields: [(text, Expr)])
+    Spawn(Expr)
+    Go(args: [Expr], params: [text], body: Expr)
+    Await(Expr)
+    Yield(Expr?)
+    New(kind: PointerKind, expr: Expr)
+    Cast(expr: Expr, target_type: Type)
+    Range(start: Expr?, end: Expr?, bound: RangeBound)
+    FunctionalUpdate(target: Expr, method: text, args: [Argument])
+    MacroInvocation(name: text, args: [MacroArg])
+    Try(Expr)
+    ExistsCheck(Expr)
+    UnwrapOr(expr: Expr, default: Expr)
+    UnwrapElse(expr: Expr, fallback_fn: Expr)
+    UnwrapOrReturn(Expr)
+    CastOr(expr: Expr, target_type: Type, default: Expr)
+    CastElse(expr: Expr, target_type: Type, fallback_fn: Expr)
+    CastOrReturn(expr: Expr, target_type: Type)
+    Coalesce(expr: Expr, default: Expr)
+    OptionalChain(expr: Expr, field: text)
+    OptionalMethodCall(receiver: Expr, method: text, args: [Argument])
+    ContractResult
+    ContractOld(Expr)
+    Forall(pattern: Pattern, range: Expr, predicate: Expr)
+    Exists(pattern: Pattern, range: Expr, predicate: Expr)
+    DoBlock([Node])
+    GridLiteral(rows: [[Expr]], device: text?)
+    TensorLiteral(dtype: text, dims: [(text, i64)], mode: TensorMode, device: text?)
+    BlockExpr(kind: text, payload: text)
+
+enum TensorMode:
+    SliceMode([TensorSlice])
+    FlatMode(default: Expr?, values: [[Expr]])
+
+struct TensorSlice:
+    dim_name: text
+    dim_value: i64
+    content: TensorSliceContent
+
+enum TensorSliceContent:
+    NestedSlices([TensorSlice])
+    GridRows([[Expr]])
+
+# === Definition Nodes ===
+
+struct FunctionDef:
+    span: Span
+    name: text
+    generic_params: [text]
+    params: [Parameter]
+    return_type: Type?
+    where_clause: WhereClause
+    body: Block
+    visibility: Visibility
+    effects: [Effect]
+    decorators: [Decorator]
+    attributes: [Attribute]
+    doc_comment: DocComment?
+    contract: ContractBlock?
+    is_abstract: bool
+    is_sync: bool
+    bounds_block: BoundsBlock?
+    is_static: bool
+    is_me_method: bool
+    is_generator: bool
+    return_constraint: Expr?
+    is_generic_template: bool
+    specialization_of: text?
+    type_bindings: Dict<text, Type>
+
+struct StructDef:
+    span: Span
+    name: text
+    generic_params: [GenericParam]
+    fields: [Field]
+    visibility: Visibility
+    attributes: [Attribute]
+    doc_comment: DocComment?
+    where_clause: WhereClause
+
+struct ClassDef:
+    span: Span
+    name: text
+    generic_params: [GenericParam]
+    fields: [Field]
+    methods: [FunctionDef]
+    visibility: Visibility
+    attributes: [Attribute]
+    doc_comment: DocComment?
+    parent: text?
+    mixins: [text]
+    where_clause: WhereClause
+
+struct EnumDef:
+    span: Span
+    name: text
+    generic_params: [GenericParam]
+    variants: [EnumVariant]
+    visibility: Visibility
+    attributes: [Attribute]
+    doc_comment: DocComment?
+
+struct TraitDef:
+    span: Span
+    name: text
+    generic_params: [GenericParam]
+    methods: [FunctionDef]
+    associated_types: [AssociatedTypeDef]
+    visibility: Visibility
+    attributes: [Attribute]
+    doc_comment: DocComment?
+    super_traits: [text]
+    where_clause: WhereClause
+
+struct ImplBlock:
+    span: Span
+    target: text
+    trait_name: text?
+    generic_params: [GenericParam]
+    methods: [FunctionDef]
+    associated_types: [AssociatedTypeImpl]
+    where_clause: WhereClause
+
+struct MixinDef:
+    span: Span
+    name: text
+    methods: [FunctionDef]
+    visibility: Visibility
+
+struct ActorDef:
+    span: Span
+    name: text
+    fields: [Field]
+    methods: [FunctionDef]
+    visibility: Visibility
+
+struct TypeAliasDef:
+    span: Span
+    name: text
+    generic_params: [GenericParam]
+    target: Type
+    visibility: Visibility
+
+struct ClassAliasDef:
+    span: Span
+    name: text
+    target: text
+    visibility: Visibility
+
+struct FunctionAliasDef:
+    span: Span
+    name: text
+    target: text
+    visibility: Visibility
+
+struct ExternDef:
+    span: Span
+    name: text
+    params: [Parameter]
+    return_type: Type?
+    abi: text?
+    visibility: Visibility
+
+struct ExternClassDef:
+    span: Span
+    name: text
+    methods: [ExternDef]
+    visibility: Visibility
+
+struct MacroDef:
+    span: Span
+    name: text
+    params: [text]
+    body: Block
+    visibility: Visibility
+
+struct UnitDef:
+    span: Span
+    name: text
+    base_type: Type?
+    visibility: Visibility
+
+struct UnitFamilyDef:
+    span: Span
+    name: text
+    units: [text]
+    visibility: Visibility
+
+struct CompoundUnitDef:
+    span: Span
+    name: text
+    components: [(text, i64)]
+    visibility: Visibility
+
+struct HandlePoolDef:
+    span: Span
+    name: text
+    ty: Type
+    visibility: Visibility
+
+struct LiteralFunctionDef:
+    span: Span
+    suffix: text
+    params: [Parameter]
+    return_type: Type?
+    body: Block
+    visibility: Visibility
+
+struct BitfieldDef:
+    span: Span
+    name: text
+    fields: [Field]
+    visibility: Visibility
+
+struct InterfaceBinding:
+    span: Span
+    interface_name: text
+    impl_name: text
+
+struct BoundsBlock:
+    span: Span
+    bounds: [Expr]
+
+# === Contract Types ===
+
+struct ContractBlock:
+    preconditions: [ContractClause]
+    postconditions: [ContractClause]
+    invariants: [ContractClause]
+
+struct ContractClause:
+    span: Span
+    condition: Expr
+    message: text?
+
+struct InvariantBlock:
+    span: Span
+    conditions: [ContractClause]
+
+# === Statement Nodes ===
+
+struct LetStmt:
+    span: Span
+    pattern: Pattern
+    ty: Type?
+    value: Expr?
+    mutability: Mutability
+    storage_class: StorageClass
+    is_ghost: bool
+    is_suspend: bool
+
+struct ConstStmt:
+    span: Span
+    name: text
+    ty: Type?
+    value: Expr
+    visibility: Visibility
+
+struct StaticStmt:
+    span: Span
+    name: text
+    ty: Type?
+    value: Expr
+    mutability: Mutability
+    visibility: Visibility
+
+struct AssignmentStmt:
+    span: Span
+    target: Expr
+    op: AssignOp
+    value: Expr
+
+struct ReturnStmt:
+    span: Span
+    value: Expr?
+
+struct IfStmt:
+    span: Span
+    let_pattern: Pattern?
+    condition: Expr
+    then_block: Block
+    elif_branches: [(Expr, Block)]
+    else_block: Block?
+    is_suspend: bool
+
+struct MatchStmt:
+    span: Span
+    subject: Expr
+    arms: [MatchArm]
+    is_suspend: bool
+
+struct ForStmt:
+    span: Span
+    pattern: Pattern
+    iterable: Expr
+    body: Block
+    is_suspend: bool
+    auto_enumerate: bool
+    invariants: [ContractClause]
+
+struct WhileStmt:
+    span: Span
+    let_pattern: Pattern?
+    condition: Expr
+    body: Block
+    is_suspend: bool
+    invariants: [ContractClause]
+
+struct LoopStmt:
+    span: Span
+    body: Block
+
+struct BreakStmt:
+    span: Span
+    value: Expr?
+
+struct ContinueStmt:
+    span: Span
+
+struct PassStmt:
+    span: Span
+
+struct SkipStmt:
+    span: Span
+    body: SkipBody
+
+enum SkipBody:
+    Standalone
+    BlockBody(Block)
+
+struct DeferStmt:
+    span: Span
+    body: DeferBody
+
+enum DeferBody:
+    ExprBody(Expr)
+    BlockBody(Block)
+
+struct GuardStmt:
+    span: Span
+    condition: Expr?
+    result: Expr
+
+struct AssertStmt:
+    span: Span
+    condition: Expr
+    message: text?
+
+struct AssumeStmt:
+    span: Span
+    condition: Expr
+    message: text?
+
+struct AdmitStmt:
+    span: Span
+    condition: Expr
+    message: text?
+
+struct ProofHintStmt:
+    span: Span
+    hint: text
+
+struct CalcStmt:
+    span: Span
+    steps: [CalcStep]
+
+struct CalcStep:
+    span: Span
+    expr: Expr
+    justification: text?
+
+struct ContextStmt:
+    span: Span
+    context: Expr
+    body: Block
+
+struct WithStmt:
+    span: Span
+    resource: Expr
+    name: text?
+    body: Block
+
+struct LeanBlock:
+    span: Span
+    import_path: text?
+    code: text
+
+# === Module System Nodes ===
+
+struct ModulePath:
+    segments: [text]
+
+enum ImportTarget:
+    Single(text)
+    Aliased(name: text, alias: text)
+    Group([ImportTarget])
+    Glob
+
+struct ModDecl:
+    span: Span
+    name: text
+    visibility: Visibility
+    attributes: [Attribute]
+    body: [Node]?
+
+struct UseStmt:
+    span: Span
+    path: ModulePath
+    target: ImportTarget
+    is_type_only: bool
+
+struct MultiUse:
+    span: Span
+    imports: [(ModulePath, ImportTarget)]
+    is_type_only: bool
+
+struct CommonUseStmt:
+    span: Span
+    path: ModulePath
+    target: ImportTarget
+
+struct ExportUseStmt:
+    span: Span
+    path: ModulePath
+    target: ImportTarget
+
+struct AutoImportStmt:
+    span: Span
+    path: ModulePath
+    macro_name: text
+
+enum StructuredExportEntry:
+    Single(text)
+    Aliased(name: text, alias: text)
+    FromModule(path: ModulePath, items: [ImportTarget])
+    GlobExport(ModulePath)
+
+struct StructuredExportBlock:
+    span: Span
+    entries: [StructuredExportEntry]
+
+struct RequiresCapabilitiesStmt:
+    span: Span
+    capabilities: [Capability]
+
+struct UnfoldStmt:
+    """Package unfold declaration marking a package as namespace-only.
+
+    When a package has an unfold declaration, direct imports of that package
+    become errors - users must import the unfolded subpackages instead.
+
+    Syntax: `unfold {subpkg1, subpkg2, ...}`
+    """
+    span: Span
+    subpackages: [text]
+
+# === AOP Nodes ===
+
+struct AopAdvice:
+    span: Span
+    pointcut: text
+    handler: Expr
+
+struct DiBinding:
+    span: Span
+    pointcut: text
+    impl_expr: Expr
+
+struct ArchitectureRule:
+    span: Span
+    kind: text
+    pointcut: text
+
+struct MockDecl:
+    span: Span
+    name: text
+    trait_name: text
+    methods: [FunctionDef]
+
+# === Main Node enum ===
+
+enum Node:
+    # Definitions
+    Function(FunctionDef)
+    Struct(StructDef)
+    Bitfield(BitfieldDef)
+    Class(ClassDef)
+    Enum(EnumDef)
+    Trait(TraitDef)
+    Impl(ImplBlock)
+    InterfaceBindingNode(InterfaceBinding)
+    Mixin(MixinDef)
+    Actor(ActorDef)
+    TypeAlias(TypeAliasDef)
+    ClassAliasNode(ClassAliasDef)
+    FunctionAliasNode(FunctionAliasDef)
+    Extern(ExternDef)
+    ExternClass(ExternClassDef)
+    MacroNode(MacroDef)
+    UnitNode(UnitDef)
+    UnitFamily(UnitFamilyDef)
+    CompoundUnit(CompoundUnitDef)
+    HandlePoolNode(HandlePoolDef)
+    LiteralFunction(LiteralFunctionDef)
+
+    # Module system
+    ModDeclNode(ModDecl)
+    UseStmtNode(UseStmt)
+    MultiUseNode(MultiUse)
+    CommonUseStmtNode(CommonUseStmt)
+    ExportUseStmtNode(ExportUseStmt)
+    StructuredExportStmt(StructuredExportBlock)
+    AutoImportStmtNode(AutoImportStmt)
+    RequiresCapabilitiesNode(RequiresCapabilitiesStmt)
+    UnfoldStmtNode(UnfoldStmt)
+
+    # AOP
+    AopAdviceNode(AopAdvice)
+    DiBindingNode(DiBinding)
+    ArchitectureRuleNode(ArchitectureRule)
+    MockDeclNode(MockDecl)
+
+    # Statements
+    Let(LetStmt)
+    Const(ConstStmt)
+    Static(StaticStmt)
+    Assignment(AssignmentStmt)
+    Return(ReturnStmt)
+    If(IfStmt)
+    Match(MatchStmt)
+    ForNode(ForStmt)
+    WhileNode(WhileStmt)
+    LoopNode(LoopStmt)
+    Break(BreakStmt)
+    ContinueNode(ContinueStmt)
+    PassNode(PassStmt)
+    SkipNode(SkipStmt)
+    DeferNode(DeferStmt)
+    Guard(GuardStmt)
+    AssertNode(AssertStmt)
+    AssumeNode(AssumeStmt)
+    AdmitNode(AdmitStmt)
+    ProofHint(ProofHintStmt)
+    CalcNode(CalcStmt)
+    ContextNode(ContextStmt)
+    WithNode(WithStmt)
+    Expression(Expr)
+    LeanBlockNode(LeanBlock)

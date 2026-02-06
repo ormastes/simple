@@ -1,0 +1,239 @@
+# Test Database Migration and Repair Tool
+#
+# Repairs corrupted databases, validates integrity, and provides migration utilities.
+
+use test_db_parser_robust.{parse_stable_db_robust, parse_volatile_db_robust}
+use test_db_serializer.{serialize_stable_db, serialize_volatile_db}
+use test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
+use app.io.mod (file_exists, file_copy, eprintln)
+
+# =========================================================================
+# Migration Report
+# =========================================================================
+
+struct MigrationReport:
+    success: bool
+    stable_errors_found: i64
+    volatile_errors_found: i64
+    stable_rows_recovered: i64
+    volatile_rows_recovered: i64
+    backup_created: bool
+    message: text
+
+impl MigrationReport:
+    fn summary() -> text:
+        if not self.success:
+            return "Migration failed: {self.message}"
+
+        var parts: List<text> = []
+        parts.push("Migration completed successfully")
+
+        if self.stable_errors_found > 0:
+            parts.push("  - Stable DB: recovered {self.stable_rows_recovered} rows ({self.stable_errors_found} errors)")
+        else:
+            parts.push("  - Stable DB: no errors found")
+
+        if self.volatile_errors_found > 0:
+            parts.push("  - Volatile DB: recovered {self.volatile_rows_recovered} rows ({self.volatile_errors_found} errors)")
+        else:
+            parts.push("  - Volatile DB: no errors found")
+
+        if self.backup_created:
+            parts.push("  - Backups created: test_db.sdn.backup, test_db_runs.sdn.backup")
+
+        parts.join("\n")
+
+# =========================================================================
+# Migration Functions
+# =========================================================================
+
+fn migrate_databases() -> MigrationReport:
+    """Migrate and repair both stable and volatile databases."""
+    var report = MigrationReport(
+        success: false,
+        stable_errors_found: 0,
+        volatile_errors_found: 0,
+        stable_rows_recovered: 0,
+        volatile_rows_recovered: 0,
+        backup_created: false,
+        message: ""
+    )
+
+    # Migrate stable database
+    val stable_result = migrate_stable_db()
+    if stable_result.err.?:
+        report.message = "Stable DB migration failed: {stable_result.unwrap_err()}"
+        return report
+
+    val (stable_errors, stable_recovered) = stable_result.unwrap()
+    report.stable_errors_found = stable_errors
+    report.stable_rows_recovered = stable_recovered
+
+    # Migrate volatile database
+    val volatile_result = migrate_volatile_db()
+    if volatile_result.err.?:
+        report.message = "Volatile DB migration failed: {volatile_result.unwrap_err()}"
+        return report
+
+    val (volatile_errors, volatile_recovered) = volatile_result.unwrap()
+    report.volatile_errors_found = volatile_errors
+    report.volatile_rows_recovered = volatile_recovered
+
+    report.success = true
+    report.backup_created = true
+    report
+
+fn migrate_stable_db() -> Result<(i64, i64), text>:
+    """Migrate and repair test_db.sdn."""
+    if not file_exists(DB_PATH):
+        return Ok((0, 0))  # No file, nothing to migrate
+
+    # Create backup
+    val backup_path = "{DB_PATH}.backup"
+    file_copy(DB_PATH, backup_path)
+
+    # Read and parse with robust parser
+    val read_result = read_db_file(DB_PATH)
+    if read_result.err.?:
+        return Err(read_result.unwrap_err())
+
+    val content = read_result.unwrap()
+    if content.trim() == "":
+        return Ok((0, 0))  # Empty file
+
+    val parsed = parse_stable_db_robust(content)
+    val errors = parsed.stats.skipped_rows
+    val recovered = parsed.tests.len() + parsed.files.len() + parsed.suites.len()
+
+    # Re-serialize to clean format
+    val clean_content = serialize_stable_db(
+        parsed.interner, parsed.files, parsed.suites, parsed.tests
+    )
+
+    # Write back
+    val write_result = write_db_file_locked(DB_PATH, clean_content)
+    if write_result.err.?:
+        return Err(write_result.unwrap_err())
+
+    Ok((errors, recovered))
+
+fn migrate_volatile_db() -> Result<(i64, i64), text>:
+    """Migrate and repair test_db_runs.sdn."""
+    if not file_exists(RUNS_PATH):
+        return Ok((0, 0))  # No file, nothing to migrate
+
+    # Create backup
+    val backup_path = "{RUNS_PATH}.backup"
+    file_copy(RUNS_PATH, backup_path)
+
+    # Read and parse with robust parser
+    val read_result = read_db_file(RUNS_PATH)
+    if read_result.err.?:
+        return Err(read_result.unwrap_err())
+
+    val content = read_result.unwrap()
+    if content.trim() == "":
+        return Ok((0, 0))  # Empty file
+
+    val parsed = parse_volatile_db_robust(content)
+    val errors = parsed.stats.skipped_rows
+    val recovered = parsed.counters.len() + parsed.timing.len() +
+                   parsed.timing_runs.len() + parsed.test_runs.len()
+
+    # Re-serialize to clean format
+    val clean_content = serialize_volatile_db(
+        parsed.counters, parsed.timing, parsed.timing_runs,
+        parsed.changes, parsed.test_runs
+    )
+
+    # Write back
+    val write_result = write_db_file_locked(RUNS_PATH, clean_content)
+    if write_result.err.?:
+        return Err(write_result.unwrap_err())
+
+    Ok((errors, recovered))
+
+# =========================================================================
+# Validation Functions
+# =========================================================================
+
+fn validate_databases() -> (bool, List<text>):
+    """Validate both databases and return (is_valid, issues)."""
+    var issues: List<text> = []
+
+    # Validate stable database
+    if file_exists(DB_PATH):
+        val stable_result = read_db_file(DB_PATH)
+        if stable_result.ok.?:
+            val content = stable_result.unwrap()
+            if content.trim() != "":
+                val parsed = parse_stable_db_robust(content)
+                if parsed.stats.has_errors():
+                    issues.push("Stable DB has {parsed.stats.skipped_rows} corrupted rows")
+                    for err in parsed.stats.errors:
+                        issues.push("  - {err}")
+
+    # Validate volatile database
+    if file_exists(RUNS_PATH):
+        val volatile_result = read_db_file(RUNS_PATH)
+        if volatile_result.ok.?:
+            val content = volatile_result.unwrap()
+            if content.trim() != "":
+                val parsed = parse_volatile_db_robust(content)
+                if parsed.stats.has_errors():
+                    issues.push("Volatile DB has {parsed.stats.skipped_rows} corrupted rows")
+                    for err in parsed.stats.errors:
+                        issues.push("  - {err}")
+
+    (issues.len() == 0, issues)
+
+# =========================================================================
+# CLI Interface
+# =========================================================================
+
+fn run_migration_cli():
+    """Run migration from command line."""
+    print "Test Database Migration Tool"
+    print "===========================\n"
+
+    # First, validate
+    print "Step 1: Validating databases..."
+    val (is_valid, issues) = validate_databases()
+
+    if is_valid:
+        print "✓ Databases are valid, no migration needed\n"
+        return
+
+    print "✗ Found issues:\n"
+    for issue in issues:
+        print "  {issue}"
+    print ""
+
+    # Run migration
+    print "Step 2: Running migration..."
+    val report = migrate_databases()
+
+    print ""
+    print report.summary()
+    print ""
+
+    if report.success:
+        # Verify after migration
+        print "Step 3: Verifying repaired databases..."
+        val (is_valid_after, issues_after) = validate_databases()
+
+        if is_valid_after:
+            print "✓ Verification passed - databases repaired successfully\n"
+        else:
+            print "⚠ Verification found remaining issues:\n"
+            for issue in issues_after:
+                print "  {issue}"
+            print ""
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export migrate_databases, migrate_stable_db, migrate_volatile_db
+export validate_databases, run_migration_cli
+export MigrationReport

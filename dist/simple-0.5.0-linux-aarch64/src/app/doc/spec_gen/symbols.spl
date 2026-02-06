@@ -1,0 +1,231 @@
+# Spec Generator - Symbol Extraction Module
+# Extracts symbols from test cases using hybrid approach
+
+use app.io
+use app.doc.spec_gen.types (TestCase)
+
+export extract_symbols_hybrid, convert_test_name_to_symbols, extract_symbols_from_docstring, scan_code_for_symbols
+
+fn extract_symbols_hybrid(test_case: TestCase) -> [text]:
+    """Extract symbols using hybrid approach:
+    1. Explicit docstring metadata
+    2. Test name conversion
+    3. Code scanning
+    """
+    var all_symbols = []
+
+    # Method 1: Explicit docstring links
+    val doc_symbols = extract_symbols_from_docstring(test_case.docstring)
+    all_symbols = all_symbols.merge(doc_symbols)
+
+    # Method 2: Test name conversion
+    val name_symbols = convert_test_name_to_symbols(test_case.name)
+    all_symbols = all_symbols.merge(name_symbols)
+
+    # Method 3: Code scanning
+    val code_symbols = scan_code_for_symbols(test_case.code)
+    all_symbols = all_symbols.merge(code_symbols)
+
+    # Deduplicate
+    deduplicate(all_symbols)
+
+fn convert_test_name_to_symbols(test_name: text) -> [text]:
+    """Convert test name to potential symbol names
+
+    Examples:
+        type_inference_basic -> ["type_inference", "TypeInference"]
+        apply_subst_generic -> ["apply_subst", "ApplySubst"]
+    """
+    # Remove common prefixes
+    var name = test_name.replace("test_", "").replace("_test", "")
+
+    # Split by underscore
+    val parts = name.split("_")
+
+    # Filter out numbers and common suffixes
+    var filtered = []
+    for part in parts:
+        if not is_number(part) and not is_common_suffix(part):
+            filtered = filtered + [part]
+
+    if filtered.len() == 0:
+        return []
+
+    var symbols = []
+
+    # Snake case (function name): type_inference
+    val snake_case = filtered.join("_")
+    symbols = symbols + [snake_case]
+
+    # Pascal case (type name): TypeInference
+    var pascal_parts = []
+    for part in filtered:
+        pascal_parts = pascal_parts + [capitalize(part)]
+    val pascal_case = pascal_parts.join("")
+    symbols = symbols + [pascal_case]
+
+    # Individual parts
+    for part in filtered:
+        if part.len() > 2:  # Skip very short parts
+            symbols = symbols + [part]
+            symbols = symbols + [capitalize(part)]
+
+    deduplicate(symbols)
+
+fn extract_symbols_from_docstring(docstring: text) -> [text]:
+    """Extract explicit symbol links from docstring
+
+    Looks for:
+    **Links:** symbol1, symbol2
+    **Symbols:** symbol1, symbol2
+    """
+    var symbols = []
+    val lines = docstring.split("\n")
+
+    for line in lines:
+        # Check for **Links:** or **Symbols:**
+        if line.contains("**Links:**") or line.contains("**Symbols:**"):
+            # Extract everything after the colon
+            val parts = line.split(":**")
+            if parts.len() > 1:
+                val symbol_list = parts[1].trim()
+                # Split by comma
+                val symbol_parts = symbol_list.split(",")
+                for sym in symbol_parts:
+                    val trimmed = sym.trim()
+                    if trimmed.len() > 0:
+                        symbols = symbols + [trimmed]
+
+    symbols
+
+fn scan_code_for_symbols(code: text) -> [text]:
+    """Scan code for potential symbol references
+
+    Looks for:
+    - Function calls: symbol()
+    - Type names: TypeName
+    - Common patterns
+    """
+    var symbols = []
+    val lines = code.split("\n")
+
+    for line in lines:
+        # Look for function calls: word(
+        val words = extract_words(line)
+        for word in words:
+            # Check if followed by (
+            if line.contains("{word}("):
+                if is_valid_symbol(word):
+                    symbols = symbols + [word]
+
+            # Check for capitalized words (types)
+            if starts_with_capital(word) and word.len() > 2:
+                symbols = symbols + [word]
+
+    # Filter out common keywords
+    filter_keywords(symbols)
+
+fn is_number(s: text) -> bool:
+    """Check if string is a number"""
+    if s.len() == 0:
+        return false
+
+    for i in 0..s.len():
+        val ch = s[i]
+        if ch < '0' or ch > '9':
+            return false
+
+    true
+
+fn is_common_suffix(s: text) -> bool:
+    """Check if string is a common suffix to filter"""
+    val suffixes = ["basic", "advanced", "simple", "complex", "test"]
+    for suffix in suffixes:
+        if s == suffix:
+            return true
+    false
+
+fn is_valid_symbol(s: text) -> bool:
+    """Check if string is a valid symbol name"""
+    if s.len() <= 2:
+        return false
+
+    # Check first character is letter or underscore
+    val first = s[0]
+    if not ((first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_'):
+        return false
+
+    true
+
+fn starts_with_capital(s: text) -> bool:
+    """Check if string starts with capital letter"""
+    if s.len() == 0:
+        return false
+
+    val first = s[0]
+    first >= 'A' and first <= 'Z'
+
+fn capitalize(s: text) -> text:
+    """Capitalize first letter of string"""
+    if s.len() == 0:
+        return s
+
+    val first = s[0]
+    if first >= 'a' and first <= 'z':
+        val upper = (first - 32) as char  # Convert to uppercase
+        return "{upper}{s.substring(1, s.len())}"
+
+    s
+
+fn extract_words(line: text) -> [text]:
+    """Extract words from a line of code"""
+    var words = []
+    var current = ""
+
+    for i in 0..line.len():
+        val ch = line[i]
+        if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_':
+            current = current + "{ch}"
+        else:
+            if current.len() > 0:
+                words = words + [current]
+                current = ""
+
+    if current.len() > 0:
+        words = words + [current]
+
+    words
+
+fn filter_keywords(symbols: [text]) -> [text]:
+    """Filter out common keywords"""
+    val keywords = ["Int", "Str", "Bool", "None", "Some", "if", "else", "val", "var", "fn", "for", "while", "return"]
+    var filtered = []
+
+    for sym in symbols:
+        var is_keyword = false
+        for kw in keywords:
+            if sym == kw:
+                is_keyword = true
+                break
+        if not is_keyword:
+            filtered = filtered + [sym]
+
+    filtered
+
+fn deduplicate(items: [text]) -> [text]:
+    """Remove duplicates from list"""
+    var seen = []
+    var result = []
+
+    for item in items:
+        var already_seen = false
+        for s in seen:
+            if s == item:
+                already_seen = true
+                break
+
+        if not already_seen:
+            seen = seen + [item]
+            result = result + [item]
+
+    result

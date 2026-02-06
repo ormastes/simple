@@ -1,0 +1,480 @@
+# Message Transfer
+#
+# Intelligent message passing between actors using size-based strategy:
+# - Small values (< 64 bytes): Deep copy (fast for small data)
+# - Large values (>= 64 bytes): Reference counted, zero-copy
+#
+# This module bridges actors with the shared heap for efficient
+# large value transfer without copying.
+#
+# References:
+# - Erlang message passing: https://www.erlang.org/blog/message-passing/
+# - BEAM internals: "Messages > 64 bytes use reference counting"
+
+from refc_binary import {
+    RefcBinary,
+    BinaryRef,
+    SharedHeap,
+    SharedHeapConfig,
+    AllocResult,
+    SMALL_BINARY_THRESHOLD,
+    CopyStrategy,
+    get_shared_heap,
+    shared_heap_allocate,
+    shared_heap_incref,
+    shared_heap_decref
+}
+
+export MessageTransfer, TransferResult, TransferStats, ValueWrapper
+export send_value, receive_value, estimate_size
+
+# ============================================================================
+# Value Wrapper
+# ============================================================================
+
+enum ValueWrapper:
+    """Wrapper for values being transferred between actors.
+
+    Small values are stored inline (copied).
+    Large values are stored as references to shared heap.
+    """
+    # Inline small values (copied between actors)
+    InlineNil
+    InlineInt(value: i64)
+    InlineFloat(value: f64)
+    InlineBool(value: bool)
+    InlineSmallText(value: text)       # < 64 bytes
+    InlineSmallArray(values: [ValueWrapper])  # Total size < 64 bytes
+
+    # Reference to shared heap (zero-copy)
+    SharedRef(ref: BinaryRef)
+
+    # Composite with mixed strategy
+    Composite(parts: [ValueWrapper])
+
+impl ValueWrapper:
+    fn is_shared() -> bool:
+        """Check if this wrapper uses shared heap."""
+        match self:
+            case SharedRef(_): true
+            case Composite(parts):
+                parts.any(\p: p.is_shared())
+            case _: false
+
+    fn estimated_size() -> i64:
+        """Estimate size of wrapped value in bytes."""
+        match self:
+            case InlineNil: 1
+            case InlineInt(_): 8
+            case InlineFloat(_): 8
+            case InlineBool(_): 1
+            case InlineSmallText(s): s.len()
+            case InlineSmallArray(vs):
+                vs.fold(0, \acc, v: acc + v.estimated_size())
+            case SharedRef(ref): ref.length
+            case Composite(parts):
+                parts.fold(0, \acc, p: acc + p.estimated_size())
+
+    fn shared_refs() -> [BinaryRef]:
+        """Get all shared references in this wrapper."""
+        match self:
+            case SharedRef(ref): [ref]
+            case Composite(parts):
+                parts.flat_map(\p: p.shared_refs())
+            case _: []
+
+impl Display for ValueWrapper:
+    fn fmt() -> text:
+        match self:
+            case InlineNil: "nil"
+            case InlineInt(v): "Int({v})"
+            case InlineFloat(v): "Float({v})"
+            case InlineBool(v): "Bool({v})"
+            case InlineSmallText(s): "Text(\"{s}\")"
+            case InlineSmallArray(vs): "Array[{vs.len()}]"
+            case SharedRef(ref): "Shared({ref})"
+            case Composite(parts): "Composite[{parts.len()}]"
+
+# ============================================================================
+# Transfer Statistics
+# ============================================================================
+
+struct TransferStats:
+    """Statistics for message transfer operations."""
+    # Transfer counts
+    total_transfers: i64
+    inline_transfers: i64      # Small values (copied)
+    shared_transfers: i64      # Large values (zero-copy)
+
+    # Bytes transferred
+    total_bytes: i64
+    inline_bytes: i64
+    shared_bytes: i64
+
+    # Savings
+    bytes_saved: i64           # Bytes not copied due to sharing
+
+    # Errors
+    failed_transfers: i64
+
+impl TransferStats:
+    static fn new() -> TransferStats:
+        TransferStats(
+            total_transfers: 0,
+            inline_transfers: 0,
+            shared_transfers: 0,
+            total_bytes: 0,
+            inline_bytes: 0,
+            shared_bytes: 0,
+            bytes_saved: 0,
+            failed_transfers: 0
+        )
+
+    fn sharing_ratio() -> f64:
+        """Ratio of shared transfers to total."""
+        if self.total_transfers == 0:
+            0.0
+        else:
+            (self.shared_transfers as f64) / (self.total_transfers as f64)
+
+    fn efficiency() -> f64:
+        """Byte efficiency (higher = more sharing)."""
+        val total = self.inline_bytes + self.shared_bytes
+        if total == 0:
+            1.0
+        else:
+            1.0 - ((self.inline_bytes as f64) / (total as f64))
+
+impl Display for TransferStats:
+    fn fmt() -> text:
+        "TransferStats(total={self.total_transfers}, shared={self.shared_transfers}, saved={self.bytes_saved})"
+
+# ============================================================================
+# Transfer Result
+# ============================================================================
+
+enum TransferResult:
+    """Result of a message transfer operation."""
+    Success(wrapper: ValueWrapper)
+    OutOfMemory
+    ValueTooLarge
+    InvalidValue
+    HeapError(message: text)
+
+impl TransferResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_): true
+            case _: false
+
+    fn unwrap() -> ValueWrapper:
+        match self:
+            case Success(w): w
+            case _: panic("TransferResult.unwrap() on failure")
+
+    fn wrapper() -> ValueWrapper?:
+        match self:
+            case Success(w): Some(w)
+            case _: None
+
+# ============================================================================
+# Message Transfer
+# ============================================================================
+
+struct MessageTransfer:
+    """Handles efficient message transfer between actors.
+
+    Automatically selects the best strategy based on value size:
+    - Small values: Inline copy (fast, no heap allocation)
+    - Large values: Shared heap reference (zero-copy)
+
+    Example:
+        val transfer = MessageTransfer.new()
+
+        # Wrap value for sending
+        val result = transfer.wrap_for_send(large_binary)
+        match result:
+            case Success(wrapper):
+                send_to_mailbox(actor_id, wrapper)
+            case OutOfMemory:
+                handle_backpressure()
+
+        # Unwrap on receive
+        val value = transfer.unwrap_on_receive(wrapper)
+    """
+    shared_heap: SharedHeap
+    stats: TransferStats
+    strategy: CopyStrategy
+
+impl MessageTransfer:
+    static fn new() -> MessageTransfer:
+        MessageTransfer(
+            shared_heap: get_shared_heap(),
+            stats: TransferStats.new(),
+            strategy: CopyStrategy.Hybrid
+        )
+
+    static fn with_heap(heap: SharedHeap) -> MessageTransfer:
+        MessageTransfer(
+            shared_heap: heap,
+            stats: TransferStats.new(),
+            strategy: CopyStrategy.Hybrid
+        )
+
+    static fn always_copy() -> MessageTransfer:
+        """Create transfer that always copies (for testing)."""
+        MessageTransfer(
+            shared_heap: get_shared_heap(),
+            stats: TransferStats.new(),
+            strategy: CopyStrategy.DeepCopy
+        )
+
+    static fn always_share() -> MessageTransfer:
+        """Create transfer that always shares (for testing)."""
+        MessageTransfer(
+            shared_heap: get_shared_heap(),
+            stats: TransferStats.new(),
+            strategy: CopyStrategy.ShareRef
+        )
+
+    # --------------------------------------------------------------------------
+    # Wrapping for send
+    # --------------------------------------------------------------------------
+
+    me wrap_for_send(data_ptr: i64, size: i64, value_type: ValueType) -> TransferResult:
+        """Wrap a value for sending to another actor.
+
+        Small values are wrapped inline (will be copied).
+        Large values are stored in shared heap (zero-copy).
+        """
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.total_bytes = self.stats.total_bytes + size
+
+        # Determine strategy
+        val should_share = self.strategy.should_share(size)
+
+        if should_share:
+            # Large value - store in shared heap
+            val result = self.shared_heap.allocate(data_ptr, size)
+            match result:
+                case Success(ref):
+                    self.stats.shared_transfers = self.stats.shared_transfers + 1
+                    self.stats.shared_bytes = self.stats.shared_bytes + size
+                    self.stats.bytes_saved = self.stats.bytes_saved + size
+                    TransferResult.Success(ValueWrapper.SharedRef(ref))
+                case OutOfMemory:
+                    self.stats.failed_transfers = self.stats.failed_transfers + 1
+                    TransferResult.OutOfMemory
+                case TooLarge:
+                    self.stats.failed_transfers = self.stats.failed_transfers + 1
+                    TransferResult.ValueTooLarge
+                case _:
+                    self.stats.failed_transfers = self.stats.failed_transfers + 1
+                    TransferResult.HeapError("Allocation failed")
+        else:
+            # Small value - wrap inline
+            self.stats.inline_transfers = self.stats.inline_transfers + 1
+            self.stats.inline_bytes = self.stats.inline_bytes + size
+
+            val wrapper = self.create_inline_wrapper(data_ptr, size, value_type)
+            TransferResult.Success(wrapper)
+
+    me wrap_nil() -> TransferResult:
+        """Wrap nil value."""
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        TransferResult.Success(ValueWrapper.InlineNil)
+
+    me wrap_int(value: i64) -> TransferResult:
+        """Wrap integer value."""
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.total_bytes = self.stats.total_bytes + 8
+        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        TransferResult.Success(ValueWrapper.InlineInt(value))
+
+    me wrap_float(value: f64) -> TransferResult:
+        """Wrap float value."""
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.total_bytes = self.stats.total_bytes + 8
+        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        TransferResult.Success(ValueWrapper.InlineFloat(value))
+
+    me wrap_bool(value: bool) -> TransferResult:
+        """Wrap boolean value."""
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.total_bytes = self.stats.total_bytes + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + 1
+        TransferResult.Success(ValueWrapper.InlineBool(value))
+
+    me wrap_text(value: text) -> TransferResult:
+        """Wrap text value (auto-selects strategy based on length)."""
+        val size = value.len()
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.total_bytes = self.stats.total_bytes + size
+
+        if self.strategy.should_share(size):
+            # Large text - use shared heap
+            # In real impl, would allocate text bytes in shared heap
+            val result = self.shared_heap.allocate(0, size)  # data_ptr placeholder
+            match result:
+                case Success(ref):
+                    self.stats.shared_transfers = self.stats.shared_transfers + 1
+                    self.stats.shared_bytes = self.stats.shared_bytes + size
+                    self.stats.bytes_saved = self.stats.bytes_saved + size
+                    TransferResult.Success(ValueWrapper.SharedRef(ref))
+                case _:
+                    self.stats.failed_transfers = self.stats.failed_transfers + 1
+                    TransferResult.OutOfMemory
+        else:
+            # Small text - inline
+            self.stats.inline_transfers = self.stats.inline_transfers + 1
+            self.stats.inline_bytes = self.stats.inline_bytes + size
+            TransferResult.Success(ValueWrapper.InlineSmallText(value))
+
+    fn create_inline_wrapper(data_ptr: i64, size: i64, value_type: ValueType) -> ValueWrapper:
+        """Create inline wrapper based on value type."""
+        match value_type:
+            case Nil: ValueWrapper.InlineNil
+            case Int: ValueWrapper.InlineInt(0)  # Would read from data_ptr
+            case Float: ValueWrapper.InlineFloat(0.0)
+            case Bool: ValueWrapper.InlineBool(false)
+            case Text: ValueWrapper.InlineSmallText("")
+            case Array: ValueWrapper.InlineSmallArray([])
+            case _: ValueWrapper.InlineNil
+
+    # --------------------------------------------------------------------------
+    # Incrementing references (for sharing)
+    # --------------------------------------------------------------------------
+
+    me share_wrapper(wrapper: ValueWrapper) -> bool:
+        """Increment refcount for all shared refs in wrapper.
+
+        Call this when passing a wrapper to another actor.
+        """
+        val refs = wrapper.shared_refs()
+        for ref in refs:
+            if not self.shared_heap.incref(ref.id):
+                return false
+        true
+
+    # --------------------------------------------------------------------------
+    # Unwrapping on receive
+    # --------------------------------------------------------------------------
+
+    me release_wrapper(wrapper: ValueWrapper):
+        """Release a wrapper, decrementing refcounts.
+
+        Call this when done with a received wrapper.
+        """
+        val refs = wrapper.shared_refs()
+        for ref in refs:
+            self.shared_heap.decref(ref.id)
+
+    # --------------------------------------------------------------------------
+    # Queries
+    # --------------------------------------------------------------------------
+
+    fn get_stats() -> TransferStats:
+        """Get transfer statistics."""
+        self.stats
+
+    fn heap_stats() -> SharedHeapStats:
+        """Get underlying shared heap statistics."""
+        self.shared_heap.get_stats()
+
+impl Display for MessageTransfer:
+    fn fmt() -> text:
+        "MessageTransfer(transfers={self.stats.total_transfers}, shared={self.stats.shared_transfers})"
+
+# ============================================================================
+# Value Type (for type-aware wrapping)
+# ============================================================================
+
+enum ValueType:
+    """Type of value being transferred."""
+    Nil
+    Int
+    Float
+    Bool
+    Text
+    Array
+    Dict
+    Struct
+    Function
+    Actor
+    Binary
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn estimate_size(value_type: ValueType, data_ptr: i64) -> i64:
+    """Estimate size of a value in bytes."""
+    match value_type:
+        case Nil: 1
+        case Int: 8
+        case Float: 8
+        case Bool: 1
+        case Text: 0  # Would need to read length from data_ptr
+        case Array: 0  # Would need to compute recursively
+        case Dict: 0
+        case Struct: 0
+        case Function: 16
+        case Actor: 8
+        case Binary: 0
+
+fn send_value(data_ptr: i64, size: i64, value_type: ValueType) -> TransferResult:
+    """Convenience function for wrapping a value for send."""
+    var transfer = MessageTransfer.new()
+    transfer.wrap_for_send(data_ptr, size, value_type)
+
+fn receive_value(wrapper: ValueWrapper):
+    """Convenience function for releasing a received wrapper."""
+    var transfer = MessageTransfer.new()
+    transfer.release_wrapper(wrapper)
+
+# ============================================================================
+# Integration with Actor Mailbox
+# ============================================================================
+
+struct MailboxMessage:
+    """A message in an actor's mailbox.
+
+    Contains the wrapped value and metadata.
+    """
+    id: i64
+    sender_id: i64?
+    wrapper: ValueWrapper
+    timestamp: i64
+
+impl MailboxMessage:
+    static fn new(id: i64, sender_id: i64?, wrapper: ValueWrapper) -> MailboxMessage:
+        MailboxMessage(
+            id: id,
+            sender_id: sender_id,
+            wrapper: wrapper,
+            timestamp: current_time_ms()
+        )
+
+    fn size() -> i64:
+        """Estimated size of the message."""
+        self.wrapper.estimated_size()
+
+    fn is_shared() -> bool:
+        """Check if message uses shared heap."""
+        self.wrapper.is_shared()
+
+impl Display for MailboxMessage:
+    fn fmt() -> text:
+        "Message(id={self.id}, size={self.size()}, shared={self.is_shared()})"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn current_time_ms() -> i64:
+    """Get current time in milliseconds (placeholder)."""
+    0

@@ -1,0 +1,165 @@
+# SMF Integration Specification
+#
+# Integration tests for SMF components:
+# - Round-trip serialization/deserialization
+# - Enum preservation through serialization
+# - Byte layout verification
+
+use ..smf_header.*
+use ..smf_enums.*
+use testing.{describe, it, expect}
+
+describe "SMF round-trip serialization":
+    it "preserves all header fields through serialization":
+        # Create a header with various settings
+        var header1 = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        header1.set_executable(true)
+        header1.set_reloadable(true)
+        header1.section_count = 5
+        header1.section_table_offset = 256
+        header1.symbol_table_offset = 512
+        header1.symbol_count = 10
+        header1.exported_count = 3
+        header1.entry_point = 0x1000
+        header1.set_compression(CompressionType.Zstd, 3)
+        header1.set_stub_info(1024, 1024)
+        header1.module_hash = 0x123456789ABCDEF0
+        header1.source_hash = 0xFEDCBA9876543210
+        header1.set_app_type(SmfAppType.Tui)
+        header1.set_window_hints(1024, 768)
+        header1.set_prefetch_hint(true, 8)
+
+        # Serialize to bytes
+        val bytes = header1.to_bytes()
+        expect(bytes.len() == 128)
+
+        # For now, we can at least verify the serialization produces
+        # the correct size and magic number
+        expect(bytes[0] == 83)   # 'S'
+        expect(bytes[1] == 77)   # 'M'
+        expect(bytes[2] == 70)   # 'F'
+        expect(bytes[3] == 0)    # '\0'
+
+describe "Enum preservation":
+    it "preserves Platform enum through u8 conversion":
+        val platforms = [
+            Platform.Any,
+            Platform.Linux,
+            Platform.Windows,
+            Platform.MacOS,
+            Platform.FreeBSD,
+            Platform.None_
+        ]
+
+        for platform in platforms:
+            val u8_val = platform.to_u8()
+            val restored = Platform.from_u8(u8_val)
+            expect(restored == platform)
+
+    it "preserves Arch enum through u8 conversion":
+        val arches = [
+            Arch.X86_64,
+            Arch.Aarch64,
+            Arch.X86,
+            Arch.Arm,
+            Arch.Riscv64,
+            Arch.Riscv32,
+            Arch.Wasm32,
+            Arch.Wasm64
+        ]
+
+        for arch in arches:
+            val u8_val = arch.to_u8()
+            val restored = Arch.from_u8(u8_val)
+            expect(restored == arch)
+
+    it "preserves CompressionType enum through u8 conversion":
+        val compressions = [
+            CompressionType.None_,
+            CompressionType.Zstd,
+            CompressionType.Lz4
+        ]
+
+        for compression in compressions:
+            val u8_val = compression.to_u8()
+            val restored = CompressionType.from_u8(u8_val)
+            expect(restored == compression)
+
+    it "preserves SmfAppType enum through u8 conversion":
+        val app_types = [
+            SmfAppType.Cli,
+            SmfAppType.Tui,
+            SmfAppType.Gui,
+            SmfAppType.Service,
+            SmfAppType.Repl
+        ]
+
+        for app_type in app_types:
+            val u8_val = app_type.to_u8()
+            val restored = SmfAppType.from_u8(u8_val)
+            expect(restored == app_type)
+
+describe "Byte layout verification":
+    it "verifies header structure is exactly 128 bytes":
+        val header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header.to_bytes()
+
+        # Total must be exactly 128 bytes
+        expect(bytes.len() == SMF_HEADER_SIZE)
+
+    it "verifies magic number is at correct position":
+        val header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header.to_bytes()
+
+        # Magic at bytes 0-3
+        expect(bytes[0] == 83)   # 'S'
+        expect(bytes[1] == 77)   # 'M'
+        expect(bytes[2] == 70)   # 'F'
+        expect(bytes[3] == 0)    # '\0'
+
+    it "verifies version fields are at correct positions":
+        val header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header.to_bytes()
+
+        # Version at bytes 4-5
+        expect(bytes[4] == 1)    # major
+        expect(bytes[5] == 1)    # minor
+
+    it "verifies platform and arch are at correct positions":
+        val header = SmfHeader.new_v1_1(Platform.Windows, Arch.Aarch64)
+        val bytes = header.to_bytes()
+
+        # Platform at byte 6, arch at byte 7
+        expect(bytes[6] == Platform.Windows.to_u8())
+        expect(bytes[7] == Arch.Aarch64.to_u8())
+
+describe "Header with different configurations":
+    it "creates minimal header (no flags, no compression)":
+        val header = SmfHeader.new_v1_1(Platform.Any, Arch.X86_64)
+        val bytes = header.to_bytes()
+
+        expect(bytes.len() == 128)
+        expect(not header.is_executable())
+        expect(not header.is_compressed())
+        expect(not header.has_stub())
+
+    it "creates full-featured header":
+        var header = SmfHeader.new_v1_1(Platform.Linux, Arch.X86_64)
+        header.set_executable(true)
+        header.set_reloadable(true)
+        header.set_debug_info(true)
+        header.set_pic(true)
+        header.set_compression(CompressionType.Zstd, 5)
+        header.set_stub_info(4096, 4096)
+        header.set_app_type(SmfAppType.Gui)
+        header.set_window_hints(1920, 1080)
+        header.set_prefetch_hint(true, 20)
+
+        val bytes = header.to_bytes()
+        expect(bytes.len() == 128)
+        expect(header.is_executable())
+        expect(header.is_reloadable())
+        expect(header.has_debug_info())
+        expect(header.is_pic())
+        expect(header.is_compressed())
+        expect(header.has_stub())

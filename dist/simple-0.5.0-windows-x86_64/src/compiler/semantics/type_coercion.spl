@@ -1,0 +1,168 @@
+# Type Coercion
+#
+# Unified type coercion rules for Simple language.
+# These rules define how values are converted between types.
+# Both interpreter evaluation and codegen must follow these rules.
+#
+# Port of rust/compiler/src/semantics/type_coercion.rs (209 lines)
+
+export CoercionResult, TypeCoercion
+
+use semantics.truthiness (TruthinessRules)
+
+# ============================================================================
+# Result Type
+# ============================================================================
+
+enum CoercionResult<T>:
+    Ok(T)                                        # Coercion succeeded
+    Incompatible(from: text, to: text)          # Coercion not possible
+    PrecisionLoss(from: text, to: text)         # Coercion would lose precision
+
+impl CoercionResult<T>:
+    static fn ok(value: T) -> CoercionResult<T>:
+        CoercionResult.Ok(value)
+
+    static fn incompatible(from: text, to: text) -> CoercionResult<T>:
+        CoercionResult.Incompatible(from: from, to: to)
+
+    fn is_ok() -> bool:
+        match self:
+            case Ok(_): true
+            case _: false
+
+    fn unwrap() -> T:
+        match self:
+            case Ok(v): v
+            case _: panic("called unwrap on non-Ok CoercionResult")
+
+# ============================================================================
+# Type Coercion Rules
+# ============================================================================
+
+struct TypeCoercion
+
+impl TypeCoercion:
+    # ========================================================================
+    # Integer Coercions
+    # ========================================================================
+
+    static fn to_int_i64(
+        from_int: i64?,
+        from_float: f64?,
+        from_bool: bool?,
+        is_nil: bool
+    ) -> CoercionResult<i64>:
+        """Coerce any numeric value to i64.
+
+        Rules:
+        - Int(i) -> i (identity)
+        - Float(f) -> truncate to i64
+        - Bool(b) -> 1 if true, 0 if false
+        - Nil -> 0
+        """
+        if from_int.?:
+            return CoercionResult.ok(from_int ?? 0)
+
+        if from_float.?:
+            return CoercionResult.ok((from_float ?? 0.0) as i64)
+
+        if from_bool.?:
+            return CoercionResult.ok(if from_bool ?? false: 1 else: 0)
+
+        if is_nil:
+            return CoercionResult.ok(0)
+
+        CoercionResult.incompatible("unknown", "i64")
+
+    static fn to_int_with_width(
+        value: i64,
+        target_bits: i32,
+        signed: bool
+    ) -> CoercionResult<i64>:
+        """Coerce numeric to specific integer type with overflow check."""
+        val (min, max) = if signed:
+            match target_bits:
+                case 8: (-128, 127)              # i8::MIN, i8::MAX
+                case 16: (-32768, 32767)         # i16::MIN, i16::MAX
+                case 32: (-2147483648, 2147483647)  # i32::MIN, i32::MAX
+                case 64: (-9223372036854775808, 9223372036854775807)  # i64::MIN, i64::MAX
+                case _: return CoercionResult.incompatible("i64", "int")
+        else:
+            match target_bits:
+                case 8: (0, 255)                 # u8::MAX
+                case 16: (0, 65535)              # u16::MAX
+                case 32: (0, 4294967295)         # u32::MAX
+                case 64: (0, 9223372036854775807)  # u64::MAX can't fit in i64
+                case _: return CoercionResult.incompatible("i64", "uint")
+
+        if value >= min and value <= max:
+            CoercionResult.ok(value)
+        else:
+            CoercionResult.PrecisionLoss(from: "i64", to: "int")
+
+    # ========================================================================
+    # Float Coercions
+    # ========================================================================
+
+    static fn to_float_f64(
+        from_float: f64?,
+        from_int: i64?,
+        from_bool: bool?,
+        is_nil: bool
+    ) -> CoercionResult<f64>:
+        """Coerce any numeric value to f64.
+
+        Rules:
+        - Float(f) -> f (identity)
+        - Int(i) -> i as f64
+        - Bool(b) -> 1.0 if true, 0.0 if false
+        - Nil -> 0.0
+        """
+        if from_float.?:
+            return CoercionResult.ok(from_float ?? 0.0)
+
+        if from_int.?:
+            return CoercionResult.ok((from_int ?? 0) as f64)
+
+        if from_bool.?:
+            return CoercionResult.ok(if from_bool ?? false: 1.0 else: 0.0)
+
+        if is_nil:
+            return CoercionResult.ok(0.0)
+
+        CoercionResult.incompatible("unknown", "f64")
+
+    static fn f64_to_f32(value: f64) -> CoercionResult<f32>:
+        """Coerce f64 to f32 (with potential precision loss)."""
+        val as_f32 = value as f32
+        # Check if we lost too much precision
+        val epsilon = 2.220446049250313e-16  # f64::EPSILON
+        val diff = ((as_f32 as f64) - value).abs()
+        if diff > epsilon * 1000.0:
+            CoercionResult.PrecisionLoss(from: "f64", to: "f32")
+        else:
+            CoercionResult.ok(as_f32)
+
+    # ========================================================================
+    # Bool Coercions
+    # ========================================================================
+
+    static fn to_bool(
+        from_bool: bool?,
+        from_int: i64?,
+        from_float: f64?,
+        is_empty_collection: bool?,
+        is_nil: bool
+    ) -> bool:
+        """Coerce any value to bool using truthiness rules.
+
+        This delegates to TruthinessRules for consistency.
+        """
+        TruthinessRules.is_truthy(
+            from_bool,
+            from_int,
+            from_float,
+            is_empty_collection,
+            is_nil
+        )

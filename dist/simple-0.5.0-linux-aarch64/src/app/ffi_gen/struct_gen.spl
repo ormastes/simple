@@ -1,0 +1,121 @@
+# FFI Wrapper Generator - Struct Code Generation
+#
+# Generates Rust struct definitions from StructSpec.
+#
+# Usage:
+#   import app.ffi_gen.struct_gen (generate_struct)
+
+use app.ffi_gen.types*
+
+# ============================================================================
+# Struct Generation
+# ============================================================================
+
+# Generate a complete Rust struct definition
+fn generate_struct(spec: StructSpec) -> text:
+    var out = ""
+
+    # Doc comment
+    if spec.doc != "":
+        for line in spec.doc.split("\n"):
+            out = out + "/// {line}\n"
+
+    # Attributes
+    if spec.repr_attr != "":
+        out = out + "#[repr({spec.repr_attr})]\n"
+
+    if spec.derives.len() > 0:
+        val derives_str = spec.derives.join(", ")
+        out = out + "#[derive({derives_str})]\n"
+
+    # Visibility and name
+    val vis = if spec.visibility != "": "{spec.visibility} " else: ""
+    val generics_str = format_generics(spec.generics)
+    val where_str = format_where_clause(spec.where_clauses)
+
+    if spec.is_tuple:
+        # Tuple struct: pub struct Name(pub T1, pub T2);
+        out = out + "{vis}struct {spec.name}{generics_str}("
+        var first = true
+        for field in spec.fields:
+            if not first:
+                out = out + ", "
+            val field_vis = if field.visibility != "": "{field.visibility} " else: ""
+            out = out + "{field_vis}{field.rust_type}"
+            first = false
+        out = out + "){where_str};\n"
+    else:
+        # Regular struct with named fields
+        out = out + "{vis}struct {spec.name}{generics_str}{where_str} {{\n"
+        for field in spec.fields:
+            out = out + generate_struct_field(field)
+        out = out + "}}\n"
+
+    out
+
+# Generate a single struct field
+fn generate_struct_field(field: FieldSpec) -> text:
+    var out = ""
+
+    # Doc comment
+    if field.doc != "":
+        for line in field.doc.split("\n"):
+            out = out + "    /// {line}\n"
+
+    # Visibility and field
+    val vis = if field.visibility != "": "{field.visibility} " else: ""
+    out = out + "    {vis}{field.name}: {field.rust_type},\n"
+
+    out
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Format generic parameters: <T, E>
+fn format_generics(generics: [text]) -> text:
+    if generics.len() == 0:
+        ""
+    else:
+        "<{generics.join(\", \")}>"
+
+# Format where clause: where T: Clone, E: Error
+fn format_where_clause(where_clauses: [text]) -> text:
+    if where_clauses.len() == 0:
+        ""
+    else:
+        "\nwhere\n    {where_clauses.join(\",\\n    \")}"
+
+# Generate a simple struct with public fields
+fn generate_simple_struct(name: text, fields: [{text: text}]) -> text:
+    var field_specs: [FieldSpec] = []
+    for entry in fields:
+        for fname in entry.keys():
+            val ftype = entry[fname]
+            field_specs.push(FieldSpec.pub_field(fname, ftype))
+
+    val spec = StructSpec.simple(name, field_specs)
+    generate_struct(spec)
+
+# Generate a struct with derives
+fn generate_derived_struct(name: text, derives: [text], fields: [{text: text}]) -> text:
+    var field_specs: [FieldSpec] = []
+    for entry in fields:
+        for fname in entry.keys():
+            val ftype = entry[fname]
+            field_specs.push(FieldSpec.pub_field(fname, ftype))
+
+    val spec = StructSpec.with_derives(name, derives, field_specs)
+    generate_struct(spec)
+
+# Generate a C-repr struct
+fn generate_c_struct(name: text, fields: [{text: text}]) -> text:
+    var field_specs: [FieldSpec] = []
+    for entry in fields:
+        for fname in entry.keys():
+            val ftype = entry[fname]
+            field_specs.push(FieldSpec.pub_field(fname, ftype))
+
+    var spec = StructSpec.simple(name, field_specs)
+    spec.repr_attr = "C"
+    generate_struct(spec)

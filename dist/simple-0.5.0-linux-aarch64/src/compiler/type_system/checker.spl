@@ -1,0 +1,357 @@
+# Type Checker
+#
+# Two-pass type checking for AST nodes:
+# 1. Register all names (functions, classes, structs, enums, traits, etc.)
+# 2. Type check all nodes in order
+#
+# Includes trait coherence checking, pattern binding, and FString key validation.
+#
+# Port of rust/type/src/checker_check.rs + checker_infer.rs + checker_builtins.rs
+
+from inference.types import {Type, TypeVarId, Constraint, UnifyError}
+from inference.unify import {Unifier}
+from inference.infer import {InferenceEngine}
+from compiler.type_system.expr_infer import {infer_expr}
+from compiler.type_system.stmt_check import {check_stmt, check_block}
+from compiler.type_system.module_check import {check_module as module_check_impl}
+from compiler.type_system.bidirectional import {infer_with_expected, InferMode}
+from ast import {Module, Node, Expr}
+
+# ============================================================================
+# Type Checker Error
+# ============================================================================
+
+enum TypeError:
+    """Type checking error."""
+    Undefined(text)
+    TypeMismatch(expected: text, found: text)
+    ConstKeyNotFound(key: text, expected_keys: [text])
+    ConstKeyMissing(key: text, provided_keys: [text])
+    CoherenceError(text)
+    Other(text)
+
+impl TypeError:
+    fn message() -> text:
+        match self:
+            case Undefined(name): "undefined: {name}"
+            case TypeMismatch(exp, found): "type mismatch: expected {exp}, found {found}"
+            case ConstKeyNotFound(key, expected):
+                "unknown key '{key}', expected one of: {expected.join(", ")}"
+            case ConstKeyMissing(key, provided):
+                "missing required key '{key}', provided: {provided.join(", ")}"
+            case CoherenceError(msg): "coherence error: {msg}"
+            case Other(msg): msg
+
+# ============================================================================
+# Trait Impl Registry
+# ============================================================================
+
+struct TraitImplRegistry:
+    """Tracks implementations of a trait for coherence checking."""
+    specific_impls: Dict<text, bool>
+    blanket_impl: bool
+    default_blanket_impl: bool
+
+impl TraitImplRegistry:
+    static fn empty() -> TraitImplRegistry:
+        TraitImplRegistry(specific_impls: {}, blanket_impl: false, default_blanket_impl: false)
+
+# ============================================================================
+# Mixin Info
+# ============================================================================
+
+struct MixinInfo:
+    """Metadata for a mixin definition (Feature #2200)."""
+    name: text
+    type_params: [text]
+    fields: [(text, Type)]
+    methods: [(text, Type)]
+    required_traits: [text]
+    required_mixins: [text]
+
+# ============================================================================
+# Type Checker
+# ============================================================================
+
+class TypeChecker:
+    """Main type checker with two-pass checking."""
+    env: Dict<text, Type>
+    next_var: i64
+    unifier: Unifier
+    trait_impls: Dict<text, TraitImplRegistry>
+    mixins: Dict<text, MixinInfo>
+    interface_bindings: Dict<text, Type>
+    fstring_keys: Dict<text, [text]>
+    errors: [TypeError]
+
+impl TypeChecker:
+    static fn create() -> TypeChecker:
+        var tc = TypeChecker(
+            env: {},
+            next_var: 0,
+            unifier: Unifier(substitutions: {}, next_var: 0),
+            trait_impls: {},
+            mixins: {},
+            interface_bindings: {},
+            fstring_keys: {},
+            errors: []
+        )
+        tc.add_builtins()
+        tc
+
+    # ========================================================================
+    # Fresh Variables
+    # ========================================================================
+
+    me fresh_var() -> Type:
+        val id = self.next_var
+        self.next_var = self.next_var + 1
+        Type.Var(TypeVarId(id: id))
+
+    # ========================================================================
+    # Built-in Functions
+    # ========================================================================
+
+    me add_builtins():
+        """Add built-in functions to the type environment."""
+        # Concurrency
+        for name in ["spawn", "spawn_isolated", "async", "future", "await"]:
+            self.env[name] = self.fresh_var()
+
+        # Actor functions
+        for name in ["send", "recv", "reply", "join"]:
+            self.env[name] = self.fresh_var()
+
+        # I/O prelude
+        for name in ["print", "println", "eprint", "eprintln", "input"]:
+            self.env[name] = self.fresh_var()
+
+        # Common built-ins
+        self.env["len"] = Type.Function(params: [self.fresh_var()], ret: Type.Int(bits: 64, signed: true))
+        self.env["type"] = Type.Function(params: [self.fresh_var()], ret: Type.Str)
+        self.env["str"] = Type.Function(params: [self.fresh_var()], ret: Type.Str)
+        self.env["int"] = Type.Function(params: [self.fresh_var()], ret: Type.Int(bits: 64, signed: true))
+        self.env["range"] = self.fresh_var()
+
+        # Math functions
+        val int_type = Type.Int(bits: 64, signed: true)
+        self.env["abs"] = Type.Function(params: [int_type], ret: int_type)
+        self.env["sqrt"] = Type.Function(params: [int_type], ret: int_type)
+        self.env["pow"] = Type.Function(params: [int_type, int_type], ret: int_type)
+        self.env["min"] = Type.Function(params: [int_type, int_type], ret: int_type)
+        self.env["max"] = Type.Function(params: [int_type, int_type], ret: int_type)
+
+        # Generator/coroutine
+        for name in ["generator", "next", "collect"]:
+            self.env[name] = self.fresh_var()
+
+        # Type constructors
+        for name in ["Some", "None", "Ok", "Err", "Channel", "ThreadPool"]:
+            self.env[name] = self.fresh_var()
+
+        # BDD/SSpec testing
+        for name in ["describe", "context", "it", "test", "example",
+                      "specify", "expect", "before_each", "after_each"]:
+            self.env[name] = self.fresh_var()
+
+    # ========================================================================
+    # Trait Coherence Checking
+    # ========================================================================
+
+    me register_trait_impl(trait_name: text, target_type: text,
+                           is_blanket: bool, is_default: bool) -> Result<(), TypeError>:
+        """Register and validate a trait implementation."""
+        if is_default and not is_blanket:
+            return Err(TypeError.CoherenceError(
+                "#[default] impl for trait '{trait_name}' must be a blanket impl"
+            ))
+
+        if not self.trait_impls.contains(trait_name):
+            self.trait_impls[trait_name] = TraitImplRegistry.empty()
+
+        val registry = self.trait_impls[trait_name]
+
+        if is_blanket:
+            if registry.blanket_impl:
+                return Err(TypeError.CoherenceError(
+                    "duplicate blanket impl for trait '{trait_name}'"
+                ))
+            if not is_default and (registry.specific_impls.? or registry.default_blanket_impl):
+                return Err(TypeError.CoherenceError(
+                    "overlapping impls for trait '{trait_name}': blanket conflicts with existing"
+                ))
+            registry.blanket_impl = true
+            registry.default_blanket_impl = is_default
+            return Ok(())
+
+        if registry.specific_impls.contains(target_type):
+            return Err(TypeError.CoherenceError(
+                "duplicate impl for trait '{trait_name}' and type '{target_type}'"
+            ))
+
+        if registry.blanket_impl and not registry.default_blanket_impl:
+            return Err(TypeError.CoherenceError(
+                "overlapping impls for trait '{trait_name}': specific '{target_type}' conflicts with blanket"
+            ))
+
+        registry.specific_impls[target_type] = true
+        Ok(())
+
+    # ========================================================================
+    # FString Key Validation
+    # ========================================================================
+
+    me register_fstring_keys(var_name: text, keys: [text]):
+        """Register FString const keys for compile-time validation."""
+        self.fstring_keys[var_name] = keys
+
+    fn resolve_dependent_keys(source: text) -> [text]?:
+        """Resolve DependentKeys to key list."""
+        val keys = self.fstring_keys.get(source)
+        if keys.?:
+            Some(keys.unwrap())
+        else:
+            nil
+
+    fn validate_const_keys(literal_keys: [text], expected_keys: [text]) -> Result<(), TypeError>:
+        """Validate dict literal keys against ConstKeySet."""
+        # Check for unknown keys
+        for key in literal_keys:
+            if not expected_keys.contains(key):
+                return Err(TypeError.ConstKeyNotFound(
+                    key: key,
+                    expected_keys: expected_keys
+                ))
+
+        # Check for missing keys
+        for expected in expected_keys:
+            if not literal_keys.contains(expected):
+                return Err(TypeError.ConstKeyMissing(
+                    key: expected,
+                    provided_keys: literal_keys
+                ))
+
+        Ok(())
+
+    # ========================================================================
+    # Pattern Binding
+    # ========================================================================
+
+    me bind_pattern_names(names: [text]):
+        """Bind a list of pattern names to fresh type variables."""
+        for name in names:
+            self.env[name] = self.fresh_var()
+
+    # ========================================================================
+    # Type Checking (Two-Pass)
+    # ========================================================================
+
+    me check_items(item_names: [(text, text)]) -> Result<(), TypeError>:
+        """Two-pass type checking.
+
+        item_names: list of (name, kind) pairs where kind is
+        "function", "class", "struct", "enum", "trait", etc.
+
+        First pass: register all names with fresh type variables.
+        Second pass: type check bodies (handled by caller via check_node).
+        """
+        # First pass: register all names
+        for (name, kind) in item_names:
+            self.env[name] = self.fresh_var()
+
+        Ok(())
+
+    me add_error(error: TypeError):
+        """Record a type error (for error recovery - continue checking)."""
+        self.errors = self.errors.push(error)
+
+    fn has_errors() -> bool:
+        self.errors.?
+
+    fn get_errors() -> [TypeError]:
+        self.errors
+
+    # ========================================================================
+    # Dyn Trait Coercion
+    # ========================================================================
+
+    fn check_dyn_coercion(source_type: text, trait_name: text) -> Result<(), TypeError>:
+        """Check if source type implements trait for dyn coercion."""
+        val registry = self.trait_impls.get(trait_name)
+        if not registry.?:
+            return Err(TypeError.Other(
+                "type '{source_type}' does not implement trait '{trait_name}' (required for dyn coercion)"
+            ))
+        val reg = registry.unwrap()
+        if not reg.specific_impls.contains(source_type) and not reg.blanket_impl:
+            return Err(TypeError.Other(
+                "type '{source_type}' does not implement trait '{trait_name}' (required for dyn coercion)"
+            ))
+        Ok(())
+
+    # ========================================================================
+    # Mixin Registration (Feature #2200)
+    # ========================================================================
+
+    me register_mixin(info: MixinInfo):
+        """Store mixin metadata for composition checking."""
+        self.mixins[info.name] = info
+
+    fn get_mixin(name: text) -> MixinInfo?:
+        val m = self.mixins.get(name)
+        if m.?:
+            Some(m.unwrap())
+        else:
+            nil
+
+    # ========================================================================
+    # Integrated Type Inference (Full System)
+    # ========================================================================
+
+    me check_module(module: Module) -> Result<(), TypeError>:
+        """Type check a complete module using full inference system.
+
+        Integrates all phases:
+        - Phase 1: Expression inference
+        - Phase 2: Statement checking
+        - Phase 3: Module checking (two-pass)
+        - Phase 4: Bidirectional inference
+        """
+        module_check_impl(self, module)
+
+    me infer_expr_with_context(expr: Expr, expected: Type?) -> Result<Type, TypeError>:
+        """Infer expression type with optional expected type (bidirectional).
+
+        If expected type is provided, uses Check mode (top-down).
+        Otherwise uses Synthesize mode (bottom-up).
+        """
+        infer_with_expected(self.create_engine(), expr, expected, self.env)
+
+    me infer_expr_simple(expr: Expr) -> Result<Type, TypeError>:
+        """Infer expression type without expected type (bottom-up only)."""
+        infer_expr(self.create_engine(), expr, self.env)
+
+    me check_stmt_integrated(stmt: Node, current_fn_ret_type: Type?) -> Result<(), TypeError>:
+        """Type check a statement and update environment."""
+        val new_env = check_stmt(self.create_engine(), stmt, self.env, current_fn_ret_type)?
+        self.env = new_env
+        Ok(())
+
+    me check_block_integrated(block: ast.Block, current_fn_ret_type: Type?) -> Result<Type, TypeError>:
+        """Type check a block of statements."""
+        check_block(self.create_engine(), block, self.env, current_fn_ret_type)
+
+    # ========================================================================
+    # Helper: Create Inference Engine
+    # ========================================================================
+
+    fn create_engine() -> InferenceEngine:
+        """Create inference engine from current type checker state."""
+        var engine = InferenceEngine.create()
+        engine.unifier = self.unifier
+        # Copy environment to engine
+        # Note: InferenceEngine uses TypeEnv, we use Dict<text, Type>
+        # For now, pass dict directly to inference functions
+        engine
+
+export TypeError, TraitImplRegistry, MixinInfo, TypeChecker

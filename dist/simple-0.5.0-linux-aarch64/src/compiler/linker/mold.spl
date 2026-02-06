@@ -1,0 +1,286 @@
+# Mold Backend - Native binary generation via mold linker.
+#
+# This module provides integration with the mold linker for generating
+# native ELF binaries from SMF files.
+#
+# Mold is a high-performance linker (~4x faster than GNU ld).
+# https://github.com/rui314/mold
+#
+# Fallback chain: mold -> lld -> ld
+
+use .obj_taker (SymbolType)
+
+# ============================================================================
+# Rust FFI Declarations
+# ============================================================================
+
+extern class MoldFfi:
+    """Rust FFI for mold linker operations."""
+
+    static fn find_mold() -> text?:
+        """Find mold executable path. Returns None if not found."""
+        ...
+
+    static fn find_lld() -> text?:
+        """Find lld executable path. Returns None if not found."""
+        ...
+
+    static fn find_ld() -> text?:
+        """Find system ld executable path. Returns None if not found."""
+        ...
+
+    static fn execute(linker_path: text, args: [text]) -> Result<i32, text>:
+        """Execute linker with arguments. Returns exit code."""
+        ...
+
+    static fn write_elf_object(
+        code: [u8],
+        name: text,
+        output_path: text
+    ) -> Result<(), text>:
+        """Write code as ELF object file."""
+        ...
+
+    static fn get_file_size(path: text) -> i64:
+        """Get file size in bytes."""
+        ...
+
+# ============================================================================
+# Resolved Object
+# ============================================================================
+
+struct ResolvedObject:
+    """An object ready for linking."""
+    name: text
+    code: [u8]
+    symbol_type: SymbolType
+
+# ============================================================================
+# Mold Backend
+# ============================================================================
+
+enum LinkerType:
+    Mold
+    Lld
+    Ld
+
+impl LinkerType:
+    fn to_string() -> text:
+        match self:
+            case Mold: "mold"
+            case Lld: "lld"
+            case Ld: "ld"
+
+struct MoldBackend:
+    """Backend for native binary generation via mold/lld/ld."""
+    linker_path: text
+    linker_type: LinkerType
+    config: MoldConfig
+
+struct MoldConfig:
+    """Configuration for mold backend."""
+    pie: bool
+    debug: bool
+    verbose: bool
+    libraries: [text]
+    library_paths: [text]
+    extra_args: [text]
+
+impl MoldConfig:
+    static fn default() -> MoldConfig:
+        MoldConfig(
+            pie: true,
+            debug: false,
+            verbose: false,
+            libraries: [],
+            library_paths: [],
+            extra_args: []
+        )
+
+    static fn from_link_config(config: any) -> MoldConfig:
+        """Create MoldConfig from LinkConfig."""
+        # Access fields via dynamic lookup
+        var extra_args: [text] = []
+
+        # Add target flags (CPU/architecture)
+        val target_flags = config.target_flags ?? []
+        for flag in target_flags:
+            extra_args.push(flag)
+
+        # Add custom linker flags
+        val linker_flags = config.linker_flags ?? []
+        for flag in linker_flags:
+            extra_args.push(flag)
+
+        MoldConfig(
+            pie: config.pie ?? true,
+            debug: config.debug ?? false,
+            verbose: config.verbose ?? false,
+            libraries: config.libraries ?? [],
+            library_paths: config.library_paths ?? [],
+            extra_args: extra_args
+        )
+
+impl MoldBackend:
+    static fn create(link_config: any) -> Result<MoldBackend, text>:
+        """Create a mold backend, falling back to lld or ld if needed."""
+        val config = MoldConfig.from_link_config(link_config)
+
+        # Try to find a linker in order of preference
+        val (linker_path, linker_type) = find_linker()?
+
+        if config.verbose:
+            print "[mold] Using linker: {linker_type.to_string()} at {linker_path}"
+
+        Ok(MoldBackend(
+            linker_path: linker_path,
+            linker_type: linker_type,
+            config: config
+        ))
+
+    static fn with_config(config: MoldConfig) -> Result<MoldBackend, text>:
+        """Create backend with explicit config."""
+        val (linker_path, linker_type) = find_linker()?
+
+        Ok(MoldBackend(
+            linker_path: linker_path,
+            linker_type: linker_type,
+            config: config
+        ))
+
+    fn link(objects: [ResolvedObject], output: text) -> Result<(), text>:
+        """Link objects to native binary."""
+        if self.config.verbose:
+            print "[mold] Linking {objects.len()} objects to {output}"
+
+        # Create temporary directory for object files
+        val temp_dir = create_temp_dir()?
+
+        # Write each object as ELF .o file
+        var obj_paths: [text] = []
+        for (idx, obj) in objects.enumerate():
+            val obj_path = "{temp_dir}/obj_{idx}.o"
+            MoldFfi.write_elf_object(obj.code, obj.name, obj_path)?
+            obj_paths = obj_paths.push(obj_path)
+
+        # Build linker arguments
+        var args: [text] = []
+
+        # Output file
+        args = args.push("-o")
+        args = args.push(output)
+
+        # Object files
+        for path in obj_paths:
+            args = args.push(path)
+
+        # Library paths
+        for path in self.config.library_paths:
+            args = args.push("-L")
+            args = args.push(path)
+
+        # Libraries
+        for lib in self.config.libraries:
+            args = args.push("-l")
+            args = args.push(lib)
+
+        # PIE
+        if self.config.pie:
+            args = args.push("-pie")
+
+        # Debug info
+        if self.config.debug:
+            args = args.push("-g")
+
+        # Extra args
+        for arg in self.config.extra_args:
+            args = args.push(arg)
+
+        # Execute linker
+        val result = MoldFfi.execute(self.linker_path, args)?
+
+        if result != 0:
+            return Err("Linker failed with exit code {result}")
+
+        # Cleanup temp directory
+        cleanup_temp_dir(temp_dir)
+
+        if self.config.verbose:
+            val size = MoldFfi.get_file_size(output)
+            print "[mold] Output size: {size} bytes"
+
+        Ok(())
+
+    fn link_with_runtime(
+        objects: [ResolvedObject],
+        output: text,
+        runtime_path: text?
+    ) -> Result<(), text>:
+        """Link objects with Simple runtime library."""
+        var all_objects = objects
+
+        # Add runtime if specified
+        if runtime_path.?:
+            # TODO: Load runtime symbols
+            pass
+
+        self.link(all_objects, output)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn find_linker() -> Result<(text, LinkerType), text>:
+    """Find an available linker in order of preference."""
+    # Try mold first
+    val mold_path = MoldFfi.find_mold()
+    if mold_path.?:
+        return Ok((mold_path.unwrap(), LinkerType.Mold))
+
+    # Try lld
+    val lld_path = MoldFfi.find_lld()
+    if lld_path.?:
+        return Ok((lld_path.unwrap(), LinkerType.Lld))
+
+    # Try system ld
+    val ld_path = MoldFfi.find_ld()
+    if ld_path.?:
+        return Ok((ld_path.unwrap(), LinkerType.Ld))
+
+    Err("No linker found. Please install mold, lld, or ensure ld is in PATH.")
+
+fn create_temp_dir() -> Result<text, text>:
+    """Create a temporary directory for object files."""
+    # TODO: Implement via FFI
+    Ok("/tmp/simple_link_{random_id()}")
+
+fn cleanup_temp_dir(path: text):
+    """Remove temporary directory."""
+    # TODO: Implement via FFI
+    pass
+
+fn random_id() -> text:
+    """Generate random ID for temp directory."""
+    # TODO: Implement properly
+    "12345"
+
+# ============================================================================
+# Linker Detection (for use without FFI during development)
+# ============================================================================
+
+fn detect_linker_path() -> text?:
+    """Detect linker path using shell commands."""
+    # This is a fallback when FFI is not available
+    # In production, use MoldFfi.find_mold() etc.
+    None
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MoldBackend
+export MoldConfig
+export MoldFfi
+export LinkerType
+export ResolvedObject
+export find_linker

@@ -1,0 +1,425 @@
+# Const Keys - Compile-Time Template Key Validation
+#
+# Provides compile-time validation of string template instantiation.
+# Ensures that template keys are used correctly and catches typos early.
+#
+# Example:
+#   val template = "Welcome {user} to {city}"
+#   val greeting = template.with {"user": "Alice", "city": "NYC"}  # OK
+#   val bad = template.with {"usr": "Alice"}  # Compile error!
+#
+# Features:
+# - Extract keys from format strings at compile time
+# - Validate .with{} calls against template keys
+# - Generate helpful error messages for typos
+# - Support for optional keys with defaults
+
+# ============================================================================
+# Template Key
+# ============================================================================
+
+struct TemplateKey:
+    """A key in a string template."""
+    name: text
+    position: i64        # Position in template string
+    is_optional: bool    # Has default value
+    default_value: text? # Default if optional
+
+impl TemplateKey:
+    static fn required(name: text, position: i64) -> TemplateKey:
+        TemplateKey(
+            name: name,
+            position: position,
+            is_optional: false,
+            default_value: nil
+        )
+
+    static fn optional(name: text, position: i64, default_val: text) -> TemplateKey:
+        TemplateKey(
+            name: name,
+            position: position,
+            is_optional: true,
+            default_value: Some(default_val)
+        )
+
+    fn to_text() -> text:
+        if self.is_optional:
+            "{self.name}? = \"{self.default_value ?? \"\"}\""
+        else:
+            self.name
+
+# ============================================================================
+# Template Schema
+# ============================================================================
+
+struct TemplateSchema:
+    """Schema extracted from a template string."""
+    template: text
+    keys: [TemplateKey]
+    required_keys: [text]
+    optional_keys: [text]
+
+impl TemplateSchema:
+    static fn from_template(template: text) -> TemplateSchema:
+        """Extract schema from a template string."""
+        var keys: [TemplateKey] = []
+        var required: [text] = []
+        var optional: [text] = []
+
+        var i = 0
+        var position = 0
+
+        while i < template.len():
+            if template[i] == '{':
+                # Find closing brace
+                var j = i + 1
+                while j < template.len() and template[j] != '}':
+                    j = j + 1
+
+                if j < template.len():
+                    val key_str = template.slice(i + 1, j)
+
+                    # Check for optional syntax: {key?=default}
+                    if key_str.contains("?="):
+                        val parts = key_str.split("?=")
+                        val key_name = parts[0]
+                        val default_val = if parts.len() > 1: parts[1] else: ""
+                        keys = keys.push(TemplateKey.optional(key_name, position, default_val))
+                        optional = optional.push(key_name)
+                    else:
+                        keys = keys.push(TemplateKey.required(key_str, position))
+                        required = required.push(key_str)
+
+                    position = position + 1
+                    i = j + 1
+                else:
+                    i = i + 1
+            else:
+                i = i + 1
+
+        TemplateSchema(
+            template: template,
+            keys: keys,
+            required_keys: required,
+            optional_keys: optional
+        )
+
+    fn has_key(name: text) -> bool:
+        """Check if schema has a key."""
+        for key in self.keys:
+            if key.name == name:
+                return true
+        false
+
+    fn get_key(name: text) -> TemplateKey?:
+        """Get a key by name."""
+        for key in self.keys:
+            if key.name == name:
+                return Some(key)
+        nil
+
+    fn key_names() -> [text]:
+        """Get all key names."""
+        self.keys.map(\k: k.name)
+
+    fn format_keys() -> text:
+        """Format keys for error messages."""
+        val names = self.key_names()
+        if names.is_empty():
+            "(no keys)"
+        else:
+            names.map(\n: "\"{n}\"").join(", ")
+
+# ============================================================================
+# Validation Error
+# ============================================================================
+
+enum ConstKeyError:
+    """Error in const key validation."""
+    # Key not in template
+    UnknownKey(provided: text, available: [text], suggestion: text?)
+
+    # Required key missing
+    MissingKey(key: text, template_keys: [text])
+
+    # Multiple errors
+    MultipleErrors(errors: [ConstKeyError])
+
+impl ConstKeyError:
+    fn to_text() -> text:
+        match self:
+            case UnknownKey(provided, available, suggestion):
+                var msg = "Unknown key \"{provided}\""
+                if available.len() > 0:
+                    msg = "{msg}. Available keys: {available.map(\\k: \"\\\"{k}\\\"\").join(\", \")}"
+                if suggestion.?:
+                    msg = "{msg}. Did you mean \"{suggestion.unwrap()}\"?"
+                msg
+
+            case MissingKey(key, template_keys):
+                "Missing required key \"{key}\". Template expects: {template_keys.map(\\k: \"\\\"{k}\\\"\").join(\", \")}"
+
+            case MultipleErrors(errors):
+                errors.map(\e: e.to_text()).join("\n")
+
+    fn has_suggestion() -> bool:
+        match self:
+            case UnknownKey(_, _, suggestion): suggestion.?
+            case _: false
+
+# ============================================================================
+# Key Validator
+# ============================================================================
+
+class ConstKeyValidator:
+    """Validates template instantiation keys."""
+    schema: TemplateSchema
+
+    static fn for_template(template: text) -> ConstKeyValidator:
+        ConstKeyValidator(schema: TemplateSchema.from_template(template))
+
+    fn validate(provided_keys: [text]) -> Result<(), ConstKeyError>:
+        """Validate provided keys against schema."""
+        var errors: [ConstKeyError] = []
+
+        # Check for unknown keys
+        for key in provided_keys:
+            if not self.schema.has_key(key):
+                val suggestion = self.find_similar_key(key)
+                errors = errors.push(ConstKeyError.UnknownKey(
+                    key,
+                    self.schema.key_names(),
+                    suggestion
+                ))
+
+        # Check for missing required keys
+        for required in self.schema.required_keys:
+            if not provided_keys.contains(required):
+                errors = errors.push(ConstKeyError.MissingKey(
+                    required,
+                    self.schema.required_keys
+                ))
+
+        if errors.is_empty():
+            Ok(())
+        elif errors.len() == 1:
+            Err(errors[0])
+        else:
+            Err(ConstKeyError.MultipleErrors(errors))
+
+    fn find_similar_key(input: text) -> text?:
+        """Find a similar key name (for typo suggestions)."""
+        var best_match: text? = nil
+        var best_distance = 3  # Max edit distance for suggestions
+
+        for key in self.schema.key_names():
+            val dist = edit_distance(input, key)
+            if dist < best_distance:
+                best_distance = dist
+                best_match = Some(key)
+
+        best_match
+
+# ============================================================================
+# Edit Distance (for typo detection)
+# ============================================================================
+
+fn edit_distance(s1: text, s2: text) -> i64:
+    """Calculate Levenshtein edit distance between two strings."""
+    val m = s1.len()
+    val n = s2.len()
+
+    # Simple case: one string is empty
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+
+    # Create distance matrix (using simplified approach)
+    var prev_row: [i64] = []
+    for j in 0..=n:
+        prev_row = prev_row.push(j)
+
+    for i in 1..=m:
+        var curr_row: [i64] = [i]
+
+        for j in 1..=n:
+            val cost = if s1[i - 1] == s2[j - 1]: 0 else: 1
+            val insert_cost = curr_row[j - 1] + 1
+            val delete_cost = prev_row[j] + 1
+            val replace_cost = prev_row[j - 1] + cost
+
+            var min_cost = insert_cost
+            if delete_cost < min_cost:
+                min_cost = delete_cost
+            if replace_cost < min_cost:
+                min_cost = replace_cost
+
+            curr_row = curr_row.push(min_cost)
+
+        prev_row = curr_row
+
+    prev_row[n]
+
+# ============================================================================
+# Compile-Time Analysis
+# ============================================================================
+
+struct TemplateAnalysis:
+    """Result of analyzing a template expression."""
+    template_literal: text?
+    is_const: bool
+    schema: TemplateSchema?
+    source_location: text
+
+impl TemplateAnalysis:
+    static fn from_literal(literal: text, location: text) -> TemplateAnalysis:
+        TemplateAnalysis(
+            template_literal: Some(literal),
+            is_const: true,
+            schema: Some(TemplateSchema.from_template(literal)),
+            source_location: location
+        )
+
+    static fn dynamic(location: text) -> TemplateAnalysis:
+        TemplateAnalysis(
+            template_literal: nil,
+            is_const: false,
+            schema: nil,
+            source_location: location
+        )
+
+    fn can_validate() -> bool:
+        """Check if we can validate at compile time."""
+        self.is_const and self.schema.?
+
+class TemplateChecker:
+    """Checks template usage at compile time."""
+    templates: Dict<text, TemplateAnalysis>  # Variable name -> analysis
+    errors: [ConstKeyError]
+    warnings: [text]
+
+    static fn create() -> TemplateChecker:
+        TemplateChecker(
+            templates: {},
+            errors: [],
+            warnings: []
+        )
+
+    me register_template(var_name: text, analysis: TemplateAnalysis):
+        """Register a template variable."""
+        self.templates[var_name] = analysis
+
+    me check_with_call(template_var: text, provided_keys: [text], location: text) -> Result<(), ConstKeyError>:
+        """Check a .with{} call."""
+        match self.templates.get(template_var):
+            case Some(analysis):
+                if analysis.can_validate():
+                    val validator = ConstKeyValidator(schema: analysis.schema.unwrap())
+                    match validator.validate(provided_keys):
+                        case Ok(_):
+                            Ok(())
+                        case Err(e):
+                            self.errors = self.errors.push(e)
+                            Err(e)
+                else:
+                    # Dynamic template - can't validate statically
+                    self.warnings = self.warnings.push(
+                        "Cannot validate template keys at compile time (dynamic template)"
+                    )
+                    Ok(())
+
+            case None:
+                # Unknown template variable
+                self.warnings = self.warnings.push(
+                    "Unknown template variable '{template_var}' at {location}"
+                )
+                Ok(())
+
+    fn get_errors() -> [ConstKeyError]:
+        self.errors
+
+    fn get_warnings() -> [text]:
+        self.warnings
+
+    fn has_errors() -> bool:
+        not self.errors.is_empty()
+
+# ============================================================================
+# Template Instantiation
+# ============================================================================
+
+struct TemplateInstance:
+    """A validated template with values."""
+    schema: TemplateSchema
+    values: Dict<text, text>
+
+impl TemplateInstance:
+    static fn create(template: text, values: Dict<text, text>) -> Result<TemplateInstance, ConstKeyError>:
+        """Create and validate a template instance."""
+        val schema = TemplateSchema.from_template(template)
+        val validator = ConstKeyValidator(schema: schema)
+
+        var keys: [text] = []
+        for key, _ in values:
+            keys = keys.push(key)
+
+        match validator.validate(keys):
+            case Ok(_):
+                Ok(TemplateInstance(schema: schema, values: values))
+            case Err(e):
+                Err(e)
+
+    fn render() -> text:
+        """Render the template with values."""
+        var result = self.schema.template
+
+        for key in self.schema.keys:
+            val placeholder = "{" + key.name + "}"
+            val value = match self.values.get(key.name):
+                case Some(v): v
+                case None:
+                    if key.is_optional:
+                        key.default_value ?? ""
+                    else:
+                        ""  # Should not happen if validated
+
+            result = result.replace(placeholder, value)
+
+        result
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn extract_template_keys(template: text) -> [text]:
+    """Extract key names from a template string."""
+    TemplateSchema.from_template(template).key_names()
+
+fn validate_template_keys(template: text, provided: [text]) -> Result<(), ConstKeyError>:
+    """Validate that provided keys match template."""
+    val validator = ConstKeyValidator.for_template(template)
+    validator.validate(provided)
+
+fn suggest_key_fix(template: text, wrong_key: text) -> text?:
+    """Suggest a fix for a wrong key."""
+    val validator = ConstKeyValidator.for_template(template)
+    validator.find_similar_key(wrong_key)
+
+fn render_template(template: text, values: Dict<text, text>) -> Result<text, ConstKeyError>:
+    """Render a template with validation."""
+    match TemplateInstance.create(template, values):
+        case Ok(instance): Ok(instance.render())
+        case Err(e): Err(e)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TemplateKey, TemplateSchema
+export ConstKeyError, ConstKeyValidator
+export edit_distance
+export TemplateAnalysis, TemplateChecker
+export TemplateInstance
+export extract_template_keys, validate_template_keys
+export suggest_key_fix, render_template
