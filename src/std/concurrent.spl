@@ -1,670 +1,257 @@
 # Concurrent Data Structures
 #
-# Lock-free and thread-safe data structures for concurrent programming.
-# Provides queues, maps, and synchronization primitives.
+# Thread-safe data structures for concurrent programming.
+# Built on working SFFI primitives: channels, atomic ints, atomic bools, and hashmaps.
 #
 # Components:
-# - MpscQueue<T>: Multi-producer single-consumer queue (lock-free)
-# - MpmcQueue<T>: Multi-producer multi-consumer queue (lock-free)
-# - ConcurrentMap<K, V>: Thread-safe hash map with sharding
+# - MpscQueue: Multi-producer single-consumer queue (channel-based)
+# - MpmcQueue: Multi-producer multi-consumer queue (channel-based, bounded)
+# - ConcurrentMap: Thread-safe hash map (__rt_hashmap-based)
 # - AtomicFlag: Simple atomic boolean flag
 # - Once: Run initialization exactly once
 # - Barrier: Synchronize multiple threads
-#
-# Usage:
-#   val queue = MpscQueue<i64>.new()
-#   queue.push(42)
-#   val value = queue.pop()  # Some(42)
-#
-# Architecture:
-# - Lock-free algorithms using compare-exchange
-# - Sharded hash map for scalability
-# - Atomic operations for synchronization
-
-use std.atomic.*
 
 # ============================================================================
-# MpscQueue<T> - Multi-Producer Single-Consumer Queue
+# FFI Declarations (all known-working SFFI)
 # ============================================================================
 
-class MpscQueue<T>:
-    """Lock-free multi-producer single-consumer queue.
+# Channel operations
+extern fn rt_channel_new() -> i64
+extern fn rt_channel_send(channel_id: i64, value: Any)
+extern fn rt_channel_try_recv(channel_id: i64) -> Any
+extern fn rt_channel_close(channel_id: i64)
 
-    Multiple threads can push concurrently.
-    Only one thread should pop.
+# Atomic integer operations
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_store(handle: i64, value: i64)
+extern fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64
+extern fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
+extern fn rt_atomic_int_free(handle: i64)
 
-    Based on Dmitry Vyukov's intrusive MPSC queue.
+# Atomic boolean operations
+extern fn rt_atomic_bool_new(initial: bool) -> i64
+extern fn rt_atomic_bool_load(handle: i64) -> bool
+extern fn rt_atomic_bool_store(handle: i64, value: bool)
+extern fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool
+extern fn rt_atomic_bool_free(handle: i64)
 
-    Example:
-        val queue = MpscQueue<i64>.new()
+# HashMap operations
+extern fn __rt_hashmap_new() -> i64
+extern fn __rt_hashmap_insert(handle: i64, key: text, value: Any) -> bool
+extern fn __rt_hashmap_get(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_contains_key(handle: i64, key: text) -> bool
+extern fn __rt_hashmap_remove(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_len(handle: i64) -> i64
 
-        # Multiple producers
-        spawn(\: queue.push(1))
-        spawn(\: queue.push(2))
+# Thread operations
+extern fn rt_thread_yield()
 
-        # Single consumer
-        while val Some(item) = queue.pop():
-            print item
-    """
-    head: AtomicUsize  # Head pointer (atomic)
-    tail: [u8]?        # Tail pointer (consumer-only)
-    stub: [u8]         # Stub node
+# ============================================================================
+# MpscQueue - Multi-Producer Single-Consumer Queue
+# ============================================================================
 
-    static fn new() -> MpscQueue<T>:
-        """Create new empty MPSC queue."""
-        val stub = mpsc_node_alloc_stub::<T>()
-        val head = AtomicUsize.new(stub as usize)
+class MpscQueue:
+    _channel_id: i64
+    _size_handle: i64
 
-        MpscQueue(
-            head: head,
-            tail: Some(stub),
-            stub: stub
-        )
+    fn push(value: Any):
+        rt_channel_send(self._channel_id, value)
+        rt_atomic_int_fetch_add(self._size_handle, 1)
 
-    fn push(value: T):
-        """Push value to queue (lock-free, multi-threaded).
-
-        Args:
-            value: Value to push
-
-        Thread-safe for multiple producers.
-        """
-        # Allocate new node
-        val node = mpsc_node_alloc(value)
-
-        # Atomically swap head
-        val prev = self.head.swap(node as usize, MemoryOrdering.AcqRel)
-
-        # Link previous head to new node
-        mpsc_node_set_next(prev as [u8], node)
-
-    fn pop() -> T?:
-        """Pop value from queue (single-threaded consumer).
-
-        Returns:
-            Some(value) if queue not empty
-            None if queue empty
-
-        NOT thread-safe - only one consumer allowed.
-        """
-        if not self.tail.?:
-            return None
-
-        val tail = self.tail.unwrap()
-        val next = mpsc_node_get_next(tail)
-
-        if not next.?:
-            # Queue empty
-            return None
-
-        val next_node = next.unwrap()
-
-        # Get value from node
-        val value = mpsc_node_get_value::<T>(next_node)
-
-        # Move tail forward
-        self.tail = Some(next_node)
-
-        # Free old tail if not stub
-        if tail as usize != self.stub as usize:
-            mpsc_node_free::<T>(tail)
-
-        Some(value)
+    fn pop() -> Any:
+        val result = rt_channel_try_recv(self._channel_id)
+        if result != nil:
+            rt_atomic_int_fetch_sub(self._size_handle, 1)
+        result
 
     fn is_empty() -> bool:
-        """Check if queue is empty.
+        rt_atomic_int_load(self._size_handle) <= 0
 
-        Returns:
-            true if empty, false otherwise
+    fn len() -> i64:
+        val size = rt_atomic_int_load(self._size_handle)
+        if size < 0:
+            return 0
+        size
 
-        May return false positives in concurrent context.
-        """
-        if not self.tail.?:
-            return true
+    fn close():
+        rt_channel_close(self._channel_id)
+        rt_atomic_int_free(self._size_handle)
 
-        val tail = self.tail.unwrap()
-        val next = mpsc_node_get_next(tail)
-        not next.?
-
-    me drop():
-        """Drop queue, freeing all nodes."""
-        # Pop all remaining items
-        while self.pop().?:
-            pass
-
-        # Free stub
-        mpsc_node_free_stub(self.stub)
+fn mpsc_queue_new() -> MpscQueue:
+    MpscQueue(
+        _channel_id: rt_channel_new(),
+        _size_handle: rt_atomic_int_new(0)
+    )
 
 # ============================================================================
-# MpmcQueue<T> - Multi-Producer Multi-Consumer Queue
+# MpmcQueue - Multi-Producer Multi-Consumer Queue
 # ============================================================================
 
-class MpmcQueue<T>:
-    """Lock-free multi-producer multi-consumer queue.
+class MpmcQueue:
+    _channel_id: i64
+    _capacity: i64
+    _size_handle: i64
 
-    Multiple threads can push and pop concurrently.
+    fn push(value: Any) -> bool:
+        val current = rt_atomic_int_load(self._size_handle)
+        if current >= self._capacity:
+            return false
+        rt_channel_send(self._channel_id, value)
+        rt_atomic_int_fetch_add(self._size_handle, 1)
+        true
 
-    Based on bounded ring buffer with atomic indices.
+    fn pop() -> Any:
+        val result = rt_channel_try_recv(self._channel_id)
+        if result != nil:
+            rt_atomic_int_fetch_sub(self._size_handle, 1)
+        result
 
-    Example:
-        val queue = MpmcQueue<i64>.with_capacity(1024)
-
-        # Multiple producers
-        spawn(\: queue.push(1))
-        spawn(\: queue.push(2))
-
-        # Multiple consumers
-        spawn(\: print queue.pop())
-        spawn(\: print queue.pop())
-    """
-    buffer: [u8]       # Ring buffer
-    capacity: usize    # Capacity (power of 2)
-    head: AtomicUsize  # Head index (pop)
-    tail: AtomicUsize  # Tail index (push)
-
-    static fn with_capacity(capacity: usize) -> MpmcQueue<T>:
-        """Create new MPMC queue with capacity.
-
-        Args:
-            capacity: Maximum queue size (rounded to power of 2)
-
-        Returns:
-            MPMC queue
-        """
-        # Round up to power of 2
-        val cap = next_power_of_2(capacity)
-        val buffer = mpmc_buffer_alloc::<T>(cap)
-
-        MpmcQueue(
-            buffer: buffer,
-            capacity: cap,
-            head: AtomicUsize.new(0),
-            tail: AtomicUsize.new(0)
-        )
-
-    fn push(value: T) -> bool:
-        """Push value to queue (lock-free, multi-threaded).
-
-        Args:
-            value: Value to push
-
-        Returns:
-            true if pushed successfully
-            false if queue full
-
-        Thread-safe for multiple producers.
-        """
-        # Try to reserve slot
-        loop:
-            val tail = self.tail.load(MemoryOrdering.Acquire)
-            val head = self.head.load(MemoryOrdering.Acquire)
-
-            # Check if full
-            if tail - head >= self.capacity:
-                return false
-
-            # Try to claim slot
-            val result = self.tail.compare_exchange(
-                tail,
-                tail + 1,
-                MemoryOrdering.AcqRel,
-                MemoryOrdering.Acquire
-            )
-
-            if result.ok.?:
-                # Successfully claimed slot
-                val index = tail % self.capacity
-                mpmc_buffer_write(self.buffer, index, value)
-                return true
-
-    fn pop() -> T?:
-        """Pop value from queue (lock-free, multi-threaded).
-
-        Returns:
-            Some(value) if queue not empty
-            None if queue empty
-
-        Thread-safe for multiple consumers.
-        """
-        # Try to pop
-        loop:
-            val head = self.head.load(MemoryOrdering.Acquire)
-            val tail = self.tail.load(MemoryOrdering.Acquire)
-
-            # Check if empty
-            if head >= tail:
-                return None
-
-            # Try to claim slot
-            val result = self.head.compare_exchange(
-                head,
-                head + 1,
-                MemoryOrdering.AcqRel,
-                MemoryOrdering.Acquire
-            )
-
-            if result.ok.?:
-                # Successfully claimed slot
-                val index = head % self.capacity
-                val value = mpmc_buffer_read::<T>(self.buffer, index)
-                return Some(value)
-
-    fn len() -> usize:
-        """Get approximate queue length.
-
-        Returns:
-            Approximate number of items
-
-        May be stale in concurrent context.
-        """
-        val tail = self.tail.load(MemoryOrdering.Acquire)
-        val head = self.head.load(MemoryOrdering.Acquire)
-
-        if tail > head:
-            tail - head
-        else:
-            0
+    fn len() -> i64:
+        val size = rt_atomic_int_load(self._size_handle)
+        if size < 0:
+            return 0
+        size
 
     fn is_empty() -> bool:
-        """Check if queue is empty.
-
-        May return false positives in concurrent context.
-        """
-        self.len() == 0
+        rt_atomic_int_load(self._size_handle) <= 0
 
     fn is_full() -> bool:
-        """Check if queue is full.
+        rt_atomic_int_load(self._size_handle) >= self._capacity
 
-        May return false positives in concurrent context.
-        """
-        self.len() >= self.capacity
+    fn close():
+        rt_channel_close(self._channel_id)
+        rt_atomic_int_free(self._size_handle)
 
-    me drop():
-        """Drop queue, freeing buffer."""
-        mpmc_buffer_free::<T>(self.buffer, self.capacity)
+fn mpmc_queue_with_capacity(capacity: i64) -> MpmcQueue:
+    MpmcQueue(
+        _channel_id: rt_channel_new(),
+        _capacity: capacity,
+        _size_handle: rt_atomic_int_new(0)
+    )
 
 # ============================================================================
-# ConcurrentMap<K, V> - Thread-Safe Hash Map
+# ConcurrentMap - Thread-Safe Hash Map
 # ============================================================================
 
-class ConcurrentMap<K, V>:
-    """Thread-safe hash map with sharding.
+class ConcurrentMap:
+    _handle: i64
 
-    Uses multiple shards (sub-maps) to reduce contention.
-    Each shard has its own lock.
+    fn insert(key: text, value: Any) -> bool:
+        __rt_hashmap_insert(self._handle, key, value)
 
-    Example:
-        val map = ConcurrentMap<text, i64>.with_shards(16)
+    fn get(key: text) -> Any:
+        __rt_hashmap_get(self._handle, key)
 
-        # Multiple threads can access concurrently
-        spawn(\: map.insert("a", 1))
-        spawn(\: map.insert("b", 2))
+    fn remove(key: text) -> Any:
+        __rt_hashmap_remove(self._handle, key)
 
-        val value = map.get("a")  # Some(1)
-    """
-    shards: [[u8]]     # Array of shard pointers
-    num_shards: usize  # Number of shards (power of 2)
-    shard_mask: usize  # Mask for shard selection
+    fn contains_key(key: text) -> bool:
+        __rt_hashmap_contains_key(self._handle, key)
 
-    static fn with_shards(num_shards: usize) -> ConcurrentMap<K, V>:
-        """Create concurrent map with specified shards.
-
-        Args:
-            num_shards: Number of shards (rounded to power of 2)
-
-        Returns:
-            Concurrent map
-
-        More shards = less contention, but more memory.
-        """
-        val shards_count = next_power_of_2(num_shards)
-        val shards = concurrent_map_alloc_shards::<K, V>(shards_count)
-
-        ConcurrentMap(
-            shards: shards,
-            num_shards: shards_count,
-            shard_mask: shards_count - 1
-        )
-
-    static fn new() -> ConcurrentMap<K, V>:
-        """Create concurrent map with default shards (16)."""
-        ConcurrentMap.with_shards(16)
-
-    fn get_shard_index(key: K) -> usize:
-        """Get shard index for key.
-
-        Args:
-            key: Key to hash
-
-        Returns:
-            Shard index (0 to num_shards - 1)
-        """
-        val hash = hash_key(key)
-        hash & self.shard_mask
-
-    fn insert(key: K, value: V) -> V?:
-        """Insert key-value pair.
-
-        Args:
-            key: Key to insert
-            value: Value to insert
-
-        Returns:
-            Previous value if key existed, None otherwise
-
-        Thread-safe.
-        """
-        val shard_idx = self.get_shard_index(key)
-        val shard = self.shards[shard_idx]
-
-        concurrent_map_shard_insert(shard, key, value)
-
-    fn get(key: K) -> V?:
-        """Get value for key.
-
-        Args:
-            key: Key to look up
-
-        Returns:
-            Some(value) if key exists, None otherwise
-
-        Thread-safe.
-        """
-        val shard_idx = self.get_shard_index(key)
-        val shard = self.shards[shard_idx]
-
-        concurrent_map_shard_get(shard, key)
-
-    fn remove(key: K) -> V?:
-        """Remove key-value pair.
-
-        Args:
-            key: Key to remove
-
-        Returns:
-            Previous value if key existed, None otherwise
-
-        Thread-safe.
-        """
-        val shard_idx = self.get_shard_index(key)
-        val shard = self.shards[shard_idx]
-
-        concurrent_map_shard_remove(shard, key)
-
-    fn contains_key(key: K) -> bool:
-        """Check if key exists.
-
-        Args:
-            key: Key to check
-
-        Returns:
-            true if key exists, false otherwise
-
-        Thread-safe.
-        """
-        self.get(key).?
-
-    fn len() -> usize:
-        """Get approximate map size.
-
-        Returns:
-            Approximate number of entries
-
-        May be stale in concurrent context.
-        """
-        var total = 0
-        for i in 0..self.num_shards:
-            val shard = self.shards[i]
-            total = total + concurrent_map_shard_len(shard)
-        total
+    fn len() -> i64:
+        __rt_hashmap_len(self._handle)
 
     fn is_empty() -> bool:
-        """Check if map is empty.
+        __rt_hashmap_len(self._handle) == 0
 
-        May return false positives in concurrent context.
-        """
-        self.len() == 0
+fn concurrent_map_new() -> ConcurrentMap:
+    ConcurrentMap(_handle: __rt_hashmap_new())
 
-    me clear():
-        """Remove all entries.
-
-        Thread-safe, but not atomic (other threads may see partial state).
-        """
-        for i in 0..self.num_shards:
-            val shard = self.shards[i]
-            concurrent_map_shard_clear(shard)
-
-    me drop():
-        """Drop map, freeing all shards."""
-        concurrent_map_free_shards::<K, V>(self.shards, self.num_shards)
+# Provided for API compat - sharding not needed (runtime HashMap is thread-safe)
+fn concurrent_map_with_shards(num_shards: i64) -> ConcurrentMap:
+    ConcurrentMap(_handle: __rt_hashmap_new())
 
 # ============================================================================
-# AtomicFlag - Simple Atomic Boolean
+# AtomicFlag - Simple Atomic Boolean Flag
 # ============================================================================
 
 class AtomicFlag:
-    """Simple atomic boolean flag.
-
-    Lighter weight than AtomicBool for simple true/false states.
-
-    Example:
-        val flag = AtomicFlag.new()
-
-        # Set flag
-        flag.set()
-
-        # Check flag
-        if flag.is_set():
-            print "Flag is set!"
-
-        # Clear flag
-        flag.clear()
-    """
-    value: AtomicBool
-
-    static fn new() -> AtomicFlag:
-        """Create new flag (initially false)."""
-        AtomicFlag(value: AtomicBool.new(false))
-
-    static fn new_set() -> AtomicFlag:
-        """Create new flag (initially true)."""
-        AtomicFlag(value: AtomicBool.new(true))
+    _handle: i64
 
     fn set():
-        """Set flag to true."""
-        self.value.store(true, MemoryOrdering.Release)
+        rt_atomic_bool_store(self._handle, true)
 
     fn clear():
-        """Clear flag to false."""
-        self.value.store(false, MemoryOrdering.Release)
+        rt_atomic_bool_store(self._handle, false)
 
     fn is_set() -> bool:
-        """Check if flag is set.
-
-        Returns:
-            true if set, false otherwise
-        """
-        self.value.load(MemoryOrdering.Acquire)
+        rt_atomic_bool_load(self._handle)
 
     fn test_and_set() -> bool:
-        """Test current value and set to true.
+        rt_atomic_bool_swap(self._handle, true)
 
-        Returns:
-            Previous value
+    fn free():
+        rt_atomic_bool_free(self._handle)
 
-        Atomic operation.
-        """
-        self.value.swap(true, MemoryOrdering.AcqRel)
+fn atomic_flag_new() -> AtomicFlag:
+    AtomicFlag(_handle: rt_atomic_bool_new(false))
+
+fn atomic_flag_new_set() -> AtomicFlag:
+    AtomicFlag(_handle: rt_atomic_bool_new(true))
 
 # ============================================================================
 # Once - Run Initialization Exactly Once
 # ============================================================================
 
 class Once:
-    """Run initialization code exactly once.
-
-    Thread-safe. Multiple threads can call, but code runs once.
-
-    Example:
-        val once = Once.new()
-
-        # Multiple threads can call
-        once.call_once(\:
-            print "Initialized!"  # Prints only once
-        )
-    """
-    state: AtomicUsize  # 0 = not run, 1 = running, 2 = done
-
-    static fn new() -> Once:
-        """Create new Once."""
-        Once(state: AtomicUsize.new(0))
+    _state: i64  # AtomicInt handle: 0=not run, 1=running, 2=done
 
     fn call_once(f: fn()):
-        """Call function exactly once.
-
-        Args:
-            f: Function to call
-
-        Thread-safe. Blocks other callers until first call completes.
-        """
         # Fast path: already done
-        if self.state.load(MemoryOrdering.Acquire) == 2:
+        if rt_atomic_int_load(self._state) == 2:
             return
-
-        # Slow path: try to claim
-        loop:
-            val current = self.state.load(MemoryOrdering.Acquire)
-
-            if current == 2:
-                # Already done
-                return
-
-            if current == 0:
-                # Try to claim
-                val result = self.state.compare_exchange(
-                    0,
-                    1,
-                    MemoryOrdering.AcqRel,
-                    MemoryOrdering.Acquire
-                )
-
-                if result.ok.?:
-                    # Successfully claimed - run function
-                    f()
-
-                    # Mark as done
-                    self.state.store(2, MemoryOrdering.Release)
-                    return
-
-            # Someone else is running - spin wait
-            # TODO: Use futex/condvar for real blocking
-            for _ in 0..100:
-                pass  # Spin
+        # Try to claim execution
+        val ok = rt_atomic_int_compare_exchange(self._state, 0, 1)
+        if ok:
+            f()
+            rt_atomic_int_store(self._state, 2)
+        else:
+            # Spin-wait for completion
+            while rt_atomic_int_load(self._state) != 2:
+                rt_thread_yield()
 
     fn is_completed() -> bool:
-        """Check if initialization has completed.
+        rt_atomic_int_load(self._state) == 2
 
-        Returns:
-            true if call_once has completed, false otherwise
-        """
-        self.state.load(MemoryOrdering.Acquire) == 2
+    fn free():
+        rt_atomic_int_free(self._state)
+
+fn once_new() -> Once:
+    Once(_state: rt_atomic_int_new(0))
 
 # ============================================================================
 # Barrier - Synchronize Multiple Threads
 # ============================================================================
 
 class Barrier:
-    """Synchronize multiple threads at a barrier point.
-
-    All threads wait until count threads have arrived.
-
-    Example:
-        val barrier = Barrier.new(3)
-
-        # Spawn 3 threads
-        spawn(\:
-            print "Thread 1 before"
-            barrier.wait()
-            print "Thread 1 after"
-        )
-        # All threads wait at barrier, then continue together
-    """
-    count: usize          # Total threads expected
-    arrived: AtomicUsize  # Threads that have arrived
-    generation: AtomicUsize  # Generation counter
-
-    static fn new(count: usize) -> Barrier:
-        """Create new barrier.
-
-        Args:
-            count: Number of threads to synchronize
-
-        Returns:
-            Barrier
-        """
-        Barrier(
-            count: count,
-            arrived: AtomicUsize.new(0),
-            generation: AtomicUsize.new(0)
-        )
+    _count: i64
+    _arrived: i64    # AtomicInt handle
+    _generation: i64 # AtomicInt handle
 
     fn wait():
-        """Wait at barrier until all threads arrive.
-
-        Blocks until count threads have called wait().
-        """
-        val gen = self.generation.load(MemoryOrdering.Acquire)
-
-        # Increment arrival count
-        val arrived = self.arrived.fetch_add(1, MemoryOrdering.AcqRel)
-
-        if arrived + 1 == self.count:
-            # Last thread - reset barrier
-            self.arrived.store(0, MemoryOrdering.Release)
-            self.generation.fetch_add(1, MemoryOrdering.AcqRel)
+        val gen = rt_atomic_int_load(self._generation)
+        val arrived = rt_atomic_int_fetch_add(self._arrived, 1)
+        if arrived + 1 == self._count:
+            # Last thread - reset and advance generation
+            rt_atomic_int_store(self._arrived, 0)
+            rt_atomic_int_fetch_add(self._generation, 1)
         else:
-            # Wait for barrier to open
-            # TODO: Use futex/condvar for real blocking
-            loop:
-                val current_gen = self.generation.load(MemoryOrdering.Acquire)
-                if current_gen > gen:
-                    break
+            # Wait for generation to advance
+            while rt_atomic_int_load(self._generation) == gen:
+                rt_thread_yield()
 
-                # Spin wait
-                for _ in 0..100:
-                    pass
+    fn free():
+        rt_atomic_int_free(self._arrived)
+        rt_atomic_int_free(self._generation)
 
-# ============================================================================
-# FFI Functions
-# ============================================================================
-
-# MPSC queue node operations
-extern fn mpsc_node_alloc<T>(value: T) -> [u8]
-extern fn mpsc_node_alloc_stub<T>() -> [u8]
-extern fn mpsc_node_free<T>(node: [u8])
-extern fn mpsc_node_free_stub(node: [u8])
-extern fn mpsc_node_get_value<T>(node: [u8]) -> T
-extern fn mpsc_node_get_next(node: [u8]) -> [u8]?
-extern fn mpsc_node_set_next(node: [u8], next: [u8])
-
-# MPMC buffer operations
-extern fn mpmc_buffer_alloc<T>(capacity: usize) -> [u8]
-extern fn mpmc_buffer_free<T>(buffer: [u8], capacity: usize)
-extern fn mpmc_buffer_write<T>(buffer: [u8], index: usize, value: T)
-extern fn mpmc_buffer_read<T>(buffer: [u8], index: usize) -> T
-
-# Concurrent map shard operations
-extern fn concurrent_map_alloc_shards<K, V>(num_shards: usize) -> [[u8]]
-extern fn concurrent_map_free_shards<K, V>(shards: [[u8]], num_shards: usize)
-extern fn concurrent_map_shard_insert<K, V>(shard: [u8], key: K, value: V) -> V?
-extern fn concurrent_map_shard_get<K, V>(shard: [u8], key: K) -> V?
-extern fn concurrent_map_shard_remove<K, V>(shard: [u8], key: K) -> V?
-extern fn concurrent_map_shard_len(shard: [u8]) -> usize
-extern fn concurrent_map_shard_clear(shard: [u8])
-
-# Utility functions
-extern fn hash_key<K>(key: K) -> usize
-extern fn next_power_of_2(n: usize) -> usize
+fn barrier_new(count: i64) -> Barrier:
+    Barrier(
+        _count: count,
+        _arrived: rt_atomic_int_new(0),
+        _generation: rt_atomic_int_new(0)
+    )
 
 # ============================================================================
 # Exports
