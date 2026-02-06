@@ -28,28 +28,57 @@ A statically typed programming language with Python-like syntax, modern safety f
 
 ## Quick Start
 
-### Installation
+### Installation from Binary (Recommended)
+
+Download the pre-compiled release for your platform - no build required!
+
+**What you get:**
+- Pre-compiled runtime (10 MB optimized binary)
+- Complete Simple compiler (100% Simple source code)
+- Standard library (100% Simple)
+- All development tools (MCP server, LSP, debugger - all in Simple)
+
+**Available platforms:**
+- Linux x86_64 / ARM64
+- macOS x86_64 / ARM64
+- Windows x86_64 / ARM64
 
 ```bash
-# Download release (Pure Simple - no build required)
-wget https://github.com/anthropics/simple/releases/download/v0.4.0/simple-0.4.0-linux-x86_64.tar.gz
-tar -xzf simple-0.4.0-linux-x86_64.tar.gz
-cd simple-0.4.0
-
-# Add to PATH
+# Linux x86_64
+wget https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-linux-x86_64.tar.gz
+tar -xzf simple-0.5.0-linux-x86_64.tar.gz
+cd simple-0.5.0
 export PATH="$PWD/bin:$PATH"
+simple --version
 
-# Verify installation
+# macOS ARM64 (Apple Silicon)
+curl -LO https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-darwin-aarch64.tar.gz
+tar -xzf simple-0.5.0-darwin-aarch64.tar.gz
+cd simple-0.5.0
+export PATH="$PWD/bin:$PATH"
+simple --version
+
+# Windows x86_64 (PowerShell)
+Invoke-WebRequest -Uri https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-windows-x86_64.zip -OutFile simple.zip
+Expand-Archive simple.zip
+cd simple-0.5.0
+$env:PATH = "$PWD\bin;$env:PATH"
 simple --version
 ```
 
-### From Source (with existing runtime)
+**Note:** The runtime is pre-compiled for performance, but the entire language implementation (compiler, stdlib, tools) is in Simple source code that you can read and modify!
+
+### From Source (Developers Only)
+
+Only needed if you want to modify the runtime:
 
 ```bash
-# If you already have simple_runtime binary
-export PATH="$PWD/bin:$PATH"
-simple build --release
+git clone https://github.com/simple-lang/simple.git
+cd simple
+simple build bootstrap  # Rebuilds runtime from Rust source
 ```
+
+See [doc/guide/architecture.md](doc/guide/architecture.md) for details on the two-layer architecture.
 
 ### Build with GPU Support
 

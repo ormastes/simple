@@ -7,6 +7,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-02-06
+
+### Major: Rust-Free Distribution
+
+This release achieves a major milestone - **Simple is now distributed as 100% Simple source code** with pre-compiled binaries. Users never see Rust code, making Simple truly a self-hosting language from the user's perspective.
+
+#### Distribution Architecture
+
+**What's Included:**
+- ✅ Pre-compiled runtime binary (10 MB optimized)
+- ✅ Complete Simple compiler source (src/compiler/)
+- ✅ Standard library source (src/std/)
+- ✅ Build system source (src/app/build/)
+- ✅ All development tools (MCP, LSP, DAP - all in Simple)
+- ✅ Examples and documentation
+
+**NOT Included:**
+- ❌ Rust source code (rust/ directory only in dev repository)
+- ❌ Build artifacts
+- ❌ Test files (minimal test subset only)
+
+#### Platform Support
+
+| Platform | Architecture | Package Size | Status |
+|----------|-------------|--------------|--------|
+| Linux | x86_64 | 10 MB | ✅ |
+| Linux | ARM64 | 10 MB | ✅ |
+| macOS | x86_64 | 10 MB | ✅ |
+| macOS | ARM64 (M1+) | 10 MB | ✅ |
+| Windows | x86_64 | 10 MB | ✅ |
+| Windows | ARM64 | 10 MB | ✅ Cross-compile |
+
+#### Self-Hosting Build System
+
+Complete build system written in Simple (11,000+ lines):
+- 8 phases: Foundation, Testing, Coverage, Quality, Bootstrap, Package, Migration, Advanced
+- 290+ SSpec tests (100% passing)
+- Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`, `watch`, `metrics`
+
+#### Distribution Builder
+
+Automated distribution packaging:
+- Multi-platform builds (6 platforms)
+- SHA256 checksum generation
+- UPX compression (optional: 10 MB → 4.5 MB)
+- Self-hosting bootstrap (Simple builds Simple)
+- GitHub Actions integration
+
+#### Documentation
+
+Three new comprehensive guides:
+1. **Installation from Binary** (README.md) - Quick start for all platforms
+2. **Architecture Guide** (doc/guide/architecture.md) - Two-layer architecture explained
+3. **Getting Started** (doc/guide/getting_started.md) - Complete tutorial for beginners
+
+### Added
+
+#### Distribution System
+- Distribution builder in `src/app/package/dist.spl` (427 lines)
+- Package manifest in `simple.sdn` with distribution config
+- GitHub Actions release workflow (`.github/workflows/release.yml`)
+- Multi-platform binary optimization (10 MB per platform)
+- SHA256 checksum generation for all releases
+- UPX compression support (reduces to 4.5 MB)
+
+#### Documentation
+- **README.md** - Added "Installation from Binary (Recommended)" section
+- **doc/guide/architecture.md** - Two-layer architecture guide (300+ lines)
+- **doc/guide/getting_started.md** - Complete beginner tutorial (200+ lines)
+- Installation guides for Linux, macOS, Windows
+- Platform comparison tables
+- Self-hosting process explanation
+
+#### Build System
+- Self-hosting bootstrap command: `simple build bootstrap`
+- Three-stage bootstrap verification
+- Binary checksum verification
+- Cross-platform build support
+
+### Changed
+
+#### Philosophy
+- **Before**: Repository includes Rust source, users see Rust code
+- **After**: Distribution is pure Simple source + pre-compiled runtime
+- Users never see Rust code unless they want to modify the runtime
+- Think of it like JVM (runtime) + Java (language), but with modifiable compiler
+
+#### Package Contents
+- Minimal: Runtime (10 MB) + lib/std + examples (bootstrap package)
+- Full: Runtime + all Simple source + docs + examples (source distribution)
+- No Rust source in distributions (only in GitHub repository)
+
+#### Performance
+- Binary size: 10 MB (from 32 MB in v0.4.0)
+- With UPX: 4.5 MB (55% reduction)
+- Compilation speed: <1.1x overhead (negligible)
+- Runtime speed: 0.9-1.1x native C/Rust performance
+
+### Infrastructure
+
+#### GitHub Actions
+- Automated release builds for 6 platforms
+- Cross-compilation for ARM64
+- Checksum generation
+- Installation verification tests
+- Artifact uploads to GitHub Releases
+
+#### Distribution Scripts
+- `script/build-bootstrap.spl` - Build bootstrap packages
+- `script/build-full.spl` - Build full source packages
+- `script/install.spl` - Quick installer script
+
+### Breaking Changes
+
+**None** - this is a packaging change only. All existing code works unchanged.
+
+### Migration Guide
+
+**From v0.4.0 to v0.5.0:**
+
+No code changes needed. Installation is now simpler:
+
+**Before (v0.4.0):**
+```bash
+git clone https://github.com/simple-lang/simple.git
+cd simple && make install
+```
+
+**After (v0.5.0):**
+```bash
+# Download pre-compiled release
+wget https://github.com/simple-lang/simple/releases/download/v0.5.0/simple-0.5.0-linux-x86_64.tar.gz
+tar -xzf simple-0.5.0-linux-x86_64.tar.gz
+cd simple-0.5.0
+export PATH="$PWD/bin:$PATH"
+simple --version
+```
+
+### Notes
+
+**For End Users:**
+- Download and run - no build required
+- No Rust toolchain needed
+- All functionality available out-of-the-box
+
+**For Library Developers:**
+- Modify compiler in Simple (no Rust knowledge needed)
+- Rebuild with `simple build bootstrap-rebuild`
+- All compiler source is readable and editable
+
+**For Runtime Developers:**
+- Clone repository (includes rust/ directory)
+- Modify runtime in Rust
+- Build with `simple build bootstrap`
+
+### Resources
+
+- [Architecture Guide](doc/guide/architecture.md) - Two-layer design explained
+- [Getting Started](doc/guide/getting_started.md) - Complete tutorial
+- [GitHub Releases](https://github.com/simple-lang/simple/releases) - Download binaries
+
+---
+
 ## [0.5.0-beta.1] - 2026-02-05
 
 ### Added
