@@ -491,6 +491,99 @@ fn get_file_size(path: text) -> i64:
     0
 
 # ============================================================================
+# Linker Auto-Detection
+# ============================================================================
+
+enum SystemLinker:
+    """Supported system linkers across all platforms."""
+    Mold        # mold (Linux - fastest)
+    Lld         # lld (LLVM linker - cross-platform)
+    LldLink     # lld-link (Windows MSVC-compatible)
+    Msvc        # Microsoft link.exe (Windows)
+    Ld          # GNU ld (Linux/Unix)
+    Ld64        # Apple ld64 (macOS)
+
+impl SystemLinker:
+    fn name() -> text:
+        match self:
+            case SystemLinker.Mold: "mold"
+            case SystemLinker.Lld: "lld"
+            case SystemLinker.LldLink: "lld-link"
+            case SystemLinker.Msvc: "MSVC link.exe"
+            case SystemLinker.Ld: "ld"
+            case SystemLinker.Ld64: "ld64"
+
+    fn command() -> text:
+        match self:
+            case SystemLinker.Mold: "mold"
+            case SystemLinker.Lld: "lld"
+            case SystemLinker.LldLink: "lld-link"
+            case SystemLinker.Msvc: "link"
+            case SystemLinker.Ld: "ld"
+            case SystemLinker.Ld64: "ld"
+
+fn auto_detect_linker() -> SystemLinker:
+    """Auto-detect best available linker for current platform."""
+    use std.platform.{is_windows, is_unix}
+    use std.common.target.TargetOS
+
+    val os = TargetOS.host()
+
+    match os:
+        case TargetOS.Linux:
+            # Prefer mold > lld > ld
+            if command_exists("mold"):
+                SystemLinker.Mold
+            elif command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case TargetOS.Windows:
+            # Prefer lld-link > MSVC link.exe
+            use compiler.linker.msvc.{is_lld_link_available, is_msvc_available}
+            if is_lld_link_available():
+                SystemLinker.LldLink
+            elif is_msvc_available():
+                SystemLinker.Msvc
+            else:
+                SystemLinker.Lld  # Fallback (may not work)
+
+        case TargetOS.MacOS:
+            # macOS uses ld64
+            SystemLinker.Ld64
+
+        case TargetOS.FreeBSD:
+            # FreeBSD prefers lld
+            if command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case _:
+            # Default to LLD for other platforms
+            SystemLinker.Lld
+
+fn command_exists(cmd: text) -> bool:
+    """Check if command exists in PATH."""
+    use app.io.shell
+
+    # Platform-specific command check
+    use std.platform.is_windows
+
+    if is_windows():
+        val result = shell("where {cmd} 2>nul")
+        result.exit_code == 0
+    else:
+        val result = shell("which {cmd} 2>/dev/null")
+        result.exit_code == 0
+
+fn get_linker_info() -> text:
+    """Get information about the detected linker."""
+    val linker = auto_detect_linker()
+    "Detected linker: {linker.name()} (command: {linker.command()})"
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -504,3 +597,7 @@ export LinkErrorKind
 export link
 export link_native
 export link_with_config
+export SystemLinker
+export auto_detect_linker
+export command_exists
+export get_linker_info
