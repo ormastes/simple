@@ -205,25 +205,60 @@ jobs:
           echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
           echo "✓ Bootstrap runtime built with cargo"
 
-      - name: Build Rust runtime
+      - name: Build Rust runtime (from source if available)
+        if: env.HAVE_PREVIOUS_RELEASE == 'false'
         run: |
+          if [ ! -d "rust" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠ No rust/ directory found (pure Simple distribution)"
+            echo "This is expected for releases after v0.4.0"
+            echo "Skipping Rust runtime build - will use dist builder"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 0
+          fi
           cd rust
           cargo build --profile bootstrap --target ${{ matrix.rust_target }}
           cd ..
         env:
           CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
 
+      - name: Prepare runtime binary for packaging
+        run: |
+          # Copy downloaded runtime to expected location for packaging
+          if [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then
+            echo "Using downloaded runtime from previous release"
+            mkdir -p dist/runtimes/${{ matrix.platform }}
+            cp "$SIMPLE_RUNTIME" dist/runtimes/${{ matrix.platform }}/simple${{ matrix.platform == 'windows-x86_64' || matrix.platform == 'windows-aarch64' && '.exe' || '' }}
+            chmod +x dist/runtimes/${{ matrix.platform }}/simple*
+          elif [ -f "rust/target/${{ matrix.rust_target }}/bootstrap/simple" ]; then
+            echo "Using freshly built runtime"
+            mkdir -p dist/runtimes/${{ matrix.platform }}
+            cp "rust/target/${{ matrix.rust_target }}/bootstrap/simple" dist/runtimes/${{ matrix.platform }}/
+          elif [ -f "rust/target/${{ matrix.rust_target }}/bootstrap/simple.exe" ]; then
+            echo "Using freshly built runtime (Windows)"
+            mkdir -p dist/runtimes/${{ matrix.platform }}
+            cp "rust/target/${{ matrix.rust_target }}/bootstrap/simple.exe" dist/runtimes/${{ matrix.platform }}/
+          else
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠ Error: No runtime binary available for packaging"
+            echo "  - No downloaded previous release"
+            echo "  - No freshly built runtime in rust/target/"
+            echo "  - Cannot create distribution package"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+        env:
+          SIMPLE_RUNTIME: ${{ env.SIMPLE_RUNTIME }}
+
       - name: Build distribution package
         run: |
-          # Use Simple packaging script
-          if [ -n "$SIMPLE_RUNTIME" ]; then
-            $SIMPLE_RUNTIME script/package-dist.spl \
+          # Use dist.spl builder with pre-staged runtimes
+          if [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then
+            $SIMPLE_RUNTIME src/app/package/dist.spl \
               --platform=${{ matrix.platform }} \
-              --profile=bootstrap \
-              --bootstrap-only \
-              --compress
+              --version=${{ needs.check-version.outputs.version }}
           else
-            # Fallback: use shell script if Simple runtime not available
+            # Fallback: use shell script
             chmod +x script/build-bootstrap.sh
             ./script/build-bootstrap.sh
           fi
