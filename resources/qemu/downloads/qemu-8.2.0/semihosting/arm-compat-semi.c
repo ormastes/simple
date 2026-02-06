@@ -77,6 +77,13 @@
 #define TARGET_SYS_ELAPSED     0x30
 #define TARGET_SYS_TICKFREQ    0x31
 
+/* Simple language custom extensions for string interning */
+#define TARGET_SYS_WRITE_HANDLE     0x100
+#define TARGET_SYS_WRITE_HANDLE_P1  0x101
+#define TARGET_SYS_WRITE_HANDLE_P2  0x102
+#define TARGET_SYS_WRITE_HANDLE_P3  0x103
+#define TARGET_SYS_WRITE_HANDLE_PN  0x104
+
 /* ADP_Stopped_ApplicationExit is used for exit(0),
  * anything else is implemented as exit(1) */
 #define ADP_Stopped_ApplicationExit     (0x20026)
@@ -84,6 +91,165 @@
 #ifndef O_BINARY
 #define O_BINARY 0
 #endif
+
+/*
+ * Simple Language String Table Support
+ *
+ * Loads string table from binary's .smt section in target memory.
+ * Format: [count:u32][entries...]
+ * Entry: [id:u32, length:u32, params:u32, text:char[]]
+ */
+
+typedef struct {
+    uint32_t count;
+    target_ulong base_addr;
+    bool loaded;
+} StringTableInfo;
+
+static StringTableInfo g_string_table = {0, 0, false};
+
+/*
+ * Find .smt section address in loaded binary
+ *
+ * For now, uses heuristic: .smt typically follows .text section
+ * TODO: Parse ELF headers to find exact .smt section address
+ */
+static target_ulong find_smt_section_address(CPUState *cs)
+{
+    /*
+     * Common layout for RISC-V baremetal:
+     *   0x80000000 - .text section
+     *   0x80000000 + text_size - .smt section
+     *
+     * For now, try common offsets:
+     *   1. 0x80000100 (256 bytes after start)
+     *   2. 0x80000200 (512 bytes after start)
+     *   3. 0x80001000 (4KB after start)
+     */
+    target_ulong candidates[] = {
+        0x80000100,
+        0x80000200,
+        0x80000400,
+        0x80001000,
+    };
+
+    uint32_t magic;
+
+    for (int i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        /* Try to read first word (should be entry count, typically 1-100) */
+        if (cpu_memory_rw_debug(cs, candidates[i], (uint8_t*)&magic, 4, 0) == 0) {
+            /* Sanity check: entry count should be reasonable (1-1000) */
+            if (magic > 0 && magic < 1000) {
+                return candidates[i];
+            }
+        }
+    }
+
+    return 0;  /* Not found */
+}
+
+/*
+ * Load string table from binary memory
+ */
+static int load_string_table_from_memory(CPUState *cs)
+{
+    target_ulong smt_addr;
+    uint32_t count;
+
+    if (g_string_table.loaded) {
+        return 0;  /* Already loaded */
+    }
+
+    /* Find .smt section */
+    smt_addr = find_smt_section_address(cs);
+    if (smt_addr == 0) {
+        fprintf(stderr, "Simple: Warning - String table section not found\n");
+        fprintf(stderr, "        Using fallback: no string interning support\n");
+        return -1;
+    }
+
+    /* Read entry count */
+    if (cpu_memory_rw_debug(cs, smt_addr, (uint8_t*)&count, 4, 0) < 0) {
+        fprintf(stderr, "Simple: Failed to read string table header\n");
+        return -1;
+    }
+
+    g_string_table.count = count;
+    g_string_table.base_addr = smt_addr + 4;  /* After count field */
+    g_string_table.loaded = true;
+
+    fprintf(stderr, "Simple: Loaded string table (%u entries) from 0x%lx\n",
+            count, (unsigned long)smt_addr);
+
+    return 0;
+}
+
+/*
+ * Get string text by ID from target memory
+ */
+static int get_string_by_id(CPUState *cs, uint32_t string_id,
+                             char *buffer, size_t bufsize)
+{
+    target_ulong entry_addr = g_string_table.base_addr;
+    uint32_t id, length, params;
+    int i;
+
+    /* Iterate through entries in target memory */
+    for (i = 0; i < g_string_table.count; i++) {
+        /* Read entry header (12 bytes: id, length, params) */
+        if (cpu_memory_rw_debug(cs, entry_addr, (uint8_t*)&id, 4, 0) < 0) {
+            return -1;
+        }
+        if (cpu_memory_rw_debug(cs, entry_addr + 4, (uint8_t*)&length, 4, 0) < 0) {
+            return -1;
+        }
+        if (cpu_memory_rw_debug(cs, entry_addr + 8, (uint8_t*)&params, 4, 0) < 0) {
+            return -1;
+        }
+
+        if (id == string_id) {
+            /* Found! Read string text */
+            size_t read_len = (length < bufsize) ? length : (bufsize - 1);
+            if (cpu_memory_rw_debug(cs, entry_addr + 12, (uint8_t*)buffer,
+                                     read_len, 0) < 0) {
+                return -1;
+            }
+            buffer[read_len] = '\0';
+            return 0;  /* Success */
+        }
+
+        /* Move to next entry: header (12) + text (aligned to 4) */
+        entry_addr += 12 + ((length + 3) & ~3);
+    }
+
+    /* String ID not found */
+    return -1;
+}
+
+/*
+ * Format string with parameters (simple sprintf-style)
+ */
+static void format_string_with_params(char *output, size_t outsize,
+                                       const char *format,
+                                       uint32_t *params, int param_count)
+{
+    /* Simple implementation: just replace {} with parameters */
+    const char *src = format;
+    char *dst = output;
+    char *end = output + outsize - 1;
+    int param_idx = 0;
+
+    while (*src && dst < end) {
+        if (src[0] == '{' && src[1] == '}' && param_idx < param_count) {
+            /* Replace {} with parameter */
+            dst += snprintf(dst, end - dst, "%u", params[param_idx++]);
+            src += 2;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
 
 static int gdb_open_modeflags[12] = {
     GDB_O_RDONLY,
