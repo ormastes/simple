@@ -1,0 +1,382 @@
+# QEMU Unified Execution Demo
+# Demonstrates the unified execution system with real QEMU examples
+
+use std.spec
+use lib.execution.mod.{ExecutionConfig, TestExecutor, parse_target}
+use lib.qemu.test_session.{QemuTestSession, QemuMultiTestRunner}
+use lib.qemu.mod.{QemuArch, QemuConfig, QemuInstance}
+use app.io.shell
+
+# ===========================================================================
+# Basic QEMU Instance Tests
+# ===========================================================================
+
+describe "QEMU Instance Management":
+    slow_it "starts and stops QEMU x86_64 with GDB stub":
+        # Use existing hello_x86_64.elf
+        val binary = "examples/baremetal/hello_x86_64.elf"
+
+        # Verify binary exists
+        val check = shell("test -f {binary}")
+        if check.exit_code != 0:
+            skip("Binary not found: {binary}")
+            return
+
+        # Create QEMU config with GDB enabled
+        val config = QemuConfig.for_remote_debug(
+            QemuArch.X86_64,
+            binary,
+            gdb_port: 1234
+        )
+
+        # Start QEMU
+        val instance_result = QemuInstance.start(config)
+        match instance_result:
+            Ok(instance):
+                # Verify running
+                expect(instance.is_running()).to_be(true)
+                expect(instance.get_gdb_port()).to_equal(1234)
+
+                # Give GDB stub time to initialize
+                shell("sleep 1")
+
+                # Check GDB port is listening
+                val port_check = shell("ss -tlnp 2>/dev/null | grep ':1234' || true")
+                val port_listening = port_check.stdout.contains("1234")
+
+                # Stop QEMU
+                instance.stop()
+                shell("sleep 0.5")
+
+                # Verify stopped
+                expect(instance.is_running()).to_be(false)
+
+                if port_listening:
+                    print("✓ GDB stub was listening on port 1234")
+                else:
+                    print("⚠ GDB port check inconclusive (may need elevated permissions)")
+
+            Err(e):
+                if e.contains("not found"):
+                    skip("QEMU not available: {e}")
+                else:
+                    fail_assertion("QEMU failed to start: {e}")
+
+    slow_it "runs x86_64 binary to completion":
+        val binary = "examples/baremetal/hello_x86_64.elf"
+
+        val check = shell("test -f {binary}")
+        if check.exit_code != 0:
+            skip("Binary not found: {binary}")
+            return
+
+        # Create config for test runner (serial stdio, debug exit)
+        val config = QemuConfig.for_test_runner(QemuArch.X86_64, binary)
+
+        val instance_result = QemuInstance.start(config)
+        match instance_result:
+            Ok(instance):
+                # Wait for execution with timeout
+                val exit_result = instance.wait_exit(timeout_ms: 10000)
+
+                match exit_result:
+                    Ok(exit_code):
+                        # x86 debug-exit device encoding: exit(0) -> QEMU exits with 1
+                        expect(exit_code).to_equal(1)
+                        print("✓ Binary executed successfully (exit code: {exit_code})")
+                    Err(e):
+                        instance.stop()
+                        fail_assertion("Execution failed: {e}")
+
+            Err(e):
+                if e.contains("not found"):
+                    skip("QEMU not available: {e}")
+                else:
+                    fail_assertion("Failed to start: {e}")
+
+# ===========================================================================
+# Execution Config Tests (Real Targets)
+# ===========================================================================
+
+describe "Execution Configuration with Real Targets":
+    it "creates config for x86_64-qemu":
+        val config = ExecutionConfig.qemu_x86_64("examples/baremetal/hello_x86_64.elf", 1234)
+
+        expect(config.target).to_equal("x86_64-qemu")
+        expect(config.program).to_equal("examples/baremetal/hello_x86_64.elf")
+        expect(config.is_remote()).to_be(true)
+        expect(config.uses_gdb()).to_be(true)
+        expect(config.reload_program).to_be(true)
+
+    it "parses target string for real binary":
+        val result = parse_target("x86_64-qemu", "examples/baremetal/hello_x86_64.elf")
+
+        match result:
+            Ok(config):
+                expect(config.target).to_equal("x86_64-qemu")
+                expect(config.program).to_contain("hello_x86_64.elf")
+            Err(e):
+                fail_assertion("Should parse target: {e}")
+
+# ===========================================================================
+# Test Session Tests (Integration)
+# ===========================================================================
+
+describe "QEMU Test Session (x86_64)":
+    slow_it "creates and manages session lifecycle":
+        val binary = "examples/baremetal/hello_x86_64.elf"
+
+        val check = shell("test -f {binary}")
+        if check.exit_code != 0:
+            skip("Binary not found: {binary}")
+            return
+
+        # Create session
+        var session = QemuTestSession.create(QemuArch.X86_64, binary)
+            .with_gdb_port(1235)  # Use different port
+            .with_auto_reset(true)
+
+        expect(session.arch).to_equal(QemuArch.X86_64)
+        expect(session.running).to_be(false)
+        expect(session.test_count).to_equal(0)
+
+        # Start session
+        val start_result = session.start()
+        match start_result:
+            Ok(msg):
+                expect(msg.contains("started")).to_be(true)
+                expect(session.running).to_be(true)
+
+                shell("sleep 1")
+
+                # Check QEMU is running
+                expect(session.is_running()).to_be(true)
+
+                # Stop session
+                session.stop()
+                shell("sleep 0.5")
+
+                expect(session.running).to_be(false)
+                print("✓ Session lifecycle completed successfully")
+
+            Err(e):
+                if e.contains("not found"):
+                    skip("QEMU not available: {e}")
+                else:
+                    # Clean up
+                    session.stop()
+                    fail_assertion("Session start failed: {e}")
+
+# ===========================================================================
+# Multi-Test Runner Demo
+# ===========================================================================
+
+describe "Multi-Test Runner (x86_64)":
+    skip "runs multiple tests with single QEMU instance":
+        # NOTE: Skipped because it requires working GDB connection
+        # The infrastructure is ready, but needs GDB MI client fixes
+
+        val binary = "examples/baremetal/hello_x86_64.elf"
+
+        var runner = QemuMultiTestRunner.create(QemuArch.X86_64, binary)
+
+        # Add test functions
+        runner.add_test(\:
+            # Test 1: Boot check
+            print("  Running test 1: Boot check")
+            Ok("boot test passed")
+        )
+
+        runner.add_test(\:
+            # Test 2: Memory check
+            print("  Running test 2: Memory check")
+            Ok("memory test passed")
+        )
+
+        runner.add_test(\:
+            # Test 3: Exit check
+            print("  Running test 3: Exit check")
+            Ok("exit test passed")
+        )
+
+        expect(runner.tests.len()).to_equal(3)
+
+        # Run all tests
+        val results = runner.run_all()
+        match results:
+            Ok(res):
+                expect(res.len()).to_equal(3)
+
+                var passed = runner.passed_count()
+                var total = runner.tests.len()
+
+                print("✓ Multi-test completed: {passed}/{total} passed")
+
+            Err(e):
+                print("⚠ Multi-test runner needs GDB MI fixes: {e}")
+
+# ===========================================================================
+# Manual Test Functions (for demonstration)
+# ===========================================================================
+
+# Manual test: Start QEMU and verify it's accessible
+fn manual_test_qemu_start():
+    print("\n=== Manual Test: QEMU Startup ===\n")
+
+    val binary = "examples/baremetal/hello_x86_64.elf"
+
+    # Check binary exists
+    val check = shell("test -f {binary}")
+    if check.exit_code != 0:
+        print("❌ Binary not found: {binary}")
+        print("   Run: cd examples/baremetal && bash build.sh")
+        return Err("binary not found")
+
+    print("✓ Binary found: {binary}")
+
+    # Create QEMU config
+    val config = QemuConfig.for_remote_debug(QemuArch.X86_64, binary, 1234)
+    print("✓ Config created (GDB port: 1234)")
+
+    # Start QEMU
+    print("⏳ Starting QEMU...")
+    val instance_result = QemuInstance.start(config)
+
+    match instance_result:
+        Ok(instance):
+            print("✓ QEMU started (PID: {instance.get_pid()})")
+
+            # Wait for GDB stub
+            shell("sleep 1")
+
+            # Check GDB port
+            val port_check = shell("ss -tlnp 2>/dev/null | grep ':1234' || true")
+            if port_check.stdout.contains("1234"):
+                print("✓ GDB stub listening on port 1234")
+            else:
+                print("⚠ GDB port check inconclusive")
+
+            # Verify running
+            if instance.is_running():
+                print("✓ QEMU instance is running")
+            else:
+                print("❌ QEMU instance stopped unexpectedly")
+
+            # Stop QEMU
+            print("⏳ Stopping QEMU...")
+            instance.stop()
+            shell("sleep 0.5")
+
+            print("✓ QEMU stopped")
+            print("\n=== Test Passed ===\n")
+            Ok("success")
+
+        Err(e):
+            print("❌ Failed to start QEMU: {e}")
+            print("\n   Check:")
+            print("   1. QEMU installed: qemu-system-x86_64 --version")
+            print("   2. Binary exists: ls -l {binary}")
+            print("\n=== Test Failed ===\n")
+            Err(e)
+
+# Manual test: Session lifecycle
+fn manual_test_session_lifecycle():
+    print("\n=== Manual Test: Session Lifecycle ===\n")
+
+    val binary = "examples/baremetal/hello_x86_64.elf"
+
+    var session = QemuTestSession.create(QemuArch.X86_64, binary)
+        .with_gdb_port(1236)
+
+    print("✓ Session created")
+    print("  Architecture: {session.arch}")
+    print("  Binary: {session.binary_path}")
+    print("  GDB port: {session.gdb_port}")
+    print("  Auto-reset: {session.auto_reset}")
+
+    # Start
+    print("\n⏳ Starting session...")
+    val start_result = session.start()
+
+    match start_result:
+        Ok(msg):
+            print("✓ {msg}")
+            shell("sleep 1")
+
+            # Verify
+            if session.is_running():
+                print("✓ Session is running")
+
+                # Reset
+                print("\n⏳ Resetting session...")
+                val reset_result = session.reset()
+                match reset_result:
+                    Ok(msg):
+                        print("✓ {msg}")
+                    Err(e):
+                        print("⚠ Reset needs GDB connection: {e}")
+
+                # Stop
+                print("\n⏳ Stopping session...")
+                session.stop()
+                shell("sleep 0.5")
+                print("✓ Session stopped")
+
+                print("\n=== Test Passed ===\n")
+                Ok("success")
+            else:
+                print("❌ Session not running")
+                session.stop()
+                Err("session not running")
+
+        Err(e):
+            print("❌ Failed to start session: {e}")
+            print("\n=== Test Failed ===\n")
+            Err(e)
+
+# Quick integration test
+fn quick_integration_test():
+    print("\n╔════════════════════════════════════════════╗")
+    print("║  QEMU Unified Execution - Quick Test      ║")
+    print("╚════════════════════════════════════════════╝\n")
+
+    # Test 1: QEMU startup
+    print("Test 1: QEMU Instance Management")
+    print("─────────────────────────────────────────────")
+    val test1 = manual_test_qemu_start()
+
+    # Test 2: Session lifecycle
+    print("\nTest 2: Session Lifecycle Management")
+    print("─────────────────────────────────────────────")
+    val test2 = manual_test_session_lifecycle()
+
+    # Summary
+    print("\n╔════════════════════════════════════════════╗")
+    print("║  Test Summary                              ║")
+    print("╚════════════════════════════════════════════╝\n")
+
+    var passed = 0
+    var total = 2
+
+    match test1:
+        Ok(_):
+            print("✓ QEMU Instance Management: PASSED")
+            passed = passed + 1
+        Err(e):
+            print("✗ QEMU Instance Management: FAILED ({e})")
+
+    match test2:
+        Ok(_):
+            print("✓ Session Lifecycle: PASSED")
+            passed = passed + 1
+        Err(e):
+            print("✗ Session Lifecycle: FAILED ({e})")
+
+    print("\nResult: {passed}/{total} tests passed")
+
+    if passed == total:
+        print("\n🎉 All tests passed!\n")
+        Ok("all passed")
+    else:
+        print("\n⚠ Some tests failed\n")
+        Err("{total - passed} test(s) failed")

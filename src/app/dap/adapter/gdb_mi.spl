@@ -1,0 +1,253 @@
+# GDB MI Debug Adapter
+# Wraps GdbMiClient to implement the DebugAdapter trait
+# Provides unified interface for GDB-based debugging (QEMU, hardware with GDB stub)
+
+use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
+use app.dap.adapter.mod.{DebugAdapter, AdapterCapabilities, AdapterConfig}
+use remote.protocol.gdb_mi.GdbMiClient
+use remote.types.DebugConfig
+
+# GDB MI adapter implementing DebugAdapter trait
+class GdbMiAdapter:
+    client: Option<GdbMiClient>
+    config: AdapterConfig
+    attached: bool
+    capabilities: AdapterCapabilities
+
+impl GdbMiAdapter:
+    # Create adapter from config
+    static fn connect(config: AdapterConfig) -> Result<GdbMiAdapter, text>:
+        # Convert AdapterConfig to DebugConfig for GdbMiClient
+        val debug_config = DebugConfig(
+            host: config.host,
+            port: config.port,
+            program: config.program,
+            architecture: "riscv32",  # TODO: Make configurable
+            timeout_ms: config.timeout_ms
+        )
+
+        # Connect to GDB
+        val client = GdbMiClient.connect(debug_config)?
+
+        Ok(GdbMiAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        ))
+
+    # Create adapter wrapping existing GdbMiClient
+    static fn from_client(client: GdbMiClient, config: AdapterConfig) -> GdbMiAdapter:
+        GdbMiAdapter(
+            client: Some(client),
+            config: config,
+            attached: true,
+            capabilities: AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+        )
+
+    # Get capabilities
+    fn get_capabilities() -> AdapterCapabilities:
+        self.capabilities
+
+    # --- DebugAdapter trait implementation ---
+
+    fn name() -> text:
+        "gdb-mi"
+
+    fn is_attached() -> bool:
+        self.attached
+
+    fn attach(program: text, args: [text]) -> Result<text, text>:
+        match self.client:
+            Some(client):
+                # Load symbols if program specified
+                if program.len() > 0:
+                    client.send_command("file-exec-and-symbols {program}")?
+                self.attached = true
+                Ok("attached to {program}")
+            None:
+                Err("GDB client not connected")
+
+    fn detach() -> Result<text, text>:
+        match self.client:
+            Some(client):
+                client.disconnect()
+                self.attached = false
+                Ok("detached")
+            None:
+                Err("GDB client not connected")
+
+    # --- Execution Control ---
+
+    fn halt() -> Result<text, text>:
+        match self.client:
+            Some(client): client.halt()
+            None: Err("GDB client not connected")
+
+    fn resume() -> Result<text, text>:
+        match self.client:
+            Some(client): client.resume()
+            None: Err("GDB client not connected")
+
+    fn single_step() -> Result<text, text>:
+        match self.client:
+            Some(client): client.single_step()
+            None: Err("GDB client not connected")
+
+    fn step_over() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_over()
+            None: Err("GDB client not connected")
+
+    fn step_out() -> Result<text, text>:
+        match self.client:
+            Some(client): client.step_out()
+            None: Err("GDB client not connected")
+
+    fn reset() -> Result<text, text>:
+        # For QEMU: monitor system_reset
+        # For hardware: depends on the target
+        match self.client:
+            Some(client):
+                # Try GDB monitor command for QEMU
+                val result = client.send_command("target-download")
+                match result:
+                    Ok(_):
+                        Ok("target reset")
+                    Err(e):
+                        # Fallback: try monitor command
+                        val mon_result = client.send_command("monitor system_reset")
+                        match mon_result:
+                            Ok(_): Ok("target reset via monitor")
+                            Err(_): Err("reset not supported: {e}")
+            None:
+                Err("GDB client not connected")
+
+    # --- Breakpoints ---
+
+    fn set_breakpoint(file: text, line: i32) -> Result<i32, text>:
+        match self.client:
+            Some(client):
+                val location = "{file}:{line}"
+                client.set_breakpoint(location)
+            None:
+                Err("GDB client not connected")
+
+    fn set_breakpoint_at_addr(addr: i64) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_breakpoint_at_addr(addr)
+            None: Err("GDB client not connected")
+
+    fn delete_breakpoint(id: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.delete_breakpoint(id)
+            None: Err("GDB client not connected")
+
+    fn set_watchpoint(expr: text, access: text) -> Result<i32, text>:
+        match self.client:
+            Some(client): client.set_watchpoint(expr, access)
+            None: Err("GDB client not connected")
+
+    # --- Variable Inspection ---
+
+    fn read_locals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_locals()
+            None: Err("GDB client not connected")
+
+    fn read_arguments() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_arguments()
+            None: Err("GDB client not connected")
+
+    fn read_globals() -> Result<[VarInfo], text>:
+        match self.client:
+            Some(client): client.read_globals()
+            None: Err("GDB client not connected")
+
+    fn evaluate(expr: text) -> Result<text, text>:
+        match self.client:
+            Some(client): client.evaluate(expr)
+            None: Err("GDB client not connected")
+
+    # --- Stack Inspection ---
+
+    fn stack_trace() -> Result<[FrameInfo], text>:
+        match self.client:
+            Some(client): client.stack_trace()
+            None: Err("GDB client not connected")
+
+    fn stack_depth() -> Result<i32, text>:
+        match self.client:
+            Some(client): client.stack_depth()
+            None: Err("GDB client not connected")
+
+    fn select_frame(level: i32) -> Result<text, text>:
+        match self.client:
+            Some(client): client.select_frame(level)
+            None: Err("GDB client not connected")
+
+    fn current_location() -> Result<LocationInfo, text>:
+        match self.client:
+            Some(client):
+                val frames = client.stack_trace()?
+                if frames.len() > 0:
+                    val f = frames[0]
+                    Ok(LocationInfo.at(f.file, f.line, f.function_name))
+                else:
+                    Err("no frames available")
+            None:
+                Err("GDB client not connected")
+
+    # --- Memory Access ---
+
+    fn read_memory(addr: i64, size: i32) -> Result<[i32], text>:
+        match self.client:
+            Some(client): client.read_memory(addr, size)
+            None: Err("GDB client not connected")
+
+    fn write_memory(addr: i64, data: [i32]) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_memory(addr, data)
+            None: Err("GDB client not connected")
+
+    # --- Register Access ---
+
+    fn read_register(name: text) -> Result<i64, text>:
+        match self.client:
+            Some(client): client.read_register(name)
+            None: Err("GDB client not connected")
+
+    fn read_all_registers() -> Result<Dict<text, i64>, text>:
+        match self.client:
+            Some(client): client.read_all_registers()
+            None: Err("GDB client not connected")
+
+    fn write_register(name: text, value: i64) -> Result<text, text>:
+        match self.client:
+            Some(client): client.write_register(name, value)
+            None: Err("GDB client not connected")
+
+    # --- Context Management ---
+
+    fn clear_context() -> Result<text, text>:
+        # GDB can't clear interpreter context (hardware/QEMU doesn't have one)
+        # This is a no-op for GDB adapter
+        Ok("context clearing not supported (hardware target)")
+
+    fn reload_program(program: text) -> Result<text, text>:
+        # Reload symbols
+        match self.client:
+            Some(client):
+                client.send_command("file-exec-and-symbols {program}")?
+                # Reset target to reload binary
+                self.reset()?
+                Ok("program reloaded")
+            None:
+                Err("GDB client not connected")

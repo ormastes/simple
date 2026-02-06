@@ -266,12 +266,38 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     rt_process_run(cmd, args)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    val (out, err, code) = process_run(cmd, args)
-    (out, err, code)
+    # Convert timeout from milliseconds to seconds (minimum 1 second)
+    val timeout_secs = if timeout_ms <= 0:
+        120  # Default 2 minutes
+    else:
+        val secs = timeout_ms / 1000
+        if secs < 1: 1 else: secs
+
+    # Use Unix 'timeout' command to enforce timeout
+    # The timeout command will send SIGTERM, then SIGKILL if needed
+    if is_windows_platform():
+        # Windows doesn't have timeout command, fall back to regular run
+        # TODO: Implement Windows timeout using PowerShell or .NET
+        val (out, err, code) = process_run(cmd, args)
+        (out, err, code)
+    else:
+        # Unix/Linux: use timeout command
+        # Build args array: timeout [seconds] cmd [args...]
+        var timeout_args: [text] = ["{timeout_secs}", cmd]
+        timeout_args.merge(args)
+
+        val (out, err, code) = rt_process_run("timeout", timeout_args)
+
+        # timeout command returns 124 if process was killed by timeout
+        if code == 124:
+            (out, err + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+        else:
+            (out, err, code)
 
 fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
-    val (out, err, code) = process_run(cmd, args)
-    (out, err, code)
+    # For now, just enforce timeout (other limits not yet implemented)
+    # TODO: Implement memory_bytes, cpu_seconds, max_fds, max_procs limits
+    process_run_timeout(cmd, args, timeout_ms)
 
 fn process_output(cmd: text, args: [text]) -> text:
     val (stdout, stderr, code) = process_run(cmd, args)

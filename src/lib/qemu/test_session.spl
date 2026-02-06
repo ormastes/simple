@@ -1,0 +1,263 @@
+# QEMU Test Session Manager
+# Manages QEMU instances with lifecycle control for test runners
+# Provides automatic reset/reload between tests for context isolation
+
+use lib.qemu.mod.{QemuInstance, QemuConfig, QemuArch, interpret_exit_code}
+use lib.execution.mod.{TestExecutor, ExecutionConfig, ExecutionResult}
+use app.dap.adapter.gdb_mi.GdbMiAdapter
+use app.dap.adapter.mod.AdapterConfig
+use app.io.{shell, ProcessResult}
+
+# QEMU test session with lifecycle management
+class QemuTestSession:
+    arch: QemuArch
+    binary_path: text
+    gdb_port: i32
+
+    # QEMU instance
+    qemu: Option<QemuInstance>
+
+    # Test executor with GDB adapter
+    executor: Option<TestExecutor>
+
+    # Session state
+    test_count: i32
+    running: bool
+
+    # Configuration
+    auto_reset: bool             # Reset between tests
+    auto_reload: bool            # Reload binary between tests
+    timeout_ms: i64
+
+impl QemuTestSession:
+    # Create new test session
+    static fn create(arch: QemuArch, binary_path: text) -> QemuTestSession:
+        QemuTestSession(
+            arch: arch,
+            binary_path: binary_path,
+            gdb_port: 1234,  # Default GDB port
+            qemu: None,
+            executor: None,
+            test_count: 0,
+            running: false,
+            auto_reset: true,
+            auto_reload: true,
+            timeout_ms: 30000
+        )
+
+    # Configure session
+    fn with_gdb_port(port: i32) -> QemuTestSession:
+        QemuTestSession(
+            arch: self.arch,
+            binary_path: self.binary_path,
+            gdb_port: port,
+            qemu: self.qemu,
+            executor: self.executor,
+            test_count: self.test_count,
+            running: self.running,
+            auto_reset: self.auto_reset,
+            auto_reload: self.auto_reload,
+            timeout_ms: self.timeout_ms
+        )
+
+    fn with_auto_reset(enabled: bool) -> QemuTestSession:
+        QemuTestSession(
+            arch: self.arch,
+            binary_path: self.binary_path,
+            gdb_port: self.gdb_port,
+            qemu: self.qemu,
+            executor: self.executor,
+            test_count: self.test_count,
+            running: self.running,
+            auto_reset: enabled,
+            auto_reload: self.auto_reload,
+            timeout_ms: self.timeout_ms
+        )
+
+    # Start QEMU and connect test executor
+    me start() -> Result<text, text>:
+        if self.running:
+            return Err("session already running")
+
+        # Create QEMU config with GDB enabled
+        val qemu_config = QemuConfig.for_remote_debug(
+            self.arch,
+            self.binary_path,
+            self.gdb_port
+        )
+
+        # Start QEMU instance
+        val instance = QemuInstance.start(qemu_config)?
+        self.qemu = Some(instance)
+
+        # Wait for GDB stub to be ready
+        shell("sleep 1")
+
+        # Create execution config
+        val exec_config = ExecutionConfig.qemu_riscv32(
+            self.binary_path,
+            self.gdb_port
+        )
+
+        # Create test executor
+        val executor = TestExecutor.create(exec_config)?
+        self.executor = Some(executor)
+
+        self.running = true
+        Ok("QEMU session started on port {self.gdb_port}")
+
+    # Stop QEMU and cleanup
+    me stop():
+        match self.executor:
+            Some(executor):
+                executor.cleanup()
+            None:
+                pass
+
+        match self.qemu:
+            Some(instance):
+                instance.stop()
+            None:
+                pass
+
+        self.running = false
+        self.executor = None
+        self.qemu = None
+
+    # Reset for next test
+    me reset() -> Result<text, text>:
+        if not self.running:
+            return Err("session not running")
+
+        match self.executor:
+            Some(executor):
+                executor.reset()?
+            None:
+                return Err("no executor available")
+
+        self.test_count = self.test_count + 1
+        Ok("session reset for test #{self.test_count}")
+
+    # Reload binary
+    me reload() -> Result<text, text>:
+        if not self.running:
+            return Err("session not running")
+
+        # Stop QEMU
+        self.stop()
+
+        # Wait a bit
+        shell("sleep 0.5")
+
+        # Restart with same config
+        self.start()
+
+    # Run a single test
+    fn run_test(test_fn: fn() -> Result<text, text>) -> Result<ExecutionResult, text>:
+        if not self.running:
+            return Err("session not running")
+
+        # Auto-reset before test if configured
+        if self.auto_reset and self.test_count > 0:
+            self.reset()?
+
+        # Run test function
+        val test_result = match test_fn():
+            Ok(msg):
+                ExecutionResult.ok(msg, 0)
+            Err(e):
+                ExecutionResult.failure(e, 1)
+
+        # Auto-reload after test if configured
+        if self.auto_reload:
+            self.reload()?
+
+        Ok(test_result)
+
+    # Execute program and capture output
+    fn execute() -> Result<ExecutionResult, text>:
+        if not self.running:
+            return Err("session not running")
+
+        match self.executor:
+            Some(executor):
+                executor.execute()
+            None:
+                Err("no executor available")
+
+    # Check if QEMU is still running
+    fn is_running() -> bool:
+        match self.qemu:
+            Some(instance): instance.is_running()
+            None: false
+
+# Multi-test session runner
+# Manages a single QEMU instance for multiple tests
+class QemuMultiTestRunner:
+    session: QemuTestSession
+    tests: [fn() -> Result<text, text>]
+    results: [ExecutionResult]
+
+impl QemuMultiTestRunner:
+    # Create runner
+    static fn create(arch: QemuArch, binary_path: text) -> QemuMultiTestRunner:
+        QemuMultiTestRunner(
+            session: QemuTestSession.create(arch, binary_path),
+            tests: [],
+            results: []
+        )
+
+    # Add test
+    me add_test(test_fn: fn() -> Result<text, text>):
+        self.tests.push(test_fn)
+
+    # Run all tests with single QEMU instance
+    me run_all() -> Result<[ExecutionResult], text>:
+        # Start session
+        self.session.start()?
+
+        # Run each test
+        for test_fn in self.tests:
+            val result = self.session.run_test(test_fn)?
+            self.results.push(result)
+
+        # Stop session
+        self.session.stop()
+
+        Ok(self.results)
+
+    # Get results
+    fn get_results() -> [ExecutionResult]:
+        self.results
+
+    # Count passed tests
+    fn passed_count() -> i32:
+        var count = 0
+        for result in self.results:
+            if result.success:
+                count = count + 1
+        count
+
+    # Count failed tests
+    fn failed_count() -> i32:
+        var count = 0
+        for result in self.results:
+            if not result.success:
+                count = count + 1
+        count
+
+# Example usage:
+#
+# val session = QemuTestSession.create(QemuArch.RiscV32, "test.elf")
+#     .with_gdb_port(1234)
+#     .with_auto_reset(true)
+#
+# session.start()
+#
+# # Test 1
+# session.run_test(\: test_basic_boot())
+#
+# # Test 2 (auto-reset between tests)
+# session.run_test(\: test_memory_access())
+#
+# session.stop()
