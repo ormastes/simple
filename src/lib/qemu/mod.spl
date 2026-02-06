@@ -210,11 +210,11 @@ class QemuInstance:
 impl QemuInstance:
     # Start QEMU instance
     static fn start(config: QemuConfig) -> Result<QemuInstance, text>:
-        # Verify QEMU is available
-        val qemu_cmd = config.arch.qemu_command()
-        val check = shell("which {qemu_cmd} 2>/dev/null")
-        if check.exit_code != 0:
-            return Err("{qemu_cmd} not found - install qemu-system-{config.arch}")
+        # Resolve QEMU binary path (project-local first, then system PATH)
+        val qemu_path = resolve_qemu_path(config.arch)
+        if qemu_path.len() == 0:
+            val cmd_name = config.arch.qemu_command()
+            return Err("{cmd_name} not found - install qemu-system-{config.arch}")
 
         # Verify binary exists
         val elf_check = shell("test -f '{config.binary_path}'")
@@ -224,7 +224,7 @@ impl QemuInstance:
         # Build command
         val args = config.build_args()
         val args_str = args.join(" ")
-        val full_cmd = "{qemu_cmd} {args_str} &"
+        val full_cmd = "{qemu_path} {args_str} &"
 
         # Start QEMU in background
         val start_result = shell(full_cmd)
@@ -234,7 +234,8 @@ impl QemuInstance:
         # Give QEMU time to start
         shell("sleep 0.5")
 
-        # Get QEMU PID
+        # Get QEMU PID (use command name for pattern matching)
+        val qemu_cmd = config.arch.qemu_command()
         val pid_pattern = if config.gdb_enabled:
             "{qemu_cmd}.*-gdb tcp::{config.gdb_port}"
         else:
@@ -341,11 +342,27 @@ fn interpret_exit_code(exit_code: i32, has_debug_exit: bool) -> ExitCodeResult:
 # Toolchain Detection
 # ===========================================================================
 
+# Resolve QEMU binary path (prioritize project binaries)
+fn resolve_qemu_path(arch: QemuArch) -> text:
+    val cmd = arch.qemu_command()
+
+    # 1. Check project-local QEMU (resources/qemu/bin/)
+    val project_path = "resources/qemu/bin/{cmd}"
+    val project_check = shell("test -x '{project_path}'")
+    if project_check.exit_code == 0:
+        return project_path
+
+    # 2. Check system PATH
+    val which_result = shell("which {cmd} 2>/dev/null")
+    if which_result.exit_code == 0:
+        return which_result.stdout.trim()
+
+    # 3. Not found
+    ""
+
 # Check if QEMU is available for an architecture
 fn is_qemu_available(arch: QemuArch) -> bool:
-    val cmd = arch.qemu_command()
-    val check = shell("which {cmd} 2>/dev/null")
-    check.exit_code == 0
+    resolve_qemu_path(arch).len() > 0
 
 # Find cross-compiler for RISC-V 32
 fn find_rv32_gcc() -> text:
