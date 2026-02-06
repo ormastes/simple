@@ -121,16 +121,15 @@ static target_ulong find_smt_section_address(CPUState *cs)
      *   0x80000000 - .text section
      *   0x80000000 + text_size - .smt section
      *
-     * For now, try common offsets:
-     *   1. 0x80000100 (256 bytes after start)
-     *   2. 0x80000200 (512 bytes after start)
-     *   3. 0x80001000 (4KB after start)
+     * Try common offsets where .smt might be located:
      */
     target_ulong candidates[] = {
-        0x80000100,
-        0x80000200,
-        0x80000400,
-        0x80001000,
+        0x80000060,  /* Small test programs */
+        0x80000100,  /* 256 bytes after start */
+        0x80000200,  /* 512 bytes after start */
+        0x80000400,  /* 1KB after start */
+        0x80001000,  /* 4KB after start */
+        0x80002000,  /* 8KB after start */
     };
 
     uint32_t magic;
