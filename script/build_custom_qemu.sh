@@ -66,52 +66,14 @@ echo ""
 # Step 3: Apply patch
 echo "→ Applying Simple language semihosting patch..."
 
-PATCH_FILE="$SOURCE_DIR/simple-semihosting.patch"
+PATCH_FILE="$SOURCE_DIR/simple-semihosting-full.patch"
 
-cat > "$PATCH_FILE" << 'PATCH_EOF'
---- a/semihosting/arm-compat-semi.c
-+++ b/semihosting/arm-compat-semi.c
-@@ -76,6 +76,12 @@
- #define TARGET_SYS_ELAPSED     0x30
- #define TARGET_SYS_TICKFREQ    0x31
-
-+/* Simple language custom extensions */
-+#define TARGET_SYS_WRITE_HANDLE     0x100
-+#define TARGET_SYS_WRITE_HANDLE_P1  0x101
-+#define TARGET_SYS_WRITE_HANDLE_P2  0x102
-+#define TARGET_SYS_WRITE_HANDLE_P3  0x103
-+#define TARGET_SYS_WRITE_HANDLE_PN  0x104
-
- /* ADP_Stopped_ApplicationExit is used for exit(0),
-  * anything else is implemented as exit(1) */
-@@ -788,6 +794,28 @@ void do_common_semihosting(CPUState *cs)
-         /* fall through */
-     default:
-+        /* Simple language extensions - string interning support */
-+        if (nr >= TARGET_SYS_WRITE_HANDLE && nr <= TARGET_SYS_WRITE_HANDLE_PN) {
-+            /*
-+             * String interning operations (0x100-0x104)
-+             *
-+             * For now, print a message instead of aborting.
-+             * Full implementation requires:
-+             * 1. JSON parser for .smt files
-+             * 2. String table loader
-+             * 3. Parameter formatting
-+             *
-+             * This stub allows the program to continue instead of aborting.
-+             */
-+            fprintf(stderr,
-+                    "Simple: String interning operation 0x%02x not yet implemented\\n"
-+                    "        (stub returns success to avoid abort)\\n", nr);
-+            common_semi_set_ret(cs, 0);
-+            break;
-+        }
-+
-+        /* Unknown operation - abort as usual */
-         fprintf(stderr, "qemu: Unsupported SemiHosting SWI 0x%02x\\n", nr);
-         cpu_dump_state(cs, stderr, 0);
-         abort();
-PATCH_EOF
+# Check if full patch exists
+if [ ! -f "$PATCH_FILE" ]; then
+    echo "❌ Error: Full patch not found at $PATCH_FILE"
+    echo "   Expected: resources/qemu/downloads/qemu-8.2.0/simple-semihosting-full.patch"
+    exit 1
+fi
 
 cd "$SOURCE_DIR"
 
