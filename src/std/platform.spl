@@ -5,45 +5,104 @@
 # - Path handling (separators, normalization)
 # - Command resolution (executable extensions)
 #
-# This module wraps src.std.common.target for easier usage.
+# Pure Simple implementation using shell commands (uname) for platform detection.
+# Uses direct extern fn calls to avoid bootstrap runtime import issues.
 
-use src.std.common.target (TargetOS, TargetArch, Target)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 export is_windows, is_unix, is_macos, is_linux
 export dir_sep, path_sep, exe_ext, lib_ext
 export normalize_path, resolve_command, is_absolute_path, join_path
 
 # ===========================================================================
-# Platform Detection
+# Platform Detection - Pure Simple Implementation
 # ===========================================================================
+
+fn shell_output_trim(command: text) -> text:
+    """Run shell command and return trimmed stdout."""
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn is_windows_env() -> bool:
+    """Check if running on Windows by checking OS environment variable."""
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false  # Default to Unix/Linux
+    else:
+        os_env.lower().contains("windows")
+
+fn get_host_os() -> text:
+    """Internal helper to get host OS using Pure Simple implementation."""
+    if is_windows_env():
+        "windows"
+    else:
+        # Unix: Use uname -s
+        val os = shell_output_trim("uname -s")
+        if os.len() == 0:
+            "linux"  # Default
+        else:
+            match os:
+                case "Linux": "linux"
+                case "Darwin": "macos"
+                case "FreeBSD": "freebsd"
+                case "OpenBSD": "openbsd"
+                case "NetBSD": "netbsd"
+                case _: os.lower()
 
 fn is_windows() -> bool:
-    TargetOS.host().is_windows()
+    """Returns true if running on Windows."""
+    get_host_os() == "windows"
 
 fn is_unix() -> bool:
-    TargetOS.host().is_unix()
+    """Returns true if running on Unix-like system (Linux, macOS, BSD)."""
+    val os = get_host_os()
+    os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or os == "netbsd"
 
 fn is_macos() -> bool:
-    TargetOS.host() == TargetOS.MacOS
+    """Returns true if running on macOS."""
+    get_host_os() == "macos"
 
 fn is_linux() -> bool:
-    TargetOS.host() == TargetOS.Linux
+    """Returns true if running on Linux."""
+    get_host_os() == "linux"
 
 # ===========================================================================
-# Path Separators
+# Path Separators - Pure Simple Implementation
 # ===========================================================================
 
 fn dir_sep() -> text:
-    TargetOS.host().dir_separator()
+    """Returns the directory separator for the current platform."""
+    if is_windows():
+        "\\"
+    else:
+        "/"
 
 fn path_sep() -> text:
-    TargetOS.host().path_separator()
+    """Returns the PATH environment variable separator."""
+    if is_windows():
+        ";"
+    else:
+        ":"
 
 fn exe_ext() -> text:
-    TargetOS.host().executable_extension()
+    """Returns the executable extension for the current platform."""
+    if is_windows():
+        ".exe"
+    else:
+        ""
 
 fn lib_ext() -> text:
-    TargetOS.host().library_extension()
+    """Returns the dynamic library extension for the current platform."""
+    if is_macos():
+        ".dylib"
+    elif is_windows():
+        ".dll"
+    else:
+        ".so"  # Linux, FreeBSD, etc.
 
 # ===========================================================================
 # Path Normalization
@@ -66,8 +125,7 @@ fn normalize_windows_path(path: text) -> text:
 
 fn normalize_path(path: text) -> text:
     """Normalize path for current platform."""
-    val os = TargetOS.host()
-    if os.is_windows():
+    if is_windows():
         normalize_windows_path(path)
     else:
         path

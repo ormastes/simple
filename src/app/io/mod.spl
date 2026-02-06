@@ -19,6 +19,10 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
+# --- Platform Detection ---
+# Note: Implemented using shell commands instead of runtime FFI
+# since pre-built runtime doesn't have rt_host_arch/rt_host_os
+
 # --- Execution Manager ---
 extern fn rt_set_jit_backend(backend: text) -> bool
 extern fn rt_get_jit_backend() -> text
@@ -73,6 +77,7 @@ export rt_file_rename, rt_sleep_ms, rt_getpid, rt_timestamp_now
 export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir
 export dir_list, dir_remove
 export cwd, home, env_get, env_set
+export host_arch, host_os
 export process_run, process_run_timeout, process_run_with_limits
 export process_output, shell
 export time_now_unix_micros, current_time_unix, current_time_ms
@@ -246,6 +251,57 @@ fn env_get(key: text) -> text:
 fn env_set(key: text, value: text) -> bool:
     print "[INFO] env_set('{key}', '{value}')"
     false
+
+fn host_arch() -> text:
+    """Get the host architecture (e.g., x86_64, aarch64, arm, i686).
+
+    Uses `uname -m` on Unix/Linux/macOS to detect architecture.
+    Returns normalized architecture names compatible with target triples.
+    """
+    if is_windows_platform():
+        # Windows: Check PROCESSOR_ARCHITECTURE environment variable
+        val proc_arch = env_get("PROCESSOR_ARCHITECTURE")
+        if proc_arch.?:
+            match proc_arch.lower():
+                case "amd64" | "x64": "x86_64"
+                case "x86": "i686"
+                case "arm64": "aarch64"
+                case "arm": "arm"
+                case _: "x86_64"  # Default for Windows
+        else:
+            "x86_64"  # Default
+    else:
+        # Unix/Linux/macOS: Use uname -m
+        val arch = shell_output_trimmed("uname -m", "x86_64")
+        # Normalize architecture names
+        match arch:
+            case "x86_64" | "amd64": "x86_64"
+            case "i686" | "i386" | "i586": "i686"
+            case "aarch64" | "arm64": "aarch64"
+            case "armv7l" | "armv7" | "arm": "armv7"
+            case "riscv64": "riscv64"
+            case "riscv32": "riscv32"
+            case _: arch  # Return as-is if unknown
+
+fn host_os() -> text:
+    """Get the host operating system (e.g., linux, windows, macos, freebsd).
+
+    Uses `uname -s` on Unix/Linux/macOS to detect OS.
+    Returns normalized OS names compatible with target triples.
+    """
+    if is_windows_platform():
+        "windows"
+    else:
+        # Unix/Linux/macOS: Use uname -s
+        val os = shell_output_trimmed("uname -s", "linux")
+        # Normalize OS names
+        match os:
+            case "Linux": "linux"
+            case "Darwin": "macos"
+            case "FreeBSD": "freebsd"
+            case "OpenBSD": "openbsd"
+            case "NetBSD": "netbsd"
+            case _: os.lower()  # Return lowercase if unknown
 
 # ============================================================================
 # Process Execution - Pure Simple
