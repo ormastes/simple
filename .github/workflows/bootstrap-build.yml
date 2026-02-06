@@ -36,7 +36,7 @@ jobs:
 
           # macOS platforms
           - platform: macos-x86_64
-            os: macos-13  # Intel mac
+            os: macos-15  # Intel mac
             target: x86_64-apple-darwin
 
           - platform: macos-arm64
@@ -58,6 +58,26 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need full history to restore rust/
+
+      - name: Clean up experimental files (Windows compatibility)
+        if: runner.os == 'Windows'
+        run: |
+          # Remove .exp/ directory which has files with colons (invalid on Windows)
+          if (Test-Path .exp) {
+            Remove-Item -Recurse -Force .exp
+            Write-Host "Removed .exp/ directory for Windows compatibility"
+          }
+        shell: pwsh
+
+      - name: Restore Rust source from git history
+        run: |
+          # Restore rust/ directory from commit before Pure Simple migration
+          git checkout 86a7ad42e -- rust/
+          echo "Restored rust/ directory for building"
+          ls -la rust/
+        shell: bash
 
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -75,7 +95,7 @@ jobs:
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }} --profile bootstrap
+            cargo build --profile bootstrap --target ${{ matrix.target }}
           fi
         shell: bash
 
@@ -83,12 +103,19 @@ jobs:
         run: |
           mkdir -p bin/bootstrap/${{ matrix.platform }}
 
+          # Determine build profile directory (cross uses release, native uses bootstrap)
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            PROFILE_DIR="release"
+          else
+            PROFILE_DIR="bootstrap"
+          fi
+
           # Copy binary with correct name
           if [ "${{ matrix.ext }}" = ".exe" ]; then
-            cp target/${{ matrix.target }}/release/simple_runtime.exe \
+            cp target/${{ matrix.target }}/${PROFILE_DIR}/simple_runtime.exe \
                bin/bootstrap/${{ matrix.platform }}/simple.exe
           else
-            cp target/${{ matrix.target }}/release/simple_runtime \
+            cp target/${{ matrix.target }}/${PROFILE_DIR}/simple_runtime \
                bin/bootstrap/${{ matrix.platform }}/simple
           fi
 
