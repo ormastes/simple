@@ -1,0 +1,141 @@
+# Process Module - Full Specification
+#
+# Complete specification for generating process.rs with:
+# - Process execution
+# - Shell command execution
+# - Output capture
+#
+# Usage: simple ffi-gen --gen-module specs/process_mod.spl
+
+use app.ffi_gen.types*
+use app.ffi_gen.module_gen (ModuleBuilder)
+
+# ============================================================================
+# Module Specification
+# ============================================================================
+
+fn process_module() -> ModuleSpec:
+    var builder = ModuleBuilder.start("process")
+        .doc("Process Execution FFI\n\nProcess execution, shell commands, and output capture.")
+
+    # Imports
+    builder = builder
+        .add_import_items("std::process", ["Command", "Stdio"])
+        .add_import_items("std::ffi", ["CStr", "CString"])
+        .add_import("std::os::raw::c_char")
+
+    # Process functions
+    builder = builder
+        .add_fn(fn_rt_process_run())
+        .add_fn(fn_rt_process_run_timeout())
+        .add_fn(fn_rt_process_output())
+        .add_fn(fn_rt_shell())
+        .add_fn(fn_rt_shell_exec())
+        .add_fn(fn_rt_getpid())
+
+    builder.build()
+
+# ============================================================================
+# Process Functions
+# ============================================================================
+
+fn fn_rt_process_run() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_process_run",
+        [FFIParamSpec.raw_ptr("cmd", "*const c_char"),
+         FFIParamSpec.raw_ptr("args", "*const c_char")],
+        "*mut c_char",
+        "let cmd_str = CStr::from_ptr(cmd as *const i8).to_string_lossy();\n" +
+        "let args_str = CStr::from_ptr(args as *const i8).to_string_lossy();\n" +
+        "let args_vec: Vec<&str> = if args_str.is_empty() {\n" +
+        "    Vec::new()\n" +
+        "} else {\n" +
+        "    args_str.split('\\n').collect()\n" +
+        "};\n" +
+        "match Command::new(cmd_str.as_ref())\n" +
+        "    .args(&args_vec)\n" +
+        "    .stdout(Stdio::piped())\n" +
+        "    .stderr(Stdio::piped())\n" +
+        "    .output()\n" +
+        "{\n" +
+        "    Ok(output) => {\n" +
+        "        let stdout = String::from_utf8_lossy(&output.stdout);\n" +
+        "        let stderr = String::from_utf8_lossy(&output.stderr);\n" +
+        "        let exit_code = output.status.code().unwrap_or(-1);\n" +
+        "        let result = format!(\"{}\\t{}\\t{}\", stdout, stderr, exit_code);\n" +
+        "        CString::new(result).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())\n" +
+        "    }\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "Run process and capture output (returns stdout\\tstderr\\texit_code)"
+    spec
+
+fn fn_rt_process_run_timeout() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_process_run_timeout",
+        [FFIParamSpec.raw_ptr("cmd", "*const c_char"),
+         FFIParamSpec.raw_ptr("args", "*const c_char"),
+         FFIParamSpec.simple("_timeout_ms", "i64")],
+        "*mut c_char",
+        "// TODO: Implement timeout support\n" +
+        "// For now, just call rt_process_run\n" +
+        "rt_process_run(cmd, args)"
+    )
+    spec.doc = "Run process with timeout (timeout not yet implemented)"
+    spec
+
+fn fn_rt_process_output() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_process_output",
+        [FFIParamSpec.raw_ptr("cmd", "*const c_char"),
+         FFIParamSpec.raw_ptr("args", "*const c_char")],
+        "*mut c_char",
+        "rt_process_run(cmd, args)"
+    )
+    spec.doc = "Run process and get output (alias for rt_process_run)"
+    spec
+
+fn fn_rt_shell() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_shell",
+        [FFIParamSpec.raw_ptr("cmd", "*const c_char")],
+        "*mut c_char",
+        "let cmd_str = CStr::from_ptr(cmd as *const i8).to_string_lossy();\n" +
+        "match Command::new(\"sh\")\n" +
+        "    .arg(\"-c\")\n" +
+        "    .arg(cmd_str.as_ref())\n" +
+        "    .stdout(Stdio::piped())\n" +
+        "    .stderr(Stdio::piped())\n" +
+        "    .output()\n" +
+        "{\n" +
+        "    Ok(output) => {\n" +
+        "        let stdout = String::from_utf8_lossy(&output.stdout).to_string();\n" +
+        "        CString::new(stdout).ok().map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut())\n" +
+        "    }\n" +
+        "    Err(_) => std::ptr::null_mut(),\n" +
+        "}"
+    )
+    spec.doc = "Execute shell command and return stdout"
+    spec
+
+fn fn_rt_shell_exec() -> FFIFnSpec:
+    var spec = FFIFnSpec.unsafe_extern_c("rt_shell_exec",
+        [FFIParamSpec.raw_ptr("cmd", "*const c_char")],
+        "i64",
+        "let cmd_str = CStr::from_ptr(cmd as *const i8).to_string_lossy();\n" +
+        "Command::new(\"sh\")\n" +
+        "    .arg(\"-c\")\n" +
+        "    .arg(cmd_str.as_ref())\n" +
+        "    .status()\n" +
+        "    .map(|s| s.code().unwrap_or(-1) as i64)\n" +
+        "    .unwrap_or(-1)"
+    )
+    spec.doc = "Execute shell command and return exit code"
+    spec
+
+fn fn_rt_getpid() -> FFIFnSpec:
+    var spec = FFIFnSpec.extern_c("rt_getpid",
+        [],
+        "i64",
+        "std::process::id() as i64"
+    )
+    spec.doc = "Get current process ID"
+    spec
+export process_module

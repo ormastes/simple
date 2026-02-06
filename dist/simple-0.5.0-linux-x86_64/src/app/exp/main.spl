@@ -1,0 +1,224 @@
+# Experiment Tracking CLI
+#
+# Commands:
+#   exp run <script> [overrides...]  - Run experiment with config overrides
+#   exp ls [--status=X] [--tag=X]    - List runs
+#   exp show <run_id>                - Show run details
+#   exp diff <run1> <run2>           - Compare two runs
+#   exp gc                           - Garbage collect unreferenced artifacts
+#   exp sweep <config.sdn>           - Launch hyperparameter sweep
+
+use std.exp.config
+use std.exp.storage
+use std.exp.run
+use std.exp.artifact
+use std.exp.query
+use std.exp.sweep
+
+use app.io.mod (get_args, exit)
+
+# ============================================================================
+# Main Entry
+# ============================================================================
+
+fn main():
+    val args = get_args()
+    if args.len() < 2:
+        print_help()
+        return
+
+    val command = args[1]
+    val rest = args[2:]
+
+    match command:
+        case "run": cmd_run(rest)
+        case "ls": cmd_ls(rest)
+        case "show": cmd_show(rest)
+        case "diff": cmd_diff(rest)
+        case "gc": cmd_gc(rest)
+        case "sweep": cmd_sweep(rest)
+        case "help" | "--help" | "-h": print_help()
+        case _:
+            print "Unknown command: {command}"
+            print_help()
+            exit(1)
+
+# ============================================================================
+# Commands
+# ============================================================================
+
+fn cmd_run(args: [text]):
+    """Run an experiment."""
+    if args.is_empty():
+        print "Usage: exp run [overrides...]"
+        print "  Overrides: key=value, key.nested=value"
+        print "  Composition: model=resnet selects configs/model/resnet.sdn"
+        return
+
+    val overrides = parse_cli_overrides(args)
+    val tags_arg = extract_flag(args, "--tag")
+    val tags = if tags_arg.?:
+        tags_arg.unwrap().split(",")
+    else:
+        []
+
+    val config_result = load_exp_config(".", overrides)
+    if config_result.is_err():
+        print "Error loading config: {config_result.unwrap_err()}"
+        exit(1)
+        return
+
+    val config = config_result.unwrap()
+    val run = start_run(config, tags)
+    print "Started run: {run.run_id}"
+    print "Config hash: {config.hash()}"
+    if tags.?:
+        print "Tags: {tags.join(\", \")}"
+
+fn cmd_ls(args: [text]):
+    """List experiment runs."""
+    var filter = RunFilter.all()
+
+    val status = extract_flag(args, "--status")
+    if status.?:
+        filter = RunFilter.by_status(status.unwrap())
+
+    val tag = extract_flag(args, "--tag")
+    if tag.?:
+        filter = RunFilter.by_tag(tag.unwrap())
+
+    val runs = list_runs(filter)
+    if runs.is_empty():
+        print "No runs found."
+        return
+
+    print "ID           Status      Start Time                Tags"
+    print "------------ ---------- ------------------------- --------"
+    for run in runs:
+        val tags_str = run.tags.join(", ")
+        print "{run.run_id}  {run.status.pad_right(10)}  {run.start_time}  {tags_str}"
+
+    print ""
+    print "{runs.len()} run(s) found."
+
+fn cmd_show(args: [text]):
+    """Show details of a specific run."""
+    if args.is_empty():
+        print "Usage: exp show <run_id>"
+        return
+
+    val run_id = args[0]
+    val result = show_run(run_id)
+    if result.is_err():
+        print "Error: {result.unwrap_err()}"
+        exit(1)
+        return
+
+    val detail = result.unwrap()
+    print "Run: {detail.run_id}"
+    print "Status: {detail.meta[\"status\"] ?? \"unknown\"}"
+    print "Start: {detail.meta[\"start_time\"] ?? \"\"}"
+    print "End: {detail.meta[\"end_time\"] ?? \"\"}"
+    print "Host: {detail.meta[\"hostname\"] ?? \"\"}"
+    print "VCS: {detail.meta[\"vcs_hash\"] ?? \"\"}"
+    print "Config: {detail.meta[\"config_hash\"] ?? \"\"}"
+    print "Tags: {detail.meta[\"tags\"] ?? \"\"}"
+
+    if detail.metrics.?:
+        print ""
+        print "Metrics:"
+        for name in detail.metrics.keys():
+            val points = detail.metrics[name]
+            if points.?:
+                val last = points[-1]
+                print "  {name}: {last.value} (step {last.step}, {points.len()} entries)"
+
+    print ""
+    print "{detail.events.len()} event(s) logged."
+
+fn cmd_diff(args: [text]):
+    """Compare two runs."""
+    if args.len() < 2:
+        print "Usage: exp diff <run1> <run2>"
+        return
+
+    val result = diff_runs(args[0], args[1])
+    if result.is_err():
+        print "Error: {result.unwrap_err()}"
+        exit(1)
+        return
+
+    val diff = result.unwrap()
+
+    if diff.config_diffs.?:
+        print "Config differences:"
+        print "  Key                  Run A              Run B"
+        print "  -------------------- ------------------ ------------------"
+        for d in diff.config_diffs:
+            print "  {d.key.pad_right(20)} {d.value_a.pad_right(18)} {d.value_b}"
+
+    if diff.metric_diffs.?:
+        print ""
+        print "Metric differences:"
+        print "  Metric               Run A              Run B"
+        print "  -------------------- ------------------ ------------------"
+        for d in diff.metric_diffs:
+            val va = if d.last_value_a.?: "{d.last_value_a.unwrap()}" else: "-"
+            val vb = if d.last_value_b.?: "{d.last_value_b.unwrap()}" else: "-"
+            print "  {d.name.pad_right(20)} {va.pad_right(18)} {vb}"
+
+    if not diff.config_diffs.? and not diff.metric_diffs.?:
+        print "No differences found."
+
+fn cmd_gc(args: [text]):
+    """Garbage collect unreferenced artifacts."""
+    print "Scanning for unreferenced blobs..."
+    val deleted = gc_artifacts()
+    print "Deleted {deleted} unreferenced blob(s)."
+
+fn cmd_sweep(args: [text]):
+    """Launch a hyperparameter sweep."""
+    if args.is_empty():
+        print "Usage: exp sweep <config.sdn> [--trials=N]"
+        return
+
+    val config_path = args[0]
+    val trials_str = extract_flag(args, "--trials") ?? "10"
+    # TODO: parse trials_str to int
+
+    print "Starting sweep from {config_path}..."
+    print "TODO: Implement sweep config loading and execution"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn extract_flag(args: [text], flag: text) -> text?:
+    """Extract --flag=value from args."""
+    val prefix = flag + "="
+    for arg in args:
+        if arg.starts_with(prefix):
+            return Some(arg[prefix.len():])
+    nil
+
+fn print_help():
+    print "exp - Experiment Tracking CLI"
+    print ""
+    print "Usage: exp <command> [args...]"
+    print ""
+    print "Commands:"
+    print "  run [overrides...]        Run experiment with config overrides"
+    print "  ls [--status=X] [--tag=X] List runs"
+    print "  show <run_id>             Show run details"
+    print "  diff <run1> <run2>        Compare two runs"
+    print "  gc                        Garbage collect artifacts"
+    print "  sweep <config> [--trials] Launch hyperparameter sweep"
+    print ""
+    print "Override syntax:"
+    print "  key=value                 Set config value"
+    print "  key.nested=value          Set nested config value"
+    print "  model=resnet              Select configs/model/resnet.sdn"
+    print ""
+    print "Config interpolation:"
+    print r"  ${env:VAR}                Environment variable"
+    print r"  ${config:path}            Reference another config value"

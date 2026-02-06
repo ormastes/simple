@@ -1,0 +1,142 @@
+# Simple CLI - lock command
+# Lockfile operations: generate, validate, check
+
+use app.cli_util (get_cli_args, find_manifest_path)
+use app.io.mod (file_exists, file_read, file_write)
+use app.package_utils (generate_lockfile_content, parse_deps_from_sdn)
+
+fn print_help():
+    print "Usage: simple lock [subcommand] [options]"
+    print ""
+    print "Manage the lockfile (simple.lock)."
+    print ""
+    print "Subcommands:"
+    print "  generate     Generate lockfile from manifest (default)"
+    print "  validate     Validate lockfile integrity"
+    print "  check        Check if lockfile is up to date with manifest"
+    print ""
+    print "Options:"
+    print "  --force      Overwrite existing lockfile"
+    print "  -h, --help   Show this help"
+
+fn handle_generate(force: bool) -> i64:
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "error: no simple.sdn or simple.toml found"
+        return 1
+
+    val cwd = cwd()
+    val lockfile_path = "{cwd}/simple.lock"
+
+    if file_exists(lockfile_path) and not force:
+        print "error: simple.lock already exists (use --force to overwrite)"
+        return 1
+
+    val content = file_read(manifest_path)
+    val deps = parse_deps_from_sdn(content)
+
+    if deps.len() == 0:
+        print "No dependencies found. Lockfile not generated."
+        return 0
+
+    val lock_content = generate_lockfile_content(deps)
+    if not file_write(lockfile_path, lock_content):
+        print "error: failed to write simple.lock"
+        return 1
+
+    print "Generated simple.lock with {deps.len()} packages"
+    0
+
+fn handle_validate() -> i64:
+    val cwd = cwd()
+    val lockfile_path = "{cwd}/simple.lock"
+
+    if not file_exists(lockfile_path):
+        print "error: simple.lock not found"
+        return 1
+
+    val content = file_read(lockfile_path)
+    val lines = content.split("\n")
+
+    # Check version
+    var has_version = false
+    var has_packages = false
+    for line in lines:
+        if line.starts_with("lockfile_version:"):
+            has_version = true
+        if line.starts_with("packages "):
+            has_packages = true
+
+    if not has_version:
+        print "error: lockfile missing version field"
+        return 1
+
+    if not has_packages:
+        print "error: lockfile missing packages table"
+        return 1
+
+    print "Lockfile is valid."
+    0
+
+fn handle_check() -> i64:
+    val manifest_path = find_manifest_path()
+    if manifest_path == "":
+        print "error: no simple.sdn or simple.toml found"
+        return 1
+
+    val cwd = cwd()
+    val lockfile_path = "{cwd}/simple.lock"
+
+    if not file_exists(lockfile_path):
+        print "Lockfile missing. Run 'simple lock generate' to create it."
+        return 1
+
+    val manifest_content = file_read(manifest_path)
+    val manifest_deps = parse_deps_from_sdn(manifest_content)
+
+    val lock_content = file_read(lockfile_path)
+    # Count packages in lockfile
+    var lock_count = 0
+    val lines = lock_content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("#") and not trimmed.starts_with("lockfile_version") and not trimmed.starts_with("generated") and not trimmed.starts_with("packages"):
+            lock_count = lock_count + 1
+
+    if manifest_deps.len() == lock_count:
+        print "Lockfile is up to date."
+    else:
+        print "Lockfile is out of date."
+        print "  manifest: {manifest_deps.len()} dependencies"
+        print "  lockfile: {lock_count} packages"
+        print ""
+        print "Run 'simple lock generate --force' to update."
+        return 1
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var force = false
+    var subcommand = "generate"
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--force":
+            force = true
+        elif not arg.starts_with("-"):
+            subcommand = arg
+
+    match subcommand:
+        case "generate":
+            return handle_generate(force)
+        case "validate":
+            return handle_validate()
+        case "check":
+            return handle_check()
+        case _:
+            print "error: unknown subcommand '{subcommand}'"
+            print_help()
+            return 1

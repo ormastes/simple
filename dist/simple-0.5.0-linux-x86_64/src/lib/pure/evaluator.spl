@@ -1,0 +1,477 @@
+# Pure Simple Evaluator
+# Tree-walking interpreter for Simple AST
+
+use lib.pure.ast (Expr, Stmt, Pattern, Module, BinOp, UnaryOp, Literal)
+
+export eval, eval_expr, eval_stmt, Value, EvalError, Environment
+
+# Runtime values
+enum Value:
+    Int(i64)
+    Float(f64)
+    String(text)
+    Bool(bool)
+    Unit
+    List([Value])
+    Function([text], Expr, Environment)
+
+# Environment for variable bindings
+class Environment:
+    bindings: [(text, Value)]
+    parent: Environment?
+
+    fn lookup(name: text) -> Value?:
+        # Search in current scope
+        var i = 0
+        while i < self.bindings.len():
+            if self.bindings[i].0 == name:
+                return Some(self.bindings[i].1)
+            i = i + 1
+
+        # Search in parent scope
+        match self.parent:
+            case Some(p):
+                p.lookup(name)
+            case None:
+                None
+
+    me define(name: text, value: Value):
+        self.bindings.push((name, value))
+
+    me update(name: text, value: Value) -> bool:
+        # Update in current scope
+        var i = 0
+        while i < self.bindings.len():
+            if self.bindings[i].0 == name:
+                self.bindings[i] = (name, value)
+                return true
+            i = i + 1
+
+        # Update in parent scope
+        match self.parent:
+            case Some(p):
+                p.update(name, value)
+            case None:
+                false
+
+    static fn empty() -> Environment:
+        Environment(bindings: [], parent: None)
+
+    static fn with_parent(parent: Environment) -> Environment:
+        Environment(bindings: [], parent: Some(parent))
+
+# Evaluation error
+struct EvalError:
+    message: text
+
+# Evaluate module
+fn eval(module: Module) -> Result<Value, EvalError>:
+    var env = Environment.empty()
+
+    var last_value = Value.Unit
+    var i = 0
+    while i < module.statements.len():
+        match eval_stmt(module.statements[i], env):
+            case Ok(v):
+                last_value = v
+            case Err(e):
+                return Err(e)
+        i = i + 1
+
+    Ok(last_value)
+
+# Evaluate statement
+fn eval_stmt(stmt: Stmt, env: Environment) -> Result<Value, EvalError>:
+    match stmt:
+        case Stmt.Expr(expr):
+            eval_expr(expr, env)
+
+        case Stmt.Let(name, type_expr, expr):
+            match eval_expr(expr, env):
+                case Ok(value):
+                    env.define(name, value)
+                    Ok(Value.Unit)
+                case Err(e):
+                    Err(e)
+
+        case Stmt.Assign(name, expr):
+            match eval_expr(expr, env):
+                case Ok(value):
+                    if env.update(name, value):
+                        Ok(Value.Unit)
+                    else:
+                        Err(EvalError(message: "Undefined variable: {name}"))
+                case Err(e):
+                    Err(e)
+
+        case Stmt.Return(expr_opt):
+            match expr_opt:
+                case Some(expr):
+                    eval_expr(expr, env)
+                case None:
+                    Ok(Value.Unit)
+
+        case Stmt.While(cond, body):
+            eval_while(cond, body, env)
+
+        case Stmt.For(var_name, iter, body):
+            eval_for(var_name, iter, body, env)
+
+        case Stmt.Function(name, params, return_type, body):
+            # Store function in environment
+            # Simplified: just return Unit for now
+            Ok(Value.Unit)
+
+        case Stmt.Struct(name, fields):
+            Ok(Value.Unit)
+
+        case Stmt.Enum(name, variants):
+            Ok(Value.Unit)
+
+# Evaluate while loop
+fn eval_while(cond: Expr, body: [Stmt], env: Environment) -> Result<Value, EvalError>:
+    var iterations = 0
+    val max_iterations = 10000
+
+    while iterations < max_iterations:
+        match eval_expr(cond, env):
+            case Ok(Value.Bool(true)):
+                var i = 0
+                while i < body.len():
+                    match eval_stmt(body[i], env):
+                        case Ok(_):
+                            ()
+                        case Err(e):
+                            return Err(e)
+                    i = i + 1
+                iterations = iterations + 1
+            case Ok(Value.Bool(false)):
+                break
+            case Ok(_):
+                return Err(EvalError(message: "Condition must be boolean"))
+            case Err(e):
+                return Err(e)
+
+    if iterations >= max_iterations:
+        Err(EvalError(message: "Loop exceeded maximum iterations"))
+    else:
+        Ok(Value.Unit)
+
+# Evaluate for loop
+fn eval_for(var_name: text, iter: Expr, body: [Stmt], env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(iter, env):
+        case Ok(Value.List(items)):
+            var i = 0
+            while i < items.len():
+                env.define(var_name, items[i])
+
+                var j = 0
+                while j < body.len():
+                    match eval_stmt(body[j], env):
+                        case Ok(_):
+                            ()
+                        case Err(e):
+                            return Err(e)
+                    j = j + 1
+
+                i = i + 1
+
+            Ok(Value.Unit)
+        case Ok(_):
+            Err(EvalError(message: "For loop requires iterable"))
+        case Err(e):
+            Err(e)
+
+# Evaluate expression
+fn eval_expr(expr: Expr, env: Environment) -> Result<Value, EvalError>:
+    match expr:
+        case Expr.Literal(lit):
+            eval_literal(lit)
+
+        case Expr.Identifier(name):
+            match env.lookup(name):
+                case Some(v):
+                    Ok(v)
+                case None:
+                    Err(EvalError(message: "Undefined variable: {name}"))
+
+        case Expr.Binary(op, left, right):
+            eval_binary(op, left, right, env)
+
+        case Expr.Unary(op, operand):
+            eval_unary(op, operand, env)
+
+        case Expr.Call(func, args):
+            eval_call(func, args, env)
+
+        case Expr.Lambda(params, body):
+            Ok(Value.Function(params, body, env))
+
+        case Expr.List(exprs):
+            eval_list(exprs, env)
+
+        case Expr.Tuple(exprs):
+            # Simplified: treat as list
+            eval_list(exprs, env)
+
+        case Expr.Index(list_expr, index_expr):
+            eval_index(list_expr, index_expr, env)
+
+        case Expr.Field(obj, field):
+            Err(EvalError(message: "Field access not yet implemented"))
+
+        case Expr.If(cond, then_expr, else_expr):
+            eval_if(cond, then_expr, else_expr, env)
+
+        case Expr.MatchCase(subject, arms):
+            Err(EvalError(message: "Match expression not yet implemented"))
+
+        case Expr.Block(stmts):
+            eval_block(stmts, env)
+
+# Evaluate literal
+fn eval_literal(lit: Literal) -> Result<Value, EvalError>:
+    match lit:
+        case Literal.Int(n):
+            Ok(Value.Int(n))
+        case Literal.Float(f):
+            Ok(Value.Float(0.0))  # Simplified
+        case Literal.String(s):
+            Ok(Value.String(s))
+        case Literal.Bool(b):
+            Ok(Value.Bool(b))
+        case Literal.Unit:
+            Ok(Value.Unit)
+
+# Evaluate binary operation
+fn eval_binary(op: BinOp, left: Expr, right: Expr, env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(left, env):
+        case Ok(left_val):
+            match eval_expr(right, env):
+                case Ok(right_val):
+                    apply_binary_op(op, left_val, right_val)
+                case Err(e):
+                    Err(e)
+        case Err(e):
+            Err(e)
+
+# Apply binary operator
+fn apply_binary_op(op: BinOp, left: Value, right: Value) -> Result<Value, EvalError>:
+    match op:
+        case BinOp.Add:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a + b))
+                case _:
+                    Err(EvalError(message: "Type error in addition"))
+
+        case BinOp.Sub:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a - b))
+                case _:
+                    Err(EvalError(message: "Type error in subtraction"))
+
+        case BinOp.Mul:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a * b))
+                case _:
+                    Err(EvalError(message: "Type error in multiplication"))
+
+        case BinOp.Div:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    if b == 0:
+                        Err(EvalError(message: "Division by zero"))
+                    else:
+                        Ok(Value.Int(a / b))
+                case _:
+                    Err(EvalError(message: "Type error in division"))
+
+        case BinOp.Eq:
+            Ok(Value.Bool(values_equal(left, right)))
+
+        case BinOp.NotEq:
+            Ok(Value.Bool(not values_equal(left, right)))
+
+        case BinOp.Lt:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Bool(a < b))
+                case _:
+                    Err(EvalError(message: "Type error in comparison"))
+
+        case BinOp.Gt:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Bool(a > b))
+                case _:
+                    Err(EvalError(message: "Type error in comparison"))
+
+        case BinOp.LtEq:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Bool(a <= b))
+                case _:
+                    Err(EvalError(message: "Type error in comparison"))
+
+        case BinOp.GtEq:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Bool(a >= b))
+                case _:
+                    Err(EvalError(message: "Type error in comparison"))
+
+        case BinOp.Mod:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    if b == 0:
+                        Err(EvalError(message: "Modulo by zero"))
+                    else:
+                        Ok(Value.Int(a % b))
+                case _:
+                    Err(EvalError(message: "Type error in modulo"))
+
+        case BinOp.And:
+            match (left, right):
+                case (Value.Bool(a), Value.Bool(b)):
+                    Ok(Value.Bool(a and b))
+                case _:
+                    Err(EvalError(message: "Type error in logical and"))
+
+        case BinOp.Or:
+            match (left, right):
+                case (Value.Bool(a), Value.Bool(b)):
+                    Ok(Value.Bool(a or b))
+                case _:
+                    Err(EvalError(message: "Type error in logical or"))
+
+        case _:
+            Err(EvalError(message: "Operator not implemented"))
+
+# Check value equality
+fn values_equal(left: Value, right: Value) -> bool:
+    match (left, right):
+        case (Value.Int(a), Value.Int(b)):
+            a == b
+        case (Value.Bool(a), Value.Bool(b)):
+            a == b
+        case (Value.String(a), Value.String(b)):
+            a == b
+        case (Value.Unit, Value.Unit):
+            true
+        case _:
+            false
+
+# Evaluate unary operation
+fn eval_unary(op: UnaryOp, operand: Expr, env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(operand, env):
+        case Ok(value):
+            match op:
+                case UnaryOp.Neg:
+                    match value:
+                        case Value.Int(n):
+                            Ok(Value.Int(-n))
+                        case _:
+                            Err(EvalError(message: "Type error in negation"))
+                case UnaryOp.Not:
+                    match value:
+                        case Value.Bool(b):
+                            Ok(Value.Bool(not b))
+                        case _:
+                            Err(EvalError(message: "Type error in not"))
+        case Err(e):
+            Err(e)
+
+# Evaluate function call
+fn eval_call(func: Expr, args: [Expr], env: Environment) -> Result<Value, EvalError>:
+    # REAL IMPLEMENTATION: Evaluate function and apply arguments
+    match eval_expr(func, env):
+        case Ok(Value.Function(params, body, closure_env)):
+            # Evaluate arguments
+            var arg_values: [Value] = []
+            var i = 0
+            while i < args.len():
+                match eval_expr(args[i], env):
+                    case Ok(v):
+                        arg_values.push(v)
+                    case Err(e):
+                        return Err(e)
+                i = i + 1
+
+            # Check arity
+            if params.len() != arg_values.len():
+                return Err(EvalError(message: "Wrong number of arguments: expected {params.len()}, got {arg_values.len()}"))
+
+            # Create new environment with parameters bound
+            var call_env = Environment.with_parent(closure_env)
+            var j = 0
+            while j < params.len():
+                call_env.define(params[j], arg_values[j])
+                j = j + 1
+
+            # Evaluate function body
+            eval_expr(body, call_env)
+
+        case Ok(_):
+            Err(EvalError(message: "Cannot call non-function value"))
+        case Err(e):
+            Err(e)
+
+# Evaluate list
+fn eval_list(exprs: [Expr], env: Environment) -> Result<Value, EvalError>:
+    var values: [Value] = []
+    var i = 0
+    while i < exprs.len():
+        match eval_expr(exprs[i], env):
+            case Ok(v):
+                values.push(v)
+            case Err(e):
+                return Err(e)
+        i = i + 1
+    Ok(Value.List(values))
+
+# Evaluate index
+fn eval_index(list_expr: Expr, index_expr: Expr, env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(list_expr, env):
+        case Ok(Value.List(items)):
+            match eval_expr(index_expr, env):
+                case Ok(Value.Int(idx)):
+                    if idx >= 0 and idx < items.len():
+                        Ok(items[idx])
+                    else:
+                        Err(EvalError(message: "Index out of bounds"))
+                case Ok(_):
+                    Err(EvalError(message: "Index must be integer"))
+                case Err(e):
+                    Err(e)
+        case Ok(_):
+            Err(EvalError(message: "Cannot index non-list"))
+        case Err(e):
+            Err(e)
+
+# Evaluate if expression
+fn eval_if(cond: Expr, then_expr: Expr, else_expr: Expr, env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(cond, env):
+        case Ok(Value.Bool(true)):
+            eval_expr(then_expr, env)
+        case Ok(Value.Bool(false)):
+            eval_expr(else_expr, env)
+        case Ok(_):
+            Err(EvalError(message: "Condition must be boolean"))
+        case Err(e):
+            Err(e)
+
+# Evaluate block
+fn eval_block(stmts: [Stmt], env: Environment) -> Result<Value, EvalError>:
+    var last_value = Value.Unit
+    var i = 0
+    while i < stmts.len():
+        match eval_stmt(stmts[i], env):
+            case Ok(v):
+                last_value = v
+            case Err(e):
+                return Err(e)
+        i = i + 1
+    Ok(last_value)

@@ -1,0 +1,193 @@
+# Bug Database MCP Resource
+#
+# Provides MCP access to the unified bug database
+# Supports both read and write operations via JSON API
+
+use lib.database.bug.{create_bug_database, BugDatabase, Bug, BugSeverity, BugStatus, parse_severity, parse_status}
+use app.mcp.resource_utils.{
+    JsonBuilder, JsonArrayBuilder, escape_json,
+    extract_json_string, extract_json_int, extract_json_array,
+    current_timestamp, error_json, success_json, items_to_json
+}
+
+export get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats
+export add_bug_from_json, update_bug_from_json, get_bug_by_id
+
+# ============================================================================
+# Bug Database Resource Provider
+# ============================================================================
+
+# Get all bugs from database
+fn get_all_bugs(db_path: String) -> String:
+    var bugdb = create_bug_database(db_path)
+    val bugs = bugdb.all_bugs()
+    bugs_to_json(bugs)
+
+# Get open bugs
+fn get_open_bugs(db_path: String) -> String:
+    var bugdb = create_bug_database(db_path)
+    val bugs = bugdb.open_bugs()
+    bugs_to_json(bugs)
+
+# Get critical bugs (P0 + P1)
+fn get_critical_bugs(db_path: String) -> String:
+    var bugdb = create_bug_database(db_path)
+    val bugs = bugdb.critical_bugs()
+    bugs_to_json(bugs)
+
+# Get bug statistics
+fn get_bug_stats(db_path: String) -> String:
+    var bugdb = create_bug_database(db_path)
+    val stats = bugdb.stats()
+
+    JsonBuilder.object()
+        .field_int("total", stats.total)
+        .field_int("open", stats.open)
+        .field_int("fixed", stats.fixed)
+        .field_int("p0", stats.p0)
+        .field_int("p1", stats.p1)
+        .field_int("important", stats.important)
+        .field("health", stats.health)
+        .build()
+
+# Get bug by ID
+fn get_bug_by_id(db_path: text, bug_id: String) -> String:
+    var bugdb = create_bug_database(db_path)
+    val bug_opt = bugdb.get_bug(bug_id)
+
+    if not bug_opt.?:
+        return error_json("Bug not found: {bug_id}")
+
+    val bug = bug_opt.unwrap()
+    bug_to_json(bug)
+
+# ============================================================================
+# Write Operations (MCP Tools)
+# ============================================================================
+
+# Add a new bug from JSON
+fn add_bug_from_json(db_path: text, json: String) -> String:
+    var bugdb = create_bug_database(db_path)
+
+    val id = extract_json_string(json, "id")
+    val severity_str = extract_json_string(json, "severity")
+    val status_str = extract_json_string(json, "status")
+    val title = extract_json_string(json, "title")
+    val file = extract_json_string(json, "file")
+    val line = extract_json_int(json, "line")
+    val reproducible_by = extract_json_string(json, "reproducible_by")
+    val description = extract_json_array(json, "description")
+
+    if id == "":
+        return error_json("Missing required field: id")
+    if title == "":
+        return error_json("Missing required field: title")
+
+    val bug = Bug(
+        id: id,
+        severity: parse_severity(severity_str),
+        status: parse_status(status_str),
+        title: title,
+        description: description,
+        file: file,
+        line: line,
+        reproducible_by: reproducible_by,
+        fix_strategy: [],
+        investigation_log: [],
+        created_at: current_timestamp(),
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val added = bugdb.add_bug(bug)
+    if not added:
+        return error_json("Failed to add bug")
+
+    val saved = bugdb.save()
+    if not saved:
+        return error_json("Failed to save database")
+
+    success_json(id)
+
+# Update an existing bug from JSON
+fn update_bug_from_json(db_path: text, bug_id: text, json: String) -> String:
+    var bugdb = create_bug_database(db_path)
+
+    val existing_opt = bugdb.get_bug(bug_id)
+    if not existing_opt.?:
+        return error_json("Bug not found: {bug_id}")
+
+    val existing = existing_opt.unwrap()
+
+    val severity_str = extract_json_string(json, "severity")
+    val status_str = extract_json_string(json, "status")
+    val title = extract_json_string(json, "title")
+    val file = extract_json_string(json, "file")
+    val line = extract_json_int(json, "line")
+    val reproducible_by = extract_json_string(json, "reproducible_by")
+
+    val updated_bug = Bug(
+        id: bug_id,
+        severity: if severity_str != "": parse_severity(severity_str) else: existing.severity,
+        status: if status_str != "": parse_status(status_str) else: existing.status,
+        title: if title != "": title else: existing.title,
+        description: existing.description,
+        file: if file != "": file else: existing.file,
+        line: if line != 0: line else: existing.line,
+        reproducible_by: if reproducible_by != "": reproducible_by else: existing.reproducible_by,
+        fix_strategy: existing.fix_strategy,
+        investigation_log: existing.investigation_log,
+        created_at: existing.created_at,
+        updated_at: current_timestamp(),
+        valid: true
+    )
+
+    val updated = bugdb.update_bug(bug_id, updated_bug)
+    if not updated:
+        return error_json("Failed to update bug")
+
+    val saved = bugdb.save()
+    if not saved:
+        return error_json("Failed to save database")
+
+    success_json(bug_id)
+
+# ============================================================================
+# JSON Conversion Helpers
+# ============================================================================
+
+# Convert list of bugs to JSON
+fn bugs_to_json(bugs: [Bug]) -> String:
+    items_to_json(bugs, "bugs", bug_to_json)
+
+# Convert single bug to JSON
+fn bug_to_json(bug: Bug) -> String:
+    JsonBuilder.object()
+        .field("id", bug.id)
+        .field("severity", severity_to_string(bug.severity))
+        .field("status", status_to_string(bug.status))
+        .field("title", bug.title)
+        .field("file", bug.file)
+        .field_int("line", bug.line)
+        .field("reproducible_by", bug.reproducible_by)
+        .field_array("description", bug.description)
+        .build()
+
+# Convert severity to string
+fn severity_to_string(severity: BugSeverity) -> String:
+    match severity:
+        case BugSeverity.P0: "P0"
+        case BugSeverity.P1: "P1"
+        case BugSeverity.P2: "P2"
+        case BugSeverity.P3: "P3"
+        case BugSeverity.Important: "Important"
+
+# Convert status to string
+fn status_to_string(status: BugStatus) -> String:
+    match status:
+        case BugStatus.Open: "Open"
+        case BugStatus.Investigating: "Investigating"
+        case BugStatus.Confirmed: "Confirmed"
+        case BugStatus.Fixed: "Fixed"
+        case BugStatus.Closed: "Closed"
+        case BugStatus.Wontfix: "Wontfix"

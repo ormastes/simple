@@ -1,0 +1,287 @@
+# Pure Simple Autograd - Global Store via Class Singleton
+# Workaround for value semantics using a global store class
+
+export AutogradStore, Tensor, backward, get_gradient
+export tensor_add, tensor_sub, tensor_mul, tensor_mul_scalar
+export tensor_from_data, tensor_from_value, tensor_zeros, tensor_ones
+
+use lib.pure.tensor_f64 (TensorF64, from_data, zeros, ones)
+use lib.pure.tensor_f64_ops (add, sub, mul, mul_scalar)
+
+# ============================================================================
+# Global Store (Singleton Pattern)
+# ============================================================================
+
+class AutogradStore:
+    """Global storage for tensors and gradients.
+
+    Workaround for value semantics: Store all tensor data globally,
+    only pass around tensor IDs.
+    """
+    next_id: i64
+    values: Dict<i64, TensorF64>
+    requires_grad: Dict<i64, bool>
+    op_types: Dict<i64, i64>
+    input_ids: Dict<i64, [i64]>
+    op_names: Dict<i64, text>
+    gradients: Dict<i64, TensorF64>
+
+    static fn create() -> AutogradStore:
+        AutogradStore(
+            next_id: 1,
+            values: {},
+            requires_grad: {},
+            op_types: {},
+            input_ids: {},
+            op_names: {},
+            gradients: {}
+        )
+
+    me allocate_id() -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        id
+
+    me register_tensor(id: i64, value: TensorF64, req_grad: bool, op_name: text):
+        self.values[id] = value
+        self.requires_grad[id] = req_grad
+        self.op_names[id] = op_name
+
+    me set_op(id: i64, op_type: i64, inputs: [i64]):
+        self.op_types[id] = op_type
+        self.input_ids[id] = inputs
+
+    fn get_value(id: i64) -> TensorF64?:
+        self.values.get(id)
+
+    fn get_requires_grad(id: i64) -> bool:
+        self.requires_grad[id] ?? false
+
+    fn get_gradient(id: i64) -> TensorF64?:
+        self.gradients.get(id)
+
+    me accumulate_gradient(id: i64, grad: TensorF64):
+        if not self.get_requires_grad(id):
+            return
+
+        if self.gradients.get(id).?:
+            self.gradients[id] = add(self.gradients[id].unwrap(), grad)
+        else:
+            self.gradients[id] = grad
+
+    me clear_gradients():
+        self.gradients = {}
+
+# Create global store instance
+# Note: Must be initialized before use
+var STORE: AutogradStore? = nil
+
+fn get_store() -> AutogradStore:
+    """Get or create global store."""
+    if not STORE.?:
+        STORE = Some(AutogradStore.create())
+    STORE.unwrap()
+
+# ============================================================================
+# Op Type Constants
+# ============================================================================
+
+val OP_ADD: i64 = 1
+val OP_SUB: i64 = 2
+val OP_MUL: i64 = 3
+val OP_MUL_SCALAR: i64 = 4
+
+# ============================================================================
+# Tensor (just an ID wrapper)
+# ============================================================================
+
+class Tensor:
+    tensor_id: i64
+
+    fn value() -> TensorF64:
+        get_store().get_value(self.tensor_id).unwrap()
+
+    fn requires_grad() -> bool:
+        get_store().get_requires_grad(self.tensor_id)
+
+    fn shape() -> [i64]:
+        self.value().shape
+
+    fn grad() -> TensorF64?:
+        get_store().get_gradient(self.tensor_id)
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn tensor_from_data(data: [f64], shape: [i64], requires_grad: bool = false) -> Tensor:
+    var store = get_store()
+    val id = store.allocate_id()
+    store.register_tensor(id, from_data(data, shape), requires_grad, "leaf")
+    Tensor(tensor_id: id)
+
+fn tensor_from_value(value: TensorF64, requires_grad: bool = false) -> Tensor:
+    var store = get_store()
+    val id = store.allocate_id()
+    store.register_tensor(id, value, requires_grad, "leaf")
+    Tensor(tensor_id: id)
+
+fn tensor_zeros(shape: [i64], requires_grad: bool = false) -> Tensor:
+    tensor_from_value(zeros(shape), requires_grad)
+
+fn tensor_ones(shape: [i64], requires_grad: bool = false) -> Tensor:
+    tensor_from_value(ones(shape), requires_grad)
+
+# ============================================================================
+# Gradient Retrieval
+# ============================================================================
+
+fn get_gradient(tensor_id: i64) -> TensorF64?:
+    get_store().get_gradient(tensor_id)
+
+# ============================================================================
+# Backward Pass
+# ============================================================================
+
+fn backward(t: Tensor):
+    """Compute gradients."""
+    var store = get_store()
+    val grad_output = ones(t.shape())
+
+    store.accumulate_gradient(t.tensor_id, grad_output)
+
+    # Check if this tensor has an operation
+    val op_type = store.op_types.get(t.tensor_id)
+    val input_ids = store.input_ids.get(t.tensor_id)
+
+    if op_type.? and input_ids.?:
+        propagate_grads(store, t.tensor_id, op_type.unwrap(), input_ids.unwrap(), grad_output)
+
+fn propagate_grads(store: AutogradStore, tensor_id: i64, op_type: i64, input_ids: [i64], grad_out: TensorF64):
+    """Propagate gradients recursively."""
+
+    if op_type == OP_ADD:
+        store.accumulate_gradient(input_ids[0], grad_out)
+        store.accumulate_gradient(input_ids[1], grad_out)
+
+        # Recurse
+        val op0 = store.op_types.get(input_ids[0])
+        val ins0 = store.input_ids.get(input_ids[0])
+        if op0.? and ins0.?:
+            propagate_grads(store, input_ids[0], op0.unwrap(), ins0.unwrap(), grad_out)
+
+        val op1 = store.op_types.get(input_ids[1])
+        val ins1 = store.input_ids.get(input_ids[1])
+        if op1.? and ins1.?:
+            propagate_grads(store, input_ids[1], op1.unwrap(), ins1.unwrap(), grad_out)
+
+    elif op_type == OP_SUB:
+        store.accumulate_gradient(input_ids[0], grad_out)
+
+        val neg_grad = mul_scalar(grad_out, -1.0)
+        store.accumulate_gradient(input_ids[1], neg_grad)
+
+        # Recurse
+        val op0 = store.op_types.get(input_ids[0])
+        val ins0 = store.input_ids.get(input_ids[0])
+        if op0.? and ins0.?:
+            propagate_grads(store, input_ids[0], op0.unwrap(), ins0.unwrap(), grad_out)
+
+        val op1 = store.op_types.get(input_ids[1])
+        val ins1 = store.input_ids.get(input_ids[1])
+        if op1.? and ins1.?:
+            propagate_grads(store, input_ids[1], op1.unwrap(), ins1.unwrap(), neg_grad)
+
+    elif op_type == OP_MUL:
+        val a_val = store.get_value(input_ids[0]).unwrap()
+        val b_val = store.get_value(input_ids[1]).unwrap()
+
+        val grad_a = mul(grad_out, b_val)
+        val grad_b = mul(grad_out, a_val)
+
+        store.accumulate_gradient(input_ids[0], grad_a)
+        store.accumulate_gradient(input_ids[1], grad_b)
+
+        # Recurse
+        val op0 = store.op_types.get(input_ids[0])
+        val ins0 = store.input_ids.get(input_ids[0])
+        if op0.? and ins0.?:
+            propagate_grads(store, input_ids[0], op0.unwrap(), ins0.unwrap(), grad_a)
+
+        val op1 = store.op_types.get(input_ids[1])
+        val ins1 = store.input_ids.get(input_ids[1])
+        if op1.? and ins1.?:
+            propagate_grads(store, input_ids[1], op1.unwrap(), ins1.unwrap(), grad_b)
+
+    elif op_type == OP_MUL_SCALAR:
+        val result_val = store.get_value(tensor_id).unwrap()
+        val input_val = store.get_value(input_ids[0]).unwrap()
+
+        val scalar = if input_val.data[0] != 0.0:
+            result_val.data[0] / input_val.data[0]
+        else:
+            1.0
+
+        val grad_x = mul_scalar(grad_out, scalar)
+        store.accumulate_gradient(input_ids[0], grad_x)
+
+        # Recurse
+        val op0 = store.op_types.get(input_ids[0])
+        val ins0 = store.input_ids.get(input_ids[0])
+        if op0.? and ins0.?:
+            propagate_grads(store, input_ids[0], op0.unwrap(), ins0.unwrap(), grad_x)
+
+# ============================================================================
+# Operations
+# ============================================================================
+
+fn tensor_add(a: Tensor, b: Tensor) -> Tensor:
+    var store = get_store()
+    val result_value = add(a.value(), b.value())
+    val requires_grad = a.requires_grad() or b.requires_grad()
+
+    val id = store.allocate_id()
+    store.register_tensor(id, result_value, requires_grad, "add")
+
+    if requires_grad:
+        store.set_op(id, OP_ADD, [a.tensor_id, b.tensor_id])
+
+    Tensor(tensor_id: id)
+
+fn tensor_sub(a: Tensor, b: Tensor) -> Tensor:
+    var store = get_store()
+    val result_value = sub(a.value(), b.value())
+    val requires_grad = a.requires_grad() or b.requires_grad()
+
+    val id = store.allocate_id()
+    store.register_tensor(id, result_value, requires_grad, "sub")
+
+    if requires_grad:
+        store.set_op(id, OP_SUB, [a.tensor_id, b.tensor_id])
+
+    Tensor(tensor_id: id)
+
+fn tensor_mul(a: Tensor, b: Tensor) -> Tensor:
+    var store = get_store()
+    val result_value = mul(a.value(), b.value())
+    val requires_grad = a.requires_grad() or b.requires_grad()
+
+    val id = store.allocate_id()
+    store.register_tensor(id, result_value, requires_grad, "mul")
+
+    if requires_grad:
+        store.set_op(id, OP_MUL, [a.tensor_id, b.tensor_id])
+
+    Tensor(tensor_id: id)
+
+fn tensor_mul_scalar(x: Tensor, scalar: f64) -> Tensor:
+    var store = get_store()
+    val result_value = mul_scalar(x.value(), scalar)
+
+    val id = store.allocate_id()
+    store.register_tensor(id, result_value, x.requires_grad(), "mul_scalar")
+
+    if x.requires_grad():
+        store.set_op(id, OP_MUL_SCALAR, [x.tensor_id])
+
+    Tensor(tensor_id: id)

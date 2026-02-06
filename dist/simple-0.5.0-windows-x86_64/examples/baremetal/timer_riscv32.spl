@@ -1,0 +1,230 @@
+# RISC-V 32-bit Timer Example
+#
+# This example demonstrates:
+# - RISC-V machine timer interrupt
+# - UART output
+# - Trap handling
+#
+# Build: simple build examples/baremetal/timer_riscv32.spl --bare-metal -o timer_riscv32.elf
+# Run: qemu-system-riscv32 -machine virt -kernel timer_riscv32.elf -serial stdio -nographic
+
+# ===========================================================================
+# RISC-V CSR Definitions
+# ===========================================================================
+
+# Machine Status Register bits
+val MSTATUS_MIE: u32 = 0x00000008   # Machine interrupt enable
+
+# Machine Interrupt Enable bits
+val MIE_MTIE: u32 = 0x00000080      # Machine timer interrupt enable
+
+# Machine Cause Register values
+val MCAUSE_TIMER: u32 = 0x80000007  # Machine timer interrupt
+
+# ===========================================================================
+# Hardware Definitions (QEMU virt machine)
+# ===========================================================================
+
+# UART base address
+val UART_BASE: u32 = 0x10000000
+
+# Machine timer (CLINT)
+val MTIME_BASE: u32 = 0x0200BFF8     # mtime register
+val MTIMECMP_BASE: u32 = 0x02004000  # mtimecmp register
+
+# Timer frequency (10 MHz in QEMU)
+val TIMER_FREQ: u32 = 10_000_000
+
+# ===========================================================================
+# UART Functions
+# ===========================================================================
+
+fn uart_putc(ch: u8):
+    unsafe:
+        *(UART_BASE as ptr<u8>) = ch
+
+fn uart_puts(msg: text):
+    for ch in msg:
+        uart_putc(ch as u8)
+
+fn uart_putln(msg: text):
+    uart_puts(msg)
+    uart_putc(10)  # '\n'
+
+# ===========================================================================
+# Timer Functions
+# ===========================================================================
+
+fn read_mtime() -> u64:
+    unsafe:
+        *(MTIME_BASE as ptr<u64>)
+
+fn write_mtimecmp(val: u64):
+    unsafe:
+        *(MTIMECMP_BASE as ptr<u64>) = val
+
+fn set_timer(interval_ms: u32):
+    val now = read_mtime()
+    val ticks = (TIMER_FREQ / 1000) as u64 * interval_ms as u64
+    write_mtimecmp(now + ticks)
+
+# ===========================================================================
+# CSR Access Functions
+# ===========================================================================
+
+fn read_mstatus() -> u32:
+    var val: u32
+    asm:
+        "csrr {0}, mstatus"
+        out(reg) val
+    val
+
+fn write_mstatus(val: u32):
+    asm:
+        "csrw mstatus, {0}"
+        in(reg) val
+
+fn read_mie() -> u32:
+    var val: u32
+    asm:
+        "csrr {0}, mie"
+        out(reg) val
+    val
+
+fn write_mie(val: u32):
+    asm:
+        "csrw mie, {0}"
+        in(reg) val
+
+fn write_mtvec(val: u32):
+    asm:
+        "csrw mtvec, {0}"
+        in(reg) val
+
+# ===========================================================================
+# Interrupt Handlers
+# ===========================================================================
+
+var tick_count: u32 = 0
+
+fn timer_interrupt_handler():
+    tick_count += 1
+
+    # Print tick message
+    uart_puts("Tick #")
+    # TODO: Convert tick_count to string
+    uart_putln("")
+
+    # Set next timer interrupt (1 second from now)
+    set_timer(1000)
+
+@naked
+fn trap_handler():
+    # Save context
+    asm:
+        # Save registers to stack
+        "addi sp, sp, -64"
+        "sw ra, 0(sp)"
+        "sw t0, 4(sp)"
+        "sw t1, 8(sp)"
+        "sw t2, 12(sp)"
+        "sw a0, 16(sp)"
+        "sw a1, 20(sp)"
+        "sw a2, 24(sp)"
+        "sw a3, 28(sp)"
+        "sw a4, 32(sp)"
+        "sw a5, 36(sp)"
+        "sw a6, 40(sp)"
+        "sw a7, 44(sp)"
+        options: [volatile]
+
+    # Read mcause
+    var cause: u32
+    asm:
+        "csrr {0}, mcause"
+        out(reg) cause
+
+    # Handle timer interrupt
+    if cause == MCAUSE_TIMER:
+        timer_interrupt_handler()
+
+    # Restore context
+    asm:
+        "lw ra, 0(sp)"
+        "lw t0, 4(sp)"
+        "lw t1, 8(sp)"
+        "lw t2, 12(sp)"
+        "lw a0, 16(sp)"
+        "lw a1, 20(sp)"
+        "lw a2, 24(sp)"
+        "lw a3, 28(sp)"
+        "lw a4, 32(sp)"
+        "lw a5, 36(sp)"
+        "lw a6, 40(sp)"
+        "lw a7, 44(sp)"
+        "addi sp, sp, 64"
+        # Return from trap
+        "mret"
+        options: [volatile, noreturn]
+
+# ===========================================================================
+# Initialization
+# ===========================================================================
+
+fn init_interrupts():
+    # Set trap vector (direct mode)
+    write_mtvec(trap_handler as u32)
+
+    # Enable timer interrupt in MIE
+    val mie = read_mie()
+    write_mie(mie | MIE_MTIE)
+
+    # Enable interrupts globally in mstatus
+    val mstatus = read_mstatus()
+    write_mstatus(mstatus | MSTATUS_MIE)
+
+    # Set first timer interrupt (1 second)
+    set_timer(1000)
+
+# ===========================================================================
+# Main Function
+# ===========================================================================
+
+fn main():
+    uart_putln("RISC-V Timer Example")
+    uart_putln("Simple bare-metal kernel")
+    uart_putln("")
+    uart_putln("Starting timer (1 second interval)...")
+
+    # Initialize interrupts
+    init_interrupts()
+
+    # Main loop (just wait for interrupts)
+    loop:
+        asm:
+            "wfi"  # Wait for interrupt
+            options: [volatile]
+
+# ===========================================================================
+# Boot Code
+# ===========================================================================
+
+@section(".text.init")
+@naked
+fn _start():
+    asm:
+        # Set up stack (use top of RAM, e.g., 128MB)
+        "lui sp, 0x80000"
+        "addi sp, sp, 0x0"  # sp = 0x80000000 (128MB)
+
+        # Clear BSS (if needed)
+        # TODO: Add BSS clearing code
+
+        # Jump to main
+        "call main"
+
+        # If main returns, loop forever
+        ".loop:"
+        "wfi"
+        "j .loop"
+        options: [volatile, noreturn]

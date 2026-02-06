@@ -1,0 +1,447 @@
+# Directory Manifest Parsing and Manipulation
+#
+# This module handles parsing __init__.spl files and converting them to
+# DirectoryManifest structures, as well as providing methods for working
+# with capabilities and visibility.
+#
+# Port of: rust/compiler/src/module_resolver/manifest.rs (301 lines)
+
+export load_manifest
+export load_manifest_with_capability_check
+export parse_manifest
+export extract_manifest
+export validate_function_effects
+
+use parser.ast (Module, Node, Capability, Effect, ImportTarget, Visibility)
+use parser (Parser)
+use compiler.module_resolver.types (ModuleResolver, DirectoryManifest, ChildModule)
+use compiler.error (CompileError, ErrorCode)
+
+# ============================================================================
+# Manifest Loading
+# ============================================================================
+
+impl ModuleResolver:
+    me load_manifest(dir_path: text) -> DirectoryManifest | CompileError:
+        """Load and parse a directory manifest (__init__.spl).
+
+        Caches the parsed manifest for future lookups.
+
+        Arguments:
+        - dir_path: Path to the directory containing __init__.spl
+
+        Returns:
+        - DirectoryManifest: The parsed manifest
+        - CompileError: If parsing fails
+
+        ROBUSTNESS:
+        - Returns cached manifest if available
+        - Returns empty manifest if __init__.spl doesn't exist
+        - Parses and caches new manifests
+        """
+        val init_path = path_join(dir_path, "__init__.spl")
+
+        # Check cache
+        if val Some(cached) = self.manifests.get(init_path):
+            return Ok(cached.clone())
+
+        # If __init__.spl doesn't exist, return empty manifest
+        if not file_exists(init_path):
+            return Ok(DirectoryManifest.empty())
+
+        # Read and parse manifest
+        val source = match file_read(init_path):
+            Some(content): content
+            None:
+                return CompileError.io_error(
+                    "failed to read file: {init_path}",
+                    ErrorCode.FILE_READ_ERROR
+                )
+
+        val manifest = self.parse_manifest(source, dir_path)?
+
+        # Cache the manifest
+        self.manifests[init_path] = manifest.clone()
+
+        Ok(manifest)
+
+    me load_manifest_with_capability_check(
+        dir_path: text,
+        parent_capabilities: [Capability]
+    ) -> DirectoryManifest | CompileError:
+        """Load a manifest and validate its capabilities against parent capabilities.
+
+        This enforces the capability inheritance rule: child modules can only
+        restrict capabilities, not expand them. A child's capabilities must be
+        a subset of its parent's capabilities.
+
+        Arguments:
+        - dir_path: Path to the directory containing __init__.spl
+        - parent_capabilities: Capabilities from the parent module (empty = unrestricted)
+
+        Returns:
+        - DirectoryManifest: The loaded manifest
+        - CompileError: If capabilities are invalid
+
+        ROBUSTNESS:
+        - Validates capability inheritance
+        - Returns detailed error message with capability lists
+        """
+        val manifest = self.load_manifest(dir_path)?
+
+        # Validate capability inheritance
+        if not manifest.capabilities_are_subset_of(parent_capabilities):
+            val child_caps = manifest.capabilities.map(\c: c.name()).join(", ")
+            val parent_caps = parent_capabilities.map(\c: c.name()).join(", ")
+
+            return CompileError.semantic(
+                "capability violation in module `{manifest.name}`",
+                ErrorCode.CAPABILITY_VIOLATION,
+                "child capabilities [{child_caps}] must be subset of parent [{parent_caps}]"
+            ).with_note("child modules can only restrict capabilities, not expand them")
+
+        Ok(manifest)
+
+    fn parse_manifest(source: text, dir_path: text) -> DirectoryManifest | CompileError:
+        """Parse a directory manifest from source.
+
+        Arguments:
+        - source: Source code of __init__.spl
+        - dir_path: Path to the directory (for error messages)
+
+        Returns:
+        - DirectoryManifest: The parsed manifest
+        - CompileError: If parsing fails
+
+        ROBUSTNESS:
+        - Returns detailed parse errors
+        - Delegates to parser for syntax errors
+        """
+        var parser = Parser.new(source)
+        val module = match parser.parse():
+            Ok(m): m
+            Err(err):
+                return CompileError.parse_error(
+                    "failed to parse __init__.spl: {err.message}",
+                    ErrorCode.PARSE_ERROR
+                )
+
+        self.extract_manifest(module, dir_path)
+
+    fn extract_manifest(module: Module, dir_path: text) -> DirectoryManifest | CompileError:
+        """Extract manifest information from parsed AST.
+
+        Processes:
+        - Module declarations (mod name, pub mod name)
+        - Common use statements (common use)
+        - Export use statements (export use)
+        - Auto import statements (auto import)
+        - Requires capabilities (requires [...])
+
+        Arguments:
+        - module: Parsed AST module
+        - dir_path: Path to the directory
+
+        Returns:
+        - DirectoryManifest: Extracted manifest
+        - CompileError: If validation fails
+
+        ROBUSTNESS:
+        - Extracts all manifest-relevant nodes
+        - Ignores non-manifest nodes (functions, types, etc.)
+        - Handles directory header attributes (#[bypass])
+        """
+        val dir_name = path_basename(dir_path)
+
+        var manifest = DirectoryManifest.new(dir_name)
+
+        for item in module.items:
+            match item:
+                Node.ModDecl(decl):
+                    # Check if this is the directory header (mod <dirname>)
+                    if manifest.child_modules.is_empty() and decl.name == manifest.name:
+                        # This is the directory header - extract attributes
+                        manifest.attributes = decl.attributes.clone()
+
+                        # Check for #[bypass] attribute
+                        for attr in decl.attributes:
+                            if attr.name == "bypass":
+                                manifest.is_bypass = true
+                                break
+                    else:
+                        # This is a child module declaration
+                        manifest.child_modules.push(ChildModule(
+                            name: decl.name.clone(),
+                            visibility: decl.visibility,
+                            attributes: decl.attributes.clone()
+                        ))
+
+                Node.CommonUseStmt(stmt):
+                    manifest.common_uses.push(stmt.clone())
+
+                Node.ExportUseStmt(stmt):
+                    manifest.exports.push(stmt.clone())
+
+                Node.AutoImportStmt(stmt):
+                    manifest.auto_imports.push(stmt.clone())
+
+                Node.RequiresCapabilities(stmt):
+                    # Extract capabilities from requires [...] statement
+                    manifest.capabilities = stmt.capabilities.clone()
+
+                Node.UseStmt(_):
+                    # Regular use statements in __init__.spl are allowed but
+                    # don't affect the manifest structure
+                    pass
+
+                _:
+                    # Other nodes in __init__.spl are not part of the manifest
+                    # (functions, types, etc. should not be in __init__.spl per spec)
+                    pass
+
+        Ok(manifest)
+
+# ============================================================================
+# Capability Validation
+# ============================================================================
+
+impl DirectoryManifest:
+    fn validate_function_effects(
+        func_name: text,
+        effects: [Effect]
+    ) -> text?:
+        """Check if a function's effects are allowed by this module's capabilities.
+
+        Returns:
+        - None: If valid
+        - Some(error_message): If invalid
+
+        Effects without corresponding capabilities:
+        - Async is always allowed (execution model, not a capability)
+        - Verification effects (@verify, @trusted, @ghost) are always allowed
+
+        ROBUSTNESS:
+        - Unrestricted modules (empty capabilities) allow all effects
+        - Each effect checked against corresponding capability
+        - Clear error messages
+        """
+        # If module has no capabilities (unrestricted), all effects are allowed
+        if self.capabilities.is_empty():
+            return None
+
+        for effect in effects:
+            match effect:
+                # Async is an execution model, not a capability - always allowed
+                Effect.Async:
+                    pass
+
+                # Verification effects are compile-time markers, always allowed
+                Effect.Verify | Effect.Trusted | Effect.Ghost | Effect.AutoLean(_):
+                    pass
+
+                # Pure requires the Pure capability
+                Effect.Pure:
+                    if not self.capabilities.contains(Capability.Pure):
+                        return Some("function '{func_name}' has @pure effect but module does not allow 'pure' capability")
+
+                # I/O requires the Io capability
+                Effect.Io:
+                    if not self.capabilities.contains(Capability.Io):
+                        return Some("function '{func_name}' has @io effect but module does not allow 'io' capability")
+
+                # Network requires the Net capability
+                Effect.Net:
+                    if not self.capabilities.contains(Capability.Net):
+                        return Some("function '{func_name}' has @net effect but module does not allow 'net' capability")
+
+                # Filesystem requires the Fs capability
+                Effect.Fs:
+                    if not self.capabilities.contains(Capability.Fs):
+                        return Some("function '{func_name}' has @fs effect but module does not allow 'fs' capability")
+
+                # Unsafe requires the Unsafe capability
+                Effect.Unsafe:
+                    if not self.capabilities.contains(Capability.Unsafe):
+                        return Some("function '{func_name}' has @unsafe effect but module does not allow 'unsafe' capability")
+
+        None
+
+# ============================================================================
+# Helper Functions (FFI Wrappers)
+# ============================================================================
+
+fn path_join(base: text, segment: text) -> text:
+    """Join two path segments."""
+    if base.ends_with("/"):
+        "{base}{segment}"
+    else:
+        "{base}/{segment}"
+
+fn path_basename(path: text) -> text:
+    """Get the basename of a path (last component)."""
+    val parts = path.split("/")
+    if parts.is_empty():
+        return ""
+    parts[parts.len() - 1]
+
+# ============================================================================
+# Usage Examples
+# ============================================================================
+#
+# # Create a resolver
+# var resolver = ModuleResolver.new("/home/user/myproject", "/home/user/myproject/src")
+#
+# # Load a manifest
+# val manifest_result = resolver.load_manifest("/home/user/myproject/src/sys")
+# match manifest_result:
+#     Ok(manifest):
+#         print "Directory: {manifest.name}"
+#         print "Child modules: {manifest.child_modules.len()}"
+#         print "Capabilities: {manifest.capabilities.len()}"
+#
+#     Err(error):
+#         print "Error: {error.message}"
+#
+# # Load with capability check
+# val parent_caps = [Capability.Pure, Capability.Io]
+# val child_manifest = resolver.load_manifest_with_capability_check(
+#     "/home/user/myproject/src/sys/http",
+#     parent_caps
+# )
+#
+# # Validate function effects
+# if val Ok(manifest) = manifest_result:
+#     val effects = [Effect.Io, Effect.Net]
+#     match manifest.validate_function_effects("fetch_url", effects):
+#         None:
+#             print "Effects are valid"
+#         Some(error):
+#             print "Error: {error}"
+#
+# # Check if child is public
+# if manifest.is_child_public("router"):
+#     print "router is public"
+#
+# ============================================================================
+# Manifest Parsing Workflow
+# ============================================================================
+#
+# 1. Read __init__.spl file (or return empty manifest if not found)
+#
+# 2. Parse with Simple parser
+#    - Returns Module AST
+#    - Syntax errors returned as CompileError
+#
+# 3. Extract manifest information:
+#    a. ModDecl nodes:
+#       - First ModDecl matching directory name: header (extract attributes)
+#       - Other ModDecl nodes: child modules (name + visibility + attributes)
+#    b. CommonUseStmt nodes: common uses
+#    c. ExportUseStmt nodes: public re-exports
+#    d. AutoImportStmt nodes: macro auto-imports
+#    e. RequiresCapabilities nodes: capability restrictions
+#
+# 4. Cache the manifest in resolver.manifests
+#
+# 5. Return DirectoryManifest
+#
+# ============================================================================
+# Capability Inheritance
+# ============================================================================
+#
+# **Rule:** Child capabilities must be subset of parent capabilities
+#
+# Examples:
+#
+# Parent: []           Child: [pure, io]       → Valid (parent unrestricted)
+# Parent: [pure, io]   Child: [pure]           → Valid (subset)
+# Parent: [pure, io]   Child: []               → Valid (inherits parent)
+# Parent: [pure]       Child: [pure, io]       → Invalid (io not in parent)
+#
+# **Effective Capabilities:**
+#
+# If child has no capabilities:
+#   → Inherit parent's capabilities
+#
+# If parent has no capabilities:
+#   → Use child's capabilities (parent unrestricted)
+#
+# If both have capabilities:
+#   → Intersection (child AND parent)
+#
+# ============================================================================
+# Effect Validation
+# ============================================================================
+#
+# Each effect requires a corresponding capability:
+#
+# Effect          | Capability  | Notes
+# ----------------|-------------|----------------------------------
+# @pure           | pure        | No side effects
+# @io             | io          | General I/O
+# @net            | net         | Network operations
+# @fs             | fs          | Filesystem operations
+# @unsafe         | unsafe      | Unsafe operations
+# @async          | -           | Always allowed (execution model)
+# @verify/@trusted| -           | Always allowed (compile-time)
+#
+# If module has no capabilities (empty list):
+#   → Unrestricted, all effects allowed
+#
+# ============================================================================
+# Performance Notes
+# ============================================================================
+#
+# - load_manifest: O(1) cache lookup + O(n) parse (if not cached)
+# - parse_manifest: O(n) where n = file size
+# - extract_manifest: O(m) where m = number of AST nodes
+# - validate_function_effects: O(k*c) where k = effects, c = capabilities
+#
+# Expected performance: Same as Rust (parsing dominates)
+#
+# Caching:
+# - First load: ~1-5ms (parse + extract)
+# - Cached loads: ~0.01ms (hash lookup)
+#
+# ============================================================================
+# Robustness Checklist
+# ============================================================================
+#
+# File I/O:
+# - [x] File not found (returns empty manifest)
+# - [x] Read error (returns CompileError)
+# - [x] Parse error (returns CompileError with details)
+#
+# Capability Validation:
+# - [x] Empty parent (unrestricted, allows any child)
+# - [x] Empty child (inherits parent)
+# - [x] Subset check (all child caps in parent)
+# - [x] Violation error (detailed message with cap lists)
+#
+# Effect Validation:
+# - [x] Unrestricted module (empty caps, allows all)
+# - [x] Each effect checks corresponding capability
+# - [x] Async always allowed (execution model)
+# - [x] Verification effects always allowed
+# - [x] Clear error messages per effect
+#
+# Manifest Extraction:
+# - [x] Directory header (first ModDecl with matching name)
+# - [x] Child modules (other ModDecl nodes)
+# - [x] #[bypass] attribute detection
+# - [x] All statement types (common use, export use, auto import, requires)
+# - [x] Ignores non-manifest nodes (functions, types)
+#
+# Edge Cases:
+# - [x] Empty __init__.spl (returns empty manifest)
+# - [x] No __init__.spl (returns empty manifest)
+# - [x] Directory header without children (valid)
+# - [x] No capabilities (unrestricted)
+# - [x] No effects (always valid)
+#
+# TODO:
+# - [ ] Add support for profile expansion in capabilities
+# - [ ] Add attribute validation (#[bypass] only valid without code files)
+# - [ ] Add macro export tracking
+# - [ ] Add visibility model integration
+#

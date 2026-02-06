@@ -1,6 +1,16 @@
 # Pure Simple I/O Implementation
 # All implementations in Simple - no Rust dependencies
 
+# Platform detection - inlined to avoid bootstrap runtime limitations
+# Use environment variable to detect Windows (OS or OSTYPE)
+# Defaults to Unix if environment variable not set
+fn is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false  # Default to Unix/Linux
+    else:
+        os_env.lower().contains("windows")
+
 # Extern function declarations for runtime
 extern fn rt_env_get(key: text) -> text
 extern fn rt_cli_get_args() -> [str]
@@ -29,10 +39,32 @@ fn rt_hook_enable_debugging(enable: bool):
     # Stub: Hook debugging not yet implemented in runtime
     pass
 
+# --- Atomic Operations ---
+# Note: These are stubs - atomic operations not yet fully implemented
+fn atomic_i64_new(value: i64) -> i64:
+    # Stub: Returns regular i64 until atomics are implemented
+    value
+
+fn atomic_bool_new(value: bool) -> bool:
+    # Stub: Returns regular bool until atomics are implemented
+    value
+
+# --- Hardware/Feature Detection ---
+fn rt_vulkan_is_available() -> bool:
+    # Stub: Vulkan detection not yet implemented
+    false
+
+fn upx_is_available() -> bool:
+    # Stub: UPX compression tool detection not yet implemented
+    # Check if upx command exists in PATH
+    shell_bool("command -v upx >/dev/null 2>&1")
+
 export rt_set_jit_backend, rt_get_jit_backend
 export rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute
 export rt_exec_manager_has_function, rt_exec_manager_backend_name, rt_exec_manager_cleanup
 export rt_debug_set_active, rt_hook_enable_debugging
+export atomic_i64_new, atomic_bool_new
+export rt_vulkan_is_available, upx_is_available
 
 export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
@@ -208,9 +240,8 @@ fn home() -> text:
     env_get("HOME")
 
 fn env_get(key: text) -> text:
-    # Environment variables
-    # The runtime might have these
-    ""
+    # Environment variables - delegate to runtime
+    rt_env_get(key)
 
 fn env_set(key: text, value: text) -> bool:
     print "[INFO] env_set('{key}', '{value}')"
@@ -226,12 +257,13 @@ struct ProcessResult:
     exit_code: i64
 
 fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    # Resolve command with platform-specific logic (adds .exe on Windows, searches PATH)
-    use std.platform.resolve_command
-    val resolved_cmd = resolve_command(cmd)
+    # WORKAROUND: Bootstrap runtime limitation - skip command resolution
+    # TODO: Re-enable platform-specific command resolution when using full parser
+    # use src.std.platform (resolve_command)
+    # val resolved_cmd = resolve_command(cmd)
 
-    # Delegate to runtime's process execution
-    rt_process_run(resolved_cmd, args)
+    # Delegate to runtime's process execution (use command as-is for bootstrap)
+    rt_process_run(cmd, args)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     val (out, err, code) = process_run(cmd, args)
@@ -247,11 +279,7 @@ fn process_output(cmd: text, args: [text]) -> text:
 
 fn shell(command: text) -> ProcessResult:
     # Execute shell command using platform-specific shell
-    # Detect Windows by checking environment variables
-    val windir = rt_env_get("WINDIR")
-    val is_win = (windir != "")
-
-    val (shell_path, shell_args) = if is_win:
+    val (shell_path, shell_args) = if is_windows_platform():
         # Windows: use cmd.exe /c
         ("cmd.exe", ["/c", command])
     else:

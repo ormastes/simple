@@ -1,0 +1,340 @@
+# Build Native - Compile Simple programs to native binaries.
+#
+# This module provides the build pipeline for creating native executables:
+# 1. Compile source files to SMF
+# 2. Link SMFs using Simple linker
+# 3. Generate native binary via mold
+#
+# Usage:
+#   build_native("src/app/cli/main.spl", "simple_new_native")
+#
+# This enables self-hosting: compiling the Simple CLI (written in Simple)
+# to a native binary using the Simple linker.
+
+use linker.*
+use driver (compile_to_smf)
+
+# ============================================================================
+# Build Configuration
+# ============================================================================
+
+struct BuildConfig:
+    """Configuration for native build."""
+    entry_point: text
+    output: text
+    dependencies: [text]
+    libraries: [text]
+    library_paths: [text]
+    optimization: i32
+    debug: bool
+    verbose: bool
+    pie: bool
+    target_cpu: text?           # Target CPU (e.g., "x86-64-v3", "haswell", "native")
+    target_features: [text]     # Target features (e.g., ["+avx2", "+fma"])
+    linker_flags: [text]        # Extra linker flags
+
+impl BuildConfig:
+    static fn default(entry: text, output: text) -> BuildConfig:
+        BuildConfig(
+            entry_point: entry,
+            output: output,
+            dependencies: [],
+            libraries: ["c"],
+            library_paths: [],
+            optimization: 0,
+            debug: false,
+            verbose: false,
+            pie: true,
+            target_cpu: nil,
+            target_features: [],
+            linker_flags: []
+        )
+
+    static fn for_simple_cli() -> BuildConfig:
+        """Configuration for building simple_new native."""
+        BuildConfig(
+            entry_point: "src/app/cli/main.spl",
+            output: "simple_new_native",
+            dependencies: [
+                "src/compiler/mod.spl",
+                "src/std/src/mod.spl"
+            ],
+            libraries: ["c", "m", "pthread"],
+            library_paths: [],
+            optimization: 2,
+            debug: false,
+            verbose: true,
+            pie: true,
+            target_cpu: Some("x86-64-v3"),      # Default to modern CPUs
+            target_features: [],
+            linker_flags: []
+        )
+
+# ============================================================================
+# Build Result
+# ============================================================================
+
+enum BuildResult:
+    Success(output: text, stats: BuildStats)
+    CompileError(file: text, message: text)
+    LinkError(message: text)
+    Error(message: text)
+
+struct BuildStats:
+    """Statistics from the build."""
+    source_files: i32
+    smf_files: i32
+    total_symbols: i32
+    output_size: i64
+    compile_time_ms: i64
+    link_time_ms: i64
+
+impl BuildResult:
+    fn is_success() -> bool:
+        match self:
+            case Success(_, _): true
+            case _: false
+
+# ============================================================================
+# Build Pipeline
+# ============================================================================
+
+fn build_native(config: BuildConfig) -> BuildResult:
+    """Build a native binary from Simple source files.
+
+    Pipeline:
+    1. Discover all source files (entry + dependencies)
+    2. Compile each source file to SMF
+    3. Link all SMFs with the Simple linker
+    4. Generate native binary via mold
+    """
+    val start_time = current_time_ms()
+
+    if config.verbose:
+        print "[build] Starting native build"
+        print "[build] Entry point: {config.entry_point}"
+        print "[build] Output: {config.output}"
+
+    # 1. Collect all source files
+    var source_files: [text] = [config.entry_point]
+    source_files = source_files.concat(config.dependencies)
+
+    # Add implicit dependencies
+    source_files = discover_dependencies(source_files, config.verbose)
+
+    if config.verbose:
+        print "[build] Compiling {source_files.len()} source files"
+
+    # 2. Compile each source to SMF
+    var smf_files: [text] = []
+    for source in source_files:
+        val smf_path = source_to_smf_path(source)
+
+        if config.verbose:
+            print "[build] Compiling: {source} -> {smf_path}"
+
+        val compile_result = compile_to_smf(source, smf_path)
+        if compile_result.is_err():
+            return BuildResult.CompileError(
+                file: source,
+                message: compile_result.unwrap_err()
+            )
+
+        smf_files = smf_files.push(smf_path)
+
+    val compile_time = current_time_ms() - start_time
+
+    if config.verbose:
+        print "[build] Compilation complete ({compile_time}ms)"
+        print "[build] Linking {smf_files.len()} SMF files"
+
+    # 3. Link SMFs to native binary
+    val link_start = current_time_ms()
+
+    # Build target flags from CPU and features
+    var target_flags: [text] = []
+    if config.target_cpu.?:
+        target_flags.push("-march={config.target_cpu.unwrap()}")
+    for feature in config.target_features:
+        target_flags.push("-m{feature}")
+
+    val link_config = LinkConfig(
+        output_format: OutputFormat.Native,
+        output_path: config.output,
+        libraries: config.libraries,
+        library_paths: config.library_paths,
+        pie: config.pie,
+        debug: config.debug,
+        verbose: config.verbose,
+        allow_deferred: false,
+        optimization_level: config.optimization,
+        target_flags: target_flags,
+        linker_flags: config.linker_flags
+    )
+
+    var linker = Linker.new(link_config)
+    val link_result = linker.link(smf_files)
+
+    match link_result:
+        case Success(output_path, stats):
+            val link_time = current_time_ms() - link_start
+            val total_time = current_time_ms() - start_time
+
+            if config.verbose:
+                print "[build] Link complete ({link_time}ms)"
+                print "[build] Output: {output_path}"
+                print "[build] Size: {stats.output_size} bytes"
+                print "[build] Total time: {total_time}ms"
+
+            BuildResult.Success(
+                output: output_path,
+                stats: BuildStats(
+                    source_files: source_files.len() as i32,
+                    smf_files: smf_files.len() as i32,
+                    total_symbols: stats.symbol_count,
+                    output_size: stats.output_size,
+                    compile_time_ms: compile_time,
+                    link_time_ms: link_time
+                )
+            )
+
+        case Error(message, errors):
+            val error_msgs = errors.map(\e: e.message).join("\n")
+            BuildResult.LinkError(message: "{message}\n{error_msgs}")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn discover_dependencies(sources: [text], verbose: bool) -> [text]:
+    """Discover all transitive dependencies."""
+    var all_sources = sources
+    var seen: Set<text> = {}
+
+    for source in sources:
+        seen = seen.insert(source)
+
+    # TODO: Implement proper import scanning
+    # For now, return input sources
+    all_sources
+
+fn source_to_smf_path(source: text) -> text:
+    """Convert source path to SMF output path."""
+    # Replace .spl with .smf, put in .build directory
+    val base = source.replace(".spl", "").replace("/", "_")
+    ".build/{base}.smf"
+
+fn current_time_ms() -> i64:
+    """Get current time in milliseconds."""
+    # TODO: Implement via FFI
+    0
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn build_simple_cli() -> BuildResult:
+    """Build the Simple CLI to native binary."""
+    val config = BuildConfig.for_simple_cli()
+    build_native(config)
+
+fn build_file(source: text, output: text) -> BuildResult:
+    """Build a single file to native binary."""
+    val config = BuildConfig.default(source, output)
+    build_native(config)
+
+# ============================================================================
+# CLI Integration
+# ============================================================================
+
+fn handle_build_command(args: [text]) -> i32:
+    """Handle 'simple build' command.
+
+    Usage:
+      simple build <source.spl> [-o <output>] [--native] [--verbose]
+      simple build --self  # Build simple_new_native
+    """
+    if args.is_empty():
+        print "Usage: simple build <source.spl> [-o <output>] [--native]"
+        print "       simple build --self  # Build simple_new_native"
+        return 1
+
+    # Check for --self flag (build simple_new)
+    if args[0] == "--self":
+        print "Building simple_new_native..."
+        val result = build_simple_cli()
+        match result:
+            case Success(output, stats):
+                print "Build successful!"
+                print "  Output: {output}"
+                print "  Size: {stats.output_size} bytes"
+                print "  Source files: {stats.source_files}"
+                print "  Compile time: {stats.compile_time_ms}ms"
+                print "  Link time: {stats.link_time_ms}ms"
+                return 0
+            case CompileError(file, msg):
+                print "Compile error in {file}:"
+                print "  {msg}"
+                return 1
+            case LinkError(msg):
+                print "Link error: {msg}"
+                return 1
+            case Error(msg):
+                print "Build error: {msg}"
+                return 1
+
+    # Parse arguments
+    var source = args[0]
+    var output = source.replace(".spl", "")
+    var verbose = false
+
+    var i = 1
+    while i < args.len():
+        match args[i]:
+            case "-o":
+                if i + 1 < args.len():
+                    output = args[i + 1]
+                    i = i + 2
+                else:
+                    print "Error: -o requires an argument"
+                    return 1
+            case "--verbose":
+                verbose = true
+                i = i + 1
+            case "--native":
+                # Default is native, this is a no-op
+                i = i + 1
+            case _:
+                print "Unknown option: {args[i]}"
+                return 1
+
+    # Build
+    var config = BuildConfig.default(source, output)
+    config.verbose = verbose
+
+    val result = build_native(config)
+    match result:
+        case Success(out, stats):
+            print "Build successful: {out}"
+            return 0
+        case CompileError(file, msg):
+            print "Compile error in {file}: {msg}"
+            return 1
+        case LinkError(msg):
+            print "Link error: {msg}"
+            return 1
+        case Error(msg):
+            print "Build error: {msg}"
+            return 1
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BuildConfig
+export BuildResult
+export BuildStats
+export build_native
+export build_simple_cli
+export build_file
+export handle_build_command

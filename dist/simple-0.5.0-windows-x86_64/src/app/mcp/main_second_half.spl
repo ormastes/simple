@@ -1,0 +1,374 @@
+# MCP (Model Context Protocol) Server for Simple Language
+# Provides LLM-friendly code representation via the MCP protocol
+#
+# Usage:
+#   simple mcp server              # Start MCP server (stdio mode)
+#   simple mcp server --debug      # Start with debug logging
+#   simple mcp <file.spl>          # Generate MCP preview (CLI mode)
+#   simple mcp read <file.spl>     # Read file in MCP mode
+#   simple mcp expand <file> <sym> # Expand specific symbol
+#   simple mcp json <file.spl>     # Generate JSON output
+# --- Tool implementations ---
+
+fn read_file_safe(path: String) -> String:
+    val content = file_read(path)
+    if content == "":
+        return "Error: could not read file: " + path
+    content
+
+fn list_spl_files(dir: String) -> String:
+    val result = shell("find " + dir + " -name '*.spl' -type f | sort")
+    if result.exit_code == 0:
+        return result.stdout ?? "No .spl files found"
+    "Error listing files in " + dir
+
+fn search_files(query: String) -> String:
+    val result = shell("grep -rn '" + query + "' --include='*.spl' . 2>/dev/null | head -50")
+    if result.exit_code == 0:
+        return result.stdout ?? "No matches found"
+    "No matches found for: " + query
+
+fn get_file_info(path: String) -> String:
+    val content = file_read(path)
+    if content == "":
+        return "Error: could not read file: " + path
+    val lines = content.split("\n")
+    var line_count = lines.len()
+    var fn_count = 0
+    var class_count = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+            fn_count = fn_count + 1
+        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
+            class_count = class_count + 1
+    "File: " + path + "\\nLines: " + line_count.to_string() + "\\nFunctions: " + fn_count.to_string() + "\\nClasses/Structs: " + class_count.to_string()
+
+# --- JSON helpers (minimal, no library dependency) ---
+
+fn extract_json_string(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(Q()):
+        val rest = trimmed.substring(1)
+        val end = unwrap_idx(rest.index_of(Q()))
+        if end >= 0:
+            return rest.substring(0, end)
+    ""
+
+fn extract_json_value(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    # Read until comma, closing brace, or end
+    var end = 0
+    for ch in trimmed:
+        if ch == "," or ch == RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
+    val search = Q() + outer_key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    extract_json_string(after, inner_key)
+
+fn escape_json(text: String) -> String:
+    var result = text
+    result = result.replace("\\", "\\\\")
+    result = result.replace(Q(), "\\" + Q())
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    result
+
+# --- Resource and Prompt handlers ---
+
+fn handle_resources_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing resources")
+
+    val resource_list = resource_mgr.list_resources()
+    var resources_json = "["
+
+    var first = true
+    for res_info in resource_list:
+        if not first:
+            resources_json = resources_json + ","
+        first = false
+
+        var res_obj = LB()
+        res_obj = res_obj + jp("uri", js(res_info.uri))
+        res_obj = res_obj + ","
+        res_obj = res_obj + jp("name", js(res_info.name))
+
+        if res_info.description.?:
+            res_obj = res_obj + ","
+            res_obj = res_obj + jp("description", js(res_info.description.unwrap()))
+
+        if res_info.mime_type.?:
+            res_obj = res_obj + ","
+            res_obj = res_obj + jp("mimeType", js(res_info.mime_type.unwrap()))
+
+        res_obj = res_obj + RB()
+        resources_json = resources_json + res_obj
+
+    resources_json = resources_json + "]"
+
+    val result = jo1(jp("resources", resources_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_resources_read(id: String, uri: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Reading resource: " + uri)
+
+    val read_result = resource_mgr.read_resource(uri)
+
+    if read_result.err.?:
+        return make_error_response(id, -32602, read_result.err.unwrap())
+
+    val content = read_result.unwrap()
+    val escaped = escape_json(content.contents)
+
+    var res_obj = LB()
+    res_obj = res_obj + jp("uri", js(content.uri))
+    res_obj = res_obj + ","
+    res_obj = res_obj + jp("contents", js(escaped))
+
+    if content.mime_type.?:
+        res_obj = res_obj + ","
+        res_obj = res_obj + jp("mimeType", js(content.mime_type.unwrap()))
+
+    res_obj = res_obj + RB()
+
+    val result = jo1(jp("resource", res_obj))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_resources_templates_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing resource templates")
+
+    val templates = resource_mgr.list_templates()
+    var templates_json = "["
+
+    var first = true
+    for tmpl in templates:
+        if not first:
+            templates_json = templates_json + ","
+        first = false
+
+        var templ_obj = LB()
+        templ_obj = templ_obj + jp("uriTemplate", js(tmpl.uri_template))
+        templ_obj = templ_obj + ","
+        templ_obj = templ_obj + jp("name", js(tmpl.name))
+
+        if tmpl.description.?:
+            templ_obj = templ_obj + ","
+            templ_obj = templ_obj + jp("description", js(tmpl.description.unwrap()))
+
+        if tmpl.mime_type.?:
+            templ_obj = templ_obj + ","
+            templ_obj = templ_obj + jp("mimeType", js(tmpl.mime_type.unwrap()))
+
+        templ_obj = templ_obj + RB()
+        templates_json = templates_json + templ_obj
+
+    templates_json = templates_json + "]"
+
+    val result = jo1(jp("resourceTemplates", templates_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_prompts_list(id: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing prompts")
+
+    val prompt_list = prompt_mgr.list_prompts()
+    var prompts_json = "["
+
+    var first = true
+    for prompt_info in prompt_list:
+        if not first:
+            prompts_json = prompts_json + ","
+        first = false
+
+        # Build arguments array
+        var args_json = "["
+        var first_arg = true
+        for arg in prompt_info.arguments:
+            if not first_arg:
+                args_json = args_json + ","
+            first_arg = false
+
+            var arg_obj = LB()
+            arg_obj = arg_obj + jp("name", js(arg.name))
+            arg_obj = arg_obj + ","
+            arg_obj = arg_obj + jp("description", js(arg.description))
+            arg_obj = arg_obj + ","
+            val req_str = if arg.required: "true" else: "false"
+            arg_obj = arg_obj + jp("required", req_str)
+            arg_obj = arg_obj + RB()
+
+            args_json = args_json + arg_obj
+
+        args_json = args_json + "]"
+
+        var prompt_obj = LB()
+        prompt_obj = prompt_obj + jp("name", js(prompt_info.name))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("description", js(prompt_info.description))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("arguments", args_json)
+        prompt_obj = prompt_obj + RB()
+
+        prompts_json = prompts_json + prompt_obj
+
+    prompts_json = prompts_json + "]"
+
+    val result = jo1(jp("prompts", prompts_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_prompts_get(id: String, prompt_name: String, body: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Getting prompt: " + prompt_name)
+
+    # Extract arguments from request
+    # TODO: Implement proper JSON argument extraction
+    val arguments: Dict<text, text> = {}  # Empty for now
+
+    val prompt_result = prompt_mgr.get_prompt(prompt_name, arguments)
+
+    if prompt_result.err.?:
+        return make_error_response(id, -32602, prompt_result.err.unwrap())
+
+    val prompt_data = prompt_result.unwrap()
+
+    # Build messages array
+    var messages_json = "["
+    var first_msg = true
+    for msg in prompt_data.messages:
+        if not first_msg:
+            messages_json = messages_json + ","
+        first_msg = false
+
+        val role_str = match msg.role:
+            prompts.PromptRole.User: "user"
+            prompts.PromptRole.Assistant: "assistant"
+
+        var msg_obj = LB()
+        msg_obj = msg_obj + jp("role", js(role_str))
+        msg_obj = msg_obj + ","
+        msg_obj = msg_obj + jp("content", js(escape_json(msg.content)))
+        msg_obj = msg_obj + RB()
+
+        messages_json = messages_json + msg_obj
+
+    messages_json = messages_json + "]"
+
+    var result_obj = LB()
+    result_obj = result_obj + jp("description", js(prompt_data.description))
+    result_obj = result_obj + ","
+    result_obj = result_obj + jp("messages", messages_json)
+    result_obj = result_obj + RB()
+
+    val result = jo1(jp("prompt", result_obj))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# Get current directory (using Simple's built-in cwd)
+fn get_current_dir() -> String:
+    cwd()
+
+# --- CLI mode handlers ---
+
+fn handle_read(args: [String]):
+    if args.len() < 2:
+        print("Error: Missing file path")
+        print("Usage: simple mcp read <file.spl>")
+        exit(1)
+    val file_path = args[1]
+    val content = file_read(file_path)
+    if content == "":
+        print("Error reading file: " + file_path)
+        exit(1)
+    print(content)
+
+fn handle_expand(args: [String]):
+    if args.len() < 3:
+        print("Error: Missing file path or symbol name")
+        print("Usage: simple mcp expand <file.spl> <symbol>")
+        exit(1)
+    val file_path = args[1]
+    val symbol_name = args[2]
+    val content = file_read(file_path)
+    if content == "":
+        print("Error reading file: " + file_path)
+        exit(1)
+    # Find symbol in content (basic search)
+    val lines = content.split("\n")
+    var found = false
+    var line_num = 0
+    for line in lines:
+        line_num = line_num + 1
+        if line.contains(symbol_name):
+            print(line_num.to_string() + ": " + line)
+            found = true
+    if not found:
+        print("Symbol not found: " + symbol_name)
+
+fn handle_search(args: [String]):
+    if args.len() < 2:
+        print("Error: Missing search query")
+        print("Usage: simple mcp search <query>")
+        exit(1)
+    val query = args[1]
+    print("Search for '" + query + "' (CLI mode)")
+
+fn handle_json(args: [String]):
+    if args.len() < 2:
+        print("Error: Missing file path")
+        print("Usage: simple mcp json <file.spl>")
+        exit(1)
+    val file_path = args[1]
+    val content = file_read(file_path)
+    if content == "":
+        print("Error reading file: " + file_path)
+        exit(1)
+    # Output as basic JSON
+    val escaped = escape_json(content)
+    val lb = LB()
+    val rb = RB()
+    val q = Q()
+    print(lb + q + "file" + q + ":" + q + escape_json(file_path) + q + "," + q + "content" + q + ":" + q + escaped + q + rb)
+
+fn handle_default_read(args: [String]):
+    val file_path = args[0]  # After clean_args, first element is the command/file
+    val content = file_read(file_path)
+    if content == "":
+        print("Error reading file: " + file_path)
+        exit(1)
+    print(content)
+
+# Check if a flag is present in args
+fn has_flag(args: [String], flag: String) -> Bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    return false
+
+# Entry point
+# main()  # Temporarily commented for debugging

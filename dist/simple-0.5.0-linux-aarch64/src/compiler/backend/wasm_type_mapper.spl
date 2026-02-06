@@ -1,0 +1,272 @@
+# Wasm Type Mapper - WebAssembly-Specific Type Mapping Implementation
+#
+# Maps MIR types to WebAssembly type strings.
+# Implements TypeMapper trait for Wasm backend.
+
+use compiler.mir_data.*
+use compiler.backend.common.type_mapper.*
+
+# ============================================================================
+# Wasm Type Mapper
+# ============================================================================
+
+class WasmTypeMapper:
+    """
+    Maps MIR types to WebAssembly type representations.
+
+    WebAssembly has 4 value types:
+    - i32 (32-bit integer)
+    - i64 (64-bit integer)
+    - f32 (32-bit float)
+    - f64 (64-bit float)
+
+    Plus reference types (GC proposal):
+    - externref (reference to external object)
+    - funcref (function reference)
+
+    All composite types (struct, array, tuple) are represented
+    as linear memory (i32 offset) or externref.
+
+    Example mappings:
+        I64 → "i64"
+        F64 → "f64"
+        I32 → "i32"
+        Bool → "i32"  (0 or 1)
+        Ptr(_) → "i32"  (memory offset in Wasm32) or "i64" (Wasm64)
+    """
+
+    target_bits: i64  # 32 or 64 for pointer size
+
+    static fn create() -> WasmTypeMapper:
+        """Create mapper for default Wasm32."""
+        WasmTypeMapper(target_bits: 32)
+
+    static fn create_wasm32() -> WasmTypeMapper:
+        """Create mapper for Wasm32 (32-bit pointers)."""
+        WasmTypeMapper(target_bits: 32)
+
+    static fn create_wasm64() -> WasmTypeMapper:
+        """Create mapper for Wasm64 (64-bit pointers)."""
+        WasmTypeMapper(target_bits: 64)
+
+    static fn create_for_target(target: CodegenTarget) -> WasmTypeMapper:
+        """Create mapper for specific Wasm target."""
+        if target == CodegenTarget.Wasm32:
+            WasmTypeMapper.create_wasm32()
+        elif target == CodegenTarget.Wasm64:
+            WasmTypeMapper.create_wasm64()
+        else:
+            error("WasmTypeMapper only supports Wasm32 and Wasm64 targets")
+
+impl TypeMapper for WasmTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        """
+        Map primitive types to Wasm value types.
+
+        Wasm only has 4 types:
+        - i32 (all integers ≤32 bits, bool)
+        - i64 (64-bit integers)
+        - f32 (32-bit floats)
+        - f64 (64-bit floats)
+        """
+        match ty:
+            case I64: "i64"
+            case I32: "i32"
+            case I16: "i32"  # Wasm doesn't have i16, use i32
+            case I8: "i32"   # Wasm doesn't have i8, use i32
+            case F64: "f64"
+            case F32: "f32"
+            case Bool: "i32"  # Boolean as i32 (0 or 1)
+            case Unit: "i32"  # Unit as dummy i32 (0)
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        """
+        Map pointer types to Wasm representation.
+
+        Wasm pointers are offsets into linear memory:
+        - Wasm32: i32 (0 to 4GB)
+        - Wasm64: i64 (0 to 16EB)
+
+        Mutability is tracked separately.
+        """
+        if self.target_bits == 32:
+            "i32"  # Wasm32 uses i32 for memory offsets
+        else:
+            "i64"  # Wasm64 uses i64 for memory offsets
+
+    fn backend_name() -> text:
+        "WebAssembly"
+
+impl WasmTypeMapper:
+    # === Custom Wasm-specific methods ===
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to Wasm representation.
+
+        Wasm doesn't have first-class struct types (yet).
+        Structs are allocated in linear memory.
+
+        Returns: "i32" (Wasm32) or "i64" (Wasm64) - memory offset
+        """
+        if self.target_bits == 32:
+            "i32"
+        else:
+            "i64"
+
+    fn map_array(element: MirType, size: i64) -> text:
+        """
+        Map array type to Wasm representation.
+
+        Arrays are contiguous memory blocks.
+
+        Returns: "i32" (Wasm32) or "i64" (Wasm64) - memory offset
+        """
+        if self.target_bits == 32:
+            "i32"
+        else:
+            "i64"
+
+    fn map_tuple(elements: [MirType]) -> text:
+        """
+        Map tuple type to Wasm representation.
+
+        Tuples are memory blocks like structs.
+
+        Returns: "i32" (Wasm32) or "i64" (Wasm64) - memory offset
+        """
+        if self.target_bits == 32:
+            "i32"
+        else:
+            "i64"
+
+    fn map_function(params: [MirType], ret: MirType) -> text:
+        """
+        Map function type to Wasm function reference.
+
+        Wasm has funcref type for function pointers.
+        For now, use table index (i32).
+
+        Returns: "i32" (function table index)
+        """
+        "i32"  # Function table index
+
+    fn map_function_signature(params: [MirType], ret: MirType) -> text:
+        """
+        Map function signature (for Wasm func declarations).
+
+        Wasm signatures: (param types...) -> (result types...)
+
+        Example:
+            (i64, i64) -> i64 → "(param i64 i64) (result i64)"
+        """
+        val param_types = params.map(\p: self.map_type(p))
+        val ret_type = self.map_type(ret)
+
+        if ret_type == "i32" and ret_type == "0":  # Unit type
+            "(param {param_types.join(" ")})"
+        else:
+            "(param {param_types.join(" ")}) (result {ret_type})"
+
+    fn is_wasm_primitive(ty: MirType) -> bool:
+        """
+        Check if type is a Wasm primitive value type.
+
+        Primitives: i32, i64, f32, f64
+        """
+        match ty.kind:
+            case I64, I32, I16, I8, F64, F32, Bool, Unit:
+                true
+            case _:
+                false
+
+    fn needs_linear_memory(ty: MirType) -> bool:
+        """
+        Check if type needs linear memory allocation.
+
+        Memory types: Struct, Array, Tuple
+        Stack types: Primitives
+        """
+        match ty.kind:
+            case Struct(_), Array(_, _), Tuple(_):
+                true
+            case _:
+                false
+
+    fn wasm_size(ty: MirType) -> i64:
+        """
+        Get size in Wasm value stack slots.
+
+        All Wasm values are 1 slot (even i32, i64, f32, f64).
+        Composite types return 1 (they're pointers).
+        """
+        1  # All Wasm values are 1 slot
+
+    # === Size and alignment (Wasm-specific) ===
+
+    fn size_of(ty: MirType) -> i64:
+        """
+        Get size in bytes in linear memory.
+
+        Note: This is memory size, not stack size.
+        """
+        match ty.kind:
+            case I64, F64: 8
+            case I32, F32: 4
+            case I16: 2
+            case I8, Bool: 1
+            case Unit: 0
+            case Ptr(_, _):
+                if self.target_bits == 32:
+                    4
+                else:
+                    8
+            case Struct(fields):
+                fields.map(\f: self.size_of(f.1)).sum()
+            case Array(elem, size):
+                self.size_of(elem) * size
+            case Tuple(elements):
+                elements.map(\e: self.size_of(e)).sum()
+            case _:
+                error("Cannot compute size of {ty}")
+
+    fn align_of(ty: MirType) -> i64:
+        """
+        Get alignment in bytes (Wasm linear memory rules).
+
+        Wasm alignment:
+        - i64/f64: 8 bytes
+        - i32/f32: 4 bytes
+        - i16: 2 bytes
+        - i8: 1 byte
+        """
+        match ty.kind:
+            case I64, F64: 8
+            case I32, F32: 4
+            case I16: 2
+            case I8, Bool: 1
+            case Ptr(_, _):
+                if self.target_bits == 32:
+                    4
+                else:
+                    8
+            case Struct(fields):
+                if fields.length == 0:
+                    1
+                else:
+                    fields.map(\f: self.align_of(f.1)).max()
+            case Array(elem, _):
+                self.align_of(elem)
+            case Tuple(elements):
+                if elements.length == 0:
+                    1
+                else:
+                    elements.map(\e: self.align_of(e)).max()
+            case _:
+                1
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export WasmTypeMapper

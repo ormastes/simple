@@ -1,0 +1,140 @@
+# Simple CLI - env command
+# Virtual environment management
+
+use app.cli_util (get_cli_args)
+use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, dir_remove_all, is_dir)
+use std.db_atomic.{atomic_write, DbConfig}
+
+fn print_help():
+    print "Usage: simple env <subcommand>"
+    print ""
+    print "Manage Simple virtual environments."
+    print ""
+    print "Subcommands:"
+    print "  create         Create a new virtual environment"
+    print "  activate       Show activation instructions"
+    print "  deactivate     Show deactivation instructions"
+    print "  status         Show current environment status"
+    print "  delete         Delete the virtual environment"
+    print ""
+    print "Options:"
+    print "  --name=<name>  Environment name (default: .simple-env)"
+    print "  -h, --help     Show this help"
+
+fn get_env_dir(name: text) -> text:
+    val cwd = cwd()
+    "{cwd}/{name}"
+
+fn handle_create(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+
+    if is_dir(env_dir):
+        print "error: environment '{env_name}' already exists"
+        return 1
+
+    if not dir_create(env_dir, true):
+        print "error: failed to create environment directory"
+        return 1
+
+    dir_create("{env_dir}/lib", true)
+    dir_create("{env_dir}/bin", true)
+    dir_create("{env_dir}/simple_modules", true)
+
+    val config = "# Simple Virtual Environment\nname: {env_name}\ncreated: 2026-02-03\n"
+    val config_result = atomic_write("{env_dir}/env.sdn", config, DbConfig.defaults())
+    if config_result.err.?:
+        print "error: failed to write env.sdn: {config_result.unwrap_err()}"
+        return 1
+
+    val activate = "# Source this file to activate the environment\n# Usage: source {env_name}/activate.sh\nexport SIMPLE_ENV=\"{env_dir}\"\nexport OLD_PATH=\"$PATH\"\nexport PATH=\"{env_dir}/bin:$PATH\"\nexport SIMPLE_MODULES=\"{env_dir}/simple_modules\"\n"
+    file_write("{env_dir}/activate.sh", activate)
+
+    val deactivate = "# Source this file to deactivate the environment\nexport PATH=\"$OLD_PATH\"\nunset SIMPLE_ENV\nunset OLD_PATH\nunset SIMPLE_MODULES\n"
+    file_write("{env_dir}/deactivate.sh", deactivate)
+
+    print "Created virtual environment '{env_name}'"
+    print ""
+    print "To activate:"
+    print "  source {env_name}/activate.sh"
+    0
+
+fn handle_activate(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+    if not is_dir(env_dir):
+        print "error: environment '{env_name}' does not exist"
+        print "Run 'simple env create' first."
+        return 1
+
+    print "To activate the environment:"
+    print "  source {env_name}/activate.sh"
+    print ""
+    print "To deactivate:"
+    print "  source {env_name}/deactivate.sh"
+    0
+
+fn handle_status(env_name: text) -> i64:
+    val active = env_get("SIMPLE_ENV")
+    if active != "":
+        print "Active environment: {active}"
+    else:
+        val env_dir = get_env_dir(env_name)
+        if is_dir(env_dir):
+            print "Environment '{env_name}' exists but is not active."
+            print "Run 'source {env_name}/activate.sh' to activate."
+        else:
+            print "No virtual environment found."
+            print "Run 'simple env create' to create one."
+    0
+
+fn handle_delete(env_name: text) -> i64:
+    val env_dir = get_env_dir(env_name)
+    if not is_dir(env_dir):
+        print "error: environment '{env_name}' does not exist"
+        return 1
+
+    val result = dir_remove_all(env_dir)
+    if result != 0:
+        print "error: failed to delete environment"
+        return 1
+
+    print "Deleted virtual environment '{env_name}'"
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    if args.len() == 0:
+        print_help()
+        return 0
+
+    var env_name = ".simple-env"
+    var subcommand = ""
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--name="):
+            env_name = arg[7:]
+        elif not arg.starts_with("-"):
+            if subcommand == "":
+                subcommand = arg
+
+    match subcommand:
+        case "create":
+            return handle_create(env_name)
+        case "activate":
+            return handle_activate(env_name)
+        case "deactivate":
+            print "To deactivate:"
+            print "  source {env_name}/deactivate.sh"
+            return 0
+        case "status":
+            return handle_status(env_name)
+        case "delete":
+            return handle_delete(env_name)
+        case _:
+            print "error: unknown subcommand '{subcommand}'"
+            print ""
+            print_help()
+            return 1

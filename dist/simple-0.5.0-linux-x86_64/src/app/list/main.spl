@@ -1,0 +1,105 @@
+# Simple CLI - list command
+# Lists installed dependencies from manifest and lockfile
+
+use app.cli_util (get_cli_args, load_manifest_or_exit, parse_dependency_entry)
+use app.io.mod (file_exists)
+
+fn print_help():
+    print "Usage: simple list [options]"
+    print ""
+    print "List project dependencies."
+    print ""
+    print "Options:"
+    print "  --json       Output as JSON"
+    print "  --installed  Show only installed packages"
+    print "  -h, --help   Show this help"
+
+fn parse_deps_section(content: text, section: text) -> [(text, text)]:
+    val lines = content.split("\n")
+    var deps = []
+    var in_section = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "{section}:":
+            in_section = true
+        elif in_section:
+            if trimmed == "" or (not line.starts_with("  ") and not line.starts_with("\t")):
+                in_section = false
+            else:
+                deps = parse_dependency_entry(trimmed, deps)
+    deps
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var as_json = false
+    var installed_only = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg == "--json":
+            as_json = true
+        elif arg == "--installed":
+            installed_only = true
+
+    val content = load_manifest_or_exit()
+    val deps = parse_deps_section(content, "dependencies")
+    val dev_deps = parse_deps_section(content, "dev_dependencies")
+
+    val cwd = cwd()
+    val modules_dir = "{cwd}/simple_modules"
+
+    if as_json:
+        print "{"
+        print "  \"dependencies\": {"
+        var i = 0
+        for (name, version) in deps:
+            val comma = if i < deps.len() - 1: "," else: ""
+            print "    \"{name}\": \"{version}\"{comma}"
+            i = i + 1
+        print "  },"
+        print "  \"dev_dependencies\": {"
+        var j = 0
+        for (name, version) in dev_deps:
+            val comma = if j < dev_deps.len() - 1: "," else: ""
+            print "    \"{name}\": \"{version}\"{comma}"
+            j = j + 1
+        print "  }"
+        print "}"
+        return 0
+
+    # Parse project name/version from manifest
+    var project_name = "unknown"
+    var project_version = "0.0.0"
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name:"):
+            project_name = trimmed[5:].trim()
+        elif trimmed.starts_with("version:"):
+            project_version = trimmed[8:].trim()
+
+    print "{project_name} v{project_version}"
+    print ""
+
+    if deps.len() == 0 and dev_deps.len() == 0:
+        print "No dependencies."
+        return 0
+
+    if deps.len() > 0:
+        print "Dependencies ({deps.len()}):"
+        for (name, version) in deps:
+            val status = if file_exists("{modules_dir}/{name}/__init__.spl"): " (installed)" else: ""
+            print "  {name}: {version}{status}"
+
+    if dev_deps.len() > 0:
+        print ""
+        print "Dev Dependencies ({dev_deps.len()}):"
+        for (name, version) in dev_deps:
+            val status = if file_exists("{modules_dir}/{name}/__init__.spl"): " (installed)" else: ""
+            print "  {name}: {version}{status}"
+
+    0

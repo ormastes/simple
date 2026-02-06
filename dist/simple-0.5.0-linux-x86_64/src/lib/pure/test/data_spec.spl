@@ -1,0 +1,181 @@
+# Tests for Pure Simple Data Loading
+
+use lib.pure.data (
+    normalize, standardize, one_hot_encode,
+    IrisDataset, create_xor_dataset, create_linear_dataset,
+    MNISTDataset, BatchIterator
+)
+
+describe "Data Loading":
+    describe "Data Utilities":
+        describe "Normalize":
+            it "normalizes to [0, 1]":
+                val data = [0.0, 5.0, 10.0]
+                val normalized = normalize(data, 0.0, 10.0)
+
+                assert normalized[0] == 0.0
+                assert normalized[1] == 0.5
+                assert normalized[2] == 1.0
+
+            it "handles same min/max":
+                val data = [5.0, 5.0, 5.0]
+                val normalized = normalize(data, 5.0, 5.0)
+
+                assert normalized.all(\x: x == 0.0)
+
+        describe "One-Hot Encoding":
+            it "encodes class 0":
+                val one_hot = one_hot_encode(0, 3)
+                assert one_hot == [1.0, 0.0, 0.0]
+
+            it "encodes class 1":
+                val one_hot = one_hot_encode(1, 3)
+                assert one_hot == [0.0, 1.0, 0.0]
+
+            it "encodes class 2":
+                val one_hot = one_hot_encode(2, 3)
+                assert one_hot == [0.0, 0.0, 1.0]
+
+    describe "Iris Dataset":
+        it "loads built-in dataset":
+            val iris = IrisDataset.load_builtin()
+
+            assert iris.num_samples == 15
+            assert iris.num_features == 4
+            assert iris.num_classes == 3
+
+        it "has correct data format":
+            val iris = IrisDataset.load_builtin()
+            val (x, y) = iris.data[0]
+
+            assert x.shape() == [1, 4]  # 4 features
+            assert y.shape() == [1, 3]  # 3 classes (one-hot)
+
+        it "splits into train/test":
+            val iris = IrisDataset.load_builtin()
+            val (train, test) = iris.split(0.8)
+
+            # 80% of 15 = 12 train, 3 test
+            assert train.len() == 12
+            assert test.len() == 3
+
+        it "has string representation":
+            val iris = IrisDataset.load_builtin()
+            val s = iris.to_string()
+
+            assert s.contains("Iris")
+            assert s.contains("15")
+
+    describe "XOR Dataset":
+        it "creates XOR dataset":
+            val xor_data = create_xor_dataset()
+
+            assert xor_data.len() == 4
+
+        it "has correct format":
+            val xor_data = create_xor_dataset()
+            val (x, y) = xor_data[0]
+
+            assert x.shape() == [1, 2]  # 2 inputs
+            assert y.shape() == [1, 1]  # 1 output
+
+        it "has correct labels":
+            val xor_data = create_xor_dataset()
+
+            # (0, 0) -> 0
+            val (x0, y0) = xor_data[0]
+            assert y0.value.data[0] == 0.0
+
+            # (0, 1) -> 1
+            val (x1, y1) = xor_data[1]
+            assert y1.value.data[0] == 1.0
+
+            # (1, 0) -> 1
+            val (x2, y2) = xor_data[2]
+            assert y2.value.data[0] == 1.0
+
+            # (1, 1) -> 0
+            val (x3, y3) = xor_data[3]
+            assert y3.value.data[0] == 0.0
+
+    describe "Linear Dataset":
+        it "creates linear dataset":
+            val data = create_linear_dataset(10, 2.0, 1.0, 0.0)
+
+            assert data.len() == 10
+
+        it "has correct format":
+            val data = create_linear_dataset(10, 2.0, 1.0, 0.0)
+            val (x, y) = data[0]
+
+            assert x.shape() == [1, 1]
+            assert y.shape() == [1, 1]
+
+        it "follows linear relationship":
+            val data = create_linear_dataset(5, 2.0, 1.0, 0.0)
+
+            # First point: x=0, y=1
+            val (x0, y0) = data[0]
+            assert x0.value.data[0] == 0.0
+            assert y0.value.data[0] == 1.0
+
+            # Last point: x=4/5, y=2*(4/5)+1=2.6
+            val (x4, y4) = data[4]
+            val expected_y = 2.0 * (4.0 / 5.0) + 1.0
+            assert y4.value.data[0] == expected_y
+
+    describe "MNIST Dataset":
+        it "loads stub dataset":
+            val mnist = MNISTDataset.load_stub()
+
+            assert mnist.num_samples == 10
+
+        it "has string representation":
+            val mnist = MNISTDataset.load_stub()
+            val s = mnist.to_string()
+
+            assert s.contains("MNIST")
+            assert s.contains("stub")
+
+    describe "Batch Iterator":
+        it "creates batch iterator":
+            val data = create_xor_dataset()
+            val iter = BatchIterator.create(data, batch_size: 2)
+
+            assert iter.has_next()
+
+        it "iterates in batches":
+            val data = create_xor_dataset()  # 4 samples
+            val iter = BatchIterator.create(data, batch_size: 2)
+
+            # First batch: 2 samples
+            val batch1 = iter.next()
+            assert batch1.len() == 2
+
+            # Second batch: 2 samples
+            val batch2 = iter.next()
+            assert batch2.len() == 2
+
+            # No more batches
+            assert not iter.has_next()
+
+        it "resets iterator":
+            val data = create_xor_dataset()
+            val iter = BatchIterator.create(data, batch_size: 2)
+
+            iter.next()
+            iter.next()
+            assert not iter.has_next()
+
+            iter.reset()
+            assert iter.has_next()
+
+        it "handles incomplete final batch":
+            val data = create_xor_dataset()  # 4 samples
+            val iter = BatchIterator.create(data, batch_size: 3)
+
+            val batch1 = iter.next()
+            assert batch1.len() == 3
+
+            val batch2 = iter.next()
+            assert batch2.len() == 1  # Only 1 sample left

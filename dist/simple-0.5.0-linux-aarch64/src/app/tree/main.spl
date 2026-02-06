@@ -1,0 +1,97 @@
+# Simple CLI - tree command
+# Shows dependency tree
+
+use app.cli_util (get_cli_args, load_manifest_or_exit, parse_dependency_entry)
+use app.io.mod (file_exists)
+
+fn print_help():
+    print "Usage: simple tree [options]"
+    print ""
+    print "Display the dependency tree for the current project."
+    print ""
+    print "Options:"
+    print "  --depth=N    Maximum tree depth (default: unlimited)"
+    print "  --dev        Include dev dependencies"
+    print "  -h, --help   Show this help"
+
+fn parse_deps_section(content: text, section: text) -> [(text, text)]:
+    val lines = content.split("\n")
+    var deps = []
+    var in_section = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "{section}:":
+            in_section = true
+        elif in_section:
+            if trimmed == "" or (not line.starts_with("  ") and not line.starts_with("\t")):
+                in_section = false
+            else:
+                deps = parse_dependency_entry(trimmed, deps)
+    deps
+
+fn print_tree_node(name: text, version: text, prefix: text, is_last: bool, modules_dir: text, max_depth: i64, current_depth: i64):
+    val connector = if is_last: "└── " else: "├── "
+    val status = if file_exists("{modules_dir}/{name}/__init__.spl"): "" else: " (not installed)"
+    print "{prefix}{connector}{name} ({version}){status}"
+
+    # Check for transitive deps in the installed package
+    if current_depth < max_depth:
+        val pkg_manifest = "{modules_dir}/{name}/simple.sdn"
+        if file_exists(pkg_manifest):
+            val pkg_content = file_read(pkg_manifest)
+            val sub_deps = parse_deps_section(pkg_content, "dependencies")
+            val child_prefix = prefix + (if is_last: "    " else: "│   ")
+            var i = 0
+            for (sub_name, sub_version) in sub_deps:
+                val sub_last = i == sub_deps.len() - 1
+                print_tree_node(sub_name, sub_version, child_prefix, sub_last, modules_dir, max_depth, current_depth + 1)
+                i = i + 1
+
+fn main() -> i64:
+    val args = get_cli_args()
+
+    var max_depth = 99
+    var include_dev = false
+
+    for arg in args:
+        if arg == "-h" or arg == "--help":
+            print_help()
+            return 0
+        elif arg.starts_with("--depth="):
+            max_depth = arg[8:].to_int()
+        elif arg == "--dev":
+            include_dev = true
+
+    val content = load_manifest_or_exit()
+    val deps = parse_deps_section(content, "dependencies")
+    val dev_deps = if include_dev: parse_deps_section(content, "dev_dependencies") else: []
+
+    # Parse project name
+    var project_name = "unknown"
+    var project_version = "0.0.0"
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("name:"):
+            project_name = trimmed[5:].trim()
+        elif trimmed.starts_with("version:"):
+            project_version = trimmed[8:].trim()
+
+    val cwd = cwd()
+    val modules_dir = "{cwd}/simple_modules"
+
+    print "{project_name} v{project_version}"
+
+    val all_deps = deps.merge(dev_deps)
+    if all_deps.len() == 0:
+        print "└── (no dependencies)"
+        return 0
+
+    var i = 0
+    for (name, version) in all_deps:
+        val is_last = i == all_deps.len() - 1
+        print_tree_node(name, version, "", is_last, modules_dir, max_depth, 0)
+        i = i + 1
+
+    0

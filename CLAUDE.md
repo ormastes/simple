@@ -14,6 +14,23 @@ Impl in simple unless it has big performance differences.
 
 **System is now 100% self-hosting in Simple language!**
 
+### Pure Simple Build (v0.5.0+)
+
+**Status:** All Rust build infrastructure removed. Build system operates entirely in Simple.
+
+**Quick Build:**
+```bash
+bin/simple build --release    # Instant (<1s) - no compilation
+```
+
+**What Changed:**
+- ✅ No Rust FFI generation required
+- ✅ No cargo build required
+- ✅ Uses pre-built 27MB runtime
+- ✅ All source code in Simple (1,109+ .spl files)
+
+**For Full Details:** See `doc/report/pure_simple_rebuild_success_2026-02-06.md`
+
 ---
 
 ## Skills Reference
@@ -23,7 +40,7 @@ For detailed guidance, invoke with `/skill-name`:
 | Skill | Purpose |
 |-------|---------|
 | `versioning` | Jujutsu (jj) workflow - **NOT git!** |
-| `test` | Test writing (Rust & Simple BDD) |
+| `test` | Test writing (Simple/SSpec BDD) |
 | `sspec` | **SSpec BDD framework** - Testing → Doc generation workflow |
 | `coding` | Coding standards, Simple language rules |
 | `design` | Design patterns, type system, APIs |
@@ -543,15 +560,6 @@ Two types of coverage with separate locations:
 - **Format**: SDN (Simple Data Notation)
 - **Config**: `rust/lib/std/src/tooling/coverage.spl` line 100
 
-**Build Coverage (Rust code line/branch coverage):**
-- **Location**: `build/coverage/`
-  - HTML: `build/coverage/html/index.html`
-  - LCOV: `build/coverage/lcov.info`
-  - JSON: `build/coverage/coverage.json`
-- **Tool**: `cargo-llvm-cov` via `simple build coverage`
-- **Format**: HTML/LCOV/JSON
-- **Config**: `src/app/build/coverage.spl` line 367
-
 ### Directory Naming Rules
 
 ✅ **DO:**
@@ -695,16 +703,6 @@ bin/simple fix file.spl --fix-all         # Apply all fixes
 bin/simple fix file.spl --fix-interactive  # Prompt per fix
 ```
 
-### Removed Commands (Rust source deleted)
-
-These commands no longer work (Rust source removed 2026-02-06):
-- ❌ `bin/simple build rust test` - No Rust source to test
-- ❌ `bin/simple build rust lint` - No Rust source to lint
-- ❌ `bin/simple build rust fmt` - No Rust source to format
-- ❌ `bin/simple build rust clean` - No Rust artifacts
-
-**Use the pre-built runtime** in `release/simple-0.4.0-beta/bin/simple_runtime` instead.
-
 ### Binary Size Optimization
 
 **Pre-Built Runtime (Current Approach):**
@@ -751,13 +749,11 @@ if upx.is_compressed("myapp"):
 
 | Binary | Location | Language | Purpose |
 |--------|----------|----------|---------|
-| `simple_runtime` | `rust/target/{profile}/simple_runtime` | Rust | Core runtime (builds Simple code) |
 | `simple` | `bin/simple` | Shell+Simple | Default CLI → `src/app/cli/main.spl` |
 | `simple_runtime` | `bin/simple_runtime` | Shell | Runtime wrapper (discovers binary) |
-| `simple` | `bin/bootstrap/simple` | Shell+Simple | Bootstrap CLI (minimal 9.3 MB) |
-| `simple_runtime` | `bin/bootstrap/simple_runtime` | Rust | Bootstrap runtime (9.3 MB minimal) |
+| `simple_runtime` | `bin/bootstrap/simple_runtime` | Pre-built | Bootstrap runtime (27 MB) |
 
-**All user-facing tools are now Simple apps** in `src/app/`. The Rust `simple_runtime` binary provides the runtime.
+**All user-facing tools are Simple apps** in `src/app/`. The pre-built `simple_runtime` binary provides the runtime.
 
 ### Setting up PATH
 
@@ -787,8 +783,6 @@ This allows:
 | **Regular Tests** | Standard unit/integration tests | `it "..."`, `test "..."` | No | `*_spec.spl`, `*_test.spl` |
 | **Slow Tests** | Long-running tests (>5s) | `slow_it "..."` | **Yes** (#[ignore]) | `*_spec.spl` |
 | **Skipped Tests** | Not yet implemented features | Tag: `skip` | No | Any test file |
-| **Rust Doc-Tests** | Executable documentation | Doc comments | Some | Rust source files |
-| **Rust #[ignore] Tests** | Manually ignored Rust tests | `#[ignore]` | **Yes** | Rust test files |
 
 ### Listing Tests
 
@@ -799,7 +793,7 @@ bin/simple test --list
 # List tests with tags displayed
 bin/simple test --list --show-tags
 
-# List only ignored tests (at Rust level)
+# List only ignored tests
 bin/simple test --list-ignored
 
 # Count tests by type
@@ -810,11 +804,8 @@ bin/simple test --list-ignored | wc -l     # Ignored tests
 ### Running Specific Test Types
 
 ```bash
-# Run all tests (Rust + Simple/SSpec, excludes slow tests by default)
+# Run all tests (excludes slow tests by default)
 bin/simple test
-
-# Run only Simple/SSpec tests (skip Rust)
-bin/simple test --no-rust-tests
 
 # Run only slow tests
 bin/simple test --only-slow
@@ -832,33 +823,12 @@ bin/simple test path/to/test_spec.spl
 bin/simple test --tag=integration --tag=database
 ```
 
-### Doc-Tests (Rust)
-
-```bash
-# Run all doc-tests (workspace-wide)
-bin/simple build rust test --doc
-
-# Run doc-tests for specific crate
-bin/simple build rust test --doc -p simple-driver
-bin/simple build rust test --doc -p arch_test
-bin/simple build rust test --doc -p simple-compiler
-
-# Count total ignored doc-tests
-bin/simple build rust test --doc 2>&1 | grep " ... ignored$" | wc -l
-```
-
 ### Test Markers Explained
 
 **Simple Language Tests:**
 - `it "description"` - Regular test (runs by default)
 - `slow_it "description"` - Slow test (generates `#[ignore]`, run with `--only-slow`)
 - Tags: `skip`, `integration`, `unit`, custom tags
-
-**Rust Doc-Tests:**
-- ` ```rust` - Executable doc-test
-- ` ```ignore` - Ignored (not recommended - fix instead)
-- ` ```no_run` - Compile-only (for runtime-dependent examples)
-- ` ```text` - Not a code block (for examples)
 
 ### Test Filtering Flags
 

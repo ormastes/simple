@@ -1,0 +1,134 @@
+# Shared Compilation Pipeline
+#
+# Reusable compilation pipeline function that all CompilationContext
+# implementations call from their compile_template() methods.
+#
+# Pipeline: monomorphize -> HIR -> MIR -> optimize -> AOP weave -> codegen
+
+use compilation_context.{ContractMode, ConcreteType, GenericTemplate}
+use backend_types.{CompiledUnit, CompiledSymbol, CompiledSymbolKind}
+use di.DiContainer
+use aop.AopWeaver
+use mir_lowering.MirLowering
+use mir_opt_integration.{OptimizationConfig, optimize_mir_module}
+use monomorphize.type_subst.{TypeSubstitution, substitute_function}
+use monomorphize.engine.{generate_mangled_name, specialize_function_with_types}
+
+# ============================================================================
+# Pipeline Function
+# ============================================================================
+
+fn compile_specialized_template(
+    template: GenericTemplate,
+    type_args: [ConcreteType],
+    contract_mode: ContractMode,
+    di: DiContainer?,
+    aop: AopWeaver?,
+    coverage: bool,
+    optimization: OptimizationConfig
+) -> Result<CompiledUnit, text>:
+    """Shared compilation pipeline.
+
+    Steps:
+    1. Monomorphize (substitute type parameters)
+    2. Lower to HIR
+    3. Lower to MIR (with contracts, DI injection)
+    4. Optimize MIR (NEW!)
+    5. AOP weaving (if configured)
+    6. Codegen to native code
+    """
+    val name = template.name
+    val args_str = type_args.map(\t: t.to_string()).join(",")
+    val mangled = if args_str.is_empty(): name else: "{name}${args_str}"
+
+    # Step 1: Monomorphize
+    # Type substitution is now integrated into the driver (Phase 4)
+    # The template should already be specialized when passed here
+    # For explicit specialization requests:
+    # val specialized = specialize_function_with_types(template.function, type_args)
+
+    # Step 2: Lower to HIR
+    # HIR lowering happens in driver Phase 3
+    # TODO: val hir = lower_to_hir(specialized)
+
+    # Step 3: Lower to MIR (with contracts, DI)
+    # MIR lowering happens in driver lower_to_mir()
+    # TODO: var mir = lower_to_mir(hir, contract_mode, di)
+
+    # Step 4: Optimize MIR
+    # MIR optimization is ready - uncomment when MIR lowering is wired:
+    # mir = optimize_mir_module(mir, optimization)
+
+    # Step 5: AOP weaving
+    # if aop.?:
+    #     mir = aop.unwrap().weave(mir)
+
+    # Step 6: Codegen
+    # TODO: val code = codegen_to_native(mir)
+
+    # For now, produce a compiled unit with the mangled name
+    # Actual pipeline integration will follow as monomorphize/codegen mature
+    Ok(CompiledUnit(
+        name: mangled,
+        code: [],
+        symbols: {},
+        entry_point: None,
+        relocations: []
+    ))
+
+# ============================================================================
+# Backward Compatible Wrappers
+# ============================================================================
+
+fn compile_specialized_template_default(
+    template: GenericTemplate,
+    type_args: [ConcreteType],
+    contract_mode: ContractMode,
+    di: DiContainer?,
+    aop: AopWeaver?,
+    coverage: bool
+) -> Result<CompiledUnit, text>:
+    """
+    Compile with default optimization (debug = no optimization).
+
+    For backward compatibility with existing code.
+    """
+    compile_specialized_template(
+        template,
+        type_args,
+        contract_mode,
+        di,
+        aop,
+        coverage,
+        OptimizationConfig.debug()
+    )
+
+fn compile_specialized_template_release(
+    template: GenericTemplate,
+    type_args: [ConcreteType],
+    contract_mode: ContractMode,
+    di: DiContainer?,
+    aop: AopWeaver?,
+    coverage: bool
+) -> Result<CompiledUnit, text>:
+    """
+    Compile with release optimization (speed optimization).
+
+    Recommended for production builds.
+    """
+    compile_specialized_template(
+        template,
+        type_args,
+        contract_mode,
+        di,
+        aop,
+        coverage,
+        OptimizationConfig.speed()
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export compile_specialized_template
+export compile_specialized_template_default, compile_specialized_template_release

@@ -1,0 +1,150 @@
+# Math Expressions
+#
+# Parses mathematical literal expressions: grid literals and tensor literals.
+
+from token import {TokenKind}
+from ast import {Expr, TensorMode, TensorSlice, TensorSliceContent}
+from error import {ParseError}
+
+impl Parser:
+
+    fn parse_primary_math() -> Expr:
+        match self.current.kind:
+            TokenKind.Grid: self.parse_grid_literal()
+            TokenKind.Tensor: self.parse_tensor_literal()
+            _:
+                raise ParseError.unexpected_token("math literal",
+                    "{self.current.kind}", self.current.span)
+
+    fn parse_grid_literal() -> Expr:
+        self.advance()
+        val device = if self.check_ident("device"):
+            self.advance()
+            self.expect(TokenKind.Assign)
+            match self.current.kind:
+                TokenKind.String(s):
+                    self.advance()
+                    s
+                _:
+                    raise ParseError.unexpected_token("string for device",
+                        "{self.current.kind}", self.current.span)
+        else:
+            None
+
+        self.expect(TokenKind.Colon)
+        self.expect(TokenKind.Newline)
+        self.expect(TokenKind.Indent)
+        val rows = self.parse_grid_rows()
+        self.expect(TokenKind.Dedent)
+        Expr.GridLiteral(rows: rows, device: device)
+
+    fn parse_grid_rows() -> [[Expr]]:
+        var rows = []
+        while self.check(TokenKind.Pipe):
+            self.advance()
+            var cells = []
+            loop:
+                val cell = self.parse_expression()
+                cells.push(cell)
+                if self.check(TokenKind.Pipe):
+                    self.advance()
+                    if self.check(TokenKind.Newline): break
+                else:
+                    raise ParseError.missing_token("| after grid cell", self.current.span)
+            self.expect(TokenKind.Newline)
+            rows.push(cells)
+            while self.check(TokenKind.Newline): self.advance()
+        if rows.len() == 0:
+            raise ParseError.syntax_error_with_span("Grid literal must have at least one row", self.current.span)
+        rows
+
+    fn parse_tensor_literal() -> Expr:
+        self.advance()
+        val tensor_name = self.expect_identifier()
+        self.expect(TokenKind.Colon)
+        val dtype = self.expect_identifier()
+
+        self.expect(TokenKind.LBracket)
+        var dims = []
+        while not self.check(TokenKind.RBracket):
+            val dim_name = self.expect_identifier()
+            self.expect(TokenKind.Assign)
+            val dim_value = match self.current.kind:
+                TokenKind.Integer(n):
+                    self.advance()
+                    n
+                _:
+                    raise ParseError.unexpected_token("integer for dimension",
+                        "{self.current.kind}", self.current.span)
+            dims.push((dim_name, dim_value))
+            if self.check(TokenKind.Comma): self.advance()
+        self.expect(TokenKind.RBracket)
+
+        val device = if self.check_ident("device"):
+            self.advance()
+            self.expect(TokenKind.Assign)
+            match self.current.kind:
+                TokenKind.String(s):
+                    self.advance()
+                    s
+                _:
+                    raise ParseError.unexpected_token("string for device",
+                        "{self.current.kind}", self.current.span)
+        else:
+            None
+
+        self.expect(TokenKind.Newline)
+        self.expect(TokenKind.Indent)
+
+        val mode = if self.check_ident("slice"):
+            val slices = self.parse_tensor_slices()
+            TensorMode.Slice(slices)
+        elif self.check_ident("default") or self.check_ident("flat"):
+            val default_val = if self.check_ident("default"):
+                self.advance()
+                self.expect(TokenKind.Colon)
+                val v = self.parse_expression()
+                self.expect(TokenKind.Newline)
+                v
+            else:
+                None
+            self.expect(TokenKind.Flat)
+            self.expect(TokenKind.Colon)
+            self.expect(TokenKind.Newline)
+            self.expect(TokenKind.Indent)
+            val values = self.parse_grid_rows()
+            self.expect(TokenKind.Dedent)
+            TensorMode.Flat(default: default_val, values: values)
+        else:
+            raise ParseError.syntax_error_with_span("'slice' or 'flat' mode in tensor literal",
+                self.current.span)
+
+        self.expect(TokenKind.Dedent)
+        Expr.TensorLiteral(dtype: dtype, dims: dims, mode: mode, device: device)
+
+    fn parse_tensor_slices() -> [TensorSlice]:
+        var slices = []
+        while self.check_ident("slice"):
+            self.advance()
+            val dim_name = self.expect_identifier()
+            self.expect(TokenKind.Assign)
+            val dim_value = match self.current.kind:
+                TokenKind.Integer(n):
+                    self.advance()
+                    n
+                _:
+                    raise ParseError.unexpected_token("integer for slice index",
+                        "{self.current.kind}", self.current.span)
+            self.expect(TokenKind.Colon)
+            self.expect(TokenKind.Newline)
+            self.expect(TokenKind.Indent)
+            val content = if self.check_ident("slice"):
+                val nested = self.parse_tensor_slices()
+                TensorSliceContent.NestedSlices(nested)
+            else:
+                val rows = self.parse_grid_rows()
+                TensorSliceContent.GridRows(rows)
+            self.expect(TokenKind.Dedent)
+            slices.push(TensorSlice(dim_name: dim_name, dim_value: dim_value, content: content))
+            while self.check(TokenKind.Newline): self.advance()
+        slices

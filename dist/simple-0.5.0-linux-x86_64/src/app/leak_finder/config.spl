@@ -1,0 +1,135 @@
+# Memory Leak Finder - Configuration
+#
+# CLI argument parsing and configuration handling.
+
+use types
+use app.io.mod (get_args)
+
+# Parse command line arguments into configuration
+fn parse_args() -> Result<types.LeakFinderConfig, text>:
+    val args = get_args()
+    var cfg = types.default_config()
+
+    # Find where actual args start (after "--" separator)
+    var start = 1
+    for idx in 0..args.len():
+        if args[idx] == "--":
+            start = idx + 1
+            break
+
+    var i = start
+    while i < args.len():
+        val arg = args[i]
+
+        if arg.starts_with("--type="):
+            val type_str = arg.slice(7)
+            match types.test_type_from_string(type_str):
+                case Some(t): cfg.test_type = t
+                case nil: return Err("Invalid test type: {type_str}. Use: simple, sdoctest, rust, or all")
+
+        elif arg.starts_with("--threshold="):
+            val threshold_str = arg.slice(12)
+            match threshold_str.parse_i64():
+                case Ok(t):
+                    if t <= 0:
+                        return Err("Threshold must be positive")
+                    cfg.threshold_kb = t
+                case Err(_):
+                    return Err("Invalid threshold: {threshold_str}")
+
+        elif arg.starts_with("--consecutive="):
+            val count_str = arg.slice(14)
+            match count_str.parse_i32():
+                case Ok(c):
+                    if c <= 0:
+                        return Err("Consecutive count must be positive")
+                    cfg.consecutive_count = c
+                case Err(_):
+                    return Err("Invalid consecutive count: {count_str}")
+
+        elif arg.starts_with("--timeout="):
+            val timeout_str = arg.slice(10)
+            match timeout_str.parse_i32():
+                case Ok(t):
+                    if t <= 0:
+                        return Err("Timeout must be positive")
+                    cfg.timeout_seconds = t
+                case Err(_):
+                    return Err("Invalid timeout: {timeout_str}")
+
+        elif arg.starts_with("--output="):
+            val output_file = arg.slice(9)
+            cfg.output_file = Some(output_file)
+
+        elif arg == "--verbose" or arg == "-v":
+            cfg.verbose = true
+
+        elif arg == "--stop-on-leak":
+            cfg.stop_on_leak = true
+
+        elif arg == "--help" or arg == "-h":
+            return Err("HELP")
+
+        elif arg == "--":
+            # Skip -- separator (used in: simple run app.spl -- args)
+            pass
+
+        elif arg.starts_with("-"):
+            return Err("Unknown option: {arg}")
+
+        else:
+            # Treat as test pattern
+            cfg.test_pattern = Some(arg)
+
+        i = i + 1
+
+    Ok(cfg)
+
+# Print usage help
+fn print_usage():
+    print("simple-leak-finder - Memory leak detection for Simple tests")
+    print("")
+    print("USAGE:")
+    print("    simple-leak-finder [options] [test-pattern]")
+    print("")
+    print("OPTIONS:")
+    print("    --type=TYPE           Test type: simple, sdoctest, rust, all (default: all)")
+    print("    --threshold=KB        Memory threshold in KB (default: 500000 = 500MB)")
+    print("    --consecutive=N       Consecutive growth count to detect leak (default: 5)")
+    print("    --timeout=SECONDS     Per-test timeout in seconds (default: 120)")
+    print("    --output=FILE         SDN output file (default: stdout)")
+    print("    --verbose, -v         Show per-test memory usage")
+    print("    --stop-on-leak        Stop when leak is detected")
+    print("    --help, -h            Show this help message")
+    print("")
+    print("EXAMPLES:")
+    print("    simple-leak-finder --type=simple --verbose")
+    print("    simple-leak-finder --threshold=100000 --consecutive=3")
+    print("    simple-leak-finder --output=leak_report.sdn")
+    print("    simple-leak-finder \"*memory*\"")
+    print("")
+    print("OUTPUT:")
+    print("    Generates SDN format report with:")
+    print("    - leak_report: Summary of findings")
+    print("    - leaks: Detected memory leak entries")
+    print("    - test_runs: Per-test memory measurements")
+
+# Format config for display
+fn format_config(cfg: types.LeakFinderConfig) -> text:
+    var output = "Configuration:\n"
+    output = output + "  Test type: {types.test_type_to_string(cfg.test_type)}\n"
+    output = output + "  Threshold: {cfg.threshold_kb} KB\n"
+    output = output + "  Consecutive: {cfg.consecutive_count}\n"
+    output = output + "  Timeout: {cfg.timeout_seconds}s\n"
+    match cfg.output_file:
+        case Some(f): output = output + "  Output: {f}\n"
+        case nil: output = output + "  Output: stdout\n"
+    output = output + "  Verbose: {cfg.verbose}\n"
+    output = output + "  Stop on leak: {cfg.stop_on_leak}\n"
+    match cfg.test_pattern:
+        case Some(p): output = output + "  Pattern: {p}\n"
+        case nil: output = output + "  Pattern: (all tests)\n"
+    output
+
+# Export functions
+export parse_args, print_usage, format_config

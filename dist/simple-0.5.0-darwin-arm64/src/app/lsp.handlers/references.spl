@@ -1,0 +1,333 @@
+# References Handler
+# Provides find-all-references functionality for symbols
+
+import lsp.protocol as protocol
+import lsp.transport as transport
+import parser.treesitter.{Tree, Node, NodeId, Span}
+
+# Reference location
+class Reference:
+    span: Span
+    node_id: NodeId
+    context: String  # "definition" or "reference"
+
+    static fn new(span: Span, node_id: NodeId, context: String) -> Reference:
+        Reference(span: span, node_id: node_id, context: context)
+
+# Find node at specific position (reused from hover/definition)
+fn find_node_at_position(tree: Tree, line: Int, column: Int) -> Option<Node>:
+    fn position_in_span(span: Span, line: Int, column: Int) -> Bool:
+        if line < span.start_line or line > span.end_line:
+            return false
+        if line == span.start_line and column < span.start_column:
+            return false
+        if line == span.end_line and column > span.end_column:
+            return false
+        true
+
+    fn traverse(node_id: NodeId, best: Option<Node>) -> Option<Node>:
+        match tree.arena.get(node_id):
+            case None:
+                best
+            case Some(node):
+                if not position_in_span(node.span, line, column):
+                    return best
+                var new_best = Some(node)
+                for child_id in node.children:
+                    new_best = traverse(child_id, new_best)
+                new_best
+
+    traverse(tree.root_node, None)
+
+# Find all references to a symbol in the tree
+fn find_all_references(tree: Tree, symbol_name: String, include_declaration: Bool) -> [Reference]:
+    var references: [Reference] = []
+
+    # Traverse tree and collect all identifier nodes matching symbol_name
+    fn traverse(node_id: NodeId):
+        match tree.arena.get(node_id):
+            case None:
+                return
+            case Some(node):
+                # Check if this node is a reference to the symbol
+                val is_reference = match node.kind:
+                    case "identifier":
+                        node.text == symbol_name
+                    case _:
+                        false
+
+                if is_reference:
+                    # Determine if this is a definition or reference
+                    val context = determine_context(tree, node_id)
+
+                    # Add to references list
+                    if include_declaration or context == "reference":
+                        val ref = Reference.new(node.span, node_id, context)
+                        references.push(ref)
+
+                # Traverse children
+                for child_id in node.children:
+                    traverse(child_id)
+
+    traverse(tree.root_node)
+    references
+
+# Determine if an identifier is a definition or reference
+fn determine_context(tree: Tree, identifier_id: NodeId) -> String:
+    # Look at parent node to determine context
+    match tree.arena.get(identifier_id):
+        case None:
+            "reference"
+        case Some(identifier_node):
+            # Find parent node
+            val parent_id = find_parent(tree, identifier_id)
+
+            match parent_id:
+                case None:
+                    "reference"
+                case Some(parent):
+                    match tree.arena.get(parent):
+                        case None:
+                            "reference"
+                        case Some(parent_node):
+                            # Check parent node kind
+                            match parent_node.kind:
+                                case "function_def":
+                                    # Check if identifier is the function name
+                                    match parent_node.fields.get("name"):
+                                        case Some(name_id):
+                                            if name_id == identifier_id:
+                                                "definition"
+                                            else:
+                                                "reference"
+                                        case None:
+                                            "reference"
+
+                                case "let_stmt":
+                                    # Check if identifier is the pattern (definition)
+                                    match parent_node.fields.get("pattern"):
+                                        case Some(pattern_id):
+                                            if pattern_id == identifier_id:
+                                                "definition"
+                                            else:
+                                                "reference"
+                                        case None:
+                                            "reference"
+
+                                case "parameter":
+                                    # Parameters are definitions
+                                    match parent_node.fields.get("name"):
+                                        case Some(name_id):
+                                            if name_id == identifier_id:
+                                                "definition"
+                                            else:
+                                                "reference"
+                                        case None:
+                                            "reference"
+
+                                case "struct_def":
+                                    # Struct names are definitions
+                                    match parent_node.fields.get("name"):
+                                        case Some(name_id):
+                                            if name_id == identifier_id:
+                                                "definition"
+                                            else:
+                                                "reference"
+                                        case None:
+                                            "reference"
+
+                                case _:
+                                    # Default to reference
+                                    "reference"
+
+# Find parent node of a given node (simplified - O(n) search)
+fn find_parent(tree: Tree, target_id: NodeId) -> Option<NodeId>:
+    fn search(node_id: NodeId) -> Option<NodeId>:
+        match tree.arena.get(node_id):
+            case None:
+                None
+            case Some(node):
+                # Check if any child matches target
+                for child_id in node.children:
+                    if child_id == target_id:
+                        return Some(node_id)
+
+                # Recursively search children
+                for child_id in node.children:
+                    match search(child_id):
+                        case Some(parent):
+                            return Some(parent)
+                        case None:
+                            continue
+
+                None
+
+    search(tree.root_node)
+
+# Convert references to LSP locations
+fn references_to_locations(references: [Reference]) -> [Dict]:
+    var locations: [Dict] = []
+
+    for ref in references:
+        val location = {
+            "range": {
+                "start": {
+                    "line": ref.span.start_line,
+                    "character": ref.span.start_column
+                },
+                "end": {
+                    "line": ref.span.end_line,
+                    "character": ref.span.end_column
+                }
+            }
+        }
+
+        locations.push(location)
+
+    locations
+
+# Handle textDocument/references request
+fn handle_references(
+    tree: Tree,
+    source: String,
+    line: Int,
+    column: Int,
+    include_declaration: Bool
+) -> Result<Option<[Dict]>, String>:
+    # Find node at cursor
+    match find_node_at_position(tree, line, column):
+        case None:
+            Ok(None)
+        case Some(node):
+            # Check if this is an identifier
+            if node.kind != "identifier":
+                return Ok(None)
+
+            val symbol_name = node.text
+
+            # Find all references to this symbol
+            val references = find_all_references(tree, symbol_name, include_declaration)
+
+            if references.len() == 0:
+                return Ok(None)
+
+            # Convert to LSP locations
+            val locations = references_to_locations(references)
+
+            Ok(Some(locations))
+
+# Scope information for filtering references
+class Scope:
+    node_id: NodeId
+    kind: String      # "function", "block", "module", "class", etc.
+    start_line: Int
+    end_line: Int
+
+    static fn new(node_id: NodeId, kind: String, start_line: Int, end_line: Int) -> Scope:
+        Scope(node_id: node_id, kind: kind, start_line: start_line, end_line: end_line)
+
+    # Check if a line is within this scope
+    fn contains_line(line: Int) -> Bool:
+        line >= self.start_line and line <= self.end_line
+
+# Find the scope containing a given node
+fn find_scope(tree: Tree, target_id: NodeId) -> Option<Scope>:
+    # Find parent nodes that define scopes
+    val scope_kinds = ["function_def", "class_def", "struct_def", "impl_block", "module", "block"]
+
+    fn find_scope_ancestor(node_id: NodeId) -> Option<Scope>:
+        match tree.arena.get(node_id):
+            None:
+                None
+            Some(node):
+                # Check if this node defines a scope
+                for scope_kind in scope_kinds:
+                    if node.kind == scope_kind:
+                        return Some(Scope.new(
+                            node_id,
+                            node.kind,
+                            node.span.start_line,
+                            node.span.end_line
+                        ))
+
+                # Check if any child contains the target (to find parent scope)
+                for child_id in node.children:
+                    if contains_node(tree, child_id, target_id):
+                        # Recurse into this subtree
+                        match find_scope_ancestor(child_id):
+                            Some(scope):
+                                return Some(scope)
+                            None:
+                                # This node might be the scope
+                                pass
+
+                None
+
+    # Start from root and find the innermost scope containing target
+    find_scope_ancestor(tree.root_node)
+
+# Check if a subtree contains a specific node
+fn contains_node(tree: Tree, subtree_id: NodeId, target_id: NodeId) -> Bool:
+    if subtree_id == target_id:
+        return true
+
+    match tree.arena.get(subtree_id):
+        None:
+            false
+        Some(node):
+            for child_id in node.children:
+                if contains_node(tree, child_id, target_id):
+                    return true
+            false
+
+# Check if a reference is in the same scope or a child scope
+fn is_in_scope_or_child(ref_scope: Option<Scope>, original_scope: Option<Scope>, tree: Tree, ref_node_id: NodeId) -> Bool:
+    match (ref_scope, original_scope):
+        (Some(rs), Some(os)):
+            # If both are in the same scope node, they're in scope
+            if rs.node_id == os.node_id:
+                return true
+
+            # Check if reference scope is nested within original scope
+            # (original scope contains reference scope)
+            if os.contains_line(rs.start_line) and os.contains_line(rs.end_line):
+                return true
+
+            # If original is at module level, all references are valid
+            if os.kind == "module":
+                return true
+
+            false
+
+        (None, Some(os)):
+            # Reference has no specific scope (module level), check if it's in original's scope
+            match tree.arena.get(ref_node_id):
+                Some(ref_node):
+                    os.contains_line(ref_node.span.start_line)
+                None:
+                    true
+
+        (Some(rs), None):
+            # Original is at module level, all references are valid
+            true
+
+        (None, None):
+            # Both at module level, all valid
+            true
+
+# Filter references by scope (for more accurate results)
+fn filter_by_scope(references: [Reference], tree: Tree, original_node_id: NodeId) -> [Reference]:
+    # Find the scope of the original node
+    val original_scope = find_scope(tree, original_node_id)
+
+    var filtered: [Reference] = []
+
+    for ref in references:
+        # Find the scope of this reference
+        val ref_scope = find_scope(tree, ref.node_id)
+
+        # Check if reference is in valid scope
+        if is_in_scope_or_child(ref_scope, original_scope, tree, ref.node_id):
+            filtered.push(ref)
+
+    filtered

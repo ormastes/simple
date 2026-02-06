@@ -1,0 +1,156 @@
+# MCP Resource Utilities
+#
+# Shared utilities for MCP resource providers.
+# Eliminates duplication across bugdb_resource, testdb_resource, featuredb_resource.
+#
+# Usage:
+#   use app.mcp.resource_utils.{
+#       extract_json_string, extract_json_int, extract_json_float, extract_json_array,
+#       current_timestamp, items_to_json
+#   }
+
+use lib.json.builder.{JsonBuilder, JsonArrayBuilder, escape_json}
+use app.io.{rt_timestamp_now}
+
+export extract_json_string, extract_json_int, extract_json_float, extract_json_array
+export current_timestamp, timestamp_to_iso
+export items_to_json, error_json, success_json
+export JsonBuilder, JsonArrayBuilder, escape_json
+
+# ============================================================================
+# JSON Parsing Helpers
+# ============================================================================
+
+# Extract a string value from JSON by key
+fn extract_json_string(json: text, key: text) -> text:
+    val pattern = "\"{key}\": \""
+    val start = json.find(pattern)
+    if start < 0:
+        return ""
+
+    val value_start = start + pattern.len()
+    val value_end = json.find("\"", value_start)
+    if value_end < 0:
+        return ""
+
+    json.substring(value_start, value_end)
+
+# Extract an integer value from JSON by key
+fn extract_json_int(json: text, key: text) -> i64:
+    val pattern = "\"{key}\": "
+    val start = json.find(pattern)
+    if start < 0:
+        return 0
+
+    val value_start = start + pattern.len()
+    var value_end = value_start
+    while value_end < json.len():
+        val ch = json.char_at(value_end)
+        if ch < '0' or ch > '9':
+            if ch != '-':
+                break
+        value_end = value_end + 1
+
+    if value_end == value_start:
+        return 0
+
+    val num_str = json.substring(value_start, value_end)
+    num_str.parse_int() ?? 0
+
+# Extract a float value from JSON by key
+fn extract_json_float(json: text, key: text) -> f64:
+    val pattern = "\"{key}\": "
+    val start = json.find(pattern)
+    if start < 0:
+        return 0.0
+
+    val value_start = start + pattern.len()
+    var value_end = value_start
+    while value_end < json.len():
+        val ch = json.char_at(value_end)
+        if (ch < '0' or ch > '9') and ch != '.' and ch != '-':
+            break
+        value_end = value_end + 1
+
+    if value_end == value_start:
+        return 0.0
+
+    val num_str = json.substring(value_start, value_end)
+    num_str.parse_float() ?? 0.0
+
+# Extract a string array from JSON by key
+fn extract_json_array(json: text, key: text) -> [text]:
+    val pattern = "\"{key}\": ["
+    val start = json.find(pattern)
+    if start < 0:
+        return []
+
+    val array_start = start + pattern.len()
+    val array_end = json.find("]", array_start)
+    if array_end < 0:
+        return []
+
+    val array_str = json.substring(array_start, array_end)
+
+    var items: [text] = []
+    var pos = 0
+    while pos < array_str.len():
+        val quote_start = array_str.find("\"", pos)
+        if quote_start < 0:
+            break
+        val quote_end = array_str.find("\"", quote_start + 1)
+        if quote_end < 0:
+            break
+        items.push(array_str.substring(quote_start + 1, quote_end))
+        pos = quote_end + 1
+
+    items
+
+# ============================================================================
+# Timestamp Helpers
+# ============================================================================
+
+# Get current timestamp in ISO 8601 format
+fn current_timestamp() -> text:
+    val micros = rt_timestamp_now()
+    timestamp_to_iso(micros)
+
+# Convert microseconds to ISO 8601 format
+fn timestamp_to_iso(micros: i64) -> text:
+    # For now, return raw timestamp - can be improved later
+    "{micros}"
+
+# ============================================================================
+# Generic Response Helpers
+# ============================================================================
+
+# Convert a list of items to JSON array using a converter function
+fn items_to_json<T>(items: [T], item_key: text, converter: fn(T) -> text) -> text:
+    val arr = JsonArrayBuilder.new()
+    for item in items:
+        arr.item_raw(converter(item))
+
+    JsonBuilder.object()
+        .field_int("total", items.len())
+        .field_array_raw(item_key, arr)
+        .build()
+
+# Create an error response
+fn error_json(message: text) -> text:
+    JsonBuilder.object()
+        .field("error", message)
+        .build()
+
+# Create a success response
+fn success_json(id: text) -> text:
+    JsonBuilder.object()
+        .field_bool("success", true)
+        .field("id", id)
+        .build()
+
+# Create a success response with custom key
+fn success_json_with_key(key: text, value: text) -> text:
+    JsonBuilder.object()
+        .field_bool("success", true)
+        .field(key, value)
+        .build()

@@ -1,0 +1,243 @@
+# Binary Operators - Precedence Climbing
+#
+# Implements precedence climbing for binary operators.
+# Each method parses operators at one precedence level and delegates
+# to the next higher level for operands.
+#
+# Precedence levels (low to high):
+#   pipe (|>)  >  parallel (//)  >  or  >  and  >  equality  >
+#   comparison  >  range  >  bitwise_or  >  bitwise_xor  >  bitwise_and  >
+#   shift  >  matmul (@)  >  term (+-)  >  factor (*/)  >
+#   power (**)  >  unary (next module)
+
+from token import {TokenKind}
+from ast import {Expr, BinOp, RangeBound}
+
+impl Parser:
+
+    # Pipeline |> (lowest precedence)
+    fn parse_pipe() -> Expr:
+        var left = self.parse_parallel()
+        while self.check(TokenKind.PipeForward):
+            self.advance()
+            val right = self.parse_parallel()
+            left = Expr.Binary(op: BinOp.PipeForward, left: left, right: right)
+        left
+
+    # Parallel //
+    fn parse_parallel() -> Expr:
+        var left = self.parse_or()
+        while self.check(TokenKind.Parallel):
+            self.advance()
+            val right = self.parse_or()
+            left = Expr.Binary(op: BinOp.Parallel, left: left, right: right)
+        left
+
+    # Logical or (or, ||, or~)
+    fn parse_or() -> Expr:
+        var left = self.parse_and()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.Or: BinOp.Or
+                TokenKind.DoublePipe: BinOp.Or
+                TokenKind.OrSuspend: BinOp.OrSuspend
+                _: break
+            self.advance()
+            val right = self.parse_and()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Logical and (and, &&, and~)
+    fn parse_and() -> Expr:
+        var left = self.parse_equality()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.And: BinOp.And
+                TokenKind.DoubleAmp: BinOp.And
+                TokenKind.AndSuspend: BinOp.AndSuspend
+                _: break
+            self.advance()
+            val right = self.parse_equality()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Equality and membership (==, !=, is, in, not in)
+    fn parse_equality() -> Expr:
+        var left = self.parse_comparison()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.Eq: BinOp.Eq
+                TokenKind.NotEq: BinOp.NotEq
+                TokenKind.Is: BinOp.Is
+                TokenKind.In: BinOp.In
+                TokenKind.Not:
+                    if self.peek_is(TokenKind.In):
+                        self.advance()  # consume 'not'
+                        BinOp.NotIn
+                    else:
+                        break
+                _: break
+            self.advance()
+            val right = self.parse_comparison()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Comparison with chaining: a < b < c -> (a < b) and (b < c)
+    fn parse_comparison() -> Expr:
+        val left = self.parse_range()
+
+        val has_cmp = match self.current.kind:
+            TokenKind.Lt: true
+            TokenKind.Gt: true
+            TokenKind.LtEq: true
+            TokenKind.GtEq: true
+            _: false
+
+        if not has_cmp:
+            return left
+
+        var comparisons = []
+        var prev_right = left
+
+        loop:
+            val op = match self.current.kind:
+                TokenKind.Lt: BinOp.Lt
+                TokenKind.Gt: BinOp.Gt
+                TokenKind.LtEq: BinOp.LtEq
+                TokenKind.GtEq: BinOp.GtEq
+                _: break
+            self.advance()
+            val right = self.parse_range()
+            comparisons.push(Expr.Binary(op: op, left: prev_right.clone(), right: right.clone()))
+            prev_right = right
+
+        if comparisons.len() == 1:
+            return comparisons[0]
+
+        var result = comparisons[0]
+        for cmp in comparisons[1:]:
+            result = Expr.Binary(op: BinOp.And, left: result, right: cmp)
+        result
+
+    # Range: a..b, a..=b, a.., ..b, ..
+    fn parse_range() -> Expr:
+        # Prefix range (..end or ..=end)
+        if self.check(TokenKind.DoubleDotEq):
+            self.advance()
+            val end = if self.is_range_terminator(): None else: self.parse_bitwise_or()
+            return Expr.Range(start: None, end: end, bound: RangeBound.Inclusive)
+
+        if self.check(TokenKind.DoubleDot):
+            self.advance()
+            val end = if self.is_range_terminator(): None else: self.parse_bitwise_or()
+            return Expr.Range(start: None, end: end, bound: RangeBound.Exclusive)
+
+        val start = self.parse_bitwise_or()
+
+        val bound = match self.current.kind:
+            TokenKind.DoubleDotEq: RangeBound.Inclusive
+            TokenKind.DoubleDot: RangeBound.Exclusive
+            _: return start
+
+        self.advance()
+        val end = if self.is_range_terminator(): None else: self.parse_bitwise_or()
+        Expr.Range(start: start, end: end, bound: bound)
+
+    fn is_range_terminator() -> bool:
+        match self.current.kind:
+            TokenKind.RBracket: true
+            TokenKind.RParen: true
+            TokenKind.RBrace: true
+            TokenKind.Comma: true
+            TokenKind.Colon: true
+            TokenKind.Semicolon: true
+            TokenKind.Newline: true
+            TokenKind.Dedent: true
+            TokenKind.Eof: true
+            _: false
+
+    # Bitwise or |
+    fn parse_bitwise_or() -> Expr:
+        var left = self.parse_bitwise_xor()
+        while self.check(TokenKind.Pipe):
+            self.advance()
+            val right = self.parse_bitwise_xor()
+            left = Expr.Binary(op: BinOp.BitOr, left: left, right: right)
+        left
+
+    # Bitwise xor (xor keyword)
+    fn parse_bitwise_xor() -> Expr:
+        var left = self.parse_bitwise_and()
+        while self.check(TokenKind.Xor):
+            self.advance()
+            val right = self.parse_bitwise_and()
+            left = Expr.Binary(op: BinOp.BitXor, left: left, right: right)
+        left
+
+    # Bitwise and &
+    fn parse_bitwise_and() -> Expr:
+        var left = self.parse_shift()
+        while self.check(TokenKind.Ampersand):
+            self.advance()
+            val right = self.parse_shift()
+            left = Expr.Binary(op: BinOp.BitAnd, left: left, right: right)
+        left
+
+    # Shift <<, >>
+    fn parse_shift() -> Expr:
+        var left = self.parse_matmul()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.ShiftLeft: BinOp.ShiftLeft
+                TokenKind.ShiftRight: BinOp.ShiftRight
+                _: break
+            self.advance()
+            val right = self.parse_matmul()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Matrix multiplication @
+    fn parse_matmul() -> Expr:
+        var left = self.parse_term()
+        while self.check(TokenKind.At):
+            self.advance()
+            val right = self.parse_term()
+            left = Expr.Binary(op: BinOp.MatMul, left: left, right: right)
+        left
+
+    # Term +, -
+    fn parse_term() -> Expr:
+        var left = self.parse_factor()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.Plus: BinOp.Add
+                TokenKind.Minus: BinOp.Sub
+                _: break
+            self.advance()
+            val right = self.parse_factor()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Factor *, /, %
+    fn parse_factor() -> Expr:
+        var left = self.parse_power()
+        loop:
+            val op = match self.current.kind:
+                TokenKind.Star: BinOp.Mul
+                TokenKind.Slash: BinOp.Div
+                TokenKind.Percent: BinOp.Mod
+                _: break
+            self.advance()
+            val right = self.parse_power()
+            left = Expr.Binary(op: op, left: left, right: right)
+        left
+
+    # Power ** (right-associative)
+    fn parse_power() -> Expr:
+        val left = self.parse_unary()
+        if self.check(TokenKind.DoubleStar):
+            self.advance()
+            val right = self.parse_power()  # right-associative recursion
+            Expr.Binary(op: BinOp.Pow, left: left, right: right)
+        else:
+            left

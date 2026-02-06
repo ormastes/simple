@@ -1,0 +1,394 @@
+# Linker Script Generator - Board Definition Parser
+#
+# Parses board SDN files into structured data for linker script generation.
+
+from std.sdn import {parse_file, SdnValue}
+
+export BoardConfig, MemoryRegion, Section, QemuConfig, MultibootConfig
+export parse_board, ParseError
+
+# Memory region permissions
+enum Permission:
+    Read
+    Write
+    Execute
+
+impl Permission:
+    fn to_char() -> text:
+        match self:
+            case Permission.Read: "r"
+            case Permission.Write: "w"
+            case Permission.Execute: "x"
+
+# Memory region definition
+struct MemoryRegion:
+    name: text
+    origin: i64
+    length: i64
+    permissions: [Permission]
+    description: text
+
+impl MemoryRegion:
+    fn permissions_str() -> text:
+        var result = ""
+        for perm in self.permissions:
+            result = result + perm.to_char()
+        result
+
+    fn length_str() -> text:
+        # Convert to human-readable format (K, M, G)
+        if self.length >= 1073741824 and self.length % 1073741824 == 0:
+            "{self.length / 1073741824}G"
+        elif self.length >= 1048576 and self.length % 1048576 == 0:
+            "{self.length / 1048576}M"
+        elif self.length >= 1024 and self.length % 1024 == 0:
+            "{self.length / 1024}K"
+        else:
+            "{self.length}"
+
+# Section definition
+struct Section:
+    name: text
+    memory: text
+    address: i64?
+    align: i64
+    input: [text]
+    section_type: text  # "progbits", "nobits"
+    size: i64?  # For fixed-size sections like stack
+    keep: bool  # Don't garbage collect
+
+impl Section:
+    fn is_nobits() -> bool:
+        self.section_type == "nobits"
+
+# QEMU-specific settings
+struct QemuConfig:
+    machine: text
+    cpu: text
+    memory: text
+    serial: text
+    isa_debug_exit_enabled: bool
+    isa_debug_exit_iobase: i64
+    isa_debug_exit_iosize: i64
+
+impl QemuConfig:
+    fn args() -> [text]:
+        var result: [text] = []
+        result.push("-machine")
+        result.push(self.machine)
+        result.push("-cpu")
+        result.push(self.cpu)
+        result.push("-m")
+        result.push(self.memory)
+        result.push("-serial")
+        result.push(self.serial)
+        if self.isa_debug_exit_enabled:
+            result.push("-device")
+            result.push("isa-debug-exit,iobase=0x{self.isa_debug_exit_iobase:x},iosize=0x{self.isa_debug_exit_iosize:x}")
+        result
+
+# Multiboot header settings
+struct MultibootConfig:
+    version: i64
+    flags: i64
+    checksum_offset: i64
+
+# Complete board configuration
+struct BoardConfig:
+    name: text
+    arch: text
+    target: text
+    description: text
+    memory: [MemoryRegion]
+    sections: [Section]
+    entry: text
+    qemu: QemuConfig?
+    multiboot: MultibootConfig?
+
+# Parse error
+enum ParseError:
+    FileNotFound(path: text)
+    ParseFailed(message: text)
+    MissingField(field: text)
+    InvalidValue(field: text, value: text)
+
+impl ParseError:
+    fn message() -> text:
+        match self:
+            case ParseError.FileNotFound(path): "File not found: {path}"
+            case ParseError.ParseFailed(msg): "Parse error: {msg}"
+            case ParseError.MissingField(field): "Missing required field: {field}"
+            case ParseError.InvalidValue(field, value): "Invalid value for {field}: {value}"
+
+# Parse a board definition file
+fn parse_board(path: text) -> Result<BoardConfig, ParseError>:
+    val result = parse_file(path)
+    match result:
+        case Err(e):
+            return Err(ParseError.ParseFailed(e.message()))
+        case Ok(sdn):
+            parse_board_sdn(sdn)
+
+# Parse board config from SDN value
+fn parse_board_sdn(sdn: SdnValue) -> Result<BoardConfig, ParseError>:
+    val dict_opt = sdn.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.ParseFailed("Expected dict at root"))
+    val dict = dict_opt.unwrap()
+
+    # Parse board section
+    val board_opt = dict["board"]?.as_dict()
+    if not board_opt.?:
+        return Err(ParseError.MissingField("board"))
+    val board_dict = board_opt.unwrap()
+
+    val name_opt = board_dict["name"]?.as_text()
+    if not name_opt.?:
+        return Err(ParseError.MissingField("board.name"))
+    val name = name_opt.unwrap()
+
+    val arch_opt = board_dict["arch"]?.as_text()
+    if not arch_opt.?:
+        return Err(ParseError.MissingField("board.arch"))
+    val arch = arch_opt.unwrap()
+
+    val target_opt = board_dict["target"]?.as_text()
+    if not target_opt.?:
+        return Err(ParseError.MissingField("board.target"))
+    val target = target_opt.unwrap()
+
+    val description = board_dict["description"]?.as_text() ?? ""
+
+    # Parse memory regions
+    val memory_dict_opt = dict["memory"]?.as_dict()
+    if not memory_dict_opt.?:
+        return Err(ParseError.MissingField("memory"))
+    val memory_dict = memory_dict_opt.unwrap()
+    var memory: [MemoryRegion] = []
+    for (region_name, region_val) in memory_dict:
+        val region_result = parse_memory_region(region_name, region_val)
+        match region_result:
+            case Ok(region): memory.push(region)
+            case Err(e): return Err(e)
+
+    # Parse sections
+    val sections_dict_opt = dict["sections"]?.as_dict()
+    if not sections_dict_opt.?:
+        return Err(ParseError.MissingField("sections"))
+    val sections_dict = sections_dict_opt.unwrap()
+    var sections: [Section] = []
+    for (section_name, section_val) in sections_dict:
+        val section_result = parse_section(section_name, section_val)
+        match section_result:
+            case Ok(section): sections.push(section)
+            case Err(e): return Err(e)
+
+    # Parse entry point
+    val entry = dict["entry"]?.as_text() ?? "_start"
+
+    # Parse QEMU config (optional)
+    var qemu: QemuConfig? = None
+    if dict["qemu"].?:
+        val qemu_result = parse_qemu_config(dict["qemu"].unwrap())
+        match qemu_result:
+            case Ok(config): qemu = Some(config)
+            case Err(e): return Err(e)
+
+    # Parse multiboot config (optional)
+    var multiboot: MultibootConfig? = None
+    if dict["multiboot"].?:
+        val multiboot_result = parse_multiboot_config(dict["multiboot"].unwrap())
+        match multiboot_result:
+            case Ok(config): multiboot = Some(config)
+            case Err(e): return Err(e)
+
+    Ok(BoardConfig(
+        name: name,
+        arch: arch,
+        target: target,
+        description: description,
+        memory: memory,
+        sections: sections,
+        entry: entry,
+        qemu: qemu,
+        multiboot: multiboot
+    ))
+
+# Parse a memory region
+fn parse_memory_region(name: text, value: SdnValue) -> Result<MemoryRegion, ParseError>:
+    val dict_opt = value.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}", "expected dict"))
+    val dict = dict_opt.unwrap()
+
+    val origin_str = dict["origin"]?.as_text() ?? "0"
+    val origin_opt = parse_address(origin_str)
+    if not origin_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}.origin", "invalid address"))
+    val origin = origin_opt.unwrap()
+
+    val length_str = dict["length"]?.as_text() ?? "0"
+    val length_opt = parse_size(length_str)
+    if not length_opt.?:
+        return Err(ParseError.InvalidValue("memory.{name}.length", "invalid size"))
+    val length = length_opt.unwrap()
+
+    val perms_str = dict["permissions"]?.as_text() ?? "rwx"
+    val description = dict["description"]?.as_text() ?? ""
+
+    var permissions: [Permission] = []
+    if perms_str.contains("r"):
+        permissions.push(Permission.Read)
+    if perms_str.contains("w"):
+        permissions.push(Permission.Write)
+    if perms_str.contains("x"):
+        permissions.push(Permission.Execute)
+
+    Ok(MemoryRegion(
+        name: name,
+        origin: origin,
+        length: length,
+        permissions: permissions,
+        description: description
+    ))
+
+# Parse a section definition
+fn parse_section(name: text, value: SdnValue) -> Result<Section, ParseError>:
+    val dict_opt = value.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("sections.{name}", "expected dict"))
+    val dict = dict_opt.unwrap()
+
+    val memory_opt = dict["memory"]?.as_text()
+    if not memory_opt.?:
+        return Err(ParseError.MissingField("sections.{name}.memory"))
+    val memory = memory_opt.unwrap()
+
+    val address = if dict["address"].?:
+        val addr_str = dict["address"].unwrap().as_text() ?? "0"
+        Some(parse_address(addr_str) ?? 0)
+    else:
+        None
+    val align = parse_size(dict["align"]?.as_text() ?? "1") ?? 1
+    val section_type = dict["type"]?.as_text() ?? "progbits"
+    val size = if dict["size"].?:
+        val size_str = dict["size"].unwrap().as_text() ?? "0"
+        Some(parse_size(size_str) ?? 0)
+    else:
+        None
+    val keep = dict["keep"]?.as_bool() ?? false
+
+    # Parse input patterns
+    var input: [text] = []
+    if dict["input"].?:
+        match dict["input"].unwrap():
+            case SdnValue.Array(items):
+                for item in items:
+                    input.push(item.as_text() ?? "")
+            case SdnValue.String(s):
+                input.push(s)
+            case _:
+                pass
+
+    Ok(Section(
+        name: name,
+        memory: memory,
+        address: address,
+        align: align,
+        input: input,
+        section_type: section_type,
+        size: size,
+        keep: keep
+    ))
+
+# Parse QEMU config
+fn parse_qemu_config(value: SdnValue) -> Result<QemuConfig, ParseError>:
+    val dict_opt = value.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("qemu", "expected dict"))
+    val dict = dict_opt.unwrap()
+
+    val machine = dict["machine"]?.as_text() ?? "pc"
+    val cpu = dict["cpu"]?.as_text() ?? "qemu32"
+    val memory = dict["memory"]?.as_text() ?? "32M"
+    val serial = dict["serial"]?.as_text() ?? "stdio"
+
+    # Parse isa-debug-exit
+    var isa_enabled = false
+    var isa_iobase: i64 = 0xF4
+    var isa_iosize: i64 = 0x04
+
+    if dict["isa_debug_exit"].?:
+        val isa_dict_opt = dict["isa_debug_exit"].unwrap().as_dict()
+        if isa_dict_opt.?:
+            val isa_dict = isa_dict_opt.unwrap()
+            isa_enabled = isa_dict["enabled"]?.as_bool() ?? false
+            isa_iobase = parse_address(isa_dict["iobase"]?.as_text() ?? "0xF4") ?? 0xF4
+            isa_iosize = parse_address(isa_dict["iosize"]?.as_text() ?? "0x04") ?? 0x04
+
+    Ok(QemuConfig(
+        machine: machine,
+        cpu: cpu,
+        memory: memory,
+        serial: serial,
+        isa_debug_exit_enabled: isa_enabled,
+        isa_debug_exit_iobase: isa_iobase,
+        isa_debug_exit_iosize: isa_iosize
+    ))
+
+# Parse multiboot config
+fn parse_multiboot_config(value: SdnValue) -> Result<MultibootConfig, ParseError>:
+    val dict_opt = value.as_dict()
+    if not dict_opt.?:
+        return Err(ParseError.InvalidValue("multiboot", "expected dict"))
+    val dict = dict_opt.unwrap()
+
+    val version = dict["version"]?.as_int() ?? 1
+    val flags = parse_address(dict["flags"]?.as_text() ?? "0") ?? 0
+    val checksum_offset = dict["checksum_offset"]?.as_int() ?? 8
+
+    Ok(MultibootConfig(
+        version: version,
+        flags: flags,
+        checksum_offset: checksum_offset
+    ))
+
+# Parse an address (supports hex with 0x prefix)
+fn parse_address(s: text) -> i64?:
+    val trimmed = s.trim()
+    if trimmed.starts_with("0x") or trimmed.starts_with("0X"):
+        parse_hex(trimmed.substring(2))
+    else:
+        trimmed.parse_int()
+
+# Parse hexadecimal number
+fn parse_hex(s: text) -> i64?:
+    var result: i64 = 0
+    for ch in s.chars():
+        if ch == '_':
+            # Allow underscores as separators, skip
+            pass
+        elif ch >= '0' and ch <= '9':
+            result = result * 16 + (ch.to_int() - '0'.to_int())
+        elif ch >= 'a' and ch <= 'f':
+            result = result * 16 + (ch.to_int() - 'a'.to_int() + 10)
+        elif ch >= 'A' and ch <= 'F':
+            result = result * 16 + (ch.to_int() - 'A'.to_int() + 10)
+        else:
+            return None
+    Some(result)
+
+# Parse a size value (supports K, M, G suffixes)
+fn parse_size(s: text) -> i64?:
+    val trimmed = s.trim().upper()
+    if trimmed.ends_with("G"):
+        val num = trimmed.substring(0, trimmed.len() - 1).parse_int()?
+        Some(num * 1073741824)
+    elif trimmed.ends_with("M"):
+        val num = trimmed.substring(0, trimmed.len() - 1).parse_int()?
+        Some(num * 1048576)
+    elif trimmed.ends_with("K"):
+        val num = trimmed.substring(0, trimmed.len() - 1).parse_int()?
+        Some(num * 1024)
+    else:
+        parse_address(trimmed)

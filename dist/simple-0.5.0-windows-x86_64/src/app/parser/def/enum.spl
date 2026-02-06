@@ -1,0 +1,274 @@
+# Definition Parser - Enum and Union Definitions
+#
+# Parsing for:
+# - enum Name<T>: variants...
+# - union Name<T>: variants...
+# - Enum variants (unit, tuple, struct)
+# - Enum methods
+
+from token import {Span, TokenKind}
+from ast import {Node, EnumDef, EnumVariant, EnumField, FunctionDef, DocComment,
+                 Visibility, Attribute, Effect}
+from error import {ParseError}
+
+export EnumParser
+
+# ============================================================================
+# Enum
+# ============================================================================
+
+fn parse_enum(self) -> Result<Node, ParseError>:
+    self.parse_enum_with_attrs([])
+
+fn parse_enum_with_attrs(self, attributes: [Attribute]) -> Result<Node, ParseError>:
+    val start_span = self.current.span
+    self.expect(TokenKind.Enum)
+    self.parse_enum_body(start_span, attributes)
+
+# Parse enum body without consuming keyword (for `effect` alias)
+fn parse_enum_body_after_keyword(self) -> Result<Node, ParseError>:
+    val start_span = self.current.span
+    self.parse_enum_body(start_span, [])
+
+fn parse_enum_with_doc(self, doc_comment: Option<DocComment>) -> Result<Node, ParseError>:
+    var node = self.parse_enum()
+    match node:
+        Ok(Node.Enum(e)):
+            e.doc_comment = doc_comment ?? e.doc_comment
+    node
+
+# ============================================================================
+# Union (alias for enum with data variants)
+# ============================================================================
+
+fn parse_union(self) -> Result<Node, ParseError>:
+    self.parse_union_with_attrs([])
+
+fn parse_union_with_attrs(self, attributes: [Attribute]) -> Result<Node, ParseError>:
+    val start_span = self.current.span
+    self.expect(TokenKind.Union)
+    self.parse_enum_body(start_span, attributes)
+
+fn parse_union_with_doc(self, doc_comment: Option<DocComment>) -> Result<Node, ParseError>:
+    var node = self.parse_union()
+    match node:
+        Ok(Node.Enum(e)):
+            e.doc_comment = doc_comment ?? e.doc_comment
+    node
+
+# ============================================================================
+# Shared Enum/Union Body Parsing
+# ============================================================================
+
+# Shared enum/union body parsing
+fn parse_enum_body(self, start_span: Span, attributes: [Attribute]) -> Result<Node, ParseError>:
+    val name = self.expect_identifier()
+    val generic_params = self.parse_generic_params_as_strings()
+    val where_clause = self.parse_where_clause()
+
+    self.expect(TokenKind.Colon)
+    self.expect(TokenKind.Newline)
+    self.expect(TokenKind.Indent)
+
+    # Optional docstring
+    var doc_comment = None
+    self.skip_newlines()
+    match self.current.kind:
+        TokenKind.String(content):
+            doc_comment = Some(DocComment(content: content))
+            self.advance()
+            self.skip_newlines()
+        TokenKind.FString(parts):
+            val content = parts.filter_map(\p: match p:
+                FStringToken.Literal(s): Some(s)
+                _: None
+            ).join("")
+            doc_comment = Some(DocComment(content: content))
+            self.advance()
+            self.skip_newlines()
+        _: ()
+
+    val (variants, methods) = self.parse_enum_variants_and_methods()
+
+    Ok(Node.Enum(EnumDef(
+        span: self.make_span(start_span),
+        name: name,
+        generic_params: generic_params,
+        where_clause: where_clause,
+        variants: variants,
+        methods: methods,
+        visibility: Visibility.Private,
+        attributes: attributes,
+        doc_comment: doc_comment,
+        is_generic_template: not generic_params.is_empty(),
+        specialization_of: None,
+        type_bindings: {},
+    )))
+
+# ============================================================================
+# Enum Variants and Methods
+# ============================================================================
+
+# Parse enum variants and methods
+fn parse_enum_variants_and_methods(self) -> ([EnumVariant], [FunctionDef]):
+    var variants = []
+    var methods = []
+
+    while not self.check(TokenKind.Dedent) and not self.is_at_end():
+        self.skip_newlines()
+        if self.check(TokenKind.Dedent):
+            break
+
+        # Method definition
+        if self.check(TokenKind.Fn) or self.check(TokenKind.Async) or self.check(TokenKind.At) or self.check(TokenKind.Hash) or (self.check(TokenKind.Pub) and (self.peek_is(TokenKind.Fn) or self.peek_is(TokenKind.Async))):
+            val item = self.parse_item()
+            match item:
+                Node.Function(f): methods.append(f)
+                _: self.error("Expected method definition in enum body")
+        else:
+            # Variant(s) — may be comma-separated on same line
+            variants.append(self.parse_enum_variant())
+            while self.check(TokenKind.Comma):
+                self.advance()
+                if self.check(TokenKind.Newline) or self.check(TokenKind.Indent) or self.check(TokenKind.Dedent) or self.is_at_end():
+                    break
+                variants.append(self.parse_enum_variant())
+
+    self.consume_dedent()
+    (variants, methods)
+
+# Parse single enum variant
+fn parse_enum_variant(self) -> EnumVariant:
+    val start_span = self.current.span
+    val name = self.expect_identifier()
+
+    val fields = if self.check(TokenKind.LParen):
+        Some(self.parse_enum_field_list())
+    elif self.check(TokenKind.LBrace):
+        Some(self.parse_enum_struct_fields())
+    else:
+        None
+
+    # Optional discriminant: Variant = 0
+    val discriminant = if self.check(TokenKind.Assign):
+        self.advance()
+        Some(self.parse_expression())
+    else:
+        None
+
+    EnumVariant(
+        span: self.make_span(start_span),
+        name: name,
+        fields: fields,
+        discriminant: discriminant,
+    )
+
+# ============================================================================
+# Enum Field Parsing
+# ============================================================================
+
+# Parse struct-style enum fields: { name1: Type1, name2: Type2 }
+fn parse_enum_struct_fields(self) -> [EnumField]:
+    self.expect(TokenKind.LBrace)
+    var fields = []
+    self.skip_newlines()
+
+    while not self.check(TokenKind.RBrace):
+        val field_name = self.expect_identifier()
+        self.expect(TokenKind.Colon)
+        val field_type = self.parse_type()
+        fields.append(EnumField(name: Some(field_name), ty: field_type))
+
+        if self.check(TokenKind.Comma):
+            self.advance()
+            self.skip_newlines()
+        elif self.check(TokenKind.Newline):
+            self.skip_newlines()
+
+    self.expect(TokenKind.RBrace)
+    fields
+
+# Parse enum field list: (Type1, Type2) or (name1: Type1, name2: Type2)
+fn parse_enum_field_list(self) -> [EnumField]:
+    self.expect(TokenKind.LParen)
+    var fields = []
+    self.skip_newlines()
+
+    while not self.check(TokenKind.RParen):
+        # Try named field: check if identifier followed by colon
+        val maybe_name = self.try_get_field_name()
+
+        val field = if maybe_name.? and self.peek_after_name_is_colon():
+            val name = self.expect_field_name()
+            self.advance()  # consume colon
+            val ty = self.parse_type()
+            EnumField(name: Some(name), ty: ty)
+        else:
+            val ty = self.parse_type()
+            EnumField(name: None, ty: ty)
+
+        fields.append(field)
+        self.skip_newlines()
+
+        if self.check(TokenKind.Comma):
+            self.advance()
+            self.skip_newlines()
+        elif not self.check(TokenKind.RParen):
+            self.error("expected comma or closing paren")
+
+    self.expect(TokenKind.RParen)
+    fields
+
+# Helper: check if current is an identifier/keyword usable as field name
+fn try_get_field_name(self) -> Option<String>:
+    match self.current.kind:
+        TokenKind.Identifier(name, _): Some(name)
+        TokenKind.Type: Some("type")
+        TokenKind.Default: Some("default")
+        TokenKind.Result: Some("result")
+        TokenKind.Bounds: Some("bounds")
+        TokenKind.Alias: Some("alias")
+        TokenKind.From: Some("from")
+        TokenKind.To: Some("to")
+        TokenKind.In: Some("in")
+        TokenKind.Is: Some("is")
+        TokenKind.As: Some("as")
+        TokenKind.Match: Some("match")
+        TokenKind.Use: Some("use")
+        TokenKind.Unit: Some("unit")
+        TokenKind.Out: Some("out")
+        TokenKind.OutErr: Some("out_err")
+        _: None
+
+# Helper: check if after current identifier token the next is colon (for named fields)
+fn peek_after_name_is_colon(self) -> Bool:
+    # Save, advance, check, restore
+    val saved = self.current
+    self.advance()
+    val result = self.check(TokenKind.Colon)
+    self.pending_tokens.push_front(self.current)
+    self.current = saved
+    result
+
+# Helper: consume a field name (identifier or keyword-as-name)
+fn expect_field_name(self) -> String:
+    val name = match self.current.kind:
+        TokenKind.Identifier(n, _): n
+        TokenKind.Type: "type"
+        TokenKind.Default: "default"
+        TokenKind.Result: "result"
+        TokenKind.Bounds: "bounds"
+        TokenKind.Alias: "alias"
+        TokenKind.From: "from"
+        TokenKind.To: "to"
+        TokenKind.In: "in"
+        TokenKind.Is: "is"
+        TokenKind.As: "as"
+        TokenKind.Match: "match"
+        TokenKind.Use: "use"
+        TokenKind.Unit: "unit"
+        TokenKind.Out: "out"
+        TokenKind.OutErr: "out_err"
+        _: self.error("expected field name")
+    self.advance()
+    name

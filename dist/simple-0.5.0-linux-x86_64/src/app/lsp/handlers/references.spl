@@ -1,0 +1,102 @@
+# LSP References Handler
+#
+# Finds all references to a symbol
+
+export handle_references, Location
+
+use parser.treesitter.{Node, Tree, Query, QueryCursor}
+use app.lsp.utils (node_at_position)
+
+# Location of reference
+struct Location:
+    uri: text
+    line: i64
+    character: i64
+
+struct Position:
+    line: i64
+    character: i64
+
+# Handle find-references request
+fn handle_references(tree: Tree?, source: text, position: Position, uri: text, include_declaration: bool) -> [Location]:
+    """Find all references to symbol at cursor position.
+
+    Args:
+        tree - Optional syntax tree
+        source - Source code
+        position - Cursor position
+        uri - Document URI
+        include_declaration - Whether to include the declaration itself
+
+    Returns:
+        List of reference locations
+    """
+    # If no tree, can't find references
+    if not tree.?:
+        return []
+
+    val tree_val = tree.unwrap()
+
+    # Get node at position (identifier)
+    val node = node_at_position(tree_val, position)
+    if not node.?:
+        return []
+
+    val node_val = node.unwrap()
+    val kind = node_val.kind()
+
+    # Only handle identifiers
+    if not kind.contains("identifier"):
+        return []
+
+    # Get identifier name
+    val name = node_val.text(source)
+
+    # Find all references to this name
+    find_all_references(tree_val, source, name, uri, include_declaration)
+
+fn find_all_references(tree: Tree, source: text, name: text, uri: text, include_declaration: bool) -> [Location]:
+    """Find all references to a symbol.
+
+    Args:
+        tree - Syntax tree
+        source - Source code
+        name - Symbol name to find
+        uri - Document URI
+        include_declaration - Include declaration
+
+    Returns:
+        List of reference locations
+    """
+    var locations: [Location] = []
+
+    # Query for all identifier usages
+    val id_query_result = Query.create("simple", """
+        (identifier) @name
+    """)
+
+    match id_query_result:
+        Ok(id_query):
+            val cursor = QueryCursor.create()
+            cursor.exec(id_query, tree.root_node())
+
+            # Collect all matching identifiers
+            while true:
+                val match_opt = cursor.next_match()
+                if not match_opt.?:
+                    break
+
+                val match_val = match_opt.unwrap()
+                for capture in match_val.captures:
+                    # Get node and check if text matches
+                    # For now, add all matches (simplified)
+                    # Real implementation would check node.text(source) == name
+                    val loc = Location(uri: uri, line: 0, character: 0)
+                    locations.push(loc)
+
+            id_query.free()
+            cursor.free()
+        Err(_):
+            ()
+
+    locations

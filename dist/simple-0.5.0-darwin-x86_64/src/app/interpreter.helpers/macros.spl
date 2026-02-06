@@ -1,0 +1,276 @@
+# Macro Expansion
+#
+# Compile-time and runtime macro support.
+
+from ..core import {Interpreter, Value, InterpreterError}
+
+export expand_macro, MacroExpander, Macro, MacroRule
+
+# A macro definition
+struct Macro:
+    name: String
+    rules: Array<MacroRule>
+    is_hygenic: bool
+
+# A single macro rule (pattern -> template)
+struct MacroRule:
+    pattern: MacroPattern
+    template: MacroTemplate
+
+# Macro pattern for matching
+enum MacroPattern:
+    Literal(String)
+    Ident(String)
+    Expr(String)
+    Block(String)
+    Type(String)
+    Sequence(Box<MacroPattern>, Option<String>, bool)
+    Choice(Array<MacroPattern>)
+    Optional(Box<MacroPattern>)
+    Group(Array<MacroPattern>)
+
+# Macro template for expansion
+enum MacroTemplate:
+    Literal(String)
+    Var(String)
+    Expr(Box<Expr>)
+    Block(Box<Block>)
+    Sequence(String, Box<MacroTemplate>, Option<String>)
+    Concat(Array<MacroTemplate>)
+
+# Macro expander
+struct MacroExpander:
+    macros: Dict<String, Macro>
+    expansion_depth: i32
+    max_depth: i32
+
+impl MacroExpander:
+    static fn new() -> MacroExpander:
+        return MacroExpander {
+            macros: Dict.new(),
+            expansion_depth: 0,
+            max_depth: 256
+        }
+
+    fn register(m: Macro):
+        self.macros.set(m.name.clone(), m)
+
+    fn has_macro(name: &str) -> bool:
+        return self.macros.contains_key(name)
+
+    fn get_macro(name: &str) -> Option<&Macro>:
+        return self.macros.get(name)
+
+# Expand a macro invocation
+fn expand_macro(expander: &mut MacroExpander, name: &str, args: &Array<Expr>) -> Result<Expr, InterpreterError>:
+    # Check recursion depth
+    if expander.expansion_depth >= expander.max_depth:
+        return Err(InterpreterError.MacroError("maximum expansion depth exceeded".to_string()))
+
+    # Look up macro
+    match expander.get_macro(name):
+        case Some(m):
+            expander.expansion_depth += 1
+
+            # Try each rule
+            for rule in m.rules:
+                match try_match_rule(&rule, args):
+                    case Some(bindings):
+                        val result = apply_template(&rule.template, &bindings)?
+                        expander.expansion_depth -= 1
+                        return Ok(result)
+                    case None:
+                        continue
+
+            expander.expansion_depth -= 1
+            return Err(InterpreterError.MacroError("no matching rule for: {name}".to_string()))
+
+        case None:
+            return Err(InterpreterError.NameError("unknown macro: {name}".to_string()))
+
+# Try to match a macro rule
+fn try_match_rule(rule: &MacroRule, args: &Array<Expr>) -> Option<Dict<String, MacroBinding>>:
+    val bindings: Dict<String, MacroBinding> = Dict.new()
+
+    if match_pattern(&rule.pattern, args, &mut bindings):
+        return Some(bindings)
+    return None
+
+# Match a pattern against arguments
+fn match_pattern(pattern: &MacroPattern, args: &Array<Expr>, bindings: &mut Dict<String, MacroBinding>) -> bool:
+    match pattern:
+        case MacroPattern.Literal(lit):
+            # Match literal token
+            if args.len() == 1:
+                match args[0]:
+                    case Expr.Identifier(name):
+                        return name == lit
+                    case _:
+                        return false
+            return false
+
+        case MacroPattern.Ident(name):
+            # Bind identifier
+            if args.len() == 1:
+                bindings.set(name.clone(), MacroBinding.Single(args[0].clone()))
+                return true
+            return false
+
+        case MacroPattern.Expr(name):
+            # Bind expression
+            if args.len() == 1:
+                bindings.set(name.clone(), MacroBinding.Single(args[0].clone()))
+                return true
+            return false
+
+        case MacroPattern.Sequence(pattern, separator, trailing):
+            # Match repeating sequence
+            val items: Array<Expr> = []
+            var idx = 0
+
+            while idx < args.len():
+                # Try to match the pattern at current position
+                val item_bindings: Dict<String, MacroBinding> = Dict.new()
+                if match_pattern(pattern, &[args[idx].clone()], &mut item_bindings):
+                    items.push(args[idx].clone())
+                    idx += 1
+
+                    # Check for separator if there's more input
+                    if idx < args.len():
+                        if val Some(sep) = separator:
+                            # Expect separator next
+                            match args[idx]:
+                                case Expr.Identifier(name):
+                                    if name == sep:
+                                        idx += 1  # Skip separator
+                                    else:
+                                        break  # No separator, end sequence
+                                case _:
+                                    break
+                else:
+                    break
+
+            # If trailing is true, allow a trailing separator
+            if trailing and idx < args.len():
+                if val Some(sep) = separator:
+                    match args[idx]:
+                        case Expr.Identifier(name):
+                            if name == sep:
+                                idx += 1  # Skip trailing separator
+                        case _:
+                            pass
+
+            # Extract the variable name from the pattern
+            val var_name = match pattern.as_ref():
+                case MacroPattern.Expr(name): name.clone()
+                case MacroPattern.Ident(name): name.clone()
+                case _: "items".to_string()
+
+            bindings.set(var_name, MacroBinding.Sequence(items))
+            return true
+
+        case MacroPattern.Group(patterns):
+            # Match group of patterns
+            if args.len() != patterns.len():
+                return false
+            for i in 0..patterns.len():
+                if not match_pattern(&patterns[i], &[args[i].clone()], bindings):
+                    return false
+            return true
+
+        case _:
+            return false
+
+# Apply template with bindings
+fn apply_template(template: &MacroTemplate, bindings: &Dict<String, MacroBinding>) -> Result<Expr, InterpreterError>:
+    match template:
+        case MacroTemplate.Literal(s):
+            return Ok(Expr.Identifier(s.clone()))
+
+        case MacroTemplate.Var(name):
+            match bindings.get(name):
+                case Some(MacroBinding.Single(expr)):
+                    return Ok(expr.clone())
+                case _:
+                    return Err(InterpreterError.MacroError("unbound variable: {name}".to_string()))
+
+        case MacroTemplate.Expr(expr):
+            return Ok(*expr.clone())
+
+        case MacroTemplate.Concat(templates):
+            # Concatenate multiple templates
+            # This would typically create a block or sequence
+            val exprs: Array<Expr> = []
+            for t in templates:
+                val e = apply_template(t, bindings)?
+                exprs.push(e)
+            # Return as tuple for now
+            return Ok(Expr.Tuple(exprs))
+
+        case MacroTemplate.Sequence(var_name, template, separator):
+            match bindings.get(var_name):
+                case Some(MacroBinding.Sequence(items)):
+                    val exprs: Array<Expr> = []
+                    for item in items:
+                        val item_bindings = Dict.new()
+                        item_bindings.set(var_name.clone(), MacroBinding.Single(item.clone()))
+                        val e = apply_template(template, &item_bindings)?
+                        exprs.push(e)
+                    return Ok(Expr.Array(exprs))
+                case _:
+                    return Err(InterpreterError.MacroError("expected sequence for: {var_name}".to_string()))
+
+        case _:
+            return Err(InterpreterError.NotImplemented("macro template".to_string()))
+
+# A macro binding (value matched by pattern)
+enum MacroBinding:
+    Single(Expr)
+    Sequence(Array<Expr>)
+
+# Built-in macros
+fn register_builtin_macros(expander: &mut MacroExpander):
+    # todo!() macro
+    expander.register(Macro {
+        name: "todo".to_string(),
+        rules: [
+            MacroRule {
+                pattern: MacroPattern.Optional(Box.new(MacroPattern.Expr("msg".to_string()))),
+                template: MacroTemplate.Expr(Box.new(
+                    Expr.Call(
+                        Box.new(Expr.Identifier("panic".to_string())),
+                        [Expr.Literal(Literal.String("not yet implemented".to_string()))]
+                    )
+                ))
+            }
+        ],
+        is_hygenic: true
+    })
+
+    # dbg!() macro
+    # TODO: Re-enable when AST construction syntax is fixed
+    # expander.register(Macro {
+    #     name: "dbg".to_string(),
+    #     rules: [
+    #         MacroRule {
+    #             pattern: MacroPattern.Expr("val".to_string()),
+    #             template: MacroTemplate.Expr(Box.new(
+    #                 Expr.Block([
+    #                     Statement.Let {
+    #                         name: "__dbg_val".to_string(),
+    #                         value: Expr.Identifier("val".to_string())
+    #                     },
+    #                     Statement.Expr(Expr.Call(
+    #                         Box.new(Expr.Identifier("println".to_string())),
+    #                         [
+    #                             Expr.Literal(Literal.String("[debug] ".to_string())),
+    #                             Expr.Identifier("__dbg_val".to_string())
+    #                         ]
+    #                     )),
+    #                     Statement.Expr(Expr.Identifier("__dbg_val".to_string()))
+    #                 ])
+    #             ))
+    #         }
+    #     ],
+    #     is_hygenic: true
+    # })

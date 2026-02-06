@@ -1,0 +1,258 @@
+# SFFI Specification for Interpreter Hooks API
+#
+# This specification defines the FFI functions needed for the Interpreter Hooks API,
+# which powers the DAP (Debug Adapter Protocol) integration.
+#
+# These functions bridge Simple's interpreter/runtime (written in Rust) with
+# the hooks API (written in Simple) to enable debugging capabilities.
+#
+# Generate Rust FFI code with:
+#   simple sffi-gen --gen-intern interpreter_hooks.spl
+
+# --- Type Definitions ---
+
+# Breakpoint type enumeration
+enum BreakpointType:
+    Line              # Break at specific line
+    Conditional       # Break when condition is true
+    Function          # Break on function entry
+    Exception         # Break on exception
+    LogPoint          # Log message without stopping
+
+# Execution state
+enum ExecutionState:
+    Running           # Execution is running
+    Paused            # Paused at breakpoint or step
+    Stopped           # Execution stopped
+    Completed         # Execution completed normally
+
+# Stack frame information
+struct StackFrame:
+    id: i64           # Frame ID (0 = current)
+    name: text        # Function/method name
+    file: text        # Source file
+    line: i64         # Current line
+    column: i64       # Current column
+    scope_id: i64     # Scope ID for variable lookup
+
+# Variable scope enumeration
+enum VariableScope:
+    Local             # Local variables
+    Global            # Global/module-level variables
+    Closure           # Captured closure variables
+    Argument          # Function arguments
+
+# Variable information
+struct Variable:
+    name: text
+    value: text           # String representation
+    type: text            # Type name
+    scope: VariableScope
+    is_mutable: bool
+    memory_address: Option<i64>
+
+# Expression evaluation result
+struct EvalResult:
+    value: text       # String representation
+    type: text        # Type name
+    error: Option<text>  # Error message if eval failed
+
+# --- FFI Function Specifications ---
+
+# Add a breakpoint at a specific line
+#
+# Registers a breakpoint in the interpreter. When execution reaches this line,
+# the interpreter will pause and notify the debugger.
+#
+# Parameters:
+# - file: Source file path
+# - line: Line number (0-based)
+# - id: Unique breakpoint ID
+#
+# Example:
+#   rt_hook_add_breakpoint("src/main.spl", 42, 1)
+extern fn rt_hook_add_breakpoint(file: text, line: i64, id: i64)
+
+# Remove a breakpoint
+#
+# Removes a previously registered breakpoint.
+#
+# Parameters:
+# - file: Source file path
+# - line: Line number (0-based)
+#
+# Example:
+#   rt_hook_remove_breakpoint("src/main.spl", 42)
+extern fn rt_hook_remove_breakpoint(file: text, line: i64)
+
+# Enable or disable a breakpoint
+#
+# Allows temporarily disabling a breakpoint without removing it.
+#
+# Parameters:
+# - file: Source file path
+# - line: Line number (0-based)
+# - enabled: Whether the breakpoint should be enabled
+#
+# Example:
+#   rt_hook_set_breakpoint_enabled("src/main.spl", 42, false)
+extern fn rt_hook_set_breakpoint_enabled(file: text, line: i64, enabled: bool)
+
+# Continue execution from paused state
+#
+# Resumes execution after hitting a breakpoint or pause.
+# Execution continues until the next breakpoint or program end.
+#
+# Example:
+#   rt_hook_continue()
+extern fn rt_hook_continue()
+
+# Pause execution
+#
+# Pauses execution at the next available statement.
+# Used to implement the "pause" button in debuggers.
+#
+# Example:
+#   rt_hook_pause()
+extern fn rt_hook_pause()
+
+# Single step execution
+#
+# Executes a single statement and then pauses.
+# The type of step (over/into/out) is determined by the hook context.
+#
+# Example:
+#   rt_hook_step()
+extern fn rt_hook_step()
+
+# Terminate execution
+#
+# Immediately stops the running program.
+# Used to implement the "stop" button in debuggers.
+#
+# Example:
+#   rt_hook_terminate()
+extern fn rt_hook_terminate()
+
+# Get current call depth
+#
+# Returns the depth of the current call stack.
+# Used to determine when to stop during step over/out.
+#
+# Returns:
+# - Current call depth (0 = top level)
+#
+# Example:
+#   val depth = rt_hook_get_call_depth()
+extern fn rt_hook_get_call_depth() -> i64
+
+# Get current stack frames
+#
+# Captures the current call stack when paused.
+# Returns stack frames from current (0) to oldest.
+#
+# Returns:
+# - Array of stack frames
+#
+# Example:
+#   val frames = rt_hook_get_stack_frames()
+extern fn rt_hook_get_stack_frames() -> [StackFrame]
+
+# Get variables in a specific scope
+#
+# Returns all variables visible in the given scope at the given frame.
+#
+# Parameters:
+# - frame_id: Stack frame ID
+# - scope: Variable scope to query
+#
+# Returns:
+# - Array of variables
+#
+# Example:
+#   val locals = rt_hook_get_variables(0, VariableScope.Local)
+extern fn rt_hook_get_variables(frame_id: i64, scope: VariableScope) -> [Variable]
+
+# Evaluate an expression in debug context
+#
+# Evaluates an arbitrary expression in the context of a stack frame.
+# Used for watch expressions and debug console.
+#
+# Parameters:
+# - expr: Expression to evaluate (as string)
+# - frame_id: Stack frame context
+#
+# Returns:
+# - Evaluation result (value, type, or error)
+#
+# Example:
+#   val result = rt_hook_evaluate_expression("a + b", 0)
+extern fn rt_hook_evaluate_expression(expr: text, frame_id: i64) -> EvalResult
+
+# Evaluate a breakpoint condition
+#
+# Evaluates a conditional breakpoint's condition in the current context.
+# Returns true if the condition is met (should break).
+#
+# Parameters:
+# - condition: Condition expression (as string)
+#
+# Returns:
+# - true if condition is met, false otherwise
+#
+# Example:
+#   if rt_hook_evaluate_condition("x > 10"):
+#       # Break here
+extern fn rt_hook_evaluate_condition(condition: text) -> bool
+
+# Enable debugging mode
+#
+# Enables debugging hooks in the interpreter.
+# Must be called before adding breakpoints.
+#
+# Example:
+#   rt_hook_enable_debugging()
+extern fn rt_hook_enable_debugging()
+
+# Disable debugging mode
+#
+# Disables debugging hooks for better performance.
+# Removes all breakpoints.
+#
+# Example:
+#   rt_hook_disable_debugging()
+extern fn rt_hook_disable_debugging()
+
+# --- Notes for Implementation ---
+#
+# Rust Implementation Location: rust/compiler/src/interpreter_hooks.rs
+#
+# The Rust implementation should:
+# 1. Maintain global breakpoint registry (thread-local or Arc<Mutex<>>)
+# 2. Check breakpoints at statement boundaries during interpretation
+# 3. Capture stack frames when paused
+# 4. Support step over/into/out by tracking call depth
+# 5. Evaluate expressions in the current execution context
+# 6. Handle concurrent debugging (if needed)
+#
+# Integration points:
+# - rust/compiler/src/interpreter/node_exec.rs - Add breakpoint checks
+# - rust/compiler/src/interpreter/interpreter_state.rs - Track call stack
+# - rust/compiler/src/interpreter/expr.rs - Expression evaluation
+# - rust/compiler/src/interpreter/interpreter_call/ - Track function calls
+#
+# Performance targets:
+# - Breakpoint check: < 1ms overhead per statement
+# - Stack frame capture: < 50ms
+# - Variable inspection: < 100ms
+# - Expression evaluation: < 200ms
+#
+# Thread safety:
+# - Debugging is single-threaded (one debugger per process)
+# - Use thread-local storage for debug state
+# - Breakpoint registry can be global with Arc<Mutex<>>
+#
+# Execution control:
+# - Use a global "execution mode" flag (Run/Pause/Step/Terminate)
+# - Check mode at each statement boundary
+# - Use condition variables for pause/resume synchronization

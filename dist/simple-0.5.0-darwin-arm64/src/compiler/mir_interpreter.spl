@@ -1,0 +1,450 @@
+# MIR Interpreter
+#
+# Pure interpreter backend for MIR execution without native compilation.
+# Evaluates MIR instructions directly using virtual register mapping.
+#
+# This enables:
+# - Self-hosting (no FFI dependencies)
+# - Debugging (compare interpreter vs native results)
+# - Portable execution (no Cranelift/LLVM needed)
+# - Fast iteration (no compilation overhead)
+#
+# Architecture:
+#   MIR Instructions -> Direct Evaluation -> RuntimeValue
+#
+# Port of rust/compiler/src/codegen/mir_interpreter.rs (1,058 lines)
+
+use mir_data.*
+
+export MirInterpreter, InterpError
+
+# ============================================================================
+# Interpreter Errors
+# ============================================================================
+
+enum InterpError:
+    """Interpreter runtime errors."""
+    DivisionByZero(message: text)
+    InvalidCast(from_ty: text, to_ty: text)
+    UnsupportedOperation(op: text)
+    InvalidRegister(vreg: i64)
+    OutOfBounds(index: i64, size: i64)
+    RuntimeError(message: text)
+
+impl InterpError:
+    fn message() -> text:
+        match self:
+            case DivisionByZero(msg): "Division by zero: {msg}"
+            case InvalidCast(from, to): "Invalid cast from {from} to {to}"
+            case UnsupportedOperation(op): "Unsupported operation: {op}"
+            case InvalidRegister(vreg): "Invalid virtual register: v{vreg}"
+            case OutOfBounds(idx, size): "Index {idx} out of bounds (size: {size})"
+            case RuntimeError(msg): "Runtime error: {msg}"
+
+# ============================================================================
+# MIR Interpreter
+# ============================================================================
+
+class MirInterpreter:
+    """
+    MIR instruction interpreter.
+
+    Maintains runtime state:
+    - locals: Local variable values (LocalId -> i64)
+    - globals: Global variable storage (name -> i64)
+    - blocks: Basic block map (BlockId -> MirBlock)
+    - current_block: Currently executing block
+    - return_value: Return value from function
+    """
+    locals: {i64: i64}       # LocalId.id -> value
+    globals: {text: i64}     # Global name -> value
+    blocks: {i64: MirBlock}  # BlockId.id -> block
+    current_block: i64?      # Current block ID
+    return_value: i64?       # Return value
+    has_returned: bool       # Whether function has returned
+
+impl MirInterpreter:
+    static fn create() -> MirInterpreter:
+        """Create a new interpreter instance."""
+        MirInterpreter(
+            locals: {},
+            globals: {},
+            blocks: {},
+            current_block: nil,
+            return_value: nil,
+            has_returned: false
+        )
+
+    # ========================================================================
+    # Value Management
+    # ========================================================================
+
+    me set_local(dest: LocalId, value: i64):
+        """Store a value in a local variable."""
+        self.locals[dest.id] = value
+
+    fn get_local(local: LocalId) -> i64:
+        """Get a value from a local variable (0 if not set)."""
+        self.locals[local.id] ?? 0
+
+    fn get_operand(operand: MirOperand) -> i64:
+        """Evaluate an operand to get its value."""
+        match operand.kind:
+            case Copy(local): self.get_local(local)
+            case Move(local): self.get_local(local)
+            case Const(value, type_):
+                match value:
+                    case Int(v): v
+                    case Float(v): f64_to_bits(v)
+                    case Bool(v): if v: 1 else: 0
+                    case _: 0  # Stub for complex constants
+
+    # ========================================================================
+    # Instruction Execution
+    # ========================================================================
+
+    me execute_instruction(inst: MirInst) -> InterpError?:
+        """Execute a single MIR instruction."""
+        match inst.kind:
+            case Const(dest, value, type_):
+                self.execute_const(dest, value)
+                nil
+
+            case Copy(dest, src):
+                val value = self.get_local(src)
+                self.set_local(dest, value)
+                nil
+
+            case Move(dest, src):
+                val value = self.get_local(src)
+                self.set_local(dest, value)
+                # Note: Move semantics not enforced in interpreter
+                nil
+
+            case BinOp(dest, op, left, right):
+                self.execute_binop(dest, op, left, right)
+
+            case UnaryOp(dest, op, operand):
+                self.execute_unaryop(dest, op, operand)
+
+            case Cast(dest, operand, target):
+                val value = self.get_operand(operand)
+                # Simple cast - just copy value for now
+                self.set_local(dest, value)
+                nil
+
+            case Bitcast(dest, operand, target):
+                val value = self.get_operand(operand)
+                self.set_local(dest, value)
+                nil
+
+            case Load(dest, ptr):
+                val addr = self.get_operand(ptr)
+                # Interpret addr as local ID for now
+                val local_id = LocalId(id: addr)
+                val value = self.get_local(local_id)
+                self.set_local(dest, value)
+                nil
+
+            case Store(ptr, value):
+                val addr = self.get_operand(ptr)
+                val val_to_store = self.get_operand(value)
+                val local_id = LocalId(id: addr)
+                self.set_local(local_id, val_to_store)
+                nil
+
+            case Alloc(dest, type_):
+                # Allocate local storage - return local ID
+                self.set_local(dest, dest.id)
+                nil
+
+            case GetElementPtr(dest, base, indices):
+                val base_val = self.get_operand(base)
+                var offset = base_val
+                for idx in indices:
+                    val idx_val = self.get_operand(idx)
+                    offset = offset + (idx_val * 8)
+                self.set_local(dest, offset)
+                nil
+
+            case Aggregate(dest, kind, operands):
+                # Stub: Complex aggregates need runtime support
+                self.set_local(dest, 0)
+                nil
+
+            case GetField(dest, base, field):
+                val base_val = self.get_operand(base)
+                # Simple field extraction (stub)
+                self.set_local(dest, base_val + (field * 8))
+                nil
+
+            case SetField(base, field, value):
+                # Stub: field setting
+                nil
+
+            case Call(dest, func, args):
+                # Stub: Function calls need runtime support
+                if dest.?:
+                    self.set_local(dest.unwrap(), 0)
+                nil
+
+            case CallIndirect(dest, ptr, args, sig):
+                # Stub: Indirect calls
+                if dest.?:
+                    self.set_local(dest.unwrap(), 0)
+                nil
+
+            case Intrinsic(dest, name, args):
+                # Stub: Intrinsics
+                if dest.?:
+                    self.set_local(dest.unwrap(), 0)
+                nil
+
+            case PipeForward(dest, value, func):
+                # Stub: Pipeline operators need runtime support
+                val val_res = self.get_operand(value)
+                self.set_local(dest, val_res)
+                nil
+
+            case Compose(dest, f, g, forward):
+                # Stub: Function composition
+                self.set_local(dest, 0)
+                nil
+
+            case Parallel(dest, funcs):
+                # Stub: Parallel execution
+                self.set_local(dest, 0)
+                nil
+
+            case LayerConnect(dest, layer1, layer2):
+                # Stub: Neural network layers
+                self.set_local(dest, 0)
+                nil
+
+            case CreatePromise(dest, body, result_type):
+                # Stub: Async promises
+                self.set_local(dest, 0)
+                nil
+
+            case Await(dest, promise):
+                # Stub: Await
+                val prom_val = self.get_operand(promise)
+                self.set_local(dest, prom_val)
+                nil
+
+            case Yield(value):
+                # Stub: Generator yield
+                nil
+
+            case Spawn(dest, handler, args):
+                # Stub: Actor spawn
+                self.set_local(dest, 0)
+                nil
+
+            case Send(target, message):
+                # Stub: Actor send
+                nil
+
+            case Receive(dest, timeout):
+                # Stub: Actor receive
+                self.set_local(dest, 0)
+                nil
+
+            case Ref(dest, borrow_kind, place):
+                # Borrow checking - return place address
+                self.set_local(dest, place.local.id)
+                nil
+
+            case DebugValue(local, name):
+                # Debug - no-op
+                nil
+
+            case Nop:
+                # No-op
+                nil
+
+            case CheckedBinOp(dest, op, left, right):
+                # For now, same as BinOp (no overflow checking)
+                self.execute_binop(dest, op, left, right)
+
+            case _:
+                Some(InterpError.UnsupportedOperation(op: "unknown instruction"))
+
+    # ========================================================================
+    # Helper Methods
+    # ========================================================================
+
+    me execute_const(dest: LocalId, value: MirConstValue):
+        """Execute constant load."""
+        val val_int = match value:
+            case Int(v): v
+            case Float(v): f64_to_bits(v)
+            case Bool(v): if v: 1 else: 0
+            case _: 0  # Stub for complex constants
+        self.set_local(dest, val_int)
+
+    me execute_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> InterpError?:
+        """Evaluate binary operation."""
+        val l = self.get_operand(left)
+        val r = self.get_operand(right)
+
+        val result = match op:
+            case Add: l + r
+            case Sub: l - r
+            case Mul: l * r
+            case Div:
+                if r == 0:
+                    return Some(InterpError.DivisionByZero(message: "Integer division"))
+                l / r
+            case Rem:
+                if r == 0:
+                    return Some(InterpError.DivisionByZero(message: "Integer modulo"))
+                l % r
+            case Pow: l ** r
+            case MatMul:
+                # Stub: Matrix multiplication needs runtime support
+                0
+            case Eq: if l == r: 1 else: 0
+            case Ne: if l != r: 1 else: 0
+            case Lt: if l < r: 1 else: 0
+            case Le: if l <= r: 1 else: 0
+            case Gt: if l > r: 1 else: 0
+            case Ge: if l >= r: 1 else: 0
+            case BitAnd: l & r
+            case BitOr: l | r
+            case BitXor: l xor r
+            case Shl: l << (r & 63)  # Mask to avoid overflow
+            case Shr: l >> (r & 63)
+            case BroadcastAdd: l + r  # Stub: Broadcast needs tensor support
+            case BroadcastSub: l - r
+            case BroadcastMul: l * r
+            case BroadcastDiv: if r != 0: l / r else: 0
+            case BroadcastPow: l ** r
+            case Offset: l + r
+            case _:
+                return Some(InterpError.UnsupportedOperation(op: "unknown binop"))
+
+        self.set_local(dest, result)
+        nil
+
+    me execute_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand) -> InterpError?:
+        """Evaluate unary operation."""
+        val v = self.get_operand(operand)
+
+        val result = match op:
+            case Neg: -v
+            case Not: if v == 0: 1 else: 0
+            case BitNot: ~v
+            case Transpose:
+                # Stub: Transpose needs matrix support
+                v
+
+        self.set_local(dest, result)
+        nil
+
+    # ========================================================================
+    # Function Execution
+    # ========================================================================
+
+    me execute_function(func: MirFunction) -> (i64?, InterpError?):
+        """Execute a MIR function and return result."""
+        # Initialize blocks
+        for block in func.blocks:
+            self.blocks[block.id.id] = block
+
+        # Initialize locals
+        for local in func.locals:
+            self.locals[local.id.id] = 0
+
+        # Start at entry block
+        self.current_block = Some(func.entry_block.id)
+        self.has_returned = false
+        self.return_value = nil
+
+        # Execute blocks until return
+        var max_iterations = 10000  # Prevent infinite loops
+        while self.current_block.? and not self.has_returned and max_iterations > 0:
+            val block_id = self.current_block.unwrap()
+            val block = self.blocks[block_id]
+
+            # Execute all instructions in block
+            for inst in block.instructions:
+                val error = self.execute_instruction(inst)
+                if error.?:
+                    return (nil, error)
+                if self.has_returned:
+                    break
+
+            # Execute terminator if not returned
+            if not self.has_returned:
+                val error = self.execute_terminator(block.terminator)
+                if error.?:
+                    return (nil, error)
+
+            max_iterations = max_iterations - 1
+
+        if max_iterations == 0:
+            return (nil, Some(InterpError.RuntimeError(message: "Infinite loop detected")))
+
+        # Return value from return instruction
+        (self.return_value, nil)
+
+    me execute_terminator(term: MirTerminator) -> InterpError?:
+        """Execute a block terminator."""
+        match term:
+            case Goto(target):
+                self.current_block = Some(target.id)
+                nil
+
+            case Return(value):
+                if value.?:
+                    self.return_value = Some(self.get_operand(value.unwrap()))
+                else:
+                    self.return_value = Some(0)
+                self.has_returned = true
+                self.current_block = nil
+                nil
+
+            case If(cond, then_, else_):
+                val cond_val = self.get_operand(cond)
+                self.current_block = Some(if cond_val != 0: then_.id else: else_.id)
+                nil
+
+            case Switch(value, targets, default):
+                val v = self.get_operand(value)
+                var target = default.id
+                for case_ in targets:
+                    if v == case_.value:
+                        target = case_.target.id
+                        break
+                self.current_block = Some(target)
+                nil
+
+            case Unreachable:
+                self.has_returned = true
+                Some(InterpError.RuntimeError(message: "Unreachable code executed"))
+
+            case Abort(message):
+                self.has_returned = true
+                Some(InterpError.RuntimeError(message: "Abort: {message}"))
+
+            case CallTerminator(dest, func, args, normal, unwind):
+                # Stub: Call terminators need runtime support
+                if dest.?:
+                    self.set_local(dest.unwrap(), 0)
+                self.current_block = Some(normal.id)
+                nil
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn f64_to_bits(v: f64) -> i64:
+    """Convert f64 to bit representation (stub)."""
+    # TODO: Implement proper f64 to bits conversion
+    v as i64
+
+fn f64_from_bits(bits: i64) -> f64:
+    """Convert bit representation to f64 (stub)."""
+    # TODO: Implement proper bits to f64 conversion
+    bits as f64

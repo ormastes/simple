@@ -1,0 +1,129 @@
+# Visibility Checker - Warnings for Non-Public Access
+#
+# Emits W0401 warnings when code accesses private items from other modules.
+# This is a non-breaking change: code continues to compile but warns about
+# future visibility violations.
+
+use hir_types.{Symbol, SymbolId, SymbolTable}
+use lexer.Span
+
+# Warning for accessing a private symbol
+struct VisibilityWarning:
+    message: text
+    symbol_name: text
+    accessing_module: text
+    defining_module: text
+    span: Span
+    code: text  # "W0401"
+
+impl VisibilityWarning:
+    static fn new(
+        symbol_name: text,
+        accessing_module: text,
+        defining_module: text,
+        span: Span
+    ) -> VisibilityWarning:
+        val message = "Accessing private symbol '{symbol_name}' from module '{accessing_module}'"
+        VisibilityWarning(
+            message: message,
+            symbol_name: symbol_name,
+            accessing_module: accessing_module,
+            defining_module: defining_module,
+            span: span,
+            code: "W0401"
+        )
+
+    fn format() -> text:
+        """Format warning for display."""
+        val lines = [
+            "WARNING[{self.code}]: {self.message}",
+            "  --> {self.defining_module}",
+            "   |",
+            "   | Symbol '{self.symbol_name}' is not exported",
+            "   |",
+            "   = note: Type doesn't match filename and lacks 'pub' modifier",
+            "   = help: Add 'pub' modifier in {self.defining_module} to export it",
+            "   = note: This will become an error in a future release"
+        ]
+        lines.join("\n")
+
+# Visibility checker for cross-module access
+class VisibilityChecker:
+    """Checks visibility and emits warnings for private access.
+
+    Usage:
+        val checker = VisibilityChecker.new("current_module.spl")
+        val warnings = checker.check_symbol_access(symbol, symbol_table, access_span)
+    """
+    current_module: text        # Module doing the accessing
+    warnings: [VisibilityWarning]
+
+    static fn new(current_module: text) -> VisibilityChecker:
+        VisibilityChecker(
+            current_module: current_module,
+            warnings: []
+        )
+
+    fn check_symbol_access(
+        symbol: Symbol,
+        symbol_module: text,
+        access_span: Span
+    ) -> VisibilityWarning?:
+        """Check if accessing a symbol from another module is allowed.
+
+        Returns Some(warning) if accessing a private symbol from another module.
+        Returns None if access is allowed (public symbol or same module).
+        """
+        # Same module? Always allowed
+        if symbol_module == self.current_module:
+            return nil
+
+        # Public symbol? Allowed from any module
+        if symbol.is_public:
+            return nil
+
+        # Private symbol from another module - emit warning
+        Some(VisibilityWarning.new(
+            symbol.name,
+            self.current_module,
+            symbol_module,
+            access_span
+        ))
+
+    me record_warning(warning: VisibilityWarning):
+        """Record a visibility warning."""
+        self.warnings = self.warnings.push(warning)
+
+    fn get_warnings() -> [VisibilityWarning]:
+        """Get all recorded warnings."""
+        self.warnings
+
+    fn warning_count() -> i64:
+        """Get count of warnings."""
+        self.warnings.len()
+
+# Integration helper for symbol lookup
+fn check_and_warn(
+    checker: VisibilityChecker,
+    symbol: Symbol,
+    symbol_module: text,
+    access_span: Span
+):
+    """Check visibility and record warning if needed.
+
+    This should be called after each symbol lookup that crosses module boundaries.
+
+    Example integration:
+        val sym = symbol_table.lookup(name)
+        if sym.?:
+            val symbol = symbol_table.get(sym.unwrap()).unwrap()
+            check_and_warn(visibility_checker, symbol, defining_module, current_span)
+    """
+    val warning = checker.check_symbol_access(symbol, symbol_module, access_span)
+    if warning.?:
+        checker.record_warning(warning.unwrap())
+
+# Export public API
+export VisibilityWarning
+export VisibilityChecker
+export check_and_warn

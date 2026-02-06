@@ -1,0 +1,357 @@
+# Postfix Operators
+#
+# Handles all postfix operations: method calls, field access, indexing,
+# slicing, optional chaining, try operator, type casting, and more.
+
+from token import {Token, TokenKind, NamePattern}
+from ast import {Expr, Argument, LambdaParam, MoveMode}
+from error import {ParseError}
+
+impl Parser:
+
+    fn expr_to_qualified_name(expr: Expr) -> text:
+        match expr:
+            Expr.Identifier(name): name
+            Expr.FieldAccess(receiver, field):
+                val receiver_name = self.expr_to_qualified_name(receiver)
+                "{receiver_name}.{field}"
+            _:
+                raise ParseError.syntax_error_with_span(
+                    "Expected qualified name", self.current.span)
+
+    fn field_access_to_path_segments(expr: Expr) -> [text]:
+        match expr:
+            Expr.Identifier(name): [name]
+            Expr.FieldAccess(receiver, field):
+                var segments = self.field_access_to_path_segments(receiver)
+                segments.push(field)
+                segments
+            _:
+                raise ParseError.syntax_error_with_span(
+                    "Expected path expression", self.current.span)
+
+    fn is_type_path(expr: Expr) -> bool:
+        match expr:
+            Expr.Identifier(name): name[0].is_uppercase()
+            _: false
+
+    fn parse_postfix() -> Expr:
+        var expr = self.parse_primary()
+        var consumed_indents = 0
+
+        loop:
+            match self.current.kind:
+                TokenKind.LParen:
+                    expr = self.parse_call(expr)
+
+                TokenKind.Bang:
+                    # Macro invocation: name!(args)
+                    match expr:
+                        Expr.Identifier(name):
+                            self.advance()
+                            val args = self.parse_macro_args()
+                            expr = Expr.MacroInvocation(name: name, args: args)
+                        _: break
+
+                TokenKind.LBracket:
+                    # Only treat [ as indexing if adjacent (no whitespace)
+                    if self.previous.span.end != self.current.span.start:
+                        break
+                    self.advance()
+
+                    if self.check(TokenKind.DoubleColon):
+                        # [::step]
+                        self.advance()
+                        val step = self.parse_optional_expr_before_bracket()
+                        self.expect(TokenKind.RBracket)
+                        expr = self.make_slice_expr(expr, None, None, step)
+                    elif self.check(TokenKind.Colon):
+                        # [:end:step]
+                        self.advance()
+                        if self.check(TokenKind.Colon):
+                            self.advance()
+                            val step = self.parse_optional_expr_before_bracket()
+                            self.expect(TokenKind.RBracket)
+                            expr = self.make_slice_expr(expr, None, None, step)
+                        else:
+                            val end = self.parse_optional_expr_before_bracket()
+                            val step = self.parse_optional_step()
+                            self.expect(TokenKind.RBracket)
+                            expr = Expr.Slice(receiver: expr, start: None, end: end, step: step)
+                    else:
+                        val first = self.parse_expression()
+                        if self.check(TokenKind.DoubleColon):
+                            # [start::step]
+                            self.advance()
+                            val step = self.parse_optional_expr_before_bracket()
+                            self.expect(TokenKind.RBracket)
+                            expr = Expr.Slice(receiver: expr, start: first, end: None, step: step)
+                        elif self.check(TokenKind.Colon) or match self.current.kind:
+                            TokenKind.Symbol(_): true
+                            _: false:
+                            # Slice: [start:end:step]
+                            val end = match self.current.kind:
+                                TokenKind.Symbol(name):
+                                    # Symbol like :name - convert back to identifier
+                                    val sym_name = name
+                                    val span = self.current.span
+                                    self.advance()
+                                    self.pending_tokens.push_front(self.current.clone())
+                                    self.current = Token(kind: TokenKind.Identifier(name: sym_name, pattern: NamePattern.Immutable), lexeme: sym_name, span: span)
+                                    self.parse_expression()
+                                _:
+                                    self.advance()  # consume colon
+                                    if self.check(TokenKind.Colon) or self.check(TokenKind.RBracket):
+                                        None
+                                    else:
+                                        self.parse_expression()
+                            val step = self.parse_optional_step()
+                            self.expect(TokenKind.RBracket)
+                            expr = Expr.Slice(receiver: expr, start: first, end: end, step: step)
+                        else:
+                            # Regular index
+                            self.expect(TokenKind.RBracket)
+                            expr = Expr.Index(receiver: expr, index: first)
+
+                TokenKind.Dot:
+                    self.advance()
+                    # Skip newlines/indents for multi-line chaining
+                    while match self.current.kind:
+                        TokenKind.Newline: true
+                        TokenKind.Indent: true
+                        _: false:
+                        if match self.current.kind:
+                            TokenKind.Indent: true
+                            _: false:
+                            consumed_indents = consumed_indents + 1
+                        self.advance()
+
+                    # Tuple element access: tuple.0
+                    if match self.current.kind:
+                        TokenKind.Integer(_): true
+                        _: false:
+                        val index = match self.current.kind:
+                            TokenKind.Integer(n): n
+                            _: 0
+                        self.advance()
+                        expr = Expr.TupleIndex(receiver: expr, index: index)
+                    else:
+                        val field = self.expect_method_name()
+                        if self.check(TokenKind.LParen):
+                            var args = self.parse_arguments()
+                            if self.check(TokenKind.Backslash):
+                                val trailing = self.parse_trailing_lambda()
+                                args.push(Argument(name: None, value: trailing))
+                            if self.is_type_path(expr):
+                                var path_segments = self.field_access_to_path_segments(expr)
+                                path_segments.push(field)
+                                expr = Expr.Call(callee: Expr.Path(path_segments), args: args)
+                            else:
+                                expr = Expr.MethodCall(receiver: expr, method: field, args: args)
+                        elif self.check(TokenKind.Backslash):
+                            val trailing = self.parse_trailing_lambda()
+                            expr = Expr.MethodCall(receiver: expr, method: field, args: [Argument(name: None, value: trailing)])
+                        elif self.check(TokenKind.LBrace) and not self.no_brace_postfix and field[0].is_uppercase():
+                            # Qualified struct init: module.StructName { ... }
+                            val qualified_name = self.expr_to_qualified_name(expr)
+                            val full_name = "{qualified_name}.{field}"
+                            self.advance()  # consume '{'
+                            self.skip_newlines()
+                            var fields = []
+                            while not self.check(TokenKind.RBrace):
+                                val field_name = self.expect_identifier()
+                                self.skip_newlines()
+                                val value = if self.check(TokenKind.Colon):
+                                    self.advance()
+                                    self.skip_newlines()
+                                    self.parse_expression()
+                                else:
+                                    Expr.Identifier(field_name)
+                                self.skip_newlines()
+                                fields.push((field_name, value))
+                                if not self.check(TokenKind.RBrace):
+                                    self.expect(TokenKind.Comma)
+                                    self.skip_newlines()
+                            self.expect(TokenKind.RBrace)
+                            expr = Expr.StructInit(name: full_name, fields: fields)
+                        elif self.check(TokenKind.LBrace) and not self.no_brace_postfix:
+                            # Method call with dict arg: obj.method {...}
+                            val dict_expr = self.parse_expression()
+                            expr = Expr.MethodCall(receiver: expr, method: field, args: [Argument(name: None, value: dict_expr)])
+                        else:
+                            expr = Expr.FieldAccess(receiver: expr, field: field)
+
+                        # Handle deprecated :: after field access
+                        if self.check(TokenKind.DoubleColon):
+                            var segments = self.field_access_to_path_segments(expr)
+                            while self.check(TokenKind.DoubleColon):
+                                self.advance()
+                                val segment = self.expect_method_name()
+                                segments.push(segment)
+                            expr = Expr.Path(segments)
+
+                TokenKind.Arrow:
+                    # Functional update: obj->method(args)
+                    self.advance()
+                    val method = self.expect_method_name()
+                    val args = self.parse_arguments()
+                    expr = Expr.FunctionalUpdate(target: expr, method: method, args: args)
+
+                TokenKind.Question:
+                    self.advance()
+                    expr = Expr.Try(expr)
+
+                TokenKind.DoubleQuestion:
+                    self.advance()
+                    val default = self.parse_unary()
+                    expr = Expr.Coalesce(expr: expr, default: default)
+
+                TokenKind.QuestionDot:
+                    self.advance()
+                    val field = self.expect_method_name()
+                    if self.check(TokenKind.LParen):
+                        val args = self.parse_arguments()
+                        expr = Expr.OptionalMethodCall(receiver: expr, method: field, args: args)
+                    else:
+                        expr = Expr.OptionalChain(expr: expr, field: field)
+
+                TokenKind.DotQuestion:
+                    self.advance()
+                    expr = Expr.ExistsCheck(expr)
+
+                TokenKind.Unwrap:
+                    self.advance()
+                    match self.current.kind:
+                        TokenKind.OrColon:
+                            self.advance()
+                            val default = self.parse_expression()
+                            expr = Expr.UnwrapOr(expr: expr, default: default)
+                        TokenKind.Else:
+                            self.advance()
+                            self.expect(TokenKind.Colon)
+                            val fallback_fn = self.parse_expression()
+                            expr = Expr.UnwrapElse(expr: expr, fallback_fn: fallback_fn)
+                        TokenKind.OrReturn:
+                            self.advance()
+                            expr = Expr.UnwrapOrReturn(expr)
+                        _:
+                            raise ParseError.syntax_error_with_span(
+                                "unwrap requires 'or:', 'else:', or 'or_return:' suffix",
+                                self.current.span)
+
+                TokenKind.As:
+                    self.advance()
+                    val target_type = self.parse_type()
+                    match self.current.kind:
+                        TokenKind.OrColon:
+                            self.advance()
+                            val default = self.parse_expression()
+                            expr = Expr.CastOr(expr: expr, target_type: target_type, default: default)
+                        TokenKind.Else:
+                            self.advance()
+                            self.expect(TokenKind.Colon)
+                            val fallback_fn = self.parse_expression()
+                            expr = Expr.CastElse(expr: expr, target_type: target_type, fallback_fn: fallback_fn)
+                        TokenKind.OrReturn:
+                            self.advance()
+                            expr = Expr.CastOrReturn(expr: expr, target_type: target_type)
+                        _:
+                            expr = Expr.Cast(expr: expr, target_type: target_type)
+
+                TokenKind.Newline:
+                    # Multi-line method chaining
+                    if self.peek_through_newlines_and_indents_is(TokenKind.Dot):
+                        consumed_indents = consumed_indents + self.skip_newlines_and_indents_for_method_chain()
+                    else:
+                        break
+
+                _: break
+
+        # Consume matching DEDENTs for multi-line chaining indents
+        while consumed_indents > 0:
+            if match self.current.kind:
+                TokenKind.Newline: true
+                _: false:
+                val next_is_dedent = self.pending_tokens.front().map(\t: match t.kind:
+                    TokenKind.Dedent: true
+                    _: false) ?? false
+                if next_is_dedent:
+                    self.advance()  # NEWLINE
+                    self.advance()  # DEDENT
+                    consumed_indents = consumed_indents - 1
+                else:
+                    break
+            elif match self.current.kind:
+                TokenKind.Dedent: true
+                _: false:
+                self.advance()
+                consumed_indents = consumed_indents - 1
+            else:
+                break
+
+        expr
+
+    fn parse_call(callee: Expr) -> Expr:
+        var args = self.parse_arguments()
+        if self.check(TokenKind.Backslash):
+            val trailing = self.parse_trailing_lambda()
+            args.push(Argument(name: None, value: trailing))
+        Expr.Call(callee: callee, args: args)
+
+    fn parse_trailing_lambda() -> Expr:
+        self.expect(TokenKind.Backslash)
+        val (params, capture_all) = self.parse_lambda_params()
+        self.expect(TokenKind.Colon)
+
+        val body = if self.check(TokenKind.Newline):
+            if self.peek_is(TokenKind.Indent):
+                val block = self.parse_block()
+                Expr.DoBlock(block.statements)
+            else:
+                self.parse_expression()
+        else:
+            self.parse_expression()
+
+        Expr.Lambda(params: params, body: body, move_mode: MoveMode.Copy, capture_all: capture_all)
+
+    fn parse_lambda_params() -> (params: [LambdaParam], capture_all: bool):
+        var params = []
+        var capture_all = false
+
+        if self.check(TokenKind.Star):
+            self.advance()
+            capture_all = true
+        elif not self.check(TokenKind.Colon):
+            val name = if self.check(TokenKind.Underscore):
+                self.advance()
+                "_"
+            else:
+                self.expect_identifier()
+            params.push(LambdaParam(name: name, ty: None))
+            self.parse_remaining_lambda_params(params)
+        else:
+            capture_all = true
+
+        (params, capture_all)
+
+    fn parse_pipe_lambda_params() -> [LambdaParam]:
+        var params = []
+        if not self.check(TokenKind.Pipe):
+            val name = if self.check(TokenKind.Underscore):
+                self.advance()
+                "_"
+            else:
+                self.expect_identifier()
+            params.push(LambdaParam(name: name, ty: None))
+            self.parse_remaining_lambda_params(params)
+        params
+
+    fn parse_remaining_lambda_params(params: [LambdaParam]):
+        while self.check(TokenKind.Comma):
+            self.advance()
+            val name = if self.check(TokenKind.Underscore):
+                self.advance()
+                "_"
+            else:
+                self.expect_identifier()
+            params.push(LambdaParam(name: name, ty: None))

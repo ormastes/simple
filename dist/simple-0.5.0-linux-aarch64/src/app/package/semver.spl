@@ -1,0 +1,294 @@
+# SemVer Parser and Constraint Matching
+# Implements Semantic Versioning 2.0.0 specification
+
+use package.types
+
+# ============================================================================
+# Version Parsing
+# ============================================================================
+
+fn parse_version(s: text) -> Result<Version, text>:
+    """Parse a semantic version string.
+
+    Examples:
+        1.2.3
+        1.2.3-alpha.1
+        1.2.3+build.123
+        1.2.3-beta.2+exp.sha.5114f85
+    """
+    # Split by + to separate build metadata
+    val parts = s.split("+")
+    val version_part = parts[0]
+    val build = if parts.length > 1: Some(parts[1]) else: None
+
+    # Split by - to separate prerelease
+    val pre_parts = version_part.split("-")
+    val core_version = pre_parts[0]
+    val prerelease = if pre_parts.length > 1: Some(pre_parts[1]) else: None
+
+    # Parse core version (MAJOR.MINOR.PATCH)
+    val components = core_version.split(".")
+    if components.length != 3:
+        return Err("Version must have exactly 3 components (MAJOR.MINOR.PATCH)")
+
+    # Parse each component as integer
+    val major = parse_int_component(components[0])?
+    val minor = parse_int_component(components[1])?
+    val patch = parse_int_component(components[2])?
+
+    Ok(Version(
+        major: major,
+        minor: minor,
+        patch: patch,
+        prerelease: prerelease,
+        build: build
+    ))
+
+fn parse_int_component(s: text) -> Result<i64, text>:
+    """Parse a version component as non-negative integer"""
+    if s.is_empty():
+        return Err("Version component cannot be empty")
+
+    # Check for negative or non-numeric
+    if s.starts_with("-"):
+        return Err("Version component cannot be negative")
+
+    # Try to parse as integer
+    val num = s.to_int()
+    if num < 0:
+        return Err("Version component must be non-negative")
+
+    Ok(num)
+
+# ============================================================================
+# Version Comparison
+# ============================================================================
+
+fn version_equal(a: Version, b: Version) -> bool:
+    """Check if two versions are equal (ignoring build metadata)"""
+    a.major == b.major and
+    a.minor == b.minor and
+    a.patch == b.patch and
+    a.prerelease == b.prerelease
+
+fn version_greater(a: Version, b: Version) -> bool:
+    """Check if version a > version b"""
+    # Compare major version
+    if a.major != b.major:
+        return a.major > b.major
+
+    # Compare minor version
+    if a.minor != b.minor:
+        return a.minor > b.minor
+
+    # Compare patch version
+    if a.patch != b.patch:
+        return a.patch > b.patch
+
+    # Compare prerelease (no prerelease > with prerelease)
+    match (a.prerelease, b.prerelease):
+        (None, Some(_)): true        # 1.0.0 > 1.0.0-alpha
+        (Some(_), None): false       # 1.0.0-alpha < 1.0.0
+        (Some(pre_a), Some(pre_b)):
+            # Lexicographic comparison of prerelease
+            pre_a > pre_b
+        (None, None): false          # Equal versions
+
+fn version_greater_or_equal(a: Version, b: Version) -> bool:
+    """Check if version a >= version b"""
+    version_equal(a, b) or version_greater(a, b)
+
+fn version_less(a: Version, b: Version) -> bool:
+    """Check if version a < version b"""
+    not version_greater_or_equal(a, b)
+
+# ============================================================================
+# Constraint Parsing
+# ============================================================================
+
+fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
+    """Parse a version constraint string.
+
+    Supported formats:
+        ^1.2.3    - Caret (compatible with 1.2.3)
+        ~1.2.3    - Tilde (patch-level changes)
+        >=1.0.0, <2.0.0 - Range
+        1.2.3     - Exact version
+        *         - Any version
+        >=1.2.3   - Greater or equal
+        <2.0.0    - Less than
+    """
+    val trimmed = s.trim()
+
+    # Wildcard
+    if trimmed == "*":
+        return Ok(VersionConstraint.Any)
+
+    # Caret constraint (^1.2.3)
+    if trimmed.starts_with("^"):
+        val version_str = trimmed.substring(1)
+        val version = parse_version(version_str)?
+        return Ok(VersionConstraint.Caret(base: version))
+
+    # Tilde constraint (~1.2.3)
+    if trimmed.starts_with("~"):
+        val version_str = trimmed.substring(1)
+        val version = parse_version(version_str)?
+        return Ok(VersionConstraint.Tilde(base: version))
+
+    # Range constraint (>=1.0.0, <2.0.0)
+    if trimmed.contains(","):
+        return parse_range_constraint(trimmed)
+
+    # Greater or equal (>=1.2.3)
+    if trimmed.starts_with(">="):
+        val version_str = trimmed.substring(2).trim()
+        val version = parse_version(version_str)?
+        return Ok(VersionConstraint.GreaterEq(version: version))
+
+    # Less than (<2.0.0)
+    if trimmed.starts_with("<"):
+        val version_str = trimmed.substring(1).trim()
+        val version = parse_version(version_str)?
+        return Ok(VersionConstraint.LessThan(version: version))
+
+    # Exact version (1.2.3)
+    val version = parse_version(trimmed)?
+    Ok(VersionConstraint.Exact(version: version))
+
+fn parse_range_constraint(s: text) -> Result<VersionConstraint, text>:
+    """Parse a range constraint like '>=1.0.0, <2.0.0'"""
+    val parts = s.split(",")
+    if parts.length != 2:
+        return Err("Range must have exactly 2 parts")
+
+    val left = parts[0].trim()
+    val right = parts[1].trim()
+
+    # Parse left bound (must be >=)
+    if not left.starts_with(">="):
+        return Err("Range left bound must be '>='")
+    val min = parse_version(left.substring(2).trim())?
+
+    # Parse right bound (must be <)
+    if not right.starts_with("<"):
+        return Err("Range right bound must be '<'")
+    val max = parse_version(right.substring(1).trim())?
+
+    # Validate range
+    if not version_less(min, max):
+        return Err("Invalid range: min must be less than max")
+
+    Ok(VersionConstraint.Range(min: min, max: max))
+
+# ============================================================================
+# Constraint Satisfaction
+# ============================================================================
+
+fn satisfies(version: Version, constraint: VersionConstraint) -> bool:
+    """Check if a version satisfies a constraint"""
+    match constraint:
+        VersionConstraint.Any:
+            true
+
+        VersionConstraint.Exact(exact_version):
+            version_equal(version, exact_version)
+
+        VersionConstraint.Caret(base):
+            satisfies_caret(version, base)
+
+        VersionConstraint.Tilde(base):
+            satisfies_tilde(version, base)
+
+        VersionConstraint.Range(min, max):
+            version_greater_or_equal(version, min) and version_less(version, max)
+
+        VersionConstraint.GreaterEq(min_version):
+            version_greater_or_equal(version, min_version)
+
+        VersionConstraint.LessThan(max_version):
+            version_less(version, max_version)
+
+fn satisfies_caret(version: Version, base: Version) -> bool:
+    """Check if version satisfies caret constraint (^base)
+
+    Rules:
+        ^1.2.3 → >=1.2.3, <2.0.0  (standard)
+        ^0.2.3 → >=0.2.3, <0.3.0  (0.x is unstable)
+        ^0.0.3 → =0.0.3           (0.0.x is highly unstable)
+    """
+    # Must be >= base
+    if not version_greater_or_equal(version, base):
+        return false
+
+    # Special case: 0.0.x (exact match only)
+    if base.major == 0 and base.minor == 0:
+        return version_equal(version, base)
+
+    # Special case: 0.x.y (lock minor version)
+    if base.major == 0:
+        return version.major == 0 and version.minor == base.minor
+
+    # Standard case: lock major version
+    version.major == base.major
+
+fn satisfies_tilde(version: Version, base: Version) -> bool:
+    """Check if version satisfies tilde constraint (~base)
+
+    Rules:
+        ~1.2.3 → >=1.2.3, <1.3.0  (patch-level changes only)
+    """
+    # Must be >= base
+    if not version_greater_or_equal(version, base):
+        return false
+
+    # Lock major and minor version
+    version.major == base.major and version.minor == base.minor
+
+# ============================================================================
+# Constraint Utilities
+# ============================================================================
+
+fn constraint_to_string(constraint: VersionConstraint) -> text:
+    """Convert constraint to string representation"""
+    match constraint:
+        VersionConstraint.Any:
+            "*"
+
+        VersionConstraint.Exact(v):
+            v.to_string()
+
+        VersionConstraint.Caret(base):
+            "^" + base.to_string()
+
+        VersionConstraint.Tilde(base):
+            "~" + base.to_string()
+
+        VersionConstraint.Range(min, max):
+            ">={min.to_string()}, <{max.to_string()}"
+
+        VersionConstraint.GreaterEq(v):
+            ">=" + v.to_string()
+
+        VersionConstraint.LessThan(v):
+            "<" + v.to_string()
+
+fn find_max_satisfying(versions: [Version], constraint: VersionConstraint) -> Version?:
+    """Find the maximum version that satisfies the constraint"""
+    var max_version = None
+
+    for version in versions:
+        if satisfies(version, constraint):
+            match max_version:
+                None:
+                    max_version = Some(version)
+                Some(current_max):
+                    if version_greater(version, current_max):
+                        max_version = Some(version)
+
+    max_version
+
+export parse_version, parse_constraint, parse_range_constraint
+export version_equal, version_greater, version_greater_or_equal, version_less
+export satisfies, satisfies_caret, satisfies_tilde
+export constraint_to_string, find_max_satisfying

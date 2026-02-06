@@ -1,0 +1,379 @@
+# SSpec Test Framework
+#
+# BDD-style test framework for Simple language.
+# Provides describe/context/it blocks, before_each/after_each hooks,
+# expect() assertions with matchers, pending/skip support.
+#
+# Error tracking uses Option pattern (nil = pass, text = error message).
+# No exceptions - assertions set error state via module-level Option var.
+#
+# Usage:
+#   use std.spec
+#
+#   describe "MyFeature":
+#       it "should work":
+#           expect(state.value).to_equal(42)
+#
+# NOTE: No static fn, no try/catch/throw - runs on bootstrap runtime.
+
+# ================================================================
+# Global Test State
+# ================================================================
+
+var current_suite: text = ""
+var current_context: text = ""
+var suite_stack: [text] = []
+var test_passed: i64 = 0
+var test_failed: i64 = 0
+var test_pending: i64 = 0
+var test_skipped: i64 = 0
+var test_errors: [text] = []
+var indent_level: i64 = 0
+
+# Hook storage
+var before_hooks: [fn()] = []
+var after_hooks: [fn()] = []
+
+# Current test error: nil = no error, text = error message (Option pattern)
+var current_test_error = nil
+
+# ================================================================
+# Test Suite Structure
+# ================================================================
+
+fn describe(name: text, block: fn()):
+    suite_stack.push(current_suite)
+    current_suite = name
+    val indent = "  ".repeat(indent_level)
+    print "{indent}{name}"
+    indent_level = indent_level + 1
+    block()
+    indent_level = indent_level - 1
+    val prev = suite_stack.pop()
+    current_suite = prev ?? ""
+
+fn context(name: text, block: fn()):
+    val saved_context = current_context
+    current_context = name
+    val indent = "  ".repeat(indent_level)
+    print "{indent}context: {name}"
+    indent_level = indent_level + 1
+    block()
+    indent_level = indent_level - 1
+    current_context = saved_context
+
+fn it(name: text, block: fn()):
+    val indent = "  ".repeat(indent_level)
+    var full_name = "{current_suite} > {name}"
+    if current_context != "":
+        full_name = "{current_suite} > {current_context} > {name}"
+
+    # Run before_each hooks
+    for hook in before_hooks:
+        hook()
+
+    # Reset error state (nil = no error)
+    current_test_error = nil
+
+    # Run test block - assertions set current_test_error on failure
+    block()
+
+    # Run after_each hooks
+    for hook in after_hooks:
+        hook()
+
+    # Check result via Option pattern
+    if current_test_error == nil:
+        test_passed = test_passed + 1
+        print "{indent}  it {name} ... ok"
+    else:
+        test_failed = test_failed + 1
+        print "{indent}  it {name} ... FAILED"
+        print "{indent}    Error: {current_test_error}"
+        test_errors.push("{full_name}: {current_test_error}")
+
+fn test(name: text, block: fn()):
+    it(name, block)
+
+fn example(name: text, block: fn()):
+    it(name, block)
+
+fn specify(name: text, block: fn()):
+    it(name, block)
+
+fn slow_it(name: text, block: fn()):
+    val indent = "  ".repeat(indent_level)
+    print "{indent}  slow_it {name} ... skipped (slow)"
+    test_skipped = test_skipped + 1
+
+fn pending(name: text):
+    val indent = "  ".repeat(indent_level)
+    print "{indent}  it {name} ... pending"
+    test_pending = test_pending + 1
+
+fn skip(name: text, reason: text):
+    val indent = "  ".repeat(indent_level)
+    print "{indent}  it {name} ... skipped ({reason})"
+    test_skipped = test_skipped + 1
+
+# ================================================================
+# Hooks
+# ================================================================
+
+fn before_each(hook: fn()):
+    before_hooks.push(hook)
+
+fn after_each(hook: fn()):
+    after_hooks.push(hook)
+
+# ================================================================
+# Expectations
+# ================================================================
+
+fn expect(value) -> ExpectHelper:
+    ExpectHelper(value: value, negated: false)
+
+struct ExpectHelper:
+    value: any
+    negated: bool
+
+    fn not_() -> ExpectHelper:
+        ExpectHelper(value: self.value, negated: true)
+
+    fn to_equal(expected):
+        val matches = self.value == expected
+        if self.negated:
+            if matches:
+                fail_assertion("Expected {self.value} to NOT equal {expected}")
+        else:
+            if not matches:
+                fail_assertion("Expected {expected}, got {self.value}")
+
+    fn to_be(expected):
+        self.to_equal(expected)
+
+    fn to_be_true():
+        if self.negated:
+            if self.value == true:
+                fail_assertion("Expected value to NOT be true")
+        else:
+            if self.value != true:
+                fail_assertion("Expected true, got {self.value}")
+
+    fn to_be_false():
+        if self.negated:
+            if self.value == false:
+                fail_assertion("Expected value to NOT be false")
+        else:
+            if self.value != false:
+                fail_assertion("Expected false, got {self.value}")
+
+    fn to_be_nil():
+        if self.negated:
+            if self.value == nil:
+                fail_assertion("Expected value to NOT be nil")
+        else:
+            if self.value != nil:
+                fail_assertion("Expected nil, got {self.value}")
+
+    fn to_be_truthy():
+        if self.negated:
+            if self.value:
+                fail_assertion("Expected value to NOT be truthy")
+        else:
+            if not self.value:
+                fail_assertion("Expected truthy value, got {self.value}")
+
+    fn to_be_falsy():
+        if self.negated:
+            if not self.value:
+                fail_assertion("Expected value to NOT be falsy")
+        else:
+            if self.value:
+                fail_assertion("Expected falsy value, got {self.value}")
+
+    fn to_be_greater_than(expected):
+        if self.negated:
+            if self.value > expected:
+                fail_assertion("Expected {self.value} to NOT be greater than {expected}")
+        else:
+            if self.value <= expected:
+                fail_assertion("Expected {self.value} to be greater than {expected}")
+
+    fn to_be_less_than(expected):
+        if self.negated:
+            if self.value < expected:
+                fail_assertion("Expected {self.value} to NOT be less than {expected}")
+        else:
+            if self.value >= expected:
+                fail_assertion("Expected {self.value} to be less than {expected}")
+
+    fn to_be_at_least(expected):
+        if self.negated:
+            if self.value >= expected:
+                fail_assertion("Expected {self.value} to NOT be at least {expected}")
+        else:
+            if self.value < expected:
+                fail_assertion("Expected {self.value} to be at least {expected}")
+
+    fn to_be_at_most(expected):
+        if self.negated:
+            if self.value <= expected:
+                fail_assertion("Expected {self.value} to NOT be at most {expected}")
+        else:
+            if self.value > expected:
+                fail_assertion("Expected {self.value} to be at most {expected}")
+
+    fn to_contain(item):
+        val contains = self.value.contains(item)
+        if self.negated:
+            if contains:
+                fail_assertion("Expected {self.value} to NOT contain {item}")
+        else:
+            if not contains:
+                fail_assertion("Expected {self.value} to contain {item}")
+
+    fn to_start_with(prefix: text):
+        val starts = self.value.starts_with(prefix)
+        if self.negated:
+            if starts:
+                fail_assertion("Expected '{self.value}' to NOT start with '{prefix}'")
+        else:
+            if not starts:
+                fail_assertion("Expected '{self.value}' to start with '{prefix}'")
+
+    fn to_end_with(suffix: text):
+        val ends = self.value.ends_with(suffix)
+        if self.negated:
+            if ends:
+                fail_assertion("Expected '{self.value}' to NOT end with '{suffix}'")
+        else:
+            if not ends:
+                fail_assertion("Expected '{self.value}' to end with '{suffix}'")
+
+    fn to_be_empty():
+        val is_empty = self.value.len() == 0
+        if self.negated:
+            if is_empty:
+                fail_assertion("Expected value to NOT be empty")
+        else:
+            if not is_empty:
+                fail_assertion("Expected empty, got length {self.value.len()}")
+
+    fn to_have_length(expected: i64):
+        val actual_len = self.value.len()
+        if self.negated:
+            if actual_len == expected:
+                fail_assertion("Expected length to NOT be {expected}")
+        else:
+            if actual_len != expected:
+                fail_assertion("Expected length {expected}, got {actual_len}")
+
+    fn to_be_close_to(expected, tolerance):
+        val diff = self.value - expected
+        var abs_diff = diff
+        if diff < 0:
+            abs_diff = -diff
+        if self.negated:
+            if abs_diff <= tolerance:
+                fail_assertion("Expected {self.value} to NOT be close to {expected} (tolerance: {tolerance})")
+        else:
+            if abs_diff > tolerance:
+                fail_assertion("Expected {self.value} to be close to {expected} (tolerance: {tolerance}), diff: {abs_diff}")
+
+    fn to_match(pattern: text):
+        val matches = self.value.contains(pattern)
+        if self.negated:
+            if matches:
+                fail_assertion("Expected '{self.value}' to NOT match '{pattern}'")
+        else:
+            if not matches:
+                fail_assertion("Expected '{self.value}' to match '{pattern}'")
+
+# ================================================================
+# Assertion Helpers
+# ================================================================
+
+# Set error state (Option pattern: nil = pass, text = fail)
+# Only records the first failure per test
+fn fail_assertion(message: text):
+    if current_test_error == nil:
+        current_test_error = message
+
+fn fail_test(message: text):
+    fail_assertion(message)
+
+fn check(condition: bool):
+    if not condition:
+        fail_assertion("Assertion failed")
+
+fn check_msg(condition: bool, message: text):
+    if not condition:
+        fail_assertion(message)
+
+fn assert_eq(a, b):
+    if a != b:
+        fail_assertion("Expected {b}, got {a}")
+
+fn assert_ne(a, b):
+    if a == b:
+        fail_assertion("Expected values to be different, but both are {a}")
+
+fn assert_true(value):
+    if value != true:
+        fail_assertion("Expected true, got {value}")
+
+fn assert_false(value):
+    if value != false:
+        fail_assertion("Expected false, got {value}")
+
+fn assert_nil(value):
+    if value != nil:
+        fail_assertion("Expected nil, got {value}")
+
+fn assert_not_nil(value):
+    if value == nil:
+        fail_assertion("Expected non-nil value")
+
+# ================================================================
+# Test Summary
+# ================================================================
+
+fn print_summary():
+    val total = test_passed + test_failed + test_pending + test_skipped
+    print ""
+    print "Test Summary:"
+    print "  Total:   {total}"
+    print "  Passed:  {test_passed}"
+    print "  Failed:  {test_failed}"
+    if test_pending > 0:
+        print "  Pending: {test_pending}"
+    if test_skipped > 0:
+        print "  Skipped: {test_skipped}"
+
+    if test_failed > 0:
+        print ""
+        print "Failures:"
+        var idx = 1
+        for err in test_errors:
+            print "  {idx}) {err}"
+            idx = idx + 1
+
+fn get_exit_code() -> i64:
+    if test_failed > 0:
+        return 1
+    return 0
+
+# ================================================================
+# Exports
+# ================================================================
+
+export describe, context, it, test, example, specify
+export slow_it, pending, skip
+export before_each, after_each
+export expect, ExpectHelper
+export check, check_msg, assert_eq, assert_ne
+export assert_true, assert_false, assert_nil, assert_not_nil
+export fail_test, fail_assertion
+export print_summary, get_exit_code
+export test_passed, test_failed, test_pending, test_skipped

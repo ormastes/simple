@@ -1,0 +1,254 @@
+# Atomic File Operations with Locking
+#
+# ⚠️ WARNING: INTERNAL MODULE - DO NOT USE DIRECTLY
+# ⚠️ Applications should use domain databases (BugDatabase, TestDatabase, etc.)
+# ⚠️ Direct use of atomic operations bypasses type safety and validation
+#
+# Provides thread-safe file operations using file-based locking.
+#
+# INTERNAL USE ONLY:
+#   This module is used by SdnDatabase.save() and domain databases.
+#   Applications should NOT import from lib.database.atomic directly.
+#
+# CORRECT USAGE (from application code):
+#   use lib.database.bug (create_bug_database)  // ✅ Use domain database
+#
+# INCORRECT USAGE (from application code):
+#   use lib.database.atomic (atomic_write)      // ❌ Internal API
+
+# Direct extern declarations for bootstrap runtime compatibility
+# (use app.io wildcard import brings in rt_timestamp_now/rt_sleep_ms which
+#  are not available in the bootstrap runtime)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_rename(from: text, to: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn file_read(path: text) -> text:
+    # Bootstrap runtime wraps rt_file_read_text result in Option
+    val result = rt_file_read_text(path)
+    result ?? ""
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+# Polyfill for rt_timestamp_now (returns microseconds since epoch)
+# Uses date +%s%3N for millisecond precision since rt_timestamp_now is not in bootstrap runtime
+fn get_timestamp() -> i64:
+    val (out, err, code) = rt_process_run("date", ["+%s%3N"])
+    val ms = out.trim().to_int() ?? 0
+    ms * 1000  # Convert milliseconds to microseconds
+
+# Polyfill for rt_sleep_ms
+fn sleep_ms(ms: i64):
+    rt_process_run("sleep", ["0.01"])
+
+# Exports
+export atomic_read, atomic_write, atomic_append
+export FileLock, is_process_alive, get_timestamp
+
+# ============================================================================
+# Process Utilities
+# ============================================================================
+
+# Check if a process is alive (cross-platform)
+fn is_process_alive(pid: i64) -> bool:
+    if pid <= 0:
+        return false
+
+    # Method 1: Linux /proc filesystem (fast)
+    val proc_path = "/proc/{pid}"
+    if file_exists(proc_path):
+        return true
+
+    # Method 2: ps command (portable fallback for macOS/BSD/Unix)
+    # Using -p flag which works on Linux, macOS, BSD
+    val (stdout, stderr, exit_code) = rt_process_run("ps", ["-p", "{pid}", "-o", "pid="])
+
+    # ps returns 0 if process exists, non-zero if not found
+    if exit_code == 0:
+        # Double-check: ps output should contain the PID
+        val output = stdout.trim()
+        output.len() > 0
+    else:
+        # /proc doesn't exist and ps failed - process is dead
+        false
+
+# ============================================================================
+# FileLock - File-based locking mechanism
+# ============================================================================
+
+class FileLock:
+    path: text              # Path to file being locked
+    lock_path: text         # Path to lock file
+    acquired: bool          # Whether lock is held
+
+    # Create lock for file
+    static fn for_file(path: text) -> FileLock:
+        FileLock(
+            path: path,
+            lock_path: path + ".lock",
+            acquired: false
+        )
+
+    # Acquire lock (blocks until available)
+    me acquire() -> bool:
+        # Try to acquire with infinite timeout
+        self.try_acquire(300000)  # 5 minutes max
+
+    # Try to acquire lock with timeout
+    me try_acquire(timeout_ms: i64) -> bool:
+        if self.acquired:
+            return true
+
+        val start_time = get_timestamp()
+        val timeout_us = timeout_ms * 1000
+
+        # Polling loop
+        while true:
+            # Try to create lock file
+            if self.try_create_lock():
+                self.acquired = true
+                return true
+
+            # Check timeout
+            val elapsed = get_timestamp() - start_time
+            if elapsed > timeout_us:
+                return false
+
+            # Sleep 10ms before retry
+            sleep_ms(10)
+
+        false
+
+    # Try to create lock file
+    me try_create_lock() -> bool:
+        # Check if lock file exists and is stale
+        if file_exists(self.lock_path):
+            if self.is_stale_lock():
+                # Force remove stale lock
+                file_delete(self.lock_path)
+            else:
+                return false
+
+        # Create lock file with PID
+        val pid = rt_getpid()
+        val lock_content = "{pid}\n{get_timestamp()}"
+        file_write(self.lock_path, lock_content)
+
+    # Check if lock is stale (>2 hours old or process dead)
+    fn is_stale_lock() -> bool:
+        if not file_exists(self.lock_path):
+            return false
+
+        val content = file_read(self.lock_path)
+        if not content.?:
+            return true
+
+        val lines = content.split("\n")
+        if lines.len() < 2:
+            return true
+
+        # Parse PID and timestamp
+        val pid_str = lines[0].trim()
+        val pid = pid_str.to_int() ?? 0
+
+        val timestamp_str = lines[1].trim()
+        val timestamp = timestamp_str.to_int() ?? 0
+
+        # Check if process is still alive
+        if pid > 0 and not is_process_alive(pid):
+            return true  # Process died, lock is stale
+
+        # Check if >2 hours old (fallback timeout)
+        val now = get_timestamp()
+        val age = now - timestamp
+        val two_hours = 2 * 60 * 60 * 1000000  # 2 hours in microseconds
+
+        if age > two_hours:
+            return true
+
+        false
+
+    # Release lock
+    me release():
+        if not self.acquired:
+            return
+
+        if file_exists(self.lock_path):
+            file_delete(self.lock_path)
+
+        self.acquired = false
+
+# ============================================================================
+# Atomic File Operations
+# ============================================================================
+
+# Read file with lock
+fn atomic_read(path: text) -> text?:
+    # Fast path: if file doesn't exist, no need to acquire lock
+    if not file_exists(path):
+        return None
+
+    var lock = FileLock.for_file(path)
+    if not lock.acquire():
+        return None
+
+    val content = if file_exists(path):
+        Some(file_read(path))
+    else:
+        None
+
+    lock.release()
+    content
+
+# Write file atomically
+fn atomic_write(path: text, content: text) -> bool:
+    var lock = FileLock.for_file(path)
+    if not lock.acquire():
+        return false
+
+    # Write to temp file first
+    val temp_path = path + ".tmp"
+    if not file_write(temp_path, content):
+        lock.release()
+        return false
+
+    # Rename temp to actual (atomic on Unix)
+    val success = rt_file_rename(temp_path, path)
+
+    lock.release()
+    success
+
+# Append to file atomically
+fn atomic_append(path: text, content: text) -> bool:
+    var lock = FileLock.for_file(path)
+    if not lock.acquire():
+        return false
+
+    # Read existing content
+    val existing = if file_exists(path):
+        file_read(path)
+    else:
+        ""
+
+    # Append new content
+    val new_content = existing + content
+
+    # Write via temp file
+    val temp_path = path + ".tmp"
+    if not file_write(temp_path, new_content):
+        lock.release()
+        return false
+
+    # Rename temp to actual
+    val success = rt_file_rename(temp_path, path)
+
+    lock.release()
+    success

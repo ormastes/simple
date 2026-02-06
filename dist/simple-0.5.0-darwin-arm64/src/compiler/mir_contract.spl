@@ -1,0 +1,130 @@
+# MIR Contract Lowering and State Machine
+#
+# Contract mode, lowerer state machine, contract context, and loop context
+# for MIR lowering. Explicit state to simplify formal verification.
+#
+# ContractMode imported from shared module (src/shared/contracts.spl).
+# Port of rust/compiler/src/mir/lower_contract.rs (248 lines)
+
+from shared.contracts import {ContractMode, ContractKind, ContractViolation}
+
+export ContractMode, LoopContext, ContractContext
+export LowererState, BlockState, MirLowerError
+
+# ============================================================================
+# Loop Context (for break/continue)
+# ============================================================================
+
+struct LoopContext:
+    continue_target: i64    # Block ID for continue
+    break_target: i64       # Block ID for break
+
+# ============================================================================
+# Contract Context
+# ============================================================================
+
+struct ContractContext:
+    """Context for contract lowering within a function."""
+    old_captures: {i64: i64}    # index -> vreg holding captured value
+    return_value: i64?          # VReg holding the return value
+    func_name: text
+    is_public: bool
+
+impl ContractContext:
+    static fn empty(func_name: text, is_public: bool) -> ContractContext:
+        ContractContext(old_captures: {}, return_value: nil,
+                        func_name: func_name, is_public: is_public)
+
+    fn has_old_capture(index: i64) -> bool:
+        self.old_captures.contains_key(index)
+
+    fn get_old_capture(index: i64) -> i64?:
+        if self.old_captures.contains_key(index):
+            Some(self.old_captures[index])
+        else:
+            nil
+
+# ============================================================================
+# Lowerer State Machine
+# ============================================================================
+
+enum LowererState:
+    """Explicit lowerer state for formal verification.
+
+    Lean model:
+      inductive LowererState
+        | idle
+        | lowering (func_name : text) (current_block : i64)
+                   (loop_stack : List LoopContext)
+    """
+    Idle
+    Lowering(func_name: text, current_block: i64,
+             loop_stack: [LoopContext], contract_ctx: ContractContext)
+
+impl LowererState:
+    fn is_idle() -> bool:
+        match self: case Idle: true; case _: false
+
+    fn is_lowering() -> bool:
+        match self: case Lowering(_, _, _, _): true; case _: false
+
+    fn try_current_block() -> Result<i64, MirLowerError>:
+        match self:
+            case Lowering(_, block, _, _): Ok(block)
+            case Idle: Err(MirLowerError.InvalidState(
+                expected: "Lowering", found: "Idle"))
+
+    fn try_loop_stack() -> Result<[LoopContext], MirLowerError>:
+        match self:
+            case Lowering(_, _, stack, _): Ok(stack)
+            case Idle: Err(MirLowerError.InvalidState(
+                expected: "Lowering", found: "Idle"))
+
+    fn try_contract_ctx() -> Result<ContractContext, MirLowerError>:
+        match self:
+            case Lowering(_, _, _, ctx): Ok(ctx)
+            case Idle: Err(MirLowerError.InvalidState(
+                expected: "Lowering", found: "Idle"))
+
+    fn loop_depth() -> i64:
+        match self:
+            case Lowering(_, _, stack, _): stack.len()
+            case Idle: 0
+
+# ============================================================================
+# Block State
+# ============================================================================
+
+enum BlockState:
+    """Makes terminator state explicit for verification."""
+    Open        # Accepting instructions
+    Sealed      # Has a terminator
+
+impl BlockState:
+    fn is_open() -> bool:
+        match self: case Open: true; case _: false
+
+    fn is_sealed() -> bool:
+        match self: case Sealed: true; case _: false
+
+# ============================================================================
+# MIR Lowering Errors
+# ============================================================================
+
+enum MirLowerError:
+    Unsupported(text)
+    InvalidState(expected: text, found: text)
+    BreakOutsideLoop
+    ContinueOutsideLoop
+    AopWeavingFailed(text)
+    CircularDependency(text)
+
+impl MirLowerError:
+    fn message() -> text:
+        match self:
+            case Unsupported(msg): "Unsupported HIR construct: {msg}"
+            case InvalidState(expected, found): "Invalid state: expected {expected}, found {found}"
+            case BreakOutsideLoop: "Break outside loop"
+            case ContinueOutsideLoop: "Continue outside loop"
+            case AopWeavingFailed(msg): "AOP weaving failed: {msg}"
+            case CircularDependency(msg): "Circular dependency in DI: {msg}"

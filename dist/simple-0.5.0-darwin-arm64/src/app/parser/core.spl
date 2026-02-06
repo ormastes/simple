@@ -1,0 +1,490 @@
+# Core Parser Implementation
+#
+# Parser struct, constructor methods, and main parse entry point.
+# Port of rust/parser/src/parser_impl/core.rs
+
+from token import {Span, Token, TokenKind}
+from lexer import {Lexer}
+from ast import {Module, Node, Block, Parameter, Type, Visibility, Mutability, UnfoldStmt}
+from error import {ParseError}
+
+export Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS
+
+val MAX_LOOP_ITERATIONS: i64 = 100_000
+
+enum ParserMode:
+    Normal
+    Strict
+
+enum DebugMode:
+    Off
+    Basic
+    Verbose
+
+class Parser:
+    lexer: Lexer
+    current: Token
+    previous: Token
+    source: text
+    pending_tokens: [Token]
+    mode: ParserMode
+    no_paren_depth: i64
+    debug_mode: DebugMode
+    debug_depth: i64
+    current_scope: text
+    error_hints: [text]
+    pattern_indent_count: i64
+    no_brace_postfix: bool
+    pending_statements: [Node]
+
+    static fn from_source(source: text) -> Parser:
+        var lex_ = Lexer.from_source(source)
+        val first = lex_.next_token()
+        val prev = Token(kind: TokenKind.Eof,
+                         span: Span(start: 0, end: 0, line: 1, column: 1),
+                         lexeme: "")
+        Parser(lexer: lex_, current: first, previous: prev, source: source,
+               pending_tokens: [], mode: ParserMode.Normal,
+               no_paren_depth: 0, debug_mode: DebugMode.Off,
+               debug_depth: 0, current_scope: "module",
+               error_hints: [], pattern_indent_count: 0,
+               no_brace_postfix: false, pending_statements: [])
+
+    static fn expression(source: text) -> Parser:
+        var lex_ = Lexer.expression(source)
+        val first = lex_.next_token()
+        val prev = Token(kind: TokenKind.Eof,
+                         span: Span(start: 0, end: 0, line: 1, column: 1),
+                         lexeme: "")
+        Parser(lexer: lex_, current: first, previous: prev, source: source,
+               pending_tokens: [], mode: ParserMode.Normal,
+               no_paren_depth: 0, debug_mode: DebugMode.Off,
+               debug_depth: 0, current_scope: "module",
+               error_hints: [], pattern_indent_count: 0,
+               no_brace_postfix: false, pending_statements: [])
+
+    static fn with_mode(source: text, mode: ParserMode) -> Parser:
+        var p = Parser.from_source(source)
+        p.mode = mode
+        p
+
+    static fn with_debug(source: text, debug_mode: DebugMode) -> Parser:
+        var p = Parser.from_source(source)
+        p.debug_mode = debug_mode
+        p
+
+    # ── Token navigation ────────────────────────────────────────────
+
+    fn is_at_end() -> bool:
+        self.current.kind is TokenKind.Eof
+
+    fn check(kind: TokenKind) -> bool:
+        self.current.kind == kind
+
+    me advance() -> Token:
+        self.previous = self.current
+        if self.pending_tokens.len() > 0:
+            self.current = self.pending_tokens.remove(0)
+        else:
+            self.current = self.lexer.next_token()
+        self.previous
+
+    me expect(kind: TokenKind) -> Result<Token, ParseError>:
+        if self.current.kind == kind:
+            Ok(self.advance())
+        else:
+            Err(ParseError.unexpected_token("{kind}", "{self.current.kind}", self.current.span))
+
+    me expect_identifier() -> Result<text, ParseError>:
+        match self.current.kind:
+            case TokenKind.Identifier(name, _):
+                self.advance()
+                Ok(name)
+            case _:
+                Err(ParseError.unexpected_token("identifier", "{self.current.kind}", self.current.span))
+
+    me skip_newlines():
+        while self.check(TokenKind.Newline):
+            self.advance()
+
+    fn peek_is(kind: TokenKind) -> bool:
+        if self.pending_tokens.len() > 0:
+            return self.pending_tokens[0].kind == kind
+        false
+
+    me peek_token() -> Token:
+        if self.pending_tokens.len() == 0:
+            val tok = self.lexer.next_token()
+            self.pending_tokens.push(tok)
+        self.pending_tokens[0]
+
+    # ── Debug tracing ───────────────────────────────────────────────
+
+    fn debug_trace(msg: text):
+        if self.debug_mode != DebugMode.Off:
+            val indent_ = "  ".repeat(self.debug_depth)
+            # Would print to stderr in production
+            ()
+
+    me debug_enter(name: text):
+        if self.debug_mode != DebugMode.Off:
+            self.debug_depth = self.debug_depth + 1
+
+    me debug_exit(name: text):
+        if self.debug_mode != DebugMode.Off and self.debug_depth > 0:
+            self.debug_depth = self.debug_depth - 1
+
+    fn check_loop_limit(iterations: i64, context: text) -> Result<(), ParseError>:
+        if iterations >= MAX_LOOP_ITERATIONS:
+            Err(ParseError.syntax_error_with_span(
+                "Parser iteration limit exceeded in {context} (possible infinite loop)",
+                self.current.span))
+        else:
+            Ok(())
+
+    # ── Main parse entry points ─────────────────────────────────────
+
+    me parse() -> Result<Module, ParseError>:
+        var items_: [Node] = []
+        var iters_ = 0
+        while not self.is_at_end():
+            self.check_loop_limit(iters_, "parse_module")?
+            iters_ = iters_ + 1
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.is_at_end():
+                break
+            items_.push(self.parse_item()?)
+        Ok(Module(name: None, items: items_))
+
+    me parse_item() -> Result<Node, ParseError>:
+        if self.pending_statements.len() > 0:
+            return Ok(self.pending_statements.remove(0))
+        while self.check(TokenKind.Newline):
+            self.advance()
+        # Delegate to specific parsers based on current token
+        # This is the main dispatch - each arm calls into sub-modules
+        match self.current.kind:
+            case TokenKind.Fn | TokenKind.Me | TokenKind.Kernel | TokenKind.Gen:
+                self.parse_function()
+            case TokenKind.Struct:
+                self.parse_struct_def()
+            case TokenKind.Class:
+                self.parse_class_def()
+            case TokenKind.Enum:
+                self.parse_enum_def()
+            case TokenKind.Union:
+                self.parse_union_def()
+            case TokenKind.Trait:
+                self.parse_trait_def()
+            case TokenKind.Impl:
+                self.parse_impl_block()
+            case TokenKind.Mixin:
+                self.parse_mixin_def()
+            case TokenKind.Actor:
+                self.parse_actor_def()
+            case TokenKind.Pub:
+                self.advance()
+                self.parse_pub_item()
+            case TokenKind.Let | TokenKind.Mut:
+                self.parse_let_stmt()
+            case TokenKind.Val:
+                self.parse_val_stmt()
+            case TokenKind.Var:
+                self.parse_var_stmt()
+            case TokenKind.Const:
+                self.parse_const_stmt()
+            case TokenKind.Static:
+                self.parse_static_stmt()
+            case TokenKind.Type:
+                self.parse_type_alias_or_expr()
+            case TokenKind.Unit:
+                self.parse_unit_def()
+            case TokenKind.Extern:
+                self.parse_extern_decl()
+            case TokenKind.Use:
+                self.parse_use_stmt()
+            case TokenKind.Import:
+                self.parse_import_stmt()
+            case TokenKind.From:
+                self.parse_from_import()
+            case TokenKind.Mod:
+                self.parse_mod_decl()
+            case TokenKind.Export:
+                self.parse_export_stmt()
+            case TokenKind.Common:
+                self.parse_common_use()
+            case TokenKind.Unfold:
+                self.parse_unfold_stmt()
+            case TokenKind.If:
+                self.parse_if_stmt()
+            case TokenKind.Match:
+                self.parse_match_stmt()
+            case TokenKind.For:
+                self.parse_for_stmt()
+            case TokenKind.While:
+                self.parse_while_stmt()
+            case TokenKind.Loop:
+                self.parse_loop_stmt()
+            case TokenKind.Return:
+                self.parse_return_stmt()
+            case TokenKind.Break:
+                self.parse_break_stmt()
+            case TokenKind.Continue:
+                self.parse_continue_stmt()
+            case TokenKind.Pass:
+                self.parse_pass_stmt()
+            case TokenKind.Defer:
+                self.parse_defer_stmt()
+            case TokenKind.Assert:
+                self.parse_assert_stmt()
+            case TokenKind.Assume:
+                self.parse_assume_stmt()
+            case TokenKind.Admit:
+                self.parse_admit_stmt()
+            case TokenKind.Context:
+                self.parse_context_or_expr()
+            case TokenKind.With:
+                self.parse_with_stmt()
+            case TokenKind.On:
+                self.parse_aop_advice()
+            case TokenKind.Feature:
+                self.parse_feature_block()
+            case TokenKind.Scenario:
+                self.parse_scenario_block()
+            case TokenKind.Hash:
+                self.parse_attributed_item()
+            case TokenKind.At:
+                self.parse_decorated_item()
+            case _:
+                self.parse_expression_or_assignment()
+
+    me parse_block() -> Result<Block, ParseError>:
+        self.expect(TokenKind.Newline)?
+        self.expect(TokenKind.Indent)?
+        self.parse_block_body()
+
+    me parse_block_body() -> Result<Block, ParseError>:
+        val start_ = self.current.span
+        var stmts_: [Node] = []
+        var iters_ = 0
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.check_loop_limit(iters_, "parse_block_body")?
+            iters_ = iters_ + 1
+            while self.check(TokenKind.Newline):
+                self.advance()
+            if self.check(TokenKind.Dedent) or self.is_at_end():
+                break
+            stmts_.push(self.parse_item()?)
+            if self.check(TokenKind.Newline):
+                self.advance()
+        if self.check(TokenKind.Dedent):
+            self.advance()
+        Ok(Block(span: Span(start: start_.start, end: self.previous.span.end,
+                             line: start_.line, column: start_.column),
+                 statements: stmts_))
+
+    me parse_parameters() -> Result<[Parameter], ParseError>:
+        self.expect(TokenKind.LParen)?
+        var params_: [Parameter] = []
+        self.skip_newlines()
+        while not self.check(TokenKind.RParen):
+            val param_span_ = self.current.span
+            val inject_ = if self.check(TokenKind.At):
+                self.advance()
+                val attr = self.expect_identifier()?
+                if attr != "inject":
+                    return Err(ParseError.unexpected_token("inject", attr, self.current.span))
+                true
+            else:
+                false
+            val mut_ = if self.check(TokenKind.Mut):
+                self.advance()
+                Mutability.Mutable
+            else:
+                Mutability.Immutable
+            val name_ = if self.check(TokenKind.Self_):
+                self.advance()
+                "self"
+            else:
+                self.expect_identifier()?
+            val ty_ = if self.check(TokenKind.Colon):
+                self.advance()
+                Some(self.parse_type()?)
+            else:
+                None
+            val variadic_ = if self.check(TokenKind.Ellipsis):
+                self.advance()
+                true
+            else:
+                false
+            val default_ = if self.check(TokenKind.Assign):
+                self.advance()
+                Some(self.parse_expression()?)
+            else:
+                None
+            params_.push(Parameter(span: param_span_, name: name_, ty: ty_,
+                                   default: default_, mutability: mut_,
+                                   inject: inject_, variadic: variadic_,
+                                   call_site_label: None))
+            if not self.check(TokenKind.RParen):
+                if self.check(TokenKind.Comma):
+                    self.advance()
+                    self.skip_newlines()
+                elif self.check(TokenKind.Newline):
+                    self.skip_newlines()
+                else:
+                    return Err(ParseError.unexpected_token("comma or newline",
+                        "{self.current.kind}", self.current.span))
+        self.expect(TokenKind.RParen)?
+        Ok(params_)
+
+    # ── Stub methods for sub-parsers ────────────────────────────────
+    # These will be implemented in expressions.spl, statements.spl, etc.
+    # For now they delegate to parse_expression_or_assignment or return errors.
+
+    me parse_expression() -> Result<ast.Expr, ParseError>:
+        # Will be implemented in expressions.spl
+        Err(ParseError.syntax_error("parse_expression not yet implemented", self.current.span.line, self.current.span.column))
+
+    me parse_expression_or_assignment() -> Result<Node, ParseError>:
+        # Will be implemented in expressions.spl
+        Err(ParseError.syntax_error("parse_expression_or_assignment not yet implemented", self.current.span.line, self.current.span.column))
+
+    me parse_type() -> Result<Type, ParseError>:
+        # Will be implemented in types.spl
+        Err(ParseError.syntax_error("parse_type not yet implemented", self.current.span.line, self.current.span.column))
+
+    # Stub methods for all the parse_item dispatch targets
+    me parse_function() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_function not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_struct_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_struct_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_class_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_class_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_enum_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_enum_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_union_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_union_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_trait_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_trait_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_impl_block() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_impl_block not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_mixin_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_mixin_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_actor_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_actor_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_pub_item() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_pub_item not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_let_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_let_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_val_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_val_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_var_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_var_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_const_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_const_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_static_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_static_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_type_alias_or_expr() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_type_alias_or_expr not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_unit_def() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_unit_def not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_extern_decl() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_extern_decl not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_use_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_use_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_import_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_import_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_from_import() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_from_import not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_mod_decl() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_mod_decl not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_export_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_export_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_common_use() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_common_use not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_unfold_stmt() -> Result<Node, ParseError>:
+        # Parse: unfold {subpkg1, subpkg2, ...}
+        val start_span = self.current.span
+        self.expect(TokenKind.Unfold)?
+        self.expect(TokenKind.LBrace)?
+
+        var subpackages: [text] = []
+        var seen_names: {text: bool} = {}
+
+        while not self.check(TokenKind.RBrace):
+            # Get identifier for subpackage name
+            val name = self.expect_path_segment()?
+
+            # Check for duplicates
+            if seen_names.contains_key(name):
+                return Err(ParseError.syntax_error(
+                    "duplicate subpackage '{name}' in unfold declaration",
+                    self.previous.span.line,
+                    self.previous.span.column))
+
+            seen_names[name] = true
+            subpackages = subpackages + [name]
+
+            # Handle comma separator
+            if not self.check(TokenKind.RBrace):
+                self.expect(TokenKind.Comma)?
+                # Allow trailing comma
+                if self.check(TokenKind.RBrace):
+                    break
+
+        # Error on empty unfold
+        if subpackages.len() == 0:
+            return Err(ParseError.syntax_error(
+                "unfold requires at least one subpackage",
+                start_span.line,
+                start_span.column))
+
+        self.expect(TokenKind.RBrace)?
+
+        val end_span = self.previous.span
+        Ok(Node.UnfoldStmtNode(UnfoldStmt(
+            span: Span(start: start_span.start, end: end_span.end, line: start_span.line, column: start_span.column),
+            subpackages: subpackages
+        )))
+    me parse_if_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_if_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_match_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_match_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_for_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_for_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_while_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_while_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_loop_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_loop_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_return_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_return_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_break_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_break_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_continue_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_continue_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_pass_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_pass_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_defer_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_defer_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_assert_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_assert_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_assume_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_assume_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_admit_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_admit_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_context_or_expr() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_context_or_expr not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_with_stmt() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_with_stmt not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_aop_advice() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_aop_advice not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_feature_block() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_feature_block not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_scenario_block() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_scenario_block not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_attributed_item() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_attributed_item not yet implemented", self.current.span.line, self.current.span.column))
+    me parse_decorated_item() -> Result<Node, ParseError>:
+        Err(ParseError.syntax_error("parse_decorated_item not yet implemented", self.current.span.line, self.current.span.column))
