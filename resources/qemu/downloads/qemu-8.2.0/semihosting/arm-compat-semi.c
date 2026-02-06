@@ -206,9 +206,6 @@ static int get_string_by_id(CPUState *cs, uint32_t string_id,
             return -1;
         }
 
-        fprintf(stderr, "  [DEBUG] Entry %d: addr=0x%lx, id=%u, len=%u, params=%u\n",
-                i, (unsigned long)entry_addr, id, length, params);
-
         if (id == string_id) {
             /* Found! Read string text */
             size_t read_len = (length < bufsize) ? length : (bufsize - 1);
