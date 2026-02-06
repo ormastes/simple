@@ -1,0 +1,189 @@
+# Semihost Execution with Output Capture
+#
+# Wraps TestExecutor to capture semihosting output from bare-metal programs.
+
+use lib.execution.mod.{ExecutionConfig, TestExecutor, ExecutionResult}
+use lib.qemu.mod.{QemuArch, QemuConfig, QemuInstance}
+use lib.qemu.semihosting.{SemihostConfig, qemu_semihost_config}
+use app.io.mod.{file_read, file_exists, file_delete, file_write}
+
+# Result from semihosting execution
+class SemihostResult:
+    exit_code: i32
+    stdout: text
+    stderr: text
+    duration_ms: i64
+    success: bool
+
+impl SemihostResult:
+    fn from_execution_result(exec_result: ExecutionResult, stdout: text, stderr: text) -> SemihostResult:
+        SemihostResult(
+            exit_code: 0,  # TODO: Extract from exec_result
+            stdout: stdout,
+            stderr: stderr,
+            duration_ms: exec_result.duration_ms,
+            success: exec_result.success
+        )
+
+# Executor that captures semihosting output
+class SemihostExecutor:
+    arch: QemuArch
+    binary: text
+    output_file: text
+    qemu_instance: Option<QemuInstance>
+
+impl SemihostExecutor:
+    # Create executor for RISC-V 32
+    static fn riscv32(binary: text, output_file: text) -> Result<SemihostExecutor, text>:
+        Ok(SemihostExecutor(
+            arch: QemuArch.RiscV32,
+            binary: binary,
+            output_file: output_file,
+            qemu_instance: nil
+        ))
+
+    # Create executor for RISC-V 64
+    static fn riscv64(binary: text, output_file: text) -> Result<SemihostExecutor, text>:
+        Ok(SemihostExecutor(
+            arch: QemuArch.RiscV64,
+            binary: binary,
+            output_file: output_file,
+            qemu_instance: nil
+        ))
+
+    # Create executor for x86_64
+    static fn x86_64(binary: text, output_file: text) -> Result<SemihostExecutor, text>:
+        Ok(SemihostExecutor(
+            arch: QemuArch.X86_64,
+            binary: binary,
+            output_file: output_file,
+            qemu_instance: nil
+        ))
+
+    # Create executor for ARM
+    static fn arm(binary: text, output_file: text) -> Result<SemihostExecutor, text>:
+        Ok(SemihostExecutor(
+            arch: QemuArch.Arm,
+            binary: binary,
+            output_file: output_file,
+            qemu_instance: nil
+        ))
+
+    # Execute and capture output
+    me execute_and_capture() -> Result<SemihostResult, text>:
+        # Create QEMU config with semihosting
+        val config = qemu_semihost_config(self.arch, self.binary, self.output_file)
+
+        # Start QEMU
+        val instance = QemuInstance.start(config)?
+        self.qemu_instance = instance
+
+        # Wait for execution to complete (timeout: 10 seconds)
+        val start_time = timestamp_now()
+        val exit_result = instance.wait_exit(10000)?
+        val duration_ms = timestamp_now() - start_time
+
+        # Read captured output
+        val stdout = self.read_output_file()?
+
+        # Create result
+        Ok(SemihostResult(
+            exit_code: exit_result,
+            stdout: stdout,
+            stderr: "",
+            duration_ms: duration_ms,
+            success: exit_result == 0
+        ))
+
+    # Read output from file
+    fn read_output_file() -> Result<text, text>:
+        # Wait a bit for file to be written
+        sleep_ms(100)
+
+        if not file_exists(self.output_file):
+            return Ok("")
+
+        val content = file_read(self.output_file)
+        if content.len() == 0:
+            Ok("")
+        else:
+            Ok(content)
+
+    # Cleanup resources
+    me cleanup():
+        # Stop QEMU if running
+        if self.qemu_instance.?:
+            val instance = self.qemu_instance.unwrap()
+            instance.stop()
+            self.qemu_instance = nil
+
+        # Delete output file
+        if file_exists(self.output_file):
+            file_delete(self.output_file)
+
+# Helper functions
+
+# Get current timestamp in milliseconds
+fn timestamp_now() -> i64:
+    # Use polyfill from runtime bugs workaround
+    val result = shell("date +%s%3N")
+    if result.exit_code == 0:
+        parse_i64(result.stdout.trim())
+    else:
+        0
+
+# Sleep for milliseconds
+fn sleep_ms(ms: i64):
+    # Use polyfill
+    val seconds = ms / 1000
+    if seconds > 0:
+        shell("sleep {seconds}")
+
+# Parse integer from string
+fn parse_i64(s: text) -> i64:
+    var result: i64 = 0
+    var negative = false
+    var start_idx = 0
+
+    if s.starts_with("-"):
+        negative = true
+        start_idx = 1
+
+    var i = start_idx
+    while i < s.len():
+        val c = s[i:i+1]
+        val digit = char_to_digit(c)
+        if digit >= 0:
+            result = result * 10 + digit
+        i = i + 1
+
+    if negative:
+        result = -result
+
+    result
+
+# Shell command helper
+class ProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell(cmd: text) -> ProcessResult:
+    val (stdout, stderr, exit_code) = rt_process_run("/bin/sh", ["-c", cmd])
+    ProcessResult(stdout: stdout, stderr: stderr, exit_code: exit_code)
+
+fn char_to_digit(c: text) -> i64:
+    match c:
+        "0": 0
+        "1": 1
+        "2": 2
+        "3": 3
+        "4": 4
+        "5": 5
+        "6": 6
+        "7": 7
+        "8": 8
+        "9": 9
+        _: -1

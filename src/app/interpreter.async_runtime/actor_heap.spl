@@ -48,51 +48,52 @@ struct HeapConfig:
     generational: bool      # Use generational GC
     pretenure_threshold: i64  # Size above which objects go directly to old gen
 
+fn HeapConfig__default() -> HeapConfig:
+    """Default configuration suitable for most actors."""
+    HeapConfig(
+        initial_size: DEFAULT_HEAP_SIZE,
+        max_size: DEFAULT_MAX_HEAP_SIZE,
+        gc_enabled: true,
+        generational: true,
+        pretenure_threshold: 1024  # 1KB objects go to old gen
+    )
+
+fn HeapConfig__no_gc(size: i64) -> HeapConfig:
+    """Configuration for short-lived actors that won't need GC.
+
+    Pre-allocate enough memory so GC never runs.
+    Actor terminates before heap is full.
+    """
+    HeapConfig(
+        initial_size: size,
+        max_size: size,
+        gc_enabled: false,
+        generational: false,
+        pretenure_threshold: 0
+    )
+
+fn HeapConfig__small() -> HeapConfig:
+    """Small heap for lightweight actors."""
+    HeapConfig(
+        initial_size: MIN_HEAP_SIZE,
+        max_size: 65536,  # 64 KB max
+        gc_enabled: true,
+        generational: false,  # Too small for generations
+        pretenure_threshold: 0
+    )
+
+fn HeapConfig__large() -> HeapConfig:
+    """Large heap for data-intensive actors."""
+    HeapConfig(
+        initial_size: 65536,  # 64 KB initial
+        max_size: 0,          # Unlimited
+        gc_enabled: true,
+        generational: true,
+        pretenure_threshold: 4096
+    )
+
+
 impl HeapConfig:
-    static fn default() -> HeapConfig:
-        """Default configuration suitable for most actors."""
-        HeapConfig(
-            initial_size: DEFAULT_HEAP_SIZE,
-            max_size: DEFAULT_MAX_HEAP_SIZE,
-            gc_enabled: true,
-            generational: true,
-            pretenure_threshold: 1024  # 1KB objects go to old gen
-        )
-
-    static fn no_gc(size: i64) -> HeapConfig:
-        """Configuration for short-lived actors that won't need GC.
-
-        Pre-allocate enough memory so GC never runs.
-        Actor terminates before heap is full.
-        """
-        HeapConfig(
-            initial_size: size,
-            max_size: size,
-            gc_enabled: false,
-            generational: false,
-            pretenure_threshold: 0
-        )
-
-    static fn small() -> HeapConfig:
-        """Small heap for lightweight actors."""
-        HeapConfig(
-            initial_size: MIN_HEAP_SIZE,
-            max_size: 65536,  # 64 KB max
-            gc_enabled: true,
-            generational: false,  # Too small for generations
-            pretenure_threshold: 0
-        )
-
-    static fn large() -> HeapConfig:
-        """Large heap for data-intensive actors."""
-        HeapConfig(
-            initial_size: 65536,  # 64 KB initial
-            max_size: 0,          # Unlimited
-            gc_enabled: true,
-            generational: true,
-            pretenure_threshold: 4096
-        )
-
     fn with_initial_size(size: i64) -> HeapConfig:
         """Set initial heap size."""
         HeapConfig(
@@ -102,7 +103,6 @@ impl HeapConfig:
             generational: self.generational,
             pretenure_threshold: self.pretenure_threshold
         )
-
     fn with_max_size(size: i64) -> HeapConfig:
         """Set maximum heap size (0 = unlimited)."""
         HeapConfig(
@@ -112,7 +112,6 @@ impl HeapConfig:
             generational: self.generational,
             pretenure_threshold: self.pretenure_threshold
         )
-
     fn without_gc() -> HeapConfig:
         """Disable garbage collection."""
         HeapConfig(
@@ -122,7 +121,6 @@ impl HeapConfig:
             generational: false,
             pretenure_threshold: self.pretenure_threshold
         )
-
 # ============================================================================
 # Heap Statistics
 # ============================================================================
@@ -149,50 +147,47 @@ struct HeapStats:
     peak_used_bytes: i64
     peak_object_count: i64
 
-impl HeapStats:
-    static fn new() -> HeapStats:
-        HeapStats(
-            used_bytes: 0,
-            allocated_bytes: 0,
-            object_count: 0,
-            gc_count: 0,
-            gc_total_time_us: 0,
-            gc_last_time_us: 0,
-            gc_max_time_us: 0,
-            young_gen_size: 0,
-            old_gen_size: 0,
-            promotions: 0,
-            peak_used_bytes: 0,
-            peak_object_count: 0
-        )
+fn HeapStats__new() -> HeapStats:
+    HeapStats(
+        used_bytes: 0,
+        allocated_bytes: 0,
+        object_count: 0,
+        gc_count: 0,
+        gc_total_time_us: 0,
+        gc_last_time_us: 0,
+        gc_max_time_us: 0,
+        young_gen_size: 0,
+        old_gen_size: 0,
+        promotions: 0,
+        peak_used_bytes: 0,
+        peak_object_count: 0
+    )
 
+
+impl HeapStats:
     fn usage_percent() -> i64:
         """Get heap usage as percentage."""
         if self.allocated_bytes == 0:
             0
         else:
             (self.used_bytes * 100) / self.allocated_bytes
-
     fn avg_gc_time_us() -> i64:
         """Average GC pause time in microseconds."""
         if self.gc_count == 0:
             0
         else:
             self.gc_total_time_us / self.gc_count
-
     fn should_gc(config: HeapConfig) -> bool:
         """Check if GC should be triggered."""
         if not config.gc_enabled:
             false
         else:
             self.usage_percent() >= GC_THRESHOLD_PERCENT
-
 impl Display for HeapStats:
     fn fmt() -> text:
         val used_kb = self.used_bytes / 1024
         val alloc_kb = self.allocated_bytes / 1024
         "HeapStats(used={used_kb}KB/{alloc_kb}KB, gc_count={self.gc_count}, avg_gc={self.avg_gc_time_us()}us)"
-
 # ============================================================================
 # Heap Generation (for generational GC)
 # ============================================================================
@@ -228,10 +223,10 @@ struct ActorHeap:
 
     Example:
         # Short-lived actor with pre-sized heap (no GC)
-        val heap = ActorHeap.new(HeapConfig.no_gc(10240))
+        val heap = ActorHeap__new(HeapConfig__no_gc(10240))
 
         # Long-lived actor with generational GC
-        val heap = ActorHeap.new(HeapConfig.default())
+        val heap = ActorHeap__new(HeapConfig__default())
     """
     config: HeapConfig
     stats: HeapStats
@@ -251,50 +246,46 @@ struct HeapRegion:
     used: i64           # Used bytes
     object_count: i64   # Number of objects
 
-impl HeapRegion:
-    static fn new(size: i64) -> HeapRegion:
-        HeapRegion(
-            base: 0,
-            size: size,
-            used: 0,
-            object_count: 0
-        )
+fn HeapRegion__new(size: i64) -> HeapRegion:
+    HeapRegion(
+        base: 0,
+        size: size,
+        used: 0,
+        object_count: 0
+    )
 
+
+impl HeapRegion:
     fn available() -> i64:
         """Available space in region."""
         self.size - self.used
-
     fn usage_percent() -> i64:
         """Usage as percentage."""
         if self.size == 0: 0 else: (self.used * 100) / self.size
+fn ActorHeap__new(config: HeapConfig) -> ActorHeap:
+    """Create a new actor heap with given configuration."""
+    val young_size = config.initial_size
+    val old_gen = if config.generational: Some(HeapRegion__new(config.initial_size / 2)) else: nil
+
+    ActorHeap(
+        config: config,
+        stats: HeapStats__new(),
+        young_generation: HeapRegion__new(young_size),
+        old_generation: old_gen,
+        is_collecting: false,
+        generation_count: 0
+    )
+
+fn ActorHeap__with_size(size: i64) -> ActorHeap:
+    """Create heap with specific initial size."""
+    ActorHeap__new(HeapConfig__default().with_initial_size(size))
+
+fn ActorHeap__no_gc(size: i64) -> ActorHeap:
+    """Create heap that won't need GC (for short-lived actors)."""
+    ActorHeap__new(HeapConfig__no_gc(size))
+
 
 impl ActorHeap:
-    static fn new(config: HeapConfig) -> ActorHeap:
-        """Create a new actor heap with given configuration."""
-        val young_size = config.initial_size
-        val old_gen = if config.generational: Some(HeapRegion.new(config.initial_size / 2)) else: nil
-
-        ActorHeap(
-            config: config,
-            stats: HeapStats.new(),
-            young_generation: HeapRegion.new(young_size),
-            old_generation: old_gen,
-            is_collecting: false,
-            generation_count: 0
-        )
-
-    static fn with_size(size: i64) -> ActorHeap:
-        """Create heap with specific initial size."""
-        ActorHeap.new(HeapConfig.default().with_initial_size(size))
-
-    static fn no_gc(size: i64) -> ActorHeap:
-        """Create heap that won't need GC (for short-lived actors)."""
-        ActorHeap.new(HeapConfig.no_gc(size))
-
-    # --------------------------------------------------------------------------
-    # Allocation
-    # --------------------------------------------------------------------------
-
     me allocate(size: i64) -> AllocationResult:
         """Allocate memory from this heap.
 
@@ -332,7 +323,6 @@ impl ActorHeap:
 
         # Out of memory
         AllocationResult.OutOfMemory(size)
-
     me update_stats_after_alloc(size: i64):
         """Update statistics after successful allocation."""
         self.stats.used_bytes = self.stats.used_bytes + size
@@ -342,7 +332,6 @@ impl ActorHeap:
             self.stats.peak_used_bytes = self.stats.used_bytes
         if self.stats.object_count > self.stats.peak_object_count:
             self.stats.peak_object_count = self.stats.object_count
-
     fn can_grow(needed: i64) -> bool:
         """Check if heap can grow to accommodate needed bytes."""
         if self.config.max_size == 0:
@@ -351,7 +340,6 @@ impl ActorHeap:
             val current = self.stats.allocated_bytes
             val new_size = ((current as f64) * HEAP_GROWTH_FACTOR) as i64
             new_size <= self.config.max_size
-
     me grow_heap(needed: i64):
         """Grow the heap to accommodate more allocations."""
         val current = self.young_generation.size
@@ -365,11 +353,6 @@ impl ActorHeap:
             object_count: self.young_generation.object_count
         )
         self.stats.allocated_bytes = new_size
-
-    # --------------------------------------------------------------------------
-    # Garbage Collection
-    # --------------------------------------------------------------------------
-
     me collect_garbage():
         """Run garbage collection on this heap.
 
@@ -394,7 +377,6 @@ impl ActorHeap:
         val gc_time = current_time_us() - start_time
         self.update_gc_stats(gc_time)
         self.is_collecting = false
-
     me collect_young_generation():
         """Collect young generation only.
 
@@ -425,7 +407,6 @@ impl ActorHeap:
         )
 
         self.stats.young_gen_size = self.young_generation.used
-
     me collect_old_generation():
         """Collect old generation (full GC).
 
@@ -446,7 +427,6 @@ impl ActorHeap:
         ))
 
         self.stats.old_gen_size = survivor_bytes
-
     me collect_full():
         """Full heap collection (non-generational)."""
         val survivors = self.young_generation.object_count / 2
@@ -461,7 +441,6 @@ impl ActorHeap:
 
         self.stats.used_bytes = survivor_bytes
         self.stats.object_count = survivors
-
     me update_gc_stats(gc_time_us: i64):
         """Update GC statistics after collection."""
         self.stats.gc_count = self.stats.gc_count + 1
@@ -470,27 +449,18 @@ impl ActorHeap:
 
         if gc_time_us > self.stats.gc_max_time_us:
             self.stats.gc_max_time_us = gc_time_us
-
-    # --------------------------------------------------------------------------
-    # Queries
-    # --------------------------------------------------------------------------
-
     fn get_stats() -> HeapStats:
         """Get current heap statistics."""
         self.stats
-
     fn usage_percent() -> i64:
         """Get heap usage as percentage."""
         self.stats.usage_percent()
-
     fn is_healthy() -> bool:
         """Check if heap is in healthy state."""
         self.usage_percent() < GC_THRESHOLD_PERCENT and self.stats.gc_max_time_us < 10000
-
     fn should_grow() -> bool:
         """Check if heap should be grown proactively."""
         self.usage_percent() > 60
-
 # ============================================================================
 # Allocation Result
 # ============================================================================
@@ -506,12 +476,10 @@ impl AllocationResult:
         match self:
             case Success(_): true
             case _: false
-
     fn address() -> i64?:
         match self:
             case Success(addr): Some(addr)
             case _: nil
-
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -531,7 +499,6 @@ impl Display for ActorHeap:
         val used_kb = self.stats.used_bytes / 1024
         val alloc_kb = self.stats.allocated_bytes / 1024
         "ActorHeap({used_kb}KB/{alloc_kb}KB, gc={self.stats.gc_count})"
-
 impl Display for HeapConfig:
     fn fmt() -> text:
         val init_kb = self.initial_size / 1024

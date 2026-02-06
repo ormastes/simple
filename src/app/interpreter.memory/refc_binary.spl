@@ -47,35 +47,34 @@ struct SharedHeapConfig:
     gc_threshold: f64       # GC when usage exceeds this ratio (0.0-1.0)
     defrag_threshold: f64   # Defragment when fragmentation exceeds this
 
-impl SharedHeapConfig:
-    static fn default() -> SharedHeapConfig:
-        SharedHeapConfig(
-            initial_size: DEFAULT_SHARED_HEAP_SIZE,
-            max_size: DEFAULT_SHARED_HEAP_SIZE * 4,
-            grow_factor: 1.5,
-            gc_threshold: 0.8,
-            defrag_threshold: 0.3
-        )
+fn SharedHeapConfig__default() -> SharedHeapConfig:
+    SharedHeapConfig(
+        initial_size: DEFAULT_SHARED_HEAP_SIZE,
+        max_size: DEFAULT_SHARED_HEAP_SIZE * 4,
+        grow_factor: 1.5,
+        gc_threshold: 0.8,
+        defrag_threshold: 0.3
+    )
 
-    static fn small() -> SharedHeapConfig:
-        """Smaller shared heap for testing."""
-        SharedHeapConfig(
-            initial_size: 1024 * 1024,  # 1 MB
-            max_size: 16 * 1024 * 1024,  # 16 MB
-            grow_factor: 2.0,
-            gc_threshold: 0.75,
-            defrag_threshold: 0.25
-        )
+fn SharedHeapConfig__small() -> SharedHeapConfig:
+    """Smaller shared heap for testing."""
+    SharedHeapConfig(
+        initial_size: 1024 * 1024,  # 1 MB
+        max_size: 16 * 1024 * 1024,  # 16 MB
+        grow_factor: 2.0,
+        gc_threshold: 0.75,
+        defrag_threshold: 0.25
+    )
 
-    static fn large() -> SharedHeapConfig:
-        """Larger shared heap for heavy workloads."""
-        SharedHeapConfig(
-            initial_size: 256 * 1024 * 1024,  # 256 MB
-            max_size: 1024 * 1024 * 1024,     # 1 GB
-            grow_factor: 1.25,
-            gc_threshold: 0.85,
-            defrag_threshold: 0.4
-        )
+fn SharedHeapConfig__large() -> SharedHeapConfig:
+    """Larger shared heap for heavy workloads."""
+    SharedHeapConfig(
+        initial_size: 256 * 1024 * 1024,  # 256 MB
+        max_size: 1024 * 1024 * 1024,     # 1 GB
+        grow_factor: 1.25,
+        gc_threshold: 0.85,
+        defrag_threshold: 0.4
+    )
 
 # ============================================================================
 # Copy Strategy
@@ -94,7 +93,6 @@ impl CopyStrategy:
             case DeepCopy: false
             case ShareRef: true
             case Hybrid: size >= SMALL_BINARY_THRESHOLD
-
 fn copy_strategy(size: i64) -> CopyStrategy:
     """Get recommended copy strategy for given size."""
     if size < SMALL_BINARY_THRESHOLD:
@@ -119,30 +117,26 @@ struct BinaryRef:
     offset: i64         # Offset in shared heap
     length: i64         # Length of data in bytes
 
-impl BinaryRef:
-    static fn new(id: i64, offset: i64, length: i64) -> BinaryRef:
-        BinaryRef(id: id, offset: offset, length: length)
+fn BinaryRef__new(id: i64, offset: i64, length: i64) -> BinaryRef:
+    BinaryRef(id: id, offset: offset, length: length)
 
+
+impl BinaryRef:
     fn size() -> i64:
         """Size of the referenced data."""
         self.length
-
     fn is_small() -> bool:
         """Check if this is a small binary (should have been copied)."""
         self.length < SMALL_BINARY_THRESHOLD
-
 impl Display for BinaryRef:
     fn fmt() -> text:
         "BinaryRef(id={self.id}, len={self.length})"
-
 impl Eq for BinaryRef:
     fn eq(other: BinaryRef) -> bool:
         self.id == other.id
-
 impl Hash for BinaryRef:
     fn hash() -> i64:
         self.id
-
 # ============================================================================
 # Reference-Counted Binary
 # ============================================================================
@@ -178,94 +172,73 @@ struct RefcBinary:
     # Data pointer (in real impl, this would be actual memory)
     data_ptr: i64           # Opaque pointer to data
 
+fn RefcBinary__new(id: i64, length: i64, data_ptr: i64) -> RefcBinary:
+    RefcBinary(
+        id: id,
+        refcount: 1,
+        length: length,
+        capacity: length,
+        hash_cache: None,
+        created_at: current_time_ms(),
+        last_accessed: current_time_ms(),
+        is_pinned: false,
+        is_sub_binary: false,
+        parent_id: None,
+        data_ptr: data_ptr
+    )
+
+fn RefcBinary__sub_binary(id: i64, parent_id: i64, offset: i64, length: i64, data_ptr: i64) -> RefcBinary:
+    """Create a sub-binary referencing part of a parent binary."""
+    RefcBinary(
+        id: id,
+        refcount: 1,
+        length: length,
+        capacity: length,
+        hash_cache: None,
+        created_at: current_time_ms(),
+        last_accessed: current_time_ms(),
+        is_pinned: false,
+        is_sub_binary: true,
+        parent_id: Some(parent_id),
+        data_ptr: data_ptr
+    )
+
+
 impl RefcBinary:
-    static fn new(id: i64, length: i64, data_ptr: i64) -> RefcBinary:
-        RefcBinary(
-            id: id,
-            refcount: 1,
-            length: length,
-            capacity: length,
-            hash_cache: None,
-            created_at: current_time_ms(),
-            last_accessed: current_time_ms(),
-            is_pinned: false,
-            is_sub_binary: false,
-            parent_id: None,
-            data_ptr: data_ptr
-        )
-
-    static fn sub_binary(id: i64, parent_id: i64, offset: i64, length: i64, data_ptr: i64) -> RefcBinary:
-        """Create a sub-binary referencing part of a parent binary."""
-        RefcBinary(
-            id: id,
-            refcount: 1,
-            length: length,
-            capacity: length,
-            hash_cache: None,
-            created_at: current_time_ms(),
-            last_accessed: current_time_ms(),
-            is_pinned: false,
-            is_sub_binary: true,
-            parent_id: Some(parent_id),
-            data_ptr: data_ptr
-        )
-
-    # --------------------------------------------------------------------------
-    # Reference counting
-    # --------------------------------------------------------------------------
-
     me incref() -> i64:
         """Increment reference count. Returns new count."""
         self.refcount = self.refcount + 1
         self.last_accessed = current_time_ms()
         self.refcount
-
     me decref() -> i64:
         """Decrement reference count. Returns new count."""
         self.refcount = self.refcount - 1
         self.refcount
-
     fn can_collect() -> bool:
         """Check if this binary can be garbage collected."""
         self.refcount <= 0 and not self.is_pinned
-
-    # --------------------------------------------------------------------------
-    # Pinning (prevent collection)
-    # --------------------------------------------------------------------------
-
     me pin():
         """Pin binary to prevent garbage collection."""
         self.is_pinned = true
-
     me unpin():
         """Unpin binary to allow garbage collection."""
         self.is_pinned = false
-
-    # --------------------------------------------------------------------------
-    # Queries
-    # --------------------------------------------------------------------------
-
     fn total_size() -> i64:
         """Total memory used including header."""
         val header_size: i64 = 64  # Approximate header size
         header_size + self.capacity
-
     fn age_ms() -> i64:
         """Age since creation in milliseconds."""
         current_time_ms() - self.created_at
-
     fn idle_time_ms() -> i64:
         """Time since last access in milliseconds."""
         current_time_ms() - self.last_accessed
-
     fn to_ref(offset: i64) -> BinaryRef:
         """Create a BinaryRef pointing to this binary."""
-        BinaryRef.new(self.id, offset, self.length)
-
+        BinaryRef__new(self.id, offset, self.length)
 impl Display for RefcBinary:
     fn fmt() -> text:
         "RefcBinary(id={self.id}, len={self.length}, refs={self.refcount})"
-
 # ============================================================================
 # Shared Heap Statistics
 # ============================================================================
@@ -298,52 +271,49 @@ struct SharedHeapStats:
     fragment_count: i64
     largest_free_block: i64
 
-impl SharedHeapStats:
-    static fn new() -> SharedHeapStats:
-        SharedHeapStats(
-            total_size: 0,
-            used_size: 0,
-            free_size: 0,
-            peak_usage: 0,
-            binary_count: 0,
-            sub_binary_count: 0,
-            pinned_count: 0,
-            total_allocations: 0,
-            total_deallocations: 0,
-            total_incref: 0,
-            total_decref: 0,
-            gc_count: 0,
-            gc_bytes_reclaimed: 0,
-            defrag_count: 0,
-            fragment_count: 0,
-            largest_free_block: 0
-        )
+fn SharedHeapStats__new() -> SharedHeapStats:
+    SharedHeapStats(
+        total_size: 0,
+        used_size: 0,
+        free_size: 0,
+        peak_usage: 0,
+        binary_count: 0,
+        sub_binary_count: 0,
+        pinned_count: 0,
+        total_allocations: 0,
+        total_deallocations: 0,
+        total_incref: 0,
+        total_decref: 0,
+        gc_count: 0,
+        gc_bytes_reclaimed: 0,
+        defrag_count: 0,
+        fragment_count: 0,
+        largest_free_block: 0
+    )
 
+
+impl SharedHeapStats:
     fn utilization() -> f64:
         """Heap utilization percentage."""
         if self.total_size == 0:
             0.0
         else:
             (self.used_size as f64) / (self.total_size as f64) * 100.0
-
     fn fragmentation() -> f64:
         """Fragmentation ratio (0.0 = none, 1.0 = severe)."""
         if self.free_size == 0:
             0.0
         else:
             1.0 - ((self.largest_free_block as f64) / (self.free_size as f64))
-
     fn avg_binary_size() -> f64:
         """Average binary size."""
         if self.binary_count == 0:
             0.0
         else:
             (self.used_size as f64) / (self.binary_count as f64)
-
 impl Display for SharedHeapStats:
     fn fmt() -> text:
         "SharedHeapStats(used={self.used_size}/{self.total_size}, binaries={self.binary_count})"
-
 # ============================================================================
 # Shared Heap
 # ============================================================================
@@ -360,7 +330,7 @@ struct SharedHeap:
     - Binary data is immutable after creation
 
     Example:
-        val heap = SharedHeap.new(SharedHeapConfig.default())
+        val heap = SharedHeap__new(SharedHeapConfig__default())
 
         # Allocate a binary
         val binary = heap.allocate(data_ptr, 1024)
@@ -387,30 +357,27 @@ struct SharedHeap:
     # State
     is_collecting: bool
 
+fn SharedHeap__new(config: SharedHeapConfig) -> SharedHeap:
+    var stats = SharedHeapStats__new()
+    stats.total_size = config.initial_size
+    stats.free_size = config.initial_size
+    stats.largest_free_block = config.initial_size
+
+    SharedHeap(
+        config: config,
+        stats: stats,
+        binaries: {},
+        next_binary_id: 0,
+        free_blocks: [(0, config.initial_size)],
+        next_offset: 0,
+        is_collecting: false
+    )
+
+fn SharedHeap__default() -> SharedHeap:
+    SharedHeap__new(SharedHeapConfig__default())
+
+
 impl SharedHeap:
-    static fn new(config: SharedHeapConfig) -> SharedHeap:
-        var stats = SharedHeapStats.new()
-        stats.total_size = config.initial_size
-        stats.free_size = config.initial_size
-        stats.largest_free_block = config.initial_size
-
-        SharedHeap(
-            config: config,
-            stats: stats,
-            binaries: {},
-            next_binary_id: 0,
-            free_blocks: [(0, config.initial_size)],
-            next_offset: 0,
-            is_collecting: false
-        )
-
-    static fn default() -> SharedHeap:
-        SharedHeap.new(SharedHeapConfig.default())
-
-    # --------------------------------------------------------------------------
-    # Allocation
-    # --------------------------------------------------------------------------
-
     me allocate(data_ptr: i64, size: i64) -> AllocResult:
         """Allocate a new binary in the shared heap.
 
@@ -445,7 +412,7 @@ impl SharedHeap:
         val id = self.next_binary_id
         self.next_binary_id = self.next_binary_id + 1
 
-        val binary = RefcBinary.new(id, size, data_ptr)
+        val binary = RefcBinary__new(id, size, data_ptr)
         self.binaries[id] = binary
 
         # Update stats
@@ -462,9 +429,8 @@ impl SharedHeap:
         if usage_ratio > self.config.gc_threshold:
             self.collect_garbage()
 
-        val ref = BinaryRef.new(id, offset, size)
+        val ref = BinaryRef__new(id, offset, size)
         AllocResult.Success(ref)
-
     me allocate_sub_binary(parent_id: i64, offset: i64, length: i64) -> AllocResult:
         """Allocate a sub-binary referencing part of an existing binary.
 
@@ -489,15 +455,14 @@ impl SharedHeap:
 
         # Data pointer is parent's data_ptr + offset
         val sub_data_ptr = parent_binary.data_ptr + offset
-        val sub = RefcBinary.sub_binary(id, parent_id, offset, length, sub_data_ptr)
+        val sub = RefcBinary__sub_binary(id, parent_id, offset, length, sub_data_ptr)
         self.binaries[id] = sub
 
         self.stats.sub_binary_count = self.stats.sub_binary_count + 1
         self.stats.binary_count = self.stats.binary_count + 1
 
-        val ref = BinaryRef.new(id, 0, length)
+        val ref = BinaryRef__new(id, 0, length)
         AllocResult.Success(ref)
-
     fn find_free_block(size: i64) -> (i64, i64)?:
         """Find a free block that can fit the requested size."""
         for i in 0..self.free_blocks.len():
@@ -505,11 +470,6 @@ impl SharedHeap:
             if block_size >= size:
                 return Some((offset, block_size))
         None
-
-    # --------------------------------------------------------------------------
-    # Reference counting
-    # --------------------------------------------------------------------------
-
     me incref(binary_id: i64) -> bool:
         """Increment reference count for a binary."""
         val binary = self.binaries.get(binary_id)
@@ -520,7 +480,6 @@ impl SharedHeap:
             true
         else:
             false
-
     me decref(binary_id: i64) -> bool:
         """Decrement reference count. May trigger deallocation."""
         val binary = self.binaries.get(binary_id)
@@ -534,7 +493,6 @@ impl SharedHeap:
             true
         else:
             false
-
     me deallocate(binary_id: i64):
         """Deallocate a binary (internal use)."""
         val binary = self.binaries.get(binary_id)
@@ -556,11 +514,6 @@ impl SharedHeap:
         self.binaries = self.binaries.remove(binary_id)
         self.stats.binary_count = self.stats.binary_count - 1
         self.stats.total_deallocations = self.stats.total_deallocations + 1
-
-    # --------------------------------------------------------------------------
-    # Garbage Collection
-    # --------------------------------------------------------------------------
-
     me collect_garbage() -> i64:
         """Collect unreferenced binaries. Returns bytes reclaimed."""
         if self.is_collecting:
@@ -585,7 +538,6 @@ impl SharedHeap:
         self.is_collecting = false
 
         reclaimed
-
     me defragment():
         """Defragment the heap by compacting free blocks."""
         # Merge adjacent free blocks (simplified)
@@ -620,11 +572,6 @@ impl SharedHeap:
         self.stats.largest_free_block = largest
         self.stats.fragment_count = self.free_blocks.len()
         self.stats.defrag_count = self.stats.defrag_count + 1
-
-    # --------------------------------------------------------------------------
-    # Pinning
-    # --------------------------------------------------------------------------
-
     me pin(binary_id: i64) -> bool:
         """Pin a binary to prevent garbage collection."""
         val binary = self.binaries.get(binary_id)
@@ -636,7 +583,6 @@ impl SharedHeap:
             true
         else:
             false
-
     me unpin(binary_id: i64) -> bool:
         """Unpin a binary to allow garbage collection."""
         val binary = self.binaries.get(binary_id)
@@ -648,40 +594,29 @@ impl SharedHeap:
             true
         else:
             false
-
-    # --------------------------------------------------------------------------
-    # Queries
-    # --------------------------------------------------------------------------
-
     fn get(binary_id: i64) -> RefcBinary?:
         """Get a binary by ID."""
         self.binaries.get(binary_id)
-
     fn get_ref(binary_id: i64) -> BinaryRef?:
         """Get a BinaryRef for a binary."""
         val binary = self.binaries.get(binary_id)
         if binary.?:
             val b = binary.unwrap()
-            Some(BinaryRef.new(b.id, 0, b.length))
+            Some(BinaryRef__new(b.id, 0, b.length))
         else:
             None
-
     fn contains(binary_id: i64) -> bool:
         """Check if binary exists in heap."""
         self.binaries.get(binary_id).?
-
     fn get_stats() -> SharedHeapStats:
         """Get heap statistics."""
         self.stats
-
     fn binary_count() -> i64:
         """Number of binaries in heap."""
         self.stats.binary_count
-
 impl Display for SharedHeap:
     fn fmt() -> text:
         "SharedHeap(binaries={self.binary_count()}, used={self.stats.used_size})"
-
 # ============================================================================
 # Allocation Result
 # ============================================================================
@@ -700,17 +635,14 @@ impl AllocResult:
         match self:
             case Success(_): true
             case _: false
-
     fn unwrap() -> BinaryRef:
         match self:
             case Success(ref): ref
             case _: panic("AllocResult.unwrap() on failure")
-
     fn ref() -> BinaryRef?:
         match self:
             case Success(ref): Some(ref)
             case _: None
-
 impl Display for AllocResult:
     fn fmt() -> text:
         match self:
@@ -720,7 +652,6 @@ impl Display for AllocResult:
             case InvalidSize: "InvalidSize"
             case ParentNotFound: "ParentNotFound"
             case InvalidRange: "InvalidRange"
-
 # ============================================================================
 # Global Shared Heap
 # ============================================================================
@@ -731,8 +662,8 @@ var GLOBAL_SHARED_HEAP: SharedHeap? = None
 fn get_shared_heap() -> SharedHeap:
     """Get the global shared heap, initializing if needed."""
     if not GLOBAL_SHARED_HEAP.?:
-        GLOBAL_SHARED_HEAP = Some(SharedHeap.default())
-    GLOBAL_SHARED_HEAP.unwrap()
+        GLOBAL_SHARED_HEAP = Some(SharedHeap__default())
+    GLOBAL_SHARED_HEAP__unwrap()
 
 fn shared_heap_allocate(data_ptr: i64, size: i64) -> AllocResult:
     """Allocate in the global shared heap."""
