@@ -5,7 +5,9 @@
 #
 # NOTE: Pure Simple implementation - no FFI, no extern calls
 
-export TimerContext, time_now
+export TimerContext, Timer, Lock, TransactionContext
+export contextmanager, suppress
+export time_now
 
 # ============================================================================
 # Helper: Current Time (Pure Simple - Simulated)
@@ -70,6 +72,24 @@ class TimerContext:
                 # Still running - return current elapsed
                 time_now() - self.start_time
 
+    fn is_running() -> bool:
+        """Check if timer is currently running.
+
+        Returns:
+            bool - true if timer has started but not ended
+        """
+        match self.end_time:
+            Some(_): false
+            None: self.start_time > 0.0
+
+    fn get_elapsed() -> f64:
+        """Get elapsed time (alias for elapsed()).
+
+        Returns:
+            f64 - Elapsed time in seconds
+        """
+        self.elapsed()
+
 impl TimerContext:
     static fn create(name: text) -> TimerContext:
         """Create a new timer context.
@@ -98,30 +118,268 @@ impl TimerContext:
         TimerContext.create(name)
 
 # ============================================================================
-# FileContext - File Resource Manager (Future)
+# Timer - Alias for TimerContext
 # ============================================================================
 
-# TODO: Add FileContext for automatic file closing
-# class FileContext:
-#     file_handle: FileHandle
-#
-#     me __enter__():
-#         self
-#
-#     me __exit__(exc_type, exc_value, traceback):
-#         self.file_handle.close()
+val Timer = TimerContext
 
 # ============================================================================
-# LockContext - Mutex/Lock Manager (Future)
+# Lock - Mutex/Lock Context Manager
 # ============================================================================
 
-# TODO: Add LockContext for automatic lock release
-# class LockContext:
-#     lock: Mutex
-#
-#     me __enter__():
-#         self.lock.acquire()
-#         self
-#
-#     me __exit__(exc_type, exc_value, traceback):
-#         self.lock.release()
+class Lock:
+    """Context manager for mutual exclusion and thread-safe resource access.
+
+    Example:
+        val lock = Lock()
+        lock.__enter__()
+        # ... critical section ...
+        lock.__exit__(nil, nil, nil)
+    """
+    locked: bool
+
+    me __enter__():
+        """Enter context - acquire lock."""
+        self.locked = true
+        self
+
+    me __exit__(exc_type, exc_value, traceback):
+        """Exit context - release lock."""
+        self.locked = false
+        false  # Don't suppress exceptions
+
+    fn is_locked() -> bool:
+        """Check if lock is currently acquired.
+
+        Returns:
+            bool - true if locked
+        """
+        self.locked
+
+    fn is_unlocked() -> bool:
+        """Check if lock is currently released.
+
+        Returns:
+            bool - true if unlocked
+        """
+        not self.locked
+
+impl Lock:
+    static fn create() -> Lock:
+        """Create a new lock in unlocked state.
+
+        Returns:
+            Lock - New unlocked lock
+        """
+        Lock(locked: false)
+
+    static fn new() -> Lock:
+        """Create a new lock (alias for create).
+
+        Returns:
+            Lock - New unlocked lock
+        """
+        Lock.create()
+
+# ============================================================================
+# TransactionContext - Transaction Management
+# ============================================================================
+
+enum TransactionState:
+    Pending
+    Committed
+    RolledBack
+
+class TransactionContext:
+    """Context manager for transactional operations with commit/rollback.
+
+    Example:
+        val tx = TransactionContext()
+        tx.__enter__()
+        # ... operations ...
+        tx.__exit__(nil, nil, nil)  # Auto-commits if no error
+    """
+    state: TransactionState
+
+    me __enter__():
+        """Enter context - start transaction."""
+        self.state = TransactionState.Pending
+        self
+
+    me __exit__(exc_type, exc_value, traceback):
+        """Exit context - commit if no error, otherwise rollback."""
+        match self.state:
+            case TransactionState.Pending:
+                if exc_type == nil:
+                    self.state = TransactionState.Committed
+                else:
+                    self.state = TransactionState.RolledBack
+            _:
+                pass  # Already committed or rolled back
+        false  # Don't suppress exceptions
+
+    me rollback():
+        """Manually rollback the transaction."""
+        self.state = TransactionState.RolledBack
+
+    fn is_pending() -> bool:
+        """Check if transaction is pending.
+
+        Returns:
+            bool - true if not yet committed or rolled back
+        """
+        match self.state:
+            case TransactionState.Pending: true
+            _: false
+
+    fn is_committed() -> bool:
+        """Check if transaction was committed.
+
+        Returns:
+            bool - true if committed
+        """
+        match self.state:
+            case TransactionState.Committed: true
+            _: false
+
+    fn is_rolled_back() -> bool:
+        """Check if transaction was rolled back.
+
+        Returns:
+            bool - true if rolled back
+        """
+        match self.state:
+            case TransactionState.RolledBack: true
+            _: false
+
+    fn is_completed() -> bool:
+        """Check if transaction is complete (committed or rolled back).
+
+        Returns:
+            bool - true if not pending
+        """
+        not self.is_pending()
+
+impl TransactionContext:
+    static fn create() -> TransactionContext:
+        """Create a new transaction in pending state.
+
+        Returns:
+            TransactionContext - New transaction
+        """
+        TransactionContext(state: TransactionState.Pending)
+
+    static fn new() -> TransactionContext:
+        """Create a new transaction (alias for create).
+
+        Returns:
+            TransactionContext - New transaction
+        """
+        TransactionContext.create()
+
+# ============================================================================
+# contextmanager - Helper Function
+# ============================================================================
+
+class ContextManagerWrapper:
+    """Wrapper that creates a context manager from enter/exit functions."""
+    enter_fn: fn() -> text
+    exit_fn: fn(text?, text?, text?) -> bool
+
+    me __enter__():
+        """Call the enter function and return its result."""
+        self.enter_fn()
+
+    me __exit__(exc_type, exc_value, traceback):
+        """Call the exit function."""
+        self.exit_fn(exc_type, exc_value, traceback)
+
+fn contextmanager(enter_fn: fn() -> text, exit_fn: fn(text?, text?, text?) -> bool) -> ContextManagerWrapper:
+    """Create a context manager from separate enter and exit functions.
+
+    Args:
+        enter_fn - Function to call on __enter__ (takes no arguments, returns text)
+        exit_fn - Function to call on __exit__
+
+    Returns:
+        ContextManagerWrapper - Context manager wrapping the functions
+
+    Example:
+        fn my_enter():
+            print "Entering"
+            return "resource"
+
+        fn my_exit(exc_type, exc_value, tb):
+            print "Exiting"
+            return false
+
+        val cm = contextmanager(my_enter, my_exit)
+        val resource = cm.__enter__()
+        cm.__exit__(nil, nil, nil)
+    """
+    ContextManagerWrapper(enter_fn: enter_fn, exit_fn: exit_fn)
+
+# ============================================================================
+# suppress - Exception Suppression Context Manager
+# ============================================================================
+
+class SuppressContext:
+    """Context manager that suppresses specified exception types."""
+    exception_types: [text]
+
+    me __enter__():
+        """Enter context."""
+        self
+
+    me __exit__(exc_type, exc_value, traceback) -> bool:
+        """Exit context - return true if exception should be suppressed."""
+        if exc_type == nil:
+            return false
+
+        # Check if exception type should be suppressed
+        for ex_type in self.exception_types:
+            if exc_type == ex_type:
+                return true
+
+        false
+
+fn suppress(type1: text, type2: text) -> SuppressContext:
+    """Create a context manager that suppresses two exception types.
+
+    Args:
+        type1 - First exception type name to suppress
+        type2 - Second exception type name to suppress
+
+    Returns:
+        SuppressContext - Context manager that suppresses exceptions
+
+    Example:
+        val ctx = suppress("ValueError", "KeyError")
+        ctx.__enter__()
+        # ... code that might raise ValueError or KeyError ...
+        val suppressed = ctx.__exit__("ValueError", "error", nil)
+        # suppressed will be true for ValueError
+    """
+    SuppressContext(exception_types: [type1, type2])
+
+fn suppress_one(type1: text) -> SuppressContext:
+    """Create a context manager that suppresses one exception type.
+
+    Args:
+        type1 - Exception type name to suppress
+
+    Returns:
+        SuppressContext - Context manager that suppresses exceptions
+    """
+    SuppressContext(exception_types: [type1])
+
+fn suppress_list(exception_types: [text]) -> SuppressContext:
+    """Create a context manager that suppresses exception types from a list.
+
+    Args:
+        exception_types - List of exception type names to suppress
+
+    Returns:
+        SuppressContext - Context manager that suppresses exceptions
+    """
+    SuppressContext(exception_types: exception_types)

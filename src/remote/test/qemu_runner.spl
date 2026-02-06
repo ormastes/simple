@@ -4,6 +4,9 @@
 
 use lib.qemu.{QemuArch, QemuConfig, QemuInstance, is_qemu_available, is_gdb_available, find_rv32_gcc, build_rv32_binary}
 
+# SFFI: shell() not available in bootstrap runtime, use rt_process_run directly
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
 # Convenience wrapper for remote debugging QEMU instances
 class QemuRunner:
     instance: QemuInstance   # Underlying QEMU instance
@@ -75,15 +78,39 @@ impl QemuRunner:
         ""
 
 # Re-export utility functions for backward compatibility
+# BUG-RT: Imported functions from lib.qemu may use shell() which isn't available.
+# Inline the logic using rt_process_run.
 fn build_rv32_test(asm_path: text, output_path: text) -> Result<text, text>:
-    build_rv32_binary(asm_path, output_path)
+    val gcc = find_rv32_gcc_local()
+    if gcc.len() == 0:
+        return Err("RISC-V cross-compiler not found")
+    val (stdout, stderr, exit_code) = rt_process_run(gcc, ["-nostdlib", "-march=rv32imac", "-mabi=ilp32", "-o", output_path, asm_path])
+    if exit_code != 0:
+        return Err("Build failed: {stderr}")
+    Ok(output_path)
+
+fn find_rv32_gcc_local() -> text:
+    val candidates = ["riscv32-unknown-elf-gcc", "riscv64-unknown-elf-gcc"]
+    for candidate in candidates:
+        val (stdout, stderr, exit_code) = rt_process_run("which", [candidate])
+        if exit_code == 0:
+            return stdout.trim()
+    ""
 
 fn is_rv32_gcc_available() -> bool:
-    find_rv32_gcc().len() > 0
+    find_rv32_gcc_local().len() > 0
 
 # Parameterless wrappers for RV32-specific checks
+# BUG-RT: Imported is_qemu_available/is_gdb_available from lib.qemu may not resolve.
+# BUG-RT: shell() not available in bootstrap runtime. Use rt_process_run directly.
 fn is_rv32_qemu_available() -> bool:
-    is_qemu_available(QemuArch.RiscV32)
+    val (stdout, stderr, exit_code) = rt_process_run("which", ["qemu-system-riscv32"])
+    exit_code == 0
 
 fn is_rv32_gdb_available() -> bool:
-    is_gdb_available(QemuArch.RiscV32)
+    val candidates = ["riscv32-unknown-elf-gdb", "riscv64-unknown-elf-gdb", "gdb-multiarch", "gdb"]
+    for candidate in candidates:
+        val (stdout, stderr, exit_code) = rt_process_run("which", [candidate])
+        if exit_code == 0:
+            return true
+    false
