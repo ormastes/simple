@@ -219,6 +219,11 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
     elif method == "prompts/get":
         val prompt_name = extract_nested_string(body, "params", "name")
         return handle_prompts_get(id, prompt_name, body, prompt_mgr, debug_mode)
+    elif method == "logging/setLevel":
+        val level = extract_nested_string(body, "params", "level")
+        if debug_mode:
+            debug_log("Log level set to: " + level)
+        return make_result_response(id, "null")
     else:
         if debug_mode:
             debug_log("Unknown method: " + method)
@@ -263,32 +268,71 @@ fn jo3(p1: String, p2: String, p3: String) -> String:
     r
 
 fn make_initialize_response(id: String) -> String:
-    val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("2.0.0")))
-    # Capabilities: tools, resources, prompts
+    # Server info with instructions for MCPSearch
+    var server_info = LB()
+    server_info = server_info + jp("name", js("simple-mcp"))
+    server_info = server_info + ","
+    server_info = server_info + jp("version", js("2.0.0"))
+    server_info = server_info + ","
+    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), feature tracking, and test result tools."
+    server_info = server_info + jp("instructions", js(instructions))
+    server_info = server_info + RB()
+
+    # Capabilities: tools, resources, prompts, logging
     var caps = LB()
     caps = caps + jp("tools", jo1(""))
     caps = caps + ","
     caps = caps + jp("resources", jo1(""))
     caps = caps + ","
     caps = caps + jp("prompts", jo1(""))
+    caps = caps + ","
+    caps = caps + jp("logging", jo1(""))
     caps = caps + RB()
-    val result = jo3(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps), jp("serverInfo", server_info))
+    val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server_info))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool) -> String:
+fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
     val prop = jo2(jp("type", js("string")), jp("description", js(prop_desc)))
     val props = jo1(jp(prop_name, prop))
     var req_arr = "[]"
     if required:
         req_arr = "[" + js(prop_name) + "]"
     val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", req_arr))
-    jo3(jp("name", js(name)), jp("description", js(desc)), jp("inputSchema", schema))
+
+    # Build annotations object
+    var annot = LB()
+    annot = annot + jp("readOnlyHint", if read_only then "true" else "false")
+    annot = annot + ","
+    annot = annot + jp("destructiveHint", if destructive then "true" else "false")
+    annot = annot + ","
+    annot = annot + jp("idempotentHint", if idempotent then "true" else "false")
+    annot = annot + ","
+    annot = annot + jp("openWorldHint", "false")
+    annot = annot + RB()
+
+    # Return tool schema with annotations
+    var result = LB()
+    result = result + jp("name", js(name))
+    result = result + ","
+    result = result + jp("description", js(desc))
+    result = result + ","
+    result = result + jp("inputSchema", schema)
+    result = result + ","
+    result = result + jp("annotations", annot)
+    result = result + RB()
+    result
 
 fn make_tools_list_response(id: String) -> String:
-    val t1 = make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true)
-    val t2 = make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false)
-    val t3 = make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true)
-    val t4 = make_tool_schema("file_info", "Get file information", "path", "File path", true)
+    # Tool annotations: (read_only, destructive, idempotent)
+    val t1 = make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true, true, false, true)
+    val t2 = make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false, true, false, true)
+    val t3 = make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true, true, false, true)
+    val t4 = make_tool_schema("file_info", "Get file information", "path", "File path", true, true, false, true)
+    # Bug database tools
+    val t5 = make_tool_schema("bugdb_get", "Get bug by ID", "id", "Bug ID", true, true, false, true)
+    val t6 = make_tool_schema("bugdb_add", "Add new bug", "bug", "Bug JSON", true, false, false, false)
+    val t7 = make_tool_schema("bugdb_update", "Update existing bug", "id", "Bug ID", true, false, false, true)
+
     var tools = "["
     tools = tools + t1
     tools = tools + ","
@@ -297,6 +341,12 @@ fn make_tools_list_response(id: String) -> String:
     tools = tools + t3
     tools = tools + ","
     tools = tools + t4
+    tools = tools + ","
+    tools = tools + t5
+    tools = tools + ","
+    tools = tools + t6
+    tools = tools + ","
+    tools = tools + t7
     tools = tools + "]"
     val result = jo1(jp("tools", tools))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
