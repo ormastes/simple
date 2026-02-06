@@ -52,7 +52,7 @@ fn parse_sspec_metadata(file_path: text) -> [SSpecItem]:
                     val after = trimmed[id_start + 4:]
                     val id_end = after.index_of("\")") ?? -1
                     if id_end >= 0:
-                        current_id = after[:id_end]
+                        current_id = after[0:id_end]
 
             # Parse modes
             if trimmed.contains("modes("):
@@ -106,13 +106,15 @@ fn parse_attr_list(line: text, attr_name: text) -> [text]:
     val end = after.index_of(")") ?? -1
     if end < 0:
         return []
-    val inner = after[:end]
+    val inner = after[0:end]
     var items: [text] = []
     val parts = inner.split(",")
     for part in parts:
-        val trimmed = part.trim().replace("\"", "")
-        if trimmed != "":
-            items.push(trimmed)
+        # BUG-14 workaround: Break chained method calls
+        val trimmed = part.trim()
+        val cleaned = trimmed.replace("\"", "")
+        if cleaned != "":
+            items.push(cleaned)
     items
 
 # Extract quoted string from line (first occurrence)
@@ -124,7 +126,7 @@ fn extract_quoted_string(line: text) -> text:
     val q2 = after.index_of("\"") ?? -1
     if q2 < 0:
         return ""
-    after[:q2]
+    after[0:q2]
 
 # Extract category from file path
 # e.g., "test/system/features/control_flow/..." -> "control_flow"
@@ -139,6 +141,32 @@ fn extract_category_from_path(file_path: text) -> text:
     if parts.len() >= 2:
         return parts[parts.len() - 2]
     "uncategorized"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Parse integer with fallback value (replacement for missing .to_int_or() method)
+fn to_int_or(s: text, default: i64) -> i64:
+    if s.len() == 0:
+        return default
+
+    # Check if string contains only digits (with optional leading -)
+    var start_idx = 0
+    if s[0:1] == "-":
+        start_idx = 1
+        if s.len() == 1:  # Just "-" is invalid
+            return default
+
+    var i = start_idx
+    while i < s.len():
+        val c = s[i:i+1]
+        if c < "0" or c > "9":
+            return default
+        i = i + 1
+
+    # Valid integer string - safe to parse
+    s.to_int()
 
 # ============================================================================
 # Feature ID Comparison (Semantic Sorting)
@@ -160,8 +188,8 @@ fn compare_feature_id(a: text, b: text) -> i64:
         val b_val = if i < b_parts.len(): b_parts[i] else: ""
 
         # Try numeric comparison first
-        val a_num = a_val.to_int_or(-1)
-        val b_num = b_val.to_int_or(-1)
+        val a_num = to_int_or(a_val, -1)
+        val b_num = to_int_or(b_val, -1)
         if a_num >= 0 and b_num >= 0:
             if a_num != b_num:
                 return a_num - b_num
