@@ -954,6 +954,98 @@ void do_common_semihosting(CPUState *cs)
         }
         /* fall through */
     default:
+        /*
+         * Simple language string interning operations
+         */
+        if (nr >= TARGET_SYS_WRITE_HANDLE && nr <= TARGET_SYS_WRITE_HANDLE_PN) {
+            char text_buffer[1024];
+            char format_buffer[1024];
+            uint32_t string_id = args;
+            uint32_t params[16];  /* Max 16 parameters */
+            int param_count = 0;
+            int i;
+
+            /* Load table on first use */
+            if (!g_string_table.loaded) {
+                if (load_string_table_from_memory(cs) < 0) {
+                    /* No table available - return error */
+                    common_semi_cb(cs, -1, ENOENT);
+                    break;
+                }
+            }
+
+            /* Lookup string by ID */
+            if (get_string_by_id(cs, string_id, text_buffer,
+                                  sizeof(text_buffer)) < 0) {
+                fprintf(stderr, "Simple: String ID %u not found\n", string_id);
+                common_semi_cb(cs, -1, EINVAL);
+                break;
+            }
+
+            /* Handle different parameter counts */
+            switch (nr) {
+            case TARGET_SYS_WRITE_HANDLE:
+                /* No parameters - just write the string */
+                semihost_sys_write_gf(cs, common_semi_dead_cb,
+                                      &console_out_gf,
+                                      (target_ulong)(uintptr_t)text_buffer,
+                                      strlen(text_buffer));
+                break;
+
+            case TARGET_SYS_WRITE_HANDLE_P1:
+                /* 1 parameter */
+                GET_ARG(0);
+                params[0] = arg0;
+                param_count = 1;
+                format_string_with_params(format_buffer, sizeof(format_buffer),
+                                           text_buffer, params, param_count);
+                semihost_sys_write_gf(cs, common_semi_dead_cb,
+                                      &console_out_gf,
+                                      (target_ulong)(uintptr_t)format_buffer,
+                                      strlen(format_buffer));
+                break;
+
+            case TARGET_SYS_WRITE_HANDLE_P2:
+                /* 2 parameters */
+                GET_ARG(0);
+                GET_ARG(1);
+                params[0] = arg0;
+                params[1] = arg1;
+                param_count = 2;
+                format_string_with_params(format_buffer, sizeof(format_buffer),
+                                           text_buffer, params, param_count);
+                semihost_sys_write_gf(cs, common_semi_dead_cb,
+                                      &console_out_gf,
+                                      (target_ulong)(uintptr_t)format_buffer,
+                                      strlen(format_buffer));
+                break;
+
+            case TARGET_SYS_WRITE_HANDLE_P3:
+                /* 3 parameters */
+                GET_ARG(0);
+                GET_ARG(1);
+                GET_ARG(2);
+                params[0] = arg0;
+                params[1] = arg1;
+                params[2] = arg2;
+                param_count = 3;
+                format_string_with_params(format_buffer, sizeof(format_buffer),
+                                           text_buffer, params, param_count);
+                semihost_sys_write_gf(cs, common_semi_dead_cb,
+                                      &console_out_gf,
+                                      (target_ulong)(uintptr_t)format_buffer,
+                                      strlen(format_buffer));
+                break;
+
+            case TARGET_SYS_WRITE_HANDLE_PN:
+                /* N parameters - TODO: implement variable args */
+                fprintf(stderr, "Simple: SYS_WRITE_HANDLE_PN not yet implemented\n");
+                common_semi_cb(cs, -1, ENOSYS);
+                break;
+            }
+            break;
+        }
+
         fprintf(stderr, "qemu: Unsupported SemiHosting SWI 0x%02x\n", nr);
         cpu_dump_state(cs, stderr, 0);
         abort();
