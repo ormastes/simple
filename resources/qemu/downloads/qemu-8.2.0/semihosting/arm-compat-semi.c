@@ -985,10 +985,9 @@ void do_common_semihosting(CPUState *cs)
             switch (nr) {
             case TARGET_SYS_WRITE_HANDLE:
                 /* No parameters - just write the string */
-                semihost_sys_write_gf(cs, common_semi_dead_cb,
-                                      &console_out_gf,
-                                      (target_ulong)(uintptr_t)text_buffer,
-                                      strlen(text_buffer));
+                fwrite(text_buffer, 1, strlen(text_buffer), stderr);
+                fflush(stderr);
+                common_semi_cb(cs, 0, 0);  /* Success */
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P1:
@@ -998,10 +997,9 @@ void do_common_semihosting(CPUState *cs)
                 param_count = 1;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
-                semihost_sys_write_gf(cs, common_semi_dead_cb,
-                                      &console_out_gf,
-                                      (target_ulong)(uintptr_t)format_buffer,
-                                      strlen(format_buffer));
+                fwrite(format_buffer, 1, strlen(format_buffer), stderr);
+                fflush(stderr);
+                common_semi_cb(cs, 0, 0);  /* Success */
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P2:
@@ -1013,10 +1011,9 @@ void do_common_semihosting(CPUState *cs)
                 param_count = 2;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
-                semihost_sys_write_gf(cs, common_semi_dead_cb,
-                                      &console_out_gf,
-                                      (target_ulong)(uintptr_t)format_buffer,
-                                      strlen(format_buffer));
+                fwrite(format_buffer, 1, strlen(format_buffer), stderr);
+                fflush(stderr);
+                common_semi_cb(cs, 0, 0);  /* Success */
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_P3:
@@ -1030,10 +1027,9 @@ void do_common_semihosting(CPUState *cs)
                 param_count = 3;
                 format_string_with_params(format_buffer, sizeof(format_buffer),
                                            text_buffer, params, param_count);
-                semihost_sys_write_gf(cs, common_semi_dead_cb,
-                                      &console_out_gf,
-                                      (target_ulong)(uintptr_t)format_buffer,
-                                      strlen(format_buffer));
+                fwrite(format_buffer, 1, strlen(format_buffer), stderr);
+                fflush(stderr);
+                common_semi_cb(cs, 0, 0);  /* Success */
                 break;
 
             case TARGET_SYS_WRITE_HANDLE_PN:
