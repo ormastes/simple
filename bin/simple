@@ -1,4 +1,92 @@
 #!/bin/bash
-# Simple Language CLI
+# Simple Language CLI - Multi-Platform Bootstrap Loader
+# Automatically detects platform and uses appropriate bootstrap binary
+
+set -e
+
+# Get script directory
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$DIR/simple_runtime" "$DIR/../src/app/cli/main.spl" "$@"
+
+# Detect platform
+detect_platform() {
+    local arch=$(uname -m)
+    local os=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+    # Normalize architecture
+    case "$arch" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        riscv64) arch="riscv64" ;;
+        *)
+            echo "Error: Unsupported architecture: $arch" >&2
+            echo "Supported: x86_64, arm64, riscv64" >&2
+            exit 1
+            ;;
+    esac
+
+    # Normalize OS
+    case "$os" in
+        linux) os="linux" ;;
+        darwin) os="macos" ;;
+        mingw*|msys*|cygwin*) os="windows" ;;
+        *)
+            echo "Error: Unsupported OS: $os" >&2
+            echo "Supported: linux, macos, windows" >&2
+            exit 1
+            ;;
+    esac
+
+    echo "${os}-${arch}"
+}
+
+# Find bootstrap binary
+find_bootstrap() {
+    local platform="$1"
+    local bootstrap_dir="$DIR/bootstrap"
+
+    # Try platform-specific binary first
+    local bootstrap_bin="$bootstrap_dir/$platform/simple"
+    if [ "$os" = "windows" ]; then
+        bootstrap_bin="$bootstrap_bin.exe"
+    fi
+
+    if [ -x "$bootstrap_bin" ]; then
+        echo "$bootstrap_bin"
+        return 0
+    fi
+
+    # Try legacy location (bin/bootstrap/simple_runtime)
+    if [ -x "$bootstrap_dir/simple_runtime" ]; then
+        echo "$bootstrap_dir/simple_runtime"
+        return 0
+    fi
+
+    # Try development build
+    if [ -x "$DIR/simple_runtime" ]; then
+        echo "$DIR/simple_runtime"
+        return 0
+    fi
+
+    # Try release build
+    local release_bin="$DIR/../release/simple-0.4.0-beta/bin/simple_runtime"
+    if [ -x "$release_bin" ]; then
+        echo "$release_bin"
+        return 0
+    fi
+
+    echo "Error: No Simple runtime found for platform: $platform" >&2
+    echo "Please download the bootstrap binary for your platform" >&2
+    echo "  https://github.com/simple-lang/simple/releases" >&2
+    exit 1
+}
+
+# Main execution
+main() {
+    local platform=$(detect_platform)
+    local bootstrap=$(find_bootstrap "$platform")
+
+    # Execute Simple CLI with bootstrap runtime
+    exec "$bootstrap" "$DIR/../src/app/cli/main.spl" "$@"
+}
+
+main "$@"

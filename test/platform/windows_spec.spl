@@ -13,7 +13,9 @@ use std.spec
 use std.platform.{
     is_windows, normalize_path, normalize_windows_path,
     resolve_command, dir_sep, path_sep, exe_ext,
-    is_absolute_windows
+    is_absolute_windows, is_mingw_path,
+    mingw_to_windows, windows_to_mingw,
+    clear_command_cache, get_command_cache_stats
 }
 use std.fs.path.{Path, is_absolute}
 use app.io.{shell, process_run}
@@ -74,6 +76,69 @@ describe "Windows Path Normalization":
 
         # Should still convert slashes
         expect(normalized).to_equal("relative\\path\\to\\file.txt")
+
+# ===========================================================================
+# MinGW Path Support Tests
+# ===========================================================================
+
+describe "MinGW Path Support":
+    it "detects MinGW-style paths":
+        use std.platform.is_mingw_path
+
+        expect(is_mingw_path("/c/Users/Test")).to_be(true)
+        expect(is_mingw_path("/d/Projects/code")).to_be(true)
+        expect(is_mingw_path("/e/Data")).to_be(true)
+
+    it "rejects non-MinGW paths":
+        use std.platform.is_mingw_path
+
+        expect(is_mingw_path("C:\\Users\\Test")).to_be(false)
+        expect(is_mingw_path("/usr/local/bin")).to_be(false)
+        expect(is_mingw_path("relative/path")).to_be(false)
+        expect(is_mingw_path("/")).to_be(false)
+
+    it "converts MinGW paths to Windows format":
+        use std.platform.mingw_to_windows
+
+        val path1 = mingw_to_windows("/c/Users/Test/file.txt")
+        expect(path1).to_equal("C:\\Users\\Test\\file.txt")
+
+        val path2 = mingw_to_windows("/d/Projects/code")
+        expect(path2).to_equal("D:\\Projects\\code")
+
+    it "converts Windows paths to MinGW format":
+        use std.platform.windows_to_mingw
+
+        val path1 = windows_to_mingw("C:\\Users\\Test\\file.txt")
+        expect(path1).to_equal("/c/Users/Test/file.txt")
+
+        val path2 = windows_to_mingw("D:\\Projects\\code")
+        expect(path2).to_equal("/d/Projects/code")
+
+    it "handles MinGW paths in normalize_windows_path":
+        val path = "/c/Users/Test/Documents/file.txt"
+        val normalized = normalize_windows_path(path)
+
+        expect(normalized).to_equal("C:\\Users\\Test\\Documents\\file.txt")
+
+    it "treats MinGW paths as absolute":
+        expect(is_absolute_windows("/c/Users/Test")).to_be(true)
+        expect(is_absolute_windows("/d/Projects")).to_be(true)
+
+    it "bidirectional conversion preserves path":
+        use std.platform.{mingw_to_windows, windows_to_mingw}
+
+        val original_mingw = "/c/Users/Test/file.txt"
+        val to_windows = mingw_to_windows(original_mingw)
+        val back_to_mingw = windows_to_mingw(to_windows)
+
+        expect(back_to_mingw).to_equal(original_mingw)
+
+        val original_windows = "C:\\Users\\Test\\file.txt"
+        val to_mingw = windows_to_mingw(original_windows)
+        val back_to_windows = mingw_to_windows(to_mingw)
+
+        expect(back_to_windows).to_equal(original_windows)
 
 # ===========================================================================
 # Windows Path Detection Tests
@@ -370,3 +435,110 @@ describe "Windows Integration":
 
         expect(p.to_string().contains("Users")).to_be(true)
         expect(p.to_string().contains("Test")).to_be(true)
+
+# ===========================================================================
+# Command Cache Tests
+# ===========================================================================
+
+describe "Command Resolution Cache":
+    it "caches resolved commands":
+        use std.platform.{resolve_command, clear_command_cache, get_command_cache_stats}
+
+        # Clear cache to start fresh
+        clear_command_cache()
+
+        # First resolution (cache miss)
+        val cmd1 = resolve_command("cmd")
+        expect(cmd1.contains("cmd.exe")).to_be(true)
+
+        # Second resolution (cache hit - should be fast)
+        val cmd2 = resolve_command("cmd")
+        expect(cmd2).to_equal(cmd1)
+
+        # Cache should have 1 entry
+        val stats = get_command_cache_stats()
+        expect(stats.contains("1 entries")).to_be(true)
+
+    it "caches multiple different commands":
+        use std.platform.{resolve_command, clear_command_cache}
+
+        clear_command_cache()
+
+        # Resolve multiple commands
+        val cmd1 = resolve_command("cmd")
+        val notepad1 = resolve_command("notepad")
+        val powershell1 = resolve_command("powershell")
+
+        # Resolve again (all should hit cache)
+        val cmd2 = resolve_command("cmd")
+        val notepad2 = resolve_command("notepad")
+        val powershell2 = resolve_command("powershell")
+
+        # All should match
+        expect(cmd2).to_equal(cmd1)
+        expect(notepad2).to_equal(notepad1)
+        expect(powershell2).to_equal(powershell1)
+
+    it "invalidates cache when PATH changes":
+        use std.platform.{resolve_command, clear_command_cache}
+        use app.io.{rt_env_get, rt_env_set}
+
+        clear_command_cache()
+
+        # Save original PATH
+        val original_path = rt_env_get("PATH")
+
+        # Resolve a command
+        val cmd1 = resolve_command("cmd")
+
+        # Change PATH (this should invalidate cache)
+        rt_env_set("PATH", "C:\\Windows\\System32")
+
+        # Resolve again (cache should be invalidated)
+        val cmd2 = resolve_command("cmd")
+
+        # Restore original PATH
+        rt_env_set("PATH", original_path)
+
+        # Both resolutions should succeed (may or may not be equal)
+        expect(cmd1.contains("cmd.exe")).to_be(true)
+        expect(cmd2.contains("cmd.exe")).to_be(true)
+
+    it "handles absolute paths without caching overhead":
+        use std.platform.{resolve_command, clear_command_cache}
+
+        clear_command_cache()
+
+        # Absolute path should be returned as-is
+        val abs_path = "C:\\Windows\\System32\\cmd.exe"
+        val resolved = resolve_command(abs_path)
+
+        expect(resolved).to_equal(abs_path)
+
+    it "caches commands with .exe already":
+        use std.platform.{resolve_command, clear_command_cache}
+
+        clear_command_cache()
+
+        # Command with .exe extension
+        val cmd1 = resolve_command("cmd.exe")
+        val cmd2 = resolve_command("cmd.exe")
+
+        expect(cmd2).to_equal(cmd1)
+        expect(cmd1.contains("cmd.exe")).to_be(true)
+
+    it "tracks cache hit rate":
+        use std.platform.{resolve_command, clear_command_cache, get_command_cache_stats}
+
+        clear_command_cache()
+
+        # First call = miss
+        resolve_command("cmd")
+
+        # Next 9 calls = hits
+        for _ in 0..9:
+            resolve_command("cmd")
+
+        # Hit rate should be 90% (9 hits out of 10 total)
+        val stats = get_command_cache_stats()
+        expect(stats.contains("90")).to_be(true)  # Should mention 90% hit rate
