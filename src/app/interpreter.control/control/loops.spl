@@ -10,7 +10,7 @@ from ..core.execution_guard import {check_loop_safety}
 from ..expr import {evaluate}
 from match import {match_pattern, bind_pattern}
 
-export eval_for, eval_while, eval_loop, ControlFlow
+export eval_for, eval_while, eval_loop, eval_with, ControlFlow
 
 # Control flow signals
 enum ControlFlow:
@@ -154,6 +154,85 @@ fn eval_loop(interp: Interpreter, body: Block) -> Result<Value, InterpreterError
                 return Err(InterpreterError.Return(value))
             case Err(e):
                 return Err(e)
+
+# ================================================================
+# With Statement (Context Managers)
+# ================================================================
+
+# Evaluate a with statement
+# Implements simple context manager protocol: enter() and cleanup()
+fn eval_with(interp: Interpreter, items: [WithItem], body: Block) -> Result<Value, InterpreterError>:
+    """Execute with statement with context manager protocol.
+
+    For each context manager:
+    1. Evaluate context expression
+    2. Call enter() method
+    3. Bind result to target variable if specified
+
+    Execute body, then always call cleanup() in reverse order.
+    """
+    var cleanup_fns: [(Value, text)] = []
+
+    # Enter all contexts
+    for item in items:
+        # Evaluate context expression
+        val ctx_value = evaluate(interp, item.context_expr)?
+
+        # Call enter() method
+        val enter_result = match ctx_value.call_method("enter", []):
+            case Ok(result): result
+            case Err(e):
+                # Cleanup contexts entered so far before propagating error
+                cleanup_contexts(interp, cleanup_fns)
+                return Err(e)
+
+        # Bind to variable if target specified
+        if item.target.?:
+            val target_name = item.target.unwrap()
+            val name_sym = intern(target_name)
+            interp.env.define(name_sym, enter_result)
+
+        # Store context and cleanup method for later
+        cleanup_fns.push((ctx_value, "cleanup"))
+
+    # Execute body
+    var error: InterpreterError? = nil
+    var result = Value.nil()
+
+    for stmt in body.statements:
+        match interp.eval_stmt(stmt):
+            case Ok(value):
+                result = value
+            case Err(e):
+                error = e
+                break
+
+    # Always cleanup in reverse order
+    cleanup_contexts(interp, cleanup_fns)
+
+    # Re-raise error if one occurred
+    if error.?:
+        return Err(error.unwrap())
+
+    Ok(result)
+
+# Helper: cleanup all contexts in reverse order
+fn cleanup_contexts(interp: Interpreter, contexts: [(Value, text)]):
+    """Call cleanup() on all contexts in reverse order.
+
+    Errors during cleanup are logged but don't prevent other cleanups.
+    """
+    # Reverse iteration
+    var i = contexts.len() - 1
+    while i >= 0:
+        val (ctx, method) = contexts[i]
+        match ctx.call_method(method, []):
+            case Ok(_):
+                pass
+            case Err(e):
+                # Log cleanup error but continue with other cleanups
+                print "Warning: cleanup failed: {e}"
+        i = i - 1
 
 # ================================================================
 # Loop Body Execution Helper

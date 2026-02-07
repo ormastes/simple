@@ -1993,6 +1993,8 @@ impl Parser:
                 val value = self.parse_expr()
                 self.skip_newlines()
                 Stmt(kind: StmtKind.Throw(value), span: start.merge(value.span))
+            case KwWith:
+                self.parse_with_stmt()
             case _:
                 self.parse_expr_or_assign_stmt()
 
@@ -2130,6 +2132,56 @@ impl Parser:
         val body = self.parse_block()
 
         Stmt(kind: StmtKind.Loop(body), span: start.merge(body.span))
+
+    me parse_with_stmt() -> Stmt:
+        """Parse with statement.
+
+        Syntax:
+            with expr as var:
+                body
+            with expr1 as var1, expr2 as var2:
+                body
+            with expr:
+                body
+        """
+        val start = self.current.span
+        self.advance()  # Consume 'with'
+
+        var items: [WithItem] = []
+
+        # Parse one or more context manager items
+        var continue_parsing = true
+        while continue_parsing:
+            # Parse context expression
+            val context_expr = self.parse_expr()
+
+            # Check for optional 'as' binding
+            var target: text? = nil
+            if self.match_token(TokenKind.KwAs):
+                target = self.parse_identifier()
+
+            # Create WithItem
+            val item = WithItem(
+                context_expr: context_expr,
+                target: target,
+                span: start.merge(self.previous.span)
+            )
+            items = items.push(item)
+
+            # Check for comma (multiple context managers)
+            if self.check(TokenKind.Comma):
+                self.advance()
+                continue_parsing = true
+            else:
+                continue_parsing = false
+
+        # Expect ':' before body
+        self.expect(TokenKind.Colon, "expected ':' after with statement")
+
+        # Parse block body
+        val body = self.parse_block()
+
+        Stmt(kind: StmtKind.With(items, body), span: start.merge(body.span))
 
     me parse_expr_or_assign_stmt() -> Stmt:
         """Parse expression or assignment statement."""
