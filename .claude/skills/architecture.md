@@ -245,7 +245,7 @@ fn safe_swap(a: mut ref Int, b: mut ref Int):
     *b = temp
 
 @verify(types)
-fn generic_map[T, U](items: List[T], f: fn(T) -> U) -> List[U]:
+fn generic_map<T, U>(items: List<T>, f: fn(T) -> U) -> List<U>:
     """Generic function with verified type inference."""
     return [f(item) for item in items]
 ```
