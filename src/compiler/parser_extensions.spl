@@ -1,0 +1,299 @@
+# Parser Extensions - Async/Await/Spawn/Attributes Support
+#
+# Extends the parser with support for:
+# - #[...] attributes
+# - async fn definitions
+# - await expressions
+# - spawn expressions
+# - actor definitions
+
+use lexer.{Token, TokenKind, Span}
+use parser_types.*
+
+# ================================================================
+# Attribute Parsing (#[...])
+# ================================================================
+
+struct AttributeParser:
+    """Helper for parsing #[...] attributes."""
+    tokens: [Token]
+    pos: i64
+
+impl AttributeParser:
+    static fn new(tokens: [Token]) -> AttributeParser:
+        AttributeParser(tokens: tokens, pos: 0)
+
+    fn current() -> Token:
+        if self.pos < self.tokens.len():
+            self.tokens[self.pos]
+        else:
+            Token.eof(0, 1)
+
+    me advance():
+        if self.pos < self.tokens.len():
+            self.pos = self.pos + 1
+
+    fn parse_attributes() -> [Attribute]:
+        """Parse sequence of #[...] attributes.
+
+        Syntax:
+            #[timeout(5000)]
+            #[tag("slow", "integration")]
+            #[skip("Not implemented")]
+        """
+        var attributes = []
+
+        while self.current().kind == TokenKind.HashLBracket:
+            self.advance()  # consume #[
+
+            # Parse attribute name
+            if self.current().kind != TokenKind.Ident:
+                break
+
+            val attr_name = self.current().text
+            self.advance()
+
+            # Parse optional arguments
+            var args: [Expr] = []
+            if self.current().kind == TokenKind.LParen:
+                self.advance()  # consume (
+
+                while self.current().kind != TokenKind.RParen:
+                    # Parse argument expression (simplified)
+                    val arg = self.parse_attr_arg()
+                    args.push(arg)
+
+                    if self.current().kind == TokenKind.Comma:
+                        self.advance()
+                    else:
+                        break
+
+                if self.current().kind == TokenKind.RParen:
+                    self.advance()  # consume )
+
+            # Expect ]
+            if self.current().kind == TokenKind.RBracket:
+                self.advance()
+
+            val attr = Attribute(
+                name: attr_name,
+                args: args,
+                span: Span.new(0, 0, 1, 1)  # TODO: proper span
+            )
+            attributes.push(attr)
+
+        attributes
+
+    fn parse_attr_arg() -> Expr:
+        """Parse a single attribute argument."""
+        match self.current().kind:
+            case TokenKind.IntLit:
+                val value = int(self.current().text)
+                self.advance()
+                Expr(
+                    kind: ExprKind.IntLit(value),
+                    span: Span.new(0, 0, 1, 1)
+                )
+            case TokenKind.StringLit:
+                val value = self.current().text
+                self.advance()
+                Expr(
+                    kind: ExprKind.StringLit(value, nil),
+                    span: Span.new(0, 0, 1, 1)
+                )
+            case TokenKind.BoolLit:
+                val value = self.current().text == "true"
+                self.advance()
+                Expr(
+                    kind: ExprKind.BoolLit(value),
+                    span: Span.new(0, 0, 1, 1)
+                )
+            case TokenKind.Ident:
+                val name = self.current().text
+                self.advance()
+                Expr(
+                    kind: ExprKind.Ident(name),
+                    span: Span.new(0, 0, 1, 1)
+                )
+            case _:
+                # Default to nil for unsupported types
+                Expr(
+                    kind: ExprKind.NilLit,
+                    span: Span.new(0, 0, 1, 1)
+                )
+
+# ================================================================
+# Async Function Detection
+# ================================================================
+
+fn is_async_function(tokens: [Token]) -> bool:
+    """Check if token sequence starts with 'async fn'."""
+    if tokens.len() < 2:
+        return false
+
+    val first = tokens[0]
+    val second = tokens[1]
+
+    first.kind == TokenKind.KwAsync and second.kind == TokenKind.KwFn
+
+fn extract_async_flag(tokens: [Token]) -> (bool, [Token]):
+    """Extract async flag and return remaining tokens.
+
+    Returns: (is_async, remaining_tokens)
+    """
+    if is_async_function(tokens):
+        # Skip 'async' keyword, keep 'fn' and rest
+        (true, tokens[1:])
+    else:
+        (false, tokens)
+
+# ================================================================
+# Await Expression Parsing
+# ================================================================
+
+fn parse_await_expr(parser: Parser) -> Expr:
+    """Parse await expression.
+
+    Syntax: await expr
+
+    Example: await fetch_data(url)
+    """
+    # Consume 'await' keyword
+    # parser.advance()
+
+    # Parse the expression being awaited
+    val awaited_expr = parser.parse_primary_expr()
+
+    Expr(
+        kind: ExprKind.Await(awaited_expr),
+        span: awaited_expr.span
+    )
+
+# ================================================================
+# Spawn Expression Parsing
+# ================================================================
+
+fn parse_spawn_expr(parser: Parser) -> Expr:
+    """Parse spawn expression.
+
+    Syntax: spawn ActorType(args...)
+
+    Example: spawn Worker(id: 1)
+    """
+    # Consume 'spawn' keyword
+    # parser.advance()
+
+    # Parse the expression to spawn (usually a constructor call)
+    val spawned_expr = parser.parse_primary_expr()
+
+    Expr(
+        kind: ExprKind.Spawn(spawned_expr),
+        span: spawned_expr.span
+    )
+
+# ================================================================
+# Actor Definition Parsing
+# ================================================================
+
+struct ActorOutline:
+    """Outline of an actor definition (from tree-sitter)."""
+    name: text
+    type_params: [text]
+    fields: [text]
+    methods: [text]
+    is_public: bool
+    span: Span
+
+fn parse_actor_body(outline: ActorOutline) -> Actor:
+    """Parse actor body from outline.
+
+    Actors are similar to classes but with message-passing semantics.
+
+    Example:
+        actor Worker:
+            var count: i64
+
+            fn init():
+                self.count = 0
+
+            fn process(task: text):
+                self.count += 1
+    """
+    # For now, actors are parsed identically to classes
+    # The difference is in how they're instantiated (spawn) and used (messages)
+
+    Actor(
+        name: outline.name,
+        type_params: [],  # TODO: parse type params
+        fields: [],       # TODO: parse fields
+        methods: {},      # TODO: parse methods
+        is_public: outline.is_public,
+        doc_comment: nil,
+        attributes: [],
+        span: outline.span
+    )
+
+# ================================================================
+# Helper Functions
+# ================================================================
+
+fn has_async_modifier(modifiers: [text]) -> bool:
+    """Check if modifiers list contains 'async'."""
+    modifiers.contains("async")
+
+fn has_spawn_keyword(tokens: [Token], start: i64) -> bool:
+    """Check if spawn keyword appears at position."""
+    if start >= tokens.len():
+        return false
+    tokens[start].kind == TokenKind.KwSpawn
+
+fn has_await_keyword(tokens: [Token], start: i64) -> bool:
+    """Check if await keyword appears at position."""
+    if start >= tokens.len():
+        return false
+    tokens[start].kind == TokenKind.KwAwait
+
+fn has_actor_keyword(tokens: [Token], start: i64) -> bool:
+    """Check if actor keyword appears at position."""
+    if start >= tokens.len():
+        return false
+    tokens[start].kind == TokenKind.KwActor
+
+# ================================================================
+# Integration Helpers
+# ================================================================
+
+fn apply_attributes_to_function(func: Function, attributes: [Attribute]) -> Function:
+    """Apply parsed attributes to a function.
+
+    NOTE: Function struct doesn't have attributes field yet.
+    This would need to be added for full support.
+    """
+    # TODO: Add attributes field to Function struct
+    # For now, interpret some attributes as flags
+
+    var is_async = func.is_async
+
+    for attr in attributes:
+        if attr.name == "async":
+            is_async = true
+
+    Function(
+        name: func.name,
+        type_params: func.type_params,
+        params: func.params,
+        return_type: func.return_type,
+        body: func.body,
+        is_async: is_async,
+        is_static: func.is_static,
+        is_public: func.is_public,
+        is_method: func.is_method,
+        is_mutable: func.is_mutable,
+        is_const: func.is_const,
+        is_kernel: func.is_kernel,
+        doc_comment: func.doc_comment,
+        span: func.span
+    )
+
+# Placeholder - Parser type would be defined in parser.spl
+type Parser = text
