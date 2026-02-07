@@ -90,7 +90,8 @@ simple build --release --features=vulkan
 
 ```sdoctest
 # hello.spl
->>> main = 0  # Entry point, returns exit code
+>>>  fn main() -> i64:
+...     0  # Entry point, returns exit code
 ```
 
 ```bash
@@ -167,22 +168,35 @@ simple watch app.spl
 
 ```sdoctest
 # Variables - immutable by default, mutable with var
->>> x = 10              # Immutable (preferred) same as "val x = 10"
->>> var y = 20          # Mutable when needed
->>> PI = 3.14159        # Constants
+>>> x = 10
+>>> x
+10
+>>> var y = 20
+>>> y
+20
+>>> PI = 3.14159
+>>> PI
+3.14159
 
-# Type annotations optional
->>> count: i64 = 100
+# Type inference works automatically
+>>> count = 100
+>>> count
+100
 
 # Basic types inferred
 >>> a = 42
+>>> a
+42
 >>> pi = 3.14159
 >>> flag = true
+>>> flag
+true
 
 # String interpolation default
 >>> name = "world"
 >>> msg = "Hello, {name}!"
->>> path = r"C:\Users\name"  # Raw strings
+>>> print msg
+Hello, world!
 ```
 
 ### Control Flow
@@ -192,11 +206,11 @@ simple watch app.spl
 >>> var x = 5
 >>> if x > 0:
 ...     print "positive"
-positive
->>> elif x < 0:
+... elif x < 0:
 ...     print "negative"
->>> else:
+... else:
 ...     print "zero"
+positive
 
 # Loops
 >>> for i in 0..3:
@@ -251,12 +265,6 @@ class Person:
     age: i64
 
     fn greet():
-        print "Hi, {self.name}!"  # No-paren calls
-
-alice = Person(name: "Alice", age: 30)
-alice.greet
-
-    fn greet():
         print "Hi, {self.name}!"
 
 alice = Person(name: "Alice", age: 30)
@@ -272,12 +280,10 @@ alice.greet()
 >>> first
 1
 
-# Collection methods - .len() is default
->>> count = nums.len()     # Preferred
+# Collection methods
+>>> count = nums.len()
 >>> count
 5
->>> size = nums.length()   # Also available  
->>> items = nums.size()    # Also available
 
 # Dictionary (short form)
 >>> scores = {"alice": 100, "bob": 85}
@@ -285,11 +291,11 @@ alice.greet()
 >>> alice_score
 100
 
-# Sets with underscore placeholder
->>> odds = nums.filter(_ % 2 == 1)
+# Filter with lambda
+>>> odds = nums.filter(\x: x % 2 == 1)
 >>> odds
 [1, 3, 5]
->>> big_nums = nums.filter(_ > 3)
+>>> big_nums = nums.filter(\x: x > 3)
 >>> big_nums
 [4, 5]
 
@@ -375,7 +381,7 @@ fn perimeter(s: Shape) -> f64:
         | Triangle(a, b, c) -> a + b + c
 
 # Pattern matching with nil (not None)
-fn get_radius(opt: Option[f64]) -> f64:
+fn get_radius(opt: Option<f64>) -> f64:
     match opt:
         | Some(r) -> r
         | nil -> 0.0  # Use nil instead of None
@@ -403,7 +409,7 @@ macro define_counter(NAME: Str const) -> (
 class Demo:
   define_counter!("User")
 
-  fn run(self) -> Int:
+  fn run() -> Int:
     self.UserCounter(10)  # Autocomplete works!
 ```
 
@@ -506,6 +512,8 @@ print("Server port: {config.server.port}")
 ### Doctest
 
 Executable examples in docstrings - tests that serve as documentation:
+
+> **Note:** The doctest feature is under active development. The examples below are skipped in automated testing until implementation is complete.
 
 <!--sdoctest:skip-begin-->
 ```simple
@@ -636,7 +644,7 @@ fn vector_add_kernel(a: []f32, b: []f32, result: []f32):
 # GPU kernel style 2: @simd with auto bounds handling
 @simd
 fn vector_scale(data: []f32, scale: f32):
-    vali = this.index()             # Global linear index (same as gpu.global_id())
+    val i = this.index()             # Global linear index (same as gpu.global_id())
     data[i] = data[i] * scale        # Bounds auto-handled
 
 # Host function - runs on CPU
@@ -666,12 +674,12 @@ fn main():
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
     # Multi-dimensional indexing
-    valrow = gpu.global_id(0)       # First dimension
-    valcol = gpu.global_id(1)       # Second dimension
+    val row = gpu.global_id(0)       # First dimension
+    val col = gpu.global_id(1)       # Second dimension
 
     # Thread group (workgroup) info
-    vallocal_row = gpu.local_id(0)  # Index within workgroup
-    valgroup_row = gpu.group_id(0)  # Workgroup index
+    val local_row = gpu.local_id(0)  # Index within workgroup
+    val group_row = gpu.group_id(0)  # Workgroup index
 
     # Alternative @simd style
     # val(row, col) = this.index()  # Tuple for 2D

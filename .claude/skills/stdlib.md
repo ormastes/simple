@@ -165,13 +165,13 @@ fn divide(a: Int, b: Int) -> Int:
     out(ret): ret * b <= a and ret * b > a - b
     return a / b
 
-class BoundedBuffer[T>:
+class BoundedBuffer<T>:
     items: List<T>
     capacity: Int
 
     invariant: self.items.len() <= self.capacity
 
-    fn push(self, item: T):
+    me push(item: T):
         in: self.items.len() < self.capacity
         out: self.items.len() == old(self.items.len()) + 1
         self.items.append(item)
@@ -184,7 +184,7 @@ class BoundedBuffer[T>:
 # Already in stdlib
 enum Option<T>:
     Some(value: T)
-    None
+    # nil is a built-in singleton value representing absence
 
 enum Result<T, E>:
     Ok(value: T)
@@ -195,13 +195,13 @@ fn find(items: List<Int>, target: Int) -> Option<Int>:
     for i, item in items.enumerate():
         if item == target:
             return Some(i)
-    return None
+    return nil
 ```
 
 ### Iterators
 ```simple
-trait Iterator[T>:
-    fn next(self) -> Option<T>
+trait Iterator<T>:
+    fn next() -> Option<T>
 
 fn map[T, U>(self, f: fn(T) -> U) -> MapIterator[T, U>:
     return MapIterator(inner=self, f=f)
@@ -209,8 +209,8 @@ fn map[T, U>(self, f: fn(T) -> U) -> MapIterator[T, U>:
 
 ### Generic Collections
 ```simple
-struct Vec[T>:
-    data: Array[T>
+struct Vec<T>:
+    data: Array<T>
     len: Int
 
     fn push(mut self, item: T):

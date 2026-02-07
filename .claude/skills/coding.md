@@ -36,18 +36,16 @@ Simple provides helpful error messages when you use syntax from other languages.
 ```sdoctest
 # Double-quoted = interpolated (default)
 >>> name = "World"
->>> greeting = "Hello, {name}!"   # "Hello, World!"
->>> print("Value: {1 + 2}")           # "Value: 3"
+>>> greeting = "Hello, {name}!"
+>>> greeting
+"Hello, World!"
+>>> print "Value: {1 + 2}"
 Value: 3
 
 # Single-quoted = raw (no interpolation)
 >>> raw = 'No {interpolation} here'
-
-# Triple-quoted = docstring (multi-line)
-"""
-Multi-line
-documentation
-"""
+>>> raw
+"No {interpolation} here"
 ```
 
 **DO NOT** use `f"..."` prefix - it's redundant.

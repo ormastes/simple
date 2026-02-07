@@ -16,7 +16,6 @@ Use this skill when working with deep learning tasks in Simple:
 **Location**: `src/std/src/config/__init__.spl`
 
 **Usage**:
-<!--sdoctest:skip-next-->
 ```simple
 import config
 
@@ -54,7 +53,6 @@ training:
 **Location**: `src/std/src/ml/tracking/__init__.spl`
 
 **Usage**:
-<!--sdoctest:skip-next-->
 ```simple
 import ml.tracking as Track
 
@@ -169,28 +167,26 @@ import ml.engine.Metric
 class F1Score(Metric):
     tp: i64
     fp: i64
-    fn: i64
+    fn_count: i64
 
-    fn __init__(self):
-        self.tp = 0
-        self.fp = 0
-        self.fn = 0
+    static fn new() -> F1Score:
+        F1Score(tp: 0, fp: 0, fn_count: 0)
 
-    fn reset(self):
+    me reset():
         """Reset for new epoch."""
         self.tp = 0
         self.fp = 0
-        self.fn = 0
+        self.fn_count = 0
 
-    fn update(self, output: any):
+    me update(output: any):
         """Update with batch output."""
         # Compute tp, fp, fn from output
         pass
 
-    fn compute(self) -> f64:
+    fn compute() -> f64:
         """Compute final metric."""
-        let precision = self.tp / (self.tp + self.fp)
-        let recall = self.tp / (self.tp + self.fn)
+        precision = self.tp / (self.tp + self.fp)
+        recall = self.tp / (self.tp + self.fn_count)
         return 2.0 * precision * recall / (precision + recall)
 
 # Use it
