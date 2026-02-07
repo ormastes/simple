@@ -1,0 +1,302 @@
+# Async/Await/Spawn Desugaring
+#
+# Transforms async/await/spawn syntax into library calls.
+# This is a compiler pass that runs after parsing.
+#
+# Transformations:
+# - async fn -> fn returning Future<T>
+# - await expr -> expr.poll(...) loop
+# - spawn expr -> spawn_actor(expr)
+# - actor def -> class with message passing
+
+use compiler.parser_types.*
+use compiler.hir_definitions.*
+
+# ================================================================
+# Async Function Desugaring
+# ================================================================
+
+fn desugar_async_function(func: Function) -> Function:
+    """Transform async fn to fn returning Future<T>.
+
+    Input:
+        async fn fetch(url: text) -> text:
+            val response = await http_get(url)
+            await response.text()
+
+    Output:
+        fn fetch(url: text) -> Future<text>:
+            use std.async.future.Future
+            use std.async.runtime.block_on
+
+            Future.from_async(\waker:
+                # Transformed body with await handling
+                val response_future = http_get(url)
+                val response = block_on(response_future)
+                val text_future = response.text()
+                block_on(text_future)
+            )
+    """
+    if not func.is_async:
+        return func
+
+    # Wrap return type in Future<T>
+    val wrapped_return = match func.return_type:
+        case Some(ret_type):
+            # Future<T> where T is original return type
+            Some(Type(
+                kind: TypeKind.Generic("Future", [ret_type]),
+                span: ret_type.span
+            ))
+        case None:
+            # Future<()>
+            Some(Type(
+                kind: TypeKind.Generic("Future", [unit_type()]),
+                span: func.span
+            ))
+
+    # Transform body to wrap in Future.from_async
+    val desugared_body = desugar_async_body(func.body)
+
+    Function(
+        name: func.name,
+        type_params: func.type_params,
+        params: func.params,
+        return_type: wrapped_return,
+        body: desugared_body,
+        is_async: false,  # No longer async after desugaring
+        is_static: func.is_static,
+        is_public: func.is_public,
+        is_method: func.is_method,
+        is_mutable: func.is_mutable,
+        is_const: func.is_const,
+        is_kernel: func.is_kernel,
+        doc_comment: func.doc_comment,
+        span: func.span
+    )
+
+fn desugar_async_body(body: Block) -> Block:
+    """Transform async function body to use Future API."""
+    # Simplified: wrap entire body in Future.ready for now
+    # Full implementation would build state machine
+
+    val wrapper_call = Expr(
+        kind: ExprKind.Call(
+            Expr(kind: ExprKind.Field(
+                Expr(kind: ExprKind.Ident("Future"), span: body.span),
+                "ready"
+            ), span: body.span),
+            [CallArg(value: Expr(kind: ExprKind.Block(body), span: body.span), name: nil)]
+        ),
+        span: body.span
+    )
+
+    Block(
+        statements: [Stmt(kind: StmtKind.Expr(wrapper_call), span: body.span)],
+        span: body.span
+    )
+
+# ================================================================
+# Await Expression Desugaring
+# ================================================================
+
+fn desugar_await_expr(expr: Expr) -> Expr:
+    """Transform await expr to Future polling.
+
+    Input:
+        await future_expr
+
+    Output:
+        block_on(future_expr)
+
+    Full transformation would be:
+        loop:
+            match future_expr.poll(waker):
+                case Ready(v): return v
+                case Pending: yield_to_runtime()
+    """
+    match expr.kind:
+        case ExprKind.Await(awaited):
+            # Simple desugaring: await x => block_on(x)
+            Expr(
+                kind: ExprKind.Call(
+                    Expr(kind: ExprKind.Ident("block_on"), span: expr.span),
+                    [CallArg(value: awaited, name: nil)]
+                ),
+                span: expr.span
+            )
+        case _:
+            expr
+
+# ================================================================
+# Spawn Expression Desugaring
+# ================================================================
+
+fn desugar_spawn_expr(expr: Expr) -> Expr:
+    """Transform spawn expr to spawn_actor call.
+
+    Input:
+        spawn Worker(id: 1)
+
+    Output:
+        spawn_actor(Worker(id: 1))
+    """
+    match expr.kind:
+        case ExprKind.Spawn(spawned):
+            Expr(
+                kind: ExprKind.Call(
+                    Expr(kind: ExprKind.Ident("spawn_actor"), span: expr.span),
+                    [CallArg(value: spawned, name: nil)]
+                ),
+                span: expr.span
+            )
+        case _:
+            expr
+
+# ================================================================
+# Actor Definition Desugaring
+# ================================================================
+
+fn desugar_actor(actor: Actor) -> Class:
+    """Transform actor to class.
+
+    Actors are just classes with special instantiation semantics.
+    The spawn keyword handles the difference.
+
+    Input:
+        actor Worker:
+            var count: i64
+            fn process(task: text):
+                self.count += 1
+
+    Output:
+        class Worker:
+            var count: i64
+            fn process(task: text):
+                self.count += 1
+    """
+    Class(
+        name: actor.name,
+        type_params: actor.type_params,
+        fields: actor.fields,
+        methods: actor.methods,
+        is_public: actor.is_public,
+        doc_comment: actor.doc_comment,
+        attributes: actor.attributes,
+        span: actor.span
+    )
+
+# ================================================================
+# Full Module Desugaring
+# ================================================================
+
+fn desugar_module(module: Module) -> Module:
+    """Desugar entire module.
+
+    - Transform all async functions
+    - Transform all await expressions
+    - Transform all spawn expressions
+    - Transform all actor definitions to classes
+    """
+    # Desugar functions
+    var desugared_functions: Dict<text, Function> = {}
+    for (name, func) in module.functions:
+        val desugared = desugar_async_function(func)
+        val with_await = desugar_function_body(desugared)
+        desugared_functions[name] = with_await
+
+    # Desugar actors to classes
+    var classes_with_actors = module.classes
+    for (name, actor) in module.actors:
+        val as_class = desugar_actor(actor)
+        classes_with_actors[name] = as_class
+
+    Module(
+        name: module.name,
+        imports: module.imports,
+        exports: module.exports,
+        functions: desugared_functions,
+        classes: classes_with_actors,
+        actors: {},  # All actors converted to classes
+        structs: module.structs,
+        enums: module.enums,
+        bitfields: module.bitfields,
+        traits: module.traits,
+        impls: module.impls,
+        type_aliases: module.type_aliases,
+        constants: module.constants,
+        static_asserts: module.static_asserts
+    )
+
+fn desugar_function_body(func: Function) -> Function:
+    """Desugar await/spawn expressions in function body."""
+    val desugared_body = desugar_block(func.body)
+
+    Function(
+        name: func.name,
+        type_params: func.type_params,
+        params: func.params,
+        return_type: func.return_type,
+        body: desugared_body,
+        is_async: func.is_async,
+        is_static: func.is_static,
+        is_public: func.is_public,
+        is_method: func.is_method,
+        is_mutable: func.is_mutable,
+        is_const: func.is_const,
+        is_kernel: func.is_kernel,
+        doc_comment: func.doc_comment,
+        span: func.span
+    )
+
+fn desugar_block(block: Block) -> Block:
+    """Desugar statements in a block."""
+    var desugared_stmts = []
+
+    for stmt in block.statements:
+        val desugared = desugar_stmt(stmt)
+        desugared_stmts.push(desugared)
+
+    Block(
+        statements: desugared_stmts,
+        span: block.span
+    )
+
+fn desugar_stmt(stmt: Stmt) -> Stmt:
+    """Desugar a single statement."""
+    match stmt.kind:
+        case StmtKind.Expr(expr):
+            val desugared_expr = desugar_expr(expr)
+            Stmt(kind: StmtKind.Expr(desugared_expr), span: stmt.span)
+        case _:
+            stmt  # Other statements unchanged for now
+
+fn desugar_expr(expr: Expr) -> Expr:
+    """Recursively desugar expressions."""
+    # First check if this expression itself needs desugaring
+    match expr.kind:
+        case ExprKind.Await(_):
+            return desugar_await_expr(expr)
+        case ExprKind.Spawn(_):
+            return desugar_spawn_expr(expr)
+        case _:
+            pass
+
+    # Then recurse into sub-expressions
+    # (Simplified - full version would handle all expression types)
+    expr
+
+# ================================================================
+# Helper Functions
+# ================================================================
+
+fn unit_type() -> Type:
+    """Create unit type ()."""
+    Type(
+        kind: TypeKind.Tuple([]),
+        span: Span.new(0, 0, 1, 1)
+    )
+
+# Note: These types would be imported from parser_types.spl
+# type CallArg = ...
+# type TypeKind = ...
