@@ -16,6 +16,7 @@ from ..ffi import {call_native}
 from builtins import {eval_builtin, is_builtin}
 from function_exec import {exec_function, exec_function_with_captured_env, exec_lambda}
 from class_instantiation import {instantiate_class}
+from ..utils.collection_ops import {eval_array_map, eval_array_filter, eval_array_any, eval_array_all}
 
 export evaluate_call, dispatch_method_call
 
@@ -214,7 +215,13 @@ fn eval_array_method(interp: Interpreter, arr: Value, method: text, args: [Value
         case "len": Some(Ok(Value.int(arr.len())))
         case "is_empty": Some(Ok(Value.bool(arr.len() == 0)))
         case "push": Some(arr.array_push(args[0]))
-        case "pop": Some(arr.array_pop())
+        case "pop":
+            # Pop returns the removed element, not the array (Python/JS behavior)
+            # Runtime binary has bug - returns array instead of element
+            # Workaround: save element, mutate array, return saved element
+            val last_elem = arr.array_last()
+            arr.array_pop()  # Mutate array (discard result)
+            Some(Ok(last_elem))
         case "first": Some(Ok(arr.array_first()))
         case "last": Some(Ok(arr.array_last()))
         case "contains": Some(Ok(Value.bool(arr.array_contains(args[0]))))
@@ -225,22 +232,26 @@ fn eval_array_method(interp: Interpreter, arr: Value, method: text, args: [Value
             Some(Ok(arr.array_join(sep)))
         case "map":
             if args.len() > 0:
-                Some(arr.array_map(interp, args[0]))
+                val arr_data = arr.as_array() ?? return Some(Err(InterpreterError.TypeError("map requires array")))
+                Some(eval_array_map(interp, arr_data, args[0]))
             else:
                 Some(Err(InterpreterError.ArityError("map requires a function argument")))
         case "filter":
             if args.len() > 0:
-                Some(arr.array_filter(interp, args[0]))
+                val arr_data = arr.as_array() ?? return Some(Err(InterpreterError.TypeError("filter requires array")))
+                Some(eval_array_filter(interp, arr_data, args[0]))
             else:
                 Some(Err(InterpreterError.ArityError("filter requires a function argument")))
         case "any":
             if args.len() > 0:
-                Some(arr.array_any(interp, args[0]))
+                val arr_data = arr.as_array() ?? return Some(Err(InterpreterError.TypeError("any requires array")))
+                Some(eval_array_any(interp, arr_data, args[0]))
             else:
                 Some(Err(InterpreterError.ArityError("any requires a function argument")))
         case "all":
             if args.len() > 0:
-                Some(arr.array_all(interp, args[0]))
+                val arr_data = arr.as_array() ?? return Some(Err(InterpreterError.TypeError("all requires array")))
+                Some(eval_array_all(interp, arr_data, args[0]))
             else:
                 Some(Err(InterpreterError.ArityError("all requires a function argument")))
         case "flatten": Some(Ok(arr.array_flatten()))
