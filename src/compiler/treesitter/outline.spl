@@ -225,14 +225,16 @@ impl TreeSitter:
     # ========================================================================
 
     me parse_attribute() -> AttributeOutline:
-        """Parse a single attribute: @name or @name(args)."""
+        """Parse a single attribute: @name or @name(args) or #[name] or #[name(args)]."""
         val start = self.current.span
-        self.advance()  # Consume '@'
+        val is_hash_bracket = self.check(TokenKind.HashLBracket)
+
+        self.advance()  # Consume '@' or '#['
 
         val name = self.parse_identifier()
         var args_span: Span? = nil
 
-        # Check for arguments: @name(arg1, arg2, ...)
+        # Check for arguments: @name(arg1, arg2, ...) or #[name(arg1, arg2, ...)]
         if self.match_token(TokenKind.LParen):
             val args_start = self.previous.span.end
             # Skip to matching right paren (handles nested parens)
@@ -252,6 +254,10 @@ impl TreeSitter:
             args_span = Some(Span.new(args_start, args_end, 0, 0))
             self.expect(TokenKind.RParen, "expected ')' after attribute arguments")
 
+        # For #[name] or #[name(args)], expect closing ]
+        if is_hash_bracket:
+            self.expect(TokenKind.RBracket, "expected ']' after attribute")
+
         AttributeOutline(
             name: name,
             args_span: args_span,
@@ -261,7 +267,7 @@ impl TreeSitter:
     me parse_attributes() -> [AttributeOutline]:
         """Parse a sequence of attributes before a declaration."""
         var attrs: [AttributeOutline] = []
-        while self.check(TokenKind.At):
+        while self.check(TokenKind.At) or self.check(TokenKind.HashLBracket):
             attrs = attrs.push(self.parse_attribute())
             self.skip_newlines()
         attrs
@@ -327,6 +333,8 @@ impl TreeSitter:
                     ))
             case KwClass:
                 TopLevelItem.Class(self.parse_class_outline(is_public, doc, attrs))
+            case KwActor:
+                TopLevelItem.Actor(self.parse_actor_outline(is_public, doc, attrs))
             case KwStruct:
                 TopLevelItem.Struct(self.parse_struct_outline(is_public, doc, attrs))
             case KwEnum:
@@ -846,6 +854,86 @@ impl TreeSitter:
         self.match_token(TokenKind.Dedent)
 
         ClassOutline(
+            name: name,
+            type_params: type_params,
+            fields: fields,
+            methods: methods,
+            is_public: is_public,
+            doc_comment: final_doc,
+            attributes: attrs,
+            span: merge_spans(start, self.previous.span)
+        )
+
+    me parse_actor_outline(is_public: bool, doc: text?, attrs: [AttributeOutline]) -> ActorOutline:
+        """Parse actor outline (same structure as class)."""
+        val start = self.current.span
+        self.advance()  # Consume 'actor'
+
+        val name = self.parse_identifier()
+        var type_params: [TypeParamOutline] = []
+
+        if self.match_token(TokenKind.Lt):
+            type_params = self.parse_type_params()
+            self.expect(TokenKind.Gt, "expected '>' after type parameters")
+
+        self.expect(TokenKind.Colon, "expected ':' after actor name")
+        self.skip_newlines()
+        self.expect(TokenKind.Indent, "expected indented actor body")
+
+        # Try to parse body docstring
+        val body_doc = self.try_parse_body_docstring()
+        val final_doc = match body_doc:
+            case Some(bd): Some(bd)
+            case None: doc
+
+        var fields: [FieldOutline] = []
+        var methods: [FunctionOutline] = []
+
+        while not self.check(TokenKind.Dedent) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.Dedent):
+                break
+
+            val member_doc = self.take_doc_comment()
+            var member_public = false
+
+            if self.match_token(TokenKind.KwPub):
+                member_public = true
+
+            match self.peek():
+                case KwFn:
+                    val m = self.parse_function_outline(member_public, false, member_doc)
+                    m.is_method = true
+                    methods = methods.push(m)
+                case KwMe:
+                    val m = self.parse_function_outline(member_public, true, member_doc)
+                    m.is_method = true
+                    methods = methods.push(m)
+                case KwVar:
+                    # Check for deprecated 'var fn' syntax
+                    if self.peek_next() == TokenKind.KwFn:
+                        self.warning("Deprecated: Replace `var fn method()` with `me method()`")
+                        self.advance()  # consume 'var'
+                        val m = self.parse_function_outline(member_public, true, member_doc)
+                        m.is_method = true
+                        methods = methods.push(m)
+                    else:
+                        self.error("expected field or method in actor")
+                        self.synchronize()
+                case KwStatic:
+                    self.advance()
+                    val m = self.parse_function_outline(member_public, false, member_doc)
+                    m.is_static = true
+                    methods = methods.push(m)
+                case Ident:
+                    fields = fields.push(self.parse_field_outline(member_public))
+                case _:
+                    self.error("expected field or method in actor")
+                    self.synchronize()
+
+        self.match_token(TokenKind.Dedent)
+
+        ActorOutline(
             name: name,
             type_params: type_params,
             fields: fields,
@@ -1680,6 +1768,7 @@ enum TopLevelItem:
     Export(ExportOutline)
     Function(FunctionOutline)
     Class(ClassOutline)
+    Actor(ActorOutline)
     Struct(StructOutline)
     Enum(EnumOutline)
     Bitfield(BitfieldOutline)

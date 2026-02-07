@@ -10,7 +10,8 @@ export resolve_from_base
 export get_exports
 export get_common_uses
 
-use parser.ast (ModulePath, ImportTarget, Visibility)
+use parser.ast (ModulePath, ImportTarget, Visibility, Node)
+use parser (Parser)
 use compiler.module_resolver.types (
     ModuleResolver, ResolvedModule, DirectoryManifest
 )
@@ -158,6 +159,7 @@ impl ModuleResolver:
         ROBUSTNESS:
         - Handles all ImportTarget variants (Single, Aliased, Group, Glob)
         - Returns public child modules
+        - For non-directory modules, parses file and extracts export statements
         """
         if val Some(manifest) = resolved.manifest:
             var exports: [text] = []
@@ -193,8 +195,79 @@ impl ModuleResolver:
 
             Ok(exports)
         else:
-            # Non-directory module - would need to parse and extract pub items
-            Ok([])
+            # Non-directory module - parse file and extract export statements
+            self.extract_file_exports(resolved.path)
+
+    fn extract_file_exports(file_path: text) -> [text] | CompileError:
+        """Extract exported symbols from a non-directory module (.spl file).
+
+        Parses the file and extracts all symbols listed in export statements.
+
+        Arguments:
+        - file_path: Path to the .spl file
+
+        Returns:
+        - List of exported symbol names
+        - CompileError if file cannot be read or parsed
+
+        ROBUSTNESS:
+        - Reads and parses the source file
+        - Extracts all export declarations
+        - Returns empty list if no exports found
+        """
+        # Read the file
+        val source = match file_read(file_path):
+            Some(content): content
+            None:
+                return CompileError.io_error(
+                    "cannot extract exports: failed to read file {file_path}",
+                    ErrorCode.FILE_READ_ERROR
+                ).with_note("ensure the file exists and is readable")
+
+        # Parse the file
+        var parser = Parser.new(source)
+        val module = match parser.parse():
+            Ok(m): m
+            Err(err):
+                return CompileError.parse_error(
+                    "cannot extract exports from {file_path}: parse error",
+                    ErrorCode.PARSE_ERROR
+                ).with_note("parser error: {err.message}")
+                 .with_note("file must be valid Simple syntax to extract exports")
+
+        # Extract export statements
+        var exports: [text] = []
+        for item in module.items:
+            match item:
+                Node.ExportDecl(names):
+                    # Export statement lists symbols to export
+                    exports.extend(names)
+
+                Node.FnDecl(decl):
+                    # Public function declarations are implicitly exported
+                    if decl.visibility == Visibility.Public:
+                        exports.push(decl.name)
+
+                Node.StructDecl(decl):
+                    # Public struct declarations are implicitly exported
+                    if decl.visibility == Visibility.Public:
+                        exports.push(decl.name)
+
+                Node.EnumDecl(decl):
+                    # Public enum declarations are implicitly exported
+                    if decl.visibility == Visibility.Public:
+                        exports.push(decl.name)
+
+                Node.ClassDecl(decl):
+                    # Public class declarations are implicitly exported
+                    if decl.visibility == Visibility.Public:
+                        exports.push(decl.name)
+
+                _:
+                    # Other nodes don't contribute to exports
+                    pass
+
+        Ok(exports)
 
     fn get_common_uses(file_path: text) -> [CommonUseStmt]:
         """Get common use imports that apply to a file.
