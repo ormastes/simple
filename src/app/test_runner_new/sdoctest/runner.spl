@@ -3,7 +3,7 @@
 # Executes extracted code blocks as subprocess tests.
 # Prepends init script content, sets up environment, enforces timeouts.
 
-use app.io.mod (file_read, file_exists, file_atomic_write, file_remove, process_run_timeout, env_set, time_now_unix_micros, getpid)
+use app.io.mod (file_read, file_exists, file_atomic_write, file_remove, process_run, env_set, time_now_unix_micros)
 use test_runner_types.TestOptions
 use sdoctest.types.*
 use sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars}
@@ -115,6 +115,25 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
     )
 
 # =========================================================================
+# Binary Discovery
+# =========================================================================
+
+fn find_sdoctest_binary() -> text:
+    # Check Pure Simple paths first (current setup)
+    val candidates = [
+        "bin/simple_runtime",
+        "./bin/simple_runtime",
+        "release/simple-0.4.0-beta/bin/simple_runtime",
+        "bin/bootstrap/linux-x86_64/simple",
+        "./rust/target/debug/simple_runtime",
+        "./rust/target/release/simple_runtime"
+    ]
+    for candidate in candidates:
+        if file_exists(candidate):
+            return candidate
+    "bin/simple_runtime"
+
+# =========================================================================
 # Per-Block Execution
 # =========================================================================
 
@@ -145,14 +164,16 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     val code = build_temp_code(block, config)
 
     # Write temp file
-    val pid = getpid()
-    val temp_path = "/tmp/sdoctest_{pid}_{block.line_number}.spl"
+    val temp_path = "/tmp/sdoctest_block_{block.line_number}.spl"
     file_atomic_write(temp_path, code)
 
-    # Run subprocess
-    val binary = find_simple_binary()
+    # Run subprocess using process_run (process_run_timeout has arg-passing bug)
+    val binary = find_sdoctest_binary()
     val start = time_now_unix_micros()
-    val (stdout, stderr, exit_code) = process_run_timeout(binary, [temp_path], timeout)
+    val run_result = process_run(binary, [temp_path])
+    val stdout = run_result.0
+    val stderr = run_result.1
+    val exit_code = run_result.2
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
