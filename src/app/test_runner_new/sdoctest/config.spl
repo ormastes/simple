@@ -3,6 +3,8 @@
 # Parses sdoctest.sdn config file using simple line-based parsing.
 # Falls back to sensible defaults if config file is missing.
 # Note: Uses manual parsing instead of std.sdn.parser due to runtime limitations.
+# Note: All array pushes are inline (not in helper functions) due to BUG-15
+#       (arrays passed to functions are copied, push inside function doesn't modify caller's array).
 
 use app.io.mod (file_read, file_exists)
 use sdoctest.types.*
@@ -80,12 +82,16 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # Top-level sections (indent 0)
         if indent == 0 and trimmed.ends_with(":"):
-            # Flush previous section data
-            flush_source(sources, current_source_path, current_source_is_dir, current_source_pattern, current_source_init, current_source_env)
+            # Flush previous section data (inline due to BUG-15)
+            if current_source_path != "":
+                val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
+                sources.push(SdoctestSource(path: current_source_path, is_dir: current_source_is_dir, pattern: pat, init: current_source_init, env: current_source_env))
             current_source_path = ""
-            flush_init(init_scripts, current_init_name, current_init_file)
+            if current_init_name != "":
+                init_scripts.push(SdoctestInitScript(name: current_init_name, file: current_init_file))
             current_init_name = ""
-            flush_env(environments, current_env_name, current_env_timeout, current_env_vars)
+            if current_env_name != "":
+                environments.push(SdoctestEnv(name: current_env_name, timeout: current_env_timeout, env_vars: current_env_vars))
             current_env_name = ""
             in_env_vars = false
 
@@ -105,8 +111,10 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
         # sources section - array of entries
         elif section == "sources":
             if trimmed.starts_with("- "):
-                # Flush previous source
-                flush_source(sources, current_source_path, current_source_is_dir, current_source_pattern, current_source_init, current_source_env)
+                # Flush previous source (inline due to BUG-15)
+                if current_source_path != "":
+                    val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
+                    sources.push(SdoctestSource(path: current_source_path, is_dir: current_source_is_dir, pattern: pat, init: current_source_init, env: current_source_env))
                 current_source_path = ""
                 current_source_is_dir = false
                 current_source_pattern = ""
@@ -142,8 +150,9 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
         # init_scripts section
         elif section == "init_scripts":
             if indent == 2 and trimmed.ends_with(":"):
-                # Flush previous
-                flush_init(init_scripts, current_init_name, current_init_file)
+                # Flush previous (inline due to BUG-15)
+                if current_init_name != "":
+                    init_scripts.push(SdoctestInitScript(name: current_init_name, file: current_init_file))
                 current_init_name = trimmed[0:trimmed.len() - 1].trim()
                 current_init_file = ""
             else:
@@ -154,8 +163,9 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
         # environments section
         elif section == "environments":
             if indent == 2 and trimmed.ends_with(":"):
-                # Flush previous
-                flush_env(environments, current_env_name, current_env_timeout, current_env_vars)
+                # Flush previous (inline due to BUG-15)
+                if current_env_name != "":
+                    environments.push(SdoctestEnv(name: current_env_name, timeout: current_env_timeout, env_vars: current_env_vars))
                 current_env_name = trimmed[0:trimmed.len() - 1].trim()
                 current_env_timeout = default_timeout
                 current_env_vars = {}
@@ -173,10 +183,14 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         i = i + 1
 
-    # Flush final entries
-    flush_source(sources, current_source_path, current_source_is_dir, current_source_pattern, current_source_init, current_source_env)
-    flush_init(init_scripts, current_init_name, current_init_file)
-    flush_env(environments, current_env_name, current_env_timeout, current_env_vars)
+    # Flush final entries (inline due to BUG-15)
+    if current_source_path != "":
+        val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
+        sources.push(SdoctestSource(path: current_source_path, is_dir: current_source_is_dir, pattern: pat, init: current_source_init, env: current_source_env))
+    if current_init_name != "":
+        init_scripts.push(SdoctestInitScript(name: current_init_name, file: current_init_file))
+    if current_env_name != "":
+        environments.push(SdoctestEnv(name: current_env_name, timeout: current_env_timeout, env_vars: current_env_vars))
 
     if environments.len() == 0:
         environments.push(SdoctestEnv(name: "default", timeout: default_timeout, env_vars: {}))
@@ -191,21 +205,12 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
     )
 
 # =========================================================================
-# Flush Helpers (accumulate partial state into lists)
+# Helpers
 # =========================================================================
 
-fn flush_source(sources: [SdoctestSource], path: text, is_dir: bool, pattern: text, init: text, env: text):
-    if path != "":
-        val pat = if is_dir and pattern == "": "*.md" else: pattern
-        sources.push(SdoctestSource(path: path, is_dir: is_dir, pattern: pat, init: init, env: env))
-
-fn flush_init(scripts: [SdoctestInitScript], name: text, file: text):
-    if name != "":
-        scripts.push(SdoctestInitScript(name: name, file: file))
-
-fn flush_env(envs: [SdoctestEnv], name: text, timeout: i64, env_vars: Dict<text, text>):
-    if name != "":
-        envs.push(SdoctestEnv(name: name, timeout: timeout, env_vars: env_vars))
+fn make_source(path: text, is_dir: bool, pattern: text, init: text, env: text) -> SdoctestSource:
+    val pat = if is_dir and pattern == "": "*.md" else: pattern
+    SdoctestSource(path: path, is_dir: is_dir, pattern: pat, init: init, env: env)
 
 # =========================================================================
 # Parsing Helpers
