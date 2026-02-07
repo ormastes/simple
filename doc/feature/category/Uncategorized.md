@@ -4,6 +4,6 @@
 
 | ID | Feature | Description | Modes | Platforms | Spec |
 |----|---------|-------------|-------|-----------|------|
-| <a id="feature-f1"></a>f1 | Feature 1 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/lib/database_feature_utils_spec.spl](../../../test/lib/database_feature_utils_spec.spl#feature-f1) |
-| <a id="feature-f2"></a>f2 | Feature 2 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/lib/database_feature_utils_spec.spl](../../../test/lib/database_feature_utils_spec.spl#feature-f2) |
-| <a id="feature-feature_001"></a>feature_001 | My Feature |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [test/lib/database_feature_utils_spec.spl](../../../test/lib/database_feature_utils_spec.spl#feature-feature_001) |
+| <a id="feature-f1"></a>f1 | Feature 1 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | /home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl |
+| <a id="feature-f2"></a>f2 | Feature 2 |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | /home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl |
+| <a id="feature-feature_001"></a>feature_001 | My Feature |  | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | /home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl |

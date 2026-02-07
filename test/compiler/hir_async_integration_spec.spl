@@ -1,0 +1,287 @@
+#!/usr/bin/env simple
+# HIR Async Integration Tests
+#
+# Tests the complete async validation pipeline with error diagnostics.
+# These tests validate the full flow from async function validation
+# through detailed error message generation.
+
+use std.spec.{describe, it, expect}
+use compiler.hir_lowering.{
+    HirLowering,
+    AsyncFunctionCheck,
+    AsyncError,
+    AsyncErrorCollector
+}
+use compiler.hir_types.{
+    HirFunction,
+    HirEnum,
+    HirType,
+    HirTypeKind,
+    HirParam
+}
+use lexer.Span
+
+# Helper to create dummy span
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+# Helper to create simple HIR type
+fn make_simple_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: dummy_span())
+
+describe "Async Integration - Complete Validation Flow":
+    it "validates correct async function with no errors":
+        # Create a valid async function that returns Future<text>
+        val future_type = make_simple_type(
+            HirTypeKind.Named(42, [make_simple_type(HirTypeKind.Str)])
+        )
+
+        val func = HirFunction(
+            name: "fetch_data",
+            params: [],
+            return_type: future_type,
+            body: nil,
+            span: dummy_span(),
+            is_async: true
+        )
+
+        # Validation should pass
+        val lowering = HirLowering.new()
+        val check = lowering.check_async_function(func, nil, nil)
+
+        expect(check.is_valid).to_equal(true)
+        expect(check.errors.len()).to_equal(0)
+        expect(check.detailed_errors.len()).to_equal(0)
+
+    it "generates detailed error for non-Future return type":
+        # Create async function that returns text instead of Future<text>
+        val text_type = make_simple_type(HirTypeKind.Str)
+
+        val func = HirFunction(
+            name: "bad_fetch",
+            params: [],
+            return_type: text_type,
+            body: nil,
+            span: dummy_span(),
+            is_async: true
+        )
+
+        # Validation should fail with detailed error
+        val lowering = HirLowering.new()
+        val check = lowering.check_async_function(func, nil, nil)
+
+        expect(check.is_valid).to_equal(false)
+        expect(check.errors.len()).to_be_greater_than(0)
+        expect(check.detailed_errors.len()).to_be_greater_than(0)
+
+        # Check detailed error has correct code
+        val error = check.detailed_errors[0]
+        expect(error.code.code()).to_equal("E0701")
+        expect(error.message).to_contain("bad_fetch")
+        expect(error.help.?).to_equal(true)
+
+    it "formats detailed errors correctly":
+        # Create invalid function
+        val text_type = make_simple_type(HirTypeKind.Str)
+
+        val func = HirFunction(
+            name: "invalid_async",
+            params: [],
+            return_type: text_type,
+            body: nil,
+            span: dummy_span(),
+            is_async: true
+        )
+
+        # Get validation results
+        val lowering = HirLowering.new()
+        val check = lowering.check_async_function(func, nil, nil)
+
+        # Format the detailed error
+        val error = check.detailed_errors[0]
+        val formatted = error.format()
+
+        # Should contain all components
+        expect(formatted).to_contain("error[E0701]")
+        expect(formatted).to_contain("invalid_async")
+        expect(formatted).to_contain("help:")
+        expect(formatted).to_contain("Future")
+
+describe "Async Integration - Poll Function Validation":
+    it "generates detailed error for wrong parameter count":
+        # Create poll function with wrong number of params
+        val poll_func = HirFunction(
+            name: "poll_fetch",
+            params: [
+                HirParam(name: "state", type: make_simple_type(HirTypeKind.Unit))
+            ],  # Missing waker parameter
+            return_type: make_simple_type(HirTypeKind.Unit),
+            body: nil,
+            span: dummy_span(),
+            is_async: false
+        )
+
+        val expected_inner = make_simple_type(HirTypeKind.Str)
+
+        # Validation should fail with detailed error
+        val lowering = HirLowering.new()
+        val check = lowering.check_poll_function_signature(
+            poll_func,
+            expected_inner,
+            dummy_span()
+        )
+
+        expect(check.is_valid).to_equal(false)
+        expect(check.detailed_errors.len()).to_be_greater_than(0)
+
+        # Check error code
+        val error = check.detailed_errors[0]
+        expect(error.code.code()).to_equal("E0704")
+        expect(error.message).to_contain("poll_fetch")
+
+    it "generates detailed error for type mismatch":
+        # Create poll function that returns Poll<i64> but should return Poll<text>
+        val poll_type = make_simple_type(
+            HirTypeKind.Named(43, [make_simple_type(HirTypeKind.Int(64, true))])
+        )
+        val state_type = make_simple_type(HirTypeKind.Named(44, []))
+        val tuple_type = make_simple_type(
+            HirTypeKind.Tuple([state_type, poll_type])
+        )
+
+        val poll_func = HirFunction(
+            name: "poll_fetch",
+            params: [
+                HirParam(name: "state", type: state_type),
+                HirParam(name: "waker", type: make_simple_type(HirTypeKind.Unit))
+            ],
+            return_type: tuple_type,
+            body: nil,
+            span: dummy_span(),
+            is_async: false
+        )
+
+        val expected_inner = make_simple_type(HirTypeKind.Str)
+
+        # Validation should fail with type mismatch error
+        val lowering = HirLowering.new()
+        val check = lowering.check_poll_function_signature(
+            poll_func,
+            expected_inner,
+            dummy_span()
+        )
+
+        expect(check.is_valid).to_equal(false)
+        expect(check.detailed_errors.len()).to_be_greater_than(0)
+
+        # Check error code
+        val error = check.detailed_errors[0]
+        expect(error.code.code()).to_equal("E0705")
+
+describe "Async Integration - State Enum Validation":
+    it "generates detailed error for empty state enum":
+        # Create state enum with no variants
+        val state_enum = HirEnum(
+            name: "FetchState",
+            variants: [],  # No State0!
+            span: dummy_span()
+        )
+
+        # Validation should fail
+        val lowering = HirLowering.new()
+        val check = lowering.check_state_enum_structure(state_enum, dummy_span())
+
+        expect(check.is_valid).to_equal(false)
+        expect(check.detailed_errors.len()).to_be_greater_than(0)
+
+        # Check error code
+        val error = check.detailed_errors[0]
+        expect(error.code.code()).to_equal("E0708")
+        expect(error.message).to_contain("FetchState")
+
+describe "Async Integration - Error Collection":
+    it "collects multiple errors from validation":
+        # Create function with multiple issues
+        val text_type = make_simple_type(HirTypeKind.Str)
+
+        val func = HirFunction(
+            name: "bad_async",
+            params: [],
+            return_type: text_type,  # Wrong return type
+            body: nil,
+            span: dummy_span(),
+            is_async: true
+        )
+
+        # Empty state enum (another error)
+        val state_enum = HirEnum(
+            name: "BadState",
+            variants: [],
+            span: dummy_span()
+        )
+
+        # Validation should collect multiple errors
+        val lowering = HirLowering.new()
+        val check = lowering.check_async_function(func, state_enum, nil)
+
+        expect(check.is_valid).to_equal(false)
+        expect(check.errors.len()).to_be_greater_than(0)
+        expect(check.detailed_errors.len()).to_be_greater_than(0)
+
+    it "formats multiple errors with collector":
+        var collector = AsyncErrorCollector.new()
+
+        # Add multiple errors
+        collector.add(async_fn_must_return_future(
+            "fetch",
+            "text",
+            "Future<text>",
+            dummy_span()
+        ))
+
+        collector.add(invalid_state_enum_structure(
+            "FetchState",
+            "no variants",
+            dummy_span()
+        ))
+
+        # Should have both errors
+        expect(collector.count()).to_equal(2)
+        expect(collector.has_errors()).to_equal(true)
+
+        # Format all errors
+        val formatted = collector.format_all()
+        expect(formatted).to_contain("E0701")
+        expect(formatted).to_contain("E0708")
+
+describe "Async Integration - Error Messages":
+    it "provides helpful suggestions for common mistakes":
+        # Test that errors include actionable help
+        val text_type = make_simple_type(HirTypeKind.Str)
+
+        val func = HirFunction(
+            name: "fetch",
+            params: [],
+            return_type: text_type,
+            body: nil,
+            span: dummy_span(),
+            is_async: true
+        )
+
+        val lowering = HirLowering.new()
+        val check = lowering.check_async_function(func, nil, nil)
+
+        val error = check.detailed_errors[0]
+
+        # Help should suggest changing to Future<T>
+        expect(error.help.?).to_equal(true)
+        expect(error.help).to_contain("Future")
+
+        # Note should explain why
+        expect(error.note.?).to_equal(true)
+        expect(error.note).to_contain("async")
+
+        # Suggestion should show correct code
+        expect(error.suggestion.?).to_equal(true)
+        expect(error.suggestion).to_contain("async fn")
+        expect(error.suggestion).to_contain("Future")

@@ -22,9 +22,9 @@ Features with failing tests - **needs immediate attention**
 
 | ID | Category | Feature | Spec |
 |----|----------|---------|------|
-| f1 | Uncategorized | Feature 1 | [spec](test/lib/database_feature_utils_spec.spl) |
-| f2 | Uncategorized | Feature 2 | [spec](test/lib/database_feature_utils_spec.spl) |
-| feature_001 | Uncategorized | My Feature | [spec](test/lib/database_feature_utils_spec.spl) |
+| f1 | Uncategorized | Feature 1 | [spec](/home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl) |
+| f2 | Uncategorized | Feature 2 | [spec](/home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl) |
+| feature_001 | Uncategorized | My Feature | [spec](/home/ormastes/dev/pub/simple/test/lib/database_feature_utils_spec.spl) |
 
 ---
 
