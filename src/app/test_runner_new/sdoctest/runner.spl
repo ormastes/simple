@@ -7,7 +7,7 @@ use app.io.mod (file_read, file_exists, file_atomic_write, file_remove, process_
 use test_runner_types.TestOptions
 use sdoctest.types.*
 use sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars}
-use sdoctest.extractor.extract_sdoctest_blocks
+use sdoctest.extractor.{extract_sdoctest_blocks, extract_reusable_lines}
 use sdoctest.discovery.{discover_sdoctest_files, is_tag_ignored}
 
 # =========================================================================
@@ -94,13 +94,19 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
     # Resolve the default env from source config or CLI override
     val default_env_name = if options.sdoctest_env != "": options.sdoctest_env else: "default"
 
+    # Build accumulated preambles for block sharing
+    val preambles = build_file_preambles(blocks)
+
+    var block_idx = 0
     for block in blocks:
-        var result = run_sdoctest_block(block, config, default_env_name, options)
+        val preamble = if block_idx < preambles.len(): preambles[block_idx] else: ""
+        block_idx = block_idx + 1
+        var result = run_sdoctest_block(block, config, default_env_name, options, preamble)
 
         # fail-as-success: convert Failed → Passed (but not Error — that's infra)
-        # Triggered by global --sdoctest-fail-as-success flag OR per-block :fail_as_success modifier
+        # Triggered by per-block :fail_as_success fence modifier
         val block_fail_as_success = block.has_modifier_fail_as_success()
-        if (options.sdoctest_fail_as_success or block_fail_as_success) and result.status == BlockStatus.Failed:
+        if block_fail_as_success and result.status == BlockStatus.Failed:
             result = BlockResult(
                 block: result.block, status: BlockStatus.Passed,
                 duration_ms: result.duration_ms, stdout: result.stdout, stderr: result.stderr,
@@ -132,6 +138,71 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
     )
 
 # =========================================================================
+# Block Accumulation - Preamble Building
+# =========================================================================
+
+fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
+    # Build accumulated preambles for each block.
+    # Block N gets reusable definitions (use, struct, class, enum, fn, impl)
+    # extracted from blocks 0..N-1.
+    var preambles: [text] = []
+    var accumulated = ""
+
+    for block in blocks:
+        # This block's preamble is whatever we've accumulated so far
+        preambles.push(accumulated)
+
+        # Extract reusable lines from this block and add to accumulator
+        val reusable = extract_reusable_lines(block.code)
+        if reusable != "":
+            if accumulated != "":
+                accumulated = accumulated + "\n" + reusable
+            else:
+                accumulated = reusable
+
+    preambles
+
+# =========================================================================
+# Auto-Skip Detection
+# =========================================================================
+
+fn should_auto_skip(code: text) -> text:
+    # Check if code contains unsupported keywords that will always fail.
+    # Returns empty string if OK, or reason string if should skip.
+    val lines = code.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip comment lines - don't check content of comments
+        if trimmed.starts_with("#"):
+            continue
+        # Skip string-only lines (rough heuristic: starts with quote)
+        if trimmed.starts_with("\"") or trimmed.starts_with("'"):
+            continue
+
+        # Check for unsupported keywords
+        if trimmed.starts_with("mock ") or trimmed.starts_with("mock("):
+            return "unsupported keyword: mock"
+        if trimmed.starts_with("gpu ") or trimmed.contains("@gpu"):
+            return "unsupported keyword: gpu"
+        if trimmed.starts_with("macro "):
+            return "unsupported keyword: macro"
+        if trimmed.starts_with("async ") or trimmed.starts_with("async("):
+            return "unsupported keyword: async"
+        if trimmed.starts_with("await "):
+            return "unsupported keyword: await"
+        if trimmed.starts_with("spawn "):
+            return "unsupported keyword: spawn"
+
+        # // as parallel operator (not comment - Simple uses # for comments)
+        # Check for standalone // operator (not inside strings)
+        if trimmed.contains(" // "):
+            return "unsupported operator: // (parallel)"
+
+    ""
+
+# =========================================================================
 # Binary Discovery
 # =========================================================================
 
@@ -154,7 +225,7 @@ fn find_sdoctest_binary() -> text:
 # Per-Block Execution
 # =========================================================================
 
-fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_name: text, options: TestOptions) -> BlockResult:
+fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_name: text, options: TestOptions, preamble: text) -> BlockResult:
     # Check if block should be skipped
     if block.has_modifier_skip():
         return BlockResult(
@@ -170,6 +241,14 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
             duration_ms: 0, stdout: "", stderr: "", error: "tag ignored"
         )
 
+    # Auto-skip blocks with unsupported keywords
+    val skip_reason = should_auto_skip(block.code)
+    if skip_reason != "":
+        return BlockResult(
+            block: block, status: BlockStatus.Skipped,
+            duration_ms: 0, stdout: "", stderr: "", error: skip_reason
+        )
+
     # Resolve environment
     val env_name = if block.get_env_name() != "": block.get_env_name() else: default_env_name
     val timeout = find_env_timeout(config, env_name)
@@ -177,8 +256,8 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
     for (k, v) in env_vars:
         env_set(k, v)
 
-    # Build code with init script prepended
-    val code = build_temp_code(block, config)
+    # Build code with init script and preamble prepended
+    val code = build_temp_code(block, config, preamble)
 
     # Write temp file
     val temp_path = "/tmp/sdoctest_block_{block.line_number}.spl"
@@ -237,20 +316,26 @@ fn run_sdoctest_block(block: SdoctestBlock, config: SdoctestConfig, default_env_
 # Code Building (init script prepending)
 # =========================================================================
 
-fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig) -> text:
+fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text) -> text:
+    var parts: [text] = []
+
+    # 1. Init script (if configured)
     val init_name = block.get_init_name()
-    if init_name == "":
-        return block.code
+    if init_name != "":
+        val init_file = find_init_script_file(config, init_name)
+        if init_file != "" and file_exists(init_file):
+            val init_content = file_read(init_file)
+            if init_content != "":
+                parts.push(init_content)
 
-    val init_file = find_init_script_file(config, init_name)
-    if init_file == "":
-        return block.code
+    # 2. Accumulated preamble from preceding blocks
+    if preamble != "":
+        parts.push(preamble)
 
-    if not file_exists(init_file):
-        return block.code
+    # 3. The actual block code
+    parts.push(block.code)
 
-    val init_content = file_read(init_file)
-    init_content + "\n\n" + block.code
+    parts.join("\n\n")
 
 # =========================================================================
 # Error Extraction
@@ -354,4 +439,5 @@ fn print_sdoctest_summary(result: SdoctestRunResult):
 
 export run_sdoctest_mode, run_sdoctest_file, run_sdoctest_block
 export build_temp_code, extract_block_error
+export build_file_preambles, should_auto_skip
 export print_sdoctest_summary

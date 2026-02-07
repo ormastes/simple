@@ -57,11 +57,11 @@ class Match:
 
     fn is_some() -> bool:
         """Check if match was successful."""
-        self.matched.len() > 0
+        self.start >= 0
 
     fn is_none() -> bool:
         """Check if match failed."""
-        self.matched.len() == 0
+        self.start < 0
 
     fn get() -> text:
         """Get matched text."""
@@ -87,15 +87,16 @@ fn search(pattern: text, input: text) -> Match:
     """Search for pattern anywhere in input."""
     _match_pattern(pattern, input, false)
 
-fn findall(pattern: text, input: text) -> [text]:
+fn findall(pattern: text, input: text) -> [Match]:
     """Find all non-overlapping matches."""
-    var result: [text] = []
+    var result: [Match] = []
     var pos = 0
     while pos < input.len():
         val m = _match_at_pos(pattern, input, pos)
-        if m.matched.len() > 0:
-            result.push(m.matched)
-            pos = pos + m.matched.len()
+        if m.start >= 0:
+            result.push(m)
+            # Move past this match (non-overlapping)
+            pos = m.end
         else:
             pos = pos + 1
     result
@@ -165,32 +166,41 @@ fn between(pattern: text, min: i64, max: i64) -> text:
 fn _match_pattern(pattern: text, input: text, anchor: bool) -> Match:
     """Internal pattern matching."""
     if anchor:
-        return _match_at_pos(pattern, input, 0)
+        val m = _match_at_pos(pattern, input, 0)
+        # Return nil if no match (for tests expecting nil)
+        if m.start < 0:
+            return nil
+        return m
     else:
         # Try matching at each position
         var pos = 0
-        while pos < input.len():
+        while pos <= input.len():
             val m = _match_at_pos(pattern, input, pos)
-            if m.matched.len() > 0:
+            if m.start >= 0:
                 return m
             pos = pos + 1
-        return Match(matched: "", start: 0, end: 0, groups: [])
+        # Return nil if no match found (for tests expecting nil)
+        return nil
 
 fn _match_at_pos(pattern: text, input: text, start: i64) -> Match:
     """Match pattern at specific position."""
-    # Simple literal matching for now
+    # Empty pattern matches at any position (returns empty match with valid position)
     if pattern.len() == 0:
         return Match(matched: "", start: start, end: start, groups: [])
 
-    # Check if pattern matches at this position
+    # Check if pattern can fit at this position
+    if start > input.len():
+        return Match(matched: "", start: -1, end: -1, groups: [])
+
+    # For patterns longer than remaining input, no match
     if start + pattern.len() > input.len():
-        return Match(matched: "", start: 0, end: 0, groups: [])
+        return Match(matched: "", start: -1, end: -1, groups: [])
 
     val substr = input[start:start + pattern.len()]
     if substr == pattern:
         return Match(matched: substr, start: start, end: start + pattern.len(), groups: [])
     else:
-        return Match(matched: "", start: 0, end: 0, groups: [])
+        return Match(matched: "", start: -1, end: -1, groups: [])
 
 fn _replace_all(pattern: text, input: text, replacement: text) -> text:
     """Replace all occurrences."""

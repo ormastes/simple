@@ -165,7 +165,7 @@ simple watch app.spl
 
 ### Variables & Types
 
-```simple:fail_as_success
+```simple
 # Variables - immutable (val) or mutable (var)
 val x = 10          # Immutable (preferred)
 var y = 20          # Mutable (when needed)
@@ -175,22 +175,23 @@ val PI = 3.14159    # Immutable constant
 val count: i64 = 100
 
 # Basic types
-vala: i32 = 42
-valpi: f64 = 3.14159
-valflag: bool = true
+val a = 42
+val pi = 3.14159
+val flag = true
 
 # Strings with interpolation
-valname = "world"
-valmsg = "Hello, {name}!"
+val name = "world"
+val msg = "Hello, {name}!"
 
 # Raw strings (no interpolation)
-valpath = 'C:\Users\name'
+val path = r"C:\Users\name"
 ```
 
 ### Control Flow
 
-```simple:fail_as_success
+```simple
 # If/else with indentation
+var x = 5
 if x > 0:
     print "positive"
 elif x < 0:
@@ -206,6 +207,7 @@ while x > 0:
     x = x - 1
 
 # Infinite loop with break/continue
+var done = true
 loop:
     if done:
         break
@@ -214,76 +216,68 @@ loop:
 
 ### Functions
 
-```simple:fail_as_success
+```simple
 fn add(a: i64, b: i64) -> i64:
     return a + b
 
-fn greet(name: str):
-    print "Hello, {name}!"
+fn greet(greeting: text):
+    print "Hello, {greeting}!"
 
 # Call functions
-valsum = add(1, 2)
+val sum = add(1, 2)
 greet("Alice")
 
 # Lambdas use backslash
-valdouble = \x: x * 2
-valevens = nums.filter \x: x % 2 == 0
+val double = \x: x * 2
+val nums = [1, 2, 3, 4, 5]
+val evens = nums.filter(\x: x % 2 == 0)
 ```
 
 ### Structs & Classes
 
-```simple:fail_as_success
+```simple
 # Structs (value types, immutable by default)
 struct Point:
     x: f64
     y: f64
 
-# Mutable struct
-mut struct Cursor:
-    x: f64
-    y: f64
-
-valp = Point(x: 1.0, y: 2.0)
+val p = Point(x: 1.0, y: 2.0)
 
 # Classes (reference types, mutable by default)
 class Person:
-    name: str
-    age: i32
+    name: text
+    age: i64
 
-    fn greet(self):
-        print "Hi, I'm {self.name}"
+    fn greet():
+        print "Hi, {self.name}!"
 
-# Immutable class
-immut class Color:
-    red: u8
-    green: u8
-    blue: u8
-
-valalice = Person(name: "Alice", age: 30)
+val alice = Person(name: "Alice", age: 30)
 alice.greet()
 ```
 
 ### Collections
 
-```simple:fail_as_success
+```simple
 # Arrays
-valnums = [1, 2, 3, 4, 5]
-valfirst = nums[0]
+val nums = [1, 2, 3, 4, 5]
+val first = nums[0]
 
 # Dictionaries
-valscores = {"alice": 100, "bob": 85}
-valalice_score = scores["alice"]
+val scores = {"alice": 100, "bob": 85}
+val alice_score = scores["alice"]
 
 # Tuples
-valpair = (1, "hello")
-val(num, text) = pair
+val pair = (1, "hello")
+val num = pair.0
+val msg = pair.1
 ```
 
 ### Unit Types (Postfix Literals)
 
 Type-safe units prevent mixing incompatible values:
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # Define unit types with postfix syntax
 unit length(base: f64):
     mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
@@ -332,7 +326,8 @@ fn area(s: Shape) -> f64:
 
 Simple macros are contract-first and LL(1) parseable - the IDE can provide autocomplete without expanding the macro:
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # Macro declares what it introduces in the contract header
 macro define_counter(NAME: Str const) -> (
   returns result: (init: Int, step: Int),
@@ -356,7 +351,8 @@ class Demo:
 
 **Built-in macros:**
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # Print with formatting
 println!("Hello, {name}!")           # Print with newline
 print!("Value: {x}")                 # Print without newline
@@ -400,7 +396,8 @@ class Point3D:
 
 Unified predicate grammar for cross-cutting concerns:
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # Pointcut expression syntax: pc{...}
 # Applies logging to all service methods
 on pc{ execution(services.**.*(..)) } use LoggingInterceptor
@@ -445,7 +442,8 @@ rate_limits |endpoint, requests, window|
 
 Load SDN in Simple:
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 config = sdn::load("app.sdn")
 print("Server port: {config.server.port}")
 ```
@@ -454,7 +452,8 @@ print("Server port: {config.server.port}")
 
 Executable examples in docstrings - tests that serve as documentation:
 
-```simple:fail_as_success
+<!--sdoctest:skip-begin-->
+```simple
 """
 Computes factorial of n
 
@@ -476,7 +475,7 @@ fn factorial(n: Int) -> Int:
 
 **Multi-line examples and setup/teardown:**
 
-```simple:fail_as_success
+```simple
 """
 Stack data structure with LIFO semantics
 
@@ -511,7 +510,7 @@ class Stack:
 
 **Wildcard matching for non-deterministic output:**
 
-```simple:fail_as_success
+```simple
 """
 Generate unique identifiers
 
@@ -545,6 +544,8 @@ Create your first Simple program:
 ```
 ````
 
+<!--sdoctest:skip-end-->
+
 Run doctests:
 ```bash
 simple doctest src/math.spl      # Run doctests in file
@@ -555,7 +556,8 @@ simple test --doctest --tag slow # Run only slow-tagged doctests
 
 ### Functional Update Operator (`->`)
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # The -> operator calls a method and assigns result back
 var data = load_data()
 data->normalize()        # data = data.normalize()
@@ -567,7 +569,8 @@ data->normalize()->filter(min: 0)->save("out.txt")
 
 ### GPU Computing
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 import std.gpu
 
 # GPU kernel style 1: #[gpu] with explicit bounds check
@@ -606,7 +609,8 @@ fn main():
 
 **GPU Thread Indexers:**
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
     # Multi-dimensional indexing
@@ -703,7 +707,8 @@ Run an example:
 
 Feature documentation is auto-generated from BDD spec tests. Each spec defines feature metadata and executable assertions that verify the feature works correctly.
 
-```simple:fail_as_success
+<!--sdoctest:skip-next-->
+```simple
 # simple/std_lib/test/features/infrastructure/lexer_spec.spl
 import std.spec
 

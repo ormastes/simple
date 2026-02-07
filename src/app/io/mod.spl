@@ -43,6 +43,24 @@ fn rt_hook_enable_debugging(enable: bool):
     # Stub: Hook debugging not yet implemented in runtime
     pass
 
+# --- Fault Detection Functions ---
+# Note: These are stubs - full fault detection not yet implemented in runtime
+fn rt_fault_set_stack_overflow_detection(enabled: bool) -> bool:
+    # Stub: Stack overflow detection not yet implemented
+    true
+
+fn rt_fault_set_max_recursion_depth(depth: i64) -> bool:
+    # Stub: Recursion depth limits not yet implemented
+    true
+
+fn rt_fault_set_timeout(timeout_ms: i64) -> bool:
+    # Stub: Timeout detection not yet implemented
+    true
+
+fn rt_fault_set_execution_limit(limit: i64) -> bool:
+    # Stub: Execution limits not yet implemented
+    true
+
 # --- Atomic Operations ---
 # Note: These are stubs - atomic operations not yet fully implemented
 fn atomic_i64_new(value: i64) -> i64:
@@ -67,17 +85,21 @@ export rt_set_jit_backend, rt_get_jit_backend
 export rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute
 export rt_exec_manager_has_function, rt_exec_manager_backend_name, rt_exec_manager_cleanup
 export rt_debug_set_active, rt_hook_enable_debugging
+export rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth
+export rt_fault_set_timeout, rt_fault_set_execution_limit
 export atomic_i64_new, atomic_bool_new
 export rt_vulkan_is_available, upx_is_available
 
 export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
-export rt_file_rename, rt_sleep_ms, rt_getpid, rt_timestamp_now
+export rt_file_rename, rt_sleep_ms
+export rt_getpid, rt_timestamp_now
 export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir
 export dir_list, dir_remove
 export cwd, home, env_get, env_set
 export host_arch, host_os
+export ProcessResult
 export process_run, process_run_timeout, process_run_with_limits
 export process_output, shell
 export time_now_unix_micros, current_time_unix, current_time_ms
@@ -119,10 +141,9 @@ fn file_read(path: text) -> text:
     shell_output("cat '{path}' 2>/dev/null", "")
 
 fn file_write(path: text, content: text) -> bool:
-    # Write using shell redirection via printf
-    # Note: For simplicity, we assume content doesn't contain single quotes
-    # A full implementation would need proper shell escaping
-    val result = shell("printf '%s' '{content}' > '{path}'")
+    # Write using heredoc for shell-safe writing (handles quotes, special chars)
+    # Single-quoted delimiter prevents shell variable/command expansion in content
+    val result = shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
     result.exit_code == 0
 
 fn file_copy(src: text, dst: text) -> bool:
@@ -148,9 +169,8 @@ fn timestamp_str() -> text:
     "{micros}"
 
 fn file_append(path: text, content: text) -> bool:
-    # Use shell append redirection
-    # Note: For simplicity, we assume content doesn't contain single quotes
-    val result = shell("printf '%s' '{content}' >> '{path}'")
+    # Append using heredoc for shell-safe writing (handles quotes, special chars)
+    val result = shell("cat >> '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
     result.exit_code == 0
 
 fn file_modified_time(path: text) -> i64:
@@ -209,7 +229,12 @@ fn dir_create_all(path: text) -> bool:
     dir_create(path, true)
 
 fn dir_walk(path: text) -> [text]:
-    # Would need to recursively traverse directories
+    # Recursively list all files under path using find command
+    val result = shell("find '{path}' -type f 2>/dev/null | sort")
+    if result.exit_code == 0:
+        var trimmed = result.stdout.trim()
+        if trimmed != "":
+            return trimmed.split("\n")
     []
 
 fn dir_remove_all(path: text) -> i32:

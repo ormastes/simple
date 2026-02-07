@@ -28,8 +28,20 @@ fn find_runtime_lib_dir() -> text:
     "rust/target/debug"
 
 fn find_simple_binary() -> text:
+    # Check environment variable first
+    val env_path = env_get("SIMPLE_RUNTIME")
+    if env_path != "" and env_path != nil:
+        if file_exists(env_path):
+            return env_path
+
     # Try multiple locations for the runtime binary
     val candidates = [
+        "bin/simple_runtime",
+        "./bin/simple_runtime",
+        "release/simple-0.4.0-beta/bin/simple_runtime",
+        "./release/simple-0.4.0-beta/bin/simple_runtime",
+        "bin/bootstrap/linux-x86_64/simple",
+        "./bin/bootstrap/linux-x86_64/simple",
         "./rust/target/debug/simple_runtime",
         "./rust/target/release/simple_runtime",
         "rust/target/debug/simple_runtime",
@@ -40,8 +52,8 @@ fn find_simple_binary() -> text:
         if file_exists(candidate):
             return candidate
 
-    # Fallback to debug (will fail if it doesn't exist, but that's expected)
-    "./rust/target/debug/simple_runtime"
+    # Fallback to bin/simple_runtime (primary location in pure Simple setup)
+    "bin/simple_runtime"
 
 fn extract_error_message(output: text) -> text:
     # Extract first meaningful error message from test output
@@ -71,10 +83,11 @@ fn extract_error_message(output: text) -> text:
     else:
         ""
 
-fn parse_test_output(output: text) -> (i64, i64, i64):
+fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_passed = 0
     var total_failed = 0
     var total_skipped = 0
+    var total_pending = 0
     val lines = output.split("\n")
     for line in lines:
         val clean = strip_ansi(line)
@@ -86,16 +99,40 @@ fn parse_test_output(output: text) -> (i64, i64, i64):
                 if passed > 0:
                     total_passed = total_passed + passed
                 total_failed = total_failed + failures_count
-        # Count skipped/pending
-        if clean.contains("pending") or clean.contains("skipped"):
-            val skip_count = extract_number_before(clean, "pending")
-            if skip_count < 0:
-                val skip_count2 = extract_number_before(clean, "skipped")
-                if skip_count2 > 0:
-                    total_skipped = total_skipped + skip_count2
-            elif skip_count > 0:
-                total_skipped = total_skipped + skip_count
-    (total_passed, total_failed, total_skipped)
+        # Parse summary line: "Pending: N" from spec.spl print_summary
+        if clean.trim().starts_with("Pending:"):
+            val pending_count = extract_number_after_colon(clean, "Pending:")
+            if pending_count > 0:
+                total_pending = total_pending + pending_count
+        # Count individual "... pending" test lines
+        elif clean.contains("... pending"):
+            total_pending = total_pending + 1
+        # Count skipped (separate from pending)
+        if clean.contains("skipped"):
+            val skip_count2 = extract_number_before(clean, "skipped")
+            if skip_count2 > 0:
+                total_skipped = total_skipped + skip_count2
+    (total_passed, total_failed, total_skipped, total_pending)
+
+fn extract_number_after_colon(s: text, prefix: text) -> i64:
+    val idx_opt = s.index_of(prefix)
+    val idx = idx_opt ?? -1
+    if idx < 0:
+        return -1
+    val after = s[idx + prefix.len():].trim()
+    if after.len() == 0:
+        return -1
+    # Collect digits from start
+    var end_pos = 0
+    while end_pos < after.len():
+        val ch = after[end_pos:end_pos + 1]
+        if ch < "0" or ch > "9":
+            break
+        end_pos = end_pos + 1
+    if end_pos == 0:
+        return -1
+    val num_str = after[0:end_pos]
+    to_int(num_str)
 
 fn extract_number_before(s: text, keyword: text) -> i64:
     val idx_opt = s.index_of(keyword)
@@ -137,14 +174,14 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Check for timeout
     if exit_code == -1:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, duration_ms: duration_ms, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
 
     val combined = stdout + "\n" + stderr
-    val (passed, failed, skipped) = parse_test_output(combined)
+    val (passed, failed, skipped, pending) = parse_test_output(combined)
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
-            return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, duration_ms: duration_ms, error: "", timed_out: false)
+            return TestFileResult(path: file_path, passed: 1, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, error: "", timed_out: false)
         else:
             # Extract error message from output
             val extracted_error = extract_error_message(combined)
@@ -152,7 +189,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
                 extracted_error
             else:
                 "Process exited with code {exit_code}"
-            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, duration_ms: duration_ms, error: error_msg, timed_out: false)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, error: error_msg, timed_out: false)
 
     # Extract error messages when tests fail
     var error = ""
@@ -161,7 +198,7 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
     elif exit_code != 0:
         error = "Process exited with code {exit_code}"
 
-    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, duration_ms: duration_ms, error: error, timed_out: false)
+    TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, error: error, timed_out: false)
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -397,6 +434,11 @@ fn extract_static_test_name(line: text) -> text:
         val end = line.index_of("\"", 6) ?? -1
         if end > 6:
             return line[6:end]
+    # pending_on "description"
+    if line.starts_with("pending_on \""):
+        val end = line.index_of("\"", 12) ?? -1
+        if end > 12:
+            return "[pending] " + line[12:end]
     ""
 
 # =========================================================================
@@ -404,7 +446,7 @@ fn extract_static_test_name(line: text) -> text:
 # =========================================================================
 
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
-export parse_test_output, extract_number_before
+export parse_test_output, extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output
 export run_test_file_interpreter, run_test_file_smf
 export run_test_file_native_old, run_test_file_native
