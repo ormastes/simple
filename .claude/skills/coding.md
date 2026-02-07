@@ -33,14 +33,15 @@ Simple provides helpful error messages when you use syntax from other languages.
 ## Language Rules
 
 ### String Literals
-```simple
+```sdoctest
 # Double-quoted = interpolated (default)
-val name = "World"
-val greeting = "Hello, {name}!"   # "Hello, World!"
-print("Value: {1 + 2}")           # "Value: 3"
+>>> name = "World"
+>>> greeting = "Hello, {name}!"   # "Hello, World!"
+>>> print("Value: {1 + 2}")           # "Value: 3"
+Value: 3
 
 # Single-quoted = raw (no interpolation)
-val raw = 'No {interpolation} here'
+>>> raw = 'No {interpolation} here'
 
 # Triple-quoted = docstring (multi-line)
 """

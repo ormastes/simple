@@ -253,7 +253,7 @@ class Context:
     modules: Dict<text, i32>
 
 fn test_copy_modify_reassign():
-    val ctx = Context(modules: {})
+    ctx = Context(modules: {})
     var modules = ctx.modules
     modules["test"] = 42
     ctx.modules = modules
@@ -463,16 +463,16 @@ Provides JSON API for bug database access via MCP:
 use app.mcp.bugdb_resource.{get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats}
 
 # Get all bugs as JSON
-val json = get_all_bugs("/path/to/bugs.sdn")
+json = get_all_bugs("/path/to/bugs.sdn")
 
 # Get only open bugs
-val open_json = get_open_bugs("/path/to/bugs.sdn")
+open_json = get_open_bugs("/path/to/bugs.sdn")
 
 # Get critical bugs (P0 + P1)
-val critical_json = get_critical_bugs("/path/to/bugs.sdn")
+critical_json = get_critical_bugs("/path/to/bugs.sdn")
 
 # Get statistics
-val stats_json = get_bug_stats("/path/to/bugs.sdn")
+stats_json = get_bug_stats("/path/to/bugs.sdn")
 ```
 
 **JSON Output Example:**

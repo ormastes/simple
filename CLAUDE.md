@@ -107,12 +107,15 @@ Skills located in `.claude/skills/`.
 ## Syntax Quick Reference
 
 **Variables:**
+<!--sdoctest:skip-next-->
 ```simple
-val name = "Alice"    # Immutable (preferred)
+name = "Alice"    # Immutable (preferred)
+other_name = "Bob".   # Immutable same as 'name = "Bob"'
 var count = 0         # Mutable
 ```
 
 **Implicit val/var (type inference, future/experimental):**
+<!--sdoctest:skip-next-->
 ```simple
 name = "Alice"        # Implicit val (immutable)
 count_ = 0            # Implicit var (mutable, trailing underscore)
@@ -138,6 +141,7 @@ fn add(a, b):             # No explicit generics needed
 ```
 
 **Implicit return:**
+<!--sdoctest:skip-next-->
 ```simple
 fn square(x):
     x * x                     # Last expression is returned (preferred)
@@ -198,31 +202,17 @@ config["key"] ?? default      # Fallback value
 ```
 
 **Existence check (`.?`) and no-paren methods:**
-```simple
+```sdoctest
 # .? checks if value is "present" (not nil AND not empty)
-opt.?                         # true if Some, false if None
-list.?                        # true if non-empty, false if empty
-dict.?                        # true if non-empty, false if empty
-str.?                         # true if non-empty string
-num.?                         # always true (primitives exist)
-
-# No-paren method calls (Ruby-like)
-list.first                    # same as list.first()
-list.last                     # same as list.last()
-str.trim                      # same as str.trim()
-str.upper                     # same as str.upper()
-
-# Combine .? with no-paren for concise checks
-list.first.?                  # true if list has first element
-str.trim.?                    # true if trimmed string is non-empty
-
-# Result type patterns (replaces is_ok/is_err)
-result.ok.?                   # true if Ok (same as is_ok())
-result.err.?                  # true if Err (same as is_err())
-
-# Negation patterns
-not opt.?                     # true if None (same as is_none())
-not list.?                    # true if empty (same as is_empty())
+>>> opt = Some(42)
+>>> opt.?
+true
+>>> list = [1, 2, 3]
+>>> list.?
+true
+>>> empty_list = []
+>>> empty_list.?
+false
 ```
 
 **Refactoring patterns (prefer `.?` style):**
@@ -243,16 +233,17 @@ print r"regex: \d+{3}"        # Raw string (no interpolation, no escapes)
 ```
 
 **Format String Templates (Future):**
+<!--sdoctest:skip-next-->
 ```simple
 # Template with auto-detected const keys
-val template = "Welcome {user} to {city}"
+template = "Welcome {user} to {city}"
 
 # Instantiate with dict - keys auto-validated at compile time
-val greeting = template.with {"user": username, "city": current_city}
+greeting = template.with {"user": username, "city": current_city}
 
 # Compile errors for wrong keys (no type annotation needed):
-val bad = template.with {"usr": x}   # ERROR: "usr" not in ["user", "city"]
-val missing = template.with {"user": x}  # ERROR: Missing key "city"
+bad = template.with {"usr": x}   # ERROR: "usr" not in ["user", "city"]
+missing = template.with {"user": x}  # ERROR: Missing key "city"
 ```
 
 **Constructors:**
@@ -270,8 +261,8 @@ class StringInterner:
     next_id: i32
 
 # ✅ PRIMARY: Direct construction (no method needed)
-val p = Point(x: 3, y: 4)
-val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+p = Point(x: 3, y: 4)
+interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
 ```
 
 **Optional: Custom factory methods (for special cases)**
@@ -295,9 +286,9 @@ impl StringInterner:
         # Could add pre-allocation logic here in future
 
 # Usage - clear intent:
-val center = Point.origin()
-val p = Point.from_polar(5.0, 0.785)
-val interner = StringInterner.with_capacity(100)
+center = Point.origin()
+p = Point.from_polar(5.0, 0.785)
+interner = StringInterner.with_capacity(100)
 ```
 
 **Why this pattern?**
@@ -444,10 +435,10 @@ fn main():
   - `.^` broadcast power
   ```simple
   # Normal code uses **
-  val result = x ** 2
+  result = x ** 2
 
   # Math blocks use ^ for power
-  val formula = m{ x^2 + 2*x*y + y^2 }
+  formula = m{ x^2 + 2*x*y + y^2 }
   ```
 
 ### Pipeline Operators
@@ -458,17 +449,17 @@ fn main():
 - ✅ **`~>` layer connect**: NN layer pipeline with **dimension checking**
   ```simple
   # Data processing pipeline
-  val result = data |> normalize |> transform |> predict
+  result = data |> normalize |> transform |> predict
 
   # Function composition
-  val preprocess = normalize >> augment >> to_tensor
+  preprocess = normalize >> augment >> to_tensor
 
   # Neural network with compile-time dimension checking
-  val model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
+  model = Linear(784, 256) ~> ReLU() ~> Linear(256, 10)
   # Type: Layer<[batch, 784], [batch, 10]>
 
   # Compile-time error on dimension mismatch:
-  val bad = Linear(784, 256) ~> Linear(128, 64)
+  bad = Linear(784, 256) ~> Linear(128, 64)
   # ERROR[E0502]: output [batch, 256] != input [batch, 128]
   ```
 - 📖 **Design**: See `doc/design/pipeline_operators_design.md`

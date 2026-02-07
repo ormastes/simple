@@ -88,9 +88,9 @@ simple build --release --features=vulkan
 
 ### Your First Program
 
-```simple
+```sdoctest
 # hello.spl
-main = 0  # Entry point, returns exit code
+>>> main = 0  # Entry point, returns exit code
 ```
 
 ```bash
@@ -141,7 +141,7 @@ Options:
 simple
 >>> 1 + 2
 3
->>> val x = 10
+>>> x = 10
 >>> x * 5
 50
 >>> exit
@@ -165,118 +165,156 @@ simple watch app.spl
 
 ### Variables & Types
 
-```simple
-# Variables - immutable (val) or mutable (var)
-val x = 10          # Immutable (preferred)
-var y = 20          # Mutable (when needed)
-val PI = 3.14159    # Immutable constant
+```sdoctest
+# Variables - immutable by default, mutable with var
+>>> x = 10              # Immutable (preferred) same as "val x = 10"
+>>> var y = 20          # Mutable when needed
+>>> PI = 3.14159        # Constants
 
-# Type annotations (optional due to inference)
-val count: i64 = 100
+# Type annotations optional
+>>> count: i64 = 100
 
-# Basic types
-val a = 42
-val pi = 3.14159
-val flag = true
+# Basic types inferred
+>>> a = 42
+>>> pi = 3.14159
+>>> flag = true
 
-# Strings with interpolation
-val name = "world"
-val msg = "Hello, {name}!"
-
-# Raw strings (no interpolation)
-val path = r"C:\Users\name"
+# String interpolation default
+>>> name = "world"
+>>> msg = "Hello, {name}!"
+>>> path = r"C:\Users\name"  # Raw strings
 ```
 
 ### Control Flow
 
-```simple
+```sdoctest
 # If/else with indentation
-var x = 5
-if x > 0:
-    print "positive"
-elif x < 0:
-    print "negative"
-else:
-    print "zero"
+>>> var x = 5
+>>> if x > 0:
+...     print "positive"
+positive
+>>> elif x < 0:
+...     print "negative"
+>>> else:
+...     print "zero"
 
 # Loops
-for i in 0..10:
-    print i
+>>> for i in 0..3:
+...     print i
+0
+1
+2
 
-while x > 0:
-    x = x - 1
-
-# Infinite loop with break/continue
-var done = true
-loop:
-    if done:
-        break
-    continue
+>>> while x > 3:
+...     x = x - 1
+>>> x
+3
 ```
 
 ### Functions
 
-```simple
-fn add(a: i64, b: i64) -> i64:
-    return a + b
+```sdoctest
+>>> fn add(a: i64, b: i64) -> i64:
+...     a + b  # Implicit return
 
-fn greet(greeting: text):
-    print "Hello, {greeting}!"
+>>> fn greet(greeting: text):
+...     print "Hello, {greeting}!"
 
-# Call functions
-val sum = add(1, 2)
-greet("Alice")
+# Function calls
+>>> sum = add(1, 2)
+>>> sum
+3
+>>> greet("Alice")
+Hello, Alice!
 
-# Lambdas use backslash
-val double = \x: x * 2
-val nums = [1, 2, 3, 4, 5]
-val evens = nums.filter(\x: x % 2 == 0)
+# Lambdas with backslash
+>>> double = \x: x * 2
+>>> nums = [1, 2, 3, 4, 5]
+>>> evens = nums.filter(\x: x % 2 == 0)
+>>> evens
+[2, 4]
 ```
 
 ### Structs & Classes
 
 ```simple
-# Structs (value types, immutable by default)
+# Structs (value types)
 struct Point:
     x: f64
     y: f64
 
-val p = Point(x: 1.0, y: 2.0)
+p = Point(x: 1.0, y: 2.0)
 
-# Classes (reference types, mutable by default)
+# Classes (reference types)
 class Person:
     name: text
     age: i64
 
     fn greet():
+        print "Hi, {self.name}!"  # No-paren calls
+
+alice = Person(name: "Alice", age: 30)
+alice.greet
+
+    fn greet():
         print "Hi, {self.name}!"
 
-val alice = Person(name: "Alice", age: 30)
+alice = Person(name: "Alice", age: 30)
 alice.greet()
 ```
 
 ### Collections
 
-```simple
-# Arrays
-val nums = [1, 2, 3, 4, 5]
-val first = nums[0]
+```sdoctest
+# Arrays - short form (no val)
+>>> nums = [1, 2, 3, 4, 5]
+>>> first = nums[0]
+>>> first
+1
 
-# Dictionaries
-val scores = {"alice": 100, "bob": 85}
-val alice_score = scores["alice"]
+# Collection methods - .len() is default
+>>> count = nums.len()     # Preferred
+>>> count
+5
+>>> size = nums.length()   # Also available  
+>>> items = nums.size()    # Also available
+
+# Dictionary (short form)
+>>> scores = {"alice": 100, "bob": 85}
+>>> alice_score = scores["alice"]
+>>> alice_score
+100
+
+# Sets with underscore placeholder
+>>> odds = nums.filter(_ % 2 == 1)
+>>> odds
+[1, 3, 5]
+>>> big_nums = nums.filter(_ > 3)
+>>> big_nums
+[4, 5]
 
 # Tuples
-val pair = (1, "hello")
-val num = pair.0
-val msg = pair.1
+>>> pair = (1, "hello")
+>>> num = pair.0
+>>> num
+1
+>>> msg = pair.1
+>>> msg
+"hello"
+
+# List comprehensions
+>>> squared = [x * x for x in 0..5]
+>>> squared
+[0, 1, 4, 9, 16]
+>>> evens = [x for x in nums if x % 2 == 0]
+>>> evens
+[2, 4]
 ```
 
 ### Unit Types (Postfix Literals)
 
 Type-safe units prevent mixing incompatible values:
 
-<!--sdoctest:skip-next-->
 ```simple
 # Define unit types with postfix syntax
 unit length(base: f64):
@@ -289,21 +327,21 @@ unit UserId: i64 as uid
 unit OrderId: i64 as oid
 
 # Usage with postfix literals
-valheight = 175_cm              # Length type
-valwidth = 10_cm + 5_mm         # Auto-converts to same base
-valspeed = 200_kmph             # Velocity type
-valdistance = 42_km             # Length type
+height = 175_cm              # Length type
+width = 10_cm + 5_mm         # Auto-converts to same base
+speed = 200_kmph             # Velocity type
+distance = 42_km             # Length type
 
 # Type safety - compile error:
-# valbad = height + speed       # Error: can't add Length + Velocity
+# bad = height + speed       # Error: can't add Length + Velocity
 
 # Semantic IDs prevent mix-ups
-valuser = 42_uid                # UserId
-valorder = 100_oid              # OrderId
-# valwrong: UserId = 100_oid    # Error: OrderId ≠ UserId
+user = 42_uid                # UserId
+order = 100_oid              # OrderId
+# wrong: UserId = 100_oid    # Error: OrderId ≠ UserId
 
 # Computed units
-valtravel_time = distance / speed    # Returns Time type
+travel_time = distance / speed    # Returns Time type
 print("ETA: {travel_time.to_min()} minutes")
 ```
 
@@ -313,20 +351,40 @@ print("ETA: {travel_time.to_min()} minutes")
 enum Shape:
     Circle(radius: f64)
     Rectangle(width: f64, height: f64)
+    Square(side: f64)
+    Triangle(base: f64, height: f64)
 
+# Pattern matching with case syntax
 fn area(s: Shape) -> f64:
     match s:
-        Circle(r):
-            return 3.14159 * r * r
-        Rectangle(w, h):
-            return w * h
+        case Circle(r):
+            3.14159 * r * r  # Implicit return
+        case Rectangle(w, h):
+            w * h
+        case Square(side):
+            side * side
+        case Triangle(b, h):
+            0.5 * b * h
+
+# Preferred arrow syntax (shorter)
+fn perimeter(s: Shape) -> f64:
+    match s:
+        | Circle(r) -> 2.0 * 3.14159 * r
+        | Rectangle(w, h) -> 2.0 * (w + h)
+        | Square(side) -> 4.0 * side
+        | Triangle(a, b, c) -> a + b + c
+
+# Pattern matching with nil (not None)
+fn get_radius(opt: Option[f64]) -> f64:
+    match opt:
+        | Some(r) -> r
+        | nil -> 0.0  # Use nil instead of None
 ```
 
 ### Parser-Friendly Macros
 
 Simple macros are contract-first and LL(1) parseable - the IDE can provide autocomplete without expanding the macro:
 
-<!--sdoctest:skip-next-->
 ```simple
 # Macro declares what it introduces in the contract header
 macro define_counter(NAME: Str const) -> (
@@ -339,19 +397,18 @@ macro define_counter(NAME: Str const) -> (
 
   emit counter_fn:
     fn "{NAME}Counter"(start: Int) -> Int:
-      return start + step
+      start + step
 
 # Usage - IDE knows about UserCounter before expansion
 class Demo:
   define_counter!("User")
 
   fn run(self) -> Int:
-    return self.UserCounter(10)  # Autocomplete works!
+    self.UserCounter(10)  # Autocomplete works!
 ```
 
 **Built-in macros:**
 
-<!--sdoctest:skip-next-->
 ```simple
 # Print with formatting
 println!("Hello, {name}!")           # Print with newline
@@ -366,8 +423,8 @@ assert_eq!(a, b)                     # Panic if a != b
 assert_ne!(a, b)                     # Panic if a == b
 
 # Collections
-valnums = vec![1, 2, 3, 4, 5]       # Create vector
-valformatted = format!("x={x}")     # Format string without printing
+nums = vec![1, 2, 3, 4, 5]           # Create vector
+formatted = format!("x={x}")         # Format string without printing
 
 # Panic with message
 panic!("Something went wrong: {err}")
@@ -385,7 +442,7 @@ macro gen_axes(BASE: Str const, N: Int const) -> (
   emit axes:
     for i in 0 .. N:
       fn "{BASE}{i}"(v: Vec[N]) -> Int:
-        return v[i]
+        v[i]
 
 # Usage: generates x(), y(), z() accessors
 class Point3D:
@@ -396,7 +453,6 @@ class Point3D:
 
 Unified predicate grammar for cross-cutting concerns:
 
-<!--sdoctest:skip-next-->
 ```simple
 # Pointcut expression syntax: pc{...}
 # Applies logging to all service methods
@@ -442,7 +498,6 @@ rate_limits |endpoint, requests, window|
 
 Load SDN in Simple:
 
-<!--sdoctest:skip-next-->
 ```simple
 config = sdn::load("app.sdn")
 print("Server port: {config.server.port}")
@@ -535,8 +590,8 @@ fn generate_uuid() -> String:
 Create your first Simple program:
 
 ```sdoctest
->>> val x = 10
->>> valy = 20
+>>> x = 10
+>>> y = 20
 >>> x + y
 30
 >>> "Result: {x + y}"
@@ -556,7 +611,6 @@ simple test --doctest --tag slow # Run only slow-tagged doctests
 
 ### Functional Update Operator (`->`)
 
-<!--sdoctest:skip-next-->
 ```simple
 # The -> operator calls a method and assigns result back
 var data = load_data()
@@ -569,7 +623,6 @@ data->normalize()->filter(min: 0)->save("out.txt")
 
 ### GPU Computing
 
-<!--sdoctest:skip-next-->
 ```simple
 import std.gpu
 
@@ -609,7 +662,6 @@ fn main():
 
 **GPU Thread Indexers:**
 
-<!--sdoctest:skip-next-->
 ```simple
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
@@ -707,7 +759,6 @@ Run an example:
 
 Feature documentation is auto-generated from BDD spec tests. Each spec defines feature metadata and executable assertions that verify the feature works correctly.
 
-<!--sdoctest:skip-next-->
 ```simple
 # simple/std_lib/test/features/infrastructure/lexer_spec.spl
 import std.spec

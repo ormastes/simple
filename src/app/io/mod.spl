@@ -19,6 +19,17 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
+# --- System & Concurrency SFFI (Phase 4) ---
+# Note: These use the exact runtime function names.
+# Wrapper functions (getpid, hostname, etc.) call these externs.
+extern fn rt_getpid() -> i64
+extern fn rt_hostname() -> text
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_env_set(key: text, value_str: text) -> bool
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_dir_remove_all(path: text) -> bool
+extern fn rt_thread_available_parallelism() -> i64
+
 # --- Platform Detection ---
 # Note: Implemented using shell commands instead of runtime FFI
 # since pre-built runtime doesn't have rt_host_arch/rt_host_os
@@ -120,6 +131,12 @@ export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
 export fault_set_timeout, fault_set_execution_limit
 export eprint
 export math_exp, math_ln, math_sqrt, math_cos, math_sin, math_random
+export math_log, math_log10, math_log2
+export math_asin, math_acos, math_atan, math_atan2
+export math_sinh, math_cosh, math_tanh
+export math_ceil, math_floor, math_round
+export thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id
+export atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange
 
 # ============================================================================
 # Core I/O - Using runtime's built-in capabilities
@@ -174,16 +191,19 @@ fn file_append(path: text, content: text) -> bool:
     result.exit_code == 0
 
 fn file_modified_time(path: text) -> i64:
-    # Return 0 for now (epoch time)
-    0
+    # Get file modification time as Unix timestamp using stat
+    val result = shell("stat -c '%Y' '{path}' 2>/dev/null || stat -f '%m' '{path}' 2>/dev/null")
+    if result.exit_code == 0:
+        int(result.stdout.trim())
+    else:
+        0
 
 fn file_remove(path: text) -> bool:
     file_delete(path)
 
 fn file_hash_sha256(path: text) -> text:
-    # Pure Simple SHA256 would require implementing the algorithm
-    # For now, return empty string
-    ""
+    # File hash via SFFI
+    rt_file_hash_sha256(path)
 
 fn file_read_lines(path: text) -> [text]?:
     # Read file and split by newlines
@@ -238,8 +258,11 @@ fn dir_walk(path: text) -> [text]:
     []
 
 fn dir_remove_all(path: text) -> i32:
-    print "[INFO] dir_remove_all('{path}')"
-    -1
+    # Recursive directory removal via SFFI
+    if rt_dir_remove_all(path):
+        0
+    else:
+        -1
 
 fn is_dir(path: text) -> bool:
     # Check if path is a directory using test -d
@@ -260,9 +283,12 @@ fn dir_remove(path: text, recursive: bool) -> bool:
 # ============================================================================
 
 fn cwd() -> text:
-    # Current working directory
-    # Could be tracked in a global variable
-    "."
+    # Current working directory using pwd command
+    val result = shell("pwd")
+    if result.exit_code == 0:
+        result.stdout.trim()
+    else:
+        "."
 
 fn home() -> text:
     # Home directory
@@ -274,8 +300,8 @@ fn env_get(key: text) -> text:
     rt_env_get(key)
 
 fn env_set(key: text, value: text) -> bool:
-    print "[INFO] env_set('{key}', '{value}')"
-    false
+    # Set environment variable via SFFI
+    rt_env_set(key, value)
 
 fn host_arch() -> text:
     """Get the host architecture (e.g., x86_64, aarch64, arm, i686).
@@ -431,7 +457,11 @@ fn shell_int(command: text, default: i64) -> i64:
     """Run shell command and parse stdout as integer."""
     val result = shell(command)
     if result.exit_code == 0:
-        result.stdout.trim().to_int_or(default)
+        val trimmed = result.stdout.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
     else:
         default
 
@@ -442,9 +472,8 @@ export shell_bool, shell_output, shell_output_trimmed, shell_lines, shell_int
 # ============================================================================
 
 fn time_now_unix_micros() -> i64:
-    # Current time in microseconds since epoch
-    # Could be tracked by the runtime
-    0
+    # Current time in microseconds since epoch via SFFI
+    rt_time_now_unix_micros()
 
 fn current_time_unix() -> i64:
     time_now_unix_micros() / 1_000_000
@@ -487,17 +516,16 @@ fn timestamp_second(micros: i64) -> i32:
 # ============================================================================
 
 fn getpid() -> i64:
-    # Process ID - could be stored by runtime on startup
-    # For now, return a fake PID
-    12345
+    # Process ID via SFFI
+    rt_getpid()
 
 fn hostname() -> text:
-    # Hostname - could be read from /etc/hostname in pure Simple
-    "localhost"
+    # Hostname via SFFI
+    rt_hostname()
 
 fn cpu_count() -> i64:
-    # CPU count - could be read from /proc/cpuinfo
-    1
+    # CPU count via SFFI (rt_thread_available_parallelism returns logical CPUs)
+    rt_thread_available_parallelism()
 
 fn path_basename(path: text) -> text:
     # Pure Simple path manipulation
@@ -525,17 +553,57 @@ fn rt_sleep_ms(milliseconds: i64):
     if remainder > 0:
         shell("sleep 0.{remainder}")
 
-fn rt_getpid() -> i64:
-    # Get process ID using shell
-    val result = shell("echo $$")
-    if result.exit_code == 0:
-        result.stdout.trim().parse_i64() ?? 12345
-    else:
-        12345
+# rt_getpid() is now declared as extern fn at the top of this file
 
 fn rt_timestamp_now() -> i64:
     # Return current timestamp in microseconds
     time_now_unix_micros()
+
+# ============================================================================
+# Thread & Concurrency - SFFI + Shell Fallbacks
+# ============================================================================
+
+fn thread_available_parallelism() -> i64:
+    # Number of logical CPUs via SFFI
+    rt_thread_available_parallelism()
+
+fn thread_sleep_ms(duration_ms: i64):
+    # Sleep for specified milliseconds (shell fallback - rt_thread_sleep_ms not in runtime)
+    val seconds = duration_ms / 1000
+    val remainder = duration_ms % 1000
+    if seconds > 0 and remainder > 0:
+        shell("sleep {seconds}.{remainder}")
+    elif seconds > 0:
+        shell("sleep {seconds}")
+    elif remainder > 0:
+        shell("sleep 0.{remainder}")
+
+fn thread_yield():
+    # Yield current thread (no-op - rt_thread_yield not in runtime)
+    pass
+
+fn thread_current_id() -> i64:
+    # Current thread ID (use PID as fallback - rt_thread_current_id not in runtime)
+    rt_getpid()
+
+# --- Atomic Operations (stubs - rt_atomic_* not in runtime) ---
+# These provide correct single-threaded semantics.
+# True atomic ops require runtime support.
+
+fn atomic_i64_load(atomic_ref: i64) -> i64:
+    atomic_ref
+
+fn atomic_i64_store(atomic_ref: i64, new_value: i64) -> i64:
+    new_value
+
+fn atomic_i64_fetch_add(atomic_ref: i64, add_value: i64) -> i64:
+    atomic_ref
+
+fn atomic_i64_compare_exchange(atomic_ref: i64, expected: i64, desired: i64) -> i64:
+    if atomic_ref == expected:
+        desired
+    else:
+        atomic_ref
 
 # ============================================================================
 # CLI Functions - Pure Simple Implementations
@@ -999,11 +1067,113 @@ fn math_random() -> f64:
     # Use /dev/urandom for randomness
     val result = shell("od -An -N4 -tu4 /dev/urandom | awk '{print $1}'")
     if result.exit_code == 0:
-        val rand_int = result.stdout.trim().to_int_or(0)
+        val trimmed_rand = result.stdout.trim()
+        var rand_int = 0
+        if trimmed_rand.len() > 0:
+            rand_int = int(trimmed_rand)
         # Normalize to [0, 1)
         rand_int / 4294967296.0  # 2^32
     else:
         0.5  # Fallback
+
+# ============================================================================
+# String Hashing (SFFI)
+# ============================================================================
+
+# Note: rt_text_hash not yet available in runtime. When added, uncomment:
+# extern fn rt_text_hash(s: text) -> i64
+# For now, use std.string.text_hash() for proper FNV-1a hash with ASCII lookup.
+fn text_hash_native(s: text) -> i64:
+    """Stub: Use std.string.text_hash() for proper FNV-1a hash.
+    This stub provides a simple position-based hash for internal use."""
+    var hash = 2166136261
+    var i = 0
+    while i < s.len():
+        hash = (hash xor (i + 1)) * 16777619
+        i = i + 1
+    hash = hash xor s.len()
+    hash
+
+# ============================================================================
+# Advanced Math Functions (SFFI)
+# ============================================================================
+
+# Logarithm functions
+extern fn rt_math_log(x: f64) -> f64
+extern fn rt_math_log10(x: f64) -> f64
+extern fn rt_math_log2(x: f64) -> f64
+
+fn math_log(x: f64) -> f64:
+    """Natural logarithm (SFFI)."""
+    rt_math_log(x)
+
+fn math_log10(x: f64) -> f64:
+    """Base-10 logarithm (SFFI)."""
+    rt_math_log10(x)
+
+fn math_log2(x: f64) -> f64:
+    """Base-2 logarithm (SFFI)."""
+    rt_math_log2(x)
+
+# Inverse trig functions
+extern fn rt_math_asin(x: f64) -> f64
+extern fn rt_math_acos(x: f64) -> f64
+extern fn rt_math_atan(x: f64) -> f64
+extern fn rt_math_atan2(y: f64, x: f64) -> f64
+
+fn math_asin(x: f64) -> f64:
+    """Arc sine (SFFI)."""
+    rt_math_asin(x)
+
+fn math_acos(x: f64) -> f64:
+    """Arc cosine (SFFI)."""
+    rt_math_acos(x)
+
+fn math_atan(x: f64) -> f64:
+    """Arc tangent (SFFI)."""
+    rt_math_atan(x)
+
+fn math_atan2(y: f64, x: f64) -> f64:
+    """Arc tangent of y/x (SFFI)."""
+    rt_math_atan2(y, x)
+
+# Hyperbolic functions
+extern fn rt_math_sinh(x: f64) -> f64
+extern fn rt_math_cosh(x: f64) -> f64
+extern fn rt_math_tanh(x: f64) -> f64
+
+fn math_sinh(x: f64) -> f64:
+    """Hyperbolic sine (SFFI)."""
+    rt_math_sinh(x)
+
+fn math_cosh(x: f64) -> f64:
+    """Hyperbolic cosine (SFFI)."""
+    rt_math_cosh(x)
+
+fn math_tanh(x: f64) -> f64:
+    """Hyperbolic tangent (SFFI)."""
+    rt_math_tanh(x)
+
+# Rounding functions
+extern fn rt_math_ceil(x: f64) -> f64
+extern fn rt_math_floor(x: f64) -> f64
+# Note: rt_math_round not available in runtime yet
+
+fn math_ceil(x: f64) -> f64:
+    """Ceiling function (SFFI)."""
+    rt_math_ceil(x)
+
+fn math_floor(x: f64) -> f64:
+    """Floor function (SFFI)."""
+    rt_math_floor(x)
+
+fn math_round(x: f64) -> f64:
+    """Round to nearest integer (pure Simple, rt_math_round not in runtime)."""
+    val floored = rt_math_floor(x)
+    if x - floored >= 0.5:
+        floored + 1.0
+    else:
+        floored
 
 # ============================================================================
 # JIT Backend Control

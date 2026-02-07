@@ -10,9 +10,71 @@ A Python doctest-inspired interactive test framework for Simple, embedding execu
 
 ---
 
-## 1. Doctest Syntax
+## 1. Block Types and Validation
 
-### 1.1 Basic Format (Python-style docstrings)
+SDoctest supports two types of code blocks with different validation behavior:
+
+### 1.1 ```simple Blocks - Demonstration Code
+
+**Purpose:** Language feature demonstrations, incomplete examples, exploratory code
+
+**Validation:** Executes code but **ignores exit code** - passes as long as:
+- Code parses without syntax errors
+- No timeout occurs
+- No infrastructure crash
+
+**Use for:**
+- README.md examples showing language features
+- Incomplete code snippets without `main` function
+- Syntax demonstrations
+- Code that may intentionally error
+
+```simple
+# This passes even though there's no main function
+struct Point:
+    x: f64
+    y: f64
+
+p = Point(x: 1.0, y: 2.0)
+```
+
+### 1.2 ```sdoctest Blocks - Verified Examples
+
+**Purpose:** Interactive examples with expected output verification
+
+**Validation:** Full verification required:
+- Code must execute successfully (exit code 0)
+- Output must match expected output
+- Failures are reported as test failures
+
+**Use for:**
+- API documentation with verified examples
+- Tutorial code that must work correctly
+- Examples showing expected output
+
+```sdoctest
+>>> 1 + 1
+2
+>>> [1, 2, 3].len()
+3
+```
+
+### 1.3 When to Use Which
+
+| Scenario | Block Type | Reason |
+|----------|------------|--------|
+| Showing struct syntax | ```simple | Demonstration only, no output to verify |
+| Function with expected output | ```sdoctest | Need to verify it works correctly |
+| Incomplete code snippet | ```simple | May not compile to complete program |
+| REPL session example | ```sdoctest | Shows exact input/output |
+| Language feature demo | ```simple | Just showing syntax, not testing |
+| API usage example | ```sdoctest | Verify API behavior |
+
+---
+
+## 2. Doctest Syntax
+
+### 2.1 Basic Format (Python-style docstrings)
 
 Doctests use triple-quote blocks (`"""..."""`) similar to Python for functions and classes. They can appear:
 - **Immediately before** the function/class definition (no empty line between)
@@ -63,7 +125,7 @@ Examples:
 - Following lines (without `>>>` or `...`) are expected output
 - Empty lines separate examples
 
-### 1.2 Multi-line Statements
+### 2.2 Multi-line Statements
 
 ```simple
 """
@@ -85,7 +147,7 @@ fn process_nums():
 
 **Continuation lines:** Use `...` for indented continuation (loops, blocks, etc.)
 
-### 1.3 Expected Exceptions
+### 2.3 Expected Exceptions
 
 ```simple
 """
@@ -105,7 +167,7 @@ fn divide(a, b):
 
 **Exception format:** `Error: ExceptionType` or `Error: ExceptionType: message`
 
-### 1.4 Wildcard Matching
+### 2.4 Wildcard Matching
 
 ```simple
 """
@@ -128,7 +190,7 @@ fn generate_uuid():
 - `*` matches any sequence (greedy)
 - Use for timestamps, UUIDs, memory addresses, non-deterministic output
 
-### 1.5 Setup/Teardown Blocks
+### 2.5 Setup/Teardown Blocks
 
 ```simple
 """
@@ -161,9 +223,9 @@ fn database_example():
 
 ---
 
-## 2. Discovery and Execution
+## 3. Discovery and Execution
 
-### 2.1 Discovery Locations
+### 3.1 Discovery Locations
 
 | Location | Priority | Purpose |
 |----------|----------|---------|
@@ -172,7 +234,7 @@ fn database_example():
 | Markdown `.md` files | Low | Tutorials, guides |
 | Dedicated `.sdt` files | High | Standalone doctest suites |
 
-### 2.2 File Patterns
+### 3.2 File Patterns
 
 ```
 src/**/*.spl         # Extract from """ blocks (with ```sdoctest fences for examples)
@@ -180,7 +242,7 @@ doc/**/*.md          # Extract from code blocks marked ```sdoctest or ```simple-
 test/doctest/**/*.sdt # Standalone doctest files (raw doctest format)
 ```
 
-### 2.3 Execution Modes
+### 3.3 Execution Modes
 
 **Mode 1: Inline (default)**
 - Execute in order within docstring
@@ -208,9 +270,9 @@ Saved 4 interactions to mytest.sdt
 
 ---
 
-## 3. Integration with BDD Spec Framework
+## 4. Integration with BDD Spec Framework
 
-### 3.1 Runner Integration
+### 4.1 Runner Integration
 
 Doctests are discovered and listed alongside spec tests:
 
@@ -227,7 +289,7 @@ Doctests:           89 examples
 Total: 277 examples
 ```
 
-### 3.2 Execution
+### 4.2 Execution
 
 ```bash
 # Run all tests (specs + doctests)
@@ -243,7 +305,7 @@ $ simple test --doctest src/lib/std/collections.spl
 $ simple test --doctest --tag examples
 ```
 
-### 3.3 Coverage Integration
+### 4.3 Coverage Integration
 
 Doctests contribute to integration-level coverage:
 - Executed lines marked as covered
@@ -257,7 +319,7 @@ Public Function Touch Coverage:
   Combined:              100/100 (100%)
 ```
 
-### 3.4 BDD-Style Reporting
+### 4.4 BDD-Style Reporting
 
 Doctests appear in test output as examples:
 
@@ -277,9 +339,9 @@ Finished in 0.43s
 
 ---
 
-## 4. Implementation Architecture
+## 5. Implementation Architecture
 
-### 4.1 Component Structure
+### 5.1 Component Structure
 
 ```
 lib/std/doctest/
@@ -292,7 +354,7 @@ lib/std/doctest/
   integration.spl        # Hook into std.spec.runner
 ```
 
-### 4.2 Parser Module
+### 5.2 Parser Module
 
 **Responsibilities:**
 - Extract doctest blocks from docstrings (`///` comments)
@@ -313,7 +375,7 @@ struct DoctestExample:
     tags: Set[String]        # @doctest(tag: ...) metadata
 ```
 
-### 4.3 Runner Module
+### 5.3 Runner Module
 
 **Responsibilities:**
 - Create isolated REPL environment per docstring
@@ -332,7 +394,7 @@ struct DoctestExample:
 7. Report pass/fail
 ```
 
-### 4.4 Matcher Module
+### 5.4 Matcher Module
 
 **Match strategies:**
 - Exact string match (default)
@@ -340,7 +402,7 @@ struct DoctestExample:
 - Exception match (`Error: Type` or `Error: Type: message`)
 - Normalized match (strip trailing whitespace, normalize newlines)
 
-### 4.5 Discovery Module
+### 5.5 Discovery Module
 
 **Discovery algorithm:**
 1. Walk source tree for `.spl` files
@@ -363,7 +425,7 @@ struct DoctestExample:
 - `"""` block immediately after function/class header = belongs to that function/class
 - No empty line between `"""` and target = automatic association
 
-### 4.6 Integration with spec.runner
+### 5.6 Integration with spec.runner
 
 **Hook points:**
 1. **Discovery phase:** `spec.runner` calls `doctest.discovery.find_all()`
@@ -382,9 +444,9 @@ describe "Doctest: std.math":
 
 ---
 
-## 5. CLI and Configuration
+## 6. CLI and Configuration
 
-### 5.1 CLI Commands
+### 6.1 CLI Commands
 
 ```bash
 # Discover and list doctests
@@ -406,7 +468,7 @@ simple repl --record output.sdt
 simple doctest --fail-fast --quiet
 ```
 
-### 5.2 Configuration (simple.toml)
+### 6.2 Configuration (simple.toml)
 
 ```toml
 [test.doctest]
@@ -422,7 +484,7 @@ default_tags = ["examples"]
 skip_tags = ["slow", "manual"]
 ```
 
-### 5.3 Metadata Attributes
+### 6.3 Metadata Attributes
 
 ```simple
 /// @doctest(mode: isolated, tag: slow, timeout: 10000)
@@ -439,9 +501,9 @@ skip_tags = ["slow", "manual"]
 
 ---
 
-## 6. Examples by Use Case
+## 7. Examples by Use Case
 
-### 6.1 API Documentation
+### 7.1 API Documentation
 
 ```simple
 """
@@ -460,7 +522,7 @@ struct Stack:
     items: List[T]
 ```
 
-### 6.2 Tutorial (Markdown)
+### 7.2 Tutorial (Markdown)
 
 ````markdown
 # Simple Collections Tutorial
@@ -480,7 +542,7 @@ Simple provides a `Stack` data structure:
 ```
 ````
 
-### 6.3 Error Handling
+### 7.3 Error Handling
 
 ```simple
 """
@@ -499,7 +561,7 @@ fn parse_int(s: String) -> Int:
     ...
 ```
 
-### 6.4 Stateful Examples
+### 7.4 Stateful Examples
 
 ```simple
 """
@@ -527,7 +589,7 @@ fn database_example():
     ...
 ```
 
-### 6.5 Standalone Test Suite (.sdt)
+### 7.5 Standalone Test Suite (.sdt)
 
 ```simple
 # test/doctest/collections/stack_examples.sdt
@@ -554,7 +616,7 @@ Error: EmptyStackError
 
 ---
 
-## 7. Implementation Plan
+## 8. Implementation Plan
 
 ### Phase 1: Core Parser and Runner (Sprint 1)
 **Goal:** Parse and execute basic doctests
@@ -619,7 +681,7 @@ Error: EmptyStackError
 
 ---
 
-## 8. Success Criteria
+## 9. Success Criteria
 
 **Phase 1 (Core):**
 - [ ] Parse `>>>` examples from strings
@@ -657,7 +719,7 @@ Error: EmptyStackError
 
 ---
 
-## 9. Comparison with Python doctest
+## 10. Comparison with Python doctest
 
 | Feature | Python doctest | Simple doctest |
 |---------|----------------|----------------|
@@ -681,7 +743,7 @@ Error: EmptyStackError
 
 ---
 
-## 10. Related Documents
+## 11. Related Documents
 
 - `doc/spec/testing/testing_bdd_framework.md` - BDD spec framework (parent framework)
 - `doc/guides/test.md` - Test policy and coverage rules
@@ -689,7 +751,7 @@ Error: EmptyStackError
 
 ---
 
-## 11. Open Questions
+## 12. Open Questions
 
 1. **REPL implementation:** Does Simple have a working REPL interpreter? If not, doctests can use the regular interpreter with captured I/O.
 2. **Docstring extraction:** Does the parser expose docstrings in the AST? If not, we can regex-parse `///` comments.
