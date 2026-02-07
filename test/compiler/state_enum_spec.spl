@@ -1,0 +1,205 @@
+#!/usr/bin/env simple
+# State Enum Generation Tests
+#
+# Tests that the state enum generator correctly creates state enums
+# from suspension point analysis.
+
+use std.spec.{describe, it, expect}
+use compiler.desugar.state_enum.{
+    generate_state_enum,
+    format_state_enum
+}
+use compiler.desugar.suspension_analysis.{
+    SuspensionPoint,
+    SuspensionAnalysis
+}
+use compiler.parser_types.*
+use lexer.Span
+
+# Helper to create a dummy span
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+# Helper to create a dummy await expression
+fn make_await_expr() -> Expr:
+    Expr(
+        kind: ExprKind.Await(
+            Expr(kind: ExprKind.Ident("future"), span: dummy_span())
+        ),
+        span: dummy_span()
+    )
+
+# Helper to create a test suspension point
+fn make_suspension_point(id: i64, live_vars: [text]) -> SuspensionPoint:
+    SuspensionPoint(
+        id: id,
+        await_expr: make_await_expr(),
+        awaited_future: Expr(kind: ExprKind.Ident("future"), span: dummy_span()),
+        context_depth: 0,
+        live_variables: live_vars,
+        span: dummy_span()
+    )
+
+describe "State Enum Generation - Basic Cases":
+    it "generates enum with no suspension points":
+        # Function with no awaits should have minimal state machine
+        val analysis = SuspensionAnalysis(
+            suspension_points: [],
+            total_states: 1
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        expect(state_enum.name).to_equal("exampleState")
+        expect(state_enum.variants.len()).to_equal(1)
+        expect(state_enum.variants[0].name).to_equal("State0")
+        expect(state_enum.variants[0].fields.len()).to_equal(0)
+
+    it "generates enum with single suspension point":
+        # async fn example():
+        #     await fetch()
+
+        val sp = make_suspension_point(0, [])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        expect(state_enum.name).to_equal("exampleState")
+        expect(state_enum.variants.len()).to_equal(2)
+
+        # State0: initial
+        expect(state_enum.variants[0].name).to_equal("State0")
+        expect(state_enum.variants[0].fields.len()).to_equal(0)
+
+        # State1: after first await
+        expect(state_enum.variants[1].name).to_equal("State1")
+        # Should have 'future' field even with no live vars
+        expect(state_enum.variants[1].fields.len()).to_equal(1)
+        expect(state_enum.variants[1].fields[0].name).to_equal("future")
+
+    it "generates enum with multiple suspension points":
+        # async fn example():
+        #     await fetch1()
+        #     await fetch2()
+        #     await fetch3()
+
+        val sp0 = make_suspension_point(0, [])
+        val sp1 = make_suspension_point(1, [])
+        val sp2 = make_suspension_point(2, [])
+
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp0, sp1, sp2],
+            total_states: 4
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        expect(state_enum.variants.len()).to_equal(4)
+        expect(state_enum.variants[0].name).to_equal("State0")
+        expect(state_enum.variants[1].name).to_equal("State1")
+        expect(state_enum.variants[2].name).to_equal("State2")
+        expect(state_enum.variants[3].name).to_equal("State3")
+
+describe "State Enum Generation - Live Variables":
+    it "includes live variables in state fields":
+        # async fn example():
+        #     val a = 1
+        #     await fetch()  # live: [a]
+
+        val sp = make_suspension_point(0, ["a"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        val state1 = state_enum.variants[1]
+        expect(state1.fields.len()).to_equal(2)  # a + future
+
+        # Check that 'a' is included
+        val field_names = state1.fields.map(\f: f.name)
+        expect(field_names).to_contain("a")
+        expect(field_names).to_contain("future")
+
+    it "preserves multiple live variables":
+        # async fn example():
+        #     val a = 1
+        #     val b = 2
+        #     val c = 3
+        #     await fetch()  # live: [a, b, c]
+
+        val sp = make_suspension_point(0, ["a", "b", "c"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        val state1 = state_enum.variants[1]
+        expect(state1.fields.len()).to_equal(4)  # a, b, c, future
+
+        val field_names = state1.fields.map(\f: f.name)
+        expect(field_names).to_contain("a")
+        expect(field_names).to_contain("b")
+        expect(field_names).to_contain("c")
+        expect(field_names).to_contain("future")
+
+describe "State Enum Generation - Documentation":
+    it "generates enum documentation":
+        val sp = make_suspension_point(0, [])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        expect(state_enum.doc_comment).to_contain("example")
+        expect(state_enum.doc_comment).to_contain("2 states")
+        expect(state_enum.doc_comment).to_contain("1 suspension")
+
+    it "generates variant documentation":
+        val sp = make_suspension_point(0, ["a", "b"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+
+        expect(state_enum.variants[0].doc_comment).to_contain("Initial")
+        expect(state_enum.variants[1].doc_comment).to_contain("await #0")
+        expect(state_enum.variants[1].doc_comment).to_contain("a, b")
+
+describe "State Enum Generation - Formatting":
+    it "formats simple enum":
+        val analysis = SuspensionAnalysis(
+            suspension_points: [],
+            total_states: 1
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+        val formatted = format_state_enum(state_enum)
+
+        expect(formatted).to_contain("enum exampleState")
+        expect(formatted).to_contain("State0")
+
+    it "formats enum with fields":
+        val sp = make_suspension_point(0, ["a"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+
+        val state_enum = generate_state_enum("example", analysis)
+        val formatted = format_state_enum(state_enum)
+
+        expect(formatted).to_contain("State0")
+        expect(formatted).to_contain("State1")
+        expect(formatted).to_contain("a:")
+        expect(formatted).to_contain("future:")

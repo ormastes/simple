@@ -4,20 +4,37 @@
 # This is a compiler pass that runs after parsing.
 #
 # Transformations:
-# - async fn -> fn returning Future<T>
+# - async fn -> fn returning Future<T> with state machine
 # - await expr -> expr.poll(...) loop
 # - spawn expr -> spawn_actor(expr)
 # - actor def -> class with message passing
 
 use compiler.parser_types.*
 use compiler.hir_definitions.*
+use compiler.desugar.suspension_analysis.{
+    analyze_suspensions,
+    has_await_expressions
+}
+use compiler.desugar.state_enum.{
+    generate_state_enum,
+    state_enum_to_ast
+}
+use compiler.desugar.poll_generator.{
+    generate_poll_function,
+    poll_function_to_ast
+}
 
 # ================================================================
 # Async Function Desugaring
 # ================================================================
 
-fn desugar_async_function(func: Function) -> Function:
-    """Transform async fn to fn returning Future<T>.
+fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
+    """Transform async fn to fn returning Future<T> with state machine.
+
+    Generates:
+    1. Transformed function returning Future<T>
+    2. State enum for the state machine
+    3. Poll function that drives the state machine
 
     Input:
         async fn fetch(url: text) -> text:
@@ -26,19 +43,21 @@ fn desugar_async_function(func: Function) -> Function:
 
     Output:
         fn fetch(url: text) -> Future<text>:
-            use std.async.future.Future
-            use std.async.runtime.block_on
+            Future.from_generator(\state, waker: poll_fetch(state, waker))
 
-            Future.from_async(\waker:
-                # Transformed body with await handling
-                val response_future = http_get(url)
-                val response = block_on(response_future)
-                val text_future = response.text()
-                block_on(text_future)
-            )
+        enum FetchState:
+            State0
+            State1(url: text, future: Future<Response>)
+            State2(url: text, response: Response, future: Future<text>)
+
+        fn poll_fetch(state: FetchState, waker: Waker) -> (FetchState, Poll<text>):
+            match state:
+                case State0: ...
+                case State1(...): ...
+                case State2(...): ...
     """
     if not func.is_async:
-        return func
+        return (func, [], [])
 
     # Wrap return type in Future<T>
     val wrapped_return = match func.return_type:
@@ -55,10 +74,10 @@ fn desugar_async_function(func: Function) -> Function:
                 span: func.span
             ))
 
-    # Transform body to wrap in Future.from_async
-    val desugared_body = desugar_async_body(func.body)
+    # Transform body using state machine generation
+    val (desugared_body, generated_enums, generated_functions) = desugar_async_body(func.body, func)
 
-    Function(
+    val transformed_func = Function(
         name: func.name,
         type_params: func.type_params,
         params: func.params,
@@ -75,11 +94,51 @@ fn desugar_async_function(func: Function) -> Function:
         span: func.span
     )
 
-fn desugar_async_body(body: Block) -> Block:
-    """Transform async function body to use Future API."""
-    # Simplified: wrap entire body in Future.ready for now
-    # Full implementation would build state machine
+    (transformed_func, generated_enums, generated_functions)
 
+fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]):
+    """Transform async function body using state machine generation.
+
+    Analyzes the function for suspension points (await expressions) and
+    generates a state machine if any are found. Otherwise, uses simple
+    Future.ready() wrapper.
+
+    Args:
+        body: Function body to transform
+        func: Complete function definition (for name, etc.)
+
+    Returns:
+        Tuple of:
+        - Transformed body (Future.from_generator call)
+        - Generated enums (state enum)
+        - Generated functions (poll function)
+    """
+    # Analyze for suspension points
+    val analysis = analyze_suspensions(func)
+
+    if analysis.suspension_points.len() == 0:
+        # No await expressions - use simple Future.ready() wrapper
+        val simple_body = desugar_async_body_simple(body)
+        return (simple_body, [], [])
+
+    # Generate state machine components
+    val state_enum = generate_state_enum(func.name, analysis)
+    val poll_func = generate_poll_function(func.name, body, analysis, state_enum)
+
+    # Convert to AST nodes
+    val enum_ast = state_enum_to_ast(state_enum, func.span)
+    val poll_fn_ast = poll_function_to_ast(poll_func, func.span)
+
+    # Create body that calls Future.from_generator with poll function
+    val generator_body = make_generator_call(func.name, func.span)
+
+    (generator_body, [enum_ast], [poll_fn_ast])
+
+fn desugar_async_body_simple(body: Block) -> Block:
+    """Simple transformation for async functions with no awaits.
+
+    Just wraps the body in Future.ready().
+    """
     val wrapper_call = Expr(
         kind: ExprKind.Call(
             Expr(kind: ExprKind.Field(
@@ -94,6 +153,55 @@ fn desugar_async_body(body: Block) -> Block:
     Block(
         statements: [Stmt(kind: StmtKind.Expr(wrapper_call), span: body.span)],
         span: body.span
+    )
+
+fn make_generator_call(func_name: text, span: Span) -> Block:
+    """Create Future.from_generator call to poll function.
+
+    Generates:
+        Future.from_generator(\state, waker: poll_<func_name>(state, waker))
+    """
+    val poll_name = "poll_{func_name}"
+
+    val lambda_body = Expr(
+        kind: ExprKind.Call(
+            Expr(kind: ExprKind.Ident(poll_name), span: span),
+            [
+                CallArg(value: Expr(kind: ExprKind.Ident("state"), span: span), name: nil),
+                CallArg(value: Expr(kind: ExprKind.Ident("waker"), span: span), name: nil)
+            ]
+        ),
+        span: span
+    )
+
+    val lambda = Expr(
+        kind: ExprKind.Lambda(
+            [
+                Param(name: "state", type_: nil, default: nil, span: span),
+                Param(name: "waker", type_: nil, default: nil, span: span)
+            ],
+            Block(
+                statements: [Stmt(kind: StmtKind.Expr(lambda_body), span: span)],
+                span: span
+            )
+        ),
+        span: span
+    )
+
+    val generator_call = Expr(
+        kind: ExprKind.Call(
+            Expr(kind: ExprKind.Field(
+                Expr(kind: ExprKind.Ident("Future"), span: span),
+                "from_generator"
+            ), span: span),
+            [CallArg(value: lambda, name: nil)]
+        ),
+        span: span
+    )
+
+    Block(
+        statements: [Stmt(kind: StmtKind.Expr(generator_call), span: span)],
+        span: span
     )
 
 # ================================================================
@@ -193,17 +301,33 @@ fn desugar_actor(actor: Actor) -> Class:
 fn desugar_module(module: Module) -> Module:
     """Desugar entire module.
 
-    - Transform all async functions
+    - Transform all async functions (generates state machines)
     - Transform all await expressions
     - Transform all spawn expressions
     - Transform all actor definitions to classes
+    - Add generated enums and functions to module
     """
-    # Desugar functions
+    # Desugar functions and collect generated code
     var desugared_functions: Dict<text, Function> = {}
+    var generated_enums: Dict<text, Enum> = module.enums  # Start with existing enums
+    var generated_helper_functions: Dict<text, Function> = {}
+
     for (name, func) in module.functions:
-        val desugared = desugar_async_function(func)
+        val (desugared, gen_enums, gen_funcs) = desugar_async_function(func)
         val with_await = desugar_function_body(desugared)
         desugared_functions[name] = with_await
+
+        # Add generated enums to module
+        for enum_ in gen_enums:
+            generated_enums[enum_.name] = enum_
+
+        # Add generated poll functions to module
+        for gen_func in gen_funcs:
+            generated_helper_functions[gen_func.name] = gen_func
+
+    # Merge generated functions with desugared functions
+    for (name, func) in generated_helper_functions:
+        desugared_functions[name] = func
 
     # Desugar actors to classes
     var classes_with_actors = module.classes
@@ -219,7 +343,7 @@ fn desugar_module(module: Module) -> Module:
         classes: classes_with_actors,
         actors: {},  # All actors converted to classes
         structs: module.structs,
-        enums: module.enums,
+        enums: generated_enums,  # Includes generated state enums
         bitfields: module.bitfields,
         traits: module.traits,
         impls: module.impls,
@@ -253,7 +377,7 @@ fn desugar_block(block: Block) -> Block:
     """Desugar statements in a block."""
     var desugared_stmts = []
 
-    for stmt in block.statements:
+    for stmt in block.stmts:
         val desugared = desugar_stmt(stmt)
         desugared_stmts.push(desugared)
 
