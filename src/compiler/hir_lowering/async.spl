@@ -1,0 +1,437 @@
+# HIR Lowering - Async/Await Support
+#
+# This module provides HIR integration for async/await features:
+# - Future<T> type recognition and lowering
+# - Async function validation
+# - State machine type checking
+# - Poll function signature validation
+
+use hir_types.*
+use hir_definitions.*
+use parser.*
+use lexer.Span
+use hir_lowering.types.{HirLowering, LoweringError, LoweringErrorKind}
+
+# ================================================================
+# Future<T> Type Support
+# ================================================================
+
+impl HirLowering:
+    fn is_future_type(hir_type: HirType) -> bool:
+        """Check if a type is Future<T>.
+
+        Args:
+            hir_type: HIR type to check
+
+        Returns:
+            true if type is Future<...>, false otherwise
+
+        Example:
+            Future<text> → true
+            Future<i64> → true
+            text → false
+        """
+        match hir_type.kind:
+            case HirTypeKind.Named(symbol, args):
+                # Look up the symbol name
+                val symbol_opt = self.symbols.get_symbol(symbol)
+                match symbol_opt:
+                    case Some(sym):
+                        sym.name == "Future" and args.len() == 1
+                    case None:
+                        false
+            case _:
+                false
+
+    fn extract_future_inner(hir_type: HirType) -> HirType?:
+        """Extract T from Future<T>.
+
+        Args:
+            hir_type: Future type to unwrap
+
+        Returns:
+            Some(T) if type is Future<T>, None otherwise
+
+        Example:
+            Future<text> → Some(text)
+            Future<i64> → Some(i64)
+            text → None
+        """
+        match hir_type.kind:
+            case HirTypeKind.Named(symbol, args):
+                val symbol_opt = self.symbols.get_symbol(symbol)
+                match symbol_opt:
+                    case Some(sym):
+                        if sym.name == "Future" and args.len() == 1:
+                            Some(args[0])
+                        else:
+                            nil
+                    case None:
+                        nil
+            case _:
+                nil
+
+    fn make_future_type(inner: HirType, span: Span) -> HirType:
+        """Construct Future<T> type.
+
+        Args:
+            inner: The T in Future<T>
+            span: Source location
+
+        Returns:
+            HIR type representing Future<T>
+
+        Example:
+            make_future_type(HirType(kind: Str), span)
+            → Future<text>
+        """
+        # Look up Future symbol (should be defined in std.async.future)
+        val future_symbol_opt = self.symbols.lookup("Future")
+
+        match future_symbol_opt:
+            case Some(future_symbol):
+                # Create Future<T> as Named type with type argument
+                HirType(
+                    kind: HirTypeKind.Named(future_symbol, [inner]),
+                    span: span
+                )
+            case None:
+                # Future symbol not found - create error type
+                # This should be caught during module loading
+                self.error("Future type not found - import std.async.future", span)
+                HirType(kind: HirTypeKind.Error, span: span)
+
+    fn is_poll_type(hir_type: HirType) -> bool:
+        """Check if a type is Poll<T>.
+
+        Args:
+            hir_type: HIR type to check
+
+        Returns:
+            true if type is Poll<...>, false otherwise
+        """
+        match hir_type.kind:
+            case HirTypeKind.Named(symbol, args):
+                val symbol_opt = self.symbols.get_symbol(symbol)
+                match symbol_opt:
+                    case Some(sym):
+                        sym.name == "Poll" and args.len() == 1
+                    case None:
+                        false
+            case _:
+                false
+
+    fn extract_poll_inner(hir_type: HirType) -> HirType?:
+        """Extract T from Poll<T>."""
+        match hir_type.kind:
+            case HirTypeKind.Named(symbol, args):
+                val symbol_opt = self.symbols.get_symbol(symbol)
+                match symbol_opt:
+                    case Some(sym):
+                        if sym.name == "Poll" and args.len() == 1:
+                            Some(args[0])
+                        else:
+                            nil
+                    case None:
+                        nil
+            case _:
+                nil
+
+# ================================================================
+# Async Function Validation
+# ================================================================
+
+struct AsyncFunctionCheck:
+    """Validation results for an async function.
+
+    Contains information about type consistency between:
+    - Async function return type
+    - Generated state enum
+    - Generated poll function
+    """
+    is_valid: bool
+    errors: [text]
+    function_name: text
+    inner_type: HirType?  # T in Future<T>
+
+impl HirLowering:
+    fn check_async_function(
+        func: HirFunction,
+        state_enum: HirEnum?,
+        poll_func: HirFunction?
+    ) -> AsyncFunctionCheck:
+        """Validate async function type consistency.
+
+        Checks:
+        1. Function return type is Future<T>
+        2. If state enum exists, it has valid structure
+        3. If poll function exists, signature matches
+        4. T is consistent across all components
+
+        Args:
+            func: The async function (already transformed)
+            state_enum: Generated state enum (if any)
+            poll_func: Generated poll function (if any)
+
+        Returns:
+            Validation results with errors if any
+
+        Example:
+            fn fetch() -> Future<text>  ← valid
+            fn fetch() -> text          ← invalid
+        """
+        var check = AsyncFunctionCheck(
+            is_valid: true,
+            errors: [],
+            function_name: func.name,
+            inner_type: nil
+        )
+
+        # Check 1: Function must return Future<T>
+        if not self.is_future_type(func.return_type):
+            check.is_valid = false
+            check.errors = check.errors.push(
+                "Async function '{func.name}' must return Future<T>, \
+                 found {self.format_type(func.return_type)}"
+            )
+            return check
+
+        # Extract T from Future<T>
+        val inner = self.extract_future_inner(func.return_type)
+        if inner.?:
+            check.inner_type = inner
+        else:
+            check.is_valid = false
+            check.errors = check.errors.push(
+                "Could not extract inner type from Future"
+            )
+            return check
+
+        # Check 2: If poll function exists, validate signature
+        if poll_func.?:
+            val poll_check = self.check_poll_function_signature(
+                poll_func,
+                inner,
+                func.span
+            )
+            if not poll_check.is_valid:
+                check.is_valid = false
+                check.errors = check.errors.concat(poll_check.errors)
+
+        # Check 3: State enum validation (if present)
+        if state_enum.?:
+            val enum_check = self.check_state_enum_structure(state_enum, func.span)
+            if not enum_check.is_valid:
+                check.is_valid = false
+                check.errors = check.errors.concat(enum_check.errors)
+
+        check
+
+    fn check_poll_function_signature(
+        poll_func: HirFunction,
+        expected_inner: HirType,
+        span: Span
+    ) -> AsyncFunctionCheck:
+        """Validate poll function signature.
+
+        Expected signature:
+            fn poll_<name>(state: StateEnum, waker: Waker) -> (StateEnum, Poll<T>)
+
+        Args:
+            poll_func: The poll function to validate
+            expected_inner: The T type (should match Poll<T> inner)
+            span: Source location for errors
+
+        Returns:
+            Validation results
+        """
+        var check = AsyncFunctionCheck(
+            is_valid: true,
+            errors: [],
+            function_name: poll_func.name,
+            inner_type: Some(expected_inner)
+        )
+
+        # Check parameter count (should be 2: state, waker)
+        if poll_func.params.len() != 2:
+            check.is_valid = false
+            check.errors = check.errors.push(
+                "Poll function must have exactly 2 parameters (state, waker), \
+                 found {poll_func.params.len()}"
+            )
+            return check
+
+        # Check return type is (StateEnum, Poll<T>)
+        match poll_func.return_type.kind:
+            case HirTypeKind.Tuple(elements):
+                if elements.len() != 2:
+                    check.is_valid = false
+                    check.errors = check.errors.push(
+                        "Poll function must return (State, Poll<T>), \
+                         found tuple with {elements.len()} elements"
+                    )
+                    return check
+
+                # Second element should be Poll<T>
+                val poll_type = elements[1]
+                if not self.is_poll_type(poll_type):
+                    check.is_valid = false
+                    check.errors = check.errors.push(
+                        "Poll function must return Poll<T> as second element"
+                    )
+                    return check
+
+                # Extract T from Poll<T> and compare
+                val poll_inner = self.extract_poll_inner(poll_type)
+                if poll_inner.?:
+                    if not self.types_equal(poll_inner, expected_inner):
+                        check.is_valid = false
+                        check.errors = check.errors.push(
+                            "Poll function returns Poll<{self.format_type(poll_inner)}>, \
+                             but async function expects Future<{self.format_type(expected_inner)}>"
+                        )
+
+            case _:
+                check.is_valid = false
+                check.errors = check.errors.push(
+                    "Poll function must return tuple (State, Poll<T>)"
+                )
+
+        check
+
+    fn check_state_enum_structure(
+        state_enum: HirEnum,
+        span: Span
+    ) -> AsyncFunctionCheck:
+        """Validate state enum structure.
+
+        Basic checks:
+        - Enum has at least State0
+        - All variants are valid
+
+        Args:
+            state_enum: The state enum to validate
+            span: Source location for errors
+
+        Returns:
+            Validation results
+        """
+        var check = AsyncFunctionCheck(
+            is_valid: true,
+            errors: [],
+            function_name: state_enum.name,
+            inner_type: nil
+        )
+
+        # Check has at least one variant (State0)
+        if state_enum.variants.len() == 0:
+            check.is_valid = false
+            check.errors = check.errors.push(
+                "State enum must have at least State0 variant"
+            )
+
+        check
+
+# ================================================================
+# Helper Functions
+# ================================================================
+
+impl HirLowering:
+    fn types_equal(a: HirType, b: HirType) -> bool:
+        """Check if two HIR types are equal.
+
+        Simplified equality check for basic types.
+        Full implementation would handle:
+        - Type parameter substitution
+        - Trait bounds
+        - Lifetime parameters
+
+        Args:
+            a: First type
+            b: Second type
+
+        Returns:
+            true if types are equal, false otherwise
+        """
+        # For now, compare string representations
+        # TODO: Implement proper structural equality
+        self.format_type(a) == self.format_type(b)
+
+    fn format_type(hir_type: HirType) -> text:
+        """Format HIR type as string for error messages.
+
+        Args:
+            hir_type: Type to format
+
+        Returns:
+            Human-readable type string
+
+        Example:
+            Future<text> → "Future<text>"
+            i64 → "i64"
+        """
+        match hir_type.kind:
+            case HirTypeKind.Int(bits, signed):
+                if signed:
+                    "i{bits}"
+                else:
+                    "u{bits}"
+
+            case HirTypeKind.Float(bits):
+                "f{bits}"
+
+            case HirTypeKind.Bool:
+                "bool"
+
+            case HirTypeKind.Char:
+                "char"
+
+            case HirTypeKind.Str:
+                "text"
+
+            case HirTypeKind.Unit:
+                "()"
+
+            case HirTypeKind.Named(symbol, args):
+                val symbol_opt = self.symbols.get_symbol(symbol)
+                match symbol_opt:
+                    case Some(sym):
+                        if args.len() == 0:
+                            sym.name
+                        else:
+                            val arg_strs = args.map(\t: self.format_type(t))
+                            "{sym.name}<{arg_strs.join(\", \")}>"
+                    case None:
+                        "<?>"
+
+            case HirTypeKind.Tuple(elements):
+                val elem_strs = elements.map(\t: self.format_type(t))
+                "({elem_strs.join(\", \")})"
+
+            case HirTypeKind.Array(elem, size):
+                "[{self.format_type(elem)}]"
+
+            case HirTypeKind.Optional(inner):
+                "{self.format_type(inner)}?"
+
+            case HirTypeKind.Result(ok, err):
+                "Result<{self.format_type(ok)}, {self.format_type(err)}>"
+
+            case HirTypeKind.Function(params, ret, effects):
+                val param_strs = params.map(\t: self.format_type(t))
+                "fn({param_strs.join(\", \")}) -> {self.format_type(ret)}"
+
+            case HirTypeKind.Infer(id, level):
+                "?{id}"
+
+            case HirTypeKind.Error:
+                "<error>"
+
+            case _:
+                "<unknown>"
+
+# ================================================================
+# Exports
+# ================================================================
+
+export AsyncFunctionCheck
