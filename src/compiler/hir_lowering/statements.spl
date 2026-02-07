@@ -126,6 +126,40 @@ impl HirLowering:
                     span: s.span
                 ))
 
+            case StmtKind.With(items, body):
+                # Lower with items
+                var hir_items: [HirWithItem] = []
+                for item in items:
+                    # Lower context expression
+                    val hir_context = self.lower_expr(item.context_expr)
+
+                    # Handle optional variable binding
+                    var hir_target: SymbolId? = nil
+                    if item.target.?:
+                        # Define symbol for the bound variable
+                        var symbols_table = self.symbols
+                        val symbol = symbols_table.define(item.target ?? "", SymbolKind.Variable, nil, item.span, false, false, nil)
+                        self.symbols = symbols_table
+                        hir_target = symbol
+
+                    # Create HIR with item
+                    val hir_item = HirWithItem(
+                        context_expr: hir_context,
+                        target: hir_target,
+                        span: item.span
+                    )
+                    hir_items = hir_items.push(hir_item)
+
+                # Lower body
+                val hir_body = self.lower_block(body)
+
+                # Create With expression
+                HirStmtKind.Expr(HirExpr(
+                    kind: HirExprKind.With(hir_items, hir_body),
+                    type_: nil,
+                    span: s.span
+                ))
+
             case _:
                 self.error("unsupported statement kind", s.span)
                 HirStmtKind.Expr(HirExpr(

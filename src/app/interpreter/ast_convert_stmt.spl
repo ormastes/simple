@@ -64,6 +64,8 @@ fn convert_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
             return convert_while_statement(tree, node)
         case "loop_statement":
             return convert_loop_statement(tree, node)
+        case "with_statement":
+            return convert_with_statement(tree, node)
         case "break_statement":
             return Ok(Statement.Break)
         case "continue_statement":
@@ -355,6 +357,71 @@ fn convert_loop_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
             case None: pass
 
     return Err("Loop statement missing body")
+
+fn convert_with_statement(tree: &Tree, node: Node) -> Result<Statement, String>:
+    var items: Array<WithItem> = []
+    var body: Option<Block> = None
+
+    for child_id in node.children:
+        match tree.get_node(child_id):
+            case Some(child):
+                match child.kind:
+                    case "with_item":
+                        # Parse context expression and optional target
+                        var context_expr: Option<Expr> = None
+                        var target: Option<String> = None
+
+                        for item_child_id in child.children:
+                            match tree.get_node(item_child_id):
+                                case Some(item_child):
+                                    match item_child.kind:
+                                        case "identifier":
+                                            # This is the 'as' target
+                                            target = Some(tree.get_text(item_child))
+                                        case _:
+                                            # Try to parse as expression
+                                            if context_expr.is_none():
+                                                match convert_expression(tree, item_child):
+                                                    case Ok(expr): context_expr = Some(expr)
+                                                    case Err(_): pass
+                                case None: pass
+
+                        # Create WithItem if we have a context expression
+                        match context_expr:
+                            case Some(expr):
+                                items.push(WithItem {
+                                    context_expr: expr,
+                                    target: target
+                                })
+                            case None: pass
+
+                    case "block":
+                        match convert_block(tree, child):
+                            case Ok(blk): body = Some(blk)
+                            case Err(_): pass
+
+                    case _:
+                        # Try to parse as context expression directly
+                        if items.is_empty():
+                            match convert_expression(tree, child):
+                                case Ok(expr):
+                                    items.push(WithItem {
+                                        context_expr: expr,
+                                        target: None
+                                    })
+                                case Err(_): pass
+            case None: pass
+
+    match body:
+        case Some(b):
+            if items.is_empty():
+                return Err("With statement missing context managers")
+            return Ok(Statement.With {
+                items: items,
+                body: b
+            })
+        case None:
+            return Err("With statement missing body")
 
 fn convert_function_def(tree: &Tree, node: Node) -> Result<Statement, String>:
     var name = ""
