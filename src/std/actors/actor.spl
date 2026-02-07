@@ -1,0 +1,273 @@
+# Actor Model - Message-Based Concurrency
+#
+# Provides actor-based concurrency with message passing.
+# Actors are lightweight isolated processes that communicate via messages.
+#
+# Usage:
+#   use std.actors.actor.{Actor, spawn_actor, ActorRef}
+#
+#   actor Worker:
+#       var count: i64
+#       fn process(data: text):
+#           self.count += 1
+#
+#   val worker = spawn_actor(Worker())
+
+# ================================================================
+# Core Types
+# ================================================================
+
+var next_actor_id: i64 = 0
+
+fn generate_actor_id() -> i64:
+    val id = next_actor_id
+    next_actor_id = next_actor_id + 1
+    id
+
+struct ActorId:
+    """Unique identifier for an actor instance."""
+    value: i64
+
+impl ActorId:
+    static fn new() -> ActorId:
+        ActorId(value: generate_actor_id())
+
+    fn to_string() -> text:
+        "Actor#{self.value}"
+
+struct Message:
+    """Message sent to an actor."""
+    method: text        # Method name to invoke
+    args: [text]        # Arguments (simplified - would be [Any])
+    reply_to: ActorId?  # Optional reply address
+
+struct ActorRef:
+    """Reference to an actor instance.
+
+    ActorRef is a handle that allows sending messages to an actor.
+    It's lightweight (just an ID) and can be copied freely.
+    """
+    actor_id: ActorId
+    mailbox: Mailbox
+
+impl ActorRef:
+    fn send(method: text, args: [text]):
+        """Send a fire-and-forget message.
+
+        Example:
+            worker.send("process", ["data"])
+        """
+        val msg = Message(
+            method: method,
+            args: args,
+            reply_to: nil
+        )
+        self.mailbox.push(msg)
+
+    fn ask(method: text, args: [text]) -> Future<text>:
+        """Send a request and get a future for the response.
+
+        Example:
+            val result = await worker.ask("compute", ["42"])
+        """
+        # TODO: Implement request-response pattern
+        # Would create a promise, send message with reply_to, return future
+        Future.pending()
+
+# ================================================================
+# Mailbox
+# ================================================================
+
+struct Mailbox:
+    """Message queue for an actor."""
+    queue: [Message]
+    capacity: i64
+
+impl Mailbox:
+    static fn new(capacity: i64) -> Mailbox:
+        Mailbox(
+            queue: [],
+            capacity: capacity
+        )
+
+    static fn default() -> Mailbox:
+        Mailbox.new(1000)  # Default capacity
+
+    fn push(msg: Message):
+        """Add a message to the mailbox."""
+        if self.queue.len() >= self.capacity:
+            # TODO: Back-pressure handling
+            print "Warning: Mailbox full for actor, dropping message"
+            return
+        self.queue.push(msg)
+
+    fn pop() -> Message?:
+        """Get next message from mailbox."""
+        if self.queue.is_empty():
+            return nil
+        Some(self.queue.pop_front())
+
+    fn is_empty() -> bool:
+        self.queue.is_empty()
+
+    fn len() -> i64:
+        self.queue.len()
+
+# ================================================================
+# Actor Context
+# ================================================================
+
+struct ActorContext:
+    """Internal context for a running actor."""
+    id: ActorId
+    mailbox: Mailbox
+    state: ActorState
+    actor_instance: Any  # Simplified - would be generic
+
+enum ActorState:
+    """Lifecycle state of an actor."""
+    Created
+    Running
+    Suspended
+    Stopping
+    Stopped
+
+# ================================================================
+# Actor Runtime
+# ================================================================
+
+struct ActorRuntime:
+    """Runtime that manages all actors."""
+    actors: Dict<i64, ActorContext>
+    ready_queue: [i64]  # Actor IDs with messages to process
+
+impl ActorRuntime:
+    static fn new() -> ActorRuntime:
+        ActorRuntime(
+            actors: {},
+            ready_queue: []
+        )
+
+    fn spawn_actor(actor_instance: Any) -> ActorRef:
+        """Spawn a new actor instance.
+
+        Example:
+            val worker = runtime.spawn_actor(Worker())
+        """
+        val actor_id = ActorId.new()
+        val mailbox = Mailbox.default()
+
+        val context = ActorContext(
+            id: actor_id,
+            mailbox: mailbox,
+            state: ActorState.Running,
+            actor_instance: actor_instance
+        )
+
+        self.actors.insert(actor_id.value, context)
+
+        ActorRef(
+            actor_id: actor_id,
+            mailbox: mailbox
+        )
+
+    fn process_mailbox(actor_id: i64) -> bool:
+        """Process one message from actor's mailbox.
+
+        Returns true if a message was processed.
+        """
+        val context = self.actors.get(actor_id) ?? return false
+        val msg = context.mailbox.pop() ?? return false
+
+        # TODO: Invoke method on actor_instance
+        # This would use reflection or generated dispatch code
+        print "Actor {actor_id} processing message: {msg.method}"
+
+        # If more messages, stay in ready queue
+        not context.mailbox.is_empty()
+
+    fn run_once() -> bool:
+        """Process one actor's messages.
+
+        Returns true if there's more work to do.
+        """
+        if self.ready_queue.is_empty():
+            return false
+
+        val actor_id = self.ready_queue.pop_front() ?? return false
+        val has_more = self.process_mailbox(actor_id)
+
+        if has_more:
+            self.ready_queue.push(actor_id)
+
+        not self.ready_queue.is_empty()
+
+    fn run():
+        """Run the actor system until all mailboxes are empty."""
+        var continue_running = true
+        while continue_running:
+            continue_running = self.run_once()
+
+    fn stop_actor(actor_id: i64):
+        """Stop an actor and remove it from the runtime."""
+        self.actors.remove(actor_id)
+        # TODO: Call cleanup hooks
+
+# ================================================================
+# Global Runtime
+# ================================================================
+
+var global_actor_runtime: ActorRuntime? = nil
+
+fn get_actor_runtime() -> ActorRuntime:
+    """Get or create the global actor runtime."""
+    if not global_actor_runtime.?:
+        global_actor_runtime = Some(ActorRuntime.new())
+    global_actor_runtime.unwrap()
+
+fn spawn_actor(actor_instance: Any) -> ActorRef:
+    """Spawn an actor on the global runtime.
+
+    Example:
+        val worker = spawn_actor(Worker())
+        worker.send("process", ["data"])
+    """
+    get_actor_runtime().spawn_actor(actor_instance)
+
+# ================================================================
+# Actor Utilities
+# ================================================================
+
+fn spawn_pool(count: i64, factory: fn() -> Any) -> [ActorRef]:
+    """Spawn N actors using a factory function.
+
+    Example:
+        val workers = spawn_pool(10, \: Worker())
+    """
+    var pool = []
+    for i in 0..count:
+        pool.push(spawn_actor(factory()))
+    pool
+
+fn broadcast(actors: [ActorRef], method: text, args: [text]):
+    """Send the same message to all actors.
+
+    Example:
+        broadcast(workers, "stop", [])
+    """
+    for actor in actors:
+        actor.send(method, args)
+
+fn round_robin(actors: [ActorRef], tasks: [text]):
+    """Distribute tasks to actors in round-robin fashion.
+
+    Example:
+        round_robin(workers, tasks)
+    """
+    var index = 0
+    for task in tasks:
+        actors[index % actors.len()].send("process", [task])
+        index = index + 1
+
+# Note: Any type is simplified - would use generics in full implementation
+type Any = text
