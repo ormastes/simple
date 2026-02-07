@@ -44,13 +44,13 @@ use lib.database.mod.{StringInterner}
 var interner = StringInterner.empty()
 
 # Intern strings (same string → same ID)
-val id1 = interner.intern("test")
-val id2 = interner.intern("test")
+id1 = interner.intern("test")
+id2 = interner.intern("test")
 assert id1 == id2
 
 # Bidirectional lookup
-val str = interner.lookup(id1)?  # "test"
-val id = interner.get_id("test")? # id1
+str = interner.lookup(id1)?  # "test"
+id = interner.get_id("test")? # id1
 ```
 
 **Key Features:**
@@ -71,9 +71,9 @@ row.set("age", "30")
 row.set("active", "true")
 
 # Get values
-val name = row.get("name")?  # "Alice"
-val age = row.get_i64("age")? # 30
-val active = row.get_bool("active")? # true
+name = row.get("name")?  # "Alice"
+age = row.get_i64("age")? # 30
+active = row.get_bool("active")? # true
 ```
 
 ### SdnTable
@@ -93,13 +93,13 @@ row.set("email", "alice@example.com")
 table.add_row(row)
 
 # Get row by ID
-val user = table.get_row("user_1")?
+user = table.get_row("user_1")?
 
 # Soft delete
 table.mark_deleted("user_1")
 
-# Get only valid rows
-val valid_rows = table.valid_rows()
+# Get all valid rows
+validrows = table.valid_rows()
 ```
 
 ### SdnDatabase
@@ -113,11 +113,11 @@ use lib.database.mod.{SdnDatabase, SdnTable}
 var db = SdnDatabase.new("/path/to/db.sdn")
 
 # Add tables
-val table = SdnTable.new("users", ["id", "name"])
+table = SdnTable.new("users", ["id", "name"])
 db.set_table("users", table)
 
 # Get table
-val users = db.get_table("users")?
+users = db.get_table("users")?
 
 # Get mutable table (must put back!)
 var mut_table = db.get_table_mut("users")?
@@ -128,7 +128,7 @@ db.set_table("users", mut_table)  # MUST PUT BACK!
 db.save()
 
 # Load from disk
-val loaded = SdnDatabase.load("/path/to/db.sdn")?
+loaded = SdnDatabase.load("/path/to/db.sdn")?
 ```
 
 ---
@@ -140,10 +140,10 @@ val loaded = SdnDatabase.load("/path/to/db.sdn")?
 ```simple
 use lib.database.query.{QueryBuilder, CompareOp}
 
-val query = QueryBuilder(db: db, table_name: "users")
+query = QueryBuilder(db: db, table_name: "users")
 
 # Filter by field
-val results = query
+results = query
     .filter_by("status", CompareOp.Eq, "active")
     .filter_by("age", CompareOp.Gt, "18")
     .only_valid()
@@ -178,7 +178,7 @@ use lib.database.bug.{create_bug_database, Bug, BugSeverity, BugStatus}
 var bugdb = create_bug_database("/path/to/bugs.sdn")
 
 # Add bug
-val bug = Bug(
+bug = Bug(
     id: "bug_001",
     severity: BugSeverity.P0,
     status: BugStatus.Open,
@@ -197,7 +197,7 @@ val bug = Bug(
 bugdb.add_bug(bug)
 
 # Query bugs
-val all = bugdb.all_bugs()
+all = bugdb.all_bugs()
 val open = bugdb.open_bugs()  # Open + Investigating + Confirmed
 val critical = bugdb.critical_bugs()  # P0 + P1
 val p0 = bugdb.bugs_by_severity(BugSeverity.P0)

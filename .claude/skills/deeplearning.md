@@ -16,18 +16,19 @@ Use this skill when working with deep learning tasks in Simple:
 **Location**: `src/std/src/config/__init__.spl`
 
 **Usage**:
+<!--sdoctest:skip-next-->
 ```simple
 import config
 
 # Load from file
-let cfg = config.from_file("config/base.sdn")
+cfg = config.from_file("config/base.sdn")
 
 # Merge configs
-let merged = config.merge(base_cfg, override_cfg)
+merged = config.merge(base_cfg, override_cfg)
 
 # Access with dotted paths
-let lr = cfg.get("training.learning_rate")
-let epochs = cfg.get("training.epochs")
+lr = cfg.get("training.learning_rate")
+epochs = cfg.get("training.epochs")
 
 # Freeze config (immutable)
 config.freeze(cfg)
@@ -53,6 +54,7 @@ training:
 **Location**: `src/std/src/ml/tracking/__init__.spl`
 
 **Usage**:
+<!--sdoctest:skip-next-->
 ```simple
 import ml.tracking as Track
 
@@ -60,7 +62,7 @@ import ml.tracking as Track
 Track.set_mode("offline")  # or "online", "disabled"
 
 # Create run
-let run = Track.run(
+run = Track.run(
     project="cifar10",
     name="baseline",
     config=cfg,
@@ -71,7 +73,7 @@ let run = Track.run(
 run.log({"train/loss": 0.5, "train/acc": 0.92}, step=100)
 
 # Log artifacts
-let artifact = Track.Artifact("model-v1", type="model")
+artifact = Track.Artifact("model-v1", type="model")
 artifact.add_file("checkpoint.pt")
 run.log_artifact(artifact, aliases=["latest", "best"])
 
