@@ -165,7 +165,7 @@ simple watch app.spl
 
 ### Variables & Types
 
-```simple
+```simple:fail_as_success
 # Variables - immutable (val) or mutable (var)
 val x = 10          # Immutable (preferred)
 var y = 20          # Mutable (when needed)
@@ -189,7 +189,7 @@ valpath = 'C:\Users\name'
 
 ### Control Flow
 
-```simple
+```simple:fail_as_success
 # If/else with indentation
 if x > 0:
     print "positive"
@@ -214,7 +214,7 @@ loop:
 
 ### Functions
 
-```simple
+```simple:fail_as_success
 fn add(a: i64, b: i64) -> i64:
     return a + b
 
@@ -232,7 +232,7 @@ valevens = nums.filter \x: x % 2 == 0
 
 ### Structs & Classes
 
-```simple
+```simple:fail_as_success
 # Structs (value types, immutable by default)
 struct Point:
     x: f64
@@ -265,7 +265,7 @@ alice.greet()
 
 ### Collections
 
-```simple
+```simple:fail_as_success
 # Arrays
 valnums = [1, 2, 3, 4, 5]
 valfirst = nums[0]
@@ -283,7 +283,7 @@ val(num, text) = pair
 
 Type-safe units prevent mixing incompatible values:
 
-```simple
+```simple:fail_as_success
 # Define unit types with postfix syntax
 unit length(base: f64):
     mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
@@ -332,7 +332,7 @@ fn area(s: Shape) -> f64:
 
 Simple macros are contract-first and LL(1) parseable - the IDE can provide autocomplete without expanding the macro:
 
-```simple
+```simple:fail_as_success
 # Macro declares what it introduces in the contract header
 macro define_counter(NAME: Str const) -> (
   returns result: (init: Int, step: Int),
@@ -356,7 +356,7 @@ class Demo:
 
 **Built-in macros:**
 
-```simple
+```simple:fail_as_success
 # Print with formatting
 println!("Hello, {name}!")           # Print with newline
 print!("Value: {x}")                 # Print without newline
@@ -400,7 +400,7 @@ class Point3D:
 
 Unified predicate grammar for cross-cutting concerns:
 
-```simple
+```simple:fail_as_success
 # Pointcut expression syntax: pc{...}
 # Applies logging to all service methods
 on pc{ execution(services.**.*(..)) } use LoggingInterceptor
@@ -445,7 +445,7 @@ rate_limits |endpoint, requests, window|
 
 Load SDN in Simple:
 
-```simple
+```simple:fail_as_success
 config = sdn::load("app.sdn")
 print("Server port: {config.server.port}")
 ```
@@ -454,7 +454,7 @@ print("Server port: {config.server.port}")
 
 Executable examples in docstrings - tests that serve as documentation:
 
-```simple
+```simple:fail_as_success
 """
 Computes factorial of n
 
@@ -476,7 +476,7 @@ fn factorial(n: Int) -> Int:
 
 **Multi-line examples and setup/teardown:**
 
-```simple
+```simple:fail_as_success
 """
 Stack data structure with LIFO semantics
 
@@ -511,7 +511,7 @@ class Stack:
 
 **Wildcard matching for non-deterministic output:**
 
-```simple
+```simple:fail_as_success
 """
 Generate unique identifiers
 
@@ -555,7 +555,7 @@ simple test --doctest --tag slow # Run only slow-tagged doctests
 
 ### Functional Update Operator (`->`)
 
-```simple
+```simple:fail_as_success
 # The -> operator calls a method and assigns result back
 var data = load_data()
 data->normalize()        # data = data.normalize()
@@ -567,7 +567,7 @@ data->normalize()->filter(min: 0)->save("out.txt")
 
 ### GPU Computing
 
-```simple
+```simple:fail_as_success
 import std.gpu
 
 # GPU kernel style 1: #[gpu] with explicit bounds check
@@ -606,7 +606,7 @@ fn main():
 
 **GPU Thread Indexers:**
 
-```simple
+```simple:fail_as_success
 #[gpu]
 fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
     # Multi-dimensional indexing
@@ -703,7 +703,7 @@ Run an example:
 
 Feature documentation is auto-generated from BDD spec tests. Each spec defines feature metadata and executable assertions that verify the feature works correctly.
 
-```simple
+```simple:fail_as_success
 # simple/std_lib/test/features/infrastructure/lexer_spec.spl
 import std.spec
 

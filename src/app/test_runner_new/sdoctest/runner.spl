@@ -20,11 +20,11 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
 
     if options.list:
         print_sdoctest_list(files, config)
-        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, duration_ms: 0)
+        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     if files.len() == 0:
         print "No sdoctest files found."
-        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, duration_ms: 0)
+        return SdoctestRunResult(files: [], total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0)
 
     print "SDoctest: Running code blocks from {files.len()} file(s)..."
     print ""
@@ -36,6 +36,7 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
     var failed = 0
     var skipped = 0
     var errors = 0
+    var accepted = 0
 
     for file_path in files:
         val file_result = run_sdoctest_file(file_path, config, options)
@@ -46,6 +47,7 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
         failed = failed + file_result.failed
         skipped = skipped + file_result.skipped
         errors = errors + file_result.errors
+        accepted = accepted + file_result.accepted
         file_results.push(file_result)
 
         if options.fail_fast and (file_result.failed > 0 or file_result.errors > 0):
@@ -63,6 +65,7 @@ fn run_sdoctest_mode(options: TestOptions, config: SdoctestConfig) -> SdoctestRu
         failed: failed,
         skipped: skipped,
         errors: errors,
+        accepted: accepted,
         duration_ms: duration_ms
     )
 
@@ -77,7 +80,7 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
         return SdoctestFileResult(
             source_file: file_path,
             blocks: [],
-            total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, duration_ms: 0
+            total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, accepted: 0, duration_ms: 0
         )
 
     var block_results: [BlockResult] = []
@@ -85,13 +88,26 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
     var file_failed = 0
     var file_skipped = 0
     var file_errors = 0
+    var file_accepted = 0
     var file_duration = 0
 
     # Resolve the default env from source config or CLI override
     val default_env_name = if options.sdoctest_env != "": options.sdoctest_env else: "default"
 
     for block in blocks:
-        val result = run_sdoctest_block(block, config, default_env_name, options)
+        var result = run_sdoctest_block(block, config, default_env_name, options)
+
+        # fail-as-success: convert Failed → Passed (but not Error — that's infra)
+        # Triggered by global --sdoctest-fail-as-success flag OR per-block :fail_as_success modifier
+        val block_fail_as_success = block.has_modifier_fail_as_success()
+        if (options.sdoctest_fail_as_success or block_fail_as_success) and result.status == BlockStatus.Failed:
+            result = BlockResult(
+                block: result.block, status: BlockStatus.Passed,
+                duration_ms: result.duration_ms, stdout: result.stdout, stderr: result.stderr,
+                error: "accepted (fail-as-success)"
+            )
+            file_accepted = file_accepted + 1
+
         match result.status:
             case BlockStatus.Passed: file_passed = file_passed + 1
             case BlockStatus.Failed: file_failed = file_failed + 1
@@ -111,6 +127,7 @@ fn run_sdoctest_file(file_path: text, config: SdoctestConfig, options: TestOptio
         failed: file_failed,
         skipped: file_skipped,
         errors: file_errors,
+        accepted: file_accepted,
         duration_ms: file_duration
     )
 
@@ -266,9 +283,15 @@ fn print_file_result(result: SdoctestFileResult):
         return
 
     val status_icon = if result.failed == 0 and result.errors == 0: "PASS" else: "FAIL"
-    print "  {status_icon}  {result.source_file} ({result.passed} passed, {result.failed} failed, {result.skipped} skipped, {result.duration_ms}ms)"
+    var summary = "{result.passed} passed"
+    if result.accepted > 0:
+        summary = summary + ", {result.accepted} accepted"
+    if result.failed > 0:
+        summary = summary + ", {result.failed} failed"
+    summary = summary + ", {result.skipped} skipped, {result.duration_ms}ms"
+    print "  {status_icon}  {result.source_file} ({summary})"
 
-    # Print failure details
+    # Print failure/error details
     for br in result.blocks:
         if br.status == BlockStatus.Failed or br.status == BlockStatus.Error:
             print "        Line {br.block.line_number}: {br.error}"
@@ -294,6 +317,8 @@ fn format_modifiers(block: SdoctestBlock) -> text:
         parts.push("skip")
     if block.has_modifier_should_fail():
         parts.push("should_fail")
+    if block.has_modifier_fail_as_success():
+        parts.push("fail_as_success")
     if block.get_init_name() != "":
         parts.push("init={block.get_init_name()}")
     if block.get_env_name() != "":
@@ -310,7 +335,12 @@ fn format_modifiers(block: SdoctestBlock) -> text:
 fn print_sdoctest_summary(result: SdoctestRunResult):
     print ""
     print "========================================="
-    print "SDoctest Results: {result.total} total, {result.passed} passed, {result.failed} failed, {result.skipped} skipped, {result.errors} errors"
+    val mode_label = if result.accepted > 0: "SDoctest Results (fail-as-success)" else: "SDoctest Results"
+    var summary = "{result.total} total, {result.passed} passed, {result.failed} failed"
+    if result.accepted > 0:
+        summary = summary + ", {result.accepted} accepted"
+    summary = summary + ", {result.skipped} skipped, {result.errors} errors"
+    print "{mode_label}: {summary}"
     print "Time:    {result.duration_ms}ms"
     print "========================================="
     if result.is_ok():
