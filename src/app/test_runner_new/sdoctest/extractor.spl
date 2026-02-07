@@ -1,0 +1,156 @@
+# SDoctest Code Block Extractor
+#
+# Extracts code blocks from markdown files with modifier parsing.
+# Supports fence modifiers (```simple:skip) and HTML comment markers.
+
+use app.io.mod (file_read, file_exists)
+use sdoctest.types.*
+
+# =========================================================================
+# Public API
+# =========================================================================
+
+fn extract_sdoctest_blocks(file_path: text) -> [SdoctestBlock]:
+    if not file_exists(file_path):
+        return []
+
+    val content = file_read(file_path)
+    extract_blocks_from_content(content, file_path)
+
+fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
+    val lines = content.split("\n")
+    var blocks: [SdoctestBlock] = []
+    var i = 0
+    var in_code_block = false
+    var code_lines: [text] = []
+    var start_line = 0
+    var current_language = ""
+    var current_modifiers: [SdoctestModifier] = []
+    var skip_next = false
+    var skip_region = false
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Check for HTML comment markers
+        if trimmed == "<!--sdoctest:skip-next-->":
+            skip_next = true
+            i = i + 1
+            continue
+
+        if trimmed == "<!--sdoctest:skip-begin-->":
+            skip_region = true
+            i = i + 1
+            continue
+
+        if trimmed == "<!--sdoctest:skip-end-->":
+            skip_region = false
+            i = i + 1
+            continue
+
+        if not in_code_block:
+            # Check for opening fence
+            if trimmed.starts_with("```simple") or trimmed.starts_with("```spl"):
+                in_code_block = true
+                code_lines = []
+                start_line = i + 1
+
+                # Parse language and modifiers from fence line
+                val fence_info = parse_fence_line(trimmed)
+                current_language = fence_info.0
+                current_modifiers = fence_info.1
+
+                # Apply skip-next marker
+                if skip_next:
+                    current_modifiers.push(SdoctestModifier.Skip)
+                    skip_next = false
+
+                # Apply skip-region
+                if skip_region:
+                    current_modifiers.push(SdoctestModifier.Skip)
+        else:
+            # Inside a code block
+            if trimmed == "```":
+                in_code_block = false
+                if code_lines.len() > 0:
+                    blocks.push(SdoctestBlock(
+                        source_file: file_path,
+                        line_number: start_line,
+                        code: code_lines.join("\n"),
+                        language: current_language,
+                        modifiers: current_modifiers
+                    ))
+                current_modifiers = []
+                current_language = ""
+            else:
+                code_lines.push(line)
+
+        i = i + 1
+
+    blocks
+
+# =========================================================================
+# Fence Line Parsing
+# =========================================================================
+
+fn parse_fence_line(fence: text) -> (text, [SdoctestModifier]):
+    # Input examples:
+    #   ```simple
+    #   ```simple:skip
+    #   ```simple:init=std_imports,env=slow
+    #   ```simple:should_fail,tag=integration
+    #   ```spl:skip
+
+    var language = ""
+    var modifiers: [SdoctestModifier] = []
+
+    # Strip leading backticks
+    var rest = fence
+    while rest.starts_with("`"):
+        rest = rest[1:]
+
+    # Split on first ':'
+    val ci = rest.index_of(":") ?? -1
+    if ci >= 0:
+        language = rest[0:ci]
+        val mod_str = rest[ci + 1:]
+        modifiers = parse_modifiers(mod_str)
+    else:
+        language = rest.trim()
+
+    (language, modifiers)
+
+fn parse_modifiers(mod_str: text) -> [SdoctestModifier]:
+    var modifiers: [SdoctestModifier] = []
+    val parts = mod_str.split(",")
+
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed == "":
+            continue
+
+        if trimmed == "skip":
+            modifiers.push(SdoctestModifier.Skip)
+        elif trimmed == "should_fail":
+            modifiers.push(SdoctestModifier.ShouldFail)
+        elif trimmed == "ignore_output":
+            modifiers.push(SdoctestModifier.IgnoreOutput)
+        elif trimmed.starts_with("init="):
+            val name = trimmed[5:]
+            modifiers.push(SdoctestModifier.Init(name))
+        elif trimmed.starts_with("env="):
+            val name = trimmed[4:]
+            modifiers.push(SdoctestModifier.Env(name))
+        elif trimmed.starts_with("tag="):
+            val name = trimmed[4:]
+            modifiers.push(SdoctestModifier.Tag(name))
+
+    modifiers
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export extract_sdoctest_blocks, extract_blocks_from_content
+export parse_fence_line, parse_modifiers
