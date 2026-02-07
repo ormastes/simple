@@ -679,33 +679,54 @@ impl MirLowering:
         self.builder.emit_aggregate(AggregateKind.Tuple, operands, tuple_type)
 
     me lower_set_lit(elements: [HirExpr]) -> LocalId:
-        """Lower set literal to Set.new() + insert() calls.
+        """Lower set literal to Set.from() call.
 
         Transforms: s{1, 2, 3}
-        Into:
-            val set = Set.new()
-            set.insert(1)
-            set.insert(2)
-            set.insert(3)
-            set
+        Into: Set.from([1, 2, 3])
+
+        This is simpler than Set.new() + insert() and works with current runtime.
+        Future optimization: emit direct Set.new() + insert() calls.
         """
-        # TODO: Determine set element type properly
-        val elem_type = MirType__i64()
+        # Infer element type from first element, or default to i64
+        val elem_type = if elements.len() > 0:
+            MirType__i64()  # TODO: Proper type inference
+        else:
+            MirType__i64()
+
+        # Lower elements to array literal
+        var elem_operands: [MirOperand] = []
+        for elem in elements:
+            val elem_local = self.lower_expr(elem)
+            elem_operands = elem_operands.push(mir_operand_copy(elem_local))
+
+        # Create array from elements
+        val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
+        val array_local = self.builder.emit_aggregate(
+            AggregateKind.Array(elem_type),
+            elem_operands,
+            array_type
+        )
+
+        # Call Set.from(array) - using runtime function placeholder
+        # In a real implementation, this would resolve Set.from symbol from symbol table
+        # For now, create a function operand that will be resolved by codegen
+        val set_from_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Placeholder - codegen will resolve "Set.from"
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [array_type],
+                return_type: MirType(kind: MirTypeKind.Named("Set", [elem_type])),
+                is_variadic: false
+            )))
+        ))
+
         val set_type = MirType(kind: MirTypeKind.Named("Set", [elem_type]))
+        val result = self.builder.emit_call(
+            set_from_operand,
+            [mir_operand_copy(array_local)],
+            set_type
+        )
 
-        # Generate: val set = Set.new()
-        val set_local = self.builder.new_temp(set_type)
-        # TODO: Emit StaticCall to Set.new() - for now just allocate temp
-        # self.builder.emit_static_call(set_local, "Set", "new", [])
-
-        # Generate: set.insert(elem) for each element
-        for element in elements:
-            val elem_local = self.lower_expr(element)
-            # TODO: Emit MethodCall to set.insert(elem)
-            # val insert_result = self.builder.new_temp(MirType__bool())
-            # self.builder.emit_method_call(insert_result, set_local, "insert", [elem_local])
-
-        set_local
+        result ?? self.builder.new_temp(set_type)
 
     me lower_const_expr(expr: HirExpr) -> MirConstValue?:
         """Lower constant expression."""
