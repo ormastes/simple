@@ -66,9 +66,15 @@ class AsyncMock:
 
         if self.error_mode:
             error_value = Some(self.error_message)
-        else if self.return_index < self.return_values.len() as i32:
-            result_value = Some(self.return_values[self.return_index as usize])
-            self.return_index = self.return_index + 1
+        else:
+            # Avoid as usize - iterate to find value at return_index
+            var idx = 0
+            for rv in self.return_values:
+                if idx == self.return_index:
+                    result_value = Some(rv)
+                    self.return_index = self.return_index + 1
+                    break
+                idx = idx + 1
 
         val record = AsyncCallRecord(
             args: args,
@@ -174,17 +180,30 @@ class PromiseSequence:
             is_error: true
         ))
 
-    fn next_promise() -> Option<PromiseReturn>:
+    me next_promise() -> Option<PromiseReturn>:
         if self.current_idx >= self.promises.len() as i32:
             return nil
-        val promise = self.promises[self.current_idx as usize]
+        # Avoid as usize - iterate to find promise at current_idx
+        var idx = 0
+        var found: Option<PromiseReturn> = nil
+        for p in self.promises:
+            if idx == self.current_idx:
+                found = Some(p)
+                break
+            idx = idx + 1
         self.current_idx = self.current_idx + 1
-        Some(promise)
+        found
 
     fn peek_next() -> Option<PromiseReturn>:
         if self.current_idx >= self.promises.len() as i32:
             return nil
-        Some(self.promises[self.current_idx as usize])
+        # Avoid as usize - iterate to find promise at current_idx
+        var idx = 0
+        for p in self.promises:
+            if idx == self.current_idx:
+                return Some(p)
+            idx = idx + 1
+        nil
 
     fn remaining() -> i32:
         (self.promises.len() as i32) - self.current_idx
@@ -338,7 +357,7 @@ class AsyncProtocolMock:
             total = total + call.delay_ms
         total
 
-    fn reset():
+    me reset():
         self.method_mocks = []
         self.recorded_calls = []
 
@@ -392,36 +411,56 @@ class AsyncMockComposition:
             parts.push("  [{entry.name}] " + entry.mock_instance.summary())
         parts.join("\n")
 
+enum TimingMatchKind:
+    WithinMs
+    AtLeastMs
+    BetweenMs
+    ExactlyMs
+
 class AsyncTimingMatcher:
-    check_fn: fn(i32) -> bool
+    kind: TimingMatchKind
+    param1: i32
+    param2: i32
     description: text
 
     static fn within_ms(duration: i32) -> AsyncTimingMatcher:
         AsyncTimingMatcher(
-            check_fn: \actual: actual <= duration,
+            kind: TimingMatchKind.WithinMs,
+            param1: duration,
+            param2: 0,
             description: "within {duration}ms"
         )
 
     static fn at_least_ms(duration: i32) -> AsyncTimingMatcher:
         AsyncTimingMatcher(
-            check_fn: \actual: actual >= duration,
+            kind: TimingMatchKind.AtLeastMs,
+            param1: duration,
+            param2: 0,
             description: "at least {duration}ms"
         )
 
     static fn between_ms(min_ms: i32, max_ms: i32) -> AsyncTimingMatcher:
         AsyncTimingMatcher(
-            check_fn: \actual: actual >= min_ms and actual <= max_ms,
+            kind: TimingMatchKind.BetweenMs,
+            param1: min_ms,
+            param2: max_ms,
             description: "between {min_ms}ms and {max_ms}ms"
         )
 
     static fn exactly_ms(duration: i32) -> AsyncTimingMatcher:
         AsyncTimingMatcher(
-            check_fn: \actual: actual == duration,
+            kind: TimingMatchKind.ExactlyMs,
+            param1: duration,
+            param2: 0,
             description: "exactly {duration}ms"
         )
 
     fn matches(actual_ms: i32) -> bool:
-        self.check_fn(actual_ms)
+        match self.kind:
+            TimingMatchKind.WithinMs: actual_ms <= self.param1
+            TimingMatchKind.AtLeastMs: actual_ms >= self.param1
+            TimingMatchKind.BetweenMs: actual_ms >= self.param1 and actual_ms <= self.param2
+            TimingMatchKind.ExactlyMs: actual_ms == self.param1
 
     fn get_description() -> text:
         self.description
@@ -443,4 +482,5 @@ export PromiseReturn, PromiseSequence
 export TimingStats, AsyncSpy
 export AsyncMethodMock, AsyncProtocolMock
 export AsyncMockEntry, AsyncMockComposition
-export AsyncTimingMatcher
+export TimingMatchKind, AsyncTimingMatcher
+export verify_async_timing, verify_call_timing

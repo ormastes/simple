@@ -6,18 +6,592 @@
 
 | Metric | Count |
 |--------|-------|
-| Total blocks | 3 |
-| Passed | 2 |
-| Failed | 0 |
-| Skipped | 1 |
+| Total blocks | 66 |
+| Passed | 18 |
+| Failed | 46 |
+| Skipped | 2 |
 | Errors | 0 |
 | Duration | 0ms |
 
-**Status: PASS**
+**Status: FAIL**
 
 ## Files
 
 | File | Total | Passed | Failed | Skipped | Duration |
 |------|-------|--------|--------|---------|----------|
-| /tmp/claude-1000/-home-ormastes-dev-pub-simple/e0756094-1f09-4b3a-8bdc-1e38108235af/scratchpad/test_sdoctest.md | 3 | 2 | 0 | 1 | 0ms |
+| doc/guide/syntax_quick_reference.md | 66 | 18 | 46 | 2 | 0ms |
+
+## Failures
+
+### doc/guide/syntax_quick_reference.md:51 (FAILED)
+
+```
+error: semantic: function `compute` not found
+```
+
+**Stderr:**
+```
+error: semantic: function `compute` not found
+```
+
+### doc/guide/syntax_quick_reference.md:140 (FAILED)
+
+```
+error: parse error: Unexpected token: expected Colon, found Comma
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected Colon, found Comma
+```
+
+### doc/guide/syntax_quick_reference.md:146 (FAILED)
+
+```
+error: parse error: array literal: expected comma between array elements
+```
+
+**Stderr:**
+```
+error: parse error: array literal: expected comma between array elements
+```
+
+### doc/guide/syntax_quick_reference.md:168 (FAILED)
+
+```
+error: semantic: variable `lst` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `lst` not found
+```
+
+### doc/guide/syntax_quick_reference.md:175 (FAILED)
+
+```
+error: semantic: variable `lst` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `lst` not found
+```
+
+### doc/guide/syntax_quick_reference.md:184 (FAILED)
+
+```
+error: semantic: variable `lst` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `lst` not found
+```
+
+### doc/guide/syntax_quick_reference.md:206 (FAILED)
+
+```
+error: semantic: variable `items` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `items` not found
+```
+
+### doc/guide/syntax_quick_reference.md:219 (FAILED)
+
+```
+error: parse error: Unexpected token: expected In, found Comma
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected In, found Comma
+```
+
+### doc/guide/syntax_quick_reference.md:237 (FAILED)
+
+```
+error: semantic: variable `user` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `user` not found
+```
+
+### doc/guide/syntax_quick_reference.md:251 (FAILED)
+
+```
+error: semantic: variable `user` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `user` not found
+```
+
+### doc/guide/syntax_quick_reference.md:263 (FAILED)
+
+```
+error: semantic: variable `user` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `user` not found
+```
+
+### doc/guide/syntax_quick_reference.md:272 (FAILED)
+
+```
+error: semantic: variable `opt` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `opt` not found
+```
+
+### doc/guide/syntax_quick_reference.md:295 (FAILED)
+
+```
+error: semantic: variable `result` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `result` not found
+```
+
+### doc/guide/syntax_quick_reference.md:310 (FAILED)
+
+```
+error: semantic: variable `list` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `list` not found
+```
+
+### doc/guide/syntax_quick_reference.md:327 (FAILED)
+
+```
+error: parse error: Unexpected token: expected '(', '{', or '[', found Dot
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected '(', '{', or '[', found Dot
+```
+
+### doc/guide/syntax_quick_reference.md:382 (FAILED)
+
+```
+error: semantic: method `reduce` not found on type `tuple` (receiver value: (1, 2, 3, 4, 5))
+```
+
+**Stderr:**
+```
+error: semantic: method `reduce` not found on type `tuple` (receiver value: (1, 2, 3, 4, 5))
+```
+
+### doc/guide/syntax_quick_reference.md:391 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Colon
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Colon
+```
+
+### doc/guide/syntax_quick_reference.md:407 (FAILED)
+
+```
+error: semantic: variable `items` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `items` not found
+```
+
+### doc/guide/syntax_quick_reference.md:422 (FAILED)
+
+```
+error: semantic: variable `value` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `value` not found
+```
+
+### doc/guide/syntax_quick_reference.md:438 (FAILED)
+
+```
+error: parse error: Unexpected token: expected LParen, found Newline
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected LParen, found Newline
+```
+
+### doc/guide/syntax_quick_reference.md:454 (FAILED)
+
+```
+error: parse error: Unexpected token: expected pattern, found LBrace
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected pattern, found LBrace
+```
+
+### doc/guide/syntax_quick_reference.md:476 (FAILED)
+
+```
+error: parse error: Unexpected token: expected pattern, found Ellipsis
+```
+
+**Stderr:**
+```
+[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
+  --> line 12:1
+   |
+ 12 | let (x, y) = get_point()
+   | ^
+
+Suggestion: Use 'val' (immutable) or 'var' (mutable)
+
+Help:
+Use 'val' for immutable or 'var' for mutable variables.
+
+TypeScript:  let x = 5;  // could be reassigned
+Simple:      val x = 5   // immutable (preferred)
+var y = 5   // mutable
+
+[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
+  --> line 13:1
+   |
+ 13 | let (first, ... (truncated)
+```
+
+### doc/guide/syntax_quick_reference.md:489 (FAILED)
+
+```
+error: semantic: variable `condition` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `condition` not found
+```
+
+### doc/guide/syntax_quick_reference.md:503 (FAILED)
+
+```
+error: semantic: variable `x` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `x` not found
+```
+
+### doc/guide/syntax_quick_reference.md:518 (FAILED)
+
+```
+error: semantic: variable `items` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `items` not found
+```
+
+### doc/guide/syntax_quick_reference.md:531 (FAILED)
+
+```
+error: semantic: variable `condition` not found
+```
+
+**Stderr:**
+```
+[33mwarning[0m: Deprecated: `if let` syntax
+  --> line 15:7
+   |
+ 15 | while let Some(item) = iterator.next():
+   |       ^
+
+Suggestion: Replace `if let` with `if val` (or `if var` for mutable binding)
+
+[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
+  --> line 15:7
+   |
+ 15 | while let Some(item) = iterator.next():
+   |       ^
+
+Suggestion: Use 'val' (immutable) or 'var' (mutable)
+
+Help:
+Use 'val' for immutable or 'var' for mutable variables.
+
+TypeScript:  let... (truncated)
+```
+
+### doc/guide/syntax_quick_reference.md:541 (FAILED)
+
+```
+error: parse error: Unexpected token: expected Colon, found Comma
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected Colon, found Comma
+```
+
+### doc/guide/syntax_quick_reference.md:559 (FAILED)
+
+```
+error: semantic: variable `value` not found
+```
+
+**Stderr:**
+```
+[33mwarning[0m: Common mistake detected: Replace 'None' with 'nil'
+  --> line 16:5
+   |
+ 16 |     None:
+   |     ^
+
+Suggestion: Replace 'None' with 'nil'
+
+Help:
+Use 'nil' instead of 'None' in Simple.
+
+Python:  return None
+Simple:  return nil
+
+[33mwarning[0m: Common mistake detected: Replace 'None' with 'nil'
+  --> line 23:5
+   |
+ 23 |     None:
+   |     ^
+
+Suggestion: Replace 'None' with 'nil'
+
+Help:
+Use 'nil' instead of 'None' in Simple.
+
+Python:  return None
+Simple:  return nil
+
+[33mwarni... (truncated)
+```
+
+### doc/guide/syntax_quick_reference.md:600 (FAILED)
+
+```
+error: semantic: variable `a` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `a` not found
+```
+
+### doc/guide/syntax_quick_reference.md:611 (FAILED)
+
+```
+error: semantic: variable `a` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `a` not found
+```
+
+### doc/guide/syntax_quick_reference.md:622 (FAILED)
+
+```
+error: semantic: variable `a` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `a` not found
+```
+
+### doc/guide/syntax_quick_reference.md:630 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions")
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions")
+```
+
+### doc/guide/syntax_quick_reference.md:641 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Assign
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Assign
+```
+
+### doc/guide/syntax_quick_reference.md:652 (FAILED)
+
+```
+error: semantic: undefined variable: data
+```
+
+**Stderr:**
+```
+error: semantic: undefined variable: data
+```
+
+### doc/guide/syntax_quick_reference.md:673 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+### doc/guide/syntax_quick_reference.md:689 (FAILED)
+
+```
+error: semantic: variable `normalize` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `normalize` not found
+```
+
+### doc/guide/syntax_quick_reference.md:712 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Gt
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Gt
+```
+
+### doc/guide/syntax_quick_reference.md:739 (FAILED)
+
+```
+error: semantic: variable `A` not found
+```
+
+**Stderr:**
+```
+error: semantic: variable `A` not found
+```
+
+### doc/guide/syntax_quick_reference.md:751 (FAILED)
+
+```
+error: parse error: Unexpected token: expected identifier, found Plus
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected identifier, found Plus
+```
+
+### doc/guide/syntax_quick_reference.md:763 (FAILED)
+
+```
+error: semantic: undefined math variable: x
+```
+
+**Stderr:**
+```
+error: semantic: undefined math variable: x
+```
+
+### doc/guide/syntax_quick_reference.md:801 (FAILED)
+
+```
+error: semantic: method `contains` not found on type `__range__`
+```
+
+**Stderr:**
+```
+error: semantic: method `contains` not found on type `__range__`
+```
+
+### doc/guide/syntax_quick_reference.md:829 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+### doc/guide/syntax_quick_reference.md:838 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+### doc/guide/syntax_quick_reference.md:855 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+### doc/guide/syntax_quick_reference.md:881 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+### doc/guide/syntax_quick_reference.md:893 (FAILED)
+
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
+**Stderr:**
+```
+error: parse error: Unexpected token: expected expression, found Indent
+```
+
 

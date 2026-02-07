@@ -42,29 +42,29 @@ fn file_exists(path: text) -> bool:
 # ============================================================================
 
 class StringInterner:
-    strings: Dict<text, i32>    # string -> id
-    reverse: Dict<i32, text>    # id -> string
+    str_to_id: Dict<text, i32>    # string -> id mapping
+    id_to_str: Dict<i32, text>    # id -> string mapping
     next_id: i32
 
     # Create empty interner
     static fn empty() -> StringInterner:
-        StringInterner(strings: {}, reverse: {}, next_id: 0)
+        StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
 
     # Intern a string, return its ID
     me intern(s: text) -> i32:
-        if self.strings.contains_key(s):
-            self.strings[s]
+        if self.str_to_id.contains_key(s):
+            self.str_to_id[s]
         else:
             val id = self.next_id
-            self.strings[s] = id
-            self.reverse[id] = s
+            self.str_to_id[s] = id
+            self.id_to_str[id] = s
             self.next_id = self.next_id + 1
             id
 
     # Get string by ID
     fn get(id: i32) -> text?:
-        if self.reverse.contains_key(id):
-            Some(self.reverse[id])
+        if self.id_to_str.contains_key(id):
+            Some(self.id_to_str[id])
         else:
             None
 
@@ -74,20 +74,24 @@ class StringInterner:
 
     # Get ID by string (forward lookup)
     fn get_id(s: text) -> i32?:
-        if self.strings.contains_key(s):
-            Some(self.strings[s])
+        if self.str_to_id.contains_key(s):
+            Some(self.str_to_id[s])
         else:
             None
 
+    # Get all (id, string) pairs
+    fn all_strings() -> Dict<i32, text>:
+        self.id_to_str
+
     # Load from SDN table
     static fn from_sdn(table: SdnTable) -> StringInterner:
-        val interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
+        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
         for row in table.rows:
             if val Some(id_str) = row.get("id"):
                 if val Some(value) = row.get("value"):
                     val id = id_str.to_int()
-                    interner.strings[value] = id
-                    interner.reverse[id] = value
+                    interner.str_to_id[value] = id
+                    interner.id_to_str[id] = value
                     if id >= interner.next_id:
                         interner.next_id = id + 1
         interner
@@ -95,7 +99,7 @@ class StringInterner:
     # Export to SDN table
     fn to_sdn() -> SdnTable:
         val table = SdnTable(name: "strings", columns: ["id", "value"], rows: [], index: {})
-        for (id, value) in self.reverse:
+        for (id, value) in self.id_to_str:
             val row = SdnRow(fields: {})
             row.set("id", "{id}")
             row.set("value", value)
@@ -120,10 +124,20 @@ struct SdnRow:
         else:
             None
 
+    # Get as i32
+    fn get_i32(column: text) -> i32?:
+        val value = self.get(column)?
+        Some(value.to_int())
+
     # Get as i64
     fn get_i64(column: text) -> i64?:
         val value = self.get(column)?
         Some(value.to_int())
+
+    # Get as f64
+    fn get_f64(column: text) -> f64?:
+        val value = self.get(column)?
+        Some(value.to_float())
 
     # Get as bool
     fn get_bool(column: text) -> bool?:
@@ -263,9 +277,18 @@ class SdnTable:
         self.rows[idx] = row
         true
 
+    # Delete row by primary key (alias for mark_deleted)
+    me delete_row(key: text) -> bool:
+        self.mark_deleted(key)
+
     # Get all valid rows (where valid=true or no valid field)
     fn valid_rows() -> [SdnRow]:
         self.rows.filter(\r: r.get_bool("valid") ?? true)
+
+    # Clear all rows and index
+    me clear():
+        self.rows.clear()
+        self.index.clear()
 
     # Rebuild index after loading
     me rebuild_index():
@@ -289,7 +312,7 @@ class SdnDatabase:
     static fn new(path: text) -> SdnDatabase:
         SdnDatabase(
             path: path,
-            interner: StringInterner(strings: {}, reverse: {}, next_id: 0),
+            interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0),
             tables: {},
             modified: false
         )
@@ -303,7 +326,7 @@ class SdnDatabase:
         if not content.?:
             return None
 
-        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(strings: {}, reverse: {}, next_id: 0), modified: false)
+        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
 
         # Parse all tables from file
         # Format: multiple tables separated by blank lines
@@ -385,3 +408,10 @@ class SdnDatabase:
     # Validation (override in subclasses)
     fn validate() -> [text]:
         []
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export StringInterner
+export SdnRow, SdnTable, SdnDatabase
