@@ -1,0 +1,237 @@
+# Async Runtime - Event Loop & Task Scheduler
+#
+# Provides the runtime infrastructure for async/await.
+# Manages tasks, schedules them, and runs the event loop.
+#
+# Usage:
+#   use std.async.runtime.{Runtime, spawn, block_on}
+#
+#   val runtime = Runtime.new()
+#   val result = runtime.block_on(my_async_fn())
+
+use std.async.future.{Future, PollResult, Waker}
+
+# ================================================================
+# Task Management
+# ================================================================
+
+var next_task_id: i64 = 0
+
+fn generate_task_id() -> i64:
+    val id = next_task_id
+    next_task_id = next_task_id + 1
+    id
+
+struct Task<T>:
+    """A spawned async task."""
+    id: i64
+    future: Future<T>
+    waker: Waker
+
+enum TaskState<T>:
+    """State of a task."""
+    Running
+    Ready(value: T)
+    Failed(error: text)
+
+# ================================================================
+# Runtime
+# ================================================================
+
+struct Runtime:
+    """Async runtime with event loop and task scheduler."""
+    ready_queue: [i64]                      # Task IDs ready to poll
+    tasks: Dict<i64, TaskContext>           # All tasks
+    completed: Dict<i64, TaskResult>        # Completed task results
+
+struct TaskContext:
+    """Internal task context."""
+    id: i64
+    future: Future<()>  # Simplified - all tasks produce ()
+    state: text         # "pending", "ready", "completed"
+
+struct TaskResult:
+    """Result of a completed task."""
+    value: text  # Simplified - would be generic in full impl
+    error: text?
+
+impl Runtime:
+    static fn new() -> Runtime:
+        """Create a new async runtime."""
+        Runtime(
+            ready_queue: [],
+            tasks: {},
+            completed: {}
+        )
+
+    fn spawn<T>(future: Future<T>) -> i64:
+        """Spawn a new async task.
+
+        Returns a task ID that can be used to check completion.
+
+        Example:
+            val task_id = runtime.spawn(fetch_data())
+            # ... do other work ...
+            val result = runtime.await_task(task_id)
+        """
+        val task_id = generate_task_id()
+
+        # Create waker that adds task back to ready queue
+        val waker = Waker.from_fn(task_id, \id:
+            if not self.ready_queue.contains(id):
+                self.ready_queue.push(id)
+        )
+
+        val context = TaskContext(
+            id: task_id,
+            future: future,
+            state: "pending"
+        )
+
+        self.tasks.insert(task_id, context)
+        self.ready_queue.push(task_id)
+
+        task_id
+
+    fn run_once() -> bool:
+        """Run one iteration of the event loop.
+
+        Returns true if there are still tasks to process.
+        """
+        if self.ready_queue.is_empty():
+            return false
+
+        val task_id = self.ready_queue.pop_front() ?? return false
+        val context = self.tasks.get(task_id) ?? return true
+
+        # Create waker for this poll
+        val waker = Waker.from_fn(task_id, \id:
+            if not self.ready_queue.contains(id):
+                self.ready_queue.push(id)
+        )
+
+        # Poll the future
+        match context.future.poll(waker):
+            case PollResult.Ready(value):
+                # Task completed
+                val result = TaskResult(value: "{value}", error: nil)
+                self.completed.insert(task_id, result)
+                self.tasks.remove(task_id)
+            case PollResult.Pending:
+                # Task not ready, will be woken later
+                pass
+
+        # More tasks to process
+        not self.ready_queue.is_empty() or not self.tasks.is_empty()
+
+    fn run():
+        """Run the event loop until all tasks complete."""
+        var continue_running = true
+        while continue_running:
+            continue_running = self.run_once()
+
+    fn block_on<T>(future: Future<T>) -> T:
+        """Block until a future completes and return its value.
+
+        This is the main entry point for running async code.
+
+        Example:
+            val runtime = Runtime.new()
+            val result = runtime.block_on(async_operation())
+        """
+        val task_id = self.spawn(future)
+        self.run()
+        val result = self.completed.get(task_id) ??
+            panic("Task {task_id} did not complete")
+        # Simplified - would return actual value
+        result.value
+
+# ================================================================
+# Global Runtime (convenience)
+# ================================================================
+
+var global_runtime: Runtime? = nil
+
+fn get_global_runtime() -> Runtime:
+    """Get or create the global runtime."""
+    if not global_runtime.?:
+        global_runtime = Some(Runtime.new())
+    global_runtime.unwrap()
+
+fn spawn<T>(future: Future<T>) -> i64:
+    """Spawn a task on the global runtime."""
+    get_global_runtime().spawn(future)
+
+fn block_on<T>(future: Future<T>) -> T:
+    """Block on the global runtime."""
+    get_global_runtime().block_on(future)
+
+# ================================================================
+# Async Utilities
+# ================================================================
+
+fn gather<T>(futures: [Future<T>]) -> Future<[T]>:
+    """Wait for all futures to complete.
+
+    Returns a future that completes when all input futures complete.
+
+    Example:
+        val results = await gather([
+            fetch_url("url1"),
+            fetch_url("url2"),
+            fetch_url("url3")
+        ])
+    """
+    # NOTE: Simplified implementation
+    # Production version would properly track each future's state
+    Future(poll_fn: \waker:
+        var all_ready = true
+        var results = []
+
+        for future in futures:
+            match future.poll(waker):
+                case PollResult.Ready(value):
+                    results.push(value)
+                case PollResult.Pending:
+                    all_ready = false
+
+        if all_ready:
+            PollResult.Ready(results)
+        else:
+            PollResult.Pending
+    )
+
+fn race<T>(futures: [Future<T>]) -> Future<T>:
+    """Return the first future to complete.
+
+    Example:
+        val fastest = await race([
+            slow_api(),
+            fast_api()
+        ])
+    """
+    Future(poll_fn: \waker:
+        for future in futures:
+            match future.poll(waker):
+                case PollResult.Ready(value):
+                    return PollResult.Ready(value)
+                case PollResult.Pending:
+                    pass
+        PollResult.Pending
+    )
+
+fn timeout<T>(future: Future<T>, duration_ms: i64) -> Future<Option<T>>:
+    """Complete within timeout or return None.
+
+    Example:
+        val result = await timeout(slow_operation(), 5000)
+        match result:
+            case Some(value): print "Completed: {value}"
+            case None: print "Timed out"
+    """
+    val timer = sleep_ms(duration_ms).map(\: None)
+    val operation = future.map(\v: Some(v))
+    race([operation, timer])
+
+# Helper (from future.spl)
+use std.async.future.sleep_ms
