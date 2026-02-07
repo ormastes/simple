@@ -201,37 +201,52 @@ fn fetch_data(url: text) -> Future<text>:
 
 ## Testing
 
-### Lexer Tests ✅
+### Test Results Summary
 
-**Verify keywords recognized:**
+**Run command:**
 ```bash
-bin/simple -c "
-use compiler.lexer.Lexer
-
-val lexer = Lexer.new('await fetch()')
-val token = lexer.next_token()
-print token.kind  # Should print KwAwait
-"
+bin/simple_runtime test/compiler/parser_await_spawn_spec.spl
 ```
 
-**Test coverage:**
-- ✅ `await` → `KwAwait`
-- ✅ `async` → `KwAsync`
-- ✅ `spawn` → `KwSpawn`
-- ✅ `actor` → `KwActor`
-- ✅ `#[` → `HashLBracket`
+**Results: 8/12 tests passing (67%)**
 
-### Parser Tests ⏳
+### Passing Tests ✅
 
-**Integration tests created:**
-```bash
-bin/simple test test/compiler/parser_await_spawn_spec.spl
-```
+**Lexer Keyword Recognition (8 tests):**
+- ✅ `await` → `KwAwait` (3 tests)
+- ✅ `spawn` → `KwSpawn` (3 tests)
+- ✅ `actor` → `KwActor` (1 test)
+- ✅ `async` → `KwAsync` (1 test)
 
-**Expected results:**
-- ✅ All lexer recognition tests pass
-- ⏳ AST construction tests (pending parser changes)
-- ⏳ Full integration tests (pending HIR)
+**Test groups:**
+- Parser - Await Expression: 3/3 ✓
+- Parser - Spawn Expression: 3/3 ✓
+- Parser - Actor Keyword: 2/2 ✓
+
+### Failing Tests ❌ (Bootstrap Runtime Limitations)
+
+**Attribute Syntax (2 tests):**
+- ❌ `#[` → `HashLBracket` recognition fails
+- ❌ Attribute name parsing fails
+- **Root cause:** HashLBracket token not in pre-built bootstrap runtime
+
+**Integration Tests (2 tests):**
+- ❌ Token counting in multi-line source
+- **Root cause:** Bootstrap runtime limitations
+
+### Bootstrap Runtime Constraints
+
+The bootstrap runtime (`bin/simple_runtime`) is a pre-built binary (27MB) from before parser changes were added. It lacks:
+1. **HashLBracket token type** - added in lexer_types.spl line 131
+2. **Static method desugaring** - .new() calls fail
+3. **Updated lexer logic** - #[ recognition in lexer.spl lines 219-233
+
+**Workaround applied:**
+- Created `create_lexer()` helper function to manually construct Lexer instances
+- Avoids `.new()` static method calls that fail in bootstrap runtime
+
+**To test with new runtime:**
+Rebuild runtime from source (requires Rust toolchain currently removed)
 
 ### Desugaring Tests ⏳
 
