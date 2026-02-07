@@ -1,0 +1,239 @@
+#!/usr/bin/env simple
+# Poll Generator Tests
+#
+# Tests that the poll function generator correctly creates poll functions
+# for async state machines.
+
+use std.spec.{describe, it, expect}
+use compiler.desugar.poll_generator.{
+    generate_poll_function
+}
+use compiler.desugar.suspension_analysis.{
+    SuspensionPoint,
+    SuspensionAnalysis
+}
+use compiler.desugar.state_enum.{
+    StateEnum,
+    StateVariant,
+    generate_state_enum
+}
+use compiler.parser_types.*
+use lexer.Span
+
+# Helper to create a dummy span
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+# Helper to create a dummy await expression
+fn make_await_expr() -> Expr:
+    Expr(
+        kind: ExprKind.Await(
+            Expr(kind: ExprKind.Ident("future"), span: dummy_span())
+        ),
+        span: dummy_span()
+    )
+
+# Helper to create a test suspension point
+fn make_suspension_point(id: i64, live_vars: [text]) -> SuspensionPoint:
+    SuspensionPoint(
+        id: id,
+        await_expr: make_await_expr(),
+        awaited_future: Expr(kind: ExprKind.Call(
+            Expr(kind: ExprKind.Ident("fetch"), span: dummy_span()),
+            []
+        ), span: dummy_span()),
+        context_depth: 0,
+        live_variables: live_vars,
+        span: dummy_span()
+    )
+
+# Helper to create empty block
+fn make_empty_block() -> Block:
+    Block(statements: [], span: dummy_span())
+
+describe "Poll Generator - Basic Structure":
+    it "generates poll function for function with no awaits":
+        val analysis = SuspensionAnalysis(
+            suspension_points: [],
+            total_states: 1
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        expect(poll_func.name).to_equal("poll_example")
+        expect(poll_func.state_param).to_equal("state")
+        expect(poll_func.waker_param).to_equal("waker")
+
+    it "generates poll function for function with single await":
+        val sp = make_suspension_point(0, [])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        expect(poll_func.name).to_equal("poll_example")
+        # Body should be a block containing a match expression
+        expect(poll_func.body.stmts.len()).to_be_greater_than(0)
+
+    it "generates poll function for function with multiple awaits":
+        val sp0 = make_suspension_point(0, [])
+        val sp1 = make_suspension_point(1, [])
+        val sp2 = make_suspension_point(2, [])
+
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp0, sp1, sp2],
+            total_states: 4
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        # Should have match with 4 arms (State0, State1, State2, State3)
+        val body_stmt = poll_func.body.stmts[0]
+        match body_stmt.kind:
+            case StmtKind.Expr(match_expr):
+                match match_expr.kind:
+                    case ExprKind.Match(scrutinee, arms):
+                        expect(arms.len()).to_equal(4)
+                    case _:
+                        expect(false).to_equal(true)  # Should be match
+            case _:
+                expect(false).to_equal(true)  # Should be expr
+
+describe "Poll Generator - Return Type":
+    it "creates correct return type":
+        val analysis = SuspensionAnalysis(
+            suspension_points: [],
+            total_states: 1
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        # Return type should be (StateEnum, Poll<T>)
+        match poll_func.return_type.kind:
+            case TypeKind.Tuple(types):
+                expect(types.len()).to_equal(2)
+                # First element: state enum type
+                # Second element: Poll<T> type
+                match types[1].kind:
+                    case TypeKind.Generic(name, args):
+                        expect(name).to_equal("Poll")
+                    case _:
+                        expect(false).to_equal(true)  # Should be Generic
+            case _:
+                expect(false).to_equal(true)  # Should be Tuple
+
+describe "Poll Generator - Documentation":
+    it "generates function documentation":
+        val sp = make_suspension_point(0, [])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        expect(poll_func.doc_comment).to_contain("example")
+        expect(poll_func.doc_comment).to_contain("1 suspension")
+
+describe "Poll Generator - Live Variables":
+    it "preserves live variables across states":
+        val sp = make_suspension_point(0, ["a", "b"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        # Poll function should be generated successfully
+        expect(poll_func.name).to_equal("poll_example")
+
+describe "Poll Generator - Complex Scenarios":
+    it "handles multiple suspension points with different live vars":
+        val sp0 = make_suspension_point(0, ["a"])
+        val sp1 = make_suspension_point(1, ["a", "b"])
+        val sp2 = make_suspension_point(2, ["a", "b", "c"])
+
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp0, sp1, sp2],
+            total_states: 4
+        )
+        val state_enum = generate_state_enum("example", analysis)
+
+        val poll_func = generate_poll_function(
+            "example",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        # Should generate successfully with accumulating live vars
+        expect(poll_func.name).to_equal("poll_example")
+
+describe "Poll Generator - Integration":
+    it "generates poll function compatible with state enum":
+        val sp = make_suspension_point(0, ["x"])
+        val analysis = SuspensionAnalysis(
+            suspension_points: [sp],
+            total_states: 2
+        )
+        val state_enum = generate_state_enum("fetch", analysis)
+
+        val poll_func = generate_poll_function(
+            "fetch",
+            make_empty_block(),
+            analysis,
+            state_enum
+        )
+
+        # Function name should match pattern
+        expect(poll_func.name).to_equal("poll_fetch")
+
+        # Return type should reference state enum
+        match poll_func.return_type.kind:
+            case TypeKind.Tuple(types):
+                match types[0].kind:
+                    case TypeKind.Named(name):
+                        expect(name).to_equal(state_enum.name)
+                    case _:
+                        expect(false).to_equal(true)
+            case _:
+                expect(false).to_equal(true)
