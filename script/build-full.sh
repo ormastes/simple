@@ -28,12 +28,18 @@ OUTPUT="simple-full-${VERSION}.tar.gz"
 
 # Build optimized runtime (optional, to include binary)
 if [ "$1" == "--with-binary" ]; then
-    echo -e "${GREEN}Building optimized runtime...${NC}"
-    cd rust
-    cargo build --profile release-opt --quiet
-    cd ..
-    echo -e "${GREEN}✓${NC} Runtime built"
-    echo ""
+    if [ -d "rust" ]; then
+        echo -e "${GREEN}Building optimized runtime from Rust source...${NC}"
+        cd rust
+        cargo build --profile release-opt --quiet
+        cd ..
+        echo -e "${GREEN}✓${NC} Runtime built from source"
+        echo ""
+    else
+        echo -e "${BLUE}Skipping Rust build (pure Simple distribution)${NC}"
+        echo -e "${BLUE}Using pre-built runtime at bin/bootstrap/simple${NC}"
+        echo ""
+    fi
 fi
 
 # Create tarball
