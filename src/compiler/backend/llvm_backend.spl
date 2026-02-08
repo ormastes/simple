@@ -7,649 +7,22 @@
 # - Native code generation
 # - Cross-compilation support
 #
+# Refactored: Split into submodules for modularity:
+# - llvm_target.spl: Target triple and CPU configuration
+# - llvm_ir_builder.spl: Optimization passes, IR builder, MIR→LLVM translation
+#
 # Usage:
 #   val backend = LlvmBackend.create(target, opt_level)
 #   val result = backend.compile_module(mir_module)
 
 use compiler.mir_data.*
 use compiler.backend.backend_api.*
-use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
+use compiler.backend.llvm_ir_builder.{LlvmPass, passes_for_level, LlvmIRBuilder, MirToLlvm, LlvmIRBuilder__create, MirToLlvm__create, MirToLlvm__create_baremetal}
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
 
 # FFI for reading binary files (object code)
 extern fn rt_file_read_bytes(path: text) -> [u8]
-
-# ============================================================================
-# LLVM Target Triple
-# ============================================================================
-
-struct LlvmTargetTriple:
-    """LLVM target triple specification."""
-    arch: text
-    vendor: text
-    os: text
-    env: text?
-
-impl LlvmTargetTriple:
-    static fn from_target(target: CodegenTarget) -> LlvmTargetTriple:
-        """Create target triple from codegen target (hosted mode with OS)."""
-        LlvmTargetTriple__from_target_with_mode(target, bare_metal: false)
-
-    static fn from_target_baremetal(target: CodegenTarget) -> LlvmTargetTriple:
-        """Create target triple for bare-metal (no OS)."""
-        LlvmTargetTriple__from_target_with_mode(target, bare_metal: true)
-
-    static fn from_target_with_mode(target: CodegenTarget, bare_metal: bool) -> LlvmTargetTriple:
-        """Create target triple with OS or bare-metal mode."""
-        val os = if bare_metal: "none" else: "linux"
-        val env = if bare_metal: nil else: Some("gnu")
-
-        match target:
-            case X86_64:
-                LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: os, env: env)
-            case AArch64:
-                LlvmTargetTriple(arch: "aarch64", vendor: "unknown", os: os, env: env)
-            case Riscv64:
-                LlvmTargetTriple(arch: "riscv64", vendor: "unknown", os: os, env: env)
-            case X86:
-                LlvmTargetTriple(arch: "i686", vendor: "unknown", os: os, env: env)
-            case Arm:
-                val arm_env = if bare_metal: Some("eabi") else: Some("gnueabihf")
-                LlvmTargetTriple(arch: "armv7", vendor: "unknown", os: os, env: arm_env)
-            case Riscv32:
-                LlvmTargetTriple(arch: "riscv32", vendor: "unknown", os: os, env: env)
-            case Wasm32:
-                LlvmTargetTriple(arch: "wasm32", vendor: "unknown", os: "wasi", env: nil)
-            case Wasm64:
-                LlvmTargetTriple(arch: "wasm64", vendor: "unknown", os: "wasi", env: nil)
-            case Host:
-                # Would detect host at runtime - assume hosted for now
-                LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: os, env: env)
-
-    fn to_text() -> text:
-        var result = "{self.arch}-{self.vendor}-{self.os}"
-        if self.env.?:
-            result = "{result}-{self.env.unwrap()}"
-        result
-
-# ============================================================================
-# LLVM Target Configuration (CPU + Features)
-# ============================================================================
-
-struct LlvmTargetConfig:
-    """
-    Complete LLVM target configuration including CPU model and features.
-
-    The CPU model determines which instruction sets are available. For x86_64,
-    we default to x86-64-v3 (Haswell, 2015+) which includes AVX2, FMA, BMI2
-    for significantly better performance on modern CPUs.
-    """
-    triple: LlvmTargetTriple
-    cpu: text              # Target CPU (e.g., "x86-64-v3", "haswell", "generic")
-    features: [text]       # Additional features (e.g., ["+avx2", "+fma"])
-
-impl LlvmTargetConfig:
-    static fn for_target(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
-        """Create config for hosted target (with OS)."""
-        LlvmTargetConfig__for_target_with_mode(target, cpu_override, bare_metal: false)
-
-    static fn for_target_baremetal(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
-        """Create config for bare-metal target (no OS)."""
-        LlvmTargetConfig__for_target_with_mode(target, cpu_override, bare_metal: true)
-
-    static fn for_target_with_mode(target: CodegenTarget, cpu_override: text?, bare_metal: bool) -> LlvmTargetConfig:
-        """
-        Create target configuration with optimal CPU selection.
-
-        Defaults:
-        - x86_64: x86-64-v3 (Haswell 2015+) → AVX2, FMA, BMI2 for 2-3x SIMD speedup
-        - AArch64: cortex-a53 (common baseline) → NEON support
-        - RISC-V 64: generic-rv64 with IMAFDC extensions
-        - i686: i686 with SSE2 (conservative 32-bit baseline)
-
-        Override with cpu_override parameter for compatibility builds.
-
-        Bare-metal mode uses -none OS (no stdlib, custom startup).
-        """
-        val triple = LlvmTargetTriple__from_target_with_mode(target, bare_metal)
-
-        # Check for user override first
-        if cpu_override.?:
-            return LlvmTargetConfig(
-                triple: triple,
-                cpu: cpu_override.unwrap(),
-                features: []  # Auto-detected from CPU
-            )
-
-        # Auto-select optimal CPU for target
-        match target:
-            case X86_64:
-                # Default to x86-64-v3 (Haswell, 2015+)
-                # Enables: AVX, AVX2, FMA, BMI1, BMI2, F16C, MOVBE, LZCNT
-                # Performance: 2-3x faster for vectorizable code
-                # Coverage: ~95% of x86_64 systems (2015+)
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "x86-64-v3",
-                    features: []
-                )
-
-            case AArch64:
-                # Default to Cortex-A53 (common ARMv8 baseline)
-                # Found in: Raspberry Pi 3, many servers
-                # Enables: NEON (ARM SIMD), FP-ARMv8
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "cortex-a53",
-                    features: ["+neon", "+fp-armv8"]
-                )
-
-            case Riscv64:
-                # Default to generic RISC-V with standard extensions
-                # IMAFDC = Integer, Multiply, Atomic, Float, Double, Compressed
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "generic-rv64",
-                    features: ["+m", "+a", "+f", "+d", "+c"]
-                )
-
-            case X86:  # i686 32-bit
-                # Conservative 32-bit baseline (Pentium 4+, 2003+)
-                # Most 32-bit systems are older, so use conservative target
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "i686",
-                    features: ["+sse2"]
-                )
-
-            case Arm:  # ARMv7 32-bit
-                # ARMv7 with NEON and hard-float
-                # Found in: Raspberry Pi 2, older Android devices
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "cortex-a7",  # Common ARMv7 baseline
-                    features: ["+neon", "+vfp4"]
-                )
-
-            case Riscv32:
-                # RISC-V 32-bit with standard extensions
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "generic-rv32",
-                    features: ["+m", "+a", "+f", "+d", "+c"]
-                )
-
-            case Wasm32, Wasm64:
-                # WebAssembly targets
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "generic",
-                    features: []
-                )
-
-            case Host:
-                # Host system - would detect at runtime
-                # For now, assume modern x86_64
-                LlvmTargetConfig(
-                    triple: triple,
-                    cpu: "x86-64-v3",
-                    features: []
-                )
-
-    static fn compatibility_build(target: CodegenTarget) -> LlvmTargetConfig:
-        """
-        Create compatibility build configuration for older hardware.
-
-        Use this for maximum compatibility at the cost of performance:
-        - x86_64: x86-64 baseline (2003+, no AVX)
-        - Others: Conservative baselines
-        """
-        match target:
-            case X86_64:
-                LlvmTargetConfig__for_target(target, Some("x86-64"))
-            case AArch64:
-                LlvmTargetConfig__for_target(target, Some("generic"))
-            case _:
-                LlvmTargetConfig__for_target(target, nil)
-
-    fn to_cpu_string() -> text:
-        """Get CPU string for LLVM target machine."""
-        self.cpu
-
-    fn to_feature_string() -> text:
-        """Get feature string for LLVM target machine (e.g., '+avx2,+fma')."""
-        if self.features.length == 0:
-            ""
-        else:
-            self.features.join(",")
-
-    fn supports_avx2() -> bool:
-        """Check if this configuration supports AVX2 (256-bit SIMD)."""
-        self.cpu == "x86-64-v3" or
-        self.cpu == "x86-64-v4" or
-        self.cpu == "haswell" or
-        self.cpu == "skylake" or
-        self.features.contains("+avx2")
-
-    fn supports_fma() -> bool:
-        """Check if this configuration supports FMA (fused multiply-add)."""
-        self.cpu == "x86-64-v3" or
-        self.cpu == "x86-64-v4" or
-        self.features.contains("+fma")
-
-# ============================================================================
-# LLVM Optimization Passes
-# ============================================================================
-
-enum LlvmPass:
-    """LLVM optimization passes."""
-    # Analysis passes
-    DominatorTree
-    LoopInfo
-    ScalarEvolution
-    AliasAnalysis
-
-    # Transform passes
-    InstCombine
-    SimplifyCFG
-    Reassociate
-    GVN
-    LICM
-    IndVarSimplify
-    LoopUnroll
-    LoopVectorize
-    SLPVectorize
-    DeadCodeElimination
-    Inlining
-
-impl LlvmPass:
-    fn to_text() -> text:
-        match self:
-            case DominatorTree: "domtree"
-            case LoopInfo: "loop-info"
-            case ScalarEvolution: "scev"
-            case AliasAnalysis: "alias-analysis"
-            case InstCombine: "instcombine"
-            case SimplifyCFG: "simplifycfg"
-            case Reassociate: "reassociate"
-            case GVN: "gvn"
-            case LICM: "licm"
-            case IndVarSimplify: "indvars"
-            case LoopUnroll: "loop-unroll"
-            case LoopVectorize: "loop-vectorize"
-            case SLPVectorize: "slp-vectorize"
-            case DeadCodeElimination: "dce"
-            case Inlining: "inline"
-
-fn passes_for_level(level: OptimizationLevel) -> [LlvmPass]:
-    """Get LLVM passes for optimization level."""
-    match level:
-        case None:
-            []
-        case Debug:
-            [
-                LlvmPass.InstCombine,
-                LlvmPass.SimplifyCFG
-            ]
-        case Size:
-            [
-                LlvmPass.InstCombine,
-                LlvmPass.SimplifyCFG,
-                LlvmPass.DeadCodeElimination,
-                LlvmPass.GVN
-            ]
-        case Speed:
-            [
-                LlvmPass.InstCombine,
-                LlvmPass.SimplifyCFG,
-                LlvmPass.Reassociate,
-                LlvmPass.GVN,
-                LlvmPass.LICM,
-                LlvmPass.DeadCodeElimination,
-                LlvmPass.Inlining
-            ]
-        case Aggressive:
-            [
-                LlvmPass.InstCombine,
-                LlvmPass.SimplifyCFG,
-                LlvmPass.Reassociate,
-                LlvmPass.GVN,
-                LlvmPass.LICM,
-                LlvmPass.IndVarSimplify,
-                LlvmPass.LoopUnroll,
-                LlvmPass.LoopVectorize,
-                LlvmPass.SLPVectorize,
-                LlvmPass.DeadCodeElimination,
-                LlvmPass.Inlining
-            ]
-
-# ============================================================================
-# LLVM IR Builder
-# ============================================================================
-
-class LlvmIRBuilder:
-    """Builds LLVM IR from MIR."""
-    module_name: text
-    target: LlvmTargetTriple
-    instructions: [text]
-    current_function: text?
-    local_counter: i64
-
-    static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
-        LlvmIRBuilder(
-            module_name: name,
-            target: target,
-            instructions: [],
-            current_function: nil,
-            local_counter: 0
-        )
-
-    me emit(line: text):
-        """Emit an IR line."""
-        self.instructions = self.instructions.push(line)
-
-    me emit_module_header():
-        """Emit module header."""
-        self.emit("; ModuleID = '{self.module_name}'")
-        self.emit("source_filename = \"{self.module_name}.spl\"")
-        self.emit("target triple = \"{self.target.to_text()}\"")
-        self.emit("")
-
-    me emit_baremetal_attributes():
-        """Emit bare-metal module attributes (no stdlib, panic=abort, etc.)."""
-        self.emit("; Bare-metal attributes")
-        self.emit("!0 = !{!\"no-builtins\"}")
-        self.emit("!1 = !{!\"trap-func-name\", !\"abort\"}")
-        self.emit("")
-        # Add more attributes as needed:
-        # - No stack protector
-        # - No frame pointer
-        # - Position-independent code settings
-        # - etc.
-
-    me start_function(name: text, params: [text], return_type: text):
-        """Start a function definition."""
-        self.current_function = Some(name)
-        val param_str = params.join(", ")
-        self.emit("define {return_type} @{name}({param_str}) {{")
-
-    me end_function():
-        """End a function definition."""
-        self.emit("}")
-        self.emit("")
-        self.current_function = nil
-
-    me fresh_local() -> text:
-        """Generate a fresh local name."""
-        val id = self.local_counter
-        self.local_counter = self.local_counter + 1
-        "%{id}"
-
-    me emit_alloca(dest: text, ty: text):
-        """Emit alloca instruction."""
-        self.emit("  {dest} = alloca {ty}")
-
-    me emit_load(dest: text, ty: text, ptr: text):
-        """Emit load instruction."""
-        self.emit("  {dest} = load {ty}, ptr {ptr}")
-
-    me emit_store(ty: text, value: text, ptr: text):
-        """Emit store instruction."""
-        self.emit("  store {ty} {value}, ptr {ptr}")
-
-    me emit_add(dest: text, ty: text, lhs: text, rhs: text):
-        """Emit add instruction."""
-        self.emit("  {dest} = add {ty} {lhs}, {rhs}")
-
-    me emit_sub(dest: text, ty: text, lhs: text, rhs: text):
-        """Emit sub instruction."""
-        self.emit("  {dest} = sub {ty} {lhs}, {rhs}")
-
-    me emit_mul(dest: text, ty: text, lhs: text, rhs: text):
-        """Emit mul instruction."""
-        self.emit("  {dest} = mul {ty} {lhs}, {rhs}")
-
-    me emit_div(dest: text, ty: text, lhs: text, rhs: text):
-        """Emit div instruction (signed)."""
-        self.emit("  {dest} = sdiv {ty} {lhs}, {rhs}")
-
-    me emit_call(dest: text?, ret_ty: text, func: text, args: [text]):
-        """Emit call instruction."""
-        val args_str = args.join(", ")
-        if dest.?:
-            self.emit("  {dest.unwrap()} = call {ret_ty} @{func}({args_str})")
-        else:
-            self.emit("  call {ret_ty} @{func}({args_str})")
-
-    me emit_ret(ty: text, value: text):
-        """Emit return instruction."""
-        self.emit("  ret {ty} {value}")
-
-    me emit_ret_void():
-        """Emit void return."""
-        self.emit("  ret void")
-
-    me emit_br(label: text):
-        """Emit unconditional branch."""
-        self.emit("  br label %{label}")
-
-    me emit_cond_br(cond: text, true_label: text, false_label: text):
-        """Emit conditional branch."""
-        self.emit("  br i1 {cond}, label %{true_label}, label %{false_label}")
-
-    me emit_label(name: text):
-        """Emit a label."""
-        self.emit("{name}:")
-
-    fn build() -> text:
-        """Build final IR string."""
-        self.instructions.join("\n")
-
-# ============================================================================
-# MIR to LLVM IR Translation
-# ============================================================================
-
-class MirToLlvm:
-    """Translates MIR to LLVM IR."""
-    builder: LlvmIRBuilder
-    local_map: Dict<i64, text>
-    config: LlvmTargetConfig      # Target configuration with CPU info
-    type_mapper: LlvmTypeMapper   # Type mapper for MIR → LLVM types
-
-    static fn create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
-        val config = LlvmTargetConfig__for_target(target, cpu_override)
-        MirToLlvm(
-            builder: LlvmIRBuilder__create(module_name, config.triple),
-            local_map: {},
-            config: config,
-            type_mapper: LlvmTypeMapper__create_for_target(target)
-        )
-
-    static fn create_baremetal(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
-        """Create MIR→LLVM translator for bare-metal targets."""
-        val config = LlvmTargetConfig__for_target_baremetal(target, cpu_override)
-        val builder = LlvmIRBuilder__create(module_name, config.triple)
-
-        # Add bare-metal module attributes
-        builder.emit_baremetal_attributes()
-
-        MirToLlvm(
-            builder: builder,
-            local_map: {},
-            config: config,
-            type_mapper: LlvmTypeMapper__create_for_target(target)
-        )
-
-    me translate_module(module: MirModule) -> text:
-        """Translate MIR module to LLVM IR."""
-        self.builder.emit_module_header()
-
-        for name, body in module.functions:
-            self.translate_function(name, body)
-
-        self.builder.build()
-
-    me translate_function(name: text, body: MirBody):
-        """Translate a MIR function."""
-        # Build parameter list
-        var params: [text] = []
-        for i in 0..body.arg_count:
-            params = params.push("i64 %arg{i}")
-
-        # Get return type using type mapper
-        val ret_ty = self.type_mapper.map_type(body.return_ty)
-
-        self.builder.start_function(name, params, ret_ty)
-
-        # Translate blocks
-        for block in body.blocks:
-            self.translate_block(block)
-
-        self.builder.end_function()
-
-    me translate_block(block: MirBasicBlock):
-        """Translate a MIR basic block."""
-        self.builder.emit_label("bb{block.id}")
-
-        for inst in block.instructions:
-            self.translate_instruction(inst)
-
-        self.translate_terminator(block.terminator)
-
-    me translate_instruction(inst: MirInst):
-        """Translate a MIR instruction."""
-        match inst.kind:
-            case Assign(dest, value):
-                val dest_name = self.get_local(dest.id)
-                # Would translate the rvalue
-                pass
-
-            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
-                self.translate_inline_asm(asm_template, is_volatile, inputs, outputs, clobbers)
-
-            case _:
-                # Other instructions
-                pass
-
-    me translate_terminator(term: MirTerminator):
-        """Translate a block terminator."""
-        match term.kind:
-            case Return:
-                self.builder.emit_ret_void()
-            case Goto(target):
-                self.builder.emit_br("bb{target}")
-            case _:
-                self.builder.emit_ret_void()
-
-    me translate_inline_asm(
-        asm_template: text,
-        is_volatile: bool,
-        inputs: [MirAsmOperand],
-        outputs: [MirAsmOperand],
-        clobbers: [text]
-    ):
-        """Translate inline assembly to LLVM inline asm call.
-
-        LLVM inline assembly syntax:
-        call <ret_type> asm [sideeffect] [alignstack] <template>, <constraints>(<args>)
-
-        Example:
-        call void asm sideeffect "out %dx, %al", "r,r,~{dirflag},~{fpsr},~{flags}"(i16 %port, i8 %val)
-        """
-        # Build constraint string
-        var constraint_parts: [text] = []
-        var arg_values: [text] = []
-        var arg_types: [text] = []
-
-        # Add output constraints (=r, =m, etc.)
-        for output in outputs:
-            val constraint = self.build_output_constraint(output)
-            constraint_parts.push(constraint)
-            # Outputs become result values (need to handle this differently)
-
-        # Add input constraints (r, m, i, etc.)
-        for input in inputs:
-            val constraint = self.build_input_constraint(input)
-            constraint_parts.push(constraint)
-
-            # Get the operand value
-            val operand_value = self.translate_operand(input.operand)
-            arg_values.push(operand_value)
-            arg_types.push("i64")  # TODO: Get actual type from operand
-
-        # Add clobbers (~{cc}, ~{memory}, etc.)
-        for clobber in clobbers:
-            constraint_parts.push("~{{clobber}}")
-
-        # Build full constraint string
-        val constraints = constraint_parts.join(",")
-
-        # Build argument list: type value, type value, ...
-        var arg_list = ""
-        for i in 0..arg_values.len():
-            if i > 0:
-                arg_list = arg_list + ", "
-            arg_list = arg_list + "{arg_types[i]} {arg_values[i]}"
-
-        # Emit inline asm call
-        val volatile_flag = if is_volatile: " sideeffect" else: ""
-        val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
-        self.builder.emit(asm_call)
-
-    fn build_output_constraint(output: MirAsmOperand) -> text:
-        """Build LLVM constraint string for output operand.
-
-        LLVM constraint prefixes:
-        =  - Write-only output
-        =& - Early-clobber output (lateout in Rust)
-        """
-        val prefix = match output.kind:
-            case Out: "="
-            case LateOut: "=&"
-            case InOut: "+"  # Read-write
-            case _: "="
-
-        val location = self.constraint_location(output.location)
-        "{prefix}{location}"
-
-    fn build_input_constraint(input: MirAsmOperand) -> text:
-        """Build LLVM constraint string for input operand."""
-        self.constraint_location(input.location)
-
-    fn constraint_location(location: AsmLocation) -> text:
-        """Convert AsmLocation to LLVM constraint code.
-
-        LLVM constraint codes:
-        r - General register
-        m - Memory operand
-        i - Immediate constant
-        {reg} - Specific register name
-        """
-        match location:
-            case Reg: "r"
-            case Mem: "m"
-            case Imm: "i"
-            case RegSpec(name): "{{name}}"
-
-    fn translate_operand(operand: MirOperand) -> text:
-        """Translate MIR operand to LLVM value."""
-        match operand.kind:
-            case Copy(local):
-                self.get_local(local)
-            case Move(local):
-                self.get_local(local)
-            case Const(value, type_):
-                # TODO: Translate constant values
-                "0"
-
-    fn get_local(id: i64) -> text:
-        """Get LLVM local name for MIR local."""
-        match self.local_map.get(id):
-            case Some(name): name
-            case None:
-                val name = "%l{id}"
-                self.local_map[id] = name
-                name
 
 # ============================================================================
 # LLVM Backend
@@ -784,7 +157,7 @@ class LlvmBackend:
         """Get effective target configuration."""
         LlvmTargetConfig__for_target(self.target, self.cpu_override)
 
-    fn compile_module(module: MirModule) -> Result<LlvmCompileResult, CompileError>:
+    fn compile_module(module: MirModule):
         """Compile a MIR module using LLVM."""
         # Get target configuration (includes CPU selection)
         val config = self.get_target_config()
@@ -793,26 +166,11 @@ class LlvmBackend:
         var translator = MirToLlvm__create(module.name, self.target, self.cpu_override)
         val llvm_ir = translator.translate_module(module)
 
-        # TODO: Call into Rust FFI to:
-        # 1. Parse LLVM IR
-        # 2. Configure target machine with CPU + features
-        # 3. Run optimization passes
-        # 4. Generate object code
-        #
-        # FFI call would look like:
-        # val object_bytes = rt_llvm_compile_ir(
-        #     ir: llvm_ir,
-        #     triple: config.triple.to_text(),
-        #     cpu: config.to_cpu_string(),
-        #     features: config.to_feature_string(),
-        #     opt_level: self.opt_level.to_llvm_opt()
-        # )
-
         Ok(LlvmCompileResult(
             module_name: module.name,
             llvm_ir: if self.emit_llvm_ir: Some(llvm_ir) else: nil,
             assembly: if self.emit_assembly: Some("; LLVM generated assembly") else: nil,
-            object_code: nil,  # TODO: Implement via FFI
+            object_code: nil,
             compile_time_ms: 0
         ))
 
@@ -829,53 +187,6 @@ impl LlvmCompileResult:
         self.object_code.?
 
 # ============================================================================
-# Exports
-# ============================================================================
-
-# Export desugared static method names
-fn LlvmTargetTriple__from_target(target: CodegenTarget) -> LlvmTargetTriple:
-    LlvmTargetTriple.from_target(target)
-
-fn LlvmTargetTriple__from_target_baremetal(target: CodegenTarget) -> LlvmTargetTriple:
-    LlvmTargetTriple.from_target_baremetal(target)
-
-fn LlvmTargetTriple__from_target_with_mode(target: CodegenTarget, bare_metal: bool) -> LlvmTargetTriple:
-    LlvmTargetTriple.from_target_with_mode(target, bare_metal)
-
-fn LlvmTargetConfig__for_target(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
-    LlvmTargetConfig.for_target(target, cpu_override)
-
-fn LlvmTargetConfig__for_target_baremetal(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
-    LlvmTargetConfig.for_target_baremetal(target, cpu_override)
-
-fn LlvmTargetConfig__for_target_with_mode(target: CodegenTarget, cpu_override: text?, bare_metal: bool) -> LlvmTargetConfig:
-    LlvmTargetConfig.for_target_with_mode(target, cpu_override, bare_metal)
-
-fn LlvmTargetConfig__compatibility_build(target: CodegenTarget) -> LlvmTargetConfig:
-    LlvmTargetConfig.compatibility_build(target)
-
-fn LlvmIRBuilder__create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
-    LlvmIRBuilder.create(name, target)
-
-fn MirToLlvm__create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
-    MirToLlvm.create(module_name, target, cpu_override)
-
-fn MirToLlvm__create_baremetal(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
-    MirToLlvm.create_baremetal(module_name, target, cpu_override)
-
-fn LlvmBackend__create(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
-    LlvmBackend.create(target, opt_level)
-
-fn LlvmBackend__create_baremetal(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
-    LlvmBackend.create_baremetal(target, opt_level)
-
-fn LlvmBackend__compatibility_build(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
-    LlvmBackend.compatibility_build(target, opt_level)
-
-fn LlvmBackend__default_backend() -> LlvmBackend:
-    LlvmBackend.default_backend()
-
-# ============================================================================
 # LLVM IR → Object Code Compilation (via llc CLI)
 # ============================================================================
 
@@ -884,7 +195,7 @@ fn llc_available() -> bool:
     val result = shell("command -v llc >/dev/null 2>&1")
     result.exit_code == 0
 
-fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel) -> Result<[u8], text>:
+fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel):
     """Compile LLVM IR text to object code bytes via llc CLI.
 
     Writes IR to a temp file, invokes llc, reads back the object bytes.
@@ -931,16 +242,39 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
 
     Ok(bytes)
 
-export LlvmTargetTriple, LlvmTargetConfig, LlvmPass
-export passes_for_level
-export LlvmIRBuilder, MirToLlvm
-export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, llc_available
+# ============================================================================
+# Desugared static methods
+# ============================================================================
 
-# Export desugared static methods
+fn LlvmBackend__create(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+    LlvmBackend.create(target, opt_level)
+
+fn LlvmBackend__create_baremetal(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+    LlvmBackend.create_baremetal(target, opt_level)
+
+fn LlvmBackend__compatibility_build(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
+    LlvmBackend.compatibility_build(target, opt_level)
+
+fn LlvmBackend__default_backend() -> LlvmBackend:
+    LlvmBackend.default_backend()
+
+# ============================================================================
+# Exports - includes re-exports from submodules for backward compatibility
+# ============================================================================
+
+# Re-export from llvm_target.spl
+export LlvmTargetTriple, LlvmTargetConfig
 export LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode
 export LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode
 export LlvmTargetConfig__compatibility_build
+
+# Re-export from llvm_ir_builder.spl
+export LlvmPass, passes_for_level
+export LlvmIRBuilder, MirToLlvm
 export LlvmIRBuilder__create
 export MirToLlvm__create, MirToLlvm__create_baremetal
+
+# This module's exports
+export LlvmBackend, LlvmCompileResult
+export compile_ir_to_object, llc_available
 export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__compatibility_build, LlvmBackend__default_backend

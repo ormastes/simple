@@ -7,43 +7,109 @@
 # https://github.com/rui314/mold
 #
 # Fallback chain: mold -> lld -> ld
+#
+# Pure Simple implementation - no Rust FFI required.
+# Uses bin/mold/mold (locally bundled) or system linkers.
+
+use std.io_runtime.{ShellResult, shell, shell_output, shell_bool, process_run, file_exists, file_write, file_delete, file_size_raw, cwd}
 
 use .obj_taker (SymbolType)
 
 # ============================================================================
-# Rust FFI Declarations
+# Linker Detection (Pure Simple)
 # ============================================================================
 
-extern class MoldFfi:
-    """Rust FFI for mold linker operations."""
+fn find_mold_path() -> text?:
+    """Find mold executable. Checks local bin/mold/mold first, then PATH."""
+    val local_mold = cwd() + "/bin/mold/mold"
+    if file_exists(local_mold):
+        return Some(local_mold)
+    # Check PATH
+    val which_result = shell_output("which mold 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        None
 
-    static fn find_mold() -> text?:
-        """Find mold executable path. Returns None if not found."""
-        ...
+fn find_lld_path() -> text?:
+    """Find lld executable in PATH."""
+    val which_result = shell_output("which lld 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        None
 
-    static fn find_lld() -> text?:
-        """Find lld executable path. Returns None if not found."""
-        ...
+fn find_ld_path() -> text?:
+    """Find system ld executable in PATH."""
+    val which_result = shell_output("which ld 2>/dev/null")
+    if which_result.len() > 0:
+        Some(which_result)
+    else:
+        None
 
-    static fn find_ld() -> text?:
-        """Find system ld executable path. Returns None if not found."""
-        ...
+fn execute_linker(linker_path: text, args: [text]) -> Result<i64, text>:
+    """Execute linker with arguments. Returns exit code."""
+    val (stdout, stderr, code) = process_run(linker_path, args)
+    if code != 0:
+        var msg = "Linker failed (exit {code})"
+        if stderr.len() > 0:
+            msg = msg + ": " + stderr
+        return Err(msg)
+    Ok(code)
 
-    static fn execute(linker_path: text, args: [text]) -> Result<i32, text>:
-        """Execute linker with arguments. Returns exit code."""
-        ...
+fn write_elf_object(code: [i64], name: text, output_path: text) -> Result<(), text>:
+    """Write code bytes as ELF object file using GNU assembler.
 
-    static fn write_elf_object(
-        code: [u8],
-        name: text,
-        output_path: text
-    ) -> Result<(), text>:
-        """Write code as ELF object file."""
-        ...
+    Generates a .s assembly file with .byte directives for the code bytes,
+    then assembles it with `as --64 -o output.o input.s`.
+    """
+    # Generate assembly source with .byte directives
+    var asm_lines = ".section .text\n"
+    asm_lines = asm_lines + ".globl " + name + "\n"
+    asm_lines = asm_lines + ".type " + name + ", @function\n"
+    asm_lines = asm_lines + name + ":\n"
 
-    static fn get_file_size(path: text) -> i64:
-        """Get file size in bytes."""
-        ...
+    # Emit .byte directives (one per line for clarity, batched for efficiency)
+    var i = 0
+    var batch_size = 16
+    var code_len = code.len()
+    for idx in range(0, code_len):
+        if i % batch_size == 0:
+            if i > 0:
+                asm_lines = asm_lines + "\n"
+            asm_lines = asm_lines + "    .byte "
+        else:
+            asm_lines = asm_lines + ", "
+        # Mask to 0-255 range (code values are i64 representing bytes)
+        val byte_val = code[idx] % 256
+        asm_lines = asm_lines + "{byte_val}"
+        i = i + 1
+
+    asm_lines = asm_lines + "\n"
+    asm_lines = asm_lines + ".size " + name + ", .-" + name + "\n"
+
+    # Write assembly to temp file
+    val asm_path = output_path + ".s"
+    val wrote = file_write(asm_path, asm_lines)
+    if not wrote:
+        return Err("Failed to write assembly file: {asm_path}")
+
+    # Assemble with GNU as
+    val (stdout, stderr, exit_code) = process_run("as", ["--64", "-o", output_path, asm_path])
+    # Cleanup temp assembly file
+    file_delete(asm_path)
+
+    if exit_code != 0:
+        var msg = "Assembler failed (exit {exit_code})"
+        if stderr.len() > 0:
+            msg = msg + ": " + stderr
+        return Err(msg)
+
+    Ok(())
+
+fn linker_file_size(path: text) -> i64:
+    """Get file size in bytes using stat."""
+    file_size_raw(path)
 
 # ============================================================================
 # Resolved Object
@@ -52,7 +118,7 @@ extern class MoldFfi:
 struct ResolvedObject:
     """An object ready for linking."""
     name: text
-    code: [u8]
+    code: [i64]
     symbol_type: SymbolType
 
 # ============================================================================
@@ -160,7 +226,7 @@ impl MoldBackend:
         var obj_paths: [text] = []
         for (idx, obj) in objects.enumerate():
             val obj_path = "{temp_dir}/obj_{idx}.o"
-            MoldFfi.write_elf_object(obj.code, obj.name, obj_path)?
+            write_elf_object(obj.code, obj.name, obj_path)?
             obj_paths = obj_paths.push(obj_path)
 
         # Build linker arguments
@@ -197,16 +263,13 @@ impl MoldBackend:
             args = args.push(arg)
 
         # Execute linker
-        val result = MoldFfi.execute(self.linker_path, args)?
-
-        if result != 0:
-            return Err("Linker failed with exit code {result}")
+        execute_linker(self.linker_path, args)?
 
         # Cleanup temp directory
         cleanup_temp_dir(temp_dir)
 
         if self.config.verbose:
-            val size = MoldFfi.get_file_size(output)
+            val size = linker_file_size(output)
             print "[mold] Output size: {size} bytes"
 
         Ok(())
@@ -233,17 +296,17 @@ impl MoldBackend:
 fn find_linker() -> Result<(text, LinkerType), text>:
     """Find an available linker in order of preference."""
     # Try mold first
-    val mold_path = MoldFfi.find_mold()
+    val mold_path = find_mold_path()
     if mold_path.?:
         return Ok((mold_path.unwrap(), LinkerType.Mold))
 
     # Try lld
-    val lld_path = MoldFfi.find_lld()
+    val lld_path = find_lld_path()
     if lld_path.?:
         return Ok((lld_path.unwrap(), LinkerType.Lld))
 
     # Try system ld
-    val ld_path = MoldFfi.find_ld()
+    val ld_path = find_ld_path()
     if ld_path.?:
         return Ok((ld_path.unwrap(), LinkerType.Ld))
 
@@ -251,28 +314,16 @@ fn find_linker() -> Result<(text, LinkerType), text>:
 
 fn create_temp_dir() -> Result<text, text>:
     """Create a temporary directory for object files."""
-    # TODO: Implement via FFI
-    Ok("/tmp/simple_link_{random_id()}")
+    val result = shell_output("mktemp -d /tmp/simple_link_XXXXXX")
+    if result.len() > 0:
+        Ok(result)
+    else:
+        Err("Failed to create temporary directory")
 
 fn cleanup_temp_dir(path: text):
-    """Remove temporary directory."""
-    # TODO: Implement via FFI
-    pass
-
-fn random_id() -> text:
-    """Generate random ID for temp directory."""
-    # TODO: Implement properly
-    "12345"
-
-# ============================================================================
-# Linker Detection (for use without FFI during development)
-# ============================================================================
-
-fn detect_linker_path() -> text?:
-    """Detect linker path using shell commands."""
-    # This is a fallback when FFI is not available
-    # In production, use MoldFfi.find_mold() etc.
-    None
+    """Remove temporary directory (with safety check)."""
+    if path.starts_with("/tmp/simple_link_"):
+        shell("rm -rf '{path}'")
 
 # ============================================================================
 # Exports
@@ -280,7 +331,8 @@ fn detect_linker_path() -> text?:
 
 export MoldBackend
 export MoldConfig
-export MoldFfi
 export LinkerType
 export ResolvedObject
 export find_linker
+export find_mold_path, find_lld_path, find_ld_path
+export execute_linker, write_elf_object, linker_file_size

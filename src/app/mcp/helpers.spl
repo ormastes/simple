@@ -1,0 +1,270 @@
+# MCP Helpers - Shared utility functions for MCP server
+#
+# Extracted from main.spl to enable reuse and reduce duplication.
+# Provides JSON building, string escaping, arg parsing, and response makers.
+
+use app.io.mod (file_read, shell, cwd)
+use lib.json.builder.{escape_json}
+
+# Brace helpers (avoid f-string interpolation issues)
+fn LB() -> String:
+    (123 as char).to_string()
+
+fn RB() -> String:
+    (125 as char).to_string()
+
+fn Q() -> String:
+    "\""
+
+# Helper: parse integer from string
+fn parse_int(s: String) -> Result<Int, String>:
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch >= '0' and ch <= '9':
+            result = result * 10 + (ch as int - '0' as int)
+        else:
+            return Err("Invalid digit: " + ch.to_string())
+        i = i + 1
+    Ok(result)
+
+# Helper: minimum of two integers
+fn min_int(a: Int, b: Int) -> Int:
+    if a < b:
+        a
+    else:
+        b
+
+# Option unwrap helper
+fn unwrap_idx(opt: Option<Int>) -> Int:
+    match opt:
+        case Some(i):
+            return i
+        case None:
+            return -1
+
+fn unwrap_str(result: Result<String, String>) -> String:
+    match result:
+        case Ok(s):
+            return s
+        case Err(_):
+            return ""
+
+# Skip program name and script path to get clean args
+fn get_clean_args(all_args: [String]) -> [String]:
+    var args = []
+    var start_idx = 1
+    if all_args.len() > 1 and all_args[1].ends_with(".spl"):
+        start_idx = 2
+    var i = start_idx
+    while i < all_args.len():
+        args = args + [all_args[i]]
+        i = i + 1
+    args
+
+# --- JSON building helpers ---
+
+fn jp(key: String, val_str: String) -> String:
+    var r = Q()
+    r = r + key
+    r = r + Q()
+    r = r + ":"
+    r = r + val_str
+    r
+
+fn js(s: String) -> String:
+    var r = Q()
+    r = r + s
+    r = r + Q()
+    r
+
+fn jo1(pair: String) -> String:
+    var r = LB()
+    r = r + pair
+    r = r + RB()
+    r
+
+fn jo2(p1: String, p2: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + RB()
+    r
+
+fn jo3(p1: String, p2: String, p3: String) -> String:
+    var r = LB()
+    r = r + p1
+    r = r + ","
+    r = r + p2
+    r = r + ","
+    r = r + p3
+    r = r + RB()
+    r
+
+# --- JSON parsing helpers ---
+
+fn extract_json_string_v2(json: String, key: String) -> String:
+    val pattern = "\"" + key + "\":"
+    val idx_opt = json.index_of(pattern)
+
+    var start_pos = -1
+    match idx_opt:
+        Some(pos): start_pos = pos + pattern.len()
+        None: return ""
+
+    if start_pos < 0:
+        return ""
+
+    val rest = json.substring(start_pos).trim()
+
+    if not rest.starts_with("\""):
+        return ""
+
+    val after_quote = rest.substring(1)
+    val end_opt = after_quote.index_of("\"")
+
+    var end_pos = -1
+    match end_opt:
+        Some(pos): end_pos = pos
+        None: return ""
+
+    if end_pos < 0:
+        return ""
+
+    after_quote.substring(0, end_pos)
+
+fn extract_json_string(json: String, key: String) -> String:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx_opt = json.index_of(search)
+
+    var idx = -1
+    match idx_opt:
+        Some(i): idx = i
+        None: idx = -1
+
+    if idx < 0:
+        return ""
+
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        val end_opt = rest.index_of(quote)
+
+        var end = -1
+        match end_opt:
+            Some(i): end = i
+            None: end = -1
+        if end >= 0:
+            return rest.substring(0, end)
+    ""
+
+fn extract_json_value(json: String, key: String) -> String:
+    val search = Q() + key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    for ch in trimmed:
+        if ch == "," or ch == RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
+    val search = Q() + outer_key + Q() + ":"
+    val idx = unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    extract_json_string(after, inner_key)
+
+# --- String escaping ---
+# escape_json imported from lib.json.builder
+
+# --- File helpers ---
+
+fn read_file_safe(path: String) -> String:
+    val content = file_read(path)
+    if content == "":
+        return "Error: could not read file: " + path
+    content
+
+fn list_spl_files(dir: String) -> String:
+    val result = shell("find " + dir + " -name '*.spl' -type f | sort")
+    if result.exit_code != 0:
+        var error = LB()
+        error = error + jp("error", js("Failed to list files"))
+        error = error + ","
+        error = error + jp("directory", js(dir))
+        error = error + RB()
+        return error
+
+    val output = result.stdout ?? ""
+    if output.trim() == "":
+        return "[]"
+
+    val file_paths = output.split("\n")
+    var files_json = "["
+    var first = true
+
+    for file_path in file_paths:
+        val trimmed = file_path.trim()
+        if trimmed != "":
+            if not first:
+                files_json = files_json + ","
+            first = false
+
+            var file_obj = LB()
+            file_obj = file_obj + jp("path", js(trimmed))
+            file_obj = file_obj + RB()
+            files_json = files_json + file_obj
+
+    files_json = files_json + "]"
+    files_json
+
+# --- Response makers ---
+
+fn make_tool_result(id: String, content: String) -> String:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(content)))
+    val result = jo1(jp("content", "[" + text_obj + "]"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_result_response(id: String, result: String) -> String:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_error_response(id: String, code: Int, message: String) -> String:
+    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
+
+# --- Flag checking ---
+
+fn has_flag(args: [String], flag: String) -> Bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    return false
+
+# --- Exports ---
+
+export LB, RB, Q
+export parse_int, min_int, unwrap_idx, unwrap_str
+export get_clean_args
+export jp, js, jo1, jo2, jo3
+export extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string
+export escape_json
+export read_file_safe, list_spl_files
+export make_tool_result, make_result_response, make_error_response
+export has_flag

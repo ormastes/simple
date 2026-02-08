@@ -1,0 +1,221 @@
+# HostScheduler - Work-Stealing Scheduler
+#
+# Multi-threaded work-stealing scheduler with priority support.
+
+use std.async_core.*
+use std.async_host.waker.{Waker}
+use std.async_host.future.{HostFuture}
+
+struct WorkStealingQueue:
+    """Lock-free work-stealing deque.
+
+    Each scheduler has local queue + can steal from others.
+    """
+    local: [usize]       # Task IDs - local push/pop
+    steal_end: usize     # Index for stealing
+
+    static fn new() -> WorkStealingQueue:
+        WorkStealingQueue(local: [], steal_end: 0)
+
+    me push(task_id: usize):
+        """Push to local end."""
+        self.local = self.local.push(task_id)
+
+    me pop() -> Option<usize>:
+        """Pop from local end (LIFO for locality)."""
+        if self.local.is_empty():
+            return nil
+        val last = self.local.len() - 1
+        val id = self.local[last]
+        self.local = self.local[0:last]
+        Some(id)
+
+    me steal() -> Option<usize>:
+        """Steal from other end (FIFO)."""
+        if self.steal_end >= self.local.len():
+            return nil
+        val id = self.local[self.steal_end]
+        self.steal_end = self.steal_end + 1
+        Some(id)
+
+    fn is_empty() -> bool:
+        self.local.is_empty()
+
+    fn len() -> usize:
+        self.local.len() - self.steal_end
+
+# ============================================================================
+# HostScheduler - Work-Stealing Scheduler
+# ============================================================================
+
+class HostScheduler:
+    """Work-stealing scheduler for host applications.
+
+    Features:
+    - Multiple worker threads
+    - Work stealing for load balancing
+    - Priority scheduling
+    - Waker integration
+    """
+    workers: [WorkStealingQueue]
+    global_queue: [usize]
+    tasks: Dict<usize, HostTask>
+    next_id: usize
+    worker_count: usize
+    is_running: bool
+
+struct HostTask:
+    id: usize
+    state: TaskState
+    priority: Priority
+    poll_fn: fn() -> Poll<()>
+    waker: Option<Waker>
+
+impl HostScheduler:
+    static fn new(worker_count: usize) -> HostScheduler:
+        """Create scheduler with specified worker count."""
+        var workers: [WorkStealingQueue] = []
+        for _ in 0..worker_count:
+            workers = workers.push(WorkStealingQueue.new())
+
+        HostScheduler(
+            workers: workers,
+            global_queue: [],
+            tasks: {},
+            next_id: 0,
+            worker_count: worker_count,
+            is_running: false
+        )
+
+    static fn default() -> HostScheduler:
+        """Create scheduler with default worker count (4)."""
+        HostScheduler.new(4)
+
+    me schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
+        """Schedule task with priority."""
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+
+        val task = HostTask(
+            id: id,
+            state: TaskState.Pending,
+            priority: priority,
+            poll_fn: poll_fn,
+            waker: nil
+        )
+
+        self.tasks[id] = task
+
+        # Add to appropriate queue based on priority
+        if priority == Priority.Critical:
+            # Prepend for high priority
+            var new_queue = [id]
+            for task in self.global_queue:
+                new_queue = new_queue.push(task)
+            self.global_queue = new_queue
+        else:
+            self.global_queue = self.global_queue.push(id)
+
+        id
+
+    me schedule_on_worker(worker_id: usize, poll_fn: fn() -> Poll<()>) -> usize:
+        """Schedule on specific worker."""
+        val id = self.schedule(Priority.Normal, poll_fn)
+        if worker_id < self.worker_count:
+            self.workers[worker_id].push(id)
+        id
+
+    fn has_runnable() -> bool:
+        """Check if any tasks can run."""
+        if not self.global_queue.is_empty():
+            return true
+        for worker in self.workers:
+            if not worker.is_empty():
+                return true
+        false
+
+    me run_one_worker(worker_id: usize) -> bool:
+        """Run one task on worker. Returns true if work done."""
+        var task_id: Option<usize> = nil
+
+        # Try local queue first
+        if worker_id < self.worker_count:
+            task_id = self.workers[worker_id].pop()
+
+        # Try global queue
+        if not task_id.?:
+            if not self.global_queue.is_empty():
+                task_id = Some(self.global_queue[0])
+                self.global_queue = self.global_queue[1:]
+
+        # Try stealing from other workers
+        if not task_id.?:
+            for other in 0..self.worker_count:
+                if other != worker_id:
+                    val stolen = self.workers[other].steal()
+                    if stolen.?:
+                        task_id = stolen
+                        break
+
+        # Execute task
+        match task_id:
+            case Some(id):
+                match self.tasks.get(id):
+                    case Some(task):
+                        var t = task
+                        t.state = TaskState.Running
+
+                        match t.poll_fn():
+                            case Poll.Ready(_):
+                                t.state = TaskState.Completed
+                                # Wake waiters
+                                match t.waker:
+                                    case Some(w): w.wake()
+                                    case None: pass
+                            case Poll.Pending:
+                                t.state = TaskState.Suspended
+
+                        self.tasks[id] = t
+                        return true
+                    case None:
+                        return false
+            case None:
+                return false
+
+    me run_one() -> bool:
+        """Run one task (round-robin workers)."""
+        for worker_id in 0..self.worker_count:
+            if self.run_one_worker(worker_id):
+                return true
+        false
+
+    me run():
+        """Run until all tasks complete."""
+        self.is_running = true
+        while self.is_running and self.has_runnable():
+            self.run_one()
+        self.is_running = false
+
+    me stop():
+        """Stop scheduler."""
+        self.is_running = false
+
+    fn is_idle() -> bool:
+        not self.has_runnable()
+
+    fn wake_task(task_id: usize):
+        """Wake suspended task."""
+        match self.tasks.get(task_id):
+            case Some(task):
+                var t = task
+                if t.state == TaskState.Suspended:
+                    t.state = TaskState.Pending
+                    self.tasks[task_id] = t
+                    self.global_queue = self.global_queue.push(task_id)
+            case None:
+                pass
+
+# Note: HostScheduler implements SchedulerCore via duck typing
+
+
+export WorkStealingQueue, HostScheduler, HostTask

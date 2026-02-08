@@ -1,10 +1,68 @@
 # Simple Language Version History
 
-## Current Version: 0.4.0
+## Current Version: 0.5.0
 
 ---
 
 ## Versions
+
+### 0.5.0 (2026-02-08)
+
+**Pure Simple Release** - 100% self-hosting with Rust source completely removed. Major grammar updates, cross-platform CI, and production-ready infrastructure.
+
+#### Key Achievements
+
+**100% Pure Simple Architecture**
+- Rust source code completely removed (24.2GB freed)
+- Pre-built runtime binary (33MB) — no Rust toolchain needed
+- 1,109+ Simple source files, 190,000+ lines
+- Pure Simple parser (2,144 lines, fully self-hosting)
+
+**Grammar Updates (3 Weeks)**
+- Parser support for `async`, `await`, `spawn`, `actor`, `#[]` attributes
+- `with` statement (context managers) — `enter()` + `cleanup()` protocol, LIFO cleanup
+- Set literals `s{1, 2, 3}` — full compiler pipeline (Parser → HIR → MIR → Codegen)
+- Async state machine generation and `Future<T>` type support in HIR
+- Async/await error diagnostics integrated into HIR pipeline
+- Desugaring pass integrated into compilation pipeline
+
+**Cross-Platform CI & Release**
+- All CI workflows rewritten for pure Simple (no Rust/cargo references)
+- Multi-platform bootstrap loader with auto-detection (`bin/simple`)
+- 7 platform packages: linux-x86_64, linux-aarch64, macos-x86_64, macos-arm64, windows-x86_64, windows-aarch64, freebsd-x86_64
+- FreeBSD support via Linuxulator (Linux binary compatibility)
+- `-c` flag uses temp file approach for full module resolution
+- Direct `.spl`/`.smf` file execution bypass
+
+**Test Suite**
+- 100% pass rate on all active tests
+- 3,606/4,379 broad lib tests passing (82%)
+- 458 spec files, 324 fully passing
+- Test suite repair infrastructure (bulk syntax fixes across 54+ files)
+- SDoctest system complete — documentation testing (669 files, 4,963 blocks)
+
+**Production Infrastructure**
+- Unified Database Library — production-ready (98/115 tests, 85.2%)
+- MCP Server — JSON-RPC 2.0 with pagination, structured output, roots
+- Stdlib SFFI — 5 phases complete (String, Collections, Math, System, Path)
+- Static method desugaring — `impl Type: static fn` → `Type__method()` rewriting
+- Script migration — 25/25 Python/Bash scripts migrated to Simple
+
+**Developer Experience**
+- Self-hosting build system (8 phases, 4,440 lines, 290+ tests)
+- SSpec BDD framework with skip/pending/mode-aware decorators
+- Import system analysis and documentation
+- File I/O protection (heredoc-based shell-safe writes)
+- Runtime fault detection stubs
+
+#### Statistics
+- Simple files: 1,109+
+- Simple lines: 190,000+
+- Tests: 3,606+ passing (broad suite)
+- Platforms: 7 (Linux, macOS, Windows, FreeBSD × x86_64/arm64)
+- Rust source: 0 lines (removed)
+
+---
 
 ### 0.4.0 (2026-02-02)
 
@@ -197,11 +255,14 @@ Initial release with core language features and tooling.
 
 ## Planned Versions
 
-### 0.5.0 (Planned)
+### 0.6.0 (Planned) - Deep Learning Edition
 
-- Improved error messages with suggestions
-- Enhanced standard library
-- Performance optimizations
+- Deep learning examples and library improvements
+- Fix `lib.pure.*` module resolution for interpreter
+- GPU acceleration via SFFI (PyTorch/CUDA backend)
+- Model serialization/deserialization
+- Training loop utilities
+- Comprehensive DL examples (XOR, regression, iris, MNIST)
 
 ### 1.0.0 (Planned)
 

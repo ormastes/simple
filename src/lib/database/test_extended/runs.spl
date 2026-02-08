@@ -1,0 +1,133 @@
+# Test Database Extended - Run Management
+#
+# Methods for managing test runs (start, complete, cleanup, prune)
+
+use lib.database.core.{SdnRow}
+use lib.database.test_extended.database.{TestDatabaseExtended}
+use lib.database.test_extended.stubs.{rt_timestamp_now, rt_getpid, hostname}
+
+# Extension methods for TestDatabaseExtended
+impl TestDatabaseExtended:
+    # Start new test run
+    me start_run() -> text:
+        val run_id = "run_{rt_timestamp_now()}"
+
+        var runs_table_opt = self.db.get_table_mut("test_runs")
+        if not runs_table_opt.?:
+            return run_id
+        var runs_table = runs_table_opt?
+        val row = SdnRow.empty()
+        row.set("run_id", run_id)
+        row.set("start_time", "{rt_timestamp_now()}")
+        row.set("end_time", "")
+        row.set("pid", "{rt_getpid()}")
+        row.set("hostname", hostname())
+        row.set("status", "running")
+        row.set("test_count", "0")
+        row.set("passed", "0")
+        row.set("failed", "0")
+        row.set("crashed", "0")
+        row.set("timed_out", "0")
+        row.set("valid", "true")
+
+        runs_table.add_row(row)
+        self.db.set_table("test_runs", runs_table)
+
+        run_id
+
+    # Complete test run
+    me complete_run(
+        run_id: text,
+        test_count: i64,
+        passed: i64,
+        failed: i64,
+        timed_out: i64
+    ):
+        var runs_table_opt = self.db.get_table_mut("test_runs")
+        if not runs_table_opt.?:
+            return
+        var runs_table = runs_table_opt?
+
+        for row in runs_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_run_id = row.get("run_id") ?? ""
+            if row_run_id != "" and row_run_id == run_id:
+                row.set("end_time", "{rt_timestamp_now()}")
+                row.set("status", "completed")
+                row.set("test_count", "{test_count}")
+                row.set("passed", "{passed}")
+                row.set("failed", "{failed}")
+                row.set("timed_out", "{timed_out}")
+                runs_table.update_row(run_id, row)
+                break
+
+        self.db.set_table("test_runs", runs_table)
+
+    # Cleanup stale runs (running > max_age_hours)
+    me cleanup_stale_runs(max_age_hours: i64) -> i64:
+        val now = rt_timestamp_now()
+        val max_age_micros = max_age_hours * 3600 * 1000000
+        var cleaned = 0
+
+        var runs_table_opt = self.db.get_table_mut("test_runs")
+        if not runs_table_opt.?:
+            return cleaned
+        var runs_table = runs_table_opt?
+        for row in runs_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val status = row.get("status") ?? ""
+            if status == "running":
+                val start_time = row.get("start_time") ?? "" .to_int_or(0)
+                val age = now - start_time
+                if age > max_age_micros:
+                    row.set("status", "crashed")
+                    row.set("end_time", "{now}")
+                    val run_id = row.get("run_id") ?? ""
+                    if run_id != "":
+                        runs_table.update_row(run_id, row)
+                        cleaned = cleaned + 1
+
+        self.db.set_table("test_runs", runs_table)
+        cleaned
+
+    # Prune old runs (keep only N most recent)
+    me prune_runs(keep_count: i64) -> i64:
+        val runs_table_opt = self.db.get_table("test_runs")
+        if not runs_table_opt.?:
+            return 0
+        val runs_table = runs_table_opt?
+        var all_runs: [(text, i64)] = []  # (run_id, start_time)
+
+        for row in runs_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val run_id = row.get("run_id") ?? ""
+            if run_id != "":
+                val start_time = row.get("start_time") ?? "" .to_int_or(0)
+                all_runs.push((run_id, start_time))
+
+        # Sort by start_time descending (most recent first) - bubble sort
+        var i = 0
+        while i < all_runs.len():
+            var j = i + 1
+            while j < all_runs.len():
+                if all_runs[i].1 < all_runs[j].1:
+                    val temp = all_runs[i]
+                    all_runs[i] = all_runs[j]
+                    all_runs[j] = temp
+                j = j + 1
+            i = i + 1
+
+        # Delete old runs
+        var deleted = 0
+        if all_runs.len() > keep_count:
+            var runs_table_mut_opt = self.db.get_table_mut("test_runs")
+            if runs_table_mut_opt.?:
+                var runs_table_mut = runs_table_mut_opt?
+                var i = keep_count
+                while i < all_runs.len():
+                    runs_table_mut.delete_row(all_runs[i].0)
+                    deleted = deleted + 1
+                    i = i + 1
+                self.db.set_table("test_runs", runs_table_mut)
+
+        deleted

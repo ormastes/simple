@@ -1,0 +1,75 @@
+# HostRuntime - Full-Featured Async Runtime
+#
+# Main runtime for host applications with work-stealing and structured concurrency.
+
+use std.async_core.*
+use std.async_host.scheduler.{HostScheduler}
+use std.async_host.handle.{HostTaskHandle}
+use std.async_host.joinset.{HostJoinSet}
+
+class HostRuntime:
+    """Complete async runtime for host applications.
+
+    Combines scheduler, I/O, and timers.
+
+    Example:
+        val runtime = HostRuntime.new()
+
+        val handle = runtime.run_task(async:
+            val data = await fetch(url)
+            process(data)
+        )
+
+        runtime.block_on(handle.join())
+    """
+    scheduler: HostScheduler
+    next_id: usize
+
+    static fn new() -> HostRuntime:
+        HostRuntime(
+            scheduler: HostScheduler.default(),
+            next_id: 0
+        )
+
+    static fn with_workers(count: usize) -> HostRuntime:
+        HostRuntime(
+            scheduler: HostScheduler.new(count),
+            next_id: 0
+        )
+
+    me run_task<T>(f: fn() -> T) -> HostTaskHandle<T>:
+        """Run task and return handle."""
+        val id = self.scheduler.schedule(Priority.Normal, \: Poll.Ready(()))
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+
+    me run_task_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
+        """Run with specific priority."""
+        val id = self.scheduler.schedule(priority, \: Poll.Ready(()))
+        HostTaskHandle(
+            task_id: id,
+            state: TaskState.Pending,
+            result: nil,
+            error: nil,
+            cancel_token: CancellationToken.new(),
+            wakers: []
+        )
+
+    me block_on<T>(future: HostFuture<T>) -> T:
+        """Block until future completes."""
+        while not future.is_ready():
+            self.scheduler.run_one()
+        future.poll().unwrap()
+
+    me run():
+        """Run all pending tasks."""
+        self.scheduler.run()
+
+
+export HostRuntime

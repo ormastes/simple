@@ -25,6 +25,7 @@ use compiler.const_eval.{eval_static_assert, ConstEvalError}
 use blocks.*
 use config.*
 use driver_types.*
+use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default}
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -478,6 +479,8 @@ class CompilerDriver:
         match format:
             case OutputFormat.Smf:
                 return self.compile_to_smf(output)
+            case OutputFormat.SelfContained:
+                return self.compile_to_self_contained(output)
             case OutputFormat.Both:
                 # Compile native first, then SMF
                 val native_result = self.compile_to_native(output)
@@ -520,8 +523,12 @@ class CompilerDriver:
             else:
                 return CompileResult.CodegenError("Backend produced no object code for {name}")
 
-        # Link object files into final executable
-        match self.link_objects(object_files, output):
+        # Link object files into final executable using linker wrapper
+        var link_config = NativeLinkConfig__default()
+        link_config.debug = self.ctx.options.debug_info
+        link_config.verbose = self.ctx.options.verbose
+
+        match link_to_native(object_files, output, link_config):
             case Ok(_):
                 log.info("Native executable written to {output} (backend: {effective_backend})")
                 CompileResult.Success(output)
@@ -534,6 +541,49 @@ class CompilerDriver:
         val is_release = self.ctx.options.release
         val effective_backend = get_effective_backend_name(backend_name, is_release)
         log.debug("AOT SMF: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+
+        val smf_bytes = smf_result.get_value()
+
+        # Write SMF file using linker wrapper
+        match link_to_smf(smf_bytes, output, self.ctx.options.verbose):
+            case Ok(_):
+                log.info("SMF module written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Failed to write SMF file: {e}")
+
+    me compile_to_self_contained(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT self-contained: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result.is_success():
+            return smf_result
+
+        val smf_bytes = smf_result.get_value()
+
+        # Build self-contained binary using linker wrapper
+        var sc_config = SelfContainedConfig__default()
+        sc_config.verbose = self.ctx.options.verbose
+
+        match link_to_self_contained(smf_bytes, output, sc_config):
+            case Ok(_):
+                log.info("Self-contained binary written to {output} (backend: {effective_backend})")
+                CompileResult.Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Self-contained build failed: {e}")
+
+    me collect_smf_bytes() -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
 
         var all_object_bytes: [u8] = []
 
@@ -552,40 +602,18 @@ class CompilerDriver:
         # Wrap object code into SMF format
         val target = Target.host()
         val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
-
-        # Write SMF file
-        if rt_file_write_bytes(output, smf_bytes):
-            log.info("SMF module written to {output} (backend: {effective_backend})")
-            CompileResult.Success(output)
-        else:
-            CompileResult.CodegenError("Failed to write SMF file: {output}")
+        CompileResult.Success(smf_bytes)
 
     # --------------------------------------------------------------------------
-    # Linker Helper
+    # Linker Helper (legacy - kept for compatibility, delegates to linker_wrapper)
     # --------------------------------------------------------------------------
 
     fn link_objects(objects: [text], output: text) -> Result<text, text>:
         if objects.is_empty():
             return Err("No object files to link")
 
-        # Find runtime library directory
-        val lib_dir = find_runtime_lib_dir()
-
-        # Build linker command with dynamic linking to runtime
-        var cmd = "cc"
-        for obj in objects:
-            cmd = cmd + " " + obj
-        cmd = cmd + " -L{lib_dir} -lsimple_compiler"
-        cmd = cmd + " -lc -lpthread -ldl -lm -lgcc_s"
-        cmd = cmd + " -Wl,-rpath,{lib_dir}"
-        cmd = cmd + " -o {output}"
-
-        # TODO: Replace direct FFI call with wrapper (shell) from app.io or compiler.ffi
-        val result = rt_shell(cmd)
-        if result.exit_code == 0:
-            Ok(output)
-        else:
-            Err(result.stderr ?? "Unknown linking error")
+        var config = NativeLinkConfig__default()
+        link_to_native(objects, output, config)
 
     # --------------------------------------------------------------------------
     # MIR Lowering
@@ -704,15 +732,12 @@ class CompilerDriver:
 
 fn find_runtime_lib_dir() -> text:
     # Check env var first
-    # TODO: Replace direct FFI call with wrapper (env_get) from app.io or compiler.ffi
     val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
     if env_path.? and env_path != "":
         return env_path
     # Default to rust/target/debug
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     if rt_file_exists("rust/target/debug/libsimple_compiler.so"):
         return "rust/target/debug"
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     if rt_file_exists("rust/target/release/libsimple_compiler.so"):
         return "rust/target/release"
     "rust/target/debug"
@@ -791,6 +816,10 @@ fn parse_sdn_file(path: text) -> CompileResult:
 # ------------------------------------------------------------------------------
 
 extern fn sys_get_args() -> [text]
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_shell(cmd: text) -> text
 
 # ============================================================================
 # Exports

@@ -1,0 +1,209 @@
+# Test Database Extended - Test Result Tracking
+#
+# Methods for tracking test results, counters, timing, and timing runs
+
+use lib.database.core.{SdnRow}
+use lib.database.stats.{stats_from_values, is_significant_change, update_baseline}
+use lib.database.test_extended.database.{TestDatabaseExtended}
+use lib.database.test_extended.stubs.{rt_timestamp_now}
+
+# Extension methods for TestDatabaseExtended
+impl TestDatabaseExtended:
+    # Main method: Update test result and statistics
+    me update_test_result(
+        file_path: text,
+        suite_name: text,
+        test_name: text,
+        status: text,
+        duration_ms: f64,
+        run_id: text
+    ):
+        # 1. Get or create hierarchy
+        val test_id = self.get_or_create_test(
+            self.get_or_create_suite(file_path, suite_name),
+            test_name
+        )
+
+        # 2. Update counter
+        self.update_counter(test_id, status)
+
+        # 3. Update timing
+        self.update_timing(test_id, duration_ms)
+
+        # 4. Add timing run
+        self.add_timing_run(test_id, duration_ms, run_id)
+
+    # Update counter for test
+    me update_counter(test_id: i64, status: text):
+        var counters_table_opt = self.db.get_table_mut("counters")
+        if not counters_table_opt.?:
+            return
+
+        var counters_table = counters_table_opt?
+
+        # Find existing counter
+        var found = false
+        var counter_row = SdnRow.empty()
+        for row in counters_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                counter_row = row
+                found = true
+                break
+
+        if not found:
+            # Create new counter
+            counter_row.set("test_id", "{test_id}")
+            counter_row.set("total_runs", "1")
+            counter_row.set("passed", if status == "passed": "1" else: "0")
+            counter_row.set("failed", if status == "failed": "1" else: "0")
+            counter_row.set("crashed", if status == "crashed": "1" else: "0")
+            counter_row.set("timed_out", if status == "timed_out": "1" else: "0")
+            counter_row.set("flaky_count", "0")
+            counter_row.set("consecutive_passes", if status == "passed": "1" else: "0")
+            counters_table.add_row(counter_row)
+        else:
+            # Update existing counter
+            val total = (counter_row.get_i64("total_runs") ?? 0) + 1
+            counter_row.set("total_runs", "{total}")
+
+            if status == "passed":
+                val passed = (counter_row.get_i64("passed") ?? 0) + 1
+                val consec = (counter_row.get_i64("consecutive_passes") ?? 0) + 1
+                counter_row.set("passed", "{passed}")
+                counter_row.set("consecutive_passes", "{consec}")
+            else:
+                counter_row.set("consecutive_passes", "0")
+
+                if status == "failed":
+                    val failed = (counter_row.get_i64("failed") ?? 0) + 1
+                    counter_row.set("failed", "{failed}")
+                elif status == "crashed":
+                    val crashed = (counter_row.get_i64("crashed") ?? 0) + 1
+                    counter_row.set("crashed", "{crashed}")
+                elif status == "timed_out":
+                    val timed = (counter_row.get_i64("timed_out") ?? 0) + 1
+                    counter_row.set("timed_out", "{timed}")
+
+            counters_table.update_row("{test_id}", counter_row)
+
+        self.db.set_table("counters", counters_table)
+
+    # Update timing statistics for test
+    me update_timing(test_id: i64, duration_ms: f64):
+        # Collect recent timing runs
+        val recent_runs = self.collect_timing_runs(test_id, 100)  # Last 100 runs
+
+        if recent_runs.len() == 0:
+            return
+
+        # Compute statistics
+        val stats = stats_from_values(recent_runs)
+
+        # Get or create timing record
+        var timing_table_opt = self.db.get_table_mut("timing")
+        if not timing_table_opt.?:
+            return
+        var timing_table = timing_table_opt?
+        var found = false
+        var timing_row = SdnRow.empty()
+
+        for row in timing_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                timing_row = row
+                found = true
+                break
+
+        # Update statistics
+        timing_row.set("test_id", "{test_id}")
+        timing_row.set("mean", "{stats.mean}")
+        timing_row.set("p50", "{stats.p50}")
+        timing_row.set("p90", "{stats.p90}")
+        timing_row.set("p95", "{stats.p95}")
+        timing_row.set("p99", "{stats.p99}")
+        timing_row.set("iqr", "{stats.iqr}")
+
+        # Store last 10 runs as JSON-like string
+        val last_10 = if recent_runs.len() > 10:
+            recent_runs[recent_runs.len() - 10:]
+        else:
+            recent_runs
+        val last_10_str = "[{last_10.join(",")}]"
+        timing_row.set("last_10_runs", last_10_str)
+
+        # Update baseline if significant change or no baseline
+        val has_baseline_opt = timing_row.get("has_baseline")
+        val has_baseline = has_baseline_opt.? and has_baseline_opt? == "true"
+        if not has_baseline:
+            timing_row.set("has_baseline", "true")
+            timing_row.set("baseline_p50", "{stats.p50}")
+            timing_row.set("baseline_updated_at", "{rt_timestamp_now()}")
+        else:
+            val baseline_str_opt = timing_row.get("baseline_p50")
+            if baseline_str_opt.?:
+                val baseline = baseline_str_opt?.to_float()
+                if is_significant_change(baseline, stats.p50, 20.0):  # 20% threshold
+                    val new_baseline = update_baseline(baseline, stats.p50, 0.3)
+                    timing_row.set("baseline_p50", "{new_baseline}")
+                    timing_row.set("baseline_updated_at", "{rt_timestamp_now()}")
+
+        if found:
+            timing_table.update_row("{test_id}", timing_row)
+        else:
+            timing_table.add_row(timing_row)
+
+        self.db.set_table("timing", timing_table)
+
+    # Add timing run record
+    me add_timing_run(test_id: i64, duration_ms: f64, run_id: text):
+        var timing_runs_table_opt = self.db.get_table_mut("timing_runs")
+        if not timing_runs_table_opt.?:
+            return
+        var timing_runs_table = timing_runs_table_opt?
+
+        val timing_run_id = self.next_timing_run_id
+        self.next_timing_run_id = self.next_timing_run_id + 1
+
+        val row = SdnRow.empty()
+        row.set("timing_run_id", "{timing_run_id}")
+        row.set("test_id", "{test_id}")
+        row.set("duration_ms", "{duration_ms}")
+        row.set("run_id", run_id)
+        row.set("timestamp", "{rt_timestamp_now()}")
+
+        timing_runs_table.add_row(row)
+        self.db.set_table("timing_runs", timing_runs_table)
+
+    # Collect timing runs for a test (most recent N)
+    fn collect_timing_runs(test_id: i64, max_count: i64) -> [f64]:
+        val timing_runs_table_opt = self.db.get_table("timing_runs")
+        if not timing_runs_table_opt.?:
+            return []
+        val timing_runs_table = timing_runs_table_opt?
+        var timings: [f64] = []
+
+        for row in timing_runs_table.rows:
+            # BUG-044: Use ?? instead of ? to avoid "try: early return"
+            val row_test_id = row.get_i64("test_id") ?? -1
+            if row_test_id != -1 and row_test_id == test_id:
+                val duration_str = row.get("duration_ms") ?? ""
+                if duration_str != "":
+                    val duration = duration_str.to_float()
+                    timings.push(duration)
+
+        # Return most recent max_count
+        if timings.len() > max_count:
+            timings[timings.len() - max_count:]
+        else:
+            timings
+
+    # Check if test is flaky
+    fn is_flaky_test(test_id: i64) -> bool:
+        val recent_runs = self.collect_timing_runs(test_id, 10)
+        if recent_runs.len() < 3:
+            return false  # Need at least 3 runs
+
+        is_flaky(recent_runs, 0.5)  # 50% CV threshold

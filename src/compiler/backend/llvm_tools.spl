@@ -1,0 +1,85 @@
+# LLVM Tools - Runtime-parser-compatible LLVM utility functions
+#
+# This module provides LLVM-related utility functions that work
+# in interpreter mode (no generics, no triple-quoted strings).
+# For the full LLVM backend, see llvm_backend.spl (compiled-only).
+
+use std.io_runtime.{ShellResult, shell, file_write, file_delete, file_read_bytes, getpid}
+
+fn llc_available() -> bool:
+    # Check if llc (LLVM static compiler) is available on PATH.
+    val result = shell("command -v llc >/dev/null 2>&1")
+    result.exit_code == 0
+
+fn compile_ir_to_object_simple(llvm_ir: text, triple: text, cpu: text, opt_flag: text):
+    # Compile LLVM IR text to object code bytes via llc CLI.
+    # Simplified version that takes strings directly (no generic types).
+    #
+    # Args:
+    #   llvm_ir: LLVM IR text
+    #   triple: Target triple string (e.g. "x86_64-unknown-linux-gnu")
+    #   cpu: CPU model string (e.g. "x86-64-v3")
+    #   opt_flag: Optimization flag (e.g. "-O2")
+    #
+    # Returns:
+    #   Ok([u8]) with object code bytes, or Err(text) with error message
+    val pid = getpid()
+    val ir_path = "/tmp/simple_llvm_{pid}.ll"
+    val obj_path = "/tmp/simple_llvm_{pid}.o"
+
+    # Write IR to temp file
+    if not file_write(ir_path, llvm_ir):
+        return Err("Failed to write LLVM IR to {ir_path}")
+
+    # Build llc command
+    val cmd = "llc --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+    val result = shell(cmd)
+
+    # Clean up IR file
+    file_delete(ir_path)
+
+    if result.exit_code != 0:
+        file_delete(obj_path)
+        return Err("llc failed (exit {result.exit_code}): {result.stdout}")
+
+    # Read object bytes
+    val bytes = file_read_bytes(obj_path)
+    file_delete(obj_path)
+
+    if bytes == nil:
+        return Err("Failed to read compiled object file: {obj_path}")
+
+    Ok(bytes)
+
+fn get_opt_flag(opt_level: text) -> text:
+    # Convert optimization level name to llc flag.
+    # Args:
+    #   opt_level: "none", "size", "speed", "aggressive", "debug"
+    # Returns: llc optimization flag string
+    if opt_level == "size":
+        return "-Oz"
+    if opt_level == "speed":
+        return "-O2"
+    if opt_level == "aggressive":
+        return "-O3"
+    return "-O0"
+
+fn get_host_triple() -> text:
+    # Get the host target triple.
+    # Uses llc to detect the host triple.
+    val result = shell("llc --version 2>&1")
+    if result.exit_code != 0:
+        return "x86_64-unknown-linux-gnu"
+
+    # Parse "Default target: x86_64-unknown-linux-gnu" from llc output
+    val lines = result.stdout.split("\n")
+    var i = 0
+    for i in 0..lines.len():
+        val line = lines[i].trim()
+        if line.starts_with("Default target:"):
+            val parts = line.split(":")
+            if parts.len() >= 2:
+                return parts[1].trim()
+    return "x86_64-unknown-linux-gnu"
+
+export llc_available, compile_ir_to_object_simple, get_opt_flag, get_host_triple

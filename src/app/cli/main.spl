@@ -10,7 +10,8 @@
 #   simple -c "code"    - Run code string
 
 use app.cli_util (get_cli_args)
-use app.io.mod (file_exists, file_write, dir_create, cwd, env_get, cli_file_exists, cli_read_file,
+use app.io.mod (file_exists, file_write, dir_create, cwd, env_get, shell, file_size_raw,
+    cli_file_exists, cli_read_file,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
     cli_run_migrate, cli_run_mcp, cli_run_diff, cli_constr, cli_run_query, cli_info,
@@ -49,6 +50,7 @@ fn print_help():
     print "  simple <file.smf>           Run compiled binary"
     print "  simple -c \"code\"            Run code string"
     print "  simple compile <src> [-o <out>] [options]  Compile source file"
+    print "  simple compile <src> --format=self-contained -o <out>  Self-contained binary"
     print "  simple watch <file.spl>     Watch and auto-recompile"
     print "  simple targets              List available target architectures"
     print "  simple linkers              List available native linkers"
@@ -343,8 +345,63 @@ fn handle_init(args: [str]) -> i64:
     print "Initialized Simple project '{name}'"
     return 0
 
+fn check_self_contained() -> bool:
+    # Check if this binary is a self-contained executable (runtime + SMF)
+    # by reading the last 32 bytes and looking for "SMFE" magic.
+    #
+    # Self-contained binary format:
+    #   [Runtime Binary] [SMF Data] [32-byte Trailer]
+    #   Trailer: "SMFE"(4) + smf_offset(8) + smf_size(8) + checksum(8) + version(4)
+    #
+    # If detected, extract and execute the embedded SMF data.
+
+    # Get own executable path
+    val exe_path_result = shell("readlink -f /proc/self/exe 2>/dev/null")
+    if exe_path_result.exit_code != 0:
+        return false
+
+    val exe_path = exe_path_result.stdout.replace("\n", "")
+    if exe_path == "":
+        return false
+
+    # Quick size check: must be > 32 bytes
+    val size = file_size_raw(exe_path)
+    if size < 33:
+        return false
+
+    # Read last 4 bytes to check magic "SMFE" (83 77 70 69)
+    val trailer_offset = size - 32
+    val magic_result = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count=4 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
+    if magic_result.exit_code != 0:
+        return false
+
+    val magic_hex = magic_result.stdout.replace("\n", "")
+    if magic_hex != "534d4645":
+        return false
+
+    # This is a self-contained binary - extract SMF offset and size from trailer
+    # Read full 32-byte trailer as hex
+    val trailer_result = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count=32 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
+    if trailer_result.exit_code != 0:
+        return false
+
+    # For now, delegate to the runtime's SMF loader by running:
+    #   bin/bootstrap/simple --run-embedded-smf <exe_path>
+    # TODO: When SMF loader is available in Simple, load and execute directly
+    print "[self-contained] Detected embedded SMF in {exe_path}"
+    print "[self-contained] Self-contained execution not yet fully implemented"
+    print "[self-contained] Use: simple run <file.smf> to run SMF modules"
+    true
+
 fn main() -> i64:
     val args = get_cli_args()
+
+    # Early check: is this a self-contained binary?
+    # Only check when no args are passed (self-contained binaries run directly)
+    # or when args don't start with a known subcommand
+    if args.len() == 0:
+        if check_self_contained():
+            return 0
 
     val flags = parse_global_flags(args)
     apply_fault_detection(flags)

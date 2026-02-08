@@ -1,0 +1,455 @@
+# Simple to C Code Generator
+#
+# Shared C code generation logic used by both native and LLVM direct compilation paths.
+# Translates Simple language subset to C code for bootstrapping.
+
+# Get indentation level (counts leading spaces/tabs)
+fn get_indent_level(line: text) -> i64:
+    var spaces = 0
+    for idx in range(0, line.len()):
+        val ch = line[idx]
+        if ch == " ":
+            spaces = spaces + 1
+        elif ch == "\t":
+            spaces = spaces + 4
+        else:
+            break
+    spaces / 4
+
+# Get C-style indentation (spaces only, no tab expansion)
+fn get_c_indent(line: text) -> i64:
+    var spaces = 0
+    for idx in range(0, line.len()):
+        val ch = line[idx]
+        if ch == " ":
+            spaces = spaces + 1
+        else:
+            break
+    spaces / 4
+
+# Convert Simple type to C type
+fn simple_type_to_c(stype: text) -> text:
+    if stype == "i64" or stype == "int":
+        return "long"
+    if stype == "i32":
+        return "int"
+    if stype == "f64" or stype == "float":
+        return "double"
+    if stype == "f32":
+        return "float"
+    if stype == "bool":
+        return "int"
+    if stype == "text" or stype == "str":
+        return "const char*"
+    "long"
+
+# Translate Simple parameter list to C
+fn translate_params(params_str: text) -> text:
+    val params = params_str.split(",")
+    var c_parts: [text] = []
+    for param in params:
+        val p = param.trim()
+        val colon_idx = p.index_of(":") ?? -1
+        if colon_idx >= 0:
+            val pname = p.substring(0, colon_idx).trim()
+            val ptype = p.substring(colon_idx + 1).trim()
+            val ctype = simple_type_to_c(ptype)
+            c_parts.push("{ctype} {pname}")
+        else:
+            c_parts.push("long {p}")
+    c_parts.join(", ")
+
+# Parse a Simple function signature into [name, c_signature_body, forward_decl]
+fn parse_fn_signature(trimmed: text) -> [text]:
+    val without_fn = trimmed.substring(3)  # remove "fn "
+    val colon_pos = without_fn.len() - 1  # trailing colon
+    val sig = without_fn.substring(0, colon_pos).trim()
+
+    # Find function name (up to first paren)
+    val paren_idx = sig.index_of("(") ?? -1
+    if paren_idx < 0:
+        return [sig, "long {sig}(void)", "long {sig}(void);"]
+
+    val name = sig.substring(0, paren_idx).trim()
+
+    # Find return type
+    val arrow_idx = sig.index_of("->") ?? -1
+    var ret_type = "long"
+    if arrow_idx >= 0:
+        val ret_str = sig.substring(arrow_idx + 2).trim()
+        ret_type = simple_type_to_c(ret_str)
+
+    # Parse parameters
+    val close_paren_idx = sig.index_of(")") ?? -1
+    var params_str = ""
+    if close_paren_idx > paren_idx + 1:
+        params_str = sig.substring(paren_idx + 1, close_paren_idx).trim()
+
+    var c_params = "void"
+    if params_str.len() > 0:
+        c_params = translate_params(params_str)
+
+    val c_sig = "{ret_type} {name}({c_params})"
+    [name, c_sig, "{c_sig};"]
+
+# Translate a Simple condition to C
+fn translate_condition(cond: text) -> text:
+    var result = cond
+    if result.contains(" and "):
+        result = result.replace(" and ", " && ")
+    if result.contains(" or "):
+        result = result.replace(" or ", " || ")
+    if result.starts_with("not "):
+        result = "!(" + result.substring(4) + ")"
+    result
+
+# Translate a Simple expression to C
+fn translate_expr(expr: text) -> text:
+    if expr == "true":
+        return "1"
+    if expr == "false":
+        return "0"
+    if expr.starts_with("\""):
+        return expr
+    if expr.ends_with(".len()"):
+        val base = expr.substring(0, expr.len() - 6)
+        return "{base}_len"
+    expr
+
+# Translate interpolated print statement
+fn translate_interpolated_print(inner: text) -> text:
+    var fmt = ""
+    var interp_args: [text] = []
+    var i = 0
+    var inner_len = inner.len()
+
+    for idx in range(0, inner_len):
+        val ch = inner[idx]
+        if ch == "{":
+            var end_idx = idx + 1
+            for j in range(idx + 1, inner_len):
+                if inner[j] == "}":
+                    end_idx = j
+                    break
+            val expr = inner.substring(idx + 1, end_idx)
+            fmt = fmt + "%ld"
+            interp_args.push(translate_expr(expr))
+            i = end_idx + 1
+        elif idx >= i:
+            fmt = fmt + ch
+
+    var args_str = ""
+    for current_arg in interp_args:
+        args_str = args_str + ", (long)" + current_arg
+    "printf(\"{fmt}\\n\"{args_str});"
+
+# Translate print statement
+fn translate_print(arg: text) -> text:
+    if arg.len() < 2:
+        return "puts(\"\");"
+    if arg.starts_with("\"") and arg.ends_with("\""):
+        val inner = arg.substring(1, arg.len() - 1)
+        if inner.contains("{"):
+            return translate_interpolated_print(inner)
+        return "puts(\"{inner}\");"
+    "printf(\"%s\\n\", {arg});"
+
+# Translate array declaration
+fn translate_array_decl(name: text, rhs: text) -> text:
+    val inner = rhs.substring(1, rhs.len() - 1).trim()
+    if inner == "":
+        return "long {name}[] = {{}}; long {name}_len = 0;"
+    val elements = inner.split(",")
+    var c_elems: [text] = []
+    for elem in elements:
+        c_elems.push(translate_expr(elem.trim()))
+    val arr_init = c_elems.join(", ")
+    val arr_len = c_elems.len()
+    "long {name}[] = {{{arr_init}}}; long {name}_len = {arr_len};"
+
+# Translate variable declaration
+fn translate_var_decl(stmt: text) -> text:
+    val eq_idx = stmt.index_of("=") ?? -1
+    if eq_idx < 0:
+        return "/* unsupported decl: {stmt} */"
+    val lhs = stmt.substring(4, eq_idx).trim()
+    val rhs = stmt.substring(eq_idx + 1).trim()
+    var name = lhs
+    val colon_idx = lhs.index_of(":") ?? -1
+    if colon_idx >= 0:
+        name = lhs.substring(0, colon_idx).trim()
+    if rhs.starts_with("\""):
+        return "const char* {name} = {rhs};"
+    if rhs == "true" or rhs == "false":
+        var c_val = "0"
+        if rhs == "true":
+            c_val = "1"
+        return "int {name} = {c_val};"
+    if rhs.starts_with("[") and rhs.ends_with("]"):
+        return translate_array_decl(name, rhs)
+    "long {name} = {rhs};"
+
+# Translate for loop
+fn translate_for_loop(trimmed: text) -> text:
+    val body = trimmed.substring(4, trimmed.len() - 1).trim()
+    val in_idx = body.index_of(" in ") ?? -1
+    if in_idx < 0:
+        return "/* unsupported for: {trimmed} */"
+    val loop_var = body.substring(0, in_idx).trim()
+    val iterable = body.substring(in_idx + 4).trim()
+    if iterable.starts_with("range(") and iterable.ends_with(")"):
+        val range_args = iterable.substring(6, iterable.len() - 1).trim()
+        val comma_idx = range_args.index_of(",") ?? -1
+        if comma_idx >= 0:
+            val start_expr = range_args.substring(0, comma_idx).trim()
+            val end_expr = range_args.substring(comma_idx + 1).trim()
+            return "for (long {loop_var} = {translate_expr(start_expr)}; {loop_var} < {translate_expr(end_expr)}; {loop_var}++) {"
+        else:
+            return "for (long {loop_var} = 0; {loop_var} < {translate_expr(range_args)}; {loop_var}++) {"
+    val dotdot_idx = iterable.index_of("..") ?? -1
+    if dotdot_idx >= 0:
+        val start_expr = iterable.substring(0, dotdot_idx).trim()
+        val end_expr = iterable.substring(dotdot_idx + 2).trim()
+        return "for (long {loop_var} = {translate_expr(start_expr)}; {loop_var} < {translate_expr(end_expr)}; {loop_var}++) {"
+    "for (long _idx_{loop_var} = 0; _idx_{loop_var} < {iterable}_len; _idx_{loop_var}++) {{ long {loop_var} = {iterable}[_idx_{loop_var}];"
+
+# Translate case statement
+fn translate_case(trimmed: text) -> text:
+    val case_body = trimmed.substring(5, trimmed.len() - 1).trim()
+    if case_body == "_":
+        return "/* default: */"
+    if case_body.starts_with("\""):
+        return "if (strcmp(_match_val, {case_body}) == 0) {"
+    "if (_match_val == {case_body}) {"
+
+# Translate Simple statement to C
+fn translate_statement(trimmed: text) -> text:
+    if trimmed.starts_with("print "):
+        val rest = trimmed.substring(6).trim()
+        return translate_print(rest)
+    if trimmed == "print":
+        return "puts(\"\");"
+    if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+        return translate_var_decl(trimmed)
+    if trimmed.starts_with("return "):
+        val expr = trimmed.substring(7).trim()
+        return "return {translate_expr(expr)};"
+    if trimmed == "return":
+        return "return;"
+    if trimmed.starts_with("if ") and trimmed.ends_with(":"):
+        val cond = trimmed.substring(3, trimmed.len() - 1).trim()
+        return "if ({translate_condition(cond)}) {"
+    if trimmed.starts_with("elif ") and trimmed.ends_with(":"):
+        val cond = trimmed.substring(5, trimmed.len() - 1).trim()
+        return "} else if ({translate_condition(cond)}) {"
+    if trimmed == "else:":
+        return "} else {"
+    if trimmed.starts_with("while ") and trimmed.ends_with(":"):
+        val cond = trimmed.substring(6, trimmed.len() - 1).trim()
+        return "while ({translate_condition(cond)}) {"
+    if trimmed.starts_with("for ") and trimmed.ends_with(":"):
+        return translate_for_loop(trimmed)
+    if trimmed.starts_with("match ") and trimmed.ends_with(":"):
+        val match_expr = trimmed.substring(6, trimmed.len() - 1).trim()
+        return "/* match {match_expr} */ {"
+    if trimmed.starts_with("case ") and trimmed.ends_with(":"):
+        return translate_case(trimmed)
+    if trimmed == "break":
+        return "break;"
+    if trimmed == "continue":
+        return "continue;"
+    # Compound assignment
+    val plus_eq = trimmed.index_of(" += ") ?? -1
+    if plus_eq >= 0:
+        val lhs = trimmed.substring(0, plus_eq).trim()
+        val rhs = trimmed.substring(plus_eq + 4).trim()
+        return "{lhs} += {translate_expr(rhs)};"
+    val minus_eq = trimmed.index_of(" -= ") ?? -1
+    if minus_eq >= 0:
+        val lhs = trimmed.substring(0, minus_eq).trim()
+        val rhs = trimmed.substring(minus_eq + 4).trim()
+        return "{lhs} -= {translate_expr(rhs)};"
+    val times_eq = trimmed.index_of(" *= ") ?? -1
+    if times_eq >= 0:
+        val lhs = trimmed.substring(0, times_eq).trim()
+        val rhs = trimmed.substring(times_eq + 4).trim()
+        return "{lhs} *= {translate_expr(rhs)};"
+    val div_eq = trimmed.index_of(" /= ") ?? -1
+    if div_eq >= 0:
+        val lhs = trimmed.substring(0, div_eq).trim()
+        val rhs = trimmed.substring(div_eq + 4).trim()
+        return "{lhs} /= {translate_expr(rhs)};"
+    # Variable assignment
+    val eq_idx = trimmed.index_of(" = ") ?? -1
+    if eq_idx >= 0:
+        val lhs = trimmed.substring(0, eq_idx).trim()
+        val rhs = trimmed.substring(eq_idx + 3).trim()
+        if not lhs.contains(" ") and not lhs.starts_with("("):
+            return "{lhs} = {translate_expr(rhs)};"
+    # Function call
+    val paren_pos = trimmed.index_of("(") ?? -1
+    if paren_pos >= 0 and trimmed.ends_with(")"):
+        return "{translate_expr(trimmed)};"
+    "/* unsupported: {trimmed} */"
+
+# Close unclosed braces by tracking indentation levels
+fn close_blocks(body_lines: [text]) -> [text]:
+    var result: [text] = []
+    var brace_indents: [i64] = []
+
+    for idx in range(0, body_lines.len()):
+        val line = body_lines[idx]
+        val trimmed = line.trim()
+        val current_indent = get_c_indent(line)
+
+        if trimmed.starts_with("} else"):
+            result.push(line)
+            continue
+
+        var close_count = 0
+        for bi in range(0, brace_indents.len()):
+            val stack_idx = brace_indents.len() - 1 - bi
+            if stack_idx < 0:
+                break
+            if current_indent <= brace_indents[stack_idx]:
+                close_count = close_count + 1
+            else:
+                break
+
+        for ci in range(0, close_count):
+            val pop_idx = brace_indents.len() - 1
+            val close_indent = brace_indents[pop_idx]
+            brace_indents.pop()
+            var close_padding = ""
+            for pi in range(0, close_indent):
+                close_padding = close_padding + "    "
+            result.push("{close_padding}}")
+
+        result.push(line)
+
+        if trimmed.ends_with("{"):
+            brace_indents.push(current_indent)
+
+    for ci in range(0, brace_indents.len()):
+        val pop_idx = brace_indents.len() - 1 - ci
+        val close_indent = brace_indents[pop_idx]
+        var close_padding = ""
+        for pi in range(0, close_indent):
+            close_padding = close_padding + "    "
+        result.push("{close_padding}}")
+
+    result
+
+# Build a C function definition
+fn build_function(name: text, sig: text, body_lines: [text]) -> text:
+    val closed_lines = close_blocks(body_lines)
+    var result = "{sig} {\n"
+    for body_line in closed_lines:
+        result = result + body_line + "\n"
+    result = result + "}"
+    result
+
+# Generate C code from Simple source
+fn generate_c_code(source_text: text) -> text:
+    val lines = source_text.split("\n")
+    var forward_decls: [text] = []
+    var func_defs: [text] = []
+    var main_body: [text] = []
+    var current_fn_name = ""
+    var current_fn_lines: [text] = []
+    var current_fn_sig = ""
+    var in_main = false
+    var in_func = false
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("#!"):
+            continue
+        if trimmed.starts_with("#"):
+            val comment_text = trimmed.substring(1).trim()
+            if in_main:
+                main_body.push("    // {comment_text}")
+            elif in_func:
+                current_fn_lines.push("    // {comment_text}")
+            continue
+
+        if trimmed.starts_with("fn ") and trimmed.ends_with(":"):
+            if in_func:
+                val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
+                func_defs.push(fn_code)
+                current_fn_lines = []
+            if trimmed == "fn main():" or trimmed.starts_with("fn main()"):
+                in_main = true
+                in_func = false
+                continue
+            val parsed = parse_fn_signature(trimmed)
+            current_fn_name = parsed[0]
+            current_fn_sig = parsed[1]
+            val fwd = parsed[2]
+            forward_decls.push(fwd)
+            in_func = true
+            in_main = false
+            continue
+
+        var is_indented = line.starts_with("    ")
+        if not is_indented:
+            is_indented = line.starts_with("\t")
+
+        if in_main and is_indented:
+            val indent = get_indent_level(line)
+            val code = translate_statement(trimmed)
+            if code != "":
+                var padding = ""
+                for pi in range(0, indent):
+                    padding = padding + "    "
+                main_body.push("{padding}{code}")
+            continue
+
+        if in_func and is_indented:
+            val indent = get_indent_level(line)
+            val code = translate_statement(trimmed)
+            if code != "":
+                var padding = ""
+                for pi in range(0, indent):
+                    padding = padding + "    "
+                current_fn_lines.push("{padding}{code}")
+            continue
+
+        if in_main:
+            in_main = false
+        if in_func:
+            val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
+            func_defs.push(fn_code)
+            current_fn_lines = []
+            in_func = false
+
+        val code = translate_statement(trimmed)
+        if code != "":
+            main_body.push("    {code}")
+
+    if in_func:
+        val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
+        func_defs.push(fn_code)
+
+    main_body = close_blocks(main_body)
+
+    var c_code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n"
+    for fwd in forward_decls:
+        c_code = c_code + fwd + "\n"
+    if forward_decls.len() > 0:
+        c_code = c_code + "\n"
+    for func in func_defs:
+        c_code = c_code + func + "\n\n"
+    c_code = c_code + "int main(void) {\n"
+    for body_line in main_body:
+        c_code = c_code + body_line + "\n"
+    c_code = c_code + "    return 0;\n}\n"
+    c_code
+
+export generate_c_code, close_blocks, translate_statement, translate_print
+export translate_interpolated_print, translate_var_decl, translate_array_decl
+export translate_for_loop, translate_case, translate_condition, translate_expr
+export build_function, parse_fn_signature, translate_params, simple_type_to_c
+export get_indent_level, get_c_indent
