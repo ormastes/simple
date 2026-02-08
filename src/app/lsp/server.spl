@@ -266,13 +266,8 @@ fn get_current_dir() -> String:
                         transport.write_notification("textDocument/publishDiagnostics", params)?
                         Ok(nil)
 
-    # Helper: Extract text document and document info from request params (no position)
-    fn extract_doc(id: Int, params: Dict, request_name: text) -> Result<(protocol.TextDocumentIdentifier, DocumentInfo), String>:
-        # Extract text document
-        val text_document_data = params.get("textDocument")?
-        val doc_id = protocol.TextDocumentIdentifier__from_json(text_document_data)?
-
-        # Get document from cache
+    # Helper: Get document from cache or write error
+    fn get_doc_or_error(id: Int, doc_id: protocol.TextDocumentIdentifier) -> Result<DocumentInfo, String>:
         match self.documents.get(doc_id.uri):
             case None:
                 transport.write_error(
@@ -282,7 +277,17 @@ fn get_current_dir() -> String:
                 )?
                 Err("Document not found")
             case Some(doc_info):
-                Ok((doc_id, doc_info))
+                Ok(doc_info)
+
+    # Helper: Extract text document and document info from request params (no position)
+    fn extract_doc(id: Int, params: Dict, request_name: text) -> Result<(protocol.TextDocumentIdentifier, DocumentInfo), String>:
+        # Extract text document
+        val text_document_data = params.get("textDocument")?
+        val doc_id = protocol.TextDocumentIdentifier__from_json(text_document_data)?
+
+        # Get document from cache
+        val doc_info = self.get_doc_or_error(id, doc_id)?
+        Ok((doc_id, doc_info))
 
     # Helper: Extract text document, position, and document info from request params
     fn extract_doc_and_position(id: Int, params: Dict, request_name: text) -> Result<(protocol.TextDocumentIdentifier, protocol.Position, DocumentInfo), String>:
@@ -294,16 +299,8 @@ fn get_current_dir() -> String:
         val position = protocol.Position__from_json(position_data)?
 
         # Get document from cache
-        match self.documents.get(doc_id.uri):
-            case None:
-                transport.write_error(
-                    id,
-                    protocol.ERROR_INVALID_PARAMS,
-                    "Document not found: {doc_id.uri}"
-                )?
-                Err("Document not found")
-            case Some(doc_info):
-                Ok((doc_id, position, doc_info))
+        val doc_info = self.get_doc_or_error(id, doc_id)?
+        Ok((doc_id, position, doc_info))
 
     # Handle textDocument/completion request
     fn handle_completion(id: Int, params: Option<Dict>) -> Result<Nil, String>:
