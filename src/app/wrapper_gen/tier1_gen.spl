@@ -1,0 +1,922 @@
+# Tier 1 Generator - Rust/C++ Wrapper Code
+#
+# Generates complete, compilable code for:
+#   - Cargo.toml (with features section)
+#   - build.rs (with include paths and search paths)
+#   - src/lib.rs (with cxx bridge + complete C ABI exports)
+#   - src/bridge.h (with wrapper structs + function declarations)
+#   - src/bridge.cpp (with #ifdef conditional implementations)
+
+use app.io.{file_write, dir_create, print}
+use app.wrapper_gen.spec_parser.{WrapperSpec, HandleTypeSpec, ParamSpec, FunctionSpec, MethodSpec}
+
+fn generate_tier1(spec: WrapperSpec, dry_run: bool):
+    """Generate Tier 1: Rust/C++ wrapper using cxx."""
+
+    val output_dir = ".build/rust/ffi_{spec.name}"
+
+    if not dry_run:
+        dir_create(output_dir)
+        dir_create("{output_dir}/src")
+
+    # Generate all Tier 1 files
+    generate_cargo_toml(spec, output_dir, dry_run)
+    generate_build_rs(spec, output_dir, dry_run)
+    generate_lib_rs(spec, output_dir, dry_run)
+    generate_bridge_h(spec, output_dir, dry_run)
+    generate_bridge_cpp(spec, output_dir, dry_run)
+
+    if dry_run:
+        print "--- Tier 1 (Rust/C++) would be generated to: {output_dir}/"
+    else:
+        print "Tier 1 generated: {output_dir}/"
+
+# ============================================================================
+# Helper: Check if type is a handle type
+# ============================================================================
+
+fn is_handle_type(type_name: text, spec: WrapperSpec) -> bool:
+    for handle in spec.handle_types:
+        if type_name == handle.name:
+            return true
+    false
+
+fn lib_upper(spec: WrapperSpec) -> text:
+    """Get uppercase library name for #ifdef macros."""
+    spec.name.upper()
+
+# ============================================================================
+# Cargo.toml Generation
+# ============================================================================
+
+fn generate_cargo_toml(spec: WrapperSpec, output_dir: text, dry_run: bool):
+    var content = ""
+    content = content + "[package]\n"
+    content = content + "name = \"simple-{spec.name}\"\n"
+    content = content + "version = \"{spec.version}\"\n"
+    content = content + "edition = \"2021\"\n"
+    content = content + "description = \"SFFI wrapper for {spec.name} (auto-generated)\"\n\n"
+
+    content = content + "[lib]\n"
+    content = content + "name = \"simple_{spec.name}\"\n"
+    content = content + "crate-type = [\"cdylib\", \"staticlib\"]\n\n"
+
+    content = content + "[dependencies]\n"
+    content = content + "cxx = \"1.0\"\n\n"
+
+    content = content + "[build-dependencies]\n"
+    content = content + "cxx-build = \"1.0\"\n\n"
+
+    content = content + "[features]\n"
+    content = content + "default = [\"stub\"]\n"
+    content = content + "stub = []\n"
+
+    if dry_run:
+        print "--- Cargo.toml ---"
+        print content
+    else:
+        file_write("{output_dir}/Cargo.toml", content)
+
+# ============================================================================
+# build.rs Generation
+# ============================================================================
+
+fn generate_build_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
+    val upper = lib_upper(spec)
+    var content = ""
+    content = content + "// Auto-generated build script for {spec.name}\n\n"
+    content = content + "fn main() {\n"
+    content = content + "    println!(\"cargo:rerun-if-changed=src/lib.rs\");\n"
+    content = content + "    println!(\"cargo:rerun-if-changed=src/bridge.cpp\");\n"
+    content = content + "    println!(\"cargo:rerun-if-changed=src/bridge.h\");\n\n"
+
+    content = content + "    let mut build = cxx_build::bridge(\"src/lib.rs\");\n"
+    content = content + "    build\n"
+    content = content + "        .file(\"src/bridge.cpp\")\n"
+    content = content + "        .flag_if_supported(\"-std=c++17\")\n"
+
+    # Add include paths
+    for inc_path in spec.include_paths:
+        content = content + "        .include(\"{inc_path}\")\n"
+
+    # Add conditional define
+    content = content + "        .define(\"HAS_{upper}\", None)\n"
+    content = content + "        .compile(\"simple-{spec.name}-bridge\");\n\n"
+
+    # Add library search paths
+    for search_path in spec.search_paths:
+        content = content + "    println!(\"cargo:rustc-link-search=native={search_path}\");\n"
+
+    # Add library linking
+    for lib in spec.link_libs:
+        content = content + "    println!(\"cargo:rustc-link-lib={lib}\");\n"
+
+    content = content + "}\n"
+
+    if dry_run:
+        print "--- build.rs ---"
+        print content
+    else:
+        file_write("{output_dir}/build.rs", content)
+
+# ============================================================================
+# lib.rs Generation (Rust with cxx bridge + complete C ABI exports)
+# ============================================================================
+
+fn generate_lib_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
+    var content = ""
+    content = content + "// Auto-generated Rust wrapper for {spec.name} using cxx\n\n"
+    content = content + "use cxx::UniquePtr;\n"
+    content = content + "use std::ffi::{CStr, CString};\n"
+    content = content + "use std::os::raw::c_char;\n\n"
+
+    # cxx bridge module
+    content = content + "#[cxx::bridge]\n"
+    content = content + "mod ffi {\n"
+    content = content + "    unsafe extern \"C++\" {\n"
+    content = content + "        include!(\"simple-{spec.name}/src/bridge.h\");\n\n"
+
+    # Opaque types
+    for handle in spec.handle_types:
+        content = content + "        type {handle.name};\n"
+    content = content + "\n"
+
+    # Functions as free functions in cxx bridge
+    for func in spec.functions:
+        content = content + gen_cxx_fn_decl(func, spec)
+    content = content + "\n"
+
+    # Methods as free functions in cxx bridge
+    for method in spec.methods:
+        content = content + gen_cxx_method_decl(method, spec)
+    content = content + "\n"
+
+    # Library info functions
+    content = content + "        // Library info\n"
+    content = content + "        fn {spec.name}_available() -> bool;\n"
+    content = content + "        fn {spec.name}_version() -> String;\n"
+
+    content = content + "    }\n"
+    content = content + "}\n\n"
+
+    # Opaque handle structs for C ABI
+    for handle in spec.handle_types:
+        content = content + "/// Opaque handle for Simple FFI\n"
+        content = content + "#[repr(C)]\n"
+        content = content + "pub struct Simple{handle.name} {\n"
+        content = content + "    inner: UniquePtr<ffi::{handle.name}>,\n"
+        content = content + "}\n\n"
+
+    # ---- Library info C ABI exports ----
+    content = content + "// ============================================================================\n"
+    content = content + "// Library Info\n"
+    content = content + "// ============================================================================\n\n"
+
+    content = content + "#[no_mangle]\n"
+    content = content + "pub extern \"C\" fn simple_{spec.name}_available() -> bool {\n"
+    content = content + "    ffi::{spec.name}_available()\n"
+    content = content + "}\n\n"
+
+    content = content + "#[no_mangle]\n"
+    content = content + "pub extern \"C\" fn simple_{spec.name}_version() -> *mut c_char {\n"
+    content = content + "    let version = ffi::{spec.name}_version();\n"
+    content = content + "    CString::new(version).unwrap_or_default().into_raw()\n"
+    content = content + "}\n\n"
+
+    # ---- Handle free functions ----
+    for handle in spec.handle_types:
+        val h_lower = handle.name.lower()
+        content = content + "#[no_mangle]\n"
+        content = content + "pub extern \"C\" fn simple_{spec.name}_{h_lower}_free(ptr: *mut Simple{handle.name}) {\n"
+        content = content + "    if !ptr.is_null() {\n"
+        content = content + "        unsafe {\n"
+        content = content + "            let _ = Box::from_raw(ptr);\n"
+        content = content + "        }\n"
+        content = content + "    }\n"
+        content = content + "}\n\n"
+
+    # ---- Function C ABI exports ----
+    content = content + "// ============================================================================\n"
+    content = content + "// Function Exports\n"
+    content = content + "// ============================================================================\n\n"
+
+    for func in spec.functions:
+        content = content + gen_c_export_fn(func, spec)
+
+    # ---- Method C ABI exports ----
+    content = content + "// ============================================================================\n"
+    content = content + "// Method Exports\n"
+    content = content + "// ============================================================================\n\n"
+
+    for method in spec.methods:
+        content = content + gen_c_export_method(method, spec)
+
+    if dry_run:
+        print "--- src/lib.rs ---"
+        print content
+    else:
+        file_write("{output_dir}/src/lib.rs", content)
+
+# ---- cxx bridge function declaration ----
+fn gen_cxx_fn_decl(func: FunctionSpec, spec: WrapperSpec) -> text:
+    var params = ""
+    for param in func.params:
+        if params != "":
+            params = params + ", "
+        val cxx_type = map_type_to_cxx(param.param_type, spec)
+        params = params + "{param.name}: {cxx_type}"
+
+    val ret = map_return_to_cxx(func.return_type, spec)
+    "        fn {spec.name}_{func.name}({params}) -> {ret};\n"
+
+# ---- cxx bridge method declaration (as free function) ----
+fn gen_cxx_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
+    val h_lower = method.handle.lower()
+    var params = "h: &{method.handle}"
+    for param in method.params:
+        val cxx_type = map_type_to_cxx(param.param_type, spec)
+        params = params + ", {param.name}: {cxx_type}"
+
+    val ret = map_return_to_cxx(method.return_type, spec)
+    "        fn {spec.name}_{h_lower}_{method.name}({params}) -> {ret};\n"
+
+# ---- C ABI export for function ----
+fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
+    var content = ""
+    content = content + "#[no_mangle]\n"
+    content = content + "pub extern \"C\" fn simple_{spec.name}_{func.name}(\n"
+
+    # Parameters
+    var param_idx = 0
+    for param in func.params:
+        val c_type = map_type_to_c_abi(param.param_type, spec)
+        content = content + "    {param.name}: {c_type},\n"
+        # Array types need a length param
+        if param.param_type == "[i64]" or param.param_type == "[f64]":
+            content = content + "    {param.name}_len: usize,\n"
+        param_idx = param_idx + 1
+
+    val ret_type = map_return_to_c_abi(func.return_type, spec)
+    content = content + ") -> {ret_type} {\n"
+
+    # Null safety checks
+    var has_null_check = false
+    for param in func.params:
+        if param.param_type == "[i64]" or param.param_type == "[f64]":
+            if not has_null_check:
+                content = content + "    // Null safety\n"
+                has_null_check = true
+            content = content + "    if {param.name}.is_null() || {param.name}_len == 0 {\n"
+            val default_ret = default_return_value(func.return_type, spec)
+            content = content + "        return {default_ret};\n"
+            content = content + "    }\n"
+        elif param.param_type == "text":
+            if not has_null_check:
+                content = content + "    // Null safety\n"
+                has_null_check = true
+            content = content + "    if {param.name}.is_null() {\n"
+            val default_ret = default_return_value(func.return_type, spec)
+            content = content + "        return {default_ret};\n"
+            content = content + "    }\n"
+        elif is_handle_type(param.param_type, spec):
+            if not has_null_check:
+                content = content + "    // Null safety\n"
+                has_null_check = true
+            content = content + "    if {param.name}.is_null() {\n"
+            val default_ret = default_return_value(func.return_type, spec)
+            content = content + "        return {default_ret};\n"
+            content = content + "    }\n"
+
+    if has_null_check:
+        content = content + "\n"
+
+    content = content + "    unsafe {\n"
+
+    # Convert parameters
+    var call_args = ""
+    for param in func.params:
+        if param.param_type == "[i64]":
+            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_slice"
+        elif param.param_type == "[f64]":
+            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_slice"
+        elif param.param_type == "text":
+            content = content + "        let {param.name}_str = CStr::from_ptr({param.name}).to_str().unwrap_or(\"\");\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_str"
+        elif is_handle_type(param.param_type, spec):
+            content = content + "        let {param.name}_ref = &*{param.name};\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "&{param.name}_ref.inner"
+        else:
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}"
+
+    # Call ffi function and return
+    if is_handle_type(func.return_type, spec):
+        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
+        content = content + "        Box::into_raw(Box::new(Simple{func.return_type} { inner: result }))\n"
+    elif func.return_type == "text":
+        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
+        content = content + "        CString::new(result).unwrap_or_default().into_raw()\n"
+    elif func.return_type == "[i64]":
+        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
+        content = content + "        // Caller must provide output buffer; returning length here\n"
+        content = content + "        result.len() as i64\n"
+    else:
+        content = content + "        ffi::{spec.name}_{func.name}({call_args})\n"
+
+    content = content + "    }\n"
+    content = content + "}\n\n"
+
+    content
+
+# ---- C ABI export for method ----
+fn gen_c_export_method(method: MethodSpec, spec: WrapperSpec) -> text:
+    val h_lower = method.handle.lower()
+    var content = ""
+    content = content + "#[no_mangle]\n"
+    content = content + "pub extern \"C\" fn simple_{spec.name}_{h_lower}_{method.name}(\n"
+    content = content + "    handle: *const Simple{method.handle},\n"
+
+    # Additional parameters
+    for param in method.params:
+        val c_type = map_type_to_c_abi(param.param_type, spec)
+        content = content + "    {param.name}: {c_type},\n"
+        if param.param_type == "[i64]" or param.param_type == "[f64]":
+            content = content + "    {param.name}_len: usize,\n"
+
+    # Return type - special case for [i64] methods that need output buffer
+    if method.return_type == "[i64]":
+        content = content + "    dims_out: *mut i64,\n"
+        content = content + "    max_dims: usize,\n"
+        content = content + ") -> i64 {\n"
+    else:
+        val ret_type = map_return_to_c_abi(method.return_type, spec)
+        content = content + ") -> {ret_type} {\n"
+
+    # Null safety on handle
+    content = content + "    if handle.is_null() {\n"
+    val default_ret = default_return_value(method.return_type, spec)
+    content = content + "        return {default_ret};\n"
+    content = content + "    }\n"
+
+    # Null checks on pointer params
+    for param in method.params:
+        if is_handle_type(param.param_type, spec):
+            content = content + "    if {param.name}.is_null() {\n"
+            content = content + "        return {default_ret};\n"
+            content = content + "    }\n"
+        elif param.param_type == "text":
+            content = content + "    if {param.name}.is_null() {\n"
+            content = content + "        return {default_ret};\n"
+            content = content + "    }\n"
+
+    content = content + "\n"
+    content = content + "    unsafe {\n"
+    content = content + "        let h = &*handle;\n"
+
+    # Convert additional params
+    var call_args = "&h.inner"
+    for param in method.params:
+        if param.param_type == "[i64]":
+            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            call_args = call_args + ", {param.name}_slice"
+        elif param.param_type == "[f64]":
+            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            call_args = call_args + ", {param.name}_slice"
+        elif param.param_type == "text":
+            content = content + "        let {param.name}_str = CStr::from_ptr({param.name}).to_str().unwrap_or(\"\");\n"
+            call_args = call_args + ", {param.name}_str"
+        elif is_handle_type(param.param_type, spec):
+            content = content + "        let {param.name}_ref = &*{param.name};\n"
+            call_args = call_args + ", &{param.name}_ref.inner"
+        else:
+            call_args = call_args + ", {param.name}"
+
+    # Call ffi method and return
+    if is_handle_type(method.return_type, spec):
+        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        Box::into_raw(Box::new(Simple{method.return_type} { inner: result }))\n"
+    elif method.return_type == "text":
+        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        CString::new(result).unwrap_or_default().into_raw()\n"
+    elif method.return_type == "[i64]":
+        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        let ndims = result.len().min(max_dims);\n"
+        content = content + "        for i in 0..ndims {\n"
+        content = content + "            *dims_out.add(i) = result[i];\n"
+        content = content + "        }\n"
+        content = content + "        result.len() as i64\n"
+    elif method.return_type == "[text]":
+        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        result.len() as i64\n"
+    else:
+        content = content + "        ffi::{spec.name}_{h_lower}_{method.name}({call_args})\n"
+
+    content = content + "    }\n"
+    content = content + "}\n\n"
+
+    content
+
+# ============================================================================
+# bridge.h Generation (C++ header)
+# ============================================================================
+
+fn generate_bridge_h(spec: WrapperSpec, output_dir: text, dry_run: bool):
+    val upper = lib_upper(spec)
+    var content = ""
+    content = content + "// Auto-generated C++ bridge header for {spec.name}\n"
+    content = content + "#pragma once\n\n"
+    content = content + "#include <memory>\n"
+    content = content + "#include <vector>\n"
+    content = content + "#include <string>\n"
+    content = content + "#include \"rust/cxx.h\"\n\n"
+
+    # Conditional library include
+    if spec.cpp_include != "":
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "#include <{spec.cpp_include}>\n"
+        content = content + "#else\n"
+        content = content + "// Stub declarations when library is not available\n"
+        content = content + "#endif\n\n"
+
+    # Wrapper structs for each handle type
+    for handle in spec.handle_types:
+        content = content + "// Opaque wrapper for {handle.cpp_type}\n"
+        content = content + "struct {handle.name} {\n"
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "    {handle.cpp_type} inner;\n"
+        content = content + "    {handle.name}({handle.cpp_type} t);\n"
+        content = content + "#else\n"
+        content = content + "    {handle.name}();\n"
+        content = content + "#endif\n"
+        content = content + "    ~{handle.name}();\n"
+        content = content + "};\n\n"
+
+    # Function declarations
+    content = content + "// ============================================================================\n"
+    content = content + "// Function Declarations\n"
+    content = content + "// ============================================================================\n\n"
+
+    for func in spec.functions:
+        content = content + gen_h_fn_decl(func, spec)
+
+    content = content + "\n"
+
+    # Method declarations (as free functions)
+    content = content + "// ============================================================================\n"
+    content = content + "// Method Declarations\n"
+    content = content + "// ============================================================================\n\n"
+
+    for method in spec.methods:
+        content = content + gen_h_method_decl(method, spec)
+
+    content = content + "\n"
+
+    # Library info declarations
+    content = content + "// ============================================================================\n"
+    content = content + "// Library Info\n"
+    content = content + "// ============================================================================\n\n"
+    content = content + "bool {spec.name}_available();\n"
+    content = content + "rust::String {spec.name}_version();\n"
+
+    if dry_run:
+        print "--- src/bridge.h ---"
+        print content
+    else:
+        file_write("{output_dir}/src/bridge.h", content)
+
+fn gen_h_fn_decl(func: FunctionSpec, spec: WrapperSpec) -> text:
+    var params = ""
+    for param in func.params:
+        if params != "":
+            params = params + ", "
+        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
+        params = params + "{cpp_type} {param.name}"
+
+    val ret = map_return_to_cpp(func.return_type, spec)
+    "{ret} {spec.name}_{func.name}({params});\n"
+
+fn gen_h_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
+    val h_lower = method.handle.lower()
+    var params = "const {method.handle}& h"
+    for param in method.params:
+        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
+        params = params + ", {cpp_type} {param.name}"
+
+    val ret = map_return_to_cpp(method.return_type, spec)
+    "{ret} {spec.name}_{h_lower}_{method.name}({params});\n"
+
+# ============================================================================
+# bridge.cpp Generation (C++ implementation)
+# ============================================================================
+
+fn generate_bridge_cpp(spec: WrapperSpec, output_dir: text, dry_run: bool):
+    val upper = lib_upper(spec)
+    var content = ""
+    content = content + "// Auto-generated C++ bridge implementation for {spec.name}\n\n"
+    content = content + "#include \"bridge.h\"\n\n"
+
+    # Conditional include
+    if spec.cpp_include != "":
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "#include <{spec.cpp_include}>\n"
+        content = content + "#else\n"
+        content = content + "// Stub types when library is not available\n"
+        # Generate minimal stub types based on handle types
+        for handle in spec.handle_types:
+            # Only generate stubs for complex types (not raw pointers)
+            if not handle.cpp_type.ends_with("*"):
+                val parts = handle.cpp_type.split("::")
+                if parts.len() >= 2:
+                    var ns = parts[0]
+                    var idx = 1
+                    while idx < parts.len() - 1:
+                        ns = ns + "::" + parts[idx]
+                        idx = idx + 1
+                    val cls = parts[parts.len() - 1]
+                    content = content + "namespace {ns} {\n"
+                    content = content + "    class {cls} {\n"
+                    content = content + "    public:\n"
+                    content = content + "        {cls}() {}\n"
+                    content = content + "    };\n"
+                    content = content + "}\n"
+        content = content + "#endif\n\n"
+
+    # Wrapper struct constructors/destructors
+    content = content + "// ============================================================================\n"
+    content = content + "// Wrapper Struct Implementations\n"
+    content = content + "// ============================================================================\n\n"
+
+    for handle in spec.handle_types:
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "{handle.name}::{handle.name}({handle.cpp_type} t) : inner(std::move(t)) {}\n"
+        content = content + "#else\n"
+        content = content + "{handle.name}::{handle.name}() {}\n"
+        content = content + "#endif\n"
+        content = content + "{handle.name}::~{handle.name}() = default;\n\n"
+
+    # Function implementations
+    content = content + "// ============================================================================\n"
+    content = content + "// Function Implementations\n"
+    content = content + "// ============================================================================\n\n"
+
+    for func in spec.functions:
+        content = content + gen_cpp_fn_impl(func, spec)
+
+    # Method implementations
+    content = content + "// ============================================================================\n"
+    content = content + "// Method Implementations\n"
+    content = content + "// ============================================================================\n\n"
+
+    for method in spec.methods:
+        content = content + gen_cpp_method_impl(method, spec)
+
+    # Library info implementations
+    content = content + "// ============================================================================\n"
+    content = content + "// Library Info\n"
+    content = content + "// ============================================================================\n\n"
+
+    content = content + "bool {spec.name}_available() {\n"
+    content = content + "#ifdef HAS_{upper}\n"
+    content = content + "    return true;\n"
+    content = content + "#else\n"
+    content = content + "    return false;\n"
+    content = content + "#endif\n"
+    content = content + "}\n\n"
+
+    content = content + "rust::String {spec.name}_version() {\n"
+    content = content + "#ifdef HAS_{upper}\n"
+    content = content + "    return rust::String(\"{spec.name} {spec.version} (cxx bridge)\");\n"
+    content = content + "#else\n"
+    content = content + "    return rust::String(\"{spec.name} stub (library not linked)\");\n"
+    content = content + "#endif\n"
+    content = content + "}\n"
+
+    if dry_run:
+        print "--- src/bridge.cpp ---"
+        print content
+    else:
+        file_write("{output_dir}/src/bridge.cpp", content)
+
+fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
+    val upper = lib_upper(spec)
+
+    # Build parameter list
+    var params = ""
+    for param in func.params:
+        if params != "":
+            params = params + ", "
+        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
+        params = params + "{cpp_type} {param.name}"
+
+    val ret = map_return_to_cpp(func.return_type, spec)
+    var content = ""
+    content = content + "{ret} {spec.name}_{func.name}({params}) {\n"
+    content = content + "#ifdef HAS_{upper}\n"
+
+    # Build argument conversions and call
+    var call_args = ""
+    for param in func.params:
+        if param.param_type == "[i64]":
+            content = content + "    std::vector<int64_t> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_vec"
+        elif param.param_type == "[f64]":
+            content = content + "    std::vector<double> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_vec"
+        elif param.param_type == "text":
+            content = content + "    std::string {param.name}_str({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_str"
+        elif is_handle_type(param.param_type, spec):
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}.inner"
+        else:
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}"
+
+    # Generate the call and return
+    if is_handle_type(func.return_type, spec):
+        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+        content = content + "    return std::make_unique<{func.return_type}>(result);\n"
+    elif func.return_type == "text":
+        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+        content = content + "    return rust::String(result);\n"
+    elif func.return_type == "[i64]":
+        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+        content = content + "    rust::Vec<int64_t> out;\n"
+        content = content + "    for (auto v : result) {\n"
+        content = content + "        out.push_back(v);\n"
+        content = content + "    }\n"
+        content = content + "    return out;\n"
+    elif func.return_type == "[text]":
+        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+        content = content + "    rust::Vec<rust::String> out;\n"
+        content = content + "    for (auto& v : result) {\n"
+        content = content + "        out.push_back(rust::String(v));\n"
+        content = content + "    }\n"
+        content = content + "    return out;\n"
+    else:
+        content = content + "    return {func.cpp_fn}({call_args});\n"
+
+    content = content + "#else\n"
+
+    # Stub return
+    val stub_ret = cpp_default_return(func.return_type, spec)
+    content = content + "    {stub_ret}\n"
+
+    content = content + "#endif\n"
+    content = content + "}\n\n"
+
+    content
+
+fn gen_cpp_method_impl(method: MethodSpec, spec: WrapperSpec) -> text:
+    val upper = lib_upper(spec)
+    val h_lower = method.handle.lower()
+
+    # Build parameter list
+    var params = "const {method.handle}& h"
+    for param in method.params:
+        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
+        params = params + ", {cpp_type} {param.name}"
+
+    val ret = map_return_to_cpp(method.return_type, spec)
+    var content = ""
+    content = content + "{ret} {spec.name}_{h_lower}_{method.name}({params}) {\n"
+    content = content + "#ifdef HAS_{upper}\n"
+
+    # Build call arguments (method call on handle's inner)
+    var call_args = ""
+    for param in method.params:
+        if param.param_type == "[i64]":
+            content = content + "    std::vector<int64_t> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_vec"
+        elif param.param_type == "[f64]":
+            content = content + "    std::vector<double> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_vec"
+        elif param.param_type == "text":
+            content = content + "    std::string {param.name}_str({param.name}.begin(), {param.name}.end());\n"
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}_str"
+        elif is_handle_type(param.param_type, spec):
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}.inner"
+        else:
+            if call_args != "":
+                call_args = call_args + ", "
+            call_args = call_args + "{param.name}"
+
+    # Generate the call and return (method call on inner)
+    if is_handle_type(method.return_type, spec):
+        content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
+        content = content + "    return std::make_unique<{method.return_type}>(result);\n"
+    elif method.return_type == "text":
+        content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
+        content = content + "    return rust::String(result);\n"
+    elif method.return_type == "[i64]":
+        content = content + "    auto sizes = h.inner.{method.cpp_method}({call_args});\n"
+        content = content + "    rust::Vec<int64_t> result;\n"
+        content = content + "    for (auto size : sizes) {\n"
+        content = content + "        result.push_back(size);\n"
+        content = content + "    }\n"
+        content = content + "    return result;\n"
+    elif method.return_type == "[text]":
+        content = content + "    auto items = h.inner.{method.cpp_method}({call_args});\n"
+        content = content + "    rust::Vec<rust::String> result;\n"
+        content = content + "    for (auto& item : items) {\n"
+        content = content + "        result.push_back(rust::String(item));\n"
+        content = content + "    }\n"
+        content = content + "    return result;\n"
+    else:
+        content = content + "    return h.inner.{method.cpp_method}({call_args});\n"
+
+    content = content + "#else\n"
+
+    # Stub return
+    val stub_ret = cpp_default_return(method.return_type, spec)
+    content = content + "    {stub_ret}\n"
+
+    content = content + "#endif\n"
+    content = content + "}\n\n"
+
+    content
+
+# ============================================================================
+# Type Mapping Helpers
+# ============================================================================
+
+# --- cxx bridge types (used in cxx::bridge mod) ---
+
+fn map_type_to_cxx(simple_type: text, spec: WrapperSpec) -> text:
+    if simple_type == "[i64]":
+        return "&[i64]"
+    elif simple_type == "[f64]":
+        return "&[f64]"
+    elif simple_type == "text":
+        return "&str"
+    elif simple_type == "i64":
+        return "i64"
+    elif simple_type == "f64":
+        return "f64"
+    elif simple_type == "bool":
+        return "bool"
+    elif is_handle_type(simple_type, spec):
+        return "&{simple_type}"
+    else:
+        return simple_type
+
+fn map_return_to_cxx(simple_type: text, spec: WrapperSpec) -> text:
+    if is_handle_type(simple_type, spec):
+        return "UniquePtr<{simple_type}>"
+    elif simple_type == "text":
+        return "String"
+    elif simple_type == "[i64]":
+        return "Vec<i64>"
+    elif simple_type == "[f64]":
+        return "Vec<f64>"
+    elif simple_type == "[text]":
+        return "Vec<String>"
+    elif simple_type == "i64":
+        return "i64"
+    elif simple_type == "f64":
+        return "f64"
+    elif simple_type == "bool":
+        return "bool"
+    else:
+        return simple_type
+
+# --- C ABI types (used in extern "C" exports) ---
+
+fn map_type_to_c_abi(simple_type: text, spec: WrapperSpec) -> text:
+    if simple_type == "[i64]":
+        return "*const i64"
+    elif simple_type == "[f64]":
+        return "*const f64"
+    elif simple_type == "text":
+        return "*const c_char"
+    elif simple_type == "i64":
+        return "i64"
+    elif simple_type == "f64":
+        return "f64"
+    elif simple_type == "bool":
+        return "bool"
+    elif is_handle_type(simple_type, spec):
+        return "*const Simple{simple_type}"
+    else:
+        return simple_type
+
+fn map_return_to_c_abi(simple_type: text, spec: WrapperSpec) -> text:
+    if simple_type == "text":
+        return "*mut c_char"
+    elif simple_type == "[i64]" or simple_type == "[f64]" or simple_type == "[text]":
+        return "i64"
+    elif simple_type == "i64":
+        return "i64"
+    elif simple_type == "f64":
+        return "f64"
+    elif simple_type == "bool":
+        return "bool"
+    elif is_handle_type(simple_type, spec):
+        return "*mut Simple{simple_type}"
+    else:
+        return simple_type
+
+fn default_return_value(simple_type: text, spec: WrapperSpec) -> text:
+    if is_handle_type(simple_type, spec):
+        return "std::ptr::null_mut()"
+    elif simple_type == "text":
+        return "std::ptr::null_mut()"
+    elif simple_type == "[i64]" or simple_type == "[f64]" or simple_type == "[text]":
+        return "0"
+    elif simple_type == "i64":
+        return "-1"
+    elif simple_type == "f64":
+        return "0.0"
+    elif simple_type == "bool":
+        return "false"
+    else:
+        return "std::ptr::null_mut()"
+
+# --- C++ types (used in bridge.h/.cpp) ---
+
+fn map_type_to_cpp_param(simple_type: text, spec: WrapperSpec) -> text:
+    if simple_type == "[i64]":
+        return "rust::Slice<const int64_t>"
+    elif simple_type == "[f64]":
+        return "rust::Slice<const double>"
+    elif simple_type == "text":
+        return "rust::Str"
+    elif simple_type == "i64":
+        return "int64_t"
+    elif simple_type == "f64":
+        return "double"
+    elif simple_type == "bool":
+        return "bool"
+    elif is_handle_type(simple_type, spec):
+        return "const {simple_type}&"
+    else:
+        return simple_type
+
+fn map_return_to_cpp(simple_type: text, spec: WrapperSpec) -> text:
+    if is_handle_type(simple_type, spec):
+        return "std::unique_ptr<{simple_type}>"
+    elif simple_type == "text":
+        return "rust::String"
+    elif simple_type == "[i64]":
+        return "rust::Vec<int64_t>"
+    elif simple_type == "[f64]":
+        return "rust::Vec<double>"
+    elif simple_type == "[text]":
+        return "rust::Vec<rust::String>"
+    elif simple_type == "i64":
+        return "int64_t"
+    elif simple_type == "f64":
+        return "double"
+    elif simple_type == "bool":
+        return "bool"
+    else:
+        return "std::unique_ptr<{simple_type}>"
+
+fn cpp_default_return(simple_type: text, spec: WrapperSpec) -> text:
+    if is_handle_type(simple_type, spec):
+        return "return std::make_unique<{simple_type}>();"
+    elif simple_type == "text":
+        return "return rust::String(\"\");"
+    elif simple_type == "[i64]":
+        return "return rust::Vec<int64_t>();"
+    elif simple_type == "[f64]":
+        return "return rust::Vec<double>();"
+    elif simple_type == "[text]":
+        return "return rust::Vec<rust::String>();"
+    elif simple_type == "i64":
+        return "return 0;"
+    elif simple_type == "f64":
+        return "return 0.0;"
+    elif simple_type == "bool":
+        return "return false;"
+    else:
+        return "return {};"
+
+export generate_tier1

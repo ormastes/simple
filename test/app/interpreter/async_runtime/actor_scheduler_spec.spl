@@ -3,20 +3,38 @@
 # Tests for reductions-based fair scheduling.
 
 # @skip
-use app.interpreter.async_runtime.actor_scheduler.{
 use std.spec.{check, check_msg}
+use app.interpreter.async_runtime.actor_scheduler.{
     ActorScheduler,
     SchedulerConfig,
     SchedulerStats,
     ActorContext,
     ActorPriority,
     ActorState,
-    RunQueue
+    RunQueue,
+    ActorScheduler__new,
+    SchedulerConfig__default,
+    SchedulerConfig__single_threaded,
+    SchedulerConfig__low_latency,
+    SchedulerConfig__high_throughput,
+    ActorPriority__from_i64,
+    ActorContext__with_defaults,
+    RunQueue__new,
+    SchedulerStats__new
 }
+
+# Constants (workaround for nested module export limitation)
+val DEFAULT_REDUCTIONS_PER_TIMESLICE: i64 = 2000
+val DEFAULT_MAX_RUN_QUEUE_LENGTH: i64 = 10000
+val DEFAULT_SCHEDULER_COUNT: i64 = 4
+
+# From actor_heap (needed by HeapConfig__default)
+val DEFAULT_HEAP_SIZE: i64 = 2048
+val DEFAULT_MAX_HEAP_SIZE: i64 = 16777216
 
 describe "SchedulerConfig":
     it "creates default config":
-        val config = SchedulerConfig.default()
+        val config = SchedulerConfig__default()
 
         check(config.reductions_per_timeslice == 2000)
         check(config.scheduler_count == 4)
@@ -24,18 +42,18 @@ describe "SchedulerConfig":
         check(config.priority_scheduling)
 
     it "creates single-threaded config":
-        val config = SchedulerConfig.single_threaded()
+        val config = SchedulerConfig__single_threaded()
 
         check(config.scheduler_count == 1)
         check(not config.work_stealing_enabled)
 
     it "creates low-latency config":
-        val config = SchedulerConfig.low_latency()
+        val config = SchedulerConfig__low_latency()
 
         check(config.reductions_per_timeslice == 500)
 
     it "creates high-throughput config":
-        val config = SchedulerConfig.high_throughput()
+        val config = SchedulerConfig__high_throughput()
 
         check(config.reductions_per_timeslice == 8000)
         check(not config.priority_scheduling)
@@ -48,10 +66,10 @@ describe "ActorPriority":
         check(ActorPriority.Low.to_i64() == 3)
 
     it "converts from i64":
-        check(ActorPriority.from_i64(0) == ActorPriority.Max)
-        check(ActorPriority.from_i64(1) == ActorPriority.High)
-        check(ActorPriority.from_i64(2) == ActorPriority.Normal)
-        check(ActorPriority.from_i64(99) == ActorPriority.Low)  # Default
+        check(ActorPriority__from_i64(0) == ActorPriority.Max)
+        check(ActorPriority__from_i64(1) == ActorPriority.High)
+        check(ActorPriority__from_i64(2) == ActorPriority.Normal)
+        check(ActorPriority__from_i64(99) == ActorPriority.Low)  # Default
 
     it "compares priorities":
         check(ActorPriority.Max.cmp(ActorPriority.High) < 0)
@@ -79,13 +97,13 @@ describe "ActorState":
 
 describe "RunQueue":
     it "creates empty queue":
-        val queue = RunQueue.new()
+        val queue = RunQueue__new()
 
         check(queue.is_empty())
         check(queue.len() == 0)
 
     it "enqueues by priority":
-        var queue = RunQueue.new()
+        var queue = RunQueue__new()
 
         queue.enqueue(1, ActorPriority.Normal)
         queue.enqueue(2, ActorPriority.High)
@@ -97,7 +115,7 @@ describe "RunQueue":
         check(queue.len_by_priority(ActorPriority.Low) == 1)
 
     it "dequeues by priority order":
-        var queue = RunQueue.new()
+        var queue = RunQueue__new()
 
         queue.enqueue(1, ActorPriority.Low)
         queue.enqueue(2, ActorPriority.Normal)
@@ -114,13 +132,13 @@ describe "RunQueue":
         check(third.unwrap() == 1)
 
     it "returns None when empty":
-        var queue = RunQueue.new()
+        var queue = RunQueue__new()
         val result = queue.dequeue()
 
         check(not result.?)
 
     it "removes specific actor":
-        var queue = RunQueue.new()
+        var queue = RunQueue__new()
 
         queue.enqueue(1, ActorPriority.Normal)
         queue.enqueue(2, ActorPriority.Normal)
@@ -132,7 +150,7 @@ describe "RunQueue":
 
 describe "ActorContext":
     it "creates with defaults":
-        val ctx = ActorContext.with_defaults(1, Some("test"), 2000)
+        val ctx = ActorContext__with_defaults(1, Some("test"), 2000)
 
         check(ctx.id == 1)
         check(ctx.name == Some("test"))
@@ -141,7 +159,7 @@ describe "ActorContext":
         check(ctx.reductions_left == 2000)
 
     it "consumes reductions":
-        var ctx = ActorContext.with_defaults(1, None, 2000)
+        var ctx = ActorContext__with_defaults(1, None, 2000)
 
         val exhausted1 = ctx.consume_reductions(500)
         check(not exhausted1)
@@ -152,7 +170,7 @@ describe "ActorContext":
         check(ctx.reductions_left < 0)
 
     it "resets reductions":
-        var ctx = ActorContext.with_defaults(1, None, 2000)
+        var ctx = ActorContext__with_defaults(1, None, 2000)
 
         ctx.consume_reductions(2000)
         ctx.reset_reductions(2000)
@@ -161,7 +179,7 @@ describe "ActorContext":
         check(ctx.timeslice_count == 1)
 
     it "transitions states":
-        var ctx = ActorContext.with_defaults(1, None, 2000)
+        var ctx = ActorContext__with_defaults(1, None, 2000)
 
         ctx.set_running()
         check(ctx.state == ActorState.Running)
@@ -179,7 +197,7 @@ describe "ActorContext":
         check(ctx.state == ActorState.Dead)
 
     it "manages links":
-        var ctx = ActorContext.with_defaults(1, None, 2000)
+        var ctx = ActorContext__with_defaults(1, None, 2000)
 
         ctx.link(2)
         ctx.link(3)
@@ -192,7 +210,7 @@ describe "ActorContext":
         check(ctx.links[0] == 3)
 
     it "manages monitors":
-        var ctx = ActorContext.with_defaults(1, None, 2000)
+        var ctx = ActorContext__with_defaults(1, None, 2000)
 
         ctx.monitor(5)
         ctx.add_monitored_by(10)
@@ -207,7 +225,7 @@ describe "ActorContext":
         check(ctx.monitored_by.len() == 0)
 
     it "formats for display":
-        val ctx = ActorContext.with_defaults(1, Some("worker"), 2000)
+        val ctx = ActorContext__with_defaults(1, Some("worker"), 2000)
         val str = ctx.fmt()
 
         check(str.contains("Actor"))
@@ -290,7 +308,7 @@ describe "ActorScheduler - Scheduling":
         check(stats.total_context_switches >= 2)
 
     it "runs until idle":
-        var scheduler = ActorScheduler.new(SchedulerConfig.single_threaded())
+        var scheduler = ActorScheduler__new(SchedulerConfig__single_threaded())
 
         # Spawn actors
         scheduler.spawn_actor(nil)
@@ -433,7 +451,7 @@ describe "ActorScheduler - Display":
         check(str.contains("ActorScheduler"))
 
     it "formats stats for display":
-        val stats = SchedulerStats.new()
+        val stats = SchedulerStats__new()
         val str = stats.fmt()
 
         check(str.contains("SchedulerStats"))

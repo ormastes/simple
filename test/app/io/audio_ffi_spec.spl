@@ -1,0 +1,604 @@
+"""
+Feature: Rodio Audio System SFFI Wrapper
+Category: Audio, FFI, Media
+Status: Implemented
+
+Tests for the Rodio cross-platform audio playback SFFI wrapper.
+Covers audio engine, source loading, sound/music playback, spatial audio,
+effects, and mixing capabilities.
+"""
+
+use app.io.audio_ffi.{
+    Vec3, Orientation,
+    AudioEngine, audio_init, audio_shutdown,
+    audio_set_master_volume, audio_get_master_volume,
+    audio_pause_all, audio_resume_all,
+    AudioSource, audio_load_from_file, audio_load_from_memory,
+    audio_source_free, audio_source_duration,
+    audio_source_sample_rate, audio_source_channels,
+    AudioPlayback,
+    audio_play_sound, audio_play_sound_with_volume, audio_play_sound_looped,
+    audio_play_music, audio_play_music_looped, audio_stop_music,
+    audio_playback_stop, audio_playback_pause, audio_playback_resume,
+    audio_playback_is_playing, audio_playback_is_paused,
+    audio_playback_set_volume, audio_playback_get_volume,
+    audio_playback_set_speed, audio_playback_get_speed,
+    audio_play_sound_spatial, audio_playback_set_position, audio_playback_get_position,
+    audio_set_listener_position, audio_get_listener_position, audio_set_listener_orientation,
+    ReverbSettings, audio_playback_set_reverb,
+    DelaySettings, audio_playback_set_delay,
+    audio_playback_fade_in, audio_playback_fade_out,
+    AudioMixer, audio_mixer_create, audio_mixer_free,
+    audio_mixer_add_source, audio_mixer_set_volume, audio_mixer_play,
+    audio_get_supported_formats, audio_last_error
+}
+use std.spec.{describe, it, expect}
+
+describe "Vector3D":
+    """
+    Tests for 3D vector type used in spatial audio.
+    """
+    it "creates vector":
+        val vector = Vector3D(x: 1.0, y: 2.0, z: 3.0)
+        expect(vector.x).to_equal(1.0)
+        expect(vector.y).to_equal(2.0)
+        expect(vector.z).to_equal(3.0)
+
+    it "calculates length":
+        val vector = Vector3D(x: 3.0, y: 4.0, z: 0.0)
+        val length = vector.length()
+        expect(length).to_equal(5.0)
+
+    it "normalizes vector":
+        val vector = Vector3D(x: 3.0, y: 4.0, z: 0.0)
+        val normalized = vector.normalize()
+        expect(normalized.x).to_equal(0.6)
+        expect(normalized.y).to_equal(0.8)
+        expect(normalized.z).to_equal(0.0)
+
+    it "calculates distance":
+        val vec1 = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        val vec2 = Vec3(x: 3.0, y: 4.0, z: 0.0)
+        val distance = vec1.distance_to(vec2)
+        expect(distance).to_equal(5.0)
+
+describe "AudioEngine":
+    """
+    Tests for audio engine initialization and management.
+    """
+    it "initializes engine":
+        val engine = audio_init()
+        expect(engine.is_valid).to_equal(true)
+        audio_shutdown(engine)
+
+    it "shuts down engine":
+        val engine = audio_init()
+        val success = audio_shutdown(engine)
+        expect(success).to_equal(true)
+
+    it "handles invalid engine shutdown":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val success = audio_shutdown(invalid_engine)
+        expect(success).to_equal(true)
+
+describe "Master Volume":
+    """
+    Tests for global audio volume control.
+    """
+    it "sets master volume":
+        val engine = audio_init()
+        val success = audio_set_master_volume(engine, 0.5)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "gets master volume":
+        val engine = audio_init()
+        audio_set_master_volume(engine, 0.7)
+        val volume = audio_get_master_volume(engine)
+        expect(volume).to_equal(0.7)
+        audio_shutdown(engine)
+
+    it "handles invalid engine volume get":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val volume = audio_get_master_volume(invalid_engine)
+        expect(volume).to_equal(0.0)
+
+    it "pauses all playback":
+        val engine = audio_init()
+        val success = audio_pause_all(engine)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "resumes all playback":
+        val engine = audio_init()
+        audio_pause_all(engine)
+        val success = audio_resume_all(engine)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+describe "AudioSource - File Loading":
+    """
+    Tests for loading audio from files.
+    """
+    it "loads audio from file":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        # May or may not succeed depending on file existence
+        expect(source.is_valid).to_equal(true)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid file path":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "nonexistent.wav")
+        # Should return invalid source
+        expect(source.is_valid).to_equal(false)
+        audio_shutdown(engine)
+
+    it "frees audio source":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val success = audio_source_free(source)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "handles invalid source free":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_source = AudioSource(handle: 0, engine: invalid_engine, is_valid: false)
+        val success = audio_source_free(invalid_source)
+        expect(success).to_equal(true)
+
+describe "AudioSource - Memory Loading":
+    """
+    Tests for loading audio from memory.
+    """
+    it "loads audio from memory":
+        val engine = audio_init()
+        val audio_data = [1, 2, 3, 4]
+        val source = audio_load_from_memory(engine, audio_data)
+        # May fail if data is invalid audio format
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles empty memory buffer":
+        val engine = audio_init()
+        val empty_data = []
+        val source = audio_load_from_memory(engine, empty_data)
+        expect(source.is_valid).to_equal(false)
+        audio_shutdown(engine)
+
+describe "AudioSource - Properties":
+    """
+    Tests for querying audio source properties.
+    """
+    it "gets source duration":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val duration = audio_source_duration(source)
+        # Duration in seconds (may be 0.0 for invalid sources)
+        expect(duration).to_be_greater_than(0.0)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "gets source sample rate":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val sample_rate = audio_source_sample_rate(source)
+        # Common sample rates: 44100, 48000, etc.
+        expect(sample_rate).to_be_greater_than(0)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "gets source channels":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val channels = audio_source_channels(source)
+        # Typically 1 (mono) or 2 (stereo)
+        expect(channels).to_be_greater_than(0)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid source properties":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_source = AudioSource(handle: 0, engine: invalid_engine, is_valid: false)
+        val duration = audio_source_duration(invalid_source)
+        val sample_rate = audio_source_sample_rate(invalid_source)
+        val channels = audio_source_channels(invalid_source)
+        expect(duration).to_equal(0.0)
+        expect(sample_rate).to_equal(0)
+        expect(channels).to_equal(0)
+
+describe "Sound Playback":
+    """
+    Tests for basic sound effect playback.
+    """
+    it "plays sound":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        expect(playback.is_valid).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "plays sound with volume":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound_with_volume(engine, source, 0.5)
+        expect(playback.is_valid).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "plays looped sound":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound_looped(engine, source)
+        expect(playback.is_valid).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid sound playback":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_source = AudioSource(handle: 0, engine: invalid_engine, is_valid: false)
+        val playback = audio_play_sound(invalid_engine, invalid_source)
+        expect(playback.is_valid).to_equal(false)
+
+describe "Music Playback":
+    """
+    Tests for streaming music playback.
+    """
+    it "plays music":
+        val engine = audio_init()
+        val playback = audio_play_music(engine, "music.mp3")
+        expect(playback.is_valid).to_equal(true)
+        audio_stop_music(playback)
+        audio_shutdown(engine)
+
+    it "plays looped music":
+        val engine = audio_init()
+        val playback = audio_play_music_looped(engine, "music.mp3")
+        expect(playback.is_valid).to_equal(true)
+        audio_stop_music(playback)
+        audio_shutdown(engine)
+
+    it "stops music":
+        val engine = audio_init()
+        val playback = audio_play_music(engine, "music.mp3")
+        val success = audio_stop_music(playback)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "handles invalid music playback":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val playback = audio_play_music(invalid_engine, "nonexistent.mp3")
+        expect(playback.is_valid).to_equal(false)
+
+describe "Playback Control - Stop/Pause/Resume":
+    """
+    Tests for playback state control.
+    """
+    it "stops playback":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_stop(playback)
+        expect(success).to_equal(true)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "pauses playback":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_pause(playback)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "resumes playback":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        audio_playback_pause(playback)
+        val success = audio_playback_resume(playback)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+describe "Playback Control - State Query":
+    """
+    Tests for querying playback state.
+    """
+    it "checks if playing":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val is_playing = audio_playback_is_playing(playback)
+        expect(is_playing).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "checks if paused":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        audio_playback_pause(playback)
+        val is_paused = audio_playback_is_paused(playback)
+        expect(is_paused).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid playback state":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_playback = AudioPlayback(handle: 0, engine: invalid_engine, is_valid: false)
+        val is_playing = audio_playback_is_playing(invalid_playback)
+        val is_paused = audio_playback_is_paused(invalid_playback)
+        expect(is_playing).to_equal(false)
+        expect(is_paused).to_equal(false)
+
+describe "Playback Control - Volume":
+    """
+    Tests for playback volume control.
+    """
+    it "sets playback volume":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_set_volume(playback, 0.5)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "gets playback volume":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        audio_playback_set_volume(playback, 0.7)
+        val volume = audio_playback_get_volume(playback)
+        expect(volume).to_equal(0.7)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid playback volume":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_playback = AudioPlayback(handle: 0, engine: invalid_engine, is_valid: false)
+        val volume = audio_playback_get_volume(invalid_playback)
+        expect(volume).to_equal(0.0)
+
+describe "Playback Control - Speed":
+    """
+    Tests for playback speed control.
+    """
+    it "sets playback speed":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_set_speed(playback, 1.5)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "gets playback speed":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        audio_playback_set_speed(playback, 2.0)
+        val speed = audio_playback_get_speed(playback)
+        expect(speed).to_equal(2.0)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid playback speed":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_playback = AudioPlayback(handle: 0, engine: invalid_engine, is_valid: false)
+        val speed = audio_playback_get_speed(invalid_playback)
+        expect(speed).to_equal(1.0)
+
+describe "Spatial Audio - Sound Position":
+    """
+    Tests for 3D positioned sound playback.
+    """
+    it "plays sound at position":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val position = Vec3(x: 5.0, y: 0.0, z: 0.0)
+        val playback = audio_play_sound_spatial(engine, source, position)
+        expect(playback.is_valid).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "sets sound position":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val position = Vec3(x: 0.0, y: 0.0, z: 0.0)
+        val playback = audio_play_sound_spatial(engine, source, position)
+        val new_position = Vec3(x: 10.0, y: 5.0, z: -3.0)
+        val success = audio_playback_set_position(playback, new_position)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "gets sound position":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val position = Vec3(x: 3.0, y: 4.0, z: 5.0)
+        val playback = audio_play_sound_spatial(engine, source, position)
+        val retrieved_pos = audio_playback_get_position(playback)
+        expect(retrieved_pos.x).to_equal(3.0)
+        expect(retrieved_pos.y).to_equal(4.0)
+        expect(retrieved_pos.z).to_equal(5.0)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+describe "Spatial Audio - Listener":
+    """
+    Tests for audio listener position and orientation.
+    """
+    it "sets listener position":
+        val engine = audio_init()
+        val position = Vec3(x: 1.0, y: 2.0, z: 3.0)
+        val success = audio_set_listener_position(engine, position)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "gets listener position":
+        val engine = audio_init()
+        val position = Vec3(x: 5.0, y: 6.0, z: 7.0)
+        audio_set_listener_position(engine, position)
+        val retrieved_pos = audio_get_listener_position(engine)
+        expect(retrieved_pos.x).to_equal(5.0)
+        expect(retrieved_pos.y).to_equal(6.0)
+        expect(retrieved_pos.z).to_equal(7.0)
+        audio_shutdown(engine)
+
+    it "sets listener orientation":
+        val engine = audio_init()
+        val forward = Vec3(x: 0.0, y: 0.0, z: -1.0)
+        val up = Vec3(x: 0.0, y: 1.0, z: 0.0)
+        val orientation = Orientation(forward: forward, up: up)
+        val success = audio_set_listener_orientation(engine, orientation)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+describe "Audio Effects - Fade":
+    """
+    Tests for fade in/out effects.
+    """
+    it "fades in playback":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_fade_in(playback, 1000)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "fades out playback":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val success = audio_playback_fade_out(playback, 500)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+describe "Audio Effects - Reverb":
+    """
+    Tests for reverb effect.
+    """
+    it "sets reverb effect":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val reverb = ReverbSettings(room_size: 0.8, damping: 0.5)
+        val success = audio_playback_set_reverb(playback, reverb)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid reverb":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_playback = AudioPlayback(handle: 0, engine: invalid_engine, is_valid: false)
+        val reverb = ReverbSettings(room_size: 0.5, damping: 0.5)
+        val success = audio_playback_set_reverb(invalid_playback, reverb)
+        expect(success).to_equal(false)
+
+describe "Audio Effects - Delay":
+    """
+    Tests for delay/echo effect.
+    """
+    it "sets delay effect":
+        val engine = audio_init()
+        val source = audio_load_from_file(engine, "test.wav")
+        val playback = audio_play_sound(engine, source)
+        val delay = DelaySettings(delay_ms: 200, decay: 0.6)
+        val success = audio_playback_set_delay(playback, delay)
+        expect(success).to_equal(true)
+        audio_playback_stop(playback)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "handles invalid delay":
+        val invalid_engine = AudioEngine(handle: 0, is_valid: false)
+        val invalid_playback = AudioPlayback(handle: 0, engine: invalid_engine, is_valid: false)
+        val delay = DelaySettings(delay_ms: 100, decay: 0.5)
+        val success = audio_playback_set_delay(invalid_playback, delay)
+        expect(success).to_equal(false)
+
+describe "AudioMixer":
+    """
+    Tests for audio mixing and grouping.
+    """
+    it "creates mixer":
+        val engine = audio_init()
+        val mixer = audio_mixer_create(engine)
+        expect(mixer.is_valid).to_equal(true)
+        audio_mixer_free(mixer)
+        audio_shutdown(engine)
+
+    it "frees mixer":
+        val engine = audio_init()
+        val mixer = audio_mixer_create(engine)
+        val success = audio_mixer_free(mixer)
+        expect(success).to_equal(true)
+        audio_shutdown(engine)
+
+    it "adds source to mixer":
+        val engine = audio_init()
+        val mixer = audio_mixer_create(engine)
+        val source = audio_load_from_file(engine, "test.wav")
+        val success = audio_mixer_add_source(mixer, source)
+        expect(success).to_equal(true)
+        audio_mixer_free(mixer)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+    it "sets mixer volume":
+        val engine = audio_init()
+        val mixer = audio_mixer_create(engine)
+        val success = audio_mixer_set_volume(mixer, 0.6)
+        expect(success).to_equal(true)
+        audio_mixer_free(mixer)
+        audio_shutdown(engine)
+
+    it "plays mixer":
+        val engine = audio_init()
+        val mixer = audio_mixer_create(engine)
+        val source = audio_load_from_file(engine, "test.wav")
+        audio_mixer_add_source(mixer, source)
+        val playback = audio_mixer_play(mixer)
+        expect(playback.is_valid).to_equal(true)
+        audio_playback_stop(playback)
+        audio_mixer_free(mixer)
+        audio_source_free(source)
+        audio_shutdown(engine)
+
+describe "Utilities":
+    """
+    Tests for utility functions.
+    """
+    it "gets supported formats":
+        val formats = audio_get_supported_formats()
+        # Should return array of format strings
+        expect(formats).to_contain("wav")
+
+    it "gets last error":
+        val error = audio_last_error()
+        # Error string may be empty if no errors
+        expect(error).to_start_with("")

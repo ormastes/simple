@@ -104,7 +104,7 @@ for platform in "${!PLATFORMS[@]}"; do
         ext=""
     fi
 
-    source_bin="$PROJECT_ROOT/target/$target/release/simple_runtime$ext"
+    source_bin="$PROJECT_ROOT/target/$target/release/simple$ext"
     dest_bin="$PROJECT_ROOT/bin/bootstrap/$platform/simple$ext"
 
     if [ -f "$source_bin" ]; then

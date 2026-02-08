@@ -123,7 +123,6 @@ gh release download v0.5.0-rc.1 --pattern "*-linux-x86_64.spk"
 tar -tzf simple-bootstrap-*-linux-x86_64.spk | grep "^./bin"
 # Should show:
 # ./bin/simple
-# ./bin/simple_runtime
 ```
 
 ### Step 8: Test Installation
@@ -135,11 +134,6 @@ tar -xzf simple-bootstrap-*-linux-x86_64.spk -C /tmp/test-release
 
 # Test binaries
 /tmp/test-release/bin/simple --version
-/tmp/test-release/bin/simple_runtime --version
-
-# Verify symlink
-ls -lh /tmp/test-release/bin/simple_runtime
-# Should show: simple_runtime -> simple
 ```
 
 ---
@@ -247,8 +241,6 @@ Copy this for each release:
 ### Verification
 - [ ] Downloaded packages
 - [ ] Verified bin/simple works
-- [ ] Verified bin/simple_runtime works
-- [ ] Checked symlink exists
 - [ ] GHCR packages published
 
 ### Post-Release
@@ -348,7 +340,6 @@ cat >> CHANGELOG.md <<EOF
 
 ### Added
 - Simple scripts (.spl) for build and install
-- Symlink bin/simple_runtime → bin/simple for backward compatibility
 
 ### Changed
 - Bootstrap packages now use bin/simple as main binary

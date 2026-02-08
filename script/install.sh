@@ -116,21 +116,11 @@ tar -xzf "$TMP_FILE" -C "$INSTALL_DIR"
 # Adjust if already in correct structure
 
 # Verify installation
-# New packages (v0.5.0+): bin/simple (binary) + bin/simple_runtime (symlink)
-# Old packages (v0.4.0):  bin/simple (wrapper) + bin/simple_runtime (binary)
+# New packages (v0.5.0+): bin/simple (binary only)
+# Old packages (v0.4.0):  bin/simple (wrapper) + bin/simple_runtime (binary, now removed)
 if [ -f "$INSTALL_DIR/bin/simple" ]; then
     chmod +x "$INSTALL_DIR/bin/simple"
-    # Check if simple_runtime exists (should be a symlink in new packages)
-    if [ ! -e "$INSTALL_DIR/bin/simple_runtime" ]; then
-        # Old package format - create symlink for backward compat
-        ln -sf simple "$INSTALL_DIR/bin/simple_runtime"
-    fi
     echo -e "${GREEN}✓${NC} Installed to $INSTALL_DIR"
-elif [ -f "$INSTALL_DIR/bin/simple_runtime" ]; then
-    # Very old package - only has simple_runtime
-    chmod +x "$INSTALL_DIR/bin/simple_runtime"
-    ln -sf simple_runtime "$INSTALL_DIR/bin/simple"
-    echo -e "${GREEN}✓${NC} Installed to $INSTALL_DIR (legacy package)"
 else
     echo -e "${RED}Error: Installation failed - runtime binary not found${NC}"
     exit 1

@@ -5,7 +5,7 @@
 The Simple MCP server provides LLM-friendly code representation via the Model Context Protocol. It enables automated code analysis, bug detection, and debugging workflows.
 
 **Location:** `src/app/mcp/main.spl`
-**Server Binary:** `./rust/target/debug/simple_old src/app/mcp/main.spl`
+**Server Binary:** `bin/simple src/app/mcp/main.spl`
 
 ---
 
@@ -15,8 +15,8 @@ The Simple MCP server provides LLM-friendly code representation via the Model Co
 Start MCP server for interactive client connections:
 
 ```bash
-./rust/target/debug/simple_old src/app/mcp/main.spl server
-./rust/target/debug/simple_old src/app/mcp/main.spl server --debug
+bin/simple src/app/mcp/main.spl server
+bin/simple src/app/mcp/main.spl server --debug
 ```
 
 **Use Cases:**
@@ -29,17 +29,17 @@ Direct command-line usage:
 
 ```bash
 # Read file
-./rust/target/debug/simple_old src/app/mcp/main.spl read <file.spl>
+bin/simple src/app/mcp/main.spl read <file.spl>
 
 # Expand symbol
-./rust/target/debug/simple_old src/app/mcp/main.spl expand <file.spl> <symbol>
+bin/simple src/app/mcp/main.spl expand <file.spl> <symbol>
 
 # Search
-./rust/target/debug/simple_old src/app/mcp/main.spl search <query>
+bin/simple src/app/mcp/main.spl search <query>
 
 # Generate JSON
-./rust/target/debug/simple_old src/app/mcp/main.spl json <file.spl>
-./rust/target/debug/simple_old src/app/mcp/main.spl json <file.spl> --meta
+bin/simple src/app/mcp/main.spl json <file.spl>
+bin/simple src/app/mcp/main.spl json <file.spl> --meta
 ```
 
 ---
@@ -50,7 +50,7 @@ Direct command-line usage:
 Read and analyze Simple source files:
 
 ```bash
-./rust/target/debug/simple_old src/app/mcp/main.spl read src/compiler/driver.spl
+bin/simple src/app/mcp/main.spl read src/compiler/driver.spl
 ```
 
 **Returns:** Full file content with syntax information
@@ -59,7 +59,7 @@ Read and analyze Simple source files:
 List Simple files in directory:
 
 ```bash
-./rust/target/debug/simple_old src/app/mcp/main.spl list src/compiler/
+bin/simple src/app/mcp/main.spl list src/compiler/
 ```
 
 **Returns:** List of .spl files (requires fs_read_dir FFI)
@@ -68,7 +68,7 @@ List Simple files in directory:
 Search for patterns in codebase:
 
 ```bash
-./rust/target/debug/simple_old src/app/mcp/main.spl search "hir_modules"
+bin/simple src/app/mcp/main.spl search "hir_modules"
 ```
 
 **Returns:** Files and locations matching query (requires filesystem iteration FFI)
@@ -77,7 +77,7 @@ Search for patterns in codebase:
 Get file statistics:
 
 ```bash
-./rust/target/debug/simple_old src/app/mcp/main.spl file_info src/compiler/driver.spl
+bin/simple src/app/mcp/main.spl file_info src/compiler/driver.spl
 ```
 
 **Returns:**
@@ -97,7 +97,7 @@ Get file statistics:
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/path/to/simple/target/debug/simple_old",
+      "command": "/path/to/simple/bin/simple",
       "args": ["src/app/mcp/main.spl", "server"]
     }
   }
@@ -143,7 +143,7 @@ register_bugs(bugs: [Bug])
 
 **Run:**
 ```bash
-./rust/target/debug/simple_old scripts/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Output:**
@@ -178,7 +178,7 @@ register_bugs(bugs: [Bug])
 ### 1. Run Automated Detection
 
 ```bash
-./rust/target/debug/simple_old scripts/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Checks:**
@@ -201,13 +201,13 @@ cat doc/bug/mcp_bug_analysis_2026-01-29.md
 
 ```bash
 # Read specific code sections
-./rust/target/debug/simple_old src/app/mcp/main.spl read src/compiler/driver.spl
+bin/simple src/app/mcp/main.spl read src/compiler/driver.spl
 
 # Search for patterns
-./rust/target/debug/simple_old src/app/mcp/main.spl search "hir_modules"
+bin/simple src/app/mcp/main.spl search "hir_modules"
 
 # Get file stats
-./rust/target/debug/simple_old src/app/mcp/main.spl file_info src/compiler/driver.spl
+bin/simple src/app/mcp/main.spl file_info src/compiler/driver.spl
 ```
 
 ### 4. Register Bugs
@@ -262,7 +262,7 @@ fn test_copy_modify_reassign():
 
 **Run:**
 ```bash
-./rust/target/debug/simple_old scripts/test_dict_semantics.spl
+bin/simple scripts/test_dict_semantics.spl
 ```
 
 **Expected:** ALL TESTS PASSED
@@ -271,7 +271,7 @@ fn test_copy_modify_reassign():
 Multi-generation bootstrap tester:
 
 ```bash
-./rust/target/debug/simple_old scripts/bootstrap_extended.spl --generations=5
+bin/simple scripts/bootstrap_extended.spl --generations=5
 ```
 
 **Features:**
@@ -285,7 +285,7 @@ Multi-generation bootstrap tester:
 Automated bug detection:
 
 ```bash
-./rust/target/debug/simple_old scripts/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Detects:**
@@ -359,7 +359,7 @@ Automated bug detection:
 ./scripts/capture_bootstrap_debug.sh
 
 # Analyze with MCP
-./rust/target/debug/simple_old scripts/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 
 # View results
 cat doc/bug/bug_db.sdn
@@ -410,15 +410,14 @@ bugs |id, severity, status, title, file, line, description, reproducible_by|
 ### MCP Server Won't Start
 
 ```bash
-# Check simple_old binary exists
-ls -la ./rust/target/debug/simple_old
+# Check simple binary exists
+ls -la bin/simple
 
-# Rebuild if needed (first-time setup)
+# Rebuild if needed
 simple build
-# Or: cd rust && cargo build
 
 # Test with debug output
-./rust/target/debug/simple_old src/app/mcp/main.spl server --debug
+bin/simple src/app/mcp/main.spl server --debug
 ```
 
 ### Tool Errors
@@ -517,13 +516,13 @@ stats_json = get_bug_stats("/path/to/bugs.sdn")
 
 ```bash
 # Test MCP modules import
-./bin/simple_runtime /tmp/test_mcp_imports.spl
+bin/simple /tmp/test_mcp_imports.spl
 
 # Test bug database integration
-./bin/simple_runtime test/integration/mcp_bugdb_spec.spl
+bin/simple test/integration/mcp_bugdb_spec.spl
 
 # Run all integration tests
-./bin/simple_runtime test/integration/database_*.spl
+bin/simple test/integration/database_*.spl
 ```
 
 ### Architecture

@@ -1,0 +1,94 @@
+# Tier 2 Generator - Simple SFFI Bindings
+#
+# Generates src/lib/<library>/ffi.spl with extern declarations
+
+use app.io.{file_write, dir_create, print}
+use app.wrapper_gen.spec_parser.{WrapperSpec, HandleTypeSpec, FunctionSpec, MethodSpec}
+
+fn generate_tier2(spec: WrapperSpec, dry_run: bool):
+    """Generate Tier 2: Simple SFFI bindings (extern fn declarations)."""
+
+    val output_dir = "src/lib/{spec.name}"
+    val output_file = "{output_dir}/ffi.spl"
+
+    if not dry_run:
+        dir_create(output_dir)
+
+    var content = ""
+    content = content + "# {spec.name} SFFI Bindings (Tier 2)\n"
+    content = content + "# Auto-generated extern fn declarations\n"
+    content = content + "#\n"
+    content = content + "# These map to Rust FFI exports in .build/rust/ffi_{spec.name}/\n\n"
+
+    # Opaque handle types
+    content = content + "# ============================================================================\n"
+    content = content + "# Opaque Handle Types\n"
+    content = content + "# ============================================================================\n\n"
+
+    for handle in spec.handle_types:
+        content = content + "extern type {handle.name}\n"
+
+    content = content + "\n"
+
+    # Library info functions
+    content = content + "# ============================================================================\n"
+    content = content + "# Library Information\n"
+    content = content + "# ============================================================================\n\n"
+
+    content = content + "extern fn rt_{spec.name}_available() -> bool\n"
+    content = content + "extern fn rt_{spec.name}_version() -> text\n\n"
+
+    # Tensor creation functions
+    if spec.functions.len() > 0:
+        content = content + "# ============================================================================\n"
+        content = content + "# Functions\n"
+        content = content + "# ============================================================================\n\n"
+
+        for func in spec.functions:
+            content = content + generate_extern_function(func, spec)
+
+    # Methods
+    if spec.methods.len() > 0:
+        content = content + "# ============================================================================\n"
+        content = content + "# Methods\n"
+        content = content + "# ============================================================================\n\n"
+
+        for method in spec.methods:
+            content = content + generate_extern_method(method, spec)
+
+    # Exports
+    content = content + "# ============================================================================\n"
+    content = content + "# Exports\n"
+    content = content + "# ============================================================================\n\n"
+
+    for handle in spec.handle_types:
+        content = content + "export {handle.name}\n"
+
+    if dry_run:
+        print "--- Tier 2 (Simple SFFI) ---"
+        print content
+    else:
+        file_write(output_file, content)
+        print "✓ Tier 2 generated: {output_file}"
+
+fn generate_extern_function(func: FunctionSpec, spec: WrapperSpec) -> text:
+    var params = ""
+    for param in func.params:
+        if params != "":
+            params = params + ", "
+        params = params + "{param.name}: {param.param_type}"
+
+    val return_decl = if func.return_type != "": " -> {func.return_type}" else: ""
+
+    "extern fn rt_{spec.name}_{func.name}({params}){return_decl}\n"
+
+fn generate_extern_method(method: MethodSpec, spec: WrapperSpec) -> text:
+    var params = "handle: {method.handle}"
+    for param in method.params:
+        params = params + ", {param.name}: {param.param_type}"
+
+    val return_decl = if method.return_type != "": " -> {method.return_type}" else: ""
+
+    "extern fn rt_{spec.name}_{method.handle.lower()}_{method.name}({params}){return_decl}\n"
+
+export generate_tier2

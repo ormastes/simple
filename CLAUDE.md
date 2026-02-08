@@ -1,35 +1,17 @@
 # Simple Language Compiler - Development Guide
 Impl in simple unless it has big performance differences.
 
-## 🎉 Recent Updates (2026-02-06)
+## 🎉 100% Pure Simple (v0.5.0+)
 
-**MAJOR: Rust source code completely removed - 100% Pure Simple achieved!**
+**Rust source completely removed** - System is 100% self-hosting!
 
-- ✅ **BUG-042 FIXED:** `static assert` syntax now works (1-line parser fix)
-- ✅ **BUG-043 FIXED:** `const fn` syntax now works (was already working)
-- ✅ **Rust deleted:** 24.2GB freed (`rust/` + `build/rust/` removed)
-- ✅ **Pure Simple parser:** 2,144 lines, fully self-hosting
-- ✅ **No Rust toolchain needed:** Uses pre-built 27MB runtime
-- 📖 **Report:** `doc/report/rust_removed_pure_simple_complete_2026-02-06.md`
+- ✅ 24.2GB freed (`rust/` directory deleted)
+- ✅ Pure Simple parser (2,144 lines, fully self-hosting)
+- ✅ Pre-built 27MB runtime - no Rust toolchain needed
+- ✅ All 1,109+ source files in Simple
+- 📖 Report: `doc/report/rust_removed_pure_simple_complete_2026-02-06.md`
 
-**System is now 100% self-hosting in Simple language!**
-
-### Pure Simple Build (v0.5.0+)
-
-**Status:** All Rust build infrastructure removed. Build system operates entirely in Simple.
-
-**Quick Build:**
-```bash
-bin/simple build --release    # Instant (<1s) - no compilation
-```
-
-**What Changed:**
-- ✅ No Rust FFI generation required
-- ✅ No cargo build required
-- ✅ Uses pre-built 27MB runtime
-- ✅ All source code in Simple (1,109+ .spl files)
-
-**For Full Details:** See `doc/report/pure_simple_rebuild_success_2026-02-06.md`
+**Quick build:** `bin/simple build --release` (instant, <1s)
 
 ---
 
@@ -51,7 +33,7 @@ For detailed guidance, invoke with `/skill-name`:
 | `todo` | TODO/FIXME comment format |
 | `doc` | Documentation writing: specs (SSpec), research, design, guides |
 | `deeplearning` | **Deep learning**: Pipeline operators, dimension checking, NN layers |
-| `sffi` | **SFFI wrappers**: Two-tier pattern (`extern fn` + wrapper), Simple FFI wrappers vs raw FFI |
+| `sffi` | **SFFI wrappers**: Two-tier pattern (runtime), three-tier pattern (external libs) |
 | `database` | **Database library**: BugDB, TestDB, FeatureDB, atomic ops, query builder |
 | `mcp` | **MCP server**: Model Context Protocol, resources, prompts, bug database integration |
 
@@ -250,71 +232,19 @@ missing = template.with {"user": x}  # ERROR: Missing key "city"
 
 **Constructors:**
 
-**Core Rule:** Use direct construction `ClassName(field: value)` - that's it!
+✅ **PRIMARY:** `Point(x: 3, y: 4)` - Direct construction (built-in, no method needed)
+✅ **OPTIONAL:** `static fn origin() -> Point` - Named factories for special cases
+❌ **AVOID:** `.new()` - Not idiomatic, use direct construction or named factories
 
 ```simple
-struct Point:
-    x: i64
-    y: i64
-
-class StringInterner:
-    strings: Dict<text, i32>
-    reverse: Dict<i32, text>
-    next_id: i32
-
-# ✅ PRIMARY: Direct construction (no method needed)
+# Direct construction (preferred)
 p = Point(x: 3, y: 4)
 interner = StringInterner(strings: {}, reverse: {}, next_id: 0)
-```
 
-**Optional: Custom factory methods (for special cases)**
-
-When you need special initialization logic, use `static fn` with a descriptive name:
-
-```simple
-impl Point:
-    # ✅ Named factory for common case
-    static fn origin() -> Point:
-        Point(x: 0, y: 0)
-
-    # ✅ Named factory for special transformation
-    static fn from_polar(r: f64, theta: f64) -> Point:
-        Point(x: r * theta.cos(), y: r * theta.sin())
-
-impl StringInterner:
-    # ✅ Factory with default capacity
-    static fn with_capacity(capacity: i32) -> StringInterner:
-        StringInterner(strings: {}, reverse: {}, next_id: 0)
-        # Could add pre-allocation logic here in future
-
-# Usage - clear intent:
+# Named factories (for special initialization)
 center = Point.origin()
 p = Point.from_polar(5.0, 0.785)
-interner = StringInterner.with_capacity(100)
 ```
-
-**Why this pattern?**
-- Direct construction is simplest: `Point(x: 3, y: 4)`
-- Named factories are clearer than `.new()`: `Point.origin()` explains intent
-- Return type automatically inferred to be the class
-- No ambiguity about what constructor is being used
-
-**Pattern Summary:**
-- ✅ **Primary:** `ClassName(field: value)` - direct construction
-- ✅ **Optional:** `static fn factory_name() -> ClassName` - named factories
-- ❌ **Avoid:** `.new()` - not idiomatic in Simple, use named factories instead
-
-**⚠️ CAUTION: Do NOT call `.new()` methods**
-
-```simple
-# ❌ WRONG:  Point.new(3, 4), Cache.new(), StringInterner.new()
-# ✅ CORRECT: Point(x: 3, y: 4), Cache(items: {}), Point.origin()
-```
-
-Why `.new()` is wrong in Simple:
-- Direct construction `ClassName(field: value)` is built-in - no method needed
-- `.new()` adds unnecessary indirection - not the Simple idiom
-- Use named factories `ClassName.factory_name()` for custom initialization
 
 **Methods (can be in class body OR impl block):**
 ```simple
@@ -390,14 +320,14 @@ fn main():
 
 - ✅ **No Rust source files** - `rust/` directory deleted
 - ✅ **Pure Simple parser** - 100% self-hosting
-- ✅ **Pre-built runtime** - `release/simple-0.4.0-beta/bin/simple_runtime` (27MB)
+- ✅ **Pre-built runtime** - `bin/bootstrap/simple` (33MB)
 - ✅ **No Rust toolchain needed** - rustc/cargo not required
 
-### SFFI (Simple FFI) - Pure Simple Approach
+### SFFI (Simple FFI)
 
-- ✅ All FFI uses the **two-tier pattern** (`extern fn` + wrapper) - see [SFFI Wrappers](#sffi-wrappers-simple-ffi---simple-first-approach) section for details
-- ✅ **Main SFFI module**: `src/app/io/mod.spl`
-- 📖 **SFFI Skill**: See `/sffi` for complete patterns
+- ✅ All FFI uses two-tier (runtime) or three-tier (external libs) patterns
+- ✅ Main module: `src/app/io/mod.spl`
+- 📖 See `/sffi` skill and SFFI section below for details
 
 ### Tests
 - ❌ **NEVER add `#[ignore]`** without user approval
@@ -700,23 +630,20 @@ bin/simple fix file.spl --fix-interactive  # Prompt per fix
 
 **Pre-Built Runtime (Current Approach):**
 
-The runtime is pre-built and included in the release (no Rust compilation needed):
+The runtime is pre-built and included in the bootstrap directory (no Rust compilation needed):
 
 ```bash
 # Pre-built runtime location
-release/simple-0.4.0-beta/bin/simple_runtime  # 27 MB
-
-# Symlink for easy access
-bin/simple_runtime -> ../release/simple-0.4.0-beta/bin/simple_runtime
+bin/bootstrap/simple  # 33 MB
 ```
 
 **Runtime Profile:**
 
 | Profile | Size | Location | Source |
 |---------|------|----------|--------|
-| Pre-built Runtime | 27 MB | `release/simple-0.4.0-beta/bin/` | Included in distribution |
+| Pre-built Runtime | 33 MB | `bin/bootstrap/` | Included in distribution |
 | Simple Source | 4.2 MB | `src/` | Pure Simple code |
-| **Total System** | **31.2 MB** | - | Runtime + Source |
+| **Total System** | **37.2 MB** | - | Runtime + Source |
 
 **UPX Compression Library:**
 
@@ -743,10 +670,9 @@ if upx.is_compressed("myapp"):
 | Binary | Location | Language | Purpose |
 |--------|----------|----------|---------|
 | `simple` | `bin/simple` | Shell+Simple | Default CLI → `src/app/cli/main.spl` |
-| `simple_runtime` | `bin/simple_runtime` | Shell | Runtime wrapper (discovers binary) |
-| `simple_runtime` | `bin/bootstrap/simple_runtime` | Pre-built | Bootstrap runtime (27 MB) |
+| `simple` | `bin/bootstrap/simple` | Pre-built | Bootstrap runtime (33 MB) |
 
-**All user-facing tools are Simple apps** in `src/app/`. The pre-built `simple_runtime` binary provides the runtime.
+**All user-facing tools are Simple apps** in `src/app/`. The pre-built `bin/bootstrap/simple` binary provides the runtime.
 
 ### Setting up PATH
 
@@ -769,112 +695,28 @@ This allows:
 
 ## Test Filtering and Test Types
 
-### Test Types
+**Test Types:**
+- **Regular:** `it "..."` - Runs by default
+- **Slow:** `slow_it "..."` - Auto-ignored, run with `--only-slow`
+- **Skipped:** Tag `skip` - Not yet implemented
 
-| Type | Description | Markers | Auto-Ignored | Location |
-|------|-------------|---------|--------------|----------|
-| **Regular Tests** | Standard unit/integration tests | `it "..."`, `test "..."` | No | `*_spec.spl`, `*_test.spl` |
-| **Slow Tests** | Long-running tests (>5s) | `slow_it "..."` | **Yes** (#[ignore]) | `*_spec.spl` |
-| **Skipped Tests** | Not yet implemented features | Tag: `skip` | No | Any test file |
-
-### Listing Tests
-
+**Common Commands:**
 ```bash
-# List all tests without running
-bin/simple test --list
-
-# List tests with tags displayed
-bin/simple test --list --show-tags
-
-# List only ignored tests
-bin/simple test --list-ignored
-
-# Count tests by type
-bin/simple test --list | wc -l              # Total tests
-bin/simple test --list-ignored | wc -l     # Ignored tests
+bin/simple test                          # All tests (excludes slow)
+bin/simple test --list                   # List tests
+bin/simple test --only-slow              # Run slow tests
+bin/simple test --tag=integration        # Filter by tag
+bin/simple test path/to/spec.spl         # Specific file
 ```
 
-### Running Specific Test Types
-
+**Run Tracking:** Automatic in `doc/test/test_db.sdn`
 ```bash
-# Run all tests (excludes slow tests by default)
-bin/simple test
-
-# Run only slow tests
-bin/simple test --only-slow
-
-# Run only skipped tests (usually fail - they're unimplemented)
-bin/simple test --only-skipped
-
-# Run tests matching a pattern
-bin/simple test pattern_here
-
-# Run tests from specific file
-bin/simple test path/to/test_spec.spl
-
-# Run with tag filtering (AND logic)
-bin/simple test --tag=integration --tag=database
+bin/simple test --list-runs              # View run history
+bin/simple test --cleanup-runs           # Clean stale runs
+bin/simple test --prune-runs=50          # Keep 50 most recent
 ```
 
-### Test Markers Explained
-
-**Simple Language Tests:**
-- `it "description"` - Regular test (runs by default)
-- `slow_it "description"` - Slow test (generates `#[ignore]`, run with `--only-slow`)
-- Tags: `skip`, `integration`, `unit`, custom tags
-
-### Test Filtering Flags
-
-| Flag | Effect | Use Case |
-|------|--------|----------|
-| `--list` | List tests without running | See available tests |
-| `--list-ignored` | List ignored tests | Find tests with #[ignore] |
-| `--show-tags` | Show tags in output | Debug tag filtering |
-| `--only-slow` | Run only slow_it() tests | Run long tests separately |
-| `--only-skipped` | Run only skip-tagged tests | Check unimplemented features |
-| `--tag=name` | Filter by tag | Run specific test categories |
-
-### Test Statistics
-
-See auto-generated reports for current statistics:
-- `doc/test/test_result.md` - Test results (updated every test run)
-- `doc/test/grouped_test_db.sdn` - Grouped test status
-
-### Test Run Tracking
-
-Test runs are automatically tracked in `doc/test/test_db.sdn` (in the `test_runs` table).
-
-**Run Management Commands:**
-
-| Flag | Effect | Use Case |
-|------|--------|----------|
-| `--list-runs` | List all test runs | See run history |
-| `--cleanup-runs` | Mark stale runs as crashed | Clean up dead processes |
-| `--prune-runs=N` | Delete old runs, keep N most recent | Limit run history size |
-| `--runs-status=STATUS` | Filter runs by status | Filter by running/completed/crashed |
-
-**Examples:**
-
-```bash
-# List all test runs
-bin/simple test --list-runs
-
-# Cleanup stale runs (marks as crashed if running > 2 hours or process dead)
-bin/simple test --cleanup-runs
-
-# Keep only 50 most recent runs
-bin/simple test --prune-runs=50
-
-# List only running tests
-bin/simple test --list-runs --runs-status=running
-```
-
-**Run Record Fields:**
-- `run_id` - Unique ID (timestamp-based)
-- `start_time`, `end_time` - ISO 8601 timestamps
-- `pid`, `hostname` - Process ID and machine name
-- `status` - `running`, `completed`, `crashed`, `timed_out`, `interrupted`
-- `test_count`, `passed`, `failed`, `crashed`, `timed_out` - Test counts
+**Reports:** `doc/test/test_result.md` (updated every test run)
 
 ---
 
@@ -888,97 +730,38 @@ Projects in `verification/`: borrow checker, GC safety, effects, SC-DRF.
 
 ---
 
-## SFFI Wrappers (Simple FFI - Simple-First Approach)
+## SFFI Wrappers (Simple FFI)
 
-**All SFFI wrappers are written in Simple using the two-tier pattern.**
+**Two patterns for FFI bindings:**
 
-**Terminology:**
-- **SFFI (Simple FFI)**: FFI wrappers written in Simple using the two-tier pattern
-- **Raw FFI**: Direct `extern fn` declarations or Rust FFI code
-- **SFFI wrapper**: The Simple wrapper function that calls `extern fn`
-- **SFFI-gen**: Tool to generate Rust FFI code from Simple specs
+1. **Two-Tier** (Runtime built-ins): `extern fn rt_*` → `fn wrapper()`
+2. **Three-Tier** (External libs): Tier 1 (C++/Rust) → Tier 2 (`extern fn`) → Tier 3 (Simple API)
 
-### Two-Tier Pattern
-
+**Two-Tier Example:**
 ```simple
-# Tier 1: Extern declaration (raw FFI binding)
-extern fn rt_file_read_text(path: text) -> text
-
-# Tier 2: Simple-friendly wrapper (idiomatic API)
-fn file_read(path: text) -> text:
+extern fn rt_file_read_text(path: text) -> text  # Tier 1: Runtime binding
+fn file_read(path: text) -> text:                 # Tier 2: Simple wrapper
     rt_file_read_text(path)
 ```
 
-**Why two tiers?**
-- `extern fn` - Raw binding to runtime, prefixed with `rt_`
-- Wrapper `fn` - Clean API for Simple users, handles type conversions
+**Three-Tier:** External libraries (PyTorch, Regex, etc.)
+- **Tier 1:** Native wrapper (`.build/rust/ffi_*/` - auto-generated from `.wrapper_spec`)
+  - `lang: cpp` → cxx bridge for C++ libraries
+  - `lang: rust` → Handle table for Rust crates
+- **Tier 2:** `extern fn` declarations (`*/ffi.spl`)
+- **Tier 3:** Idiomatic Simple API (`*/mod.spl`)
 
-### Main SFFI Module
-
-All SFFI declarations live in `src/app/io/mod.spl`:
-
-| Category | Prefix | Examples |
-|----------|--------|----------|
-| File | `rt_file_` | read, write, exists, copy, delete |
-| Directory | `rt_dir_` | create, list, walk, remove |
-| Environment | `rt_env_` | cwd, home, get, set |
-| Process | `rt_process_` | run, run_timeout, run_with_limits |
-| Time | `rt_time_`, `rt_timestamp_` | now, year, month, day |
-| System | `rt_getpid`, `rt_hostname` | pid, hostname, cpu_count |
-| CLI | `rt_cli_` | run_file, run_tests, run_lint |
-
-### Adding New SFFI Functions
-
-1. **Add extern declaration** in `src/app/io/mod.spl`:
-   ```simple
-   extern fn rt_my_function(arg1: text, arg2: i64) -> bool
-   ```
-
-2. **Add wrapper function**:
-   ```simple
-   fn my_function(arg1: text, arg2: i64) -> bool:
-       rt_my_function(arg1, arg2)
-   ```
-
-3. **Group with section comment**:
-   ```simple
-   # --- My category ---
-   extern fn rt_my_function(...)
-   fn my_function(...)
-   ```
-
-### Type Conversions
-
-| Simple Type | Rust Type | Notes |
-|-------------|-----------|-------|
-| `text` | `String` | Automatic |
-| `i64`, `i32` | `i64`, `i32` | Direct |
-| `bool` | `bool` | Direct |
-| `[text]` | `Vec<String>` | Array of strings |
-| `(text, text, i64)` | Tuple | Multiple returns |
-| `[text]?` | `Option<Vec<String>>` | Optional |
-
-### SFFI Error Handling Patterns
-
-```simple
-# Pattern 1: Boolean return
-fn file_write(path: text, content: text) -> bool:
-    rt_file_write_text(path, content)
-
-# Pattern 2: Tuple with error info
-fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    rt_process_run(cmd, args)  # (stdout, stderr, exit_code)
-
-# Pattern 3: Empty string for failure
-fn env_get(key: text) -> text:
-    rt_env_get(key)  # "" if not set
+**Wrapper Generator:**
+```bash
+simple wrapper-gen torch.wrapper_spec    # Auto-detects backend from lang field
 ```
 
-### See Also
+**Main SFFI Module:** `src/app/io/mod.spl` (File, Dir, Env, Process, Time, System)
 
-- `/sffi` skill - Complete SFFI patterns and examples
-- `src/app/io/mod.spl` - Main SFFI wrapper module
-- `doc/guide/sffi_gen_guide.md` - SFFI generation guide (formerly ffi_gen_guide.md)
+**See Also:**
+- `/sffi` skill - Complete patterns and examples
+- `doc/design/sffi_external_library_pattern.md` - Three-tier pattern design
+- `doc/guide/sffi_gen_guide.md` - Wrapper generator guide
 
 ---
 
