@@ -120,64 +120,25 @@ jobs:
             brew install upx
           fi
 
-      - name: Download previous Simple runtime (for self-hosting build)
+      - name: Use pre-built Simple runtime (from repository)
         run: |
-          # Use v0.4.0 (last stable release) for bootstrapping
-          BOOTSTRAP_VERSION="v0.4.0"
+          # v0.5.0+: Use pre-built runtime from repository
+          # The repository now includes bin/bootstrap/simple (pure Simple, no Rust build)
 
-          # Determine platform
-          RUNNER_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-          RUNNER_ARCH=$(uname -m)
-          case "$RUNNER_OS" in
-            linux) RUNNER_PLATFORM="linux" ;;
-            darwin) RUNNER_PLATFORM="darwin" ;;
-            *) RUNNER_PLATFORM="$RUNNER_OS" ;;
-          esac
-          case "$RUNNER_ARCH" in
-            x86_64|amd64) RUNNER_ARCH_NAME="x86_64" ;;
-            arm64|aarch64) RUNNER_ARCH_NAME="arm64" ;;
-            *) RUNNER_ARCH_NAME="$RUNNER_ARCH" ;;
-          esac
-
-          # Download v0.4.0 bootstrap for this platform
-          PATTERN="simple-bootstrap-*-${RUNNER_PLATFORM}-${RUNNER_ARCH_NAME}.spk"
-          echo "Downloading $BOOTSTRAP_VERSION bootstrap: $PATTERN"
-
-          gh release download "$BOOTSTRAP_VERSION" \
-            --repo "${{ github.repository }}" \
-            --pattern "$PATTERN" \
-            --dir /tmp/bootstrap-dl || true
-
-          BOOTSTRAP_SPK=$(ls /tmp/bootstrap-dl/*.spk 2>/dev/null | head -1)
-
-          if [ -n "$BOOTSTRAP_SPK" ] && [ -s "$BOOTSTRAP_SPK" ]; then
-            echo "✓ Found previous release: $BOOTSTRAP_SPK"
-            mkdir -p /tmp/simple-prev
-            tar -xzf "$BOOTSTRAP_SPK" -C /tmp/simple-prev
-
-            # Check for bin/simple (current releases)
-            if [ -f "/tmp/simple-prev/bin/simple" ]; then
-              SIMPLE_RUNTIME=/tmp/simple-prev/bin/simple
-              echo "Using bin/simple from previous release"
-              chmod +x "$SIMPLE_RUNTIME"
-              echo "SIMPLE_RUNTIME=$SIMPLE_RUNTIME" >> $GITHUB_ENV
-              echo "HAVE_PREVIOUS_RELEASE=true" >> $GITHUB_ENV
-              echo "Will use self-hosting build with Simple runtime"
-            else
-              echo "⚠ No runtime binary found in previous release package"
-              echo "HAVE_PREVIOUS_RELEASE=false" >> $GITHUB_ENV
-              echo "Will bootstrap from scratch with cargo"
-            fi
+          if [ -f "bin/bootstrap/simple" ]; then
+            echo "✓ Using pre-built runtime from repository: bin/bootstrap/simple"
+            echo "SIMPLE_RUNTIME=$(pwd)/bin/bootstrap/simple" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
+            chmod +x bin/bootstrap/simple
           else
-            echo "No previous release found"
-            echo "HAVE_PREVIOUS_RELEASE=false" >> $GITHUB_ENV
-            echo "Will bootstrap from scratch with cargo"
+            echo "✗ Error: No bootstrap runtime found at bin/bootstrap/simple"
+            echo "This is a pure Simple distribution - Rust source is no longer available"
+            echo "HAVE_BOOTSTRAP=false" >> $GITHUB_ENV
+            exit 1
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-      - name: Build Rust runtime (bootstrap from scratch if no previous release)
-        if: env.HAVE_PREVIOUS_RELEASE == 'false'
+      - name: Build Rust runtime (bootstrap from scratch if no bootstrap binary)
+        if: env.HAVE_BOOTSTRAP == 'false'
         run: |
           if [ ! -d "rust" ]; then
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -199,7 +160,7 @@ jobs:
           echo "✓ Bootstrap binary built with cargo"
 
       - name: Build Rust runtime (from source if available)
-        if: env.HAVE_PREVIOUS_RELEASE == 'false'
+        if: env.HAVE_BOOTSTRAP == 'false'
         run: |
           if [ ! -d "rust" ]; then
             echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
