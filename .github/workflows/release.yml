@@ -6,9 +6,6 @@ on:
       - 'v*.*.*'  # Trigger only on version tags like v0.3.0
   workflow_dispatch:  # Allow manual trigger
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   check-version:
     name: Check Version Change
@@ -58,33 +55,21 @@ jobs:
           # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            rust_target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             platform: linux-aarch64
-            target: aarch64-unknown-linux-gnu
-            rust_target: aarch64-unknown-linux-gnu
             cross_compile: true
 
           # macOS platforms
           - os: macos-latest
             platform: darwin-arm64
-            target: aarch64-apple-darwin
-            rust_target: aarch64-apple-darwin
           - os: macos-15  # Intel Mac
             platform: darwin-x86_64
-            target: x86_64-apple-darwin
-            rust_target: x86_64-apple-darwin
 
           # Windows platforms
           - os: windows-latest
             platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            rust_target: x86_64-pc-windows-msvc
           - os: windows-latest
             platform: windows-aarch64
-            target: aarch64-pc-windows-msvc
-            rust_target: aarch64-pc-windows-msvc
             cross_compile: true
 
     runs-on: ${{ matrix.os }}
@@ -92,33 +77,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          target: ${{ matrix.rust_target }}
-
-      - name: Install dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.platform == 'linux-aarch64'
-        run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-
-      - name: Install UPX (compression)
-        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest' || matrix.os == 'macos-15'
-        run: |
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get install -y upx-ucl
-          elif [ "$RUNNER_OS" = "macOS" ]; then
-            brew install upx
-          fi
 
       - name: Use pre-built Simple runtime (from repository)
         shell: bash
@@ -138,50 +96,19 @@ jobs:
             exit 1
           fi
 
-      - name: Build Rust runtime (bootstrap from scratch if no bootstrap binary)
-        if: env.HAVE_BOOTSTRAP == 'false'
+      - name: Install UPX (compression)
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        shell: bash
         run: |
-          if [ ! -d "rust" ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "⚠ Error: No previous release found and no rust/ directory"
-            echo "Cannot build bootstrap package without Rust source or previous runtime"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            exit 1
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y upx-ucl
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install upx
           fi
 
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "Building with cargo (bootstrap from scratch)"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          cd rust
-          cargo build --profile release-opt --target ${{ matrix.target }} --bin simple
-          cd ..
-          SIMPLE_BINARY="rust/target/${{ matrix.target }}/release-opt/simple"
-          chmod +x "$SIMPLE_BINARY"
-          echo "SIMPLE_RUNTIME=$SIMPLE_BINARY" >> $GITHUB_ENV
-          echo "✓ Bootstrap binary built with cargo"
-
-      - name: Build Rust runtime (from source if available)
-        if: env.HAVE_BOOTSTRAP == 'false'
+      - name: Create distribution package
+        shell: bash
         run: |
-          if [ ! -d "rust" ]; then
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            echo "⚠ No rust/ directory found (pure Simple distribution)"
-            echo "This is expected for releases after v0.4.0"
-            echo "Skipping Rust runtime build - will use dist builder"
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            exit 0
-          fi
-          cd rust
-          cargo build --profile bootstrap --target ${{ matrix.rust_target }}
-          cd ..
-        env:
-          CARGO_BUILD_TARGET: ${{ matrix.rust_target }}
-
-      - name: Create distribution package (repackage v0.4.0)
-        run: |
-          # Since rust/ is not available and v0.4.0 runtime is incompatible
-          # with v0.5.0 build system, we'll repackage v0.4.0 runtime directly
-
           VERSION="${{ needs.check-version.outputs.version }}"
           PLATFORM="${{ matrix.platform }}"
 
@@ -221,10 +148,9 @@ jobs:
 
           echo "✓ Package created: simple-bootstrap-${VERSION}-${PLATFORM}.spk"
           ls -lh "simple-bootstrap-${VERSION}-${PLATFORM}.spk"
-        env:
-          SIMPLE_RUNTIME: ${{ env.SIMPLE_RUNTIME }}
 
       - name: Calculate checksums
+        shell: bash
         run: |
           PKG=$(ls simple-bootstrap-*.spk | head -1)
           sha256sum "${PKG}" > "${PKG}.sha256"
@@ -248,20 +174,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Build optimized runtime
-        run: |
-          if [ ! -d "rust" ]; then
-            echo "⚠ Skipping: rust/ directory not found (pure Simple distribution)"
-            exit 0
-          fi
-          cd rust
-          cargo build --profile release-opt
 
       - name: Build full package
         run: |
@@ -326,9 +238,10 @@ jobs:
           Choose the package for your platform:
 
           - **Linux x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-linux-x86_64.spk\`
+          - **Linux ARM64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-linux-aarch64.spk\`
           - **macOS ARM64** (Apple Silicon): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-arm64.spk\`
           - **macOS x86_64** (Intel): \`simple-bootstrap-${{ steps.version.outputs.version }}-darwin-x86_64.spk\`
-          - **Windows**: Coming soon (build from source)
+          - **Windows x86_64**: \`simple-bootstrap-${{ steps.version.outputs.version }}-windows-x86_64.spk\`
 
           ### Full Package (Development)
 
@@ -508,40 +421,20 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-
-      - name: Install SPIR-V Tools
+      - name: Setup bootstrap runtime
         run: |
-          sudo apt-get update
-          sudo apt-get install -y spirv-tools
-
-      - name: Build debug runtime
-        run: |
-          if [ ! -d "rust" ]; then
-            echo "⚠ Skipping: rust/ directory not found (pure Simple distribution)"
-            exit 0
+          if [ -f "bin/bootstrap/simple" ]; then
+            chmod +x bin/bootstrap/simple
+            echo "✓ Bootstrap runtime ready"
+          else
+            echo "✗ No bootstrap runtime"
+            exit 1
           fi
-          cd rust
-          cargo build
-
-      - name: Run Rust slow tests
-        run: |
-          if [ ! -d "rust" ]; then
-            echo "⚠ Skipping: rust/ directory not found (pure Simple distribution)"
-            exit 0
-          fi
-          cd rust
-          cargo test --workspace -- --ignored --nocapture
-        continue-on-error: true
 
       - name: Run Simple/SSpec slow tests
         run: |
-          # Build the runtime first (already done above)
-          # Run only slow tests
-          bin/simple src/app/build/test.spl --only-slow
+          export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+          bin/simple test --only-slow
         continue-on-error: true
 
   test-installation:

@@ -109,10 +109,23 @@ fn slow_it(name: text, block: fn()):
     # due to runtime module closure limitation. Use fixed indent and skip counter increment.
     print "    slow_it {name} ... skipped (slow)"
 
+fn _is_interpreter_mode() -> bool:
+    """Check if running in interpreter mode via SIMPLE_RUNTIME_MODE env var."""
+    val mode = rt_env_get("SIMPLE_RUNTIME_MODE")
+    if mode == nil:
+        return true
+    if mode == "":
+        return true
+    if mode == "interpreter":
+        return true
+    false
+
 fn skip_it(name: text, block: fn()):
-    # NOTE: Can't access module vars (indent_level, test_skipped) from imported functions
-    # due to runtime module closure limitation. Use fixed indent.
-    print "    it {name} ... skipped (compiled-only)"
+    # Skip in interpreter mode, run in compiled/smf/native modes
+    if _is_interpreter_mode():
+        print "    it {name} ... skipped (compiled-only)"
+    else:
+        it(name, block)
 
 fn pending(name: text):
     # NOTE: Can't access module vars from imported functions.
@@ -258,15 +271,17 @@ fn only_on_unix(name: text, block: fn()):
 
 fn skip_on_interpreter(name: text, block: fn()):
     """Skip test if running in interpreter mode (compiled-only test)."""
-    # TODO: Detect if running in interpreter vs compiled mode
-    # For now, assume we're always in interpreter mode (bootstrap runtime)
-    print "    it {name} ... skipped (compiled-only)"
+    if _is_interpreter_mode():
+        print "    it {name} ... skipped (compiled-only)"
+    else:
+        it(name, block)
 
 fn only_on_interpreter(name: text, block: fn()):
     """Run test ONLY in interpreter mode."""
-    # TODO: Detect if running in interpreter vs compiled mode
-    # For now, run all tests (assume interpreter mode)
-    it(name, block)
+    if _is_interpreter_mode():
+        it(name, block)
+    else:
+        print "    it {name} ... skipped (interpreter-only)"
 
 fn skip_if_missing_module(name: text, module_name: text, block: fn()):
     """Skip test if module is not available."""
@@ -520,6 +535,14 @@ fn get_exit_code() -> i64:
     return 0
 
 # ================================================================
+# Import New Skip/Ignore System
+# ================================================================
+# NOTE: Decorator imports with 'as' aliasing removed - runtime parser
+# doesn't support 'as' keyword in use/export statements.
+# Users can import decorators directly: use std.spec.decorators.{skip, ignore}
+# Users can import env_detect directly: use std.spec.env_detect.{is_interpreter, ...}
+
+# ================================================================
 # Exports
 # ================================================================
 
@@ -542,3 +565,12 @@ export check, check_msg, assert_eq, assert_ne
 export assert_true, assert_false, assert_nil, assert_not_nil
 export fail_test, fail_assertion
 export print_summary, get_exit_code
+
+# New Comprehensive Skip/Ignore System
+# NOTE: 'export ... as ...' not supported by runtime parser.
+# Users should import decorators directly: use std.spec.decorators.{skip, ignore, only_on, skip_if}
+# Users should import env_detect directly: use std.spec.env_detect.{get_runtime_mode, is_interpreter, ...}
+
+# Internal helper export (used by skip_it, skip_on_interpreter, only_on_interpreter)
+export _is_interpreter_mode
+

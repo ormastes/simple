@@ -653,10 +653,38 @@ pub fn compile_and_run(mir: MirModule, entry: text, args: [i64]) -> Result<i64, 
     module.cleanup()
     Ok(result)
 
+pub fn aot_compile_to_bytes(mir: MirModule) -> Result<[u8], text>:
+    """AOT compile a MIR module and return object code bytes.
+
+    This is a convenience function for backend integration. It compiles the module
+    using Cranelift, emits to a temp file, reads the bytes, and cleans up.
+    """
+    val pipeline = CodegenPipeline.aot(CodegenTarget.Native)
+    val compiled = pipeline.compile_module(mir)
+    if compiled.is_err():
+        val err = compiled.unwrap_err()
+        return Err("Cranelift compile error: {err.message}")
+
+    val module = compiled.unwrap()
+    val tmp_path = "/tmp/simple_cl_{mir.name}.o"
+    val emit_result = module.emit_object(tmp_path)
+    if emit_result.is_err():
+        val err = emit_result.unwrap_err()
+        return Err("Cranelift emit error: {err.message}")
+
+    val bytes = rt_file_read_bytes(tmp_path)
+    rt_file_delete(tmp_path)
+    module.cleanup()
+
+    if bytes == nil:
+        return Err("Failed to read Cranelift object file: {tmp_path}")
+
+    Ok(bytes)
+
 # ============================================================================
 # Exports
 # ============================================================================
 
 export Codegen, CodegenTarget, CodegenMode, CodegenError
 export CodegenPipeline, CompiledModule
-export jit_compile, aot_compile, compile_and_run
+export jit_compile, aot_compile, compile_and_run, aot_compile_to_bytes

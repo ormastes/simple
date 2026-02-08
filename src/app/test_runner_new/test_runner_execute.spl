@@ -4,7 +4,7 @@
 
 use test_runner_types.*
 use test_runner_files.{strip_ansi, read_file_content}
-use app.io.mod (file_exists, env_get, time_now_unix_micros, process_run_timeout, process_run_with_limits, file_write)
+use app.io.mod (file_exists, env_get, time_now_unix_micros, process_run_timeout, process_run_with_limits, file_write, file_delete)
 
 # =========================================================================
 # Binary Location Discovery
@@ -359,15 +359,16 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
-    # Native mode: Compile test file to native executable, then run it
-    # Step 1: Compile to native binary
-    val output_binary = file_path.replace(".spl", ".native")
-    var compile_args: [text] = ["compile", file_path, "-o", output_binary]
+    # Native mode: Compile test file to .smf, then run the .smf
+    # Step 1: Preprocess SSpec files (wrap in fn main())
+    val source_path = preprocess_sspec_file(file_path)
+
+    # Step 2: Compile to .smf via 'simple compile'
+    val smf_path = file_path.replace(".spl", ".smf")
+    var compile_args: [text] = ["compile", source_path, "-o", smf_path]
     if options.verbose:
         compile_args.push("--verbose")
-
-    if options.verbose:
-        print "[native] Compiling {file_path} to {output_binary}"
+        print "[native] Compiling {file_path} to {smf_path}"
 
     val (compile_stdout, compile_stderr, compile_exit) = process_run_timeout(binary, compile_args, timeout_ms)
 
@@ -386,24 +387,24 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             timed_out: false
         )
 
-    # Step 2: Run the compiled native binary
+    # Step 3: Run the compiled .smf
     if options.verbose:
-        print "[native] Running {output_binary}"
+        print "[native] Running {smf_path}"
 
-    var run_args: [text] = []
+    var run_args: [text] = [smf_path]
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val (stdout, stderr, exit_code) = process_run_timeout(output_binary, run_args, timeout_ms)
+    val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
-    # Clean up binary if successful
+    # Clean up .smf artifact unless keeping
     if not options.keep_artifacts:
-        # TODO: Delete output_binary file
-        ()
+        if file_exists(smf_path):
+            file_delete(smf_path)
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
