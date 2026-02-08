@@ -17,6 +17,7 @@ extern fn rt_cli_get_args() -> [str]
 extern fn rt_exit(code: i64)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_handle_compile(args: [str]) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
 # --- System & Concurrency SFFI (Phase 4) ---
@@ -121,7 +122,7 @@ export cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify, cli_run_migrate
 export cli_run_mcp, cli_run_diff, cli_run_query, cli_run_spec_coverage
 export cli_run_feature_gen, cli_run_task_gen, cli_run_spec_gen, cli_run_sspec_docgen
 export cli_run_todo_gen, cli_run_lex, cli_run_brief, cli_run_ffi_gen, cli_run_i18n
-export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_linkers
+export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_compile, cli_handle_linkers
 export cli_read_file, context_generate, context_stats, settlement_main
 export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
 export fault_set_timeout, fault_set_execution_limit
@@ -751,6 +752,9 @@ fn cli_handle_run(args: [str], gc_log: bool, gc_off: bool) -> i64:
         print "No file specified"
         1
 
+fn cli_handle_compile(args: [str]) -> i64:
+    rt_cli_handle_compile(args)
+
 fn cli_handle_linkers() -> i64:
     cli_not_implemented("Linker information")
 
@@ -765,7 +769,9 @@ fn cli_compile(args: [str]) -> i64:
     # Options:
     #   --target=<target>        Target architecture (e.g., baremetal-x86)
     #   --emit=<format>          Output format: llvm-ir, object, elf (default: elf)
+    #   --backend=<backend>      Compilation backend: auto, cranelift, llvm (default: auto)
     #   -o <output>              Output file path
+    #   --release                Release build (enables optimization, prefers LLVM)
     #   --help                   Show help
 
     # Default values
@@ -773,7 +779,9 @@ fn cli_compile(args: [str]) -> i64:
     var output_file: text = ""
     var target: text = ""
     var emit: text = "elf"
+    var backend: text = "auto"
     var verbose: bool = false
+    var release: bool = false
 
     # Parse arguments (skip first arg if it's "compile")
     var i = 0
@@ -791,19 +799,26 @@ fn cli_compile(args: [str]) -> i64:
             print "Options:"
             print "  --target=<target>     Target: baremetal-x86, baremetal-arm, etc."
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm (default: auto)"
+            print "  --release             Release build (optimized, prefers LLVM)"
             print "  -o <output>           Output file path"
             print "  --verbose, -v         Verbose output"
             print "  --help, -h            Show this help"
             print ""
             print "Examples:"
             print "  simple compile hello.spl"
+            print "  simple compile hello.spl --backend=llvm"
+            print "  simple compile hello.spl --release -o hello.smf"
             print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
-            print "  simple compile --target=baremetal-x86 -o kernel.elf main.spl"
             return 0
         elif arg.starts_with("--target="):
             target = arg.substring(9)
         elif arg.starts_with("--emit="):
             emit = arg.substring(7)
+        elif arg.starts_with("--backend="):
+            backend = arg.substring(10)
+        elif arg == "--release":
+            release = true
         elif arg == "-o":
             i = i + 1
             if i < args.len():
@@ -841,10 +856,31 @@ fn cli_compile(args: [str]) -> i64:
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
 
-    # Handle normal compilation
-    eprint("Error: Non-bare-metal compilation not yet implemented")
-    eprint("Hint: Use --target=baremetal-x86 for bare-metal targets")
-    return 1
+    # Handle normal compilation via bootstrap binary subprocess
+    # The compilation pipeline (parse → HIR → MIR → codegen → SMF) requires
+    # the native Cranelift backend, which is only available in the bootstrap binary.
+    # SIMPLE_COMPILE_RUST=1 tells the binary to use its native compile path.
+    var cmd_parts: [text] = []
+    for arg in args:
+        cmd_parts.push(arg)
+    val args_str = cmd_parts.join(" ")
+
+    # Find bootstrap binary
+    var binary = ""
+    if file_exists("bin/bootstrap/simple"):
+        binary = "bin/bootstrap/simple"
+    elif file_exists("./bin/bootstrap/simple"):
+        binary = "./bin/bootstrap/simple"
+    else:
+        eprint("Error: Bootstrap binary not found")
+        return 1
+
+    val result = shell("SIMPLE_COMPILE_RUST=1 {binary} {args_str}")
+    if result.stdout != "":
+        print result.stdout
+    if result.stderr != "" and result.exit_code != 0:
+        eprint(result.stderr)
+    result.exit_code
 
 # Bare-metal compilation using BaremetalBuilder
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:

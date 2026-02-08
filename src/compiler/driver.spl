@@ -493,75 +493,69 @@ class CompilerDriver:
 
     me compile_to_native(output: text) -> CompileResult:
         val log = self.ctx.logger
-        log.debug("AOT native: compiling to {output}")
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT native: compiling to {output} (backend: {effective_backend})")
 
-        # AOT compile all modules
-        var pipeline = CodegenPipeline.aot(CodegenTarget.Native)
-        var compiled_modules: [CompiledModule] = []
+        # Compile all modules and collect object files
+        var object_files: [text] = []
 
         for name in self.ctx.mir_modules.keys():
             log.trace("compiling module: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            match pipeline.compile_module(mir_module):
-                case Ok(compiled):
-                    compiled_modules = compiled_modules.push(compiled)
-                case Err(e):
-                    return CompileResult.CodegenError("AOT compile error in {name}: {e.message}")
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
 
-        # Emit object files
-        var object_files: [text] = []
-        for module in compiled_modules:
-            val obj_path = "{output}.{module.name}.o"
-            match module.emit_object(obj_path):
-                case Ok(_):
+            val module = compiled.unwrap()
+            if module.object_code.?:
+                # Write object bytes to file for linking
+                val obj_path = "{output}.{name}.o"
+                if rt_file_write_bytes(obj_path, module.object_code.unwrap()):
                     object_files = object_files.push(obj_path)
-                case Err(e):
-                    return CompileResult.CodegenError("Object emit error: {e.message}")
+                else:
+                    return CompileResult.CodegenError("Failed to write object file: {obj_path}")
+            else:
+                return CompileResult.CodegenError("Backend produced no object code for {name}")
 
         # Link object files into final executable
         match self.link_objects(object_files, output):
             case Ok(_):
-                log.info("Native executable written to {output}")
+                log.info("Native executable written to {output} (backend: {effective_backend})")
                 CompileResult.Success(output)
             case Err(e):
                 CompileResult.CodegenError("Linking failed: {e}")
 
     me compile_to_smf(output: text) -> CompileResult:
         val log = self.ctx.logger
-        log.debug("AOT SMF: compiling to {output}")
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT SMF: compiling to {output} (backend: {effective_backend})")
 
-        # AOT compile all modules to get object code
-        var pipeline = CodegenPipeline.aot(CodegenTarget.Native)
         var all_object_bytes: [u8] = []
 
         for name in self.ctx.mir_modules.keys():
             log.trace("compiling module for SMF: {name}")
             val mir_module = self.ctx.mir_modules[name]
-            match pipeline.compile_module(mir_module):
-                case Ok(compiled):
-                    # Emit to temporary object file, then read bytes
-                    val tmp_path = "{output}.{name}.tmp.o"
-                    match compiled.emit_object(tmp_path):
-                        case Ok(_):
-                            # TODO: Replace direct FFI call with wrapper (file_read_bytes) from app.io or compiler.ffi
-                            val bytes = rt_file_read_bytes(tmp_path)
-                            if bytes.?:
-                                all_object_bytes = all_object_bytes.concat(bytes.unwrap())
-                            # TODO: Replace direct FFI call with wrapper (file_delete) from app.io or compiler.ffi
-                            rt_file_delete(tmp_path)
-                        case Err(e):
-                            return CompileResult.CodegenError("Object emit error: {e.message}")
-                case Err(e):
-                    return CompileResult.CodegenError("AOT compile error in {name}: {e.message}")
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled.is_err():
+                val err = compiled.unwrap_err()
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
+
+            val module = compiled.unwrap()
+            if module.object_code.?:
+                all_object_bytes = all_object_bytes.concat(module.object_code.unwrap())
 
         # Wrap object code into SMF format
         val target = Target.host()
         val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
 
         # Write SMF file
-        # TODO: Replace direct FFI call with wrapper (file_write_bytes) from app.io or compiler.ffi
         if rt_file_write_bytes(output, smf_bytes):
-            log.info("SMF module written to {output}")
+            log.info("SMF module written to {output} (backend: {effective_backend})")
             CompileResult.Success(output)
         else:
             CompileResult.CodegenError("Failed to write SMF file: {output}")

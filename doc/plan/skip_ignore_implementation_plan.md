@@ -9,23 +9,234 @@
 
 Implement `@skip(platforms=..., runtimes=...)` and `@ignore(platforms=..., runtimes=...)` decorator system for test framework.
 
-**Timeline:** 4 weeks (function-based) + 2-4 weeks (parser attributes)
+**Timeline:** 8 weeks (comprehensive function-based) + 2-4 weeks (parser attributes)
 **Priority:** HIGH
+**Scope:** Comprehensive skip/ignore system supporting ALL execution conditions
 **Dependencies:** None (builds on existing spec.spl)
+
+## Semantic Distinction
+
+### `@skip` - "Will implement in future"
+
+**Meaning:** The environment/platform **should be supported** but isn't implemented yet. This is a **TODO** item.
+
+```simple
+@skip(platforms: ["windows"], test_mode: ["interpreter"])
+it "file permissions test":
+    # This WILL work on Windows eventually
+    # We just haven't implemented it yet
+    chmod("/tmp/file", 0o644)
+    check(get_permissions() == 0o644)
+```
+
+**Use cases:**
+- Feature not yet ported to this platform
+- Runtime mode not yet supported (e.g., interpreter mode needs work)
+- Known bug that will be fixed
+
+**Reporting:** Skipped tests are **counted** in test totals and reported as "SKIP" to track technical debt.
+
+### `@ignore` - "Fundamentally not supported"
+
+**Meaning:** The environment/platform is **fundamentally incompatible**. This will **never be fixed** because the underlying capability doesn't exist.
+
+```simple
+@ignore(platforms: ["windows"])
+it "Unix fork test":
+    # This will NEVER work on Windows
+    # fork() is Unix-only API, no Windows equivalent
+    pid = fork()
+    check(pid > 0)
+```
+
+**Use cases:**
+- Platform-specific APIs (fork on Unix, WinAPI on Windows)
+- Hardware-specific features (GPU tests on CPU-only machines)
+- Architectural impossibilities (32-bit pointer tests on 64-bit systems)
+
+**Reporting:** Ignored tests are **NOT counted** in totals at all. They're completely silent, as if they don't exist on that platform.
+
+### Quick Comparison
+
+| Aspect | `@skip` | `@ignore` |
+|--------|---------|-----------|
+| **Intent** | Will implement in future | Fundamentally not supported |
+| **Timeline** | Temporary (TODO) | Permanent (won't fix) |
+| **Counted in totals** | ✅ Yes | ❌ No |
+| **Output** | Shows "SKIP" message | Silent (no output) |
+| **Example** | Feature not yet ported | Platform-specific API |
+| **Technical debt** | Yes, track it | No, by design |
+
+## Real-World Examples
+
+### Example 1: Platform + Runtime Combinations
+```simple
+# Skip on Windows interpreter (will implement later)
+val skip_win_interp = skip(
+    platforms: ["windows"],
+    runtimes: ["interpreter"],
+    reason: "Windows interpreter support incomplete"
+)
+
+# Ignore on 32-bit architectures (fundamental limitation)
+val ignore_32bit = ignore(
+    architectures: ["x86", "arm32"],
+    reason: "64-bit pointers required"
+)
+```
+
+### Example 2: Hardware Requirements
+```simple
+# Skip GPU tests if no GPU detected
+val skip_no_gpu = skip(
+    hardware: ["gpu"],
+    reason: "GPU acceleration not yet implemented for CPU fallback"
+)
+
+# Ignore SIMD tests on platforms without SIMD
+val ignore_no_simd = ignore(
+    hardware: ["avx2", "neon"],
+    reason: "SIMD instructions required, no scalar implementation"
+)
+```
+
+### Example 3: Feature Flags
+```simple
+# Skip async tests if async feature disabled
+val skip_no_async = skip(
+    features: ["async"],
+    reason: "Async runtime not initialized"
+)
+
+# Ignore generics in interpreter
+val ignore_generics = ignore(
+    runtimes: ["interpreter"],
+    features: ["generics"],
+    reason: "Generics require static compilation"
+)
+```
+
+### Example 4: Version Constraints
+```simple
+# Skip on older compiler versions
+val skip_old_version = skip(
+    version: "< 0.5.0",
+    reason: "Requires v0.5.0+ for new syntax"
+)
+```
+
+### Example 5: Complex Multi-Condition
+```simple
+# Network tests that require multiple conditions
+val skip_network_test = skip(
+    network: true,
+    env_vars: {"CI": "true"},
+    profiles: ["debug"],
+    reason: "Network tests only in CI debug builds"
+)
+
+skip_network_test("API integration test", fn():
+    val response = http_get("https://api.example.com")
+    check(response.status == 200)
+)
+```
+
+### Example 6: File System Features
+```simple
+# Skip symlink tests on Windows (will implement with junctions)
+val skip_symlink_win = skip(
+    platforms: ["windows"],
+    fs_features: ["symlinks"],
+    reason: "Need to implement junction support"
+)
+
+# Ignore permission tests on FAT32
+val ignore_fat32_perms = ignore(
+    fs_features: ["permissions"],
+    reason: "FAT32 has no permission system"
+)
+```
 
 ## Goals
 
-1. Support multi-parameter skip/ignore: `@skip(platforms=["windows"], runtimes=["interpreter"])`
-2. Distinguish skip (counted) vs ignore (not counted)
-3. Accurate platform/runtime detection with caching
-4. Backward compatible with existing tests
-5. Clear migration path from old syntax
+1. **Comprehensive condition support**: Platform, runtime, architecture, features, hardware, dependencies, environment, file system, network, version constraints
+2. **Semantic distinction**: Clear skip (TODO) vs ignore (won't fix) semantics
+3. **Accurate detection**: Fast, cached detection for all condition types
+4. **Flexible composition**: AND/OR logic for complex conditions
+5. **Performance**: < 1ms overhead per test
+6. **Backward compatible**: Existing tests continue to work
+7. **Clear migration**: Automated migration from old skip functions
+8. **Comprehensive reporting**: Track skipped tests as technical debt
+
+## Comprehensive Condition Support
+
+The system supports ALL possible test execution conditions across multiple dimensions:
+
+### 1. **Platform Conditions**
+```simple
+platforms: ["windows", "linux", "macos", "unix", "bsd", "solaris"]
+```
+
+### 2. **Runtime Mode**
+```simple
+runtimes: ["interpreter", "compiled", "jit", "aot"]
+```
+
+### 3. **Build Profile**
+```simple
+profiles: ["debug", "release", "bootstrap", "test"]
+```
+
+### 4. **Architecture**
+```simple
+architectures: ["x86_64", "aarch64", "arm64", "riscv64", "wasm32"]
+```
+
+### 5. **Feature Flags**
+```simple
+features: ["generics", "async", "macros", "effects", "inline_asm"]
+```
+
+### 6. **Compiler Version**
+```simple
+version: ">= 0.5.0"
+version: "< 1.0.0"
+version: "0.4.x"
+```
+
+### 7. **Hardware Capabilities**
+```simple
+hardware: ["gpu", "simd", "avx2", "neon", "multi_core"]
+```
+
+### 8. **Dependencies**
+```simple
+requires: ["torch", "numpy", "sqlite3"]
+```
+
+### 9. **Environment Variables**
+```simple
+env_vars: {"CI": "true", "SIMPLE_COVERAGE": nil}
+```
+
+### 10. **File System Capabilities**
+```simple
+fs_features: ["symlinks", "permissions", "case_sensitive", "xattr"]
+```
+
+### 11. **Network Availability**
+```simple
+network: true  # Requires internet connection
+```
+
+### 12. **Performance/Timing**
+```simple
+max_duration: "5s"  # Skip if expected to take longer
+tags: ["slow", "quick", "integration", "unit"]
+```
 
 ## Non-Goals (Future Work)
 
-- Architecture-specific skip (x86_64, arm64)
-- Version-specific skip (min/max version)
-- Feature-specific skip (async, generics)
 - Distributed test execution
 - Test result database integration
 
@@ -46,23 +257,89 @@ Implement `@skip(platforms=..., runtimes=...)` and `@ignore(platforms=..., runti
 **Files Modified:**
 - ✅ `src/std/spec.spl` (+40 lines for platform detection)
 
-#### Task 1.2: Runtime Detection ⏳ TODO
+#### Task 1.2: Comprehensive Environment Detection ⏳ TODO
+
+**1. Runtime Mode Detection:**
 - [ ] Detect interpreter vs compiled mode
-- [ ] Detect debug vs release build
+- [ ] Detect debug vs release build profile
 - [ ] Detect JIT availability
-- [ ] Detect feature flags (generics, async, etc.)
-- [ ] Create `RuntimeInfo` struct
-- [ ] Cache runtime info
+- [ ] Detect AOT compilation
+
+**2. Architecture Detection:**
+- [ ] `is_x86_64()`, `is_aarch64()`, `is_arm64()`, `is_riscv64()`, `is_wasm32()`
+- [ ] Detect pointer size (32-bit vs 64-bit)
+- [ ] Detect endianness
+
+**3. Feature Flag Detection:**
+- [ ] Detect generics support
+- [ ] Detect async/await support
+- [ ] Detect macro system
+- [ ] Detect effects system
+- [ ] Detect inline assembly
+
+**4. Hardware Capability Detection:**
+- [ ] Detect GPU availability (CUDA, OpenCL, Metal)
+- [ ] Detect SIMD support (AVX2, NEON, SSE)
+- [ ] Detect CPU core count
+- [ ] Detect memory size
+
+**5. Dependency Detection:**
+- [ ] Check for external libraries (via `dlopen`/`LoadLibrary`)
+- [ ] Check for optional modules
+- [ ] Version checking for dependencies
+
+**6. Environment Detection:**
+- [ ] Read environment variables
+- [ ] Detect CI environment
+- [ ] Detect test mode flags
+
+**7. File System Detection:**
+- [ ] Check symlink support
+- [ ] Check permission system
+- [ ] Check case sensitivity
+- [ ] Check extended attributes
+
+**8. Network Detection:**
+- [ ] Check internet connectivity
+- [ ] Check specific hosts reachable
+
+**9. Version Detection:**
+- [ ] Get compiler version
+- [ ] Parse version constraints
+- [ ] Semver comparison
 
 **Files to Create:**
-- `src/std/spec/runtime.spl` (NEW - ~80 lines)
+- `src/std/spec/env_detect.spl` (NEW - ~400 lines for all detection)
+  - Platform detection (existing)
+  - Runtime detection
+  - Architecture detection
+  - Feature detection
+  - Hardware detection
+  - Dependency detection
+  - Environment detection
+  - File system detection
+  - Network detection
+  - Version detection
+
+**Structs:**
+```simple
+struct EnvInfo:
+    platform: PlatformInfo
+    runtime: RuntimeInfo
+    architecture: ArchInfo
+    features: FeatureInfo
+    hardware: HardwareInfo
+    fs: FileSystemInfo
+    version: VersionInfo
+```
 
 **Deliverables:**
-- `RuntimeInfo` struct with all detection results
-- Cached detection functions
-- Unit tests for detection accuracy
+- Complete environment detection system
+- All info structs with cached results
+- 100+ unit tests for detection accuracy
+- Performance benchmark (< 1ms total)
 
-**Time Estimate:** 3 days
+**Time Estimate:** 2 weeks (comprehensive implementation)
 
 ---
 
@@ -73,18 +350,51 @@ Implement `@skip(platforms=..., runtimes=...)` and `@ignore(platforms=..., runti
 **Implementation:**
 ```simple
 struct SkipCondition:
+    # Platform & Runtime
     platforms: [text]
     runtimes: [text]
+    profiles: [text]
+    architectures: [text]
+
+    # Compiler Features
+    features: [text]
+    version: text
+
+    # Hardware & Dependencies
+    hardware: [text]
+    requires: [text]
+
+    # Environment & File System
+    env_vars: {text: text}
+    fs_features: [text]
+    network: bool
+
+    # Metadata
+    tags: [text]
     reason: text
     ignore: bool
 
     fn matches() -> bool:
-        # Evaluate if current environment matches skip conditions
-        val platform_match = matches_any_platform(self.platforms)
-        val runtime_match = matches_any_runtime(self.runtimes)
+        """Evaluate if current environment matches ANY skip condition (OR logic)."""
+
+        # Check each condition dimension
+        val checks = [
+            matches_platforms(self.platforms),
+            matches_runtimes(self.runtimes),
+            matches_profiles(self.profiles),
+            matches_architectures(self.architectures),
+            matches_features(self.features),
+            matches_version(self.version),
+            matches_hardware(self.hardware),
+            matches_requires(self.requires),
+            matches_env_vars(self.env_vars),
+            matches_fs_features(self.fs_features),
+            matches_network(self.network),
+            matches_tags(self.tags)
+        ]
 
         # Skip if ANY condition matches (OR logic)
-        platform_match or runtime_match
+        checks.any(\check: check)
 ```
 
 **Files to Modify:**
@@ -173,14 +483,53 @@ describe "Condition Evaluation":
 
 **Implementation:**
 ```simple
-fn skip(platforms: [text] = [], runtimes: [text] = [], reason: text = "") -> fn(text, fn()):
+fn skip(
+    platforms: [text] = [],
+    runtimes: [text] = [],
+    profiles: [text] = [],
+    architectures: [text] = [],
+    features: [text] = [],
+    version: text = "",
+    hardware: [text] = [],
+    requires: [text] = [],
+    env_vars: {text: text} = {},
+    fs_features: [text] = [],
+    network: bool = false,
+    tags: [text] = [],
+    reason: text = ""
+) -> fn(text, fn()):
     """
-    Create a skip decorator that skips tests on matching platforms/runtimes.
-    Skipped tests are counted in test totals.
+    Create a skip decorator that skips tests based on ANY matching condition.
 
-    Usage:
-        val skip_win = skip(platforms: ["windows"])
-        skip_win("test name", fn(): test_body())
+    Semantic: "Will implement in future" - This is a TODO item.
+    Use when the feature SHOULD work in this environment but isn't implemented yet.
+
+    Skipped tests are COUNTED in test totals and reported as "SKIP" to track technical debt.
+
+    Usage Examples:
+        # Platform-specific
+        val skip_win = skip(platforms: ["windows"], reason: "Not yet ported")
+        skip_win("file permissions test", fn(): chmod("/tmp/file", 0o644))
+
+        # Runtime mode
+        val skip_interp = skip(runtimes: ["interpreter"], reason: "Needs compiled mode")
+        skip_interp("generic types test", fn(): val list = List<i32>())
+
+        # Hardware requirements
+        val skip_no_gpu = skip(hardware: ["gpu"], reason: "GPU-only test")
+        skip_no_gpu("CUDA kernel test", fn(): launch_kernel())
+
+        # Feature flags
+        val skip_no_async = skip(features: ["async"], reason: "Async not impl")
+        skip_no_async("async test", fn(): await fetch())
+
+        # Multiple conditions (OR logic)
+        val skip_complex = skip(
+            platforms: ["windows"],
+            runtimes: ["interpreter"],
+            reason: "Needs Unix + compiled"
+        )
+        skip_complex("test", fn(): ...)
     """
     fn decorator(name: text, block: fn()):
         if should_skip_test(platforms, runtimes):
@@ -211,14 +560,52 @@ fn skip_test(name: text, reason: text):
 
 **Implementation:**
 ```simple
-fn ignore(platforms: [text] = [], runtimes: [text] = [], reason: text = "") -> fn(text, fn()):
+fn ignore(
+    platforms: [text] = [],
+    runtimes: [text] = [],
+    profiles: [text] = [],
+    architectures: [text] = [],
+    features: [text] = [],
+    version: text = "",
+    hardware: [text] = [],
+    requires: [text] = [],
+    env_vars: {text: text} = {},
+    fs_features: [text] = [],
+    network: bool = false,
+    tags: [text] = [],
+    reason: text = ""
+) -> fn(text, fn()):
     """
-    Create an ignore decorator that completely ignores tests on matching platforms/runtimes.
-    Ignored tests are NOT counted in test totals at all.
+    Create an ignore decorator that completely ignores tests based on ANY matching condition.
 
-    Usage:
-        val ignore_win = ignore(platforms: ["windows"])
-        ignore_win("test name", fn(): test_body())
+    Semantic: "Fundamentally not supported" - This will NEVER be fixed.
+    Use when the environment fundamentally lacks the capability.
+
+    Ignored tests are NOT counted in test totals at all. Completely silent.
+
+    Usage Examples:
+        # Platform-specific API
+        val ignore_win = ignore(platforms: ["windows"], reason: "Unix fork() API")
+        ignore_win("fork test", fn(): pid = fork())
+
+        # Architecture limitation
+        val ignore_32bit = ignore(architectures: ["x86", "arm32"], reason: "64-bit only")
+        ignore_32bit("large pointer test", fn(): ...)
+
+        # Hardware requirement
+        val ignore_no_gpu = ignore(hardware: ["gpu"], reason: "CUDA only, no CPU impl")
+        ignore_no_gpu("GPU kernel test", fn(): ...)
+
+        # Feature permanently disabled
+        val ignore_no_jit = ignore(runtimes: ["interpreter"], reason: "JIT compilation only")
+        ignore_no_jit("JIT optimization test", fn(): ...)
+
+        # File system limitation
+        val ignore_no_symlinks = ignore(
+            fs_features: ["symlinks"],
+            reason: "Symlinks not supported"
+        )
+        ignore_no_symlinks("symlink test", fn(): ...)
     """
     fn decorator(name: text, block: fn()):
         if should_skip_test(platforms, runtimes):
@@ -681,13 +1068,15 @@ compiled_only("generic types", fn():
 
 | Week | Phase | Status | Tasks |
 |------|-------|--------|-------|
-| 1 | Foundation | 50% | Runtime detection |
-| 2 | Core Logic | 0% | SkipCondition, evaluator |
-| 3 | Decorators | 0% | skip, ignore, only_on, skip_if |
-| 4 | Syntax Sugar | 0% | TestBuilder, docs |
-| 5-8 | Parser (Future) | 0% | Attribute syntax |
+| 1-2 | Foundation | 25% | Platform ✅, Runtime, Architecture, Features |
+| 3-4 | Detection | 0% | Hardware, Dependencies, Environment, File System, Network, Version |
+| 5 | Core Logic | 0% | SkipCondition, comprehensive evaluator |
+| 6 | Decorators | 0% | skip, ignore, only_on, skip_if |
+| 7 | Syntax Sugar | 0% | TestBuilder, fluent API |
+| 8 | Documentation | 0% | Docs, examples, migration guide |
+| 9-12 | Parser (Future) | 0% | Attribute syntax |
 
-**Total:** 4 weeks for function-based, +2-4 weeks for parser
+**Total:** 8 weeks for comprehensive function-based system, +4 weeks for parser
 
 ---
 
