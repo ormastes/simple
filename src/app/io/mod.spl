@@ -35,15 +35,8 @@ extern fn rt_thread_available_parallelism() -> i64
 # Note: Implemented using shell commands instead of runtime FFI
 # since pre-built runtime doesn't have rt_host_arch/rt_host_os
 
-# --- Execution Manager ---
-extern fn rt_set_jit_backend(backend: text) -> bool
-extern fn rt_get_jit_backend() -> text
-extern fn rt_exec_manager_create(backend: text) -> i64
-extern fn rt_exec_manager_compile(handle: i64, mir_data: text) -> text
-extern fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64
-extern fn rt_exec_manager_has_function(handle: i64, name: text) -> bool
-extern fn rt_exec_manager_backend_name(handle: i64) -> text
-extern fn rt_exec_manager_cleanup(handle: i64)
+# --- Execution Manager (moved to app.io.jit) ---
+# extern fn declarations now in jit.spl
 
 # --- Debug/Hook Functions ---
 # Note: These are stubs - runtime doesn't support debug hooks yet
@@ -556,50 +549,10 @@ fn rt_timestamp_now() -> i64:
     time_now_unix_micros()
 
 # ============================================================================
-# Thread & Concurrency - SFFI + Shell Fallbacks
+# Thread & Concurrency - Imported from app.io.thread
 # ============================================================================
-
-fn thread_available_parallelism() -> i64:
-    # Number of logical CPUs via SFFI
-    rt_thread_available_parallelism()
-
-fn thread_sleep_ms(duration_ms: i64):
-    # Sleep for specified milliseconds (shell fallback - rt_thread_sleep_ms not in runtime)
-    val seconds = duration_ms / 1000
-    val remainder = duration_ms % 1000
-    if seconds > 0 and remainder > 0:
-        shell("sleep {seconds}.{remainder}")
-    elif seconds > 0:
-        shell("sleep {seconds}")
-    elif remainder > 0:
-        shell("sleep 0.{remainder}")
-
-fn thread_yield():
-    # Yield current thread (no-op - rt_thread_yield not in runtime)
-    pass
-
-fn thread_current_id() -> i64:
-    # Current thread ID (use PID as fallback - rt_thread_current_id not in runtime)
-    rt_getpid()
-
-# --- Atomic Operations (stubs - rt_atomic_* not in runtime) ---
-# These provide correct single-threaded semantics.
-# True atomic ops require runtime support.
-
-fn atomic_i64_load(atomic_ref: i64) -> i64:
-    atomic_ref
-
-fn atomic_i64_store(atomic_ref: i64, new_value: i64) -> i64:
-    new_value
-
-fn atomic_i64_fetch_add(atomic_ref: i64, add_value: i64) -> i64:
-    atomic_ref
-
-fn atomic_i64_compare_exchange(atomic_ref: i64, expected: i64, desired: i64) -> i64:
-    if atomic_ref == expected:
-        desired
-    else:
-        atomic_ref
+use app.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id}
+use app.io.thread.{atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange}
 
 # ============================================================================
 # CLI Functions - Pure Simple Implementations
@@ -769,6 +722,7 @@ fn cli_compile(args: [str]) -> i64:
     # Options:
     #   --target=<target>        Target architecture (e.g., baremetal-x86)
     #   --emit=<format>          Output format: llvm-ir, object, elf (default: elf)
+    #   --format=<fmt>           Output format: native, smf, self-contained, both
     #   --backend=<backend>      Compilation backend: auto, cranelift, llvm (default: auto)
     #   -o <output>              Output file path
     #   --release                Release build (enables optimization, prefers LLVM)
@@ -779,6 +733,7 @@ fn cli_compile(args: [str]) -> i64:
     var output_file: text = ""
     var target: text = ""
     var emit: text = "elf"
+    var output_format: text = ""
     var backend: text = "auto"
     var verbose: bool = false
     var release: bool = false
@@ -799,26 +754,40 @@ fn cli_compile(args: [str]) -> i64:
             print "Options:"
             print "  --target=<target>     Target: baremetal-x86, baremetal-arm, etc."
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
+            print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
+            print "  --native              Compile to native binary via C codegen + gcc"
             print "  --backend=<backend>   Backend: auto, cranelift, llvm (default: auto)"
             print "  --release             Release build (optimized, prefers LLVM)"
             print "  -o <output>           Output file path"
             print "  --verbose, -v         Verbose output"
             print "  --help, -h            Show this help"
             print ""
+            print "Output Formats (--format):"
+            print "  native                Native executable (default)"
+            print "  smf                   SMF module file"
+            print "  self-contained, sc    Self-contained binary (runtime + SMF in one file)"
+            print "  both                  Both native executable and SMF module"
+            print ""
             print "Examples:"
             print "  simple compile hello.spl"
             print "  simple compile hello.spl --backend=llvm"
             print "  simple compile hello.spl --release -o hello.smf"
+            print "  simple compile hello.spl --format=self-contained -o hello"
+            print "  simple compile --native -o hello hello.spl"
             print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
             return 0
         elif arg.starts_with("--target="):
             target = arg.substring(9)
         elif arg.starts_with("--emit="):
             emit = arg.substring(7)
+        elif arg.starts_with("--format="):
+            output_format = arg.substring(9)
         elif arg.starts_with("--backend="):
             backend = arg.substring(10)
         elif arg == "--release":
             release = true
+        elif arg == "--native":
+            emit = "native"
         elif arg == "-o":
             i = i + 1
             if i < args.len():
@@ -852,35 +821,53 @@ fn cli_compile(args: [str]) -> i64:
         eprint("Error: Source file not found: {source_file}")
         return 1
 
+    # Handle native compilation (Simple -> C -> gcc -> binary)
+    if emit == "native":
+        var out = output_file
+        if out == "":
+            out = source_file.replace(".spl", "")
+        # Shell out to native compile module to avoid circular import
+        var native_cmd = "bin/bootstrap/simple src/app/compile/native.spl '{source_file}' '{out}'"
+        if verbose:
+            native_cmd = "bin/bootstrap/simple src/app/compile/native.spl '{source_file}' '{out}' --verbose"
+        val native_result = shell(native_cmd)
+        if native_result.stdout != "":
+            print native_result.stdout
+        if native_result.stderr != "" and native_result.exit_code != 0:
+            eprint(native_result.stderr)
+        return native_result.exit_code
+
     # Handle bare-metal compilation
     if target.starts_with("baremetal-"):
         return compile_baremetal(source_file, target, emit, output_file, verbose)
 
-    # Handle normal compilation via bootstrap binary subprocess
-    # The compilation pipeline (parse → HIR → MIR → codegen → SMF) requires
-    # the native Cranelift backend, which is only available in the bootstrap binary.
-    # SIMPLE_COMPILE_RUST=1 tells the binary to use its native compile path.
-    var cmd_parts: [text] = []
-    for arg in args:
-        cmd_parts.push(arg)
-    val args_str = cmd_parts.join(" ")
+    # If --format is specified, inject it into args for the bootstrap compiler
+    # The bootstrap compiler's rt_cli_handle_compile will pass --format through
+    # to the CompilerDriver which uses OutputFormat__from_text()
+    var compile_args = args
+    if output_format != "":
+        # Validate format value
+        if output_format != "native" and output_format != "smf" and output_format != "self-contained" and output_format != "sc" and output_format != "both":
+            eprint("Error: Unknown format: {output_format}")
+            eprint("Valid formats: native, smf, self-contained (sc), both")
+            return 1
 
-    # Find bootstrap binary
-    var binary = ""
-    if file_exists("bin/bootstrap/simple"):
-        binary = "bin/bootstrap/simple"
-    elif file_exists("./bin/bootstrap/simple"):
-        binary = "./bin/bootstrap/simple"
-    else:
-        eprint("Error: Bootstrap binary not found")
-        return 1
+    # Use bootstrap binary's native compile path via FFI.
+    # rt_cli_handle_compile() calls directly into the bootstrap binary's Cranelift compiler,
+    # avoiding shell-out which would cause infinite recursion (bootstrap binary interprets
+    # this same source file, which would shell out again).
+    #
+    # TODO: When compiler modules can run in interpreter mode, use pure-Simple LLVM path:
+    #   CompilerDriver.compile() -> MirToLlvm -> shell("llc") -> SMF
 
-    val result = shell("SIMPLE_COMPILE_RUST=1 {binary} {args_str}")
-    if result.stdout != "":
-        print result.stdout
-    if result.stderr != "" and result.exit_code != 0:
-        eprint(result.stderr)
-    result.exit_code
+    # Check if llc is available for LLVM backend
+    if backend == "llvm":
+        val llc_check = shell("command -v llc >/dev/null 2>&1")
+        if llc_check.exit_code != 0:
+            eprint("Error: llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)")
+            return 1
+
+    rt_cli_handle_compile(compile_args)
 
 # Bare-metal compilation using BaremetalBuilder
 fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
@@ -1126,118 +1113,16 @@ fn text_hash_native(s: text) -> i64:
     hash
 
 # ============================================================================
-# Advanced Math Functions (SFFI)
+# Advanced Math Functions - Imported from app.io.math
 # ============================================================================
-
-# Logarithm functions
-extern fn rt_math_log(x: f64) -> f64
-extern fn rt_math_log10(x: f64) -> f64
-extern fn rt_math_log2(x: f64) -> f64
-
-fn math_log(x: f64) -> f64:
-    """Natural logarithm (SFFI)."""
-    rt_math_log(x)
-
-fn math_log10(x: f64) -> f64:
-    """Base-10 logarithm (SFFI)."""
-    rt_math_log10(x)
-
-fn math_log2(x: f64) -> f64:
-    """Base-2 logarithm (SFFI)."""
-    rt_math_log2(x)
-
-# Inverse trig functions
-extern fn rt_math_asin(x: f64) -> f64
-extern fn rt_math_acos(x: f64) -> f64
-extern fn rt_math_atan(x: f64) -> f64
-extern fn rt_math_atan2(y: f64, x: f64) -> f64
-
-fn math_asin(x: f64) -> f64:
-    """Arc sine (SFFI)."""
-    rt_math_asin(x)
-
-fn math_acos(x: f64) -> f64:
-    """Arc cosine (SFFI)."""
-    rt_math_acos(x)
-
-fn math_atan(x: f64) -> f64:
-    """Arc tangent (SFFI)."""
-    rt_math_atan(x)
-
-fn math_atan2(y: f64, x: f64) -> f64:
-    """Arc tangent of y/x (SFFI)."""
-    rt_math_atan2(y, x)
-
-# Hyperbolic functions
-extern fn rt_math_sinh(x: f64) -> f64
-extern fn rt_math_cosh(x: f64) -> f64
-extern fn rt_math_tanh(x: f64) -> f64
-
-fn math_sinh(x: f64) -> f64:
-    """Hyperbolic sine (SFFI)."""
-    rt_math_sinh(x)
-
-fn math_cosh(x: f64) -> f64:
-    """Hyperbolic cosine (SFFI)."""
-    rt_math_cosh(x)
-
-fn math_tanh(x: f64) -> f64:
-    """Hyperbolic tangent (SFFI)."""
-    rt_math_tanh(x)
-
-# Rounding functions
-extern fn rt_math_ceil(x: f64) -> f64
-extern fn rt_math_floor(x: f64) -> f64
-# Note: rt_math_round not available in runtime yet
-
-fn math_ceil(x: f64) -> f64:
-    """Ceiling function (SFFI)."""
-    rt_math_ceil(x)
-
-fn math_floor(x: f64) -> f64:
-    """Floor function (SFFI)."""
-    rt_math_floor(x)
-
-fn math_round(x: f64) -> f64:
-    """Round to nearest integer (pure Simple, rt_math_round not in runtime)."""
-    val floored = rt_math_floor(x)
-    if x - floored >= 0.5:
-        floored + 1.0
-    else:
-        floored
+use app.io.math.{math_log, math_log10, math_log2}
+use app.io.math.{math_asin, math_acos, math_atan, math_atan2}
+use app.io.math.{math_sinh, math_cosh, math_tanh}
+use app.io.math.{math_ceil, math_floor, math_round}
 
 # ============================================================================
-# JIT Backend Control
+# JIT Backend Control - Imported from app.io.jit
 # ============================================================================
-
-fn set_jit_backend(backend: text) -> bool:
-    """Set the JIT backend: 'auto', 'cranelift', or 'llvm'."""
-    rt_set_jit_backend(backend)
-
-fn get_jit_backend() -> text:
-    """Get the current JIT backend name."""
-    rt_get_jit_backend()
-
-fn exec_manager_create(backend: text) -> i64:
-    """Create a new execution manager. Returns handle (0 on failure)."""
-    rt_exec_manager_create(backend)
-
-fn exec_manager_compile(handle: i64, mir_data: text) -> text:
-    """Compile MIR data. Returns empty string on success, error message on failure."""
-    rt_exec_manager_compile(handle, mir_data)
-
-fn exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
-    """Execute a compiled function by name."""
-    rt_exec_manager_execute(handle, name, args)
-
-fn exec_manager_has_function(handle: i64, name: text) -> bool:
-    """Check if a function has been compiled."""
-    rt_exec_manager_has_function(handle, name)
-
-fn exec_manager_backend_name(handle: i64) -> text:
-    """Get the backend name for an execution manager."""
-    rt_exec_manager_backend_name(handle)
-
-fn exec_manager_cleanup(handle: i64):
-    """Release resources for an execution manager."""
-    rt_exec_manager_cleanup(handle)
+use app.io.jit.{set_jit_backend, get_jit_backend}
+use app.io.jit.{exec_manager_create, exec_manager_compile, exec_manager_execute}
+use app.io.jit.{exec_manager_has_function, exec_manager_backend_name, exec_manager_cleanup}

@@ -1,12 +1,12 @@
 # Simple Language Version History
 
-## Version 0.4.0 (2026-02-05) - Pure Simple Release
+## Version 0.4.0 (2026-02-05) - Infrastructure Release
 
 ### Highlights
-- **100% Pure Simple Architecture** - All application code in Simple language
 - **MCP Server Complete** - Model Context Protocol with full JSON-RPC 2.0 support
 - **Unified Database Library** - Production-ready with atomic operations
 - **Self-Hosting Build System** - Complete build pipeline in Simple
+- **Pure Simple DL Library** - Tensor, autograd, neural network layers
 
 ### Major Features
 
@@ -35,32 +35,6 @@
 - 4,440 lines of implementation, 2,370 lines of tests (290+ SSpec tests)
 - Commands: `build`, `test`, `coverage`, `lint`, `fmt`, `check`, `bootstrap`, `package`
 
-### CLI Entry Point
-- **Main CLI**: `bin/simple` (shell wrapper that calls Simple app)
-- **Runtime**: `bin/simple_runtime` (internal, calls `src/app/cli/main.spl`)
-- Usage: `simple <command>` or `simple <file.spl>`
-
-### File Structure
-```
-bin/
-├── simple              # Main CLI entry point
-├── simple_runtime      # Runtime binary
-└── bootstrap/          # Minimal bootstrap binaries
-
-src/
-├── app/                # Applications (CLI, build, MCP, LSP, etc.)
-│   ├── cli/            # Main CLI dispatcher
-│   ├── build/          # Self-hosting build system
-│   ├── mcp/            # MCP server
-│   ├── lsp/            # Language server
-│   └── io/             # SFFI wrappers
-├── lib/                # Libraries
-│   ├── database/       # Unified database library
-│   └── pure/           # Pure Simple DL library
-├── std/                # Standard library
-└── compiler/           # Compiler infrastructure
-```
-
 ### Statistics
 - Simple files: 2,000+
 - Simple lines: 190,000+
@@ -68,39 +42,79 @@ src/
 
 ---
 
-## Version 0.5.0 (Planned) - Grammar & DL Edition
+## Version 0.5.0 (2026-02-08) - Pure Simple Release
+
+### Achievements
+
+#### 100% Pure Simple Architecture ✅
+- [x] Rust source completely removed (24.2GB freed)
+- [x] Pre-built runtime binary (33MB) — no Rust toolchain needed
+- [x] Pure Simple parser (2,144 lines, fully self-hosting)
+- [x] 1,109+ Simple source files, 190,000+ lines
+
+#### Grammar Updates (3 Weeks) ✅
+- [x] Parser: `async`, `await`, `spawn`, `actor`, `#[]` attributes
+- [x] `with` statement (context managers) — `enter()` + `cleanup()` protocol
+- [x] Set literals `s{1, 2, 3}` — full compiler pipeline
+- [x] Async state machine generation and `Future<T>` HIR support
+- [x] Async/await error diagnostics in HIR pipeline
+- [x] Desugaring pass integrated into compilation pipeline
+
+#### Cross-Platform CI & Release ✅
+- [x] All CI workflows rewritten for pure Simple (no Rust)
+- [x] Multi-platform bootstrap loader with auto-detection
+- [x] 7 platform packages (Linux, macOS, Windows, FreeBSD × architectures)
+- [x] FreeBSD support via Linuxulator
+- [x] `-c` flag with full module resolution (temp file approach)
+
+#### Production Infrastructure ✅
+- [x] Unified Database Library (98/115 tests, 85.2%)
+- [x] MCP Server — JSON-RPC 2.0 with pagination, structured output
+- [x] Stdlib SFFI — 5 phases (String, Collections, Math, System, Path)
+- [x] Static method desugaring (impl Type: static fn)
+- [x] Script migration — 25/25 Python/Bash scripts → Simple
+- [x] SDoctest — documentation testing (669 files, 4,963 blocks)
+
+#### Test Suite ✅
+- [x] 100% pass rate on all active tests
+- [x] 3,606/4,379 broad lib tests passing (82%)
+- [x] 458 spec files, 324 fully passing
+- [x] Test suite repair (54+ files bulk-fixed)
+
+### Known Issues (0.5.0)
+- Runtime parser doesn't support `with` / `s{}` syntax yet (requires runtime rebuild)
+- DL examples (`examples/pure_nn/`) need interpreter support for generic type static methods
+- ~773 broad test failures remain (imported class constructors, closure capture, etc.)
+
+### Statistics
+- Simple files: 1,109+
+- Simple lines: 190,000+
+- Tests: 3,606+ passing
+- Platforms: 7
+- Rust source: 0 lines
+
+---
+
+## Version 0.6.0 (Planned) - Deep Learning Edition
 
 ### Planned Features
 
-#### Grammar Refactoring
-- [ ] Streamlined syntax for common patterns
-- [ ] Improved error messages
-- [ ] Parser performance optimization
-- [ ] Better IDE support preparation
-
-#### Deep Learning Enhancements
-- [ ] Fix module resolution for `lib.pure.*` imports
+#### Deep Learning Examples & Library
+- [ ] Fix module resolution for `lib.pure.*` imports in interpreter
 - [ ] Verify all `examples/pure_nn/` examples run correctly
-- [ ] GPU acceleration via SFFI
+- [ ] GPU acceleration via SFFI (PyTorch/CUDA backend)
 - [ ] Model serialization/deserialization
 - [ ] Training loop utilities
+- [ ] Comprehensive examples: XOR, regression, iris, MNIST
 
-### Known Issues (0.4.0)
-- DL examples (`examples/pure_nn/`) cannot run due to interpreter limitation: static method calls on generic types not supported (`PureTensor<T>.from_data(...)` fails with "unsupported path call")
-  - **Import issue FIXED**: Module paths now resolve correctly with `lib.pure.tensor.{...}` syntax
-  - **Remaining issue**: Interpreter needs support for generic type static methods
-- Some test specs have parse errors with newer syntax features
-
-#### Documentation Updates
-- [ ] Consistent file/directory references
-- [ ] Updated architecture diagrams
-- [ ] API reference generation
-- [ ] Getting started guide refresh
+#### Runtime Rebuild
+- [ ] Rebuild runtime with `with` statement and `s{}` parser support
+- [ ] Enable 533+ blocked tests
 
 #### Code Quality
 - [ ] Lint rule expansion
 - [ ] Auto-fix improvements
-- [ ] Test coverage increase
+- [ ] Test coverage increase toward 90%+
 
 ---
 
@@ -125,4 +139,4 @@ src/
 
 ## Release Notes Location
 - Full release notes: `release/RELEASE_NOTES_*.md`
-- GitHub releases: `https://github.com/anthropics/simple/releases`
+- GitHub releases: `https://github.com/simple-lang/simple/releases`

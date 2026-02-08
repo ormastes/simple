@@ -1,0 +1,79 @@
+# HostTaskHandle - Task Handle
+#
+# Handle for spawned tasks with join, abort, and status checking.
+
+use std.async_core.*
+use std.async_host.future.{HostFuture}
+
+class HostTaskHandle<T>:
+    """Handle to a spawned task.
+
+    Full-featured:
+    - Non-blocking completion check
+    - Blocking join
+    - Cancellation
+    """
+    task_id: usize
+    state: TaskState
+    result: Option<T>
+    error: Option<AsyncError>
+    cancel_token: CancellationToken
+    wakers: [Waker]
+
+    fn id() -> usize:
+        self.task_id
+
+    fn is_finished() -> bool:
+        """Non-blocking completion check."""
+        self.state.is_terminal()
+
+    fn try_join() -> Option<T>:
+        """Non-blocking result retrieval."""
+        if self.is_finished():
+            self.result
+        else:
+            nil
+
+    fn try_join_result() -> Option<Result<T, AsyncError>>:
+        """Non-blocking result with error."""
+        if not self.is_finished():
+            return nil
+
+        match self.error:
+            case Some(e):
+                Some(Err(e))
+            case None:
+                match self.result:
+                    case Some(v): Some(Ok(v))
+                    case None: Some(Err(AsyncError.JoinError("no result")))
+
+    fn join() -> HostFuture<T>:
+        """Awaitable join (returns future)."""
+        if self.is_finished():
+            match self.result:
+                case Some(v):
+                    val ready: HostFuture<T> = HostFuture.ready(v)
+                    ready
+                case None:
+                    val failed: HostFuture<T> = HostFuture.failed(AsyncError.JoinError("no result"))
+                    failed
+        else:
+            # Return pending future linked to this task
+            val pending: HostFuture<T> = HostFuture.pending()
+            pending
+
+    me cancel():
+        """Request task cancellation."""
+        self.cancel_token.cancel()
+
+    fn is_cancelled() -> bool:
+        """Check if cancellation requested."""
+        self.cancel_token.is_cancelled()
+
+    fn state() -> TaskState:
+        self.state
+
+# Note: HostTaskHandle implements TaskHandleCore<T> via duck typing
+
+
+export HostTaskHandle

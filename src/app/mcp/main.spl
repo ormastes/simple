@@ -16,70 +16,7 @@ use app.io.mod (file_read, get_args, exit, shell, cwd)
 use app.mcp.resources
 use app.mcp.prompts
 use app.mcp.bugdb_resource
-
-struct ShellResult:
-    exit_code: Int
-    stdout: String?
-    stderr: String?
-
-# Brace helpers (avoid f-string interpolation issues)
-fn LB() -> String:
-    (123 as char).to_string()
-
-fn RB() -> String:
-    (125 as char).to_string()
-
-fn Q() -> String:
-    "\""
-
-# Helper: parse integer from string
-fn parse_int(s: String) -> Result<Int, String>:
-    # Simple integer parsing (positive integers only)
-    var result = 0
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch >= '0' and ch <= '9':
-            result = result * 10 + (ch as int - '0' as int)
-        else:
-            return Err("Invalid digit: " + ch.to_string())
-        i = i + 1
-    Ok(result)
-
-# Helper: minimum of two integers
-fn min_int(a: Int, b: Int) -> Int:
-    if a < b:
-        a
-    else:
-        b
-
-# Option unwrap helper
-fn unwrap_idx(opt: Option<Int>) -> Int:
-    match opt:
-        case Some(i):
-            return i
-        case None:
-            return -1
-
-fn unwrap_str(result: Result<String, String>) -> String:
-    match result:
-        case Ok(s):
-            return s
-        case Err(_):
-            return ""
-
-# Skip program name and script path to get clean args
-fn get_clean_args(all_args: [String]) -> [String]:
-    var args = []
-    var start_idx = 1
-    # If second arg is the script path (ends with .spl), skip it too
-    if all_args.len() > 1 and all_args[1].ends_with(".spl"):
-        start_idx = 2
-    var i = start_idx
-    while i < all_args.len():
-        args = args + [all_args[i]]
-        i = i + 1
-    args
+use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, has_flag}
 
 # Main entry point
 fn main():
@@ -253,43 +190,6 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
             debug_log("Unknown method: " + method)
         return make_error_response(id, -32601, "Method not found: " + method)
 
-fn jp(key: String, val_str: String) -> String:
-    var r = Q()
-    r = r + key
-    r = r + Q()
-    r = r + ":"
-    r = r + val_str
-    r
-
-fn js(s: String) -> String:
-    var r = Q()
-    r = r + s
-    r = r + Q()
-    r
-
-fn jo1(pair: String) -> String:
-    var r = LB()
-    r = r + pair
-    r = r + RB()
-    r
-
-fn jo2(p1: String, p2: String) -> String:
-    var r = LB()
-    r = r + p1
-    r = r + ","
-    r = r + p2
-    r = r + RB()
-    r
-
-fn jo3(p1: String, p2: String, p3: String) -> String:
-    var r = LB()
-    r = r + p1
-    r = r + ","
-    r = r + p2
-    r = r + ","
-    r = r + p3
-    r = r + RB()
-    r
 
 fn make_initialize_response(id: String) -> String:
     # Server info with instructions for MCPSearch
@@ -431,58 +331,9 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
     else:
         return make_error_response(id, -32602, "Unknown tool: " + tool_name)
 
-fn make_tool_result(id: String, content: String) -> String:
-    val text_obj = jo2(jp("type", js("text")), jp("text", js(content)))
-    val result = jo1(jp("content", "[" + text_obj + "]"))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn make_result_response(id: String, result: String) -> String:
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn make_error_response(id: String, code: Int, message: String) -> String:
-    val err = jo2(jp("code", code.to_string()), jp("message", js(escape_json(message))))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("error", err))
 
 # --- Tool implementations ---
 
-fn read_file_safe(path: String) -> String:
-    val content = file_read(path)
-    if content == "":
-        return "Error: could not read file: " + path
-    content
-
-fn list_spl_files(dir: String) -> String:
-    val result = shell("find " + dir + " -name '*.spl' -type f | sort")
-    if result.exit_code != 0:
-        var error = LB()
-        error = error + jp("error", js("Failed to list files"))
-        error = error + ","
-        error = error + jp("directory", js(dir))
-        error = error + RB()
-        return error
-
-    val output = result.stdout ?? ""
-    if output.trim() == "":
-        return "[]"  # Empty array
-
-    val file_paths = output.split("\n")
-    var files_json = "["
-    var first = true
-
-    for file_path in file_paths:
-        val trimmed = file_path.trim()
-        if trimmed != "":
-            if not first:
-                files_json = files_json + ","
-            first = false
-
-            var file_obj = LB()
-            file_obj = file_obj + jp("path", js(trimmed))
-            file_obj = file_obj + RB()
-            files_json = files_json + file_obj
-
-    files_json = files_json + "]"
-    files_json
 
 fn search_files(query: String) -> String:
     val result = shell("grep -rn '" + query + "' --include='*.spl' . 2>/dev/null | head -50")
@@ -560,107 +411,6 @@ fn get_file_info(path: String) -> String:
     result = result + RB()
     result
 
-# --- JSON helpers (minimal, no library dependency) ---
-
-fn extract_json_string_v2(json: String, key: String) -> String:
-    # Completely standalone implementation without any helper functions
-    val pattern = "\"" + key + "\":"
-    val idx_opt = json.index_of(pattern)
-
-    var start_pos = -1
-    match idx_opt:
-        Some(pos): start_pos = pos + pattern.len()
-        None: return ""
-
-    if start_pos < 0:
-        return ""
-
-    val rest = json.substring(start_pos).trim()
-
-    if not rest.starts_with("\""):
-        return ""
-
-    val after_quote = rest.substring(1)
-    val end_opt = after_quote.index_of("\"")
-
-    var end_pos = -1
-    match end_opt:
-        Some(pos): end_pos = pos
-        None: return ""
-
-    if end_pos < 0:
-        return ""
-
-    after_quote.substring(0, end_pos)
-
-fn extract_json_string(json: String, key: String) -> String:
-    # Build search pattern: "key":
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx_opt = json.index_of(search)
-
-    # Unwrap Option<Int> inline to avoid type inference issues
-    var idx = -1
-    match idx_opt:
-        Some(i): idx = i
-        None: idx = -1
-
-    if idx < 0:
-        return ""
-
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        val end_opt = rest.index_of(quote)
-
-        # Unwrap Option<Int> inline
-        var end = -1
-        match end_opt:
-            Some(i): end = i
-            None: end = -1
-        if end >= 0:
-            return rest.substring(0, end)
-    ""
-
-fn extract_json_value(json: String, key: String) -> String:
-    val search = Q() + key + Q() + ":"
-    val idx = unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    # Read until comma, closing brace, or end
-    var end = 0
-    for ch in trimmed:
-        if ch == "," or ch == RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
-    val search = Q() + outer_key + Q() + ":"
-    val idx = unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    extract_json_string(after, inner_key)
-
-fn escape_json(text: String) -> String:
-    var result = text
-    result = result.replace("\\", "\\\\")
-    result = result.replace(Q(), "\\" + Q())
-    result = result.replace("\n", "\\n")
-    result = result.replace("\r", "\\r")
-    result = result.replace("\t", "\\t")
-    result
 
 # --- Resource and Prompt handlers ---
 
@@ -917,16 +667,21 @@ fn get_current_dir() -> String:
 
 # --- CLI mode handlers ---
 
+# Helper: Read file or exit with error
+fn read_file_or_exit(file_path: text) -> text:
+    val content = file_read(file_path)
+    if content == "":
+        print("Error reading file: " + file_path)
+        exit(1)
+    content
+
 fn handle_read(args: [String]):
     if args.len() < 2:
         print("Error: Missing file path")
         print("Usage: simple mcp read <file.spl>")
         exit(1)
     val file_path = args[1]
-    val content = file_read(file_path)
-    if content == "":
-        print("Error reading file: " + file_path)
-        exit(1)
+    val content = read_file_or_exit(file_path)
     print(content)
 
 fn handle_expand(args: [String]):
@@ -936,10 +691,7 @@ fn handle_expand(args: [String]):
         exit(1)
     val file_path = args[1]
     val symbol_name = args[2]
-    val content = file_read(file_path)
-    if content == "":
-        print("Error reading file: " + file_path)
-        exit(1)
+    val content = read_file_or_exit(file_path)
     # Find symbol in content (basic search)
     val lines = content.split("\n")
     var found = false
@@ -966,10 +718,7 @@ fn handle_json(args: [String]):
         print("Usage: simple mcp json <file.spl>")
         exit(1)
     val file_path = args[1]
-    val content = file_read(file_path)
-    if content == "":
-        print("Error reading file: " + file_path)
-        exit(1)
+    val content = read_file_or_exit(file_path)
     # Output as basic JSON
     val escaped = escape_json(content)
     val lb = LB()
@@ -979,18 +728,9 @@ fn handle_json(args: [String]):
 
 fn handle_default_read(args: [String]):
     val file_path = args[0]  # After clean_args, first element is the command/file
-    val content = file_read(file_path)
-    if content == "":
-        print("Error reading file: " + file_path)
-        exit(1)
+    val content = read_file_or_exit(file_path)
     print(content)
 
-# Check if a flag is present in args
-fn has_flag(args: [String], flag: String) -> Bool:
-    for arg in args:
-        if arg == flag:
-            return true
-    return false
 
 # Entry point
 main()

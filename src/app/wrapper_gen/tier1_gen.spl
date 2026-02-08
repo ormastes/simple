@@ -608,25 +608,11 @@ fn generate_bridge_cpp(spec: WrapperSpec, output_dir: text, dry_run: bool):
     else:
         file_write("{output_dir}/src/bridge.cpp", content)
 
-fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
-    val upper = lib_upper(spec)
-
-    # Build parameter list
-    var params = ""
-    for param in func.params:
-        if params != "":
-            params = params + ", "
-        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
-        params = params + "{cpp_type} {param.name}"
-
-    val ret = map_return_to_cpp(func.return_type, spec)
+# Helper: Build parameter conversions and call arguments
+fn build_param_conversions(params: [ParamSpec], spec: WrapperSpec) -> (text, text):
     var content = ""
-    content = content + "{ret} {spec.name}_{func.name}({params}) {\n"
-    content = content + "#ifdef HAS_{upper}\n"
-
-    # Build argument conversions and call
     var call_args = ""
-    for param in func.params:
+    for param in params:
         if param.param_type == "[i64]":
             content = content + "    std::vector<int64_t> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
             if call_args != "":
@@ -650,6 +636,27 @@ fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
             if call_args != "":
                 call_args = call_args + ", "
             call_args = call_args + "{param.name}"
+    (content, call_args)
+
+fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
+    val upper = lib_upper(spec)
+
+    # Build parameter list
+    var params = ""
+    for param in func.params:
+        if params != "":
+            params = params + ", "
+        val cpp_type = map_type_to_cpp_param(param.param_type, spec)
+        params = params + "{cpp_type} {param.name}"
+
+    val ret = map_return_to_cpp(func.return_type, spec)
+    var content = ""
+    content = content + "{ret} {spec.name}_{func.name}({params}) {\n"
+    content = content + "#ifdef HAS_{upper}\n"
+
+    # Build argument conversions and call
+    val (conv_content, call_args) = build_param_conversions(func.params, spec)
+    content = content + conv_content
 
     # Generate the call and return
     if is_handle_type(func.return_type, spec):
@@ -702,31 +709,8 @@ fn gen_cpp_method_impl(method: MethodSpec, spec: WrapperSpec) -> text:
     content = content + "#ifdef HAS_{upper}\n"
 
     # Build call arguments (method call on handle's inner)
-    var call_args = ""
-    for param in method.params:
-        if param.param_type == "[i64]":
-            content = content + "    std::vector<int64_t> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
-            if call_args != "":
-                call_args = call_args + ", "
-            call_args = call_args + "{param.name}_vec"
-        elif param.param_type == "[f64]":
-            content = content + "    std::vector<double> {param.name}_vec({param.name}.begin(), {param.name}.end());\n"
-            if call_args != "":
-                call_args = call_args + ", "
-            call_args = call_args + "{param.name}_vec"
-        elif param.param_type == "text":
-            content = content + "    std::string {param.name}_str({param.name}.begin(), {param.name}.end());\n"
-            if call_args != "":
-                call_args = call_args + ", "
-            call_args = call_args + "{param.name}_str"
-        elif is_handle_type(param.param_type, spec):
-            if call_args != "":
-                call_args = call_args + ", "
-            call_args = call_args + "{param.name}.inner"
-        else:
-            if call_args != "":
-                call_args = call_args + ", "
-            call_args = call_args + "{param.name}"
+    val (conv_content, call_args) = build_param_conversions(method.params, spec)
+    content = content + conv_content
 
     # Generate the call and return (method call on inner)
     if is_handle_type(method.return_type, spec):

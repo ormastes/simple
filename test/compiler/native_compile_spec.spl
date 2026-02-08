@@ -1,0 +1,299 @@
+# Runtime FFI functions (avoid broken app.io module import)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn file_write(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+# Write source to file. Use concatenation for strings containing braces to avoid
+# Simple's string interpolation eating {varname} patterns in source code.
+fn write_source(path: text, content: text) -> bool:
+    val cmd = "cat > " + path + " << 'SIMPLE_WRITE_EOF'\n" + content + "\nSIMPLE_WRITE_EOF"
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", cmd])
+    code == 0
+
+# Build a print statement with interpolation: print "{varname}"
+# Using concatenation to avoid Simple's own interpolation
+fn interp_print(varname: text) -> text:
+    "print \"" + "{" + varname + "}" + "\""
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)
+
+struct ShellResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn shell(command: text) -> ShellResult:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    ShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+describe "Native Compilation Pipeline":
+    describe "generate_c_code via compile":
+        it "compiles hello world to native binary":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_hello.spl"
+            val out_path = "/tmp/simple_native_test_hello"
+            file_write(src_path, "print \"Hello World\"")
+
+            # Compile using standalone native.spl script
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            # Run binary and check output
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("Hello World")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+        it "compiles with fn main":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_main.spl"
+            val out_path = "/tmp/simple_native_test_main"
+            file_write(src_path, "fn main():\n    print \"from main\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("from main")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+        it "compiles with comments":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_comment.spl"
+            val out_path = "/tmp/simple_native_test_comment"
+            file_write(src_path, "# A comment\nprint \"OK\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("OK")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+        it "compiles val declarations":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_val.spl"
+            val out_path = "/tmp/simple_native_test_val"
+            file_write(src_path, "val x = 42\nprint \"done\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("done")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+    describe "for loops":
+        it "compiles for range loop":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_for.spl"
+            val out_path = "/tmp/simple_native_test_for"
+            val src = "fn main():\n    var total = 0\n    for i in range(1, 6):\n        total += i\n    " + interp_print("total")
+            write_source(src_path, src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("15")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+    describe "functions":
+        it "compiles recursive factorial":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_fact.spl"
+            val out_path = "/tmp/simple_native_test_fact"
+            val src = "fn factorial(n: i64) -> i64:\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)\n\nfn main():\n    val result = factorial(6)\n    " + interp_print("result")
+            write_source(src_path, src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("720")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+    describe "arrays":
+        it "compiles array declaration and indexing":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_arr.spl"
+            val out_path = "/tmp/simple_native_test_arr"
+            val line1 = "fn main():"
+            val line2 = "    val nums = [10, 20, 30]"
+            val line3 = "    " + interp_print("nums[0]")
+            val line4 = "    " + interp_print("nums.len()")
+            val src = line1 + "\n" + line2 + "\n" + line3 + "\n" + line4
+            write_source(src_path, src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("10")
+            expect(stdout).to_contain("3")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+    describe "compound assignment":
+        it "compiles += -= *=":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_native_test_compound.spl"
+            val out_path = "/tmp/simple_native_test_compound"
+            val src = "fn main():\n    var x = 10\n    x += 5\n    x -= 3\n    x *= 2\n    " + interp_print("x")
+            write_source(src_path, src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("24")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+    describe "advanced example":
+        it "compiles native_advanced.spl end-to-end":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "examples/native_advanced.spl"
+            val out_path = "/tmp/simple_native_test_advanced"
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("factorial(5) = 120")
+            expect(stdout).to_contain("fibonacci(10) = 55")
+            expect(stdout).to_contain("sum(1..11) = 55")
+            expect(stdout).to_contain("medium")
+            expect(stdout).to_contain("count after break = 5")
+            expect(stdout).to_contain("acc = 14")
+
+            file_delete(out_path)
+
+    describe "LLVM direct pipeline":
+        it "compiles hello world via LLVM":
+            val clang_check = shell("command -v clang >/dev/null 2>&1")
+            if clang_check.exit_code != 0:
+                print "  (skipped: clang not found)"
+                return
+
+            val src_path = "/tmp/simple_llvm_test_hello.spl"
+            val out_path = "/tmp/simple_llvm_test_hello"
+            file_write(src_path, "print \"Hello LLVM\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/llvm_direct.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("Hello LLVM")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+        it "compiles advanced example via LLVM":
+            val clang_check = shell("command -v clang >/dev/null 2>&1")
+            if clang_check.exit_code != 0:
+                print "  (skipped: clang not found)"
+                return
+
+            val src_path = "examples/native_advanced.spl"
+            val out_path = "/tmp/simple_llvm_test_advanced"
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/llvm_direct.spl", src_path, out_path])
+            expect(comp_code).to_equal(0)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("factorial(5) = 120")
+            expect(stdout).to_contain("fibonacci(10) = 55")
+            expect(stdout).to_contain("acc = 14")
+
+            file_delete(out_path)
+
+        it "emits LLVM IR with --emit-ir":
+            val clang_check = shell("command -v clang >/dev/null 2>&1")
+            if clang_check.exit_code != 0:
+                print "  (skipped: clang not found)"
+                return
+
+            val src_path = "/tmp/simple_llvm_test_ir.spl"
+            val out_path = "/tmp/simple_llvm_test_ir.ll"
+            file_write(src_path, "print \"IR test\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/llvm_direct.spl", src_path, out_path, "--emit-ir"])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            file_delete(src_path)
+            file_delete(out_path)

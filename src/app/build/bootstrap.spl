@@ -2,13 +2,17 @@
 #
 # 3-stage self-compilation verification for the Simple compiler.
 # Ensures the compiler can compile itself consistently.
+#
+# Stage 1: Pre-built bootstrap binary → simple_new1 (copy)
+# Stage 2: simple_new1 compiles src/app/cli/main.spl → simple_new2.smf
+# Stage 3: simple_new2.smf compiles src/app/cli/main.spl → simple_new3.smf
+# Verify: Stage2 == Stage3 (binary reproducibility)
 
 use app.build.types (BuildProfile)
-use app.build.cargo (Cargo, BuildConfig, print_build_result)
 
 # Bootstrap stage
 enum BootstrapStage:
-    Stage1    # Bootstrap build → simple_new1
+    Stage1    # Pre-built binary → simple_new1
     Stage2    # simple_new1 → simple_new2
     Stage3    # simple_new2 → simple_new3
 
@@ -31,7 +35,7 @@ struct StageResult:
 
 impl StageResult:
     fn summary() -> text:
-        val status = if self.success: "✓" else: "✗"
+        val status = if self.success: "+" else: "x"
         "Stage {stage_name(self.stage)}: {status} ({self.binary_size} bytes, {self.build_duration_ms}ms)"
 
 # Bootstrap pipeline result
@@ -51,13 +55,13 @@ impl BootstrapResult:
         ]
 
         if self.verified:
-            parts = parts.merge(["✓ Verification: Stage2 == Stage3"])
+            parts = parts.merge(["+ Verification: Stage2 == Stage3"])
         else:
-            parts = parts.merge(["✗ Verification: Stage2 != Stage3"])
+            parts = parts.merge(["x Verification: Stage2 != Stage3"])
 
         parts.join("\n")
 
-use app.io.mod (file_exists, file_size_raw, file_copy, file_delete, dir_create, process_run, file_hash_sha256)
+use app.io.mod (file_exists, file_size_raw, file_copy, file_delete, dir_create, process_run, file_hash_sha256, shell, time_now_unix_micros)
 
 # Bootstrap class
 class Bootstrap:
@@ -70,8 +74,8 @@ class Bootstrap:
         # Create output directory
         dir_create(config.output_dir, false)
 
-        # Stage 1: Rust → simple_new1
-        print "Stage 1: Building with Rust compiler..."
+        # Stage 1: Pre-built binary → simple_new1
+        print "Stage 1: Using pre-built bootstrap binary..."
         val stage1_result = run_stage1(config)
         print stage1_result.summary()
 
@@ -85,7 +89,7 @@ class Bootstrap:
             )
 
         # Stage 2: simple_new1 → simple_new2
-        print "\nStage 2: Building with simple_new1..."
+        print "\nStage 2: Compiling with simple_new1..."
         val stage2_result = run_stage2(config, stage1_result)
         print stage2_result.summary()
 
@@ -99,7 +103,7 @@ class Bootstrap:
             )
 
         # Stage 3: simple_new2 → simple_new3
-        print "\nStage 3: Building with simple_new2..."
+        print "\nStage 3: Compiling with simple_new2..."
         val stage3_result = run_stage3(config, stage2_result)
         print stage3_result.summary()
 
@@ -121,18 +125,20 @@ class Bootstrap:
             verified = true
 
         if verified:
-            print "✓ Verification passed: stage2 == stage3"
+            print "+ Verification passed: stage2 == stage3"
         else:
-            print "✗ Verification failed: stage2 != stage3"
+            print "x Verification failed: stage2 != stage3"
 
         # Cleanup if requested
         if not config.keep_artifacts:
             cleanup_artifacts(config, stage1_result, stage2_result, stage3_result)
 
-        val overall_success = stage1_result.success and
-                              stage2_result.success and
-                              stage3_result.success and
-                              verified
+        val s1_ok = stage1_result.success
+        val s2_ok = stage2_result.success
+        val s3_ok = stage3_result.success
+        val s12 = s1_ok and s2_ok
+        val s123 = s12 and s3_ok
+        val overall_success = s123 and verified
 
         BootstrapResult(
             stage1: stage1_result,
@@ -146,23 +152,18 @@ class Bootstrap:
     static fn quick() -> BootstrapResult:
         Bootstrap.run(default_bootstrap_config())
 
-# Stage 1: Build with Rust compiler
+# Stage 1: Use pre-built bootstrap binary
 fn run_stage1(config: BootstrapConfig) -> StageResult:
     val start_time = current_time_ms()
 
-    # Build with cargo (bootstrap profile)
-    val build_config = BuildConfig(
-        profile: config.profile,
-        features: [],
-        workspace_root: config.workspace_root,
-        target_dir: "{config.workspace_root}/target",
-        jobs: 4,
-        verbose: false
-    )
+    # Find the pre-built bootstrap binary
+    var bootstrap_path = "bin/bootstrap/simple"
+    if not file_exists(bootstrap_path):
+        bootstrap_path = "./bin/bootstrap/simple"
 
-    val build_result = Cargo.build(build_config)
-
-    if not build_result.success:
+    if not file_exists(bootstrap_path):
+        print "  Error: Pre-built bootstrap binary not found"
+        print "  Expected: bin/bootstrap/simple"
         return StageResult(
             stage: BootstrapStage.Stage1,
             success: false,
@@ -171,13 +172,11 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
             build_duration_ms: current_time_ms() - start_time,
             hash: ""
         )
-
-    # Locate the built binary
-    val binary_path = "{config.workspace_root}/target/bootstrap/simple"
-    val stage1_path = "{config.output_dir}/simple_new1"
 
     # Copy to stage1 output
-    if not file_copy(binary_path, stage1_path):
+    val stage1_path = "{config.output_dir}/simple_new1"
+    if not file_copy(bootstrap_path, stage1_path):
+        print "  Error: Failed to copy bootstrap binary to {stage1_path}"
         return StageResult(
             stage: BootstrapStage.Stage1,
             success: false,
@@ -187,12 +186,13 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
             hash: ""
         )
 
-    # Also copy to bin/bootstrap/ for user access
-    dir_create("bin/bootstrap", false)
-    file_copy(binary_path, "bin/bootstrap/simple")
+    # Make executable
+    shell("chmod +x {stage1_path}")
 
     val binary_size = file_size_raw(stage1_path)
     val hash = file_hash_sha256(stage1_path)
+
+    print "  Copied pre-built binary ({binary_size} bytes)"
 
     StageResult(
         stage: BootstrapStage.Stage1,
@@ -203,40 +203,23 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
         hash: hash
     )
 
-# Stage 2: Build with simple_new1
+# Stage 2: Use stage1 binary to compile the compiler
 fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Use simple_new1 to build the compiler
-    # This would invoke: simple_new1 compile ...
-    # For now, we'll use the same cargo build (placeholder)
-    # TODO: Implement self-compilation once compiler supports it
+    # Stage 2: Use stage1 binary to compile the compiler source to stage2 SMF.
+    # SIMPLE_COMPILE_RUST=1 tells the binary to use its native Cranelift backend.
+    val stage2_path = "{config.output_dir}/simple_new2.smf"
+    val stage1_binary = stage1.binary_path
 
-    val build_config = BuildConfig(
-        profile: config.profile,
-        features: [],
-        workspace_root: config.workspace_root,
-        target_dir: "{config.workspace_root}/target",
-        jobs: 4,
-        verbose: false
-    )
+    # Use stage1 binary to compile the compiler
+    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage1_binary} compile src/app/cli/main.spl -o {stage2_path}"
+    val compile_result = shell(compile_cmd)
 
-    val build_result = Cargo.build(build_config)
-
-    if not build_result.success:
-        return StageResult(
-            stage: BootstrapStage.Stage2,
-            success: false,
-            binary_path: "",
-            binary_size: 0,
-            build_duration_ms: current_time_ms() - start_time,
-            hash: ""
-        )
-
-    val binary_path = "{config.workspace_root}/target/bootstrap/simple"
-    val stage2_path = "{config.output_dir}/simple_new2"
-
-    if not file_copy(binary_path, stage2_path):
+    if compile_result.exit_code != 0:
+        print "  Error: Stage 2 compilation failed"
+        if compile_result.stderr != "":
+            print "  {compile_result.stderr}"
         return StageResult(
             stage: BootstrapStage.Stage2,
             success: false,
@@ -258,39 +241,24 @@ fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
         hash: hash
     )
 
-# Stage 3: Build with simple_new2
+# Stage 3: Use stage2 to compile the compiler
 fn run_stage3(config: BootstrapConfig, stage2: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Use simple_new2 to build the compiler
-    # Same placeholder as stage2
-    # TODO: Implement self-compilation
+    # Stage 3: Use stage2 SMF (run through bootstrap runtime) to compile again.
+    # If stage2 == stage3 (hash match), the compiler is reproducible.
+    val stage3_path = "{config.output_dir}/simple_new3.smf"
+    val stage2_binary = stage2.binary_path
 
-    val build_config = BuildConfig(
-        profile: config.profile,
-        features: [],
-        workspace_root: config.workspace_root,
-        target_dir: "{config.workspace_root}/target",
-        jobs: 4,
-        verbose: false
-    )
+    # Use stage2 (run through bootstrap runtime) to compile the compiler
+    val bootstrap_binary = "bin/bootstrap/simple"
+    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {bootstrap_binary} {stage2_binary} compile src/app/cli/main.spl -o {stage3_path}"
+    val compile_result = shell(compile_cmd)
 
-    val build_result = Cargo.build(build_config)
-
-    if not build_result.success:
-        return StageResult(
-            stage: BootstrapStage.Stage3,
-            success: false,
-            binary_path: "",
-            binary_size: 0,
-            build_duration_ms: current_time_ms() - start_time,
-            hash: ""
-        )
-
-    val binary_path = "{config.workspace_root}/target/bootstrap/simple"
-    val stage3_path = "{config.output_dir}/simple_new3"
-
-    if not file_copy(binary_path, stage3_path):
+    if compile_result.exit_code != 0:
+        print "  Error: Stage 3 compilation failed"
+        if compile_result.stderr != "":
+            print "  {compile_result.stderr}"
         return StageResult(
             stage: BootstrapStage.Stage3,
             success: false,
@@ -356,8 +324,7 @@ fn empty_stage_result(stage: BootstrapStage) -> StageResult:
 
 # Helper: Current time in milliseconds
 fn current_time_ms() -> i64:
-    # TODO: Use proper time FFI
-    0
+    time_now_unix_micros() / 1000
 
 # Helper: Stage name to string
 fn stage_name(stage: BootstrapStage) -> text:
@@ -376,21 +343,21 @@ fn print_bootstrap_result(result: BootstrapResult):
     print ""
 
     if result.overall_success:
-        print "✓ Bootstrap pipeline completed successfully"
+        print "+ Bootstrap pipeline completed successfully"
         print ""
         print "Final binary:"
         print "  Path: {result.stage3.binary_path}"
         print "  Size: {result.stage3.binary_size} bytes"
         print "  Hash: {result.stage3.hash}"
     else:
-        print "✗ Bootstrap pipeline failed"
+        print "x Bootstrap pipeline failed"
 
 # Default bootstrap configuration
 fn default_bootstrap_config() -> BootstrapConfig:
     BootstrapConfig(
         profile: BuildProfile.Bootstrap,
         verify: true,
-        keep_artifacts: false,
-        workspace_root: "build/rust/ffi_gen",
-        output_dir: "bootstrap"
+        keep_artifacts: true,
+        workspace_root: ".",
+        output_dir: "build/bootstrap"
     )

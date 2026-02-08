@@ -1,0 +1,185 @@
+# I/O Runtime Module - Direct extern fn wrappers for common I/O operations
+#
+# This module provides reusable I/O functions using direct `extern fn rt_*`
+# calls. It works around the broken `use app.io.{...}` module import issue
+# by declaring the extern functions directly.
+#
+# Usage:
+#   use std.io_runtime.{shell, file_write, file_read, file_exists, ...}
+#
+# This replaces the pattern of duplicating extern fn declarations in every
+# test file and compiler module that needs I/O.
+
+# ============================================================================
+# Extern Function Declarations (runtime built-ins)
+# ============================================================================
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_copy(src: text, dst: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value_str: text) -> bool
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+extern fn rt_cli_get_args() -> [str]
+extern fn rt_exit(code: i64)
+
+# ============================================================================
+# Shell Result
+# ============================================================================
+
+struct ShellResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+# ============================================================================
+# Shell Execution
+# ============================================================================
+
+fn shell(command: text) -> ShellResult:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    ShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn shell_output(command: text) -> text:
+    val result = shell(command)
+    if result.exit_code == 0:
+        result.stdout.trim()
+    else:
+        ""
+
+fn shell_bool(command: text) -> bool:
+    val result = shell(command)
+    result.exit_code == 0
+
+# ============================================================================
+# File Operations
+# ============================================================================
+
+fn file_read(path: text) -> text:
+    val content = rt_file_read_text(path)
+    content ?? ""
+
+fn file_write(path: text, content: text) -> bool:
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", "cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"])
+    code == 0
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+fn file_copy(src: text, dst: text) -> bool:
+    val result = shell("cp '{src}' '{dst}'")
+    result.exit_code == 0
+
+fn file_read_bytes(path: text) -> [u8]:
+    rt_file_read_bytes(path)
+
+fn file_size(path: text) -> i64:
+    val size_str = shell_output("stat -c '%s' '{path}' 2>/dev/null")
+    if size_str == "":
+        return 0
+    int(size_str)
+
+fn file_size_raw(path: text) -> i64:
+    file_size(path)
+
+# ============================================================================
+# Process Execution
+# ============================================================================
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    rt_process_run(cmd, args)
+
+# ============================================================================
+# Environment
+# ============================================================================
+
+fn env_get(key: text) -> text:
+    rt_env_get(key)
+
+fn env_set(key: text, value: text) -> bool:
+    rt_env_set(key, value)
+
+fn cwd() -> text:
+    shell_output("pwd")
+
+fn home() -> text:
+    rt_env_get("HOME")
+
+# ============================================================================
+# System
+# ============================================================================
+
+fn getpid() -> i64:
+    rt_getpid()
+
+fn time_now_unix_micros() -> i64:
+    rt_time_now_unix_micros()
+
+fn get_args() -> [str]:
+    rt_cli_get_args()
+
+fn exit(code: i64):
+    rt_exit(code)
+
+# ============================================================================
+# Directory Operations
+# ============================================================================
+
+fn dir_create(path: text, recursive: bool) -> bool:
+    if recursive:
+        val result = shell("mkdir -p '{path}'")
+        result.exit_code == 0
+    else:
+        val result = shell("mkdir '{path}'")
+        result.exit_code == 0
+
+fn dir_create_all(path: text) -> bool:
+    dir_create(path, true)
+
+fn is_dir(path: text) -> bool:
+    shell_bool("test -d '{path}'")
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+fn host_os() -> text:
+    val os = shell_output("uname -s")
+    if os == "Linux":
+        return "linux"
+    if os == "Darwin":
+        return "macos"
+    if os == "FreeBSD":
+        return "freebsd"
+    os.lower()
+
+fn host_arch() -> text:
+    val arch = shell_output("uname -m")
+    if arch == "x86_64" or arch == "amd64":
+        return "x86_64"
+    if arch == "aarch64" or arch == "arm64":
+        return "aarch64"
+    arch
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ShellResult
+export shell, shell_output, shell_bool
+export file_read, file_write, file_exists, file_delete, file_copy, file_read_bytes, file_size, file_size_raw
+export process_run
+export env_get, env_set, cwd, home
+export getpid, time_now_unix_micros, get_args, exit
+export dir_create, dir_create_all, is_dir
+export host_os, host_arch

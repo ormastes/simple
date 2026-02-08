@@ -1,186 +1,95 @@
-# Future Type - Async/Await Foundation
+# Future - Async Computation
 #
-# Core types for asynchronous programming in Simple.
-# Future represents a value that will be available in the future.
-#
-# Usage:
-#   use std.async.future.{Future, PollResult}
-#
-#   val future = Future.ready(42)
-#   val result = future.poll(waker)
+# Represents an asynchronous computation that may not be available yet.
 
-# ================================================================
-# Core Types
-# ================================================================
+use std.async.poll.{Poll}
+use std.async.ffi.{
+    future_alloc_ready, future_alloc_pending, future_poll,
+    future_map, future_then, future_free
+}
 
-enum PollResult<T>:
-    """Result of polling a future."""
-    Ready(value: T)     # Value is ready now
-    Pending             # Value not ready, will wake when ready
+class Future<T>:
+    """Represents an asynchronous computation.
 
-struct Waker:
-    """Handle to wake a sleeping task."""
-    task_id: i64
-    wake_fn: fn(i64)   # Function to call when waking
+    A future is a value that may not be available yet.
+    Futures are polled to check if they're ready.
 
-impl Waker:
-    fn wake():
-        """Wake the associated task."""
-        self.wake_fn(self.task_id)
+    Example:
+        val future = Future<i64>.from_value(42)
 
-    static fn from_fn(task_id: i64, wake_fn: fn(i64)) -> Waker:
-        Waker(task_id: task_id, wake_fn: wake_fn)
-
-struct Future<T>:
-    """A future value that will be available asynchronously.
-
-    Future is the core abstraction for async programming.
-    It represents a computation that will complete in the future.
-
-    Key methods:
-    - poll(waker) - Try to get the value (returns Ready or Pending)
-    - map(fn) - Transform the future's value
-    - and_then(fn) - Chain futures together
+        match future.poll():
+            case Poll.Ready(value):
+                print "Got {value}"
+            case Poll.Pending:
+                print "Not ready yet"
     """
-    poll_fn: fn(Waker) -> PollResult<T>
+    state: [u8]  # Opaque future state
 
-impl Future:
-    static fn ready<T>(value: T) -> Future<T>:
-        """Create a future that is immediately ready."""
-        Future(poll_fn: \waker: PollResult.Ready(value))
+    static fn from_value(value: T) -> Future<T>:
+        """Create future that's immediately ready.
 
-    static fn pending<T>() -> Future<T>:
-        """Create a future that is perpetually pending."""
-        Future(poll_fn: \waker: PollResult.Pending)
+        Args:
+            value: Ready value
 
-    fn poll(waker: Waker) -> PollResult<T>:
-        """Poll this future for readiness."""
-        self.poll_fn(waker)
+        Returns:
+            Completed future
+        """
+        val state = future_alloc_ready(value)
+        Future(state: state)
+
+    static fn pending() -> Future<T>:
+        """Create future that's pending.
+
+        Returns:
+            Pending future
+        """
+        val state = future_alloc_pending::<T>()
+        Future(state: state)
+
+    fn poll() -> Poll<T>:
+        """Poll future to check if ready.
+
+        Returns:
+            Ready(value) if complete, Pending otherwise
+
+        Non-blocking operation.
+        """
+        future_poll::<T>(self.state)
+
+    fn is_ready() -> bool:
+        """Check if future is ready (non-blocking).
+
+        Returns:
+            true if ready, false otherwise
+        """
+        self.poll().is_ready()
 
     fn map<U>(f: fn(T) -> U) -> Future<U>:
-        """Transform the future's value.
+        """Transform future value.
 
-        Example:
-            val future = Future.ready(42)
-            val doubled = future.map(\x: x * 2)
+        Args:
+            f: Transformation function
+
+        Returns:
+            New future with transformed value
         """
-        val original_poll = self.poll_fn
-        Future(poll_fn: \waker:
-            match original_poll(waker):
-                case PollResult.Ready(value):
-                    PollResult.Ready(f(value))
-                case PollResult.Pending:
-                    PollResult.Pending
-        )
+        val state = future_map(self.state, f)
+        Future(state: state)
 
-    fn and_then<U>(f: fn(T) -> Future<U>) -> Future<U>:
-        """Chain futures together.
+    fn then<U>(f: fn(T) -> Future<U>) -> Future<U>:
+        """Chain futures (flatMap).
 
-        Example:
-            val future1 = Future.ready(5)
-            val future2 = future1.and_then(\x:
-                Future.ready(x * 2)
-            )
+        Args:
+            f: Function returning future
+
+        Returns:
+            Chained future
         """
-        val original_poll = self.poll_fn
-        # NOTE: This is simplified - full implementation needs state machine
-        Future(poll_fn: \waker:
-            match original_poll(waker):
-                case PollResult.Ready(value):
-                    val next_future = f(value)
-                    next_future.poll(waker)
-                case PollResult.Pending:
-                    PollResult.Pending
-        )
+        val state = future_then(self.state, f)
+        Future(state: state)
 
-# ================================================================
-# Future Combinators
-# ================================================================
+    me drop():
+        """Drop future, freeing resources."""
+        future_free::<T>(self.state)
 
-fn join<T, U>(fut1: Future<T>, fut2: Future<U>) -> Future<(T, U)>:
-    """Wait for both futures to complete.
-
-    Returns a future that completes when both input futures complete.
-
-    Example:
-        val combined = join(fetch_user(), fetch_posts())
-        val (user, posts) = await combined
-    """
-    # NOTE: Simplified implementation - production version needs state tracking
-    Future(poll_fn: \waker:
-        match (fut1.poll(waker), fut2.poll(waker)):
-            case (PollResult.Ready(v1), PollResult.Ready(v2)):
-                PollResult.Ready((v1, v2))
-            case _:
-                PollResult.Pending
-    )
-
-fn select<T>(fut1: Future<T>, fut2: Future<T>) -> Future<T>:
-    """Race two futures, returning whichever completes first.
-
-    Example:
-        val fastest = select(slow_api(), fast_api())
-        val result = await fastest
-    """
-    Future(poll_fn: \waker:
-        # Try both futures
-        match fut1.poll(waker):
-            case PollResult.Ready(value):
-                return PollResult.Ready(value)
-            case PollResult.Pending:
-                pass
-
-        match fut2.poll(waker):
-            case PollResult.Ready(value):
-                return PollResult.Ready(value)
-            case PollResult.Pending:
-                return PollResult.Pending
-    )
-
-# ================================================================
-# Async Helpers
-# ================================================================
-
-fn yield_now() -> Future<()>:
-    """Yield control to other tasks.
-
-    Creates a future that completes on the next poll.
-    Useful for cooperative multitasking.
-
-    Example:
-        await yield_now()  # Let other tasks run
-    """
-    var polled = false
-    Future(poll_fn: \waker:
-        if polled:
-            PollResult.Ready(())
-        else:
-            polled = true
-            waker.wake()  # Wake immediately
-            PollResult.Pending
-    )
-
-fn sleep_ms(duration: i64) -> Future<()>:
-    """Sleep for a duration in milliseconds.
-
-    NOTE: This is a simplified implementation.
-    Production version would use a timer wheel or similar.
-
-    Example:
-        await sleep_ms(1000)  # Sleep 1 second
-    """
-    val start_time = current_time_ms()
-    Future(poll_fn: \waker:
-        val elapsed = current_time_ms() - start_time
-        if elapsed >= duration:
-            PollResult.Ready(())
-        else:
-            # TODO: Register with timer to wake at start_time + duration
-            waker.wake()  # Simplified: wake immediately
-            PollResult.Pending
-    )
-
-# Helper: Get current time
-fn current_time_ms() -> i64:
-    # TODO: Use proper time SFFI
-    0
+export Future

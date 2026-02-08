@@ -1,0 +1,188 @@
+# Persistent Dictionary
+#
+# Main persistent dictionary implementation using HAMT.
+
+use std.array_builder.ArrayBuilder
+use app.interpreter.collections.persistent_dict.node.{HamtNode}
+use app.interpreter.collections.persistent_dict.helpers.{
+    BITS_PER_LEVEL, compute_hash
+}
+
+struct PersistentDict<K, V>:
+    """Immutable persistent dictionary using HAMT.
+
+    All operations return a new dictionary, leaving the original unchanged.
+    Memory efficient through structural sharing.
+
+    Example:
+        val dict1 = PersistentDict.new()
+        val dict2 = dict1.set("key", "value")
+        val dict3 = dict2.set("other", "data")
+
+        # dict1 is still empty
+        # dict2 has one entry
+        # dict3 has two entries
+        # dict2 and dict3 share most of their structure
+    """
+    root: HamtNode<K, V>
+    size: i64
+
+impl PersistentDict<K, V>:
+    # --------------------------------------------------------------------------
+    # Construction
+    # --------------------------------------------------------------------------
+
+    static fn new() -> PersistentDict<K, V>:
+        """Create an empty persistent dictionary."""
+        PersistentDict(
+            root: HamtNode.Empty,
+            size: 0
+        )
+
+    static fn empty() -> PersistentDict<K, V>:
+        """Create an empty persistent dictionary (alias for new())."""
+        PersistentDict.new()
+
+    static fn from_entries(entries: [(K, V)]) -> PersistentDict<K, V>:
+        """Create a dictionary from a list of key-value pairs."""
+        var dict = PersistentDict.new()
+        for (key, value) in entries:
+            dict = dict.set(key, value)
+        dict
+
+    # --------------------------------------------------------------------------
+    # Queries
+    # --------------------------------------------------------------------------
+
+    fn len() -> i64:
+        """Number of entries in the dictionary."""
+        self.size
+
+    fn is_empty() -> bool:
+        """Check if dictionary is empty."""
+        self.size == 0
+
+    fn get(key: K) -> V?:
+        """Get value for key, or None if not found.
+
+        Time: O(log32 n) ≈ O(7) for practical sizes
+        """
+        val hash = compute_hash(key)
+        self.root.find(hash, key, 0)
+
+    fn contains(key: K) -> bool:
+        """Check if key exists in dictionary."""
+        self.get(key).?
+
+    fn get_or(key: K, default: V) -> V:
+        """Get value for key, or default if not found."""
+        self.get(key) ?? default
+
+    # --------------------------------------------------------------------------
+    # Modification (returns new dict)
+    # --------------------------------------------------------------------------
+
+    fn set(key: K, value: V) -> PersistentDict<K, V>:
+        """Set a key-value pair, returning a new dictionary.
+
+        The original dictionary is unchanged.
+
+        Time: O(log32 n) with ~7 node copies
+        Memory: Only the modified path is duplicated
+        """
+        val hash = compute_hash(key)
+        val existed = self.root.find(hash, key, 0).?
+        val new_root = self.root.insert(hash, key, value, 0)
+        val new_size = if existed: self.size else: self.size + 1
+        PersistentDict(root: new_root, size: new_size)
+
+    fn remove(key: K) -> PersistentDict<K, V>:
+        """Remove a key, returning a new dictionary.
+
+        The original dictionary is unchanged.
+        Returns self if key doesn't exist.
+        """
+        val hash = compute_hash(key)
+        if not self.root.find(hash, key, 0).?:
+            return self  # Key not found, return unchanged
+
+        val new_root = self.root.remove(hash, key, 0)
+        PersistentDict(root: new_root, size: self.size - 1)
+
+    fn update(key: K, f: fn(V?) -> V) -> PersistentDict<K, V>:
+        """Update a value using a function.
+
+        The function receives the current value (or None if not present)
+        and returns the new value.
+        """
+        val current = self.get(key)
+        val new_value = f(current)
+        self.set(key, new_value)
+
+    # --------------------------------------------------------------------------
+    # Bulk operations
+    # --------------------------------------------------------------------------
+
+    fn merge(other: PersistentDict<K, V>) -> PersistentDict<K, V>:
+        """Merge another dictionary into this one.
+
+        On key conflicts, values from `other` take precedence.
+        """
+        var result = self
+        for (key, value) in other.entries():
+            result = result.set(key, value)
+        result
+
+    fn filter(predicate: fn(K, V) -> bool) -> PersistentDict<K, V>:
+        """Keep only entries matching the predicate."""
+        var result = PersistentDict.new()
+        for (key, value) in self.entries():
+            if predicate(key, value):
+                result = result.set(key, value)
+        result
+
+    fn map_values<U>(f: fn(V) -> U) -> PersistentDict<K, U>:
+        """Transform all values using a function."""
+        var result: PersistentDict<K, U> = PersistentDict.new()
+        for (key, value) in self.entries():
+            result = result.set(key, f(value))
+        result
+
+    # --------------------------------------------------------------------------
+    # Conversion
+    # --------------------------------------------------------------------------
+
+    fn entries() -> [(K, V)]:
+        """Get all entries as a list of (key, value) pairs."""
+        self.root.collect_entries([])
+
+    fn keys() -> [K]:
+        """Get all keys as a list."""
+        var result: [K] = []
+        for (key, _) in self.entries():
+            result = result.push(key)
+        result
+
+    fn values() -> [V]:
+        """Get all values as a list."""
+        var result: [V] = []
+        for (_, value) in self.entries():
+            result = result.push(value)
+        result
+
+    fn to_dict() -> Dict<K, V>:
+        """Convert to a regular mutable Dict."""
+        var result: Dict<K, V> = {}
+        for (key, value) in self.entries():
+            result[key] = value
+        result
+
+    static fn from_dict(dict: Dict<K, V>) -> PersistentDict<K, V>:
+        """Create from a regular Dict."""
+        var result = PersistentDict.new()
+        for key in dict.keys():
+            result = result.set(key, dict[key])
+        result
+
+
+export PersistentDict

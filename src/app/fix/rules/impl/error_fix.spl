@@ -1,0 +1,187 @@
+# EasyFix Rules - Error Fix Rules
+#
+# Rules that fix compiler errors:
+#   E:typo_suggestion            — Fix misspelled identifiers (Levenshtein)
+#   E:parser_contextual_keyword  — Fix contextual keyword syntax
+#   E:type_mismatch_coercion     — Insert type coercion (.to_string() etc.)
+
+use std.tooling.easy_fix.*
+use super.super.helpers.*
+
+# ============================================================================
+# Rule 7: typo_suggestion (Levenshtein distance)
+# Detects likely misspelled identifiers and suggests corrections.
+# Confidence: Likely
+# ============================================================================
+
+fn check_typo_suggestion(source: String, file: String, known_names: [String]) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    val lines = source.split("\n")
+    var line_num = 0
+    var byte_offset = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Look for lines with "undefined" or "not found" error patterns
+        # This rule is primarily used with compiler error output, but we can also
+        # scan for identifiers that are close to known names
+        # For text-scanning mode: check val/var assignments with unknown identifiers
+
+        byte_offset = byte_offset + line.len() + 1
+
+    # This rule is primarily for compiler diagnostics integration.
+    # The text-scanning version is a no-op; the Rust version hooks into name resolution.
+    fixes
+
+fn suggest_typo_fix(file: String, line_num: Int, col: Int, byte_start: Int, byte_end: Int, misspelled: String, known_names: [String]) -> Option<EasyFix>:
+    var best_name = ""
+    var best_dist = 3  # Max distance threshold
+
+    for name in known_names:
+        val dist = levenshtein(misspelled, name)
+        if dist > 0 and dist < best_dist:
+            best_dist = dist
+            best_name = name
+
+    if best_name.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:typo_suggestion:{line_num}",
+            description: "did you mean `{best_name}`?",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_start,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: best_name
+        ))
+        return Some(fix)
+
+    None
+
+# ============================================================================
+# Rule 8: parser_contextual_keyword (E0013)
+# Detects common parser errors with contextual keywords.
+# Confidence: Safe
+# ============================================================================
+
+fn check_parser_contextual_keyword(source: String, file: String) -> [EasyFix]:
+    for_each_line(source, \ctx:
+        var line_fixes: [EasyFix] = []
+
+        # Detect common misuses:
+        # "skip fn" should be "fn" with skip tag
+        # "async static fn" should be "static async fn"
+        # "pub fn" at wrong indent
+
+        if ctx.trimmed.starts_with("async static fn "):
+            val start = ctx.byte_offset + ctx.indent
+            val end = start + 16  # len("async static fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                description: "reorder keywords: `static async fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: "static async fn "
+            ))
+            line_fixes.push(fix)
+
+        if ctx.trimmed.starts_with("static pub fn "):
+            val start = ctx.byte_offset + ctx.indent
+            val end = start + 14  # len("static pub fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                description: "reorder keywords: `pub static fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: "pub static fn "
+            ))
+            line_fixes.push(fix)
+
+        if ctx.trimmed.starts_with("pub async static fn "):
+            val start = ctx.byte_offset + ctx.indent
+            val end = start + 20  # len("pub async static fn ")
+            var fix = EasyFix.create(
+                id: "E:parser_contextual_keyword:{ctx.line_num}",
+                description: "reorder keywords: `pub static async fn`",
+                confidence: FixConfidence.Safe
+            )
+            fix.add_replacement(Replacement.create(
+                file: file,
+                start: start,
+                end: end,
+                line: ctx.line_num,
+                column: ctx.indent + 1,
+                new_text: "pub static async fn "
+            ))
+            line_fixes.push(fix)
+
+        line_fixes
+    )
+
+# ============================================================================
+# Rule 9: type_mismatch_coercion
+# Detects type mismatches where a simple coercion can fix the issue.
+# Confidence: Likely
+# ============================================================================
+
+fn check_type_mismatch_coercion(source: String, file: String) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    # This rule works primarily with compiler type-check errors.
+    # The text-scanning version is a no-op; the Rust version hooks into type checker.
+    fixes
+
+fn suggest_type_coercion_fix(file: String, line_num: Int, col: Int, byte_end: Int, expected_type: String, actual_type: String) -> Option<EasyFix>:
+    # Common coercions
+    var coercion = ""
+
+    if expected_type == "String" and actual_type == "Int":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Float":
+        coercion = ".to_string()"
+    if expected_type == "String" and actual_type == "Bool":
+        coercion = ".to_string()"
+    if expected_type == "Int" and actual_type == "Float":
+        coercion = ".to_int()"
+    if expected_type == "Float" and actual_type == "Int":
+        coercion = ".to_float()"
+    if expected_type == "Bool" and actual_type == "Int":
+        coercion = " != 0"
+
+    if coercion.len() > 0:
+        var fix = EasyFix.create(
+            id: "E:type_mismatch_coercion:{line_num}",
+            description: "insert `{coercion}` to convert {actual_type} to {expected_type}",
+            confidence: FixConfidence.Likely
+        )
+        fix.add_replacement(Replacement.create(
+            file: file,
+            start: byte_end,
+            end: byte_end,
+            line: line_num,
+            column: col,
+            new_text: coercion
+        ))
+        return Some(fix)
+
+    None
+
+export check_typo_suggestion, suggest_typo_fix
+export check_parser_contextual_keyword
+export check_type_mismatch_coercion, suggest_type_coercion_fix

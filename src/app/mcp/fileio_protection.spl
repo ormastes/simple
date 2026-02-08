@@ -1,6 +1,10 @@
 # File I/O Protection Engine
 # Provides rule-based access control for file operations
 
+use std.io_runtime.{file_exists, file_read}
+use std.path.{normalize_path, basename}
+use std.glob.{glob_match}
+
 export ProtectionEngine, ProtectionRule, RuleType, RuleAction, ProtectionResult
 export create_engine
 
@@ -42,59 +46,15 @@ class ProtectionEngine:
         match rule.rule_type:
             RuleType.Exact:
                 # Normalize paths for comparison
-                val norm_path = self.normalize_path(path)
-                val norm_pattern = self.normalize_path(rule.pattern)
+                val norm_path = normalize_path(path)
+                val norm_pattern = normalize_path(rule.pattern)
                 norm_path == norm_pattern
             RuleType.Glob:
-                self.glob_match(path, rule.pattern)
+                glob_match(path, rule.pattern)
             RuleType.Regex:
-                self.regex_match(path, rule.pattern)
-
-    # Normalize path (resolve relative, remove trailing slash)
-    fn normalize_path(path: text) -> text:
-        var result = path
-
-        # Remove trailing slash
-        if result.ends_with("/") and result.len() > 1:
-            result = result[0:-1]
-
-        # Resolve relative paths (basic implementation)
-        if result.starts_with("./"):
-            result = result[2:]
-
-        result
-
-    # Glob pattern matching
-    fn glob_match(path: text, pattern: text) -> bool:
-        # Simple glob matching: * matches any characters
-        # TODO: Full glob implementation with ?, [], {}
-
-        if not pattern.contains("*"):
-            return path == pattern
-
-        val parts = pattern.split("*")
-        if parts.len() == 0:
-            return true
-
-        var pos = 0
-        for i in 0..parts.len():
-            val part = parts[i]
-            if part.len() == 0:
-                continue
-
-            val idx = path[pos:].index_of(part)
-            if not idx.?:
-                return false
-
-            pos = pos + idx.unwrap() + part.len()
-
-        true
-
-    # Regex pattern matching
-    fn regex_match(path: text, pattern: text) -> bool:
-        # TODO: Implement regex matching
-        # For now, fall back to glob matching
-        self.glob_match(path, pattern)
+                # TODO: Implement regex matching
+                # For now, fall back to glob matching
+                glob_match(path, rule.pattern)
 
     # Find first matching rule for path
     fn find_rule(path: text) -> ProtectionRule?:
@@ -136,13 +96,7 @@ class ProtectionEngine:
 
     # Get temp path for redirected file
     fn get_temp_path(path: text) -> text:
-        # Extract filename from path
-        val parts = path.split("/")
-        val filename = if parts.len() > 0:
-            parts[parts.len() - 1]
-        else:
-            path
-
+        val filename = basename(path)
         self.temp_base + "/" + filename
 
     # Add a protection rule
@@ -262,21 +216,3 @@ fn add_default_rules(engine: ProtectionEngine):
     engine.add_rule("test/", RuleType.Exact, RuleAction.Protect, "Test directory")
     engine.add_rule("doc/", RuleType.Exact, RuleAction.Allow, "Documentation can be modified")
 
-# Helper function to check if file exists
-fn file_exists(path: text) -> bool:
-    val result = shell("test -f '{path}' && echo yes || echo no")
-    result.trim() == "yes"
-
-# Helper function to read file
-fn file_read(path: text) -> text:
-    shell("cat '{path}'")
-
-# Helper function to run shell command
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-
-fn shell(cmd: text) -> text:
-    val (stdout, stderr, exit_code) = rt_process_run("sh", ["-c", cmd])
-    if exit_code == 0:
-        stdout
-    else:
-        ""
