@@ -1,14 +1,14 @@
 # Test Results
 
-**Generated:** 2026-02-06 01:05:24
-**Total Tests:** 27
+**Generated:** 2026-02-08 00:11:11
+**Total Tests:** 8
 **Status:** ✅ ALL PASSED
 
 ## Summary
 
 | Status | Count | Percentage |
 |--------|-------|-----------|
-| ✅ Passed | 27 | 100.0% |
+| ✅ Passed | 8 | 100.0% |
 | ❌ Failed | 0 | 0.0% |
 | ⏭️ Skipped | 0 | 0.0% |
 | 🔕 Ignored | 0 | 0.0% |
@@ -20,26 +20,14 @@
 
 | Test | Change | Run |
 |------|--------|-----|
-| creates empty interner | new_test |  |
-| interns strings with unique IDs | new_test |  |
-| resolves IDs to strings | new_test |  |
-| exports to SDN table | new_test |  |
-| resolves IDs to strings | new_test |  |
-| loads from SDN table | new_test |  |
-| creates empty row | new_test |  |
-| sets and gets field values | new_test |  |
-| resolves IDs to strings | new_test |  |
-| parses i64 fields | new_test |  |
-| parses bool fields | new_test |  |
-| checks if has column | new_test |  |
-| SdnTable | new_test |  |
-| creates new table | new_test |  |
-| adds rows | new_test |  |
-| updates row by key | new_test |  |
-| soft deletes rows | new_test |  |
-| exports to SDN format | new_test |  |
-| creates new database | new_test |  |
-| creates empty interner | new_test |  |
+| maps _ip to IP.from() when IP class is defined | new_test |  |
+| maps snake_case suffix to PascalCase type | new_test |  |
+| maps short suffix to UPPERCASE first (common acronyms) | new_test |  |
+| maps longer suffix to PascalCase | new_test |  |
+| tries UPPERCASE before PascalCase for 2-letter suffix | new_test |  |
+| tries UPPERCASE before PascalCase for 3-letter suffix | new_test |  |
+| uses PascalCase for 4+ letter suffix | new_test |  |
+| ip maps to IP not Ip | new_test |  |
 
 ---
 

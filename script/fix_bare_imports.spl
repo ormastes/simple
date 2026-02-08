@@ -1,0 +1,132 @@
+#!/usr/bin/env simple
+# Fix Bare Imports
+#
+# Convert "use module" to "use module.*" or "use module.{func1, func2}"
+
+use app.io.*
+use std.spec.*
+
+fn main():
+    val args = cli_get_args()
+    if args.len() < 2:
+        print_usage()
+        return
+
+    val target_path = args[1]
+    var strategy = "wildcard"  # Default: use module.*
+    var dry_run = false
+
+    # Parse flags
+    for arg in args:
+        if arg == "--strategy=explicit":
+            strategy = "explicit"
+        elif arg == "--strategy=wildcard":
+            strategy = "wildcard"
+        elif arg == "--dry-run":
+            dry_run = true
+
+    print "\n=== Bare Import Fixer ==="
+    print "Target: {target_path}"
+    print "Strategy: {strategy}"
+    print "Dry run: {dry_run}\n"
+
+    if dir_exists(target_path):
+        process_directory(target_path, strategy, dry_run)
+    elif file_exists(target_path):
+        process_file(target_path, strategy, dry_run)
+    else:
+        print "Error: Path not found: {target_path}"
+
+fn print_usage():
+    print "Usage: fix_bare_imports.spl <path> [options]"
+    print ""
+    print "Options:"
+    print "  --strategy=wildcard   Add .* to bare imports (default)"
+    print "  --strategy=explicit   Import only used functions"
+    print "  --dry-run            Preview changes without applying"
+
+fn process_directory(dir: text, strategy: text, dry_run: bool):
+    val files = glob_files(dir)
+    print "Found {files.len()} files\n"
+
+    var fixed_count = 0
+    for file in files:
+        val fixed = process_file(file, strategy, dry_run)
+        if fixed:
+            fixed_count = fixed_count + 1
+
+    print "\nSummary: Fixed {fixed_count} files"
+
+fn glob_files(dir: text) -> [text]:
+    val all_files = dir_list_recursive(dir)
+    var spl_files: [text] = []
+    for file in all_files:
+        if file.ends_with(".spl"):
+            spl_files = spl_files + [file]
+    spl_files
+
+fn process_file(file_path: text, strategy: text, dry_run: bool) -> bool:
+    val content = file_read(file_path)
+    var new_content = content
+
+    if strategy == "wildcard":
+        new_content = fix_with_wildcard(content)
+    else:
+        new_content = fix_with_explicit(content, file_path)
+
+    if new_content == content:
+        return false
+
+    if dry_run:
+        print "\n=== {file_path} ==="
+        show_changes(content, new_content)
+        return true
+
+    file_write(file_path, new_content)
+    print "✓ Fixed: {file_path}"
+    true
+
+fn fix_with_wildcard(content: text) -> text:
+    var result = content
+    val lines = content.split("\n")
+    var new_lines: [text] = []
+
+    for line in lines:
+        var new_line = line
+        val trimmed = line.trim()
+
+        # Check if it's a bare "use" statement
+        if trimmed.starts_with("use ") and not trimmed.contains(".*") and not trimmed.contains(".{"):
+            # Skip if it has parentheses (function import)
+            if not trimmed.contains("("):
+                # Add .* before the closing paren or end
+                new_line = line.replace("use ", "use ").replace("\n", ".*\n")
+                # Handle different endings
+                if not new_line.ends_with(".*"):
+                    new_line = new_line.trim() + ".*"
+
+        new_lines = new_lines + [new_line]
+
+    new_lines.join("\n")
+
+fn fix_with_explicit(content: text, file_path: text) -> text:
+    # TODO: Analyze file to find which functions are actually used
+    # For now, fall back to wildcard
+    fix_with_wildcard(content)
+
+fn show_changes(old: text, new: text):
+    val old_lines = old.split("\n")
+    val new_lines = new.split("\n")
+
+    for i in 0..min(old_lines.len(), new_lines.len()):
+        if old_lines[i] != new_lines[i]:
+            print "- {old_lines[i]}"
+            print "+ {new_lines[i]}"
+
+fn min(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+main()
