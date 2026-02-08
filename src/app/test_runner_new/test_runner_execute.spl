@@ -357,18 +357,53 @@ fn preprocess_sspec_file(file_path: text) -> text:
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
-
-    # Native mode: Run test file directly WITHOUT "test" command to avoid recursion
-    # The test will execute as a standalone program
     val timeout_ms = options.timeout * 1000
-    var run_args: [text] = [file_path]
+
+    # Native mode: Compile test file to native executable, then run it
+    # Step 1: Compile to native binary
+    val output_binary = file_path.replace(".spl", ".native")
+    var compile_args: [text] = ["compile", file_path, "-o", output_binary]
+    if options.verbose:
+        compile_args.push("--verbose")
+
+    if options.verbose:
+        print "[native] Compiling {file_path} to {output_binary}"
+
+    val (compile_stdout, compile_stderr, compile_exit) = process_run_timeout(binary, compile_args, timeout_ms)
+
+    if compile_exit != 0:
+        val end = time_now_unix_micros()
+        val duration_ms = (end - start) / 1000
+        val error_msg = "Compilation failed: {compile_stderr}"
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            pending: 0,
+            duration_ms: duration_ms,
+            error: error_msg,
+            timed_out: false
+        )
+
+    # Step 2: Run the compiled native binary
+    if options.verbose:
+        print "[native] Running {output_binary}"
+
+    var run_args: [text] = []
     if options.gc_log:
         run_args.push("--gc-log")
     if options.gc_off:
         run_args.push("--gc=off")
-    val (stdout, stderr, exit_code) = process_run_timeout(binary, run_args, timeout_ms)
+
+    val (stdout, stderr, exit_code) = process_run_timeout(output_binary, run_args, timeout_ms)
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
+
+    # Clean up binary if successful
+    if not options.keep_artifacts:
+        # TODO: Delete output_binary file
+        ()
 
     make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
 
