@@ -1,0 +1,137 @@
+# Batch Test Runner
+#
+# Run tests in configurable batches to isolate failures and track progress.
+
+use app.io.*
+use std.spec.*
+
+struct BatchResult:
+    batch_id: i64
+    files: [text]
+    passed: i64
+    failed: i64
+    total_time_ms: i64
+
+fn run_test_batch(dir: text, batch_size: i64, abort_threshold: i64) -> [BatchResult]:
+    val test_files = glob_test_files(dir)
+    val batches = chunk_array(test_files, batch_size)
+    var all_results: [BatchResult] = []
+
+    print "\n=== Batch Test Runner ==="
+    print "Found {test_files.len()} test files in {dir}"
+    print "Batch size: {batch_size}"
+    print "Total batches: {batches.len()}\n"
+
+    for batch_idx in 0..batches.len():
+        val batch = batches[batch_idx]
+        print "\n=== Batch {batch_idx + 1}/{batches.len()} ({batch.len()} files) ==="
+
+        var passed = 0
+        var failed = 0
+        var total_time = 0
+
+        for file in batch:
+            val result = run_single_test_file(file)
+            if result.success:
+                passed = passed + 1
+            else:
+                failed = failed + 1
+            total_time = total_time + result.time_ms
+
+        val total = passed + failed
+        var pass_rate = 0
+        if total > 0:
+            pass_rate = (passed * 100) / total
+
+        print "Batch {batch_idx + 1}: {pass_rate}% pass rate ({passed}/{total})"
+        print "Total time: {total_time}ms\n"
+
+        val batch_result = BatchResult(
+            batch_id: batch_idx,
+            files: batch,
+            passed: passed,
+            failed: failed,
+            total_time_ms: total_time
+        )
+        all_results = all_results + [batch_result]
+
+        # Check abort threshold
+        if pass_rate < abort_threshold:
+            print "\n⚠️  Batch {batch_idx + 1} pass rate ({pass_rate}%) below threshold ({abort_threshold}%)"
+            print "Aborting batch run. Fix issues and retry.\n"
+            break
+
+    generate_batch_summary(all_results)
+    all_results
+
+fn glob_test_files(dir: text) -> [text]:
+    # Find all *_spec.spl files recursively
+    val all_files = dir_list_recursive(dir)
+    var test_files: [text] = []
+    for file in all_files:
+        if file.ends_with("_spec.spl"):
+            test_files = test_files + [file]
+    test_files
+
+fn chunk_array(arr: [text], size: i64) -> [[text]]:
+    var chunks: [[text]] = []
+    var current_chunk: [text] = []
+    var count = 0
+
+    for item in arr:
+        current_chunk = current_chunk + [item]
+        count = count + 1
+
+        if count >= size:
+            chunks = chunks + [current_chunk]
+            current_chunk = []
+            count = 0
+
+    # Add remaining items
+    if current_chunk.len() > 0:
+        chunks = chunks + [current_chunk]
+
+    chunks
+
+struct TestFileResult:
+    success: bool
+    time_ms: i64
+
+fn run_single_test_file(file: text) -> TestFileResult:
+    # Run test file and capture result
+    val start = time_now()
+    val cmd_result = process_run("bin/simple", ["test", file])
+    val end = time_now()
+    val elapsed = end - start
+
+    val success = cmd_result.2 == 0  # exit_code
+    TestFileResult(success: success, time_ms: elapsed / 1000)
+
+fn generate_batch_summary(results: [BatchResult]):
+    print "\n=== Batch Summary ==="
+    var total_passed = 0
+    var total_failed = 0
+    var total_time = 0
+
+    for result in results:
+        total_passed = total_passed + result.passed
+        total_failed = total_failed + result.failed
+        total_time = total_time + result.total_time_ms
+
+    val total = total_passed + total_failed
+    var overall_pass_rate = 0
+    if total > 0:
+        overall_pass_rate = (total_passed * 100) / total
+
+    print "Overall: {overall_pass_rate}% pass rate"
+    print "Total: {total_passed} passed, {total_failed} failed"
+    print "Total time: {total_time}ms\n"
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export run_test_batch
+export BatchResult
+export glob_test_files
+export chunk_array
