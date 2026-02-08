@@ -44,20 +44,20 @@ find_bootstrap() {
     local platform="$1"
     local bootstrap_dir="$DIR/bootstrap"
 
-    # Try platform-specific binary first
+    # Try main bootstrap binary first (most reliable - known to be real)
+    if [ -x "$bootstrap_dir/simple" ]; then
+        echo "$bootstrap_dir/simple"
+        return 0
+    fi
+
+    # Try platform-specific binary as fallback
     local bootstrap_bin="$bootstrap_dir/$platform/simple"
-    if [ "$os" = "windows" ]; then
+    if [ "$platform" = *"windows"* ]; then
         bootstrap_bin="$bootstrap_bin.exe"
     fi
 
     if [ -x "$bootstrap_bin" ]; then
         echo "$bootstrap_bin"
-        return 0
-    fi
-
-    # Try bootstrap binary (main location)
-    if [ -x "$bootstrap_dir/simple" ]; then
-        echo "$bootstrap_dir/simple"
         return 0
     fi
 
@@ -106,6 +106,36 @@ main() {
     # Without this, module resolution tries 78+ paths per import,
     # walking from the file directory up to / trying 6 stdlib patterns.
     export SIMPLE_LIB="$DIR/../src"
+
+    # Handle flags/modes that bootstrap binary supports natively
+    case "$1" in
+        --version|--help)
+            run_filtered "$bootstrap" "$@"
+            exit $?
+            ;;
+        -c)
+            # Write code to temp file for full module support (use, etc.)
+            # Bootstrap binary's native -c only handles single expressions.
+            # Semicolons are converted to newlines for CLI convenience.
+            # File is created in project dir so module resolution works.
+            if [ -z "$2" ]; then
+                echo "Error: -c requires a code argument" >&2
+                exit 1
+            fi
+            local tmp
+            tmp=$(mktemp "$DIR/../.simple_eval_XXXXXX.spl")
+            printf '%s\n' "$2" | sed 's/; */\n/g' > "$tmp"
+            run_filtered "$bootstrap" "$tmp"
+            local rc=$?
+            rm -f "$tmp"
+            exit $rc
+            ;;
+        *.spl|*.smf)
+            # Run source/binary files directly through bootstrap
+            run_filtered "$bootstrap" "$@"
+            exit $?
+            ;;
+    esac
 
     # Use lightweight entry point for known commands (saves ~160ms)
     local fast_entry
