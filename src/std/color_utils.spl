@@ -1,0 +1,243 @@
+# Color Utilities Module
+#
+# RGB and HSL color space operations including conversions, color schemes,
+# and WCAG accessibility checking.
+#
+# Categories:
+# - RGB/HSL color space conversions
+# - Color manipulation (lighten, darken, saturate, desaturate)
+# - Color schemes (complementary, triadic)
+# - WCAG accessibility (luminance, contrast ratios)
+# - Utility functions (invert, grayscale, named colors)
+#
+# All operations use pure Simple implementations (no FFI required).
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RGB, HSL
+export rgb_to_hsl, hsl_to_rgb
+export lighten, darken, saturate, desaturate
+export complementary_scheme, triadic_scheme
+export relative_luminance, contrast_ratio
+export meets_wcag_aa, meets_wcag_aaa
+export named_color, invert, grayscale
+
+# ============================================================================
+# RGB Color Space
+# ============================================================================
+
+class RGB:
+    r: i64
+    g: i64
+    b: i64
+
+impl RGB:
+    static fn create(r: i64, g: i64, b: i64) -> RGB:
+        RGB(r: r, g: g, b: b)
+
+    static fn black() -> RGB:
+        RGB(r: 0, g: 0, b: 0)
+
+    static fn white() -> RGB:
+        RGB(r: 255, g: 255, b: 255)
+
+# ============================================================================
+# HSL Color Space
+# ============================================================================
+
+class HSL:
+    h: f64
+    s: f64
+    l: f64
+
+impl HSL:
+    static fn create(h: f64, s: f64, l: f64) -> HSL:
+        HSL(h: h, s: s, l: l)
+
+# ============================================================================
+# Color Space Conversions
+# ============================================================================
+
+fn rgb_to_hsl(rgb: RGB) -> HSL:
+    """Convert RGB to HSL color space.
+
+    RGB values are 0-255, HSL hue is 0-360, saturation and lightness are 0-100.
+    """
+    val r = rgb.r as f64 / 255.0
+    val g = rgb.g as f64 / 255.0
+    val b = rgb.b as f64 / 255.0
+
+    val max_val = if r > g: (if r > b: r else: b) else: (if g > b: g else: b)
+    val min_val = if r < g: (if r < b: r else: b) else: (if g < b: g else: b)
+
+    val l = (max_val + min_val) / 2.0 * 100.0
+
+    if max_val == min_val:
+        return HSL(h: 0.0, s: 0.0, l: l)
+
+    val d = max_val - min_val
+    val s = if l > 50.0: d / (2.0 - max_val - min_val) * 100.0 else: d / (max_val + min_val) * 100.0
+
+    var h = 0.0
+    if max_val == r:
+        h = ((g - b) / d) * 60.0
+    else if max_val == g:
+        h = ((b - r) / d + 2.0) * 60.0
+    else:
+        h = ((r - g) / d + 4.0) * 60.0
+
+    if h < 0.0:
+        h = h + 360.0
+
+    HSL(h: h, s: s, l: l)
+
+fn hue_to_rgb_component(p: f64, q: f64, t_in: f64) -> f64:
+    """Helper for HSL to RGB conversion."""
+    var t = t_in
+    if t < 0.0:
+        t = t + 1.0
+    if t > 1.0:
+        t = t - 1.0
+
+    if t < 1.0 / 6.0:
+        return p + (q - p) * 6.0 * t
+    if t < 1.0 / 2.0:
+        return q
+    if t < 2.0 / 3.0:
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0
+    p
+
+fn hsl_to_rgb(hsl: HSL) -> RGB:
+    """Convert HSL to RGB color space.
+
+    HSL hue is 0-360, saturation and lightness are 0-100.
+    RGB values are 0-255.
+    """
+    val l = hsl.l / 100.0
+    val s = hsl.s / 100.0
+
+    if s == 0.0:
+        val v = (l * 255.0) as i64
+        return RGB(r: v, g: v, b: v)
+
+    val q = if l < 0.5: l * (1.0 + s) else: l + s - l * s
+    val p = 2.0 * l - q
+    val h_norm = hsl.h / 360.0
+
+    val r = hue_to_rgb_component(p, q, h_norm + 1.0 / 3.0)
+    val g = hue_to_rgb_component(p, q, h_norm)
+    val b = hue_to_rgb_component(p, q, h_norm - 1.0 / 3.0)
+
+    RGB(r: (r * 255.0) as i64, g: (g * 255.0) as i64, b: (b * 255.0) as i64)
+
+# ============================================================================
+# Color Manipulation
+# ============================================================================
+
+fn lighten(rgb: RGB, amount: f64) -> RGB:
+    """Lighten a color by increasing lightness in HSL space."""
+    val hsl = rgb_to_hsl(rgb)
+    val new_l = hsl.l + amount
+    val clamped_l = if new_l > 100.0: 100.0 else: new_l
+    hsl_to_rgb(HSL(h: hsl.h, s: hsl.s, l: clamped_l))
+
+fn darken(rgb: RGB, amount: f64) -> RGB:
+    """Darken a color by decreasing lightness in HSL space."""
+    val hsl = rgb_to_hsl(rgb)
+    val new_l = hsl.l - amount
+    val clamped_l = if new_l < 0.0: 0.0 else: new_l
+    hsl_to_rgb(HSL(h: hsl.h, s: hsl.s, l: clamped_l))
+
+fn saturate(rgb: RGB, amount: f64) -> RGB:
+    """Increase color saturation in HSL space."""
+    val hsl = rgb_to_hsl(rgb)
+    val new_s = hsl.s + amount
+    val clamped_s = if new_s > 100.0: 100.0 else: (if new_s < 0.0: 0.0 else: new_s)
+    hsl_to_rgb(HSL(h: hsl.h, s: clamped_s, l: hsl.l))
+
+fn desaturate(rgb: RGB, amount: f64) -> RGB:
+    """Decrease color saturation in HSL space."""
+    val hsl = rgb_to_hsl(rgb)
+    val new_s = hsl.s - amount
+    val clamped_s = if new_s < 0.0: 0.0 else: new_s
+    hsl_to_rgb(HSL(h: hsl.h, s: clamped_s, l: hsl.l))
+
+# ============================================================================
+# Color Schemes
+# ============================================================================
+
+fn complementary_scheme(rgb: RGB) -> RGB:
+    """Generate complementary color (180 degrees opposite on hue wheel)."""
+    val hsl = rgb_to_hsl(rgb)
+    var new_h = hsl.h + 180.0
+    if new_h >= 360.0:
+        new_h = new_h - 360.0
+    hsl_to_rgb(HSL(h: new_h, s: hsl.s, l: hsl.l))
+
+fn triadic_scheme(rgb: RGB) -> (RGB, RGB, RGB):
+    """Generate triadic color scheme (120 degrees apart)."""
+    val hsl = rgb_to_hsl(rgb)
+    var h1 = hsl.h + 120.0
+    var h2 = hsl.h + 240.0
+    if h1 >= 360.0:
+        h1 = h1 - 360.0
+    if h2 >= 360.0:
+        h2 = h2 - 360.0
+    (rgb, hsl_to_rgb(HSL(h: h1, s: hsl.s, l: hsl.l)), hsl_to_rgb(HSL(h: h2, s: hsl.s, l: hsl.l)))
+
+# ============================================================================
+# WCAG Accessibility
+# ============================================================================
+
+fn relative_luminance(rgb: RGB) -> f64:
+    """Calculate relative luminance for WCAG contrast calculations.
+
+    Uses the WCAG 2.0 formula: 0.2126*R + 0.7152*G + 0.0722*B
+    """
+    val r = rgb.r as f64 / 255.0
+    val g = rgb.g as f64 / 255.0
+    val b = rgb.b as f64 / 255.0
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+
+fn contrast_ratio(c1: RGB, c2: RGB) -> f64:
+    """Calculate WCAG contrast ratio between two colors.
+
+    Returns ratio from 1:1 (no contrast) to 21:1 (maximum contrast).
+    """
+    val l1 = relative_luminance(c1)
+    val l2 = relative_luminance(c2)
+    val lighter = if l1 > l2: l1 else: l2
+    val darker = if l1 > l2: l2 else: l1
+    (lighter + 0.05) / (darker + 0.05)
+
+fn meets_wcag_aa(c1: RGB, c2: RGB) -> bool:
+    """Check if colors meet WCAG AA standard (contrast >= 4.5:1)."""
+    contrast_ratio(c1=c1, c2=c2) >= 4.5
+
+fn meets_wcag_aaa(c1: RGB, c2: RGB) -> bool:
+    """Check if colors meet WCAG AAA standard (contrast >= 7.0:1)."""
+    contrast_ratio(c1=c1, c2=c2) >= 7.0
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn named_color(name: text) -> RGB?:
+    """Look up common color names."""
+    if name == "red": return RGB(r: 255, g: 0, b: 0)
+    if name == "green": return RGB(r: 0, g: 128, b: 0)
+    if name == "blue": return RGB(r: 0, g: 0, b: 255)
+    if name == "black": return RGB(r: 0, g: 0, b: 0)
+    if name == "white": return RGB(r: 255, g: 255, b: 255)
+    nil
+
+fn invert(rgb: RGB) -> RGB:
+    """Invert a color (255 - each component)."""
+    RGB(r: 255 - rgb.r, g: 255 - rgb.g, b: 255 - rgb.b)
+
+fn grayscale(rgb: RGB) -> RGB:
+    """Convert color to grayscale using average method."""
+    val gray = ((rgb.r + rgb.g + rgb.b) / 3)
+    RGB(r: gray, g: gray, b: gray)

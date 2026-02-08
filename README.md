@@ -883,8 +883,8 @@ See [doc/spec/README.md](doc/spec/README.md) for the complete specification inde
 simple/
 ├── bin/                      # CLI entry points
 │   ├── simple               # Main CLI (shell wrapper)
-│   ├── simple_runtime       # Runtime binary
 │   └── bootstrap/           # Minimal bootstrap binaries
+│       └── simple           # Pre-built runtime (33 MB)
 │
 ├── src/                      # Simple source code (100% Simple)
 │   ├── app/                  # Applications

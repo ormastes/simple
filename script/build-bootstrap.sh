@@ -83,14 +83,14 @@ if [ -n "$TARGET" ] && [ "$TARGET" != "" ]; then
     RUNTIME_PATH="rust/target/${TARGET}/release-opt/simple"
 fi
 
-if [ -n "$SIMPLE_RUNTIME" ] && [ -f "$SIMPLE_RUNTIME" ]; then
-    echo -e "${BLUE}Using previous Simple runtime for self-hosting build${NC}"
-    echo "  Runtime: $SIMPLE_RUNTIME"
+if [ -n "$SIMPLE_BOOTSTRAP" ] && [ -f "$SIMPLE_BOOTSTRAP" ]; then
+    echo -e "${BLUE}Using previous Simple bootstrap binary for self-hosting build${NC}"
+    echo "  Bootstrap: $SIMPLE_BOOTSTRAP"
     USE_SIMPLE_BUILD=true
 
     # Try self-hosting build
     echo "Building with Simple (self-hosting)..."
-    if $SIMPLE_RUNTIME src/app/build/main.spl --bootstrap --quiet 2>&1; then
+    if $SIMPLE_BOOTSTRAP src/app/build/main.spl --bootstrap --quiet 2>&1; then
         echo -e "${GREEN}✓ Self-hosting build succeeded${NC}"
     else
         echo -e "${YELLOW}⚠ Self-hosting build failed, falling back to cargo${NC}"
@@ -138,18 +138,12 @@ mkdir -p "$TMP_DIR/lib/simple/app"
 echo -e "${GREEN}✓ Directory structure created${NC}"
 echo ""
 
-# Step 5: Copy runtime binary and create symlink
+# Step 5: Copy runtime binary
 echo -e "${GREEN}Step 3/7: Copying runtime binary...${NC}"
 cp "$RUNTIME_PATH" "$TMP_DIR/bin/simple"
 chmod 755 "$TMP_DIR/bin/simple"
 
-# Create symlink for backward compatibility
-cd "$TMP_DIR/bin"
-ln -sf simple simple_runtime
-cd - > /dev/null
-
 echo -e "${GREEN}✓ Runtime copied${NC}"
-echo -e "${GREEN}✓ Symlink created: bin/simple_runtime → bin/simple${NC}"
 echo ""
 
 # Step 6: Copy stdlib files
@@ -257,9 +251,6 @@ install:
     - name: simple
       target: bin/simple
       type: executable
-    - name: simple_runtime
-      target: bin/simple_runtime
-      type: symlink
 
   paths:
     runtime: lib/simple/

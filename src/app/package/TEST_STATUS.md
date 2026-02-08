@@ -119,11 +119,11 @@ tar -xzf simple-bootstrap-0.3.0-linux-x86_64.spk -C /tmp/test
 # ✅ Works - extracts correctly
 
 # Test runtime
-/tmp/test/bin/simple_runtime --version
+/tmp/test/bin/simple --version
 # ✅ Works - outputs version
 
 # Test FFI (Rust level)
-cd rust && cargo test --package simple-runtime ffi::package
+cd rust && cargo test --package simple ffi::package
 # ✅ Works - all tests pass
 ```
 
@@ -141,7 +141,7 @@ fn test_create_and_extract_tarball() { ... }
 
 Run with:
 ```bash
-cd rust && cargo test --package simple-runtime --lib ffi::package
+cd rust && cargo test --package simple --lib ffi::package
 ```
 
 ## Next Steps (Priority Order)

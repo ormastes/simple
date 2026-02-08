@@ -1,0 +1,276 @@
+# TreeSitter-style Parser Components
+#
+# Provides lexer and token types for parsing Simple code
+# (Note: Not actual TreeSitter binding - Simple implementation)
+
+export TokenKind, Span, Token, Lexer, lexer_new
+
+# ============================================================================
+# Token Types
+# ============================================================================
+
+enum TokenKind:
+    # Literals
+    Integer
+    Float
+    String
+    Boolean
+    Nil
+
+    # Identifiers and Keywords
+    Identifier
+    Keyword
+
+    # Operators
+    Operator
+
+    # Delimiters
+    LeftParen
+    RightParen
+    LeftBrace
+    RightBrace
+    LeftBracket
+    RightBracket
+
+    # Special
+    Whitespace
+    Comment
+    Newline
+    Eof
+    Unknown
+
+struct Span:
+    """Source location span with start and end positions"""
+    start_byte: i64
+    end_byte: i64
+    start_line: i64
+    start_column: i64
+
+struct Token:
+    """A single lexical token with its kind, text, and location"""
+    kind: TokenKind
+    text: text
+    span: Span
+
+# ============================================================================
+# Lexer - Functional Style (Interpreter-friendly)
+# ============================================================================
+
+struct Lexer:
+    """Simple lexer for tokenizing source code"""
+    source: text
+
+fn is_keyword(word: text) -> bool:
+    """Check if word is a keyword"""
+    val keywords = ["fn", "val", "var", "if", "else", "elif", "for", "while",
+                   "return", "break", "continue", "match", "case", "struct",
+                   "enum", "impl", "use", "export", "extern", "static",
+                   "true", "false", "nil", "and", "or", "not", "in"]
+    for kw in keywords:
+        if word == kw:
+            return true
+    false
+
+fn compute_position(source: text, byte_pos: i64) -> (i64, i64):
+    """Compute (line, column) from byte position"""
+    var line = 1
+    var column = 1
+    for i in 0..byte_pos:
+        if i >= source.len():
+            break
+        if source[i:i + 1] == "\n":
+            line = line + 1
+            column = 1
+        else:
+            column = column + 1
+    (line, column)
+
+fn make_span(source: text, start: i64, end_pos: i64) -> Span:
+    """Create a Span with line/column info"""
+    val start_pos = compute_position(source, start)
+    Span(
+        start_byte: start,
+        end_byte: end_pos,
+        start_line: start_pos.0,
+        start_column: start_pos.1
+    )
+
+fn tokenize_simple(source: text) -> [Token]:
+    """Simple tokenizer that splits on whitespace and operators"""
+    var tokens = []
+    var pos = 0
+
+    for _ in 0..100000:  # Safety limit
+        if pos >= source.len():
+            break
+
+        # Skip whitespace
+        for _ in 0..1000:
+            if pos >= source.len():
+                break
+            val ch = source[pos:pos + 1]
+            if ch == " " or ch == "\t" or ch == "\r":
+                pos = pos + 1
+            else:
+                break
+
+        if pos >= source.len():
+            break
+
+        val ch = source[pos:pos + 1]
+
+        # Newline
+        if ch == "\n":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.Newline, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+
+        # Comment
+        elif ch == "#":
+            val start = pos
+            for _ in 0..10000:
+                pos = pos + 1
+                if pos >= source.len():
+                    break
+                if source[pos:pos + 1] == "\n":
+                    break
+            val text = source[start:pos]
+            val span = make_span(source, start, pos)
+            val token = Token(kind: TokenKind.Comment, text: text, span: span)
+            tokens = tokens + [token]
+
+        # String
+        elif ch == "\"":
+            val start = pos
+            pos = pos + 1  # Skip opening quote
+            var found_end = false
+            for _ in 0..10000:
+                if pos >= source.len():
+                    break
+                val c = source[pos:pos + 1]
+                if c == "\"":
+                    pos = pos + 1
+                    found_end = true
+                    break
+                elif c == "\\":
+                    pos = pos + 2  # Skip escape
+                else:
+                    pos = pos + 1
+            val text = source[start + 1:pos - 1]
+            val span = make_span(source, start, pos)
+            val token = Token(kind: TokenKind.String, text: text, span: span)
+            tokens = tokens + [token]
+
+        # Number
+        elif ch >= "0" and ch <= "9":
+            val start = pos
+            var has_dot = false
+            for _ in 0..1000:
+                if pos >= source.len():
+                    break
+                val c = source[pos:pos + 1]
+                if c >= "0" and c <= "9":
+                    pos = pos + 1
+                elif c == ".":
+                    has_dot = true
+                    pos = pos + 1
+                else:
+                    break
+            val text = source[start:pos]
+            val span = make_span(source, start, pos)
+            var kind = TokenKind.Integer
+            if has_dot:
+                kind = TokenKind.Float
+            val token = Token(kind: kind, text: text, span: span)
+            tokens = tokens + [token]
+
+        # Identifier or Keyword
+        elif (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_":
+            val start = pos
+            for _ in 0..1000:
+                if pos >= source.len():
+                    break
+                val c = source[pos:pos + 1]
+                val is_alpha = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+                val is_digit = c >= "0" and c <= "9"
+                val is_under = c == "_"
+                if is_alpha or is_digit or is_under:
+                    pos = pos + 1
+                else:
+                    break
+            val text = source[start:pos]
+            val span = make_span(source, start, pos)
+            var kind = TokenKind.Identifier
+            if is_keyword(text):
+                kind = TokenKind.Keyword
+            elif text == "true" or text == "false":
+                kind = TokenKind.Boolean
+            elif text == "nil":
+                kind = TokenKind.Nil
+            val token = Token(kind: kind, text: text, span: span)
+            tokens = tokens + [token]
+
+        # Delimiters
+        elif ch == "(":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.LeftParen, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+        elif ch == ")":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.RightParen, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+        elif ch == "{":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.LeftBrace, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+        elif ch == "}":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.RightBrace, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+        elif ch == "[":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.LeftBracket, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+        elif ch == "]":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.RightBracket, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+
+        # Operators
+        elif ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "=" or ch == "!" or ch == "<" or ch == ">" or ch == ":" or ch == "," or ch == ".":
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.Operator, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+
+        # Unknown
+        else:
+            val span = make_span(source, pos, pos + 1)
+            val token = Token(kind: TokenKind.Unknown, text: ch, span: span)
+            tokens = tokens + [token]
+            pos = pos + 1
+
+    # Add EOF
+    val eof_span = make_span(source, pos, pos)
+    val eof_token = Token(kind: TokenKind.Eof, text: "", span: eof_span)
+    tokens + [eof_token]
+
+fn lexer_new(source: text) -> Lexer:
+    """Create a new lexer for the given source"""
+    Lexer(source: source)
+
+impl Lexer:
+    static fn new(source: text) -> Lexer:
+        """Create a new lexer (static method)"""
+        lexer_new(source)
+
+    fn tokenize() -> Option<[Token]>:
+        """Tokenize the source code"""
+        Some(tokenize_simple(self.source))

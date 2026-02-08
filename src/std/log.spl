@@ -1,0 +1,102 @@
+# Log Module - Runtime-guarded logging
+#
+# Lightweight, interpreter-safe log module that reads SIMPLE_LOG env var
+# once at module load time. When logging is disabled (default), log calls
+# cost only a single integer comparison (~1ns).
+#
+# Usage:
+#   use std.log.{log_debug, log_info, log_warn, log_error}
+#
+#   log_debug("test_runner", "Loading file {path}")  # no-op if SIMPLE_LOG < debug
+#   log_info("cli", "Starting test run")
+#
+# Environment:
+#   SIMPLE_LOG=trace   → show everything
+#   SIMPLE_LOG=debug   → show debug + above
+#   SIMPLE_LOG=info    → show info + above
+#   SIMPLE_LOG=warn    → show warn + error only
+#   SIMPLE_LOG=error   → show errors only
+#   (unset or "off")   → silent (all log calls become no-ops)
+#
+# Note: Due to module import limitations, this module may not be directly
+# importable via `use std.log.{...}` from all contexts. For files loaded
+# via the test runner or CLI, use the inline pattern instead:
+#
+#   use app.io.mod (env_get)
+#   fn _is_debug_enabled() -> bool:
+#       val env = env_get("SIMPLE_LOG")
+#       env == "debug" or env == "trace"
+
+extern fn rt_env_get(key: text) -> text
+
+# Level constants
+val LOG_OFF = 0
+val LOG_ERROR = 1
+val LOG_WARN = 2
+val LOG_INFO = 3
+val LOG_DEBUG = 4
+val LOG_TRACE = 5
+
+# Read SIMPLE_LOG once at module load time
+fn _parse_log_level() -> i64:
+    val env = rt_env_get("SIMPLE_LOG")
+    if env == "trace":
+        return 5
+    if env == "debug":
+        return 4
+    if env == "info":
+        return 3
+    if env == "warn":
+        return 2
+    if env == "error":
+        return 1
+    0
+
+val LOG_LEVEL = _parse_log_level()
+
+# Convenience functions — each has an inline guard so that
+# when SIMPLE_LOG is unset (LOG_LEVEL = 0), the print is never reached.
+# Note: the msg string argument IS evaluated before the call (interpreted language),
+# but for simple interpolation the cost is negligible. The real saving is
+# avoiding print I/O. For truly expensive messages, guard at the call site:
+#   if LOG_LEVEL >= LOG_DEBUG: log_debug("scope", "expensive: {compute()}")
+
+fn log_error(scope: text, msg: text):
+    if LOG_ERROR <= LOG_LEVEL:
+        print "[ERROR] [{scope}] {msg}"
+
+fn log_warn(scope: text, msg: text):
+    if LOG_WARN <= LOG_LEVEL:
+        print "[WARN] [{scope}] {msg}"
+
+fn log_info(scope: text, msg: text):
+    if LOG_INFO <= LOG_LEVEL:
+        print "[INFO] [{scope}] {msg}"
+
+fn log_debug(scope: text, msg: text):
+    if LOG_DEBUG <= LOG_LEVEL:
+        print "[DEBUG] [{scope}] {msg}"
+
+fn log_trace(scope: text, msg: text):
+    if LOG_TRACE <= LOG_LEVEL:
+        print "[TRACE] [{scope}] {msg}"
+
+# General log function with explicit level
+fn log(level: i64, scope: text, msg: text):
+    if level <= LOG_LEVEL:
+        var prefix = "LOG"
+        if level == 1:
+            prefix = "ERROR"
+        if level == 2:
+            prefix = "WARN"
+        if level == 3:
+            prefix = "INFO"
+        if level == 4:
+            prefix = "DEBUG"
+        if level == 5:
+            prefix = "TRACE"
+        print "[{prefix}] [{scope}] {msg}"
+
+export LOG_OFF, LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE
+export LOG_LEVEL
+export log, log_error, log_warn, log_info, log_debug, log_trace

@@ -1,0 +1,627 @@
+# Off-Heap Mailbox
+#
+# Message queue stored outside the actor's heap for GC efficiency.
+# Inspired by Erlang's off-heap message queue optimization.
+#
+# Benefits:
+# - GC doesn't scan unread messages
+# - Fast message queue operations
+# - Reduced GC pause times for busy actors
+# - Messages materialized into heap only when matched
+#
+# References:
+# - Erlang message_queue_data: https://www.erlang.org/blog/message-passing/
+
+export Mailbox, MailboxConfig, MailboxStats, MessageRef, MessagePriority, SendResult
+export Mailbox__new, Mailbox__default, Mailbox__unbounded
+export MailboxConfig__default, MailboxConfig__unlimited, MailboxConfig__bounded, MailboxConfig__with_priority
+export MailboxStats__new
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+val DEFAULT_MAILBOX_CAPACITY: i64 = 1000
+val DEFAULT_HIGH_PRIORITY_RESERVE: i64 = 100
+
+struct MailboxConfig:
+    """Configuration for actor mailbox."""
+    capacity: i64           # Maximum messages (0 = unlimited)
+    off_heap: bool          # Store messages off-heap
+    priority_enabled: bool  # Enable message priorities
+    high_priority_reserve: i64  # Reserved slots for high priority
+
+impl MailboxConfig:
+    static fn default() -> MailboxConfig:
+        MailboxConfig(
+            capacity: DEFAULT_MAILBOX_CAPACITY,
+            off_heap: true,
+            priority_enabled: false,
+            high_priority_reserve: DEFAULT_HIGH_PRIORITY_RESERVE
+        )
+
+    static fn unlimited() -> MailboxConfig:
+        """Unlimited mailbox (Erlang default behavior)."""
+        MailboxConfig(
+            capacity: 0,
+            off_heap: true,
+            priority_enabled: false,
+            high_priority_reserve: 0
+        )
+
+    static fn bounded(capacity: i64) -> MailboxConfig:
+        """Bounded mailbox with backpressure."""
+        MailboxConfig(
+            capacity: capacity,
+            off_heap: true,
+            priority_enabled: false,
+            high_priority_reserve: capacity / 10
+        )
+
+    static fn with_priority() -> MailboxConfig:
+        """Mailbox with priority support."""
+        MailboxConfig(
+            capacity: DEFAULT_MAILBOX_CAPACITY,
+            off_heap: true,
+            priority_enabled: true,
+            high_priority_reserve: DEFAULT_HIGH_PRIORITY_RESERVE
+        )
+
+    fn on_heap() -> MailboxConfig:
+        """Store messages on actor's heap (simpler, but slower GC)."""
+        MailboxConfig(
+            capacity: self.capacity,
+            off_heap: false,
+            priority_enabled: self.priority_enabled,
+            high_priority_reserve: self.high_priority_reserve
+        )
+
+# Manually desugared static methods for bootstrap runtime compatibility
+fn MailboxConfig__default() -> MailboxConfig:
+    MailboxConfig(
+        capacity: 1000,  # DEFAULT_MAILBOX_CAPACITY (inlined due to nested module bug)
+        off_heap: true,
+        priority_enabled: false,
+        high_priority_reserve: 100  # DEFAULT_HIGH_PRIORITY_RESERVE (inlined)
+    )
+
+fn MailboxConfig__unlimited() -> MailboxConfig:
+    """Unlimited mailbox (Erlang default behavior)."""
+    MailboxConfig(
+        capacity: 0,
+        off_heap: true,
+        priority_enabled: false,
+        high_priority_reserve: 0
+    )
+
+fn MailboxConfig__bounded(capacity: i64) -> MailboxConfig:
+    """Bounded mailbox with backpressure."""
+    MailboxConfig(
+        capacity: capacity,
+        off_heap: true,
+        priority_enabled: false,
+        high_priority_reserve: capacity / 10
+    )
+
+fn MailboxConfig__with_priority() -> MailboxConfig:
+    """Mailbox with priority support."""
+    MailboxConfig(
+        capacity: 1000,  # DEFAULT_MAILBOX_CAPACITY (inlined)
+        off_heap: true,
+        priority_enabled: true,
+        high_priority_reserve: 100  # DEFAULT_HIGH_PRIORITY_RESERVE (inlined)
+    )
+
+fn MailboxStats__new() -> MailboxStats:
+    MailboxStats(
+        current_size: 0,
+        high_priority_count: 0,
+        normal_priority_count: 0,
+        low_priority_count: 0,
+        total_received: 0,
+        total_processed: 0,
+        total_dropped: 0,
+        avg_wait_time_ms: 0,
+        max_wait_time_ms: 0,
+        total_wait_time_ms: 0,
+        off_heap_bytes: 0,
+        peak_size: 0
+    )
+
+fn Mailbox__new(config: MailboxConfig) -> Mailbox:
+    """Create a new mailbox with given configuration."""
+    Mailbox(
+        config: config,
+        stats: MailboxStats__new(),
+        high_queue: [],
+        normal_queue: [],
+        low_queue: [],
+        next_message_id: 0,
+        is_closed: false
+    )
+
+fn Mailbox__default() -> Mailbox:
+    """Create mailbox with default configuration."""
+    Mailbox__new(MailboxConfig__default())
+
+fn Mailbox__unbounded() -> Mailbox:
+    """Create unbounded mailbox (Erlang-style)."""
+    Mailbox__new(MailboxConfig__unlimited())
+
+# ============================================================================
+# Message Priority
+# ============================================================================
+
+enum MessagePriority:
+    """Priority level for messages."""
+    High        # System messages, timeouts
+    Normal      # Regular messages
+    Low         # Background tasks, logging
+
+impl MessagePriority:
+    fn to_i64() -> i64:
+        match self:
+            case High: 0
+            case Normal: 1
+            case Low: 2
+
+impl Ord for MessagePriority:
+    fn cmp(other: MessagePriority) -> i64:
+        self.to_i64() - other.to_i64()
+
+# ============================================================================
+# Message Reference (Off-Heap)
+# ============================================================================
+
+struct MessageRef:
+    """Reference to an off-heap message.
+
+    The actual message data is stored in a separate memory region
+    that is not scanned by the actor's GC. This struct is a
+    lightweight handle to that data.
+    """
+    id: i64                 # Unique message ID
+    sender_id: i64?         # Sender actor ID (for replies)
+    priority: MessagePriority
+    timestamp: i64          # When message was sent
+    size: i64               # Size of payload in bytes
+    data_ptr: i64           # Pointer to off-heap data (opaque)
+    materialized: bool      # Has been copied to actor heap?
+
+impl MessageRef:
+    static fn new(id: i64, sender_id: i64?, priority: MessagePriority, size: i64, data_ptr: i64) -> MessageRef:
+        MessageRef(
+            id: id,
+            sender_id: sender_id,
+            priority: priority,
+            timestamp: current_time_ms(),
+            size: size,
+            data_ptr: data_ptr,
+            materialized: false
+        )
+
+    fn age_ms() -> i64:
+        """How long the message has been in the queue."""
+        current_time_ms() - self.timestamp
+
+    fn is_stale(max_age_ms: i64) -> bool:
+        """Check if message is older than threshold."""
+        self.age_ms() > max_age_ms
+
+# ============================================================================
+# Mailbox Statistics
+# ============================================================================
+
+struct MailboxStats:
+    """Statistics about mailbox usage."""
+    # Queue state
+    current_size: i64
+    high_priority_count: i64
+    normal_priority_count: i64
+    low_priority_count: i64
+
+    # Throughput
+    total_received: i64
+    total_processed: i64
+    total_dropped: i64
+
+    # Timing
+    avg_wait_time_ms: i64
+    max_wait_time_ms: i64
+    total_wait_time_ms: i64
+
+    # Memory
+    off_heap_bytes: i64
+    peak_size: i64
+
+impl MailboxStats:
+    static fn new() -> MailboxStats:
+        MailboxStats(
+            current_size: 0,
+            high_priority_count: 0,
+            normal_priority_count: 0,
+            low_priority_count: 0,
+            total_received: 0,
+            total_processed: 0,
+            total_dropped: 0,
+            avg_wait_time_ms: 0,
+            max_wait_time_ms: 0,
+            total_wait_time_ms: 0,
+            off_heap_bytes: 0,
+            peak_size: 0
+        )
+
+    fn throughput() -> f64:
+        """Messages processed per message received."""
+        if self.total_received == 0:
+            0.0
+        else:
+            (self.total_processed as f64) / (self.total_received as f64)
+
+    fn drop_rate() -> f64:
+        """Percentage of messages dropped."""
+        if self.total_received == 0:
+            0.0
+        else:
+            (self.total_dropped as f64) / (self.total_received as f64) * 100.0
+
+impl Display for MailboxStats:
+    fn fmt() -> text:
+        "MailboxStats(size={self.current_size}, received={self.total_received}, processed={self.total_processed})"
+
+# ============================================================================
+# Mailbox
+# ============================================================================
+
+struct Mailbox:
+    """Off-heap message queue for actors.
+
+    Messages are stored outside the actor's heap so that:
+    1. GC doesn't scan unread messages
+    2. Queue operations are fast
+    3. Large messages don't fragment actor heap
+
+    Messages are "materialized" (copied to actor heap) only when
+    the actor matches them in a receive expression.
+
+    Example:
+        val mailbox = Mailbox.new(MailboxConfig__default())
+
+        # Send message (stores off-heap)
+        mailbox.send(message, MessagePriority.Normal)
+
+        # Receive message (materializes to heap)
+        match mailbox.receive():
+            case Some(msg): process(msg)
+            case None: # No message
+    """
+    config: MailboxConfig
+    stats: MailboxStats
+
+    # Message queues (by priority if enabled)
+    high_queue: [MessageRef]
+    normal_queue: [MessageRef]
+    low_queue: [MessageRef]
+
+    # State
+    next_message_id: i64
+    is_closed: bool
+
+impl Mailbox:
+    static fn new(config: MailboxConfig) -> Mailbox:
+        """Create a new mailbox with given configuration."""
+        Mailbox(
+            config: config,
+            stats: MailboxStats.new(),
+            high_queue: [],
+            normal_queue: [],
+            low_queue: [],
+            next_message_id: 0,
+            is_closed: false
+        )
+
+    static fn default() -> Mailbox:
+        """Create mailbox with default configuration."""
+        Mailbox.new(MailboxConfig__default())
+
+    static fn unbounded() -> Mailbox:
+        """Create unbounded mailbox (Erlang-style)."""
+        Mailbox.new(MailboxConfig.unlimited())
+
+    # --------------------------------------------------------------------------
+    # Send
+    # --------------------------------------------------------------------------
+
+    me send(data_ptr: i64, size: i64, sender_id: i64?, priority: MessagePriority) -> SendResult:
+        """Send a message to this mailbox.
+
+        The message data is already stored off-heap at data_ptr.
+        This method just adds it to the queue.
+
+        Returns SendResult indicating success or failure.
+        """
+        if self.is_closed:
+            return SendResult.MailboxClosed
+
+        # Check capacity
+        if self.config.capacity > 0:
+            val total = self.total_size()
+            if total >= self.config.capacity:
+                # Check if high priority can use reserved space
+                if priority == MessagePriority.High:
+                    val reserved_used = self.stats.high_priority_count
+                    if reserved_used >= self.config.high_priority_reserve:
+                        self.stats.total_dropped = self.stats.total_dropped + 1
+                        return SendResult.QueueFull
+                else:
+                    self.stats.total_dropped = self.stats.total_dropped + 1
+                    return SendResult.QueueFull
+
+        # Create message reference
+        val msg_ref = MessageRef.new(
+            self.next_message_id,
+            sender_id,
+            priority,
+            size,
+            data_ptr
+        )
+        self.next_message_id = self.next_message_id + 1
+
+        # Add to appropriate queue
+        if self.config.priority_enabled:
+            match priority:
+                case High:
+                    self.high_queue = self.high_queue.push(msg_ref)
+                    self.stats.high_priority_count = self.stats.high_priority_count + 1
+                case Normal:
+                    self.normal_queue = self.normal_queue.push(msg_ref)
+                    self.stats.normal_priority_count = self.stats.normal_priority_count + 1
+                case Low:
+                    self.low_queue = self.low_queue.push(msg_ref)
+                    self.stats.low_priority_count = self.stats.low_priority_count + 1
+        else:
+            self.normal_queue = self.normal_queue.push(msg_ref)
+            self.stats.normal_priority_count = self.stats.normal_priority_count + 1
+
+        # Update stats
+        self.stats.total_received = self.stats.total_received + 1
+        self.stats.current_size = self.total_size()
+        self.stats.off_heap_bytes = self.stats.off_heap_bytes + size
+
+        if self.stats.current_size > self.stats.peak_size:
+            self.stats.peak_size = self.stats.current_size
+
+        SendResult.Success
+
+    me send_normal(data_ptr: i64, size: i64, sender_id: i64?) -> SendResult:
+        """Send a normal priority message."""
+        self.send(data_ptr, size, sender_id, MessagePriority.Normal)
+
+    me send_high(data_ptr: i64, size: i64, sender_id: i64?) -> SendResult:
+        """Send a high priority message."""
+        self.send(data_ptr, size, sender_id, MessagePriority.High)
+
+    # --------------------------------------------------------------------------
+    # Receive
+    # --------------------------------------------------------------------------
+
+    me receive() -> MessageRef?:
+        """Receive the next message (by priority).
+
+        Returns the message reference. The caller is responsible for
+        materializing the data into the actor's heap.
+
+        Priority order: High > Normal > Low
+        """
+        if self.is_closed and self.is_empty():
+            return None
+
+        # Check queues in priority order
+        if self.config.priority_enabled and self.high_queue.len() > 0:
+            val msg = self.high_queue[0]
+            self.high_queue = self.high_queue[1:]
+            self.stats.high_priority_count = self.stats.high_priority_count - 1
+            self.record_receive(msg)
+            return Some(msg)
+
+        if self.normal_queue.len() > 0:
+            val msg = self.normal_queue[0]
+            self.normal_queue = self.normal_queue[1:]
+            self.stats.normal_priority_count = self.stats.normal_priority_count - 1
+            self.record_receive(msg)
+            return Some(msg)
+
+        if self.config.priority_enabled and self.low_queue.len() > 0:
+            val msg = self.low_queue[0]
+            self.low_queue = self.low_queue[1:]
+            self.stats.low_priority_count = self.stats.low_priority_count - 1
+            self.record_receive(msg)
+            return Some(msg)
+
+        None
+
+    me try_receive() -> MessageRef?:
+        """Non-blocking receive. Returns None immediately if no message."""
+        self.receive()
+
+    me receive_with_timeout(timeout_ms: i64) -> MessageRef?:
+        """Receive with timeout. Returns None if no message within timeout."""
+        # In actual impl, this would block with timeout
+        # Simplified version just does non-blocking check
+        self.receive()
+
+    me record_receive(msg: MessageRef):
+        """Record statistics for received message."""
+        self.stats.total_processed = self.stats.total_processed + 1
+        self.stats.current_size = self.total_size()
+        self.stats.off_heap_bytes = self.stats.off_heap_bytes - msg.size
+
+        val wait_time = msg.age_ms()
+        self.stats.total_wait_time_ms = self.stats.total_wait_time_ms + wait_time
+
+        if wait_time > self.stats.max_wait_time_ms:
+            self.stats.max_wait_time_ms = wait_time
+
+        if self.stats.total_processed > 0:
+            self.stats.avg_wait_time_ms = self.stats.total_wait_time_ms / self.stats.total_processed
+
+    # --------------------------------------------------------------------------
+    # Selective Receive (Erlang-style pattern matching)
+    # --------------------------------------------------------------------------
+
+    me select(predicate: fn(MessageRef) -> bool) -> MessageRef?:
+        """Selective receive: get first message matching predicate.
+
+        This is like Erlang's selective receive where messages can be
+        matched out of order based on patterns.
+
+        Messages that don't match are kept in the queue.
+        """
+        # Check high priority queue
+        if self.config.priority_enabled:
+            for i in 0..self.high_queue.len():
+                if predicate(self.high_queue[i]):
+                    val msg = self.high_queue[i]
+                    self.high_queue = remove_at(self.high_queue, i)
+                    self.stats.high_priority_count = self.stats.high_priority_count - 1
+                    self.record_receive(msg)
+                    return Some(msg)
+
+        # Check normal queue
+        for i in 0..self.normal_queue.len():
+            if predicate(self.normal_queue[i]):
+                val msg = self.normal_queue[i]
+                self.normal_queue = remove_at(self.normal_queue, i)
+                self.stats.normal_priority_count = self.stats.normal_priority_count - 1
+                self.record_receive(msg)
+                return Some(msg)
+
+        # Check low priority queue
+        if self.config.priority_enabled:
+            for i in 0..self.low_queue.len():
+                if predicate(self.low_queue[i]):
+                    val msg = self.low_queue[i]
+                    self.low_queue = remove_at(self.low_queue, i)
+                    self.stats.low_priority_count = self.stats.low_priority_count - 1
+                    self.record_receive(msg)
+                    return Some(msg)
+
+        None
+
+    me select_by_sender(sender_id: i64) -> MessageRef?:
+        """Receive message from specific sender."""
+        self.select(\msg: msg.sender_id == Some(sender_id))
+
+    # --------------------------------------------------------------------------
+    # Queries
+    # --------------------------------------------------------------------------
+
+    fn total_size() -> i64:
+        """Total number of messages in all queues."""
+        self.high_queue.len() + self.normal_queue.len() + self.low_queue.len()
+
+    fn is_empty() -> bool:
+        """Check if mailbox is empty."""
+        self.total_size() == 0
+
+    fn is_full() -> bool:
+        """Check if mailbox is at capacity."""
+        if self.config.capacity == 0:
+            false  # Unlimited
+        else:
+            self.total_size() >= self.config.capacity
+
+    fn get_stats() -> MailboxStats:
+        """Get mailbox statistics."""
+        self.stats
+
+    # --------------------------------------------------------------------------
+    # Management
+    # --------------------------------------------------------------------------
+
+    me close():
+        """Close the mailbox. No new messages accepted."""
+        self.is_closed = true
+
+    me clear():
+        """Clear all pending messages."""
+        self.high_queue = []
+        self.normal_queue = []
+        self.low_queue = []
+        self.stats.current_size = 0
+        self.stats.high_priority_count = 0
+        self.stats.normal_priority_count = 0
+        self.stats.low_priority_count = 0
+        self.stats.off_heap_bytes = 0
+
+    me drop_stale(max_age_ms: i64) -> i64:
+        """Drop messages older than max_age_ms. Returns count dropped."""
+        var dropped: i64 = 0
+
+        self.high_queue = self.high_queue.filter(\msg:
+            if msg.is_stale(max_age_ms):
+                dropped = dropped + 1
+                false
+            else:
+                true
+        )
+
+        self.normal_queue = self.normal_queue.filter(\msg:
+            if msg.is_stale(max_age_ms):
+                dropped = dropped + 1
+                false
+            else:
+                true
+        )
+
+        self.low_queue = self.low_queue.filter(\msg:
+            if msg.is_stale(max_age_ms):
+                dropped = dropped + 1
+                false
+            else:
+                true
+        )
+
+        self.stats.total_dropped = self.stats.total_dropped + dropped
+        self.stats.current_size = self.total_size()
+        dropped
+
+# ============================================================================
+# Send Result
+# ============================================================================
+
+enum SendResult:
+    """Result of sending a message."""
+    Success
+    QueueFull
+    MailboxClosed
+
+impl SendResult:
+    fn is_success() -> bool:
+        match self:
+            case Success: true
+            case _: false
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn current_time_ms() -> i64:
+    """Get current time in milliseconds (placeholder)."""
+    0
+
+fn remove_at<T>(arr: [T], index: i64) -> [T]:
+    """Remove element at index from array."""
+    var result: [T] = []
+    for i in 0..arr.len():
+        if i != index:
+            result = result.push(arr[i])
+    result
+
+# ============================================================================
+# Display
+# ============================================================================
+
+impl Display for Mailbox:
+    fn fmt() -> text:
+        "Mailbox(size={self.total_size()}, closed={self.is_closed})"

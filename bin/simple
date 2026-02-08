@@ -61,23 +61,40 @@ find_bootstrap() {
         return 0
     fi
 
-    # Try release build
-    local release_bin="$DIR/../.release/simple-0.4.0-beta/bin/simple_runtime"
-    if [ -x "$release_bin" ]; then
-        echo "$release_bin"
-        return 0
-    fi
-
-    # Legacy: Try development build
-    if [ -x "$DIR/simple_runtime" ]; then
-        echo "$DIR/simple_runtime"
-        return 0
-    fi
-
     echo "Error: No Simple runtime found for platform: $platform" >&2
     echo "Please download the bootstrap binary for your platform" >&2
     echo "  https://github.com/simple-lang/simple/releases" >&2
     exit 1
+}
+
+# Check if first non-flag argument is a known fast-path command.
+# Each fast-path command has a lightweight entry point that only
+# imports what it needs, saving ~160ms of module loading overhead.
+detect_fast_path() {
+    for arg in "$@"; do
+        case "$arg" in
+            --*) continue ;;  # Skip flags
+            test) echo "test_entry.spl"; return 0 ;;
+            lint|fmt|fix) echo "lint_entry.spl"; return 0 ;;
+            *) return 1 ;;    # First non-flag arg is not a fast-path command
+        esac
+    done
+    return 1
+}
+
+# Run command with noisy stderr lines filtered out.
+# The runtime emits hundreds of [DEBUG] register_definitions lines
+# per invocation that are hardcoded eprintln! calls in the binary.
+# It also emits [WARNING]/Warning about test_db.sdn parse failures
+# due to a binary-internal writer/reader incompatibility (the binary
+# writes unquoted strings with colons that its own parser rejects).
+# Filtering these reduces noise and saves I/O overhead.
+run_filtered() {
+    "$@" 2> >(grep -v -e '^\[DEBUG\]' \
+                       -e '^\[WARNING\] Failed to load test database' \
+                       -e '^\[WARNING\] Existing records will be preserved' \
+                       -e '^\[INFO\] Backup created at:' \
+                       -e '^Warning: Failed to update.*test database' >&2)
 }
 
 # Main execution
@@ -85,8 +102,21 @@ main() {
     local platform=$(detect_platform)
     local bootstrap=$(find_bootstrap "$platform")
 
-    # Execute Simple CLI with bootstrap runtime
-    exec "$bootstrap" "$DIR/../src/app/cli/main.spl" "$@"
+    # Set stdlib path to eliminate directory walk-up probing.
+    # Without this, module resolution tries 78+ paths per import,
+    # walking from the file directory up to / trying 6 stdlib patterns.
+    export SIMPLE_LIB="$DIR/../src"
+
+    # Use lightweight entry point for known commands (saves ~160ms)
+    local fast_entry
+    if fast_entry=$(detect_fast_path "$@"); then
+        run_filtered "$bootstrap" "$DIR/../src/app/cli/$fast_entry" "$@"
+        exit $?
+    fi
+
+    # Fall back to full CLI for all other commands
+    run_filtered "$bootstrap" "$DIR/../src/app/cli/main.spl" "$@"
+    exit $?
 }
 
 main "$@"

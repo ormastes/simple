@@ -276,26 +276,26 @@ if lock.acquire():
 
 ```bash
 # Run database library tests (27 tests)
-./bin/simple_runtime test/lib/database_spec.spl
+bin/simple test/lib/database_spec.spl
 ```
 
 ### Integration Tests
 
 ```bash
 # MCP integration
-./bin/simple_runtime test/integration/mcp_bugdb_spec.spl
+bin/simple test/integration/mcp_bugdb_spec.spl
 
 # Atomic operations
-./bin/simple_runtime test/integration/database_atomic_spec.spl
+bin/simple test/integration/database_atomic_spec.spl
 
 # Query builder
-./bin/simple_runtime test/integration/database_query_spec.spl
+bin/simple test/integration/database_query_spec.spl
 
 # End-to-end workflows
-./bin/simple_runtime test/integration/database_e2e_spec.spl
+bin/simple test/integration/database_e2e_spec.spl
 
 # Core components
-./bin/simple_runtime test/integration/database_core_spec.spl
+bin/simple test/integration/database_core_spec.spl
 ```
 
 ---
