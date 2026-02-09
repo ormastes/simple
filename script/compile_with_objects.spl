@@ -1,0 +1,183 @@
+#!/usr/bin/env simple
+# Compile Simple Modules with Object Files
+#
+# This script compiles Simple source files to both SMF and object files,
+# placing them in standard locations for library linking to find.
+#
+# Usage:
+#   simple script/compile_with_objects.spl [--input-dir=src] [--output-dir=build]
+#
+# This enables native linking against library modules by ensuring
+# companion object files exist for each SMF module.
+
+use app.io.{shell, file_exists, cwd}
+
+fn main():
+    # Parse arguments
+    val args = get_args()
+    var input_dir = "src"
+    var output_dir = "build"
+    var verbose = false
+
+    for arg in args:
+        if arg.starts_with("--input-dir="):
+            input_dir = arg[12:]
+        elif arg.starts_with("--output-dir="):
+            output_dir = arg[13:]
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif arg == "--help" or arg == "-h":
+            print_usage()
+            exit(0)
+
+    print "========================================="
+    print "Compiling Modules with Object Files"
+    print "========================================="
+    print ""
+    print "Input:  {input_dir}"
+    print "Output: {output_dir}"
+    print ""
+
+    # Step 1: Create output directories
+    print "[1/4] Creating output directories..."
+    val mkdir_result = shell("mkdir -p {output_dir}/smf {output_dir}/obj")
+    if mkdir_result.exit_code != 0:
+        print "Error: Failed to create output directories"
+        exit(1)
+
+    # Step 2: Find all Simple source files
+    print "[2/4] Finding source files..."
+    val find_result = shell("find {input_dir} -name '*.spl' -type f 2>/dev/null")
+
+    var source_files: [text] = []
+    if find_result.exit_code == 0:
+        val lines = find_result.stdout.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed != "" and trimmed.ends_with(".spl"):
+                source_files.push(trimmed)
+
+    print "Found {source_files.len()} source files"
+
+    if source_files.len() == 0:
+        print ""
+        print "No source files found in {input_dir}"
+        exit(0)
+
+    # Step 3: Compile each file to SMF and object
+    print "[3/4] Compiling files..."
+    var success_count = 0
+    var error_count = 0
+
+    for source_path in source_files:
+        # Derive output paths
+        var rel_path = source_path
+        if rel_path.starts_with(input_dir + "/"):
+            rel_path = rel_path[(input_dir.len() + 1):]
+
+        # Remove .spl extension
+        if rel_path.ends_with(".spl"):
+            rel_path = rel_path[0:(rel_path.len() - 4)]
+
+        val smf_path = "{output_dir}/smf/{rel_path}.smf"
+        val obj_path = "{output_dir}/obj/{rel_path}.o"
+
+        if verbose:
+            print "  {source_path}"
+            print "    → SMF: {smf_path}"
+            print "    → OBJ: {obj_path}"
+
+        # Create subdirectories for nested modules
+        val smf_dir = extract_directory(smf_path)
+        val obj_dir = extract_directory(obj_path)
+        shell("mkdir -p '{smf_dir}' '{obj_dir}' 2>/dev/null")
+
+        # Compile to SMF
+        val smf_result = shell("simple compile {source_path} --emit-smf -o {smf_path} 2>&1")
+        var smf_ok = smf_result.exit_code == 0
+
+        # Compile to object
+        val obj_result = shell("simple compile {source_path} --emit-obj -o {obj_path} 2>&1")
+        var obj_ok = obj_result.exit_code == 0
+
+        if smf_ok and obj_ok:
+            success_count = success_count + 1
+            if verbose:
+                print "    ✓ Success"
+        else:
+            error_count = error_count + 1
+            print "  ✗ Failed: {source_path}"
+            if not smf_ok:
+                print "    SMF error: {smf_result.stderr}"
+            if not obj_ok:
+                print "    OBJ error: {obj_result.stderr}"
+
+    print ""
+    print "Compilation complete:"
+    print "  Success: {success_count}"
+    print "  Errors:  {error_count}"
+
+    # Step 4: Create symlinks in standard locations
+    print "[4/4] Creating standard symlinks..."
+
+    # Link build/obj to build/lib/obj for library linking
+    val link1_result = shell("ln -sf ../obj {output_dir}/lib/obj 2>/dev/null")
+
+    # Link build/smf to standard locations
+    val link2_result = shell("ln -sf {output_dir}/smf .build/smf 2>/dev/null")
+
+    print "✓ Symlinks created"
+    print ""
+
+    print "========================================="
+    print "Compilation Complete"
+    print "========================================="
+    print ""
+
+    if error_count == 0:
+        print "All modules compiled successfully!"
+        print ""
+        print "Object files available at:"
+        print "  {output_dir}/obj/"
+        print ""
+        print "Libraries can now link against these objects."
+    else:
+        print "Some modules failed to compile."
+        print "Review errors above and fix before linking."
+        exit(1)
+
+fn print_usage():
+    print "Compile Simple Modules with Object Files"
+    print ""
+    print "Usage:"
+    print "  simple script/compile_with_objects.spl [options]"
+    print ""
+    print "Options:"
+    print "  --input-dir=DIR   Input directory (default: src)"
+    print "  --output-dir=DIR  Output directory (default: build)"
+    print "  --verbose, -v     Verbose output"
+    print "  --help, -h        Show this help"
+    print ""
+    print "Description:"
+    print "  Compiles all .spl files in input directory to both SMF and"
+    print "  object files, placing them in standard locations for library"
+    print "  linking to discover."
+    print ""
+    print "Examples:"
+    print "  # Compile standard library"
+    print "  simple script/compile_with_objects.spl --input-dir=src/std"
+    print ""
+    print "  # Compile application"
+    print "  simple script/compile_with_objects.spl --input-dir=src/app"
+
+fn extract_directory(path: text) -> text:
+    """Extract directory from file path."""
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path[0:last_slash]
+    else:
+        "."
+
+fn get_args() -> [text]:
+    # Placeholder for command-line arguments
+    []

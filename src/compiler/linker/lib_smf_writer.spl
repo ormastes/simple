@@ -32,7 +32,10 @@ struct ModuleEntry:
     name: text               # Module path (e.g., "std/io/mod")
     smf_path: text           # Path to SMF file
     data: [u8]               # SMF file data (cached)
-    hash: u64                # FNV-1a hash of data
+    hash: u64                # FNV-1a hash of SMF data
+    obj_path: text           # Path to object file (empty if none)
+    obj_data: [u8]           # Object file data (empty if none)
+    obj_hash: u64            # FNV-1a hash of object data (0 if none)
 
 impl LibSmfBuilder:
     """Create a new library SMF builder."""
@@ -46,7 +49,7 @@ impl LibSmfBuilder:
     me set_verbose(verbose: bool):
         self.verbose = verbose
 
-    """Add a module to the library.
+    """Add a module to the library (SMF only, no object file).
 
     Args:
         name: Module path (e.g., "std/io/mod")
@@ -76,7 +79,10 @@ impl LibSmfBuilder:
             name: name,
             smf_path: smf_path,
             data: data,
-            hash: hash
+            hash: hash,
+            obj_path: "",
+            obj_data: [],
+            obj_hash: 0
         )
         self.modules.push(entry)
 
@@ -85,7 +91,67 @@ impl LibSmfBuilder:
 
         Ok(())
 
-    """Add a module from in-memory data.
+    """Add a module with both SMF and object file.
+
+    Args:
+        name: Module path (e.g., "std/io/mod")
+        smf_path: Path to SMF file
+        obj_path: Path to object file (.o)
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_module_with_object(
+        name: text,
+        smf_path: text,
+        obj_path: text
+    ) -> Result<(), text>:
+        # Check if SMF file exists
+        if not file_exists(smf_path):
+            return Err("SMF file not found: {smf_path}")
+
+        # Check if object file exists
+        if not file_exists(obj_path):
+            return Err("Object file not found: {obj_path}")
+
+        # Read SMF data
+        val smf_result = file_read(smf_path)
+        if smf_result.is_err():
+            return Err("Failed to read SMF file: {smf_path}")
+
+        val smf_text = smf_result.unwrap()
+        val smf_data = text_to_bytes(smf_text)
+        val smf_hash = fnv1a_hash(smf_data)
+
+        # Read object data
+        val obj_result = file_read(obj_path)
+        if obj_result.is_err():
+            return Err("Failed to read object file: {obj_path}")
+
+        val obj_text = obj_result.unwrap()
+        val obj_data = text_to_bytes(obj_text)
+        val obj_hash = fnv1a_hash(obj_data)
+
+        # Add to modules list
+        val entry = ModuleEntry(
+            name: name,
+            smf_path: smf_path,
+            data: smf_data,
+            hash: smf_hash,
+            obj_path: obj_path,
+            obj_data: obj_data,
+            obj_hash: obj_hash
+        )
+        self.modules.push(entry)
+
+        if self.verbose:
+            print "[lib-smf-writer] Added module with object: {name}"
+            print "[lib-smf-writer]   SMF: {smf_data.len()} bytes, hash: {smf_hash}"
+            print "[lib-smf-writer]   OBJ: {obj_data.len()} bytes, hash: {obj_hash}"
+
+        Ok(())
+
+    """Add a module from in-memory data (SMF only).
 
     Args:
         name: Module path
@@ -103,12 +169,53 @@ impl LibSmfBuilder:
             name: name,
             smf_path: "",
             data: data,
-            hash: hash
+            hash: hash,
+            obj_path: "",
+            obj_data: [],
+            obj_hash: 0
         )
         self.modules.push(entry)
 
         if self.verbose:
             print "[lib-smf-writer] Added module: {name} ({data.len()} bytes)"
+
+        Ok(())
+
+    """Add a module from in-memory data with object file.
+
+    Args:
+        name: Module path
+        smf_data: SMF file data
+        obj_data: Object file data
+
+    Returns:
+        Result indicating success or error
+    """
+    me add_module_data_with_object(
+        name: text,
+        smf_data: [u8],
+        obj_data: [u8]
+    ) -> Result<(), text>:
+        # Calculate hashes
+        val smf_hash = fnv1a_hash(smf_data)
+        val obj_hash = fnv1a_hash(obj_data)
+
+        # Add to modules list
+        val entry = ModuleEntry(
+            name: name,
+            smf_path: "",
+            data: smf_data,
+            hash: smf_hash,
+            obj_path: "",
+            obj_data: obj_data,
+            obj_hash: obj_hash
+        )
+        self.modules.push(entry)
+
+        if self.verbose:
+            print "[lib-smf-writer] Added module with object: {name}"
+            print "[lib-smf-writer]   SMF: {smf_data.len()} bytes"
+            print "[lib-smf-writer]   OBJ: {obj_data.len()} bytes"
 
         Ok(())
 
@@ -127,19 +234,39 @@ impl LibSmfBuilder:
         if self.verbose:
             print "[lib-smf-writer] Writing library with {self.modules.len()} modules to {output_path}"
 
-        # Build index entries
+        # Build index entries and calculate offsets
         var index_entries: [ModuleIndexEntry] = []
         var current_offset = LSMF_HEADER_SIZE + (LSMF_INDEX_ENTRY_SIZE * (self.modules.len() as i64))
 
         for entry in self.modules:
-            val index_entry = ModuleIndexEntry.new(
-                entry.name,
-                current_offset as u64,
-                entry.data.len() as u64,
-                entry.hash
-            )
+            val smf_offset = current_offset as u64
+            val smf_size = entry.data.len() as u64
+            val obj_offset_val = if entry.obj_data.len() > 0:
+                (current_offset + entry.data.len()) as u64
+            else:
+                0 as u64
+            val obj_size_val = entry.obj_data.len() as u64
+
+            val index_entry = if entry.obj_data.len() > 0:
+                ModuleIndexEntry.new_with_object(
+                    entry.name,
+                    smf_offset,
+                    smf_size,
+                    entry.hash,
+                    obj_offset_val,
+                    obj_size_val,
+                    entry.obj_hash
+                )
+            else:
+                ModuleIndexEntry.new(
+                    entry.name,
+                    smf_offset,
+                    smf_size,
+                    entry.hash
+                )
+
             index_entries.push(index_entry)
-            current_offset = current_offset + entry.data.len()
+            current_offset = current_offset + entry.data.len() + entry.obj_data.len()
 
         # Build header
         var header = LibSmfHeader.new_default()
@@ -163,15 +290,19 @@ impl LibSmfBuilder:
         # 2. Index table
         file_data = file_data + (index_bytes)
 
-        # 3. Module data
+        # 3. Module data (SMF + object files)
         for entry in self.modules:
             file_data = file_data + (entry.data)
+            if entry.obj_data.len() > 0:
+                file_data = file_data + (entry.obj_data)
 
         # Calculate library hash (excluding header)
         var content_for_hash: [u8] = []
         content_for_hash = content_for_hash + (index_bytes)
         for entry in self.modules:
             content_for_hash = content_for_hash + (entry.data)
+            if entry.obj_data.len() > 0:
+                content_for_hash = content_for_hash + (entry.obj_data)
         header.library_hash = fnv1a_hash(content_for_hash)
 
         # Update header with library hash
@@ -188,9 +319,19 @@ impl LibSmfBuilder:
             return Err("Failed to write library file: {output_path}")
 
         if self.verbose:
+            val obj_count = self.count_objects()
             print "[lib-smf-writer] Wrote {file_data.len()} bytes to {output_path}"
+            print "[lib-smf-writer]   {self.modules.len()} modules, {obj_count} with object files"
 
         Ok(())
+
+    """Count how many modules have object files."""
+    fn count_objects() -> i64:
+        var count = 0
+        for entry in self.modules:
+            if entry.obj_data.len() > 0:
+                count = count + 1
+        count
 
     """Get number of modules in the library."""
     fn module_count() -> i64:

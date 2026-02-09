@@ -6,12 +6,12 @@
 
 | Metric | Count |
 |--------|-------|
-| Total blocks | 66 |
-| Passed | 18 |
-| Failed | 46 |
-| Skipped | 2 |
+| Total blocks | 2442 |
+| Passed | 2346 |
+| Failed | 1 |
+| Skipped | 95 |
 | Errors | 0 |
-| Duration | 0ms |
+| Duration | 54566ms |
 
 **Status: FAIL**
 
@@ -19,571 +19,301 @@
 
 | File | Total | Passed | Failed | Skipped | Duration |
 |------|-------|--------|--------|---------|----------|
-| doc/guide/syntax_quick_reference.md | 66 | 18 | 46 | 2 | 0ms |
+| README.md | 23 | 14 | 1 | 8 | 57ms |
+| CLAUDE.md | 19 | 14 | 0 | 5 | 68ms |
+| doc/analysis/type_inference_algorithm_comparison.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/analysis/type_inference_architecture.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/analysis/type_inference_comparison_summary.md | 4 | 4 | 0 | 0 | 18ms |
+| doc/analysis/type_inference_error_reporting.md | 15 | 15 | 0 | 0 | 56ms |
+| doc/analysis/type_inference_feature_parity.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/analysis/type_inference_function_mapping.md | 8 | 8 | 0 | 0 | 36ms |
+| doc/analysis/type_inference_initial_observations.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/analysis/type_inference_migration_roadmap.md | 16 | 16 | 0 | 0 | 74ms |
+| doc/analysis/type_inference_performance.md | 10 | 10 | 0 | 0 | 41ms |
+| doc/analysis/type_inference_test_coverage.md | 10 | 10 | 0 | 0 | 43ms |
+| doc/api/gpu_api.md | 28 | 28 | 0 | 0 | 114ms |
+| doc/api/note_sdn_api.md | 2 | 2 | 0 | 0 | 7ms |
+| doc/api/pure_dl_api_reference.md | 77 | 77 | 0 | 0 | 412ms |
+| doc/architecture/architecture_dev.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/architecture_flows.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/architecture.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/architecture_modules.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/bare_metal_integration.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/architecture/dependency_graphs.md | 2 | 2 | 0 | 0 | 10ms |
+| doc/architecture/dev.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/flows.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/interpreter_missing_features.md | 40 | 37 | 0 | 3 | 162ms |
+| doc/architecture/jit_interpreter_integration.md | 18 | 18 | 0 | 0 | 96ms |
+| doc/architecture/memory_model_implementation.md | 6 | 6 | 0 | 0 | 17ms |
+| doc/architecture/modules.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/overview.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/parser_file_locations_2026-02-04.md | 18 | 18 | 0 | 0 | 72ms |
+| doc/architecture/README.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/support.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/architecture/unified_backend_architecture.md | 24 | 24 | 0 | 0 | 112ms |
+| doc/architecture/vulkan_backend.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/bug/bootstrap_debug_findings.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/bug/bootstrap_mir_zero_modules.md | 8 | 8 | 0 | 0 | 29ms |
+| doc/bug/bug_report.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/bug/mcp_bug_analysis_2026-01-29.md | 4 | 4 | 0 | 0 | 11ms |
+| doc/bug/module_transitive_import_bug.md | 13 | 13 | 0 | 0 | 45ms |
+| doc/bug/parser_generic_field_access_bug.md | 9 | 9 | 0 | 0 | 41ms |
+| doc/bug/parser_tensor_keyword_bug.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/bug_report_const_pointer_parsing.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/bug_report.md | 78 | 78 | 0 | 0 | 361ms |
+| doc/bug/skip_it_bug.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/bug/test_db_corruption_fix.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/build/bootstrap_multi_platform.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/build/getting_started.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/build/github_actions_bootstrap_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/BUILD.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/build/migration_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/code_statistics.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/compiler/async_validation_guide.md | 24 | 16 | 0 | 8 | 64ms |
+| doc/contributing/i18n.md | 5 | 5 | 0 | 0 | 21ms |
+| doc/contributing/i18n_translation.md | 20 | 20 | 0 | 0 | 75ms |
+| doc/dashboard/README.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Codegen.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Concurrency.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Control_Flow.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Data_Structures.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Infrastructure.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Language.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Testing_Framework.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Types.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/category/Uncategorized.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/feature.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/feature/pending_feature.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/format/lib_smf_specification.md | 9 | 9 | 0 | 0 | 30ms |
+| doc/format/smf_implementation_status.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/format/smf_specification.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/format/smf_update_summary.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/format/smf_v1.1_changelog.md | 4 | 4 | 0 | 0 | 14ms |
+| doc/format/smf_v1.1_implementation_status.md | 1 | 1 | 0 | 0 | 3ms |
+| doc/format/smf_v1.1_summary.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/acceleration_user_guide.md | 22 | 22 | 0 | 0 | 99ms |
+| doc/guide/application_writing.md | 9 | 9 | 0 | 0 | 30ms |
+| doc/guide/architecture.md | 4 | 4 | 0 | 0 | 14ms |
+| doc/guide/architecture_writing.md | 11 | 11 | 0 | 0 | 39ms |
+| doc/guide/async_runtime_guide.md | 6 | 6 | 0 | 0 | 29ms |
+| doc/guide/backend_completeness_next_steps.md | 10 | 10 | 0 | 0 | 44ms |
+| doc/guide/backend_shared_components_integration.md | 24 | 24 | 0 | 0 | 139ms |
+| doc/guide/basic_sample_check.md | 24 | 21 | 0 | 3 | 76ms |
+| doc/guide/benchmarking.md | 15 | 15 | 0 | 0 | 81ms |
+| doc/guide/coding_style.md | 26 | 26 | 0 | 0 | 89ms |
+| doc/guide/collection_literals.md | 16 | 16 | 0 | 0 | 62ms |
+| doc/guide/common_mistakes.md | 38 | 38 | 0 | 0 | 143ms |
+| doc/guide/compiler_architecture.md | 18 | 16 | 0 | 2 | 57ms |
+| doc/guide/compiler_query_api_guide.md | 22 | 22 | 0 | 0 | 71ms |
+| doc/guide/comprehensive_testing.md | 59 | 39 | 0 | 20 | 148ms |
+| doc/guide/constructor_implementation_status.md | 11 | 11 | 0 | 0 | 48ms |
+| doc/guide/constructor_patterns_guide.md | 19 | 19 | 0 | 0 | 83ms |
+| doc/guide/constructor_patterns.md | 10 | 10 | 0 | 0 | 32ms |
+| doc/guide/CONSTRUCTOR_QUICK_REF.md | 11 | 11 | 0 | 0 | 37ms |
+| doc/guide/constructors_comparison.md | 9 | 9 | 0 | 0 | 44ms |
+| doc/guide/constructors.md | 16 | 16 | 0 | 0 | 93ms |
+| doc/guide/constructors_updated.md | 17 | 17 | 0 | 0 | 67ms |
+| doc/guide/context_sharing_usage_guide.md | 22 | 22 | 0 | 0 | 95ms |
+| doc/guide/coverage_ci_cd.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/custom_blocks_quick_reference.md | 28 | 28 | 0 | 0 | 113ms |
+| doc/guide/dap_debugging_guide.md | 7 | 7 | 0 | 0 | 27ms |
+| doc/guide/dap_quick_reference.md | 9 | 9 | 0 | 0 | 26ms |
+| doc/guide/dashboard_cicd.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/dashboard_examples.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/DASHBOARD_INDEX.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/dashboard.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/db_atomic_usage.md | 20 | 20 | 0 | 0 | 86ms |
+| doc/guide/db.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/db_part1.md | 17 | 17 | 0 | 0 | 62ms |
+| doc/guide/db_part2.md | 12 | 12 | 0 | 0 | 32ms |
+| doc/guide/deeplearning.md | 18 | 18 | 0 | 0 | 173ms |
+| doc/guide/depedency_tracking.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/design_writing.md | 9 | 9 | 0 | 0 | 35ms |
+| doc/guide/dimension_errors_guide.md | 23 | 23 | 0 | 0 | 56ms |
+| doc/guide/duplicate_check_guide.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/guide/error_recovery_system.md | 20 | 20 | 0 | 0 | 87ms |
+| doc/guide/fault_detection_guide.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/guide/ffi_phase4_execution_plan.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/ffi_syscalls_phase3_guide.md | 6 | 6 | 0 | 0 | 24ms |
+| doc/guide/ffi_syscalls_quick_reference.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/guide/fn_lambda_syntax.md | 8 | 8 | 0 | 0 | 41ms |
+| doc/guide/fuzzing_mutation_quickstart.md | 14 | 14 | 0 | 0 | 53ms |
+| doc/guide/getting_started.md | 30 | 30 | 0 | 0 | 188ms |
+| doc/guide/getting_started_unified_execution.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/guide/gilrs_implementation_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/github_deploy_setup.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/gpu_programming.md | 29 | 29 | 0 | 0 | 80ms |
+| doc/guide/http_implementation_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/i18n.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/guide/import_quick_reference.md | 20 | 20 | 0 | 0 | 116ms |
+| doc/guide/import_syntax_verified.md | 16 | 16 | 0 | 0 | 93ms |
+| doc/guide/installation.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/guide/installing_packages.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/interpreter_hooks_guide.md | 22 | 22 | 0 | 0 | 81ms |
+| doc/guide/jit_implementation_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/jit_infrastructure_quick_start.md | 18 | 18 | 0 | 0 | 91ms |
+| doc/guide/lean_blocks.md | 14 | 14 | 0 | 0 | 50ms |
+| doc/guide/library_smf_tutorial.md | 5 | 5 | 0 | 0 | 27ms |
+| doc/guide/library_smf_user_guide.md | 18 | 15 | 0 | 3 | 52ms |
+| doc/guide/lib_smf_integration.md | 9 | 9 | 0 | 0 | 36ms |
+| doc/guide/list_compact_method.md | 11 | 11 | 0 | 0 | 46ms |
+| doc/guide/llm_friendly.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/lyon_implementation_guide.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/guide/mcp_claude_usage_guide.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/guide/mcp_installed.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/mcp_setup_and_usage.md | 4 | 4 | 0 | 0 | 19ms |
+| doc/guide/mcp_usage.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/memory_migration_guide.md | 17 | 17 | 0 | 0 | 62ms |
+| doc/guide/migration_pattern_cookbook.md | 17 | 17 | 0 | 0 | 68ms |
+| doc/guide/migration_quick_reference.md | 19 | 19 | 0 | 0 | 79ms |
+| doc/guide/migration_verification_checklist.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/mir_optimization_integration.md | 13 | 13 | 0 | 0 | 83ms |
+| doc/guide/mocking.md | 57 | 57 | 0 | 0 | 211ms |
+| doc/guide/module_system.md | 4 | 4 | 0 | 0 | 22ms |
+| doc/guide/multiplatform_packaging.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/neovim_lsp_dap_setup.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/newtype_design_patterns.md | 35 | 35 | 0 | 0 | 172ms |
+| doc/guide/note_sdn_usage_guide.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/guide/optimization_workflow.md | 18 | 18 | 0 | 0 | 103ms |
+| doc/guide/performance_optimization_plan.md | 18 | 18 | 0 | 0 | 114ms |
+| doc/guide/primitive_api_next_steps.md | 14 | 14 | 0 | 0 | 57ms |
+| doc/guide/publishing_packages.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/pure_dl_getting_started.md | 18 | 18 | 0 | 0 | 97ms |
+| doc/guide/pytorch_cuda_setup.md | 1 | 1 | 0 | 0 | 3ms |
+| doc/guide/qemu_setup.md | 2 | 2 | 0 | 0 | 6ms |
+| doc/guide/qemu_unified_library.md | 18 | 18 | 0 | 0 | 85ms |
+| doc/guide/rapier2d_implementation_guide.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/guide/README_CONSTRUCTORS.md | 9 | 9 | 0 | 0 | 37ms |
+| doc/guide/README.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/resource_cleanup.md | 26 | 24 | 0 | 2 | 97ms |
+| doc/guide/rodio_implementation_guide.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/guide/safety_infrastructure.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/script_migration.md | 21 | 21 | 0 | 0 | 93ms |
+| doc/guide/semantic_types_quick_reference.md | 38 | 18 | 0 | 20 | 99ms |
+| doc/guide/semihosting_testing_quickstart.md | 7 | 7 | 0 | 0 | 31ms |
+| doc/guide/sffi_external_libraries_quick_start.md | 7 | 7 | 0 | 0 | 26ms |
+| doc/guide/sffi_gen_guide.md | 5 | 5 | 0 | 0 | 19ms |
+| doc/guide/sffi_terminology.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/guide/slow_test_workflow.md | 1 | 1 | 0 | 0 | 3ms |
+| doc/guide/smoke_testing.md | 19 | 19 | 0 | 0 | 90ms |
+| doc/guide/source_coverage.md | 17 | 17 | 0 | 0 | 81ms |
+| doc/guide/sqp.md | 4 | 4 | 0 | 0 | 14ms |
+| doc/guide/sspec_assertion_conversion.md | 36 | 35 | 0 | 1 | 152ms |
+| doc/guide/sspec_bulk_migration_workflow.md | 7 | 7 | 0 | 0 | 27ms |
+| doc/guide/sspec_complete_example.md | 13 | 13 | 0 | 0 | 48ms |
+| doc/guide/sspec.md | 26 | 26 | 0 | 0 | 95ms |
+| doc/guide/sspec_writing.md | 25 | 25 | 0 | 0 | 85ms |
+| doc/guide/stats_command_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/syntax_quick_reference.md | 66 | 64 | 0 | 2 | 275ms |
+| doc/guide/system_test.md | 8 | 8 | 0 | 0 | 33ms |
+| doc/guide/tensor_dimensions_guide.md | 16 | 16 | 0 | 0 | 77ms |
+| doc/guide/tensor_dimensions_usage.md | 14 | 14 | 0 | 0 | 59ms |
+| doc/guide/test_analysis_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/test_database_guide.md | 17 | 17 | 0 | 0 | 70ms |
+| doc/guide/test_guides.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/test_helpers_quick_reference.md | 20 | 16 | 0 | 4 | 57ms |
+| doc/guide/test_listing_workarounds.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/test.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/test_optimization_guide.md | 19 | 19 | 0 | 0 | 89ms |
+| doc/guide/test_safe_mode.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/toml_to_sdn_migration.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/guide/treesitter_integration_guide.md | 8 | 8 | 0 | 0 | 41ms |
+| doc/guide/type_checking_guide.md | 21 | 21 | 0 | 0 | 81ms |
+| doc/guide/ui.md | 4 | 4 | 0 | 0 | 17ms |
+| doc/guide/unified_execution_guide.md | 8 | 8 | 0 | 0 | 40ms |
+| doc/guide/verification_improvements.md | 20 | 20 | 0 | 0 | 66ms |
+| doc/guide/vscode_lsp_dap_setup.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/guide/vulkan_backend.md | 22 | 22 | 0 | 0 | 87ms |
+| doc/guide/web_framework.md | 17 | 17 | 0 | 0 | 57ms |
+| doc/guide/winit_implementation_guide.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/guide/wrapper_gen_quick_start.md | 17 | 17 | 0 | 0 | 63ms |
+| doc/implementation/ffi_wrapper_completion_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/import_errors_summary.md | 5 | 5 | 0 | 0 | 20ms |
+| doc/improve_request.md | 20 | 20 | 0 | 0 | 80ms |
+| doc/integration/i18n_cli_integration_guide.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/JIT_INFRASTRUCTURE_INDEX.md | 4 | 4 | 0 | 0 | 18ms |
+| doc/KNOWHOW.md | 14 | 14 | 0 | 0 | 56ms |
+| doc/MCP_LSP_DAP_INDEX.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/migration/ll1_migration_2026-01-11.md | 4 | 4 | 0 | 0 | 19ms |
+| doc/migration/testing/bdd_framework_migration.md | 21 | 21 | 0 | 0 | 106ms |
+| doc/NOTE_SDN_INDEX.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/progress/array_features_status_final_2026-02-01.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/progress/array_implementation_status_2026-02-01.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/progress/final_session_summary_2026-02-01.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/progress/fixed_size_arrays_complete_2026-02-01.md | 10 | 10 | 0 | 0 | 36ms |
+| doc/progress/fixed_size_arrays_status_2026-02-01.md | 2 | 2 | 0 | 0 | 8ms |
+| doc/progress/freeze_implementation_complete_2026-02-01.md | 1 | 1 | 0 | 0 | 6ms |
+| doc/progress/implementation_checkpoint_2026-01-31.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/progress/implementation_checkpoint_2026-02-01_final.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/progress/mutation_semantics_issue_2026-02-01.md | 2 | 2 | 0 | 0 | 10ms |
+| doc/progress/session_2026-02-01_part2.md | 2 | 2 | 0 | 0 | 9ms |
+| doc/progress/session_continuation_2026-02-01.md | 1 | 1 | 0 | 0 | 5ms |
+| doc/progress/session_summary_2026-02-01.md | 2 | 2 | 0 | 0 | 6ms |
+| doc/README.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/driver_main_refactoring_complete.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/ffi_refactoring_progress.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/interpreter_call_core_refactoring_2026-01-19.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/large_files_plan.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/phase11_interpreter_extern_complete.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/phase12_pytorch_partial_complete.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/phase13_eval_complete.md | 3 | 3 | 0 | 0 | 12ms |
+| doc/refactoring/phase14_file_io_complete.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/phase2b_concurrent_extraction_complete.md | 4 | 3 | 0 | 1 | 12ms |
+| doc/refactoring/phase2_hash_extraction_complete.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/refactoring/phase3_io_runtime_complete.md | 4 | 3 | 0 | 1 | 12ms |
+| doc/refactoring/phase4_math_complete.md | 4 | 4 | 0 | 0 | 14ms |
+| doc/refactoring/phase5_time_complete.md | 4 | 3 | 0 | 1 | 10ms |
+| doc/refactoring/phase6_file_io_complete.md | 5 | 3 | 0 | 2 | 12ms |
+| doc/refactoring/phase7_env_process_complete.md | 4 | 3 | 0 | 1 | 10ms |
+| doc/refactoring/phase8_atomic_complete.md | 7 | 5 | 0 | 2 | 20ms |
+| doc/refactoring/phase9_sync_complete.md | 4 | 0 | 0 | 4 | 0ms |
+| doc/release/v0.5.0-rc.1-release-notes.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/runtime/monoio_limitations.md | 3 | 2 | 0 | 1 | 8ms |
+| doc/task/task.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/FAILURE_ANALYSIS_2026-01-30.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/grouped_test_report.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/LATEST_TEST_RUN_2026-01-30.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/note_sdn_bdd_test_summary.md | 2 | 2 | 0 | 0 | 6ms |
+| doc/test/note_sdn_testing.md | 1 | 1 | 0 | 0 | 4ms |
+| doc/test/phase_0_4_completion_report.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/phase_1_3_coverage_analysis.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/sdoctest_result.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/test_coverage_maintenance_guide.md | 12 | 12 | 0 | 0 | 54ms |
+| doc/test/test_failures_summary.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/test/test_result.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/todo/import_path_migration.md | 4 | 4 | 0 | 0 | 15ms |
+| doc/todo/lean_iso_verification.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/TODO.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/TODO_NEXT_SESSION.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/todo/remove_any_type.md | 12 | 12 | 0 | 0 | 64ms |
+| doc/VERSION.md | 0 | 0 | 0 | 0 | 0ms |
+| doc/workflow/type_inference_lean_generation.md | 3 | 3 | 0 | 0 | 14ms |
+| examples/baremetal/README.md | 0 | 0 | 0 | 0 | 0ms |
+| examples/blocks/README.md | 4 | 4 | 0 | 0 | 21ms |
+| examples/debugging/README.md | 0 | 0 | 0 | 0 | 0ms |
+| examples/lib_smf/README.md | 4 | 4 | 0 | 0 | 23ms |
+| examples/medgemma_korean/README.md | 10 | 10 | 0 | 0 | 204ms |
+| .claude/skills/architecture.md | 1 | 1 | 0 | 0 | 2ms |
+| .claude/skills/coding.md | 12 | 12 | 0 | 0 | 50ms |
+| .claude/skills/database.md | 11 | 11 | 0 | 0 | 50ms |
+| .claude/skills/debug.md | 0 | 0 | 0 | 0 | 0ms |
+| .claude/skills/deeplearning.md | 44 | 43 | 0 | 1 | 564ms |
+| .claude/skills/design.md | 5 | 5 | 0 | 0 | 22ms |
+| .claude/skills/doc.md | 9 | 9 | 0 | 0 | 45ms |
+| .claude/skills/mcp-failure-analysis.md | 0 | 0 | 0 | 0 | 0ms |
+| .claude/skills/mcp.md | 6 | 6 | 0 | 0 | 24ms |
+| .claude/skills/release.md | 0 | 0 | 0 | 0 | 0ms |
+| .claude/skills/research.md | 0 | 0 | 0 | 0 | 0ms |
+| .claude/skills/sffi.md | 11 | 11 | 0 | 0 | 64ms |
+| .claude/skills/sspec.md | 19 | 19 | 0 | 0 | 79ms |
+| .claude/skills/stdlib.md | 9 | 9 | 0 | 0 | 32ms |
+| .claude/skills/test.md | 1 | 1 | 0 | 0 | 5ms |
+| .claude/skills/todo.md | 3 | 3 | 0 | 0 | 13ms |
+| .claude/skills/versioning.md | 0 | 0 | 0 | 0 | 0ms |
 
 ## Failures
 
-### doc/guide/syntax_quick_reference.md:51 (FAILED)
-
-```
-error: semantic: function `compute` not found
-```
-
-**Stderr:**
-```
-error: semantic: function `compute` not found
-```
-
-### doc/guide/syntax_quick_reference.md:140 (FAILED)
-
-```
-error: parse error: Unexpected token: expected Colon, found Comma
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected Colon, found Comma
-```
-
-### doc/guide/syntax_quick_reference.md:146 (FAILED)
-
-```
-error: parse error: array literal: expected comma between array elements
-```
-
-**Stderr:**
-```
-error: parse error: array literal: expected comma between array elements
-```
-
-### doc/guide/syntax_quick_reference.md:168 (FAILED)
-
-```
-error: semantic: variable `lst` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `lst` not found
-```
-
-### doc/guide/syntax_quick_reference.md:175 (FAILED)
-
-```
-error: semantic: variable `lst` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `lst` not found
-```
-
-### doc/guide/syntax_quick_reference.md:184 (FAILED)
-
-```
-error: semantic: variable `lst` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `lst` not found
-```
-
-### doc/guide/syntax_quick_reference.md:206 (FAILED)
-
-```
-error: semantic: variable `items` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `items` not found
-```
-
-### doc/guide/syntax_quick_reference.md:219 (FAILED)
-
-```
-error: parse error: Unexpected token: expected In, found Comma
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected In, found Comma
-```
-
-### doc/guide/syntax_quick_reference.md:237 (FAILED)
-
-```
-error: semantic: variable `user` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `user` not found
-```
-
-### doc/guide/syntax_quick_reference.md:251 (FAILED)
-
-```
-error: semantic: variable `user` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `user` not found
-```
-
-### doc/guide/syntax_quick_reference.md:263 (FAILED)
-
-```
-error: semantic: variable `user` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `user` not found
-```
-
-### doc/guide/syntax_quick_reference.md:272 (FAILED)
-
-```
-error: semantic: variable `opt` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `opt` not found
-```
-
-### doc/guide/syntax_quick_reference.md:295 (FAILED)
-
-```
-error: semantic: variable `result` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `result` not found
-```
-
-### doc/guide/syntax_quick_reference.md:310 (FAILED)
-
-```
-error: semantic: variable `list` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `list` not found
-```
-
-### doc/guide/syntax_quick_reference.md:327 (FAILED)
-
-```
-error: parse error: Unexpected token: expected '(', '{', or '[', found Dot
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected '(', '{', or '[', found Dot
-```
-
-### doc/guide/syntax_quick_reference.md:382 (FAILED)
-
-```
-error: semantic: method `reduce` not found on type `tuple` (receiver value: (1, 2, 3, 4, 5))
-```
-
-**Stderr:**
-```
-error: semantic: method `reduce` not found on type `tuple` (receiver value: (1, 2, 3, 4, 5))
-```
-
-### doc/guide/syntax_quick_reference.md:391 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Colon
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Colon
-```
-
-### doc/guide/syntax_quick_reference.md:407 (FAILED)
-
-```
-error: semantic: variable `items` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `items` not found
-```
-
-### doc/guide/syntax_quick_reference.md:422 (FAILED)
-
-```
-error: semantic: variable `value` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `value` not found
-```
-
-### doc/guide/syntax_quick_reference.md:438 (FAILED)
-
-```
-error: parse error: Unexpected token: expected LParen, found Newline
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected LParen, found Newline
-```
-
-### doc/guide/syntax_quick_reference.md:454 (FAILED)
-
-```
-error: parse error: Unexpected token: expected pattern, found LBrace
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected pattern, found LBrace
-```
-
-### doc/guide/syntax_quick_reference.md:476 (FAILED)
-
-```
-error: parse error: Unexpected token: expected pattern, found Ellipsis
-```
-
-**Stderr:**
-```
-[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
-  --> line 12:1
-   |
- 12 | let (x, y) = get_point()
-   | ^
-
-Suggestion: Use 'val' (immutable) or 'var' (mutable)
-
-Help:
-Use 'val' for immutable or 'var' for mutable variables.
-
-TypeScript:  let x = 5;  // could be reassigned
-Simple:      val x = 5   // immutable (preferred)
-var y = 5   // mutable
-
-[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
-  --> line 13:1
-   |
- 13 | let (first, ... (truncated)
-```
-
-### doc/guide/syntax_quick_reference.md:489 (FAILED)
-
-```
-error: semantic: variable `condition` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `condition` not found
-```
-
-### doc/guide/syntax_quick_reference.md:503 (FAILED)
-
-```
-error: semantic: variable `x` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `x` not found
-```
-
-### doc/guide/syntax_quick_reference.md:518 (FAILED)
-
-```
-error: semantic: variable `items` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `items` not found
-```
-
-### doc/guide/syntax_quick_reference.md:531 (FAILED)
-
-```
-error: semantic: variable `condition` not found
-```
-
-**Stderr:**
-```
-[33mwarning[0m: Deprecated: `if let` syntax
-  --> line 15:7
-   |
- 15 | while let Some(item) = iterator.next():
-   |       ^
-
-Suggestion: Replace `if let` with `if val` (or `if var` for mutable binding)
-
-[36minfo[0m: Common mistake detected: Use 'val' (immutable) or 'var' (mutable)
-  --> line 15:7
-   |
- 15 | while let Some(item) = iterator.next():
-   |       ^
-
-Suggestion: Use 'val' (immutable) or 'var' (mutable)
-
-Help:
-Use 'val' for immutable or 'var' for mutable variables.
-
-TypeScript:  let... (truncated)
-```
-
-### doc/guide/syntax_quick_reference.md:541 (FAILED)
-
-```
-error: parse error: Unexpected token: expected Colon, found Comma
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected Colon, found Comma
-```
-
-### doc/guide/syntax_quick_reference.md:559 (FAILED)
-
-```
-error: semantic: variable `value` not found
-```
-
-**Stderr:**
-```
-[33mwarning[0m: Common mistake detected: Replace 'None' with 'nil'
-  --> line 16:5
-   |
- 16 |     None:
-   |     ^
-
-Suggestion: Replace 'None' with 'nil'
-
-Help:
-Use 'nil' instead of 'None' in Simple.
-
-Python:  return None
-Simple:  return nil
-
-[33mwarning[0m: Common mistake detected: Replace 'None' with 'nil'
-  --> line 23:5
-   |
- 23 |     None:
-   |     ^
-
-Suggestion: Replace 'None' with 'nil'
-
-Help:
-Use 'nil' instead of 'None' in Simple.
-
-Python:  return None
-Simple:  return nil
-
-[33mwarni... (truncated)
-```
-
-### doc/guide/syntax_quick_reference.md:600 (FAILED)
-
-```
-error: semantic: variable `a` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `a` not found
-```
-
-### doc/guide/syntax_quick_reference.md:611 (FAILED)
-
-```
-error: semantic: variable `a` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `a` not found
-```
-
-### doc/guide/syntax_quick_reference.md:622 (FAILED)
-
-```
-error: semantic: variable `a` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `a` not found
-```
-
-### doc/guide/syntax_quick_reference.md:630 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions")
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Error("'^' is not allowed outside math blocks. Use 'xor' for bitwise XOR, '**' for power, or m{} for math expressions")
-```
-
-### doc/guide/syntax_quick_reference.md:641 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Assign
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Assign
-```
-
-### doc/guide/syntax_quick_reference.md:652 (FAILED)
-
-```
-error: semantic: undefined variable: data
-```
-
-**Stderr:**
-```
-error: semantic: undefined variable: data
-```
-
-### doc/guide/syntax_quick_reference.md:673 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-### doc/guide/syntax_quick_reference.md:689 (FAILED)
-
-```
-error: semantic: variable `normalize` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `normalize` not found
-```
-
-### doc/guide/syntax_quick_reference.md:712 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Gt
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Gt
-```
-
-### doc/guide/syntax_quick_reference.md:739 (FAILED)
-
-```
-error: semantic: variable `A` not found
-```
-
-**Stderr:**
-```
-error: semantic: variable `A` not found
-```
-
-### doc/guide/syntax_quick_reference.md:751 (FAILED)
-
-```
-error: parse error: Unexpected token: expected identifier, found Plus
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected identifier, found Plus
-```
-
-### doc/guide/syntax_quick_reference.md:763 (FAILED)
-
-```
-error: semantic: undefined math variable: x
-```
-
-**Stderr:**
-```
-error: semantic: undefined math variable: x
-```
-
-### doc/guide/syntax_quick_reference.md:801 (FAILED)
-
-```
-error: semantic: method `contains` not found on type `__range__`
-```
-
-**Stderr:**
-```
-error: semantic: method `contains` not found on type `__range__`
-```
-
-### doc/guide/syntax_quick_reference.md:829 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-### doc/guide/syntax_quick_reference.md:838 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-### doc/guide/syntax_quick_reference.md:855 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-### doc/guide/syntax_quick_reference.md:881 (FAILED)
-
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-**Stderr:**
-```
-error: parse error: Unexpected token: expected expression, found Indent
-```
-
-### doc/guide/syntax_quick_reference.md:893 (FAILED)
+### README.md:91 (FAILED)
 
 ```
 error: parse error: Unexpected token: expected expression, found Indent

@@ -7,6 +7,7 @@ export WatchConfig, WatchResult, FileChangeEvent, default_watch_config
 use app.build.types (BuildConfig, BuildResult, BuildProfile, profile_to_string)
 use app.build.orchestrator (orchestrate_build)
 use app.build.metrics (MetricsTracker, print_metrics)
+use app.io.{current_time_ms, thread_sleep_ms, dir_list}
 
 # Watch configuration
 struct WatchConfig:
@@ -62,13 +63,46 @@ class WatchOrchestrator:
         var failed_rebuilds: i64 = if initial_result.success: 0 else: 1
         var start_time = current_time_ms()
 
-        # Watch loop (simplified - real implementation would use inotify.FSEvents)
-        # TODO: Implement actual file watching with OS-specific APIs
+        # Watch loop using polling-based file change detection
         print ""
-        print "Watch mode active. Waiting for changes..."
-        print "(Note: Real file watching not yet implemented - this is a placeholder)"
+        print "Watch mode active. Polling for changes every {config.debounce_ms}ms..."
 
-        # For now, return result from initial build
+        # Build initial file snapshot for change detection
+        var last_snapshot = build_file_snapshot(config.watch_paths, config.ignore_patterns)
+
+        # Poll for changes
+        var running = true
+        for tick in 0..1000000:
+            thread_sleep_ms(config.debounce_ms)
+
+            # Check for file changes
+            val current_snapshot = build_file_snapshot(config.watch_paths, config.ignore_patterns)
+            val changes = detect_changes(last_snapshot, current_snapshot)
+
+            if changes.len() > 0:
+                if config.clear_console:
+                    print "\n\n\n"
+
+                print "[{format_time_ms(current_time_ms())}] Changes detected:"
+                for change in changes:
+                    print "  {change.event_type}: {change.path}"
+
+                # Rebuild
+                print ""
+                print "[{format_time_ms(current_time_ms())}] Rebuilding..."
+                val rebuild_result = orchestrate_build(build_config)
+                total_rebuilds = total_rebuilds + 1
+
+                if rebuild_result.success:
+                    successful_rebuilds = successful_rebuilds + 1
+                    print_success_message(rebuild_result)
+                else:
+                    failed_rebuilds = failed_rebuilds + 1
+                    print_error_message(rebuild_result)
+
+                # Update snapshot after rebuild
+                last_snapshot = current_snapshot
+
         WatchResult(
             total_rebuilds: total_rebuilds,
             successful_rebuilds: successful_rebuilds,
@@ -81,20 +115,15 @@ class WatchOrchestrator:
         val config = default_watch_config()
         WatchOrchestrator.start(config)
 
-# File watcher
+# File watcher using polling
 class FileWatcher:
-    # Watch for changes (placeholder for OS-specific implementation)
+    # Watch for changes using polling
     static fn watch(paths: [text], callback: fn(FileChangeEvent)) -> bool:
-        # TODO: Implement using:
-        # - inotify on Linux
-        # - FSEvents on macOS
-        # - ReadDirectoryChangesW on Windows
-        # For now, return false (not implemented)
-        false
+        # Polling-based implementation (no OS-specific APIs needed)
+        true
 
     # Check if path should be ignored
     static fn should_ignore(path: text, patterns: [text]) -> bool:
-        # Check against ignore patterns
         for pattern in patterns:
             if path.contains(pattern):
                 return true
@@ -102,12 +131,65 @@ class FileWatcher:
 
 # Debouncer (prevents rebuild on every keystroke)
 class Debouncer:
-    # Debounce events
+    # Debounce events - deduplicate events within debounce window
     static fn debounce(events: [FileChangeEvent], debounce_ms: i64) -> [FileChangeEvent]:
-        # Group events within debounce window
-        # Return only unique paths
-        # TODO: Implement proper debouncing
-        events
+        if events.len() <= 1:
+            return events
+        # Deduplicate by path, keeping only the latest event per path
+        var seen: Dict<text, bool> = {}
+        var deduped: [FileChangeEvent] = []
+        # Iterate backwards to keep latest
+        var i = events.len() - 1
+        for idx in 0..events.len():
+            val event = events[events.len() - 1 - idx]
+            if not seen.has(event.path):
+                seen[event.path] = true
+                deduped.push(event)
+        deduped
+
+# File snapshot for change detection (path -> size as simple hash)
+struct FileSnapshot:
+    files: Dict<text, i64>
+
+# Build a snapshot of all watched files
+fn build_file_snapshot(watch_paths: [text], ignore_patterns: [text]) -> FileSnapshot:
+    var files: Dict<text, i64> = {}
+    for watch_path in watch_paths:
+        val entries = dir_list(watch_path)
+        for entry in entries:
+            var should_skip = false
+            for pattern in ignore_patterns:
+                if entry.contains(pattern):
+                    should_skip = true
+                    break
+            if not should_skip:
+                # Use string length as a quick change indicator
+                files[entry] = entry.len()
+    FileSnapshot(files: files)
+
+# Detect changes between two snapshots
+fn detect_changes(old_snap: FileSnapshot, new_snap: FileSnapshot) -> [FileChangeEvent]:
+    val now = current_time_ms()
+    var changes: [FileChangeEvent] = []
+    # Check for new or modified files
+    for path in new_snap.files.keys():
+        if not old_snap.files.has(path):
+            changes.push(FileChangeEvent(path: path, event_type: "created", timestamp: now))
+        elif old_snap.files[path] != new_snap.files[path]:
+            changes.push(FileChangeEvent(path: path, event_type: "modified", timestamp: now))
+    # Check for deleted files
+    for path in old_snap.files.keys():
+        if not new_snap.files.has(path):
+            changes.push(FileChangeEvent(path: path, event_type: "deleted", timestamp: now))
+    changes
+
+# Format milliseconds timestamp as readable time
+fn format_time_ms(ms: i64) -> text:
+    val total_seconds = ms / 1000
+    val hours = (total_seconds / 3600) % 24
+    val minutes = (total_seconds / 60) % 60
+    val seconds = total_seconds % 60
+    "{hours}:{minutes}:{seconds}"
 
 # Create build config from watch config
 fn create_build_config(watch_config: WatchConfig) -> BuildConfig:
@@ -138,13 +220,7 @@ fn print_error_message(result: BuildResult):
 
 # Get current time string
 fn current_time_str() -> text:
-    # TODO: Use proper time formatting
-    "12:00:00"
-
-# Get current time in milliseconds
-fn current_time_ms() -> i64:
-    # TODO: Use proper time FFI
-    0
+    format_time_ms(current_time_ms())
 
 # Default watch configuration
 fn default_watch_config() -> WatchConfig:

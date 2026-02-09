@@ -6,6 +6,7 @@ export IncrementalConfig, IncrementalResult, default_incremental_config
 
 use app.build.types (BuildConfig, BuildResult, BuildProfile)
 use app.build.cargo (Cargo)
+use app.io.{current_time_ms, file_hash_sha256, file_exists, dir_create_all, file_read, file_write}
 
 # Dependency graph node
 struct DepNode:
@@ -109,7 +110,9 @@ class IncrementalBuild:
 
     # Clean incremental cache
     static fn clean_cache(cache_dir: text) -> bool:
-        # TODO: Implement cache cleanup
+        val cache_path = "{cache_dir}/build_cache.sdn"
+        if file_exists(cache_path):
+            file_write(cache_path, "# Build cache cleared\n")
         print "Cleaning incremental cache: {cache_dir}"
         true
 
@@ -117,44 +120,113 @@ class IncrementalBuild:
 class DepGraphBuilder:
     # Build dependency graph from source files
     static fn build_graph(root: text) -> [DepNode]:
-        # TODO: Parse source files to build dependency graph
-        # For now, return empty graph
+        val graph_path = "{root}/build/dep_graph.sdn"
+        if file_exists(graph_path):
+            return load_dependency_graph()
         []
 
     # Update dependency graph
     static fn update_graph(graph: [DepNode], changes: [text]) -> [DepNode]:
-        # TODO: Incrementally update graph based on file changes
-        graph
+        # Mark changed modules and their dependents for rebuild
+        var changed_set: Dict<text, bool> = {}
+        for change in changes:
+            changed_set[change] = true
+        # Update hashes for changed modules
+        var updated: [DepNode] = []
+        for node in graph:
+            if changed_set.has(node.module):
+                val new_hash = file_hash_sha256(node.module)
+                updated.push(DepNode(
+                    module: node.module,
+                    dependencies: node.dependencies,
+                    last_modified: current_time_ms(),
+                    hash: new_hash
+                ))
+            else:
+                updated.push(node)
+        updated
 
 # Cache manager
 class CacheManager:
     # Load build cache
     static fn load(cache_dir: text) -> [CacheEntry]:
-        # TODO: Load from cache_dir/build_cache.sdn
-        []
+        val cache_path = "{cache_dir}/build_cache.sdn"
+        if not file_exists(cache_path):
+            return []
+        val content = file_read(cache_path)
+        # Parse SDN cache entries (one per line: module|profile|hash|output|timestamp)
+        var entries: [CacheEntry] = []
+        val lines = content.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            if trimmed.len() == 0:
+                continue
+            if trimmed.starts_with("#"):
+                continue
+            val parts = trimmed.split("|")
+            if parts.len() >= 5:
+                entries.push(CacheEntry(
+                    module: parts[0],
+                    profile: parts[1],
+                    source_hash: parts[2],
+                    output_path: parts[3],
+                    timestamp: int(parts[4])
+                ))
+        entries
 
     # Save build cache
     static fn save(cache: [CacheEntry], cache_dir: text) -> bool:
-        # TODO: Save to cache_dir/build_cache.sdn
+        dir_create_all(cache_dir)
+        val cache_path = "{cache_dir}/build_cache.sdn"
+        var lines: [text] = ["# Build cache (module|profile|hash|output|timestamp)"]
+        for entry in cache:
+            lines.push("{entry.module}|{entry.profile}|{entry.source_hash}|{entry.output_path}|{entry.timestamp}")
+        file_write(cache_path, lines.join("\n") + "\n")
         true
 
     # Verify cache entry is valid
     static fn verify(entry: CacheEntry, source_path: text) -> bool:
-        # Check if source file hash matches cached hash
-        # TODO: Implement hash verification
-        true
+        if not file_exists(source_path):
+            return false
+        val current_hash = file_hash_sha256(source_path)
+        current_hash == entry.source_hash
 
     # Prune old cache entries
     static fn prune(cache: [CacheEntry], max_size_mb: i64) -> [CacheEntry]:
-        # Remove old entries to keep cache under max size
-        # TODO: Implement LRU or timestamp-based pruning
-        cache
+        # Keep only entries within size limit (approximate by count)
+        # Each entry ~100 bytes, so max_entries ~ max_size_mb * 10000
+        val max_entries = max_size_mb * 10000
+        if cache.len() <= max_entries:
+            return cache
+        # Sort by timestamp (newest first) and truncate
+        # Simple approach: just keep the last max_entries entries
+        cache[cache.len() - max_entries:]
 
 # Load dependency graph
 fn load_dependency_graph() -> [DepNode]:
-    # TODO: Load from dependency graph file
-    # For now, return empty graph (cargo handles dependencies)
-    []
+    val graph_path = "build/dep_graph.sdn"
+    if not file_exists(graph_path):
+        return []
+    val content = file_read(graph_path)
+    var nodes: [DepNode] = []
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0:
+            continue
+        if trimmed.starts_with("#"):
+            continue
+        # Format: module|dep1,dep2,...|last_modified|hash
+        val parts = trimmed.split("|")
+        if parts.len() >= 4:
+            val deps = if parts[1].len() > 0: parts[1].split(",") else: []
+            nodes.push(DepNode(
+                module: parts[0],
+                dependencies: deps,
+                last_modified: int(parts[2]),
+                hash: parts[3]
+            ))
+    nodes
 
 # Load build cache
 fn load_build_cache(cache_dir: text) -> [CacheEntry]:
@@ -162,31 +234,53 @@ fn load_build_cache(cache_dir: text) -> [CacheEntry]:
 
 # Find modules that need rebuilding
 fn find_modules_to_rebuild(dep_graph: [DepNode], cache: [CacheEntry]) -> [text]:
-    # TODO: Compare modification times and hashes
-    # Return list of modules that need rebuilding
-    # For now, let cargo handle this
-    []
+    # Build cache lookup by module name
+    var cache_map: Dict<text, CacheEntry> = {}
+    for entry in cache:
+        cache_map[entry.module] = entry
+    # Check each module against cache
+    var to_rebuild: [text] = []
+    for node in dep_graph:
+        if not cache_map.has(node.module):
+            to_rebuild.push(node.module)
+            continue
+        val cached = cache_map[node.module]
+        if cached.source_hash != node.hash:
+            to_rebuild.push(node.module)
+            continue
+        # Check if any dependency needs rebuilding
+        var dep_changed = false
+        for dep in node.dependencies:
+            if not cache_map.has(dep):
+                dep_changed = true
+                break
+            if cache_map[dep].source_hash != node.hash:
+                dep_changed = true
+                break
+        if dep_changed:
+            to_rebuild.push(node.module)
+    to_rebuild
 
 # Update build cache after successful build
 fn update_build_cache(cache: [CacheEntry], dep_graph: [DepNode], cache_dir: text):
-    # TODO: Update cache entries with new hashes and timestamps
-    # Save updated cache
-    CacheManager.save(cache, cache_dir)
+    val now = current_time_ms()
+    var updated_cache: [CacheEntry] = []
+    for node in dep_graph:
+        updated_cache.push(CacheEntry(
+            module: node.module,
+            profile: "default",
+            source_hash: node.hash,
+            output_path: "build/{node.module}",
+            timestamp: now
+        ))
+    CacheManager.save(updated_cache, cache_dir)
 
 # Calculate cache hit rate
 fn calculate_cache_hit_rate(modules_built: i64, total_modules: i64) -> f64:
     if total_modules == 0:
         return 0.0
-
     val cached = total_modules - modules_built
-    val rate = (cached * 100) / total_modules
-    # Convert to float (approximation since we don't have float division yet)
-    0.0  # TODO: Implement proper float calculation
-
-# Get current time in milliseconds
-fn current_time_ms() -> i64:
-    # TODO: Use proper time FFI
-    0
+    (cached * 100) / total_modules
 
 # Default incremental configuration
 fn default_incremental_config() -> IncrementalConfig:

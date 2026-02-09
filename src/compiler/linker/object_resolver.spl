@@ -1,0 +1,182 @@
+# Object File Resolution for Library Linking
+#
+# Resolves object files for modules extracted from libraries.
+# Uses a companion file strategy: for each SMF module, looks for a
+# corresponding .o file in standard locations.
+#
+# Strategy:
+# 1. When a module is needed from a library, check for companion .o file
+# 2. Look in standard object file directories (build/obj/, .build/cache/)
+# 3. If found, use existing object file
+# 4. If not found, attempt to compile SMF to object (future)
+# 5. If compilation not available, report error with helpful message
+
+use app.io.{file_exists, shell, cwd}
+
+# ============================================================================
+# Object File Resolution
+# ============================================================================
+
+struct ObjectFileResolver:
+    """Resolves object files for library modules."""
+    search_paths: [text]
+    cache: Dict<text, text>    # module_name -> object_path
+    verbose: bool
+
+impl ObjectFileResolver:
+    """Create a new resolver with default search paths."""
+    static fn new(verbose: bool) -> ObjectFileResolver:
+        var paths = default_object_search_paths()
+        ObjectFileResolver(
+            search_paths: paths,
+            cache: {},
+            verbose: verbose
+        )
+
+    """Add a search path for object files."""
+    me add_search_path(path: text):
+        if not self.search_paths.contains(path):
+            self.search_paths.push(path)
+
+    """Resolve object file for a module."""
+    me resolve(module_name: text) -> Result<text, text>:
+        # Check cache first
+        if self.cache.contains_key(module_name):
+            val cached = self.cache[module_name]
+            if file_exists(cached):
+                return Ok(cached)
+            else:
+                # Cache invalidated, remove
+                self.cache.remove(module_name)
+
+        # Try to find object file in search paths
+        val result = self.find_object_file(module_name)
+
+        match result:
+            case Ok(path):
+                # Cache the result
+                self.cache[module_name] = path
+                Ok(path)
+            case Err(e):
+                Err(e)
+
+    """Find object file in search paths."""
+    fn find_object_file(module_name: text) -> Result<text, text>:
+        # Convert module name to potential file paths
+        # Example: "std/io/mod" → ["std_io_mod.o", "std/io/mod.o", "io_mod.o"]
+        val candidates = generate_object_candidates(module_name)
+
+        if self.verbose:
+            print "[object-resolver] Looking for: {module_name}"
+            print "[object-resolver]   Candidates: {candidates.len()}"
+
+        # Search in each path
+        for search_path in self.search_paths:
+            for candidate in candidates:
+                val full_path = "{search_path}/{candidate}"
+                if file_exists(full_path):
+                    if self.verbose:
+                        print "[object-resolver]   Found: {full_path}"
+                    return Ok(full_path)
+
+        # Not found - provide helpful error
+        val paths_str = self.search_paths.join(", ")
+        Err("Object file not found for module '{module_name}'\n  Searched in: {paths_str}\n  Candidates: {candidates.join(", ")}\n  \n  To fix:\n    1. Compile module to object: simple compile {module_name}.spl --emit-obj\n    2. Or recompile library with object files included")
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Get default object file search paths."""
+fn default_object_search_paths() -> [text]:
+    [
+        "build/obj",           # Standard build output
+        ".build/cache/obj",    # Build system cache
+        "obj",                 # Local objects
+        ".",                   # Current directory
+        "build/lib/obj"        # Library object cache
+    ]
+
+"""Generate object file candidates for a module name."""
+fn generate_object_candidates(module_name: text) -> [text]:
+    var candidates: [text] = []
+
+    # Full path variant: std/io/mod → std/io/mod.o
+    candidates.push("{module_name}.o")
+
+    # Underscore variant: std/io/mod → std_io_mod.o
+    val underscored = module_name.replace("/", "_")
+    candidates.push("{underscored}.o")
+
+    # Last component only: std/io/mod → mod.o
+    val last_slash = module_name.rfind("/")
+    if last_slash >= 0:
+        val last_component = module_name[(last_slash + 1):]
+        candidates.push("{last_component}.o")
+
+    # With src prefix: std/io/mod → src/std/io/mod.o
+    candidates.push("src/{module_name}.o")
+
+    candidates
+
+"""Check if we can compile SMF to object."""
+fn can_compile_smf_to_object() -> bool:
+    # Check if smf-to-object tool is available
+    # For now, return false (not yet implemented)
+    false
+
+"""Attempt to compile SMF module to object file (future)."""
+fn compile_smf_to_object(
+    smf_data: [u8],
+    output_path: text
+) -> Result<(), text>:
+    # TODO: Implement SMF to object compilation
+    # This would:
+    # 1. Parse SMF
+    # 2. Extract or reconstruct MIR
+    # 3. Run codegen pipeline
+    # 4. Emit object file
+    Err("SMF to object compilation not yet implemented")
+
+# ============================================================================
+# Integration with Linker Wrapper
+# ============================================================================
+
+"""Resolve object files for resolved modules."""
+fn resolve_objects_for_modules(
+    resolved_modules: [ResolvedModule],
+    verbose: bool
+) -> Result<[text], text>:
+    var resolver = ObjectFileResolver.new(verbose)
+    var object_paths: [text] = []
+
+    for module in resolved_modules:
+        val result = resolver.resolve(module.module_name)
+
+        match result:
+            case Ok(obj_path):
+                object_paths.push(obj_path)
+                if verbose:
+                    print "[object-resolver] Resolved {module.module_name} → {obj_path}"
+            case Err(e):
+                return Err(e)
+
+    Ok(object_paths)
+
+# ResolvedModule struct (should be imported from linker_wrapper_lib_support)
+# Defining here to avoid circular dependency issues
+struct ResolvedModule:
+    module_name: text
+    library_path: text
+    smf_data: [u8]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ObjectFileResolver
+export resolve_objects_for_modules
+export generate_object_candidates
+export default_object_search_paths
+export can_compile_smf_to_object
+export compile_smf_to_object

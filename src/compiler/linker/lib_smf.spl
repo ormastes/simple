@@ -181,26 +181,30 @@ impl LibSmfHeader:
 
 Each entry describes one module in the library:
 - Module path/name (unique identifier)
-- Location in file (offset and size)
-- Verification hash
+- Location in file (offset and size) for both SMF and object file
+- Verification hashes
 """
 struct ModuleIndexEntry:
     # Module name (64 bytes) - null-terminated UTF-8
     name: [u8]               # Module path (e.g., "std/io/mod")
 
-    # Location (16 bytes)
+    # SMF Location (16 bytes)
     offset: u64              # Offset to module SMF data
     size: u64                # Size of module SMF data
 
-    # Metadata (16 bytes)
-    hash: u64                # FNV-1a hash of module data
-    timestamp: u64           # Build timestamp (Unix epoch)
+    # Object Location (16 bytes)
+    obj_offset: u64          # Offset to object file (0 if none)
+    obj_size: u64            # Size of object file (0 if none)
 
-    # Reserved (32 bytes)
+    # Metadata (16 bytes)
+    hash: u64                # FNV-1a hash of SMF data
+    obj_hash: u64            # FNV-1a hash of object data (0 if none)
+
+    # Reserved (16 bytes)
     reserved: [u8]
 
 impl ModuleIndexEntry:
-    """Create a new module index entry."""
+    """Create a new module index entry (SMF only)."""
     static fn new(name: text, offset: u64, size: u64, hash: u64) -> ModuleIndexEntry:
         var name_bytes: [u8] = []
         var i = 0
@@ -215,7 +219,7 @@ impl ModuleIndexEntry:
 
         var reserved: [u8] = []
         i = 0
-        while i < 32:
+        while i < 16:
             reserved.push(0)
             i = i + 1
 
@@ -223,10 +227,54 @@ impl ModuleIndexEntry:
             name: name_bytes,
             offset: offset,
             size: size,
+            obj_offset: 0,
+            obj_size: 0,
             hash: hash,
-            timestamp: 0,
+            obj_hash: 0,
             reserved: reserved
         )
+
+    """Create a new module index entry with object file."""
+    static fn new_with_object(
+        name: text,
+        smf_offset: u64,
+        smf_size: u64,
+        smf_hash: u64,
+        obj_offset: u64,
+        obj_size: u64,
+        obj_hash: u64
+    ) -> ModuleIndexEntry:
+        var name_bytes: [u8] = []
+        var i = 0
+        while i < name.len() and i < 63:
+            name_bytes.push(name[i] as u8)
+            i = i + 1
+        # Null-terminate
+        name_bytes.push(0)
+        # Pad to 64 bytes
+        while name_bytes.len() < 64:
+            name_bytes.push(0)
+
+        var reserved: [u8] = []
+        i = 0
+        while i < 16:
+            reserved.push(0)
+            i = i + 1
+
+        ModuleIndexEntry(
+            name: name_bytes,
+            offset: smf_offset,
+            size: smf_size,
+            obj_offset: obj_offset,
+            obj_size: obj_size,
+            hash: smf_hash,
+            obj_hash: obj_hash,
+            reserved: reserved
+        )
+
+    """Check if this entry includes an object file."""
+    fn has_object() -> bool:
+        self.obj_size > 0
 
     """Get module name as text."""
     fn get_name() -> text:
@@ -244,15 +292,19 @@ impl ModuleIndexEntry:
         # Name (64 bytes)
         bytes = bytes + (self.name)
 
-        # Location (16 bytes)
+        # SMF Location (16 bytes)
         bytes = bytes + (u64_to_bytes(self.offset))
         bytes = bytes + (u64_to_bytes(self.size))
 
+        # Object Location (16 bytes)
+        bytes = bytes + (u64_to_bytes(self.obj_offset))
+        bytes = bytes + (u64_to_bytes(self.obj_size))
+
         # Metadata (16 bytes)
         bytes = bytes + (u64_to_bytes(self.hash))
-        bytes = bytes + (u64_to_bytes(self.timestamp))
+        bytes = bytes + (u64_to_bytes(self.obj_hash))
 
-        # Reserved (32 bytes)
+        # Reserved (16 bytes)
         bytes = bytes + (self.reserved)
 
         bytes
@@ -269,17 +321,21 @@ impl ModuleIndexEntry:
             name.push(bytes[i])
             i = i + 1
 
-        # Read location (16 bytes)
+        # Read SMF location (16 bytes)
         val offset = bytes_to_u64(bytes, start + 64)
         val size = bytes_to_u64(bytes, start + 72)
 
-        # Read metadata (16 bytes)
-        val hash = bytes_to_u64(bytes, start + 80)
-        val timestamp = bytes_to_u64(bytes, start + 88)
+        # Read object location (16 bytes)
+        val obj_offset = bytes_to_u64(bytes, start + 80)
+        val obj_size = bytes_to_u64(bytes, start + 88)
 
-        # Read reserved (32 bytes)
+        # Read metadata (16 bytes)
+        val hash = bytes_to_u64(bytes, start + 96)
+        val obj_hash = bytes_to_u64(bytes, start + 104)
+
+        # Read reserved (16 bytes)
         var reserved: [u8] = []
-        i = start + 96
+        i = start + 112
         while i < start + 128:
             reserved.push(bytes[i])
             i = i + 1
@@ -288,8 +344,10 @@ impl ModuleIndexEntry:
             name: name,
             offset: offset,
             size: size,
+            obj_offset: obj_offset,
+            obj_size: obj_size,
             hash: hash,
-            timestamp: timestamp,
+            obj_hash: obj_hash,
             reserved: reserved
         ))
 

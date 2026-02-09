@@ -54,20 +54,42 @@ bin/simple compile examples/lib_smf/load_from_library.spl -o load_lib
 - Listing available modules
 - Checking module existence
 - Getting module source information
-- Attempting to load a module (demonstrates current limitation)
+- Loading a module from library (works end-to-end!)
+- Accessing module header and exported symbols
+
+### 3. Link with Libraries
+
+**File:** `link_with_libraries.spl`
+
+Demonstrates using the linker wrapper library support to link object files while resolving symbols from library archives.
+
+**Run:**
+```bash
+bin/simple compile examples/lib_smf/link_with_libraries.spl -o link_lib
+./link_lib
+```
+
+**Shows:**
+- Scanning library paths for .lsm files
+- Discovering available libraries and modules
+- Symbol resolution workflow
+- Integration with native linker
 
 ## Current Status
 
-✅ **Working:**
+✅ **Complete (Phase 1 & 2):**
 - Creating library archives with `LibSmfBuilder`
 - Reading library contents with `LibSmfReader`
 - Finding modules with `SmfGetter`
 - Listing and querying available modules
+- `SmfReaderMemory` - Load SMF from in-memory bytes
+- Full module loading from libraries (end-to-end working!)
 
-⚠️ **In Progress:**
-- `SmfReaderImpl.from_data()` - Load SMF from in-memory bytes
-  - This is needed to fully integrate library loading
-  - Currently returns an error indicating the feature is not yet implemented
+⚠️ **In Progress (Phase 3):**
+- Linker wrapper integration
+  - Library scanning (✅ complete)
+  - Symbol resolution (✅ complete)
+  - SMF to object conversion (⚠️ pending codegen integration)
 
 ## Architecture
 

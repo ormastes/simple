@@ -7,10 +7,11 @@
 #   - Interpolation: ${env:VAR}, ${config:path}
 #   - Immutable snapshot + hash once run starts
 
+use app.io.{env_get}
+
+# Keep local extern fns for file ops that collide with app.io names
 extern fn rt_file_read_text(path: str) -> str
 extern fn rt_file_exists(path: str) -> bool
-extern fn rt_env_get(key: str) -> str
-extern fn rt_package_sha256(path: str) -> str
 
 # ============================================================================
 # Config Value Types
@@ -164,7 +165,7 @@ pub fn load_exp_config(base_dir: text, cli_overrides: [text]) -> Result<ExpConfi
         val eq_idx = arg.index_of("=")
         if eq_idx < 0:
             continue
-        val key = arg[:eq_idx].trim()
+        val key = arg[0:eq_idx].trim()
         val value = arg[eq_idx + 1:].trim()
 
         # Check if this is a composition select (e.g., model=resnet)
@@ -268,8 +269,8 @@ fn interpolate_string(s: text, root: Dict<text, ConfigValue>) -> text:
         if end < 0:
             break
         val var_name = result[start + 6:end]
-        val env_val = env_get(var_name) ?? ""
-        result = result[:start] + env_val + result[end + 1:]
+        val env_val = get_env_optional(var_name) ?? ""
+        result = result[0:start] + env_val + result[end + 1:]
         start = result.index_of(env_prefix)
 
     # Resolve config interpolation
@@ -286,7 +287,7 @@ fn interpolate_string(s: text, root: Dict<text, ConfigValue>) -> text:
             case Some(Float(f)): "{f}"
             case Some(Bool(b)): "{b}"
             case _: ""
-        result = result[:start] + text_val + result[end + 1:]
+        result = result[0:start] + text_val + result[end + 1:]
         start = result.index_of(config_prefix)
 
     result
@@ -401,20 +402,17 @@ fn sdn_value_to_config(sdn: SdnValue) -> ConfigValue:
     ConfigValue.Null
 
 fn file_exists(path: text) -> bool:
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     rt_file_exists(path)
 
 fn file_read(path: text) -> text:
-    # TODO: Replace direct FFI call with wrapper (file_read_text) from app.io or compiler.ffi
     rt_file_read_text(path)
 
 fn parse_sdn(content: text) -> Result<SdnValue, text>:
     # TODO: Use rt_sdn_parse
     Ok(SdnValue.empty())
 
-fn env_get(key: text) -> text?:
-    # TODO: Replace direct FFI call with wrapper (env_get) from app.io or compiler.ffi
-    val result = rt_env_get(key)
+fn get_env_optional(key: text) -> text?:
+    val result = env_get(key)
     if result == "":
         nil
     else:

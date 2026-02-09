@@ -1,0 +1,414 @@
+# Table (DataFrame) Module
+#
+# Provides DataFrame-like tabular data structure with:
+# - Column-based storage
+# - SQL-like operations (select, where, group_by)
+# - Aggregation and statistical functions
+# - Method chaining for fluent API
+#
+# Pure Simple implementation following std.array patterns.
+# Uses struct + functions pattern (no classes with static methods).
+
+use std.array (array_sum, array_group_by, array_sort_by, array_min, array_max, array_all)
+
+# ============================================================================
+# Column - Single column of typed data
+# ============================================================================
+
+struct Column:
+    name: text
+    data: [any]
+
+fn column_create(col_name: text, col_data: [any]) -> Column:
+    """Create column from name and data."""
+    Column(name: col_name, data: col_data)
+
+fn column_len(col: Column) -> i64:
+    """Get length of column."""
+    col.data.len()
+
+fn column_get(col: Column, idx: i64) -> any:
+    """Get value at index."""
+    col.data[idx]
+
+fn column_sum(col: Column) -> f64:
+    """Sum all values in column."""
+    var total = 0.0
+    for val in col.data:
+        total = total + val
+    total
+
+fn column_mean(col: Column) -> f64:
+    """Compute mean of column."""
+    if col.data.len() == 0:
+        return 0.0
+    column_sum(col) / col.data.len()
+
+fn column_min(col: Column) -> any:
+    """Find minimum value."""
+    if col.data.len() == 0:
+        return nil
+    var best = col.data[0]
+    var i = 1
+    while i < col.data.len():
+        if col.data[i] < best:
+            best = col.data[i]
+        i = i + 1
+    best
+
+fn column_max(col: Column) -> any:
+    """Find maximum value."""
+    if col.data.len() == 0:
+        return nil
+    var best = col.data[0]
+    var i = 1
+    while i < col.data.len():
+        if col.data[i] > best:
+            best = col.data[i]
+        i = i + 1
+    best
+
+fn column_std_dev(col: Column) -> f64:
+    """Compute standard deviation."""
+    if col.data.len() == 0:
+        return 0.0
+    val avg = column_mean(col)
+    var sum_sq_diff = 0.0
+    for val in col.data:
+        val diff = val - avg
+        sum_sq_diff = sum_sq_diff + (diff * diff)
+    val variance = sum_sq_diff / col.data.len()
+    variance.sqrt()
+
+fn column_unique(col: Column) -> [any]:
+    """Get unique values."""
+    var seen = {}
+    var result = []
+    for val in col.data:
+        val key = "{val}"
+        if not seen.contains_key(key):
+            seen[key] = true
+            result.push(val)
+    result
+
+fn column_value_counts(col: Column) -> Dict<any, i64>:
+    """Count value occurrences."""
+    var counts = {}
+    for val in col.data:
+        val key = "{val}"
+        if counts.contains_key(key):
+            counts[key] = counts[key] + 1
+        else:
+            counts[key] = 1
+    counts
+
+# ============================================================================
+# Table - DataFrame-like structure
+# ============================================================================
+
+struct Table:
+    columns: Dict<text, Column>
+    column_names: [text]
+    num_rows: i64
+
+fn table_empty() -> Table:
+    """Create empty table."""
+    Table(columns: {}, column_names: [], num_rows: 0)
+
+fn table_from_columns(cols: [Column]) -> Table:
+    """Create from list of columns."""
+    var table_cols = {}
+    var names = []
+    var rows = 0
+
+    for col in cols:
+        table_cols[col.name] = col
+        names.push(col.name)
+        if rows == 0:
+            rows = col.data.len()
+
+    Table(columns: table_cols, column_names: names, num_rows: rows)
+
+fn table_from_dict(data: Dict<text, [any]>) -> Table:
+    """Create from dictionary of name -> array."""
+    var cols = []
+    for (name, values) in data:
+        val col = Column(name: name, data: values)
+        cols.push(col)
+    table_from_columns(cols)
+
+fn table_get(table: Table, col_name: text):
+    """Get column by name. Returns nil if not found."""
+    if table.columns.contains_key(col_name):
+        table.columns[col_name]
+    else:
+        nil
+
+fn table_col_index(table: Table, col_name: text) -> i64:
+    """Get column index."""
+    var i = 0
+    while i < table.column_names.len():
+        if table.column_names[i] == col_name:
+            return i
+        i = i + 1
+    -1
+
+fn table_where(table: Table, predicate: fn(Dict<text, any>) -> bool) -> Table:
+    """Filter rows by predicate."""
+    var new_cols = []
+
+    # Build row dicts and filter
+    var keep_indices = []
+    var row_idx = 0
+    while row_idx < table.num_rows:
+        var row = {}
+        for col_name in table.column_names:
+            val col = table.columns[col_name]
+            row[col_name] = col.data[row_idx]
+
+        if predicate(row):
+            keep_indices.push(row_idx)
+
+        row_idx = row_idx + 1
+
+    # Build filtered columns
+    for col_name in table.column_names:
+        val old_col = table.columns[col_name]
+        var new_data = []
+        for idx in keep_indices:
+            new_data.push(old_col.data[idx])
+        new_cols.push(Column(name: col_name, data: new_data))
+
+    table_from_columns(new_cols)
+
+fn table_select(table: Table, col_names: [text]) -> Table:
+    """Select specific columns."""
+    var new_cols = []
+    for name in col_names:
+        if table.columns.contains_key(name):
+            new_cols.push(table.columns[name])
+    table_from_columns(new_cols)
+
+fn table_drop(table: Table, col_names: [text]) -> Table:
+    """Drop specific columns."""
+    var keep_names = []
+    for name in table.column_names:
+        var should_keep = true
+        for drop_name in col_names:
+            if name == drop_name:
+                should_keep = false
+        if should_keep:
+            keep_names.push(name)
+    table_select(table, keep_names)
+
+fn table_sort_by(table: Table, col_name: text, ascending: bool) -> Table:
+    """Sort by column."""
+    if not table.columns.contains_key(col_name):
+        return table
+
+    val sort_col = table.columns[col_name]
+
+    # Create index array
+    var indices = []
+    var i = 0
+    while i < table.num_rows:
+        indices.push(i)
+        i = i + 1
+
+    # Sort indices by column values
+    var sorted_indices = array_sort_by(indices, fn(a_idx, b_idx):
+        val a = sort_col.data[a_idx]
+        val b = sort_col.data[b_idx]
+        if ascending:
+            if a < b:
+                return -1
+            elif a > b:
+                return 1
+            else:
+                return 0
+        else:
+            if a > b:
+                return -1
+            elif a < b:
+                return 1
+            else:
+                return 0
+    )
+
+    # Reorder all columns
+    var new_cols = []
+    for col_name_iter in table.column_names:
+        val old_col = table.columns[col_name_iter]
+        var new_data = []
+        for idx in sorted_indices:
+            new_data.push(old_col.data[idx])
+        new_cols.push(Column(name: col_name_iter, data: new_data))
+
+    table_from_columns(new_cols)
+
+fn table_group_by(table: Table, col_name: text, agg_col: text, agg_fn: text) -> Table:
+    """Group by column and aggregate."""
+    if not table.columns.contains_key(col_name):
+        return table_empty()
+    if not table.columns.contains_key(agg_col):
+        return table_empty()
+
+    val group_col = table.columns[col_name]
+    val value_col = table.columns[agg_col]
+
+    # Group values by key
+    var groups = {}
+    var i = 0
+    while i < table.num_rows:
+        val key = "{group_col.data[i]}"
+        val val = value_col.data[i]
+
+        if groups.contains_key(key):
+            var group_vals = groups[key]
+            group_vals.push(val)
+            groups[key] = group_vals
+        else:
+            groups[key] = [val]
+
+        i = i + 1
+
+    # Compute aggregates
+    var group_keys = []
+    var group_results = []
+
+    for (key, values) in groups:
+        group_keys.push(key)
+
+        if agg_fn == "sum":
+            var total = 0.0
+            for v in values:
+                total = total + v
+            group_results.push(total)
+        elif agg_fn == "mean":
+            var total = 0.0
+            for v in values:
+                total = total + v
+            group_results.push(total / values.len())
+        elif agg_fn == "count":
+            group_results.push(values.len())
+        elif agg_fn == "min":
+            var best = values[0]
+            for v in values:
+                if v < best:
+                    best = v
+            group_results.push(best)
+        elif agg_fn == "max":
+            var best = values[0]
+            for v in values:
+                if v > best:
+                    best = v
+            group_results.push(best)
+        else:
+            group_results.push(nil)
+
+    # Build result table
+    var result_dict = {}
+    result_dict[col_name] = group_keys
+    result_dict["{agg_fn}_{agg_col}"] = group_results
+    table_from_dict(result_dict)
+
+fn table_with_column(table: Table, col_name: text, values: [any]) -> Table:
+    """Add computed column."""
+    if values.len() != table.num_rows:
+        return table
+
+    var new_col_names = table.column_names
+    new_col_names.push(col_name)
+
+    var new_cols = table.columns
+    new_cols[col_name] = Column(name: col_name, data: values)
+
+    Table(columns: new_cols, column_names: new_col_names, num_rows: table.num_rows)
+
+fn table_with_computed(table: Table, col_name: text, compute: fn(Dict<text, any>) -> any) -> Table:
+    """Add computed column from function."""
+    var new_values = []
+
+    var row_idx = 0
+    while row_idx < table.num_rows:
+        var row = {}
+        for name in table.column_names:
+            val col = table.columns[name]
+            row[name] = col.data[row_idx]
+
+        new_values.push(compute(row))
+        row_idx = row_idx + 1
+
+    table_with_column(table, col_name, new_values)
+
+fn table_inner_join(table: Table, other: Table, on_col: text) -> Table:
+    """Inner join on common column."""
+    if not table.columns.contains_key(on_col):
+        return table_empty()
+    if not other.columns.contains_key(on_col):
+        return table_empty()
+
+    val left_col = table.columns[on_col]
+    val right_col = other.columns[on_col]
+
+    # Build lookup for right table
+    var right_lookup = {}
+    var j = 0
+    while j < other.num_rows:
+        val key = "{right_col.data[j]}"
+        if not right_lookup.contains_key(key):
+            right_lookup[key] = []
+        var indices = right_lookup[key]
+        indices.push(j)
+        right_lookup[key] = indices
+        j = j + 1
+
+    # Find matching rows
+    var result_rows = []
+    var i = 0
+    while i < table.num_rows:
+        val key = "{left_col.data[i]}"
+        if right_lookup.contains_key(key):
+            val right_indices = right_lookup[key]
+            for right_idx in right_indices:
+                var row = {}
+                # Add left columns
+                for name in table.column_names:
+                    val col = table.columns[name]
+                    row[name] = col.data[i]
+                # Add right columns (skip join column)
+                for name in other.column_names:
+                    if name != on_col:
+                        val col = other.columns[name]
+                        row[name] = col.data[right_idx]
+                result_rows.push(row)
+        i = i + 1
+
+    # Convert rows to columns
+    if result_rows.len() == 0:
+        return table_empty()
+
+    val first_row = result_rows[0]
+    var all_col_names = []
+    for (name, _val) in first_row:
+        all_col_names.push(name)
+
+    var result_dict = {}
+    for name in all_col_names:
+        var col_data = []
+        for row in result_rows:
+            col_data.push(row[name])
+        result_dict[name] = col_data
+
+    table_from_dict(result_dict)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Column, Table
+export column_create, column_len, column_get, column_sum, column_mean
+export column_min, column_max, column_std_dev, column_unique, column_value_counts
+export table_empty, table_from_columns, table_from_dict, table_get, table_col_index
+export table_where, table_select, table_drop, table_sort_by, table_group_by
+export table_with_column, table_with_computed, table_inner_join
