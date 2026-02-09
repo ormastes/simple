@@ -67,6 +67,13 @@ fn isel_frame_offset(ctx: ISelContext, local_id: i64) -> i64:
     0
 
 fn isel_add_extern(ctx: ISelContext, name: text) -> ISelContext:
+    # Check if already added (avoid duplicates that break symbol indexing)
+    var already_added = false
+    for existing in ctx.extern_symbols:
+        if existing == name:
+            already_added = true
+    if already_added:
+        return ctx
     var new_ext = ctx.extern_symbols
     new_ext = new_ext + [name]
     ISelContext(
@@ -412,6 +419,8 @@ fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             isel_set_field(ctx, base, field, value)
         case Alloc(dest, type_):
             isel_alloc(ctx, dest, type_)
+        case Aggregate(dest, kind, operands):
+            isel_aggregate(ctx, dest, operands)
         case Cast(dest, operand, target):
             isel_cast(ctx, dest, operand, target)
         case Nop:
@@ -607,6 +616,37 @@ fn isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult
     insts = insts + [new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(aligned)])]
     insts = insts + [new_mach_inst(X86_OP_LEA, [dest_op, op_mem(physical_reg(X86_RSP), 0)])]
     ISelInstResult(insts: insts, ctx: ctx)
+
+fn isel_aggregate(ctx: ISelContext, dest: LocalId, operands: [MirOperand]) -> ISelInstResult:
+    var insts: [MachInst] = []
+    var current_ctx = ctx
+
+    # Calculate total size (each field is 8 bytes)
+    val num_fields = operands.len()
+    var total_size = num_fields * 8
+    if total_size < 8:
+        total_size = 8
+    # Align to 16 bytes for stack alignment
+    if total_size % 16 != 0:
+        total_size = total_size + (16 - (total_size % 16))
+
+    # Allocate stack space
+    insts = insts + [new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(total_size)])]
+
+    # Get base address into destination vreg
+    val dest_op = local_vreg_op(dest.id)
+    val base_reg = virtual_reg(dest.id)
+    insts = insts + [new_mach_inst(X86_OP_LEA, [dest_op, op_mem(physical_reg(X86_RSP), 0)])]
+
+    # Store each operand at its field offset
+    for i in 0..num_fields:
+        val op_low = lower_operand(current_ctx, operands[i])
+        current_ctx = op_low.ctx
+        insts = insts + op_low.insts
+        val offset = i * 8
+        insts = insts + [new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(base_reg, offset), op_low.result])]
+
+    ISelInstResult(insts: insts, ctx: current_ctx)
 
 fn isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirType) -> ISelInstResult:
     val low = lower_operand(ctx, operand)

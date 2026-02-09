@@ -1,0 +1,344 @@
+# Test: Pipeline with multiple program variants
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+use compiler.parser.*
+use compiler.parser_types.*
+use compiler.lexer.*
+use compiler.blocks.*
+use compiler.treesitter.*
+use compiler.hir_lowering.*
+use compiler.mir_lowering.*
+use compiler.mir_data.*
+use compiler.backend.native.mod.{compile_native}
+use compiler.backend.backend_types.{CodegenTarget}
+
+fn byte_to_hex(b: i64) -> text:
+    val digits = "0123456789abcdef"
+    "{digits[b / 16]}{digits[b % 16]}"
+
+fn compile_and_run(label: text, source: text, expected_exit: i64) -> bool:
+    print "--- {label} ---"
+    print "  Source: {source}"
+
+    # Parse
+    var parser = Parser.new(source)
+    val ast_module = parser.parse()
+    if parser.errors.len() > 0:
+        print "  Parse ERRORS: {parser.errors.len()}"
+        for e in parser.errors:
+            print "    {e.message}"
+        return false
+
+    # HIR
+    var hir_lowering = HirLowering.new()
+    val hir_module = hir_lowering.lower_module(ast_module)
+
+    # MIR
+    var mir_ctx = MirLowering.new(hir_lowering.symbols)
+    val mir_module = mir_ctx.lower_module(hir_module)
+
+    # Debug: print MIR
+    for key in mir_module.functions.keys():
+        val fn_ = mir_module.functions[key]
+        print "  MIR fn: {fn_.name}, return: {fn_.signature.return_type}"
+        print "    locals: {fn_.locals.len()}, blocks: {fn_.blocks.len()}"
+        for blk in fn_.blocks:
+            print "    block {blk.id.id}: {blk.instructions.len()} insts, term: {blk.terminator}"
+
+    # Native backend
+    val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+    print "  ELF: {elf_bytes.len()} bytes"
+
+    # Write to disk
+    var off = 0
+    while off < elf_bytes.len():
+        var chunk = ""
+        var end_ = off + 800
+        if end_ > elf_bytes.len():
+            end_ = elf_bytes.len()
+        var j = off
+        while j < end_:
+            chunk = chunk + byte_to_hex(elf_bytes[j])
+            j = j + 1
+        if off == 0:
+            shell("echo -n '{chunk}' > /tmp/pipeline_multi.hex")
+        else:
+            shell("echo -n '{chunk}' >> /tmp/pipeline_multi.hex")
+        off = end_
+
+    shell("xxd -r -p /tmp/pipeline_multi.hex /tmp/pipeline_multi.o")
+    shell("rm -f /tmp/pipeline_multi.hex")
+
+    val link_r = rt_process_run("gcc", ["-o", "/tmp/pipeline_multi", "/tmp/pipeline_multi.o", "-no-pie"])
+    if link_r[2] != 0:
+        print "  Link FAILED: {link_r[1]}"
+        return false
+
+    val run_r = rt_process_run("/tmp/pipeline_multi", [])
+    print "  Exit code: {run_r[2]} (expected: {expected_exit})"
+    if run_r[2] == expected_exit:
+        print "  PASS"
+        return true
+    else:
+        print "  FAIL"
+        return false
+
+fn compile_and_run_output(label: text, source: text, expected_exit: i64, expected_stdout: text) -> bool:
+    print "--- {label} ---"
+    print "  Source: {source}"
+
+    # Parse
+    var parser = Parser.new(source)
+    val ast_module = parser.parse()
+    if parser.errors.len() > 0:
+        print "  Parse ERRORS: {parser.errors.len()}"
+        for e in parser.errors:
+            print "    {e.message}"
+        return false
+
+    # HIR
+    var hir_lowering = HirLowering.new()
+    val hir_module = hir_lowering.lower_module(ast_module)
+
+    # MIR
+    var mir_ctx = MirLowering.new(hir_lowering.symbols)
+    val mir_module = mir_ctx.lower_module(hir_module)
+
+    # Native backend
+    val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+    print "  ELF: {elf_bytes.len()} bytes"
+
+    # Write to disk
+    var off = 0
+    while off < elf_bytes.len():
+        var chunk = ""
+        var end_ = off + 800
+        if end_ > elf_bytes.len():
+            end_ = elf_bytes.len()
+        var j = off
+        while j < end_:
+            chunk = chunk + byte_to_hex(elf_bytes[j])
+            j = j + 1
+        if off == 0:
+            shell("echo -n '{chunk}' > /tmp/pipeline_multi.hex")
+        else:
+            shell("echo -n '{chunk}' >> /tmp/pipeline_multi.hex")
+        off = end_
+
+    shell("xxd -r -p /tmp/pipeline_multi.hex /tmp/pipeline_multi.o")
+    shell("rm -f /tmp/pipeline_multi.hex")
+
+    val link_r = rt_process_run("gcc", ["-o", "/tmp/pipeline_multi", "/tmp/pipeline_multi.o", "-no-pie"])
+    if link_r[2] != 0:
+        print "  Link exit: {link_r[2]}"
+        print "  Link stdout: {link_r[0]}"
+        print "  Link stderr: {link_r[1]}"
+        return false
+
+    val run_r = rt_process_run("/tmp/pipeline_multi", [])
+    val stdout_text = run_r[0]
+    print "  Exit code: {run_r[2]} (expected: {expected_exit})"
+    print "  Stdout: '{stdout_text}' (expected: '{expected_stdout}')"
+    var exit_ok = run_r[2] == expected_exit
+    var stdout_ok = stdout_text == expected_stdout
+    if exit_ok and stdout_ok:
+        print "  PASS"
+        return true
+    else:
+        if not exit_ok:
+            print "  FAIL (exit code mismatch)"
+        if not stdout_ok:
+            print "  FAIL (stdout mismatch)"
+        return false
+
+print "=== Pipeline Multi-Test ==="
+
+# Test 1: Simple return 0
+val t1 = compile_and_run("Return 0", "fn main():\n    0\n", 0)
+
+# Test 2: Return 42
+val t2 = compile_and_run("Return 42", "fn main():\n    42\n", 42)
+
+# Test 3: Return with explicit return
+val t3 = compile_and_run("Explicit return", "fn main():\n    return 0\n", 0)
+
+# Test 4: Simple arithmetic
+val t4 = compile_and_run("Arithmetic", "fn main():\n    1 + 2\n", 3)
+
+# Test 5: Nested arithmetic
+val t5 = compile_and_run("Nested arith", "fn main():\n    (10 + 20) * 2\n", 60)
+
+# Test 6: Variable declaration
+val t6 = compile_and_run("Variable", "fn main():\n    val x = 5\n    x + 3\n", 8)
+
+# Test 7: If expression
+val t7 = compile_and_run("If-else", "fn main():\n    val x = 10\n    if x > 5:\n        1\n    else:\n        0\n", 1)
+
+# Test 8: While loop
+val t8 = compile_and_run("While loop", "fn main():\n    var x = 0\n    while x < 10:\n        x = x + 1\n    x\n", 10)
+
+# Test 9: Multiple variables
+val t9 = compile_and_run("Multi vars", "fn main():\n    val a = 10\n    val b = 20\n    val c = a + b\n    c\n", 30)
+
+# Test 10: Nested if-else
+val t10 = compile_and_run("Nested if", "fn main():\n    val x = 15\n    if x > 20:\n        3\n    else:\n        if x > 10:\n            2\n        else:\n            1\n", 2)
+
+# Test 11: Complex while - compute factorial of 5
+val t11 = compile_and_run("Factorial 5", "fn main():\n    var n = 5\n    var result = 1\n    while n > 0:\n        result = result * n\n        n = n - 1\n    result\n", 120)
+
+# Test 12: Subtraction and negative results (exit code wraps to 256-x)
+val t12 = compile_and_run("Subtraction", "fn main():\n    val x = 100\n    val y = 58\n    x - y\n", 42)
+
+# Test 13: Var mutation in while (var decrements)
+val t13 = compile_and_run("Var decrement", "fn main():\n    var x = 50\n    while x > 10:\n        x = x - 5\n    x\n", 10)
+
+# Test 14: Multiple while iterations with <= operator
+val t14 = compile_and_run("Sum 1..5", "fn main():\n    var sum = 0\n    var i = 1\n    while i <= 5:\n        sum = sum + i\n        i = i + 1\n    sum\n", 15)
+
+# Test 15: >= operator
+val t15 = compile_and_run("GtEq op", "fn main():\n    val x = 10\n    if x >= 10:\n        1\n    else:\n        0\n", 1)
+
+# Test 16: == operator (equality)
+val t16 = compile_and_run("Equality", "fn main():\n    val x = 5\n    if x == 5:\n        42\n    else:\n        0\n", 42)
+
+# Test 17: != operator (inequality)
+val t17 = compile_and_run("Inequality", "fn main():\n    val x = 5\n    if x != 3:\n        1\n    else:\n        0\n", 1)
+
+# Test 18: Function call
+val t18 = compile_and_run("Fn call", "fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    add(10, 20)\n", 30)
+
+# Test 19: Nested function calls
+val t19 = compile_and_run("Nested fn", "fn double(x: i64) -> i64:\n    x * 2\n\nfn main():\n    double(double(5))\n", 20)
+
+# Test 20: Recursive function (fibonacci-ish: fib(6) = 8)
+val t20 = compile_and_run("Recursion", "fn fib(n: i64) -> i64:\n    if n <= 1:\n        n\n    else:\n        fib(n - 1) + fib(n - 2)\n\nfn main():\n    fib(6)\n", 8)
+
+# Test 21: Multiple functions calling each other
+val t21 = compile_and_run("Multi fn", "fn square(x: i64) -> i64:\n    x * x\n\nfn add_squares(a: i64, b: i64) -> i64:\n    square(a) + square(b)\n\nfn main():\n    add_squares(3, 4)\n", 25)
+
+# Test 22: Division (integer)
+val t22 = compile_and_run("Division", "fn main():\n    val x = 100\n    val y = 4\n    x / y\n", 25)
+
+# Test 23: Modulo
+val t23 = compile_and_run("Modulo", "fn main():\n    val x = 17\n    val y = 5\n    x % y\n", 2)
+
+# Test 24: Deeply nested recursion (fib(10) = 55)
+val t24 = compile_and_run("Deep recursion", "fn fib(n: i64) -> i64:\n    if n <= 1:\n        n\n    else:\n        fib(n - 1) + fib(n - 2)\n\nfn main():\n    fib(10)\n", 55)
+
+# Test 25: Multiple args (>2)
+val t25 = compile_and_run("3 args", "fn add3(a: i64, b: i64, c: i64) -> i64:\n    a + b + c\n\nfn main():\n    add3(10, 20, 30)\n", 60)
+
+# Test 26: Chain of function calls
+val t26 = compile_and_run("Call chain", "fn inc(x: i64) -> i64:\n    x + 1\n\nfn main():\n    inc(inc(inc(inc(0))))\n", 4)
+
+# Test 27: GCD (Euclidean algorithm)
+val t27 = compile_and_run("GCD", "fn gcd(a: i64, b: i64) -> i64:\n    if b == 0:\n        a\n    else:\n        gcd(b, a % b)\n\nfn main():\n    gcd(48, 18)\n", 6)
+
+# Test 28: Countdown with var mutation (power of 2)
+val t28 = compile_and_run("Power of 2", "fn main():\n    var result = 1\n    var i = 0\n    while i < 7:\n        result = result * 2\n        i = i + 1\n    result\n", 128)
+
+# Test 29: Many values live across calls (stress register pressure)
+val t29 = compile_and_run("Reg pressure", "fn identity(x: i64) -> i64:\n    x\n\nfn main():\n    val a = 1\n    val b = 2\n    val c = 3\n    val d = 4\n    val e = 5\n    val f = identity(10)\n    val g = identity(20)\n    a + b + c + d + e + f + g\n", 45)
+
+# Test 30: 4-arg function
+val t30 = compile_and_run("4 args", "fn sum4(a: i64, b: i64, c: i64, d: i64) -> i64:\n    a + b + c + d\n\nfn main():\n    sum4(10, 20, 30, 40)\n", 100)
+
+# Test 31: >5 values live across multiple calls (forces spilling with callee-only)
+val t31 = compile_and_run("Spill across calls", "fn id(x: i64) -> i64:\n    x\n\nfn main():\n    val a = 1\n    val b = 2\n    val c = 3\n    val d = 4\n    val e = 5\n    val f = 6\n    val g = 7\n    val h = id(a + b)\n    a + b + c + d + e + f + g + h\n", 31)
+
+# Test 32: Mutual recursion (is_even/is_odd)
+val t32 = compile_and_run("Mutual recursion", "fn is_even(n: i64) -> i64:\n    if n == 0:\n        1\n    else:\n        is_odd(n - 1)\n\nfn is_odd(n: i64) -> i64:\n    if n == 0:\n        0\n    else:\n        is_even(n - 1)\n\nfn main():\n    is_even(10)\n", 1)
+
+# Test 33: Complex expression (Collatz step count for 6 = 8 steps)
+val t33 = compile_and_run("Collatz", "fn collatz_steps(n: i64) -> i64:\n    var steps = 0\n    var x = n\n    while x != 1:\n        if x % 2 == 0:\n            x = x / 2\n        else:\n            x = x * 3 + 1\n        steps = steps + 1\n    steps\n\nfn main():\n    collatz_steps(6)\n", 8)
+
+# Test 34: 5-arg function
+val t34 = compile_and_run("5 args", "fn sum5(a: i64, b: i64, c: i64, d: i64, e: i64) -> i64:\n    a + b + c + d + e\n\nfn main():\n    sum5(1, 2, 3, 4, 5)\n", 15)
+
+# Test 35: Nested while loops (multiplication via nested loops)
+val t35 = compile_and_run("Nested while", "fn main():\n    var total = 0\n    var i = 0\n    while i < 3:\n        var j = 0\n        while j < 4:\n            total = total + 1\n            j = j + 1\n        i = i + 1\n    total\n", 12)
+
+# Test 36: Boolean logic - chained comparisons
+val t36 = compile_and_run("Bool chain", "fn in_range(x: i64, lo: i64, hi: i64) -> i64:\n    if x >= lo:\n        if x <= hi:\n            1\n        else:\n            0\n    else:\n        0\n\nfn main():\n    in_range(5, 3, 10) + in_range(15, 3, 10) + in_range(3, 3, 10)\n", 2)
+
+# Test 37: Ackermann-like function (bounded)
+val t37 = compile_and_run("Ackermann", "fn ack(m: i64, n: i64) -> i64:\n    if m == 0:\n        n + 1\n    else:\n        if n == 0:\n            ack(m - 1, 1)\n        else:\n            ack(m - 1, ack(m, n - 1))\n\nfn main():\n    ack(2, 3)\n", 9)
+
+# ==========================================================================
+# Step 1: String Output Tests (extern calls with string constants)
+# ==========================================================================
+
+# Test 38: Simple puts call - verify string constant + extern call
+val t38 = compile_and_run_output("puts Hello", "extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"Hello\")\n    0\n", 0, "Hello\n")
+
+# Test 39: Multiple puts calls - verify multi-string output
+val t39 = compile_and_run_output("Multi puts", "extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"foo\")\n    puts(\"bar\")\n    0\n", 0, "foo\nbar\n")
+
+# Test 40: String constant + return value combined
+val t40 = compile_and_run_output("puts + retval", "extern fn puts(s: text) -> i64\n\nfn main():\n    puts(\"done\")\n    42\n", 42, "done\n")
+
+# ==========================================================================
+# Step 3: Multi-arg extern calls (printf, write)
+# ==========================================================================
+
+# Test 41: printf with format string + int arg (2 args)
+val t41 = compile_and_run_output("printf 2 args", "extern fn printf(fmt: text, n: i64) -> i64\n\nfn main():\n    printf(\"%d\\n\", 42)\n    0\n", 0, "42\n")
+
+# Test 42: printf with format string + 2 int args (3 args)
+val t42 = compile_and_run_output("printf 3 args", "extern fn printf(fmt: text, a: i64, b: i64) -> i64\n\nfn main():\n    printf(\"%d+%d\\n\", 10, 20)\n    0\n", 0, "10+20\n")
+
+# Test 43: puts with computed value after call
+val t43 = compile_and_run_output("call + compute", "extern fn puts(s: text) -> i64\n\nfn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn main():\n    puts(\"calc\")\n    add(3, 4)\n", 7, "calc\n")
+
+var passed = 0
+var total = 43
+if t1: passed = passed + 1
+if t2: passed = passed + 1
+if t3: passed = passed + 1
+if t4: passed = passed + 1
+if t5: passed = passed + 1
+if t6: passed = passed + 1
+if t7: passed = passed + 1
+if t8: passed = passed + 1
+if t9: passed = passed + 1
+if t10: passed = passed + 1
+if t11: passed = passed + 1
+if t12: passed = passed + 1
+if t13: passed = passed + 1
+if t14: passed = passed + 1
+if t15: passed = passed + 1
+if t16: passed = passed + 1
+if t17: passed = passed + 1
+if t18: passed = passed + 1
+if t19: passed = passed + 1
+if t20: passed = passed + 1
+if t21: passed = passed + 1
+if t22: passed = passed + 1
+if t23: passed = passed + 1
+if t24: passed = passed + 1
+if t25: passed = passed + 1
+if t26: passed = passed + 1
+if t27: passed = passed + 1
+if t28: passed = passed + 1
+if t29: passed = passed + 1
+if t30: passed = passed + 1
+if t31: passed = passed + 1
+if t32: passed = passed + 1
+if t33: passed = passed + 1
+if t34: passed = passed + 1
+if t35: passed = passed + 1
+if t36: passed = passed + 1
+if t37: passed = passed + 1
+if t38: passed = passed + 1
+if t39: passed = passed + 1
+if t40: passed = passed + 1
+if t41: passed = passed + 1
+if t42: passed = passed + 1
+if t43: passed = passed + 1
+
+print ""
+print "=== Results: {passed}/{total} passed ==="

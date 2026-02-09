@@ -35,7 +35,7 @@ fn emit_u32_le(buf: [i64], value: i64) -> [i64]:
 # Operand Extraction
 # ============================================================================
 
-fn get_phys_reg_id(op: Operand) -> i64:
+fn a64_get_phys_reg_id(op: Operand) -> i64:
     match op.kind:
         case Reg(reg):
             match reg.kind:
@@ -43,7 +43,7 @@ fn get_phys_reg_id(op: Operand) -> i64:
                 case Virtual(id): id
         case _: 0
 
-fn get_mem_base_id(op: Operand) -> i64:
+fn a64_get_mem_base_id(op: Operand) -> i64:
     match op.kind:
         case Mem(base, _):
             match base.kind:
@@ -51,22 +51,22 @@ fn get_mem_base_id(op: Operand) -> i64:
                 case Virtual(id): id
         case _: 0
 
-fn get_mem_offset(op: Operand) -> i64:
+fn a64_get_mem_offset(op: Operand) -> i64:
     match op.kind:
         case Mem(_, offset): offset
         case _: 0
 
-fn get_imm_value(op: Operand) -> i64:
+fn a64_get_imm_value(op: Operand) -> i64:
     match op.kind:
         case Imm(v): v
         case _: 0
 
-fn get_label_id(op: Operand) -> i64:
+fn a64_get_label_id(op: Operand) -> i64:
     match op.kind:
         case Label(id): id
         case _: 0
 
-fn get_sym_name(op: Operand) -> text:
+fn a64_get_sym_name(op: Operand) -> text:
     match op.kind:
         case Sym(name): name
         case _: ""
@@ -107,13 +107,13 @@ fn branch_opcode_to_cond(opcode: i64) -> i64:
 # Encode Context
 # ============================================================================
 
-struct EncodeContext:
+struct A64EncodeContext:
     code: [i64]
     relocations: [EncodedReloc]
     block_offsets: Dict<i64, i64>
-    pending_jumps: [PendingJump]
+    pending_jumps: [A64PendingJump]
 
-struct PendingJump:
+struct A64PendingJump:
     code_offset: i64
     target_block: i64
     jump_kind: i64
@@ -124,14 +124,14 @@ val JUMP_BCOND = 1       # Conditional B.cond (imm19)
 val JUMP_CBZ = 2         # CBZ (imm19)
 val JUMP_CBNZ = 3        # CBNZ (imm19)
 
-fn new_encode_context() -> EncodeContext:
-    EncodeContext(code: [], relocations: [], block_offsets: {}, pending_jumps: [])
+fn a64_new_encode_context() -> A64EncodeContext:
+    A64EncodeContext(code: [], relocations: [], block_offsets: {}, pending_jumps: [])
 
 # ============================================================================
 # Instruction Encoding
 # ============================================================================
 
-fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
+fn encode_inst_aarch64(ectx: A64EncodeContext, inst: MachInst) -> A64EncodeContext:
     var code = ectx.code
     var relocs = ectx.relocations
     var pending = ectx.pending_jumps
@@ -147,16 +147,16 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     elif inst.opcode == A64_OP_MOV:
         # MOV Xd, Xn -> ORR Xd, XZR, Xn
         # 0xAA0003E0 | (Xn << 16) | Xd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
         val encoding = 0xAA0003E0 or (rn << 16) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_MOVZ:
         # MOVZ Xd, #imm16 (shift=0)
         # 0xD2800000 | (imm16 << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val imm = get_imm_value(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val imm = a64_get_imm_value(inst.operands[1])
         val imm16 = imm and 0xFFFF
         val encoding = 0xD2800000 or (imm16 << 5) or rd
         code = emit_u32_le(code, encoding)
@@ -164,9 +164,9 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     elif inst.opcode == A64_OP_MOVK:
         # MOVK Xd, #imm16, LSL#shift
         # operands: [Rd, Imm(imm16), Imm(shift)]
-        val rd = get_phys_reg_id(inst.operands[0])
-        val imm = get_imm_value(inst.operands[1])
-        val shift = get_imm_value(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val imm = a64_get_imm_value(inst.operands[1])
+        val shift = a64_get_imm_value(inst.operands[2])
         val imm16 = imm and 0xFFFF
         # Base opcode depends on shift: 0=0xF2800000, 16=0xF2A00000, 32=0xF2C00000, 48=0xF2E00000
         var base = 0xF2800000
@@ -181,139 +181,139 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
 
     elif inst.opcode == A64_OP_ADD:
         # ADD Xd, Xn, Xm: 0x8B000000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x8B000000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_SUB:
         # SUB Xd, Xn, Xm: 0xCB000000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0xCB000000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_MUL:
         # MUL Xd, Xn, Xm: 0x9B007C00 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x9B007C00 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_SDIV:
         # SDIV Xd, Xn, Xm: 0x9AC00C00 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x9AC00C00 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_AND:
         # AND Xd, Xn, Xm: 0x8A000000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x8A000000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_ORR:
         # ORR Xd, Xn, Xm: 0xAA000000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0xAA000000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_EOR:
         # EOR Xd, Xn, Xm: 0xCA000000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0xCA000000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_LSL:
         # LSL Xd, Xn, Xm: 0x9AC02000 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x9AC02000 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_ASR:
         # ASR Xd, Xn, Xm: 0x9AC02800 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x9AC02800 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_LSR:
         # LSR Xd, Xn, Xm: 0x9AC02400 | (Rm << 16) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val rm = get_phys_reg_id(inst.operands[2])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val rm = a64_get_phys_reg_id(inst.operands[2])
         val encoding = 0x9AC02400 or (rm << 16) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_NEG:
         # NEG Xd, Xm -> SUB Xd, XZR, Xm
         # 0xCB0003E0 | (Rm << 16) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rm = get_phys_reg_id(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rm = a64_get_phys_reg_id(inst.operands[1])
         val encoding = 0xCB0003E0 or (rm << 16) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_CMP:
         # CMP Xn, Xm -> SUBS XZR, Xn, Xm
         # 0xEB00001F | (Rm << 16) | (Rn << 5)
-        val rn = get_phys_reg_id(inst.operands[0])
-        val rm = get_phys_reg_id(inst.operands[1])
+        val rn = a64_get_phys_reg_id(inst.operands[0])
+        val rm = a64_get_phys_reg_id(inst.operands[1])
         val encoding = 0xEB00001F or (rm << 16) or (rn << 5)
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_CSET:
         # CSET Xd, cond -> CSINC Xd, XZR, XZR, cond_inv
         # 0x9A9F07E0 | (cond_inv << 12) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val cond = get_imm_value(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val cond = a64_get_imm_value(inst.operands[1])
         val cond_inv = invert_cond(cond)
         val encoding = 0x9A9F07E0 or (cond_inv << 12) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_ADD_IMM:
         # ADD Xd, Xn, #imm12: 0x91000000 | (imm12 << 10) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val imm12 = get_imm_value(inst.operands[2]) and 0xFFF
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val imm12 = a64_get_imm_value(inst.operands[2]) and 0xFFF
         val encoding = 0x91000000 or (imm12 << 10) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_SUB_IMM:
         # SUB Xd, Xn, #imm12: 0xD1000000 | (imm12 << 10) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val rn = get_phys_reg_id(inst.operands[1])
-        val imm12 = get_imm_value(inst.operands[2]) and 0xFFF
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val rn = a64_get_phys_reg_id(inst.operands[1])
+        val imm12 = a64_get_imm_value(inst.operands[2]) and 0xFFF
         val encoding = 0xD1000000 or (imm12 << 10) or (rn << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_LDR:
         # LDR Xd, [Xn, #off]: 0xF9400000 | ((off/8) << 10) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val base = a64_get_mem_base_id(inst.operands[1])
+        val offset = a64_get_mem_offset(inst.operands[1])
         val scaled_off = (offset / 8) and 0xFFF
         val encoding = 0xF9400000 or (scaled_off << 10) or (base << 5) or rd
         code = emit_u32_le(code, encoding)
 
     elif inst.opcode == A64_OP_STR:
         # STR Xd, [Xn, #off]: 0xF9000000 | ((off/8) << 10) | (Rn << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
-        val base = get_mem_base_id(inst.operands[1])
-        val offset = get_mem_offset(inst.operands[1])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
+        val base = a64_get_mem_base_id(inst.operands[1])
+        val offset = a64_get_mem_offset(inst.operands[1])
         val scaled_off = (offset / 8) and 0xFFF
         val encoding = 0xF9000000 or (scaled_off << 10) or (base << 5) or rd
         code = emit_u32_le(code, encoding)
@@ -321,10 +321,10 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     elif inst.opcode == A64_OP_STP:
         # STP Rt1, Rt2, [Xn, #off]
         # 0xA9000000 | ((off/8 & 0x7F) << 15) | (Rt2 << 10) | (Rn << 5) | Rt1
-        val rt1 = get_phys_reg_id(inst.operands[0])
-        val rt2 = get_phys_reg_id(inst.operands[1])
-        val base = get_mem_base_id(inst.operands[2])
-        val offset = get_mem_offset(inst.operands[2])
+        val rt1 = a64_get_phys_reg_id(inst.operands[0])
+        val rt2 = a64_get_phys_reg_id(inst.operands[1])
+        val base = a64_get_mem_base_id(inst.operands[2])
+        val offset = a64_get_mem_offset(inst.operands[2])
         val simm7 = (offset / 8) and 0x7F
         val encoding = 0xA9000000 or (simm7 << 15) or (rt2 << 10) or (base << 5) or rt1
         code = emit_u32_le(code, encoding)
@@ -332,10 +332,10 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     elif inst.opcode == A64_OP_LDP:
         # LDP Rt1, Rt2, [Xn, #off]
         # 0xA9400000 | ((off/8 & 0x7F) << 15) | (Rt2 << 10) | (Rn << 5) | Rt1
-        val rt1 = get_phys_reg_id(inst.operands[0])
-        val rt2 = get_phys_reg_id(inst.operands[1])
-        val base = get_mem_base_id(inst.operands[2])
-        val offset = get_mem_offset(inst.operands[2])
+        val rt1 = a64_get_phys_reg_id(inst.operands[0])
+        val rt2 = a64_get_phys_reg_id(inst.operands[1])
+        val base = a64_get_mem_base_id(inst.operands[2])
+        val offset = a64_get_mem_offset(inst.operands[2])
         val simm7 = (offset / 8) and 0x7F
         val encoding = 0xA9400000 or (simm7 << 15) or (rt2 << 10) or (base << 5) or rt1
         code = emit_u32_le(code, encoding)
@@ -347,7 +347,7 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 # Emit placeholder, patch later
                 val jump_offset = code.len()
                 code = emit_u32_le(code, 0x14000000)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B)]
+                pending = pending + [A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B)]
             case _:
                 code = emit_u32_le(code, 0x14000000)
 
@@ -368,7 +368,7 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
             case Label(block_id):
                 val jump_offset = code.len()
                 code = emit_u32_le(code, 0x94000000)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B)]
+                pending = pending + [A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_B)]
             case _:
                 code = emit_u32_le(code, 0x94000000)
 
@@ -381,33 +381,33 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 # Emit placeholder with condition code embedded
                 val placeholder = 0x54000000 or cond
                 code = emit_u32_le(code, placeholder)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_BCOND)]
+                pending = pending + [A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_BCOND)]
             case _:
                 val placeholder = 0x54000000 or cond
                 code = emit_u32_le(code, placeholder)
 
     elif inst.opcode == A64_OP_CBZ:
         # CBZ Xd, offset: 0xB4000000 | ((imm19) << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Label(block_id):
                 val jump_offset = code.len()
                 val placeholder = 0xB4000000 or rd
                 code = emit_u32_le(code, placeholder)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBZ)]
+                pending = pending + [A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBZ)]
             case _:
                 val placeholder = 0xB4000000 or rd
                 code = emit_u32_le(code, placeholder)
 
     elif inst.opcode == A64_OP_CBNZ:
         # CBNZ Xd, offset: 0xB5000000 | ((imm19) << 5) | Rd
-        val rd = get_phys_reg_id(inst.operands[0])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Label(block_id):
                 val jump_offset = code.len()
                 val placeholder = 0xB5000000 or rd
                 code = emit_u32_le(code, placeholder)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBNZ)]
+                pending = pending + [A64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_CBNZ)]
             case _:
                 val placeholder = 0xB5000000 or rd
                 code = emit_u32_le(code, placeholder)
@@ -415,7 +415,7 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
     elif inst.opcode == A64_OP_ADRP:
         # ADRP Xd, symbol - needs relocation
         # 0x90000000 | Rd, linker fills the rest
-        val rd = get_phys_reg_id(inst.operands[0])
+        val rd = a64_get_phys_reg_id(inst.operands[0])
         match inst.operands[1].kind:
             case Sym(name):
                 val reloc_offset = code.len()
@@ -436,7 +436,7 @@ fn encode_inst_aarch64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         # Unknown opcode - emit BRK #0 (debug trap)
         code = emit_u32_le(code, 0xD4200000)
 
-    EncodeContext(code: code, relocations: relocs, block_offsets: ectx.block_offsets, pending_jumps: pending)
+    A64EncodeContext(code: code, relocations: relocs, block_offsets: ectx.block_offsets, pending_jumps: pending)
 
 # ============================================================================
 # Jump Patching
@@ -496,13 +496,13 @@ fn patch_branch(code: [i64], byte_offset: i64, rel_offset: i64, kind: i64) -> [i
 # ============================================================================
 
 fn encode_function_aarch64(func: MachFunction) -> EncodedFunction:
-    var ectx = new_encode_context()
+    var ectx = a64_new_encode_context()
 
     # Pass 1: encode all instructions, record block offsets and pending jumps
     for block in func.blocks:
         var offsets = ectx.block_offsets
         offsets[block.block_id] = ectx.code.len()
-        ectx = EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
+        ectx = A64EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
 
         for inst in block.insts:
             ectx = encode_inst_aarch64(ectx, inst)
@@ -534,7 +534,7 @@ fn encode_module_aarch64(module: MachModule) -> [EncodedFunction]:
 # Exports
 # ============================================================================
 
-export EncodeContext, new_encode_context, PendingJump
+export A64EncodeContext, a64_new_encode_context, A64PendingJump
 export JUMP_B, JUMP_BCOND, JUMP_CBZ, JUMP_CBNZ
 export COND_EQ, COND_NE, COND_GE, COND_LT, COND_GT, COND_LE
 export encode_function_aarch64, encode_inst_aarch64, encode_module_aarch64

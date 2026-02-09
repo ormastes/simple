@@ -1,0 +1,261 @@
+# MCP Server for Jujutsu (jj) with Git Compatibility Layer
+#
+# Provides:
+#   - 48 native jj_* tools
+#   - 27 git_* compatibility tools (translates git commands to jj)
+#   - 5 resources (status, log, bookmarks, conflicts, op-log)
+#   - 4 prompts (workflow, git-to-jj, revset-reference, concepts)
+#
+# Usage:
+#   simple src/app/mcp_jj/main.spl server     # Start MCP server (stdio)
+#   simple src/app/mcp_jj/main.spl version     # Show jj version
+
+use app.io.mod (get_args, exit)
+use app.mcp_jj.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, make_tool_result, make_result_response, make_error_response, has_flag}
+use app.mcp_jj.jj_runner.{get_default_repo_path, get_jj_version, is_jj_repo}
+use app.mcp_jj.tools_jj.{get_all_jj_tool_schemas, handle_jj_tool}
+use app.mcp_jj.tools_git.{get_all_git_tool_schemas, handle_git_tool}
+use app.mcp_jj.resources as res
+use app.mcp_jj.prompts as prompts
+
+fn main():
+    val raw_args = get_args()
+    val args = get_clean_args(raw_args)
+
+    if args.len() < 1:
+        print_usage()
+        exit(1)
+
+    val command = args[0]
+
+    if command == "--help" or command == "-h":
+        print_usage()
+        exit(0)
+    elif command == "server":
+        start_server()
+    elif command == "version":
+        print(get_jj_version())
+    else:
+        print_usage()
+        exit(1)
+
+fn print_usage():
+    print("jj-git MCP Server - Jujutsu with Git Compatibility Layer")
+    print("")
+    print("Usage:")
+    print("  simple src/app/mcp_jj/main.spl server   # Start MCP server (stdio)")
+    print("  simple src/app/mcp_jj/main.spl version   # Show jj version")
+    print("")
+    print("Environment:")
+    print("  JJ_MCP_REPO_PATH      Default repository path (default: cwd)")
+    print("  JJ_MCP_SHOW_WARNINGS  Show git compat warnings (default: true)")
+
+fn start_server():
+    var repo_path = get_default_repo_path()
+
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+
+            if method == "initialize":
+                response = make_initialize_response(id)
+            elif method == "initialized":
+                response = ""  # Notification, no response
+            elif method == "shutdown":
+                response = make_result_response(id, "null")
+            elif method == "exit":
+                exit(0)
+            elif method == "ping":
+                response = make_result_response(id, LB() + RB())
+            elif method == "tools/list":
+                val cursor = extract_nested_string(line, "params", "cursor")
+                response = handle_tools_list(id, cursor)
+            elif method == "tools/call":
+                val tool_name = extract_nested_string(line, "params", "name")
+                val result = handle_tool_call(id, tool_name, line, repo_path)
+                response = result
+                # Check if git_set_working_dir changed the repo path
+                if tool_name == "git_set_working_dir":
+                    val new_path = extract_repo_path_change(result)
+                    if new_path != "":
+                        repo_path = new_path
+            elif method == "resources/list":
+                response = handle_resources_list(id, repo_path)
+            elif method == "resources/read":
+                val uri = extract_nested_string(line, "params", "uri")
+                response = handle_resources_read(id, uri, repo_path)
+            elif method == "prompts/list":
+                response = handle_prompts_list(id)
+            elif method == "prompts/get":
+                val prompt_name = extract_nested_string(line, "params", "name")
+                response = handle_prompts_get(id, prompt_name)
+            elif method == "notifications/cancelled":
+                response = ""  # Notification, no response
+            else:
+                response = make_error_response(id, -32601, "Method not found: " + method)
+
+            if response != "":
+                write_stdout_message(response)
+
+fn read_stdin_message() -> String:
+    var header = input()
+    if header == "":
+        return ""
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int()
+    if content_length == 0:
+        return ""
+    # Skip blank line after headers
+    input()
+    # Read body
+    val body = input()
+    body
+
+fn write_stdout_message(body: String):
+    var header = "Content-Length: "
+    header = header + body.len().to_string()
+    header = header + "\r\n\r\n"
+    print_raw(header)
+    print_raw(body)
+
+# --- Initialize response ---
+
+fn make_initialize_response(id: String) -> String:
+    var server_info = LB()
+    server_info = server_info + jp("name", js("jj-git-mcp"))
+    server_info = server_info + ","
+    server_info = server_info + jp("version", js("1.0.0"))
+    server_info = server_info + ","
+    val instructions = "This MCP server provides Jujutsu (jj) version control tools. It includes 48 native jj_* tools for full jj functionality, plus 27 git_* compatibility tools that translate git commands to jj equivalents with helpful warnings. Use jj_* tools for best results. If you see git_* tools being called, the response will include a warning explaining the jj equivalent."
+    server_info = server_info + jp("instructions", js(escape_json(instructions)))
+    server_info = server_info + RB()
+
+    var tools_cap = jo1(jp("listChanged", "true"))
+    var resources_cap = jo1(jp("listChanged", "true"))
+    var prompts_cap = jo1(jp("listChanged", "true"))
+
+    var caps = LB()
+    caps = caps + jp("tools", tools_cap)
+    caps = caps + ","
+    caps = caps + jp("resources", resources_cap)
+    caps = caps + ","
+    caps = caps + jp("prompts", prompts_cap)
+    caps = caps + RB()
+
+    val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server_info))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Tools ---
+
+fn get_all_tools() -> [String]:
+    var all_tools: [String] = []
+    val jj_tools = get_all_jj_tool_schemas()
+    for tool in jj_tools:
+        all_tools.push(tool)
+    val git_tools = get_all_git_tool_schemas()
+    for tool in git_tools:
+        all_tools.push(tool)
+    all_tools
+
+fn handle_tools_list(id: String, cursor: String) -> String:
+    val all_tools = get_all_tools()
+    val page_size = 20
+    var offset = 0
+
+    if cursor != "":
+        if cursor.starts_with("offset:"):
+            val cursor_value = cursor.substring(7)
+            val parse_result = parse_int(cursor_value)
+            if parse_result.ok.?:
+                offset = parse_result.unwrap()
+
+    val total = all_tools.len()
+    val end = min_int(offset + page_size, total)
+    val has_more = end < total
+
+    var tools = "["
+    var first = true
+    for i in offset..end:
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + all_tools[i]
+    tools = tools + "]"
+
+    var result = LB()
+    result = result + jp("tools", tools)
+    if has_more:
+        val next_cursor = "offset:" + end.to_string()
+        result = result + "," + jp("nextCursor", js(next_cursor))
+    result = result + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_tool_call(id: String, tool_name: String, body: String, repo_path: String) -> String:
+    # Try jj_* tools first
+    if tool_name.starts_with("jj_"):
+        val result = handle_jj_tool(id, tool_name, body, repo_path)
+        if result != "":
+            return result
+
+    # Try git_* tools
+    if tool_name.starts_with("git_"):
+        val result = handle_git_tool(id, tool_name, body, repo_path)
+        if result != "":
+            return result
+
+    make_error_response(id, -32602, "Unknown tool: " + tool_name)
+
+fn extract_repo_path_change(response: String) -> String:
+    # Check if the response contains SET_REPO_PATH: marker
+    val marker = "SET_REPO_PATH:"
+    val idx = unwrap_idx(response.index_of(marker))
+    if idx < 0:
+        return ""
+    # Extract path after marker, before any quote/escape
+    val after = response.substring(idx + marker.len())
+    # Find the end - it's terminated by a quote
+    val end = unwrap_idx(after.index_of("\""))
+    if end < 0:
+        return after.trim()
+    after.substring(0, end).trim()
+
+# --- Resources ---
+
+fn handle_resources_list(id: String, repo_path: String) -> String:
+    val resources_json = res.get_all_resources(repo_path)
+    val result = jo1(jp("resources", resources_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_resources_read(id: String, uri: String, repo_path: String) -> String:
+    val content = res.read_resource(uri, repo_path)
+    if content == "":
+        return make_error_response(id, -32602, "Resource not found: " + uri)
+    val result = jo1(jp("contents", "[" + content + "]"))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Prompts ---
+
+fn handle_prompts_list(id: String) -> String:
+    val prompts_json = prompts.get_all_prompts()
+    val result = jo1(jp("prompts", prompts_json))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_prompts_get(id: String, prompt_name: String) -> String:
+    val content = prompts.get_prompt(prompt_name)
+    if content == "":
+        return make_error_response(id, -32602, "Prompt not found: " + prompt_name)
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", content))
+
+export main
