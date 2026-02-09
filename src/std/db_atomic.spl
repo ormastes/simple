@@ -344,12 +344,21 @@ impl AtomicTable:
 
         val content = content_result.unwrap()
 
-        # Parse table (simplified - production should use robust parser)
-        var columns: [text] = []
-        var rows: [[text]] = []
+        # Parse table using std.sdn (Phase 3.1 - TODO #201 ✅)
+        use std.sdn.{parse, SdnValue}
 
-        # TODO: Use proper SDN parser here
-        # For now, basic line-based parsing
+        val parse_result = parse(content)
+        if parse_result.err.?:
+            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
+
+        val sdn_value = parse_result.unwrap()
+
+        # Extract table data from SDN (Phase 3.1 - TODO #202 ✅)
+        val table_data = extract_table_from_sdn(sdn_value, table_name)
+        if table_data.err.?:
+            return Err(table_data.unwrap_err())
+
+        val (columns, rows) = table_data.unwrap()
 
         Ok(AtomicTable(
             path: path,
@@ -403,9 +412,90 @@ impl AtomicTable:
         if content_result.err.?:
             return Err(content_result.unwrap_err())
 
-        # TODO: Parse content and update self.columns, self.rows
+        # Parse content and update self.columns, self.rows (Phase 3.1 - TODO #202 ✅)
+        use std.sdn.{parse, SdnValue}
+
+        val content = content_result.unwrap()
+        val parse_result = parse(content)
+        if parse_result.err.?:
+            return Err("Failed to parse SDN: {parse_result.unwrap_err()}")
+
+        val sdn_value = parse_result.unwrap()
+        val table_data = extract_table_from_sdn(sdn_value, self.table_name)
+        if table_data.err.?:
+            return Err(table_data.unwrap_err())
+
+        val (columns, rows) = table_data.unwrap()
+        self.columns = columns
+        self.rows = rows
         self.dirty = false
         Ok(())
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn extract_table_from_sdn(sdn_value: SdnValue, table_name: text) -> Result<([text], [[text]]), text>:
+    """Extract table data from parsed SDN value.
+
+    Args:
+        sdn_value: Parsed SDN value (must be Dict containing table)
+        table_name: Name of table to extract
+
+    Returns:
+        Ok((columns, rows)) on success
+        Err(message) if table not found or wrong format
+
+    Example SDN format:
+        todos |id, name, status|
+            1, "Task 1", "done"
+            2, "Task 2", "pending"
+    """
+    use std.sdn.{SdnValue}
+
+    # SDN file should be a dict with table_name as key
+    match sdn_value:
+        case SdnValue.Dict(d):
+            if not d.contains_key(table_name):
+                return Err("Table '{table_name}' not found in SDN")
+
+            val table_value = d[table_name]
+            match table_value:
+                case SdnValue.Table(fields, types, rows):
+                    # Convert fields (Option) to required columns
+                    var columns: [text] = []
+                    if fields.?:
+                        columns = fields.unwrap()
+                    else:
+                        return Err("Table has no column headers")
+
+                    # Convert SdnValue rows to text rows
+                    var text_rows: [[text]] = []
+                    for row in rows:
+                        var text_row: [text] = []
+                        for cell in row:
+                            text_row.push(sdn_value_to_text(cell))
+                        text_rows.push(text_row)
+
+                    Ok((columns, text_rows))
+
+                case _:
+                    Err("Value for '{table_name}' is not a table")
+
+        case _:
+            Err("SDN root must be a dictionary")
+
+fn sdn_value_to_text(value: SdnValue) -> text:
+    """Convert SdnValue to text representation."""
+    use std.sdn.{SdnValue}
+
+    match value:
+        case SdnValue.Null: ""
+        case SdnValue.Bool(b): if b: "true" else: "false"
+        case SdnValue.Int(i): "{i}"
+        case SdnValue.Float(f): "{f}"
+        case SdnValue.String(s): s
+        case _: "<complex>"  # Arrays, dicts, tables
 
 # =========================================================================
 # Exports

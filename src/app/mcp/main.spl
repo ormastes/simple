@@ -10,13 +10,14 @@
 #   simple mcp json <file.spl>     # Generate JSON output
 
 # I/O imports
-use app.io.mod (file_read, get_args, exit, shell, cwd)
+use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
 
 # MCP modules
 use app.mcp.resources
 use app.mcp.prompts
 use app.mcp.bugdb_resource
-use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, has_flag}
+use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag}
+use app.mcp.debug_tools.{SessionManager, SessionBreakpoint, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate, parse_var_entry, parse_stack_frame, step_mode_to_int}
 
 # Main entry point
 fn main():
@@ -88,22 +89,456 @@ fn start_server(debug_mode: Bool):
     if debug_mode:
         debug_log("MCP server starting in debug mode")
 
-    # Initialize resource and prompt managers
+    # Initialize resource, prompt, and debug session managers
     val project_root = get_current_dir()
     val resource_mgr = resources.ResourceManager.create(project_root)
     val prompt_mgr = prompts.PromptManager.create(project_root)
+    var session_mgr = SessionManager.empty()
 
     if debug_mode:
         debug_log("Initialized with project root: " + project_root)
 
     # Send nothing until we get initialize request
     var running = true
-    while running:
+    for _iter in range(0, 999999):
+        if not running:
+            return
         val line = read_stdin_message()
         if line == "":
             running = false
         else:
-            val response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr)
+            # Check if this is a debug tool call (must be handled inline for session_mgr mutation)
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+            var is_debug = false
+            var tool_name = ""
+            if method == "tools/call":
+                tool_name = extract_nested_string(line, "params", "name")
+                is_debug = tool_name.starts_with("debug_")
+
+            if is_debug:
+                if debug_mode:
+                    debug_log("Debug tool call (inline): " + tool_name)
+                # INLINE debug dispatch: session_mgr mutations must stay in this scope
+                if tool_name == "debug_create_session":
+                    val d_program = extract_nested_string(line, "arguments", "program")
+                    if d_program == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: program")
+                    else:
+                        var d_tt = extract_nested_string(line, "arguments", "target_type")
+                        if d_tt == "":
+                            d_tt = "interpreter"
+                        val d_session = session_mgr.create_session(d_program, d_tt)
+                        rt_debug_set_active(true)
+                        var d_r = LB()
+                        d_r = d_r + jp("session_id", js(d_session.id))
+                        d_r = d_r + "," + jp("program", js(d_session.program))
+                        d_r = d_r + "," + jp("target_type", js(d_session.target_type))
+                        d_r = d_r + "," + jp("state", js(d_session.state))
+                        d_r = d_r + RB()
+                        response = make_tool_result(id, d_r)
+                elif tool_name == "debug_list_sessions":
+                    val d_sessions = session_mgr.list_sessions()
+                    var d_arr = "["
+                    var d_first = true
+                    for d_s in d_sessions:
+                        if not d_first:
+                            d_arr = d_arr + ","
+                        d_first = false
+                        var d_obj = LB()
+                        d_obj = d_obj + jp("session_id", js(d_s.id))
+                        d_obj = d_obj + "," + jp("program", js(d_s.program))
+                        d_obj = d_obj + "," + jp("target_type", js(d_s.target_type))
+                        d_obj = d_obj + "," + jp("state", js(d_s.state))
+                        d_obj = d_obj + RB()
+                        d_arr = d_arr + d_obj
+                    d_arr = d_arr + "]"
+                    response = make_tool_result(id, d_arr)
+                elif tool_name == "debug_close_session":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    else:
+                        val d_removed = session_mgr.remove_session(d_sid)
+                        if not d_removed:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_remaining = session_mgr.list_sessions()
+                            if d_remaining.len() == 0:
+                                rt_debug_set_active(false)
+                            var d_r = LB()
+                            d_r = d_r + jp("closed", js(d_sid))
+                            d_r = d_r + "," + jp("status", js("ok"))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_set_breakpoint":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_file = extract_nested_string(line, "arguments", "file")
+                    val d_line_str = extract_nested_string(line, "arguments", "line")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_file == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: file")
+                    elif d_line_str == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: line")
+                    else:
+                        val d_lr = parse_int(d_line_str)
+                        var d_line = 0
+                        match d_lr:
+                            Ok(v): d_line = v
+                            Err(e): d_line = -1
+                        if d_line < 0:
+                            response = make_error_response(id, -32602, "Invalid line number: " + d_line_str)
+                        else:
+                            val d_cond = extract_nested_string(line, "arguments", "condition")
+                            val d_bp_id = session_mgr.add_breakpoint(d_sid, d_file, d_line, d_cond)
+                            if d_bp_id == "":
+                                response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                            else:
+                                rt_debug_add_breakpoint_at(d_file, d_line)
+                                var d_r = LB()
+                                d_r = d_r + jp("breakpoint_id", d_bp_id)
+                                d_r = d_r + "," + jp("session_id", js(d_sid))
+                                d_r = d_r + "," + jp("file", js(d_file))
+                                d_r = d_r + "," + jp("line", d_line.to_string())
+                                d_r = d_r + "," + jp("verified", "true")
+                                d_r = d_r + RB()
+                                response = make_tool_result(id, d_r)
+                elif tool_name == "debug_remove_breakpoint":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_bp_id_str = extract_nested_string(line, "arguments", "breakpoint_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_bp_id_str == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: breakpoint_id")
+                    else:
+                        val d_sidx = session_mgr.find_session(d_sid)
+                        if d_sidx >= 0:
+                            val d_sess = session_mgr.sessions[d_sidx]
+                            val d_bpr = parse_int(d_bp_id_str)
+                            var d_bpi = -1
+                            match d_bpr:
+                                Ok(v): d_bpi = v
+                                Err(_): pass
+                            for d_bp in d_sess.breakpoints:
+                                if d_bp.id == d_bpi:
+                                    rt_debug_remove_breakpoint_at(d_bp.file, d_bp.line)
+                        val d_removed = session_mgr.remove_breakpoint(d_sid, d_bp_id_str)
+                        if not d_removed:
+                            response = make_error_response(id, -32602, "Breakpoint not found: " + d_bp_id_str)
+                        else:
+                            var d_r = LB()
+                            d_r = d_r + jp("removed", js(d_bp_id_str))
+                            d_r = d_r + "," + jp("status", js("ok"))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_continue":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    else:
+                        val d_found = session_mgr.set_state(d_sid, "running")
+                        if not d_found:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            rt_debug_continue_exec()
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("state", js("running"))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_step":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_mode = extract_nested_string(line, "arguments", "mode")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_mode == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: mode")
+                    else:
+                        val d_step_int = step_mode_to_int(d_mode)
+                        if d_step_int == 0:
+                            response = make_error_response(id, -32602, "Invalid step mode: " + d_mode + ". Must be over, in, or out")
+                        else:
+                            val d_found = session_mgr.set_state(d_sid, "paused")
+                            if not d_found:
+                                response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                            else:
+                                rt_debug_set_step_mode_val(d_step_int)
+                                var d_r = LB()
+                                d_r = d_r + jp("session_id", js(d_sid))
+                                d_r = d_r + "," + jp("mode", js(d_mode))
+                                d_r = d_r + "," + jp("state", js("paused"))
+                                d_r = d_r + RB()
+                                response = make_tool_result(id, d_r)
+                elif tool_name == "debug_get_variables":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_raw_vars = rt_debug_local_vars()
+                            var d_vars = "["
+                            var d_first = true
+                            for d_raw in d_raw_vars:
+                                if not d_first:
+                                    d_vars = d_vars + ","
+                                d_first = false
+                                d_vars = d_vars + parse_var_entry(d_raw)
+                            d_vars = d_vars + "]"
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("variables", d_vars)
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_stack_trace":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_sess = session_mgr.sessions[d_idx]
+                            val d_raw_frames = rt_debug_stack_trace_lines()
+                            var d_frames = "["
+                            if d_raw_frames.len() > 0:
+                                var d_first = true
+                                var d_fi = 0
+                                for d_raw in d_raw_frames:
+                                    if not d_first:
+                                        d_frames = d_frames + ","
+                                    d_first = false
+                                    d_frames = d_frames + parse_stack_frame(d_fi, d_raw)
+                                    d_fi = d_fi + 1
+                            else:
+                                val d_cf = rt_debug_get_current_file()
+                                val d_cl = rt_debug_get_current_line()
+                                var d_source = d_sess.program
+                                if d_cf != "":
+                                    d_source = d_cf
+                                var d_ln = 1
+                                if d_cl > 0:
+                                    d_ln = d_cl
+                                var d_frame = LB()
+                                d_frame = d_frame + jp("id", "0")
+                                d_frame = d_frame + "," + jp("name", js("main"))
+                                d_frame = d_frame + "," + jp("source", js(escape_json(d_source)))
+                                d_frame = d_frame + "," + jp("line", d_ln.to_string())
+                                d_frame = d_frame + RB()
+                                d_frames = d_frames + d_frame
+                            d_frames = d_frames + "]"
+                            var d_total = d_raw_frames.len()
+                            if d_total == 0:
+                                d_total = 1
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("frames", d_frames)
+                            d_r = d_r + "," + jp("total_frames", d_total.to_string())
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_evaluate":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_expr = extract_nested_string(line, "arguments", "expression")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_expr == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: expression")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_frame_str = extract_nested_string(line, "arguments", "frame_index")
+                            var d_fi = 0
+                            if d_frame_str != "":
+                                val d_fir = parse_int(d_frame_str)
+                                match d_fir:
+                                    Ok(v): d_fi = v
+                                    Err(_): pass
+                            val d_ej = rt_debug_eval_expression(d_expr, d_fi)
+                            val d_res = extract_json_string_v2(d_ej, "result")
+                            val d_typ = extract_json_string_v2(d_ej, "type")
+                            val d_err = extract_json_string_v2(d_ej, "error")
+                            var d_display = d_res
+                            if d_err != "":
+                                d_display = d_err
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
+                            d_r = d_r + "," + jp("result", js(escape_json(d_display)))
+                            d_r = d_r + "," + jp("type", js(d_typ))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_set_function_breakpoint":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_func = extract_nested_string(line, "arguments", "function_name")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_func == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: function_name")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_cond = extract_nested_string(line, "arguments", "condition")
+                            val d_bp_id = rt_debug_add_function_breakpoint(d_func, d_cond)
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("breakpoint_id", d_bp_id.to_string())
+                            d_r = d_r + "," + jp("function_name", js(escape_json(d_func)))
+                            d_r = d_r + "," + jp("type", js("function"))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_enable_breakpoint":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_bp_str = extract_nested_string(line, "arguments", "breakpoint_id")
+                    val d_en_str = extract_nested_string(line, "arguments", "enabled")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_bp_str == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: breakpoint_id")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_bpr = parse_int(d_bp_str)
+                            var d_bpi = 0
+                            match d_bpr:
+                                Ok(v): d_bpi = v
+                                Err(_): pass
+                            var d_en = 1
+                            if d_en_str == "false" or d_en_str == "0":
+                                d_en = 0
+                            rt_debug_set_breakpoint_enabled(d_bpi, d_en)
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("breakpoint_id", d_bp_str)
+                            d_r = d_r + "," + jp("enabled", d_en_str)
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_get_source":
+                    val d_file = extract_nested_string(line, "arguments", "file")
+                    val d_start_str = extract_nested_string(line, "arguments", "start_line")
+                    val d_count_str = extract_nested_string(line, "arguments", "count")
+                    if d_file == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: file")
+                    else:
+                        var d_start = 1
+                        var d_cnt = 20
+                        if d_start_str != "":
+                            val d_sr = parse_int(d_start_str)
+                            match d_sr:
+                                Ok(v): d_start = v
+                                Err(_): pass
+                        if d_count_str != "":
+                            val d_cr = parse_int(d_count_str)
+                            match d_cr:
+                                Ok(v): d_cnt = v
+                                Err(_): pass
+                        val d_src = rt_debug_get_source_lines(d_file, d_start, d_cnt)
+                        var d_r = LB()
+                        d_r = d_r + jp("file", js(escape_json(d_file)))
+                        d_r = d_r + "," + jp("start_line", d_start.to_string())
+                        d_r = d_r + "," + jp("count", d_cnt.to_string())
+                        d_r = d_r + "," + jp("source", js(escape_json(d_src)))
+                        d_r = d_r + RB()
+                        response = make_tool_result(id, d_r)
+                elif tool_name == "debug_watch":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_action = extract_nested_string(line, "arguments", "action")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_action == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: action")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            if d_action == "add":
+                                val d_expr = extract_nested_string(line, "arguments", "expression")
+                                val d_wid = rt_debug_add_watch(d_expr)
+                                var d_r = LB()
+                                d_r = d_r + jp("session_id", js(d_sid))
+                                d_r = d_r + "," + jp("action", js("add"))
+                                d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
+                                d_r = d_r + "," + jp("watch_id", d_wid.to_string())
+                                d_r = d_r + RB()
+                                response = make_tool_result(id, d_r)
+                            elif d_action == "remove":
+                                val d_expr = extract_nested_string(line, "arguments", "expression")
+                                val d_ok = rt_debug_remove_watch(d_expr)
+                                var d_r = LB()
+                                d_r = d_r + jp("session_id", js(d_sid))
+                                d_r = d_r + "," + jp("action", js("remove"))
+                                d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
+                                d_r = d_r + "," + jp("removed", d_ok.to_string())
+                                d_r = d_r + RB()
+                                response = make_tool_result(id, d_r)
+                            else:
+                                val d_watches = rt_debug_list_watches()
+                                var d_r = LB()
+                                d_r = d_r + jp("session_id", js(d_sid))
+                                d_r = d_r + "," + jp("action", js("list"))
+                                d_r = d_r + "," + jp("watches", js(escape_json(d_watches)))
+                                d_r = d_r + RB()
+                                response = make_tool_result(id, d_r)
+                elif tool_name == "debug_set_variable":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    val d_var = extract_nested_string(line, "arguments", "name")
+                    val d_val = extract_nested_string(line, "arguments", "value")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    elif d_var == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: name")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            val d_frame_str = extract_nested_string(line, "arguments", "frame_index")
+                            var d_frame = 0
+                            if d_frame_str != "":
+                                val d_fr = parse_int(d_frame_str)
+                                match d_fr:
+                                    Ok(v): d_frame = v
+                                    Err(_): pass
+                            val d_ok = rt_debug_set_variable(d_var, d_val, d_frame)
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("name", js(escape_json(d_var)))
+                            d_r = d_r + "," + jp("value", js(escape_json(d_val)))
+                            d_r = d_r + "," + jp("frame_index", d_frame.to_string())
+                            d_r = d_r + "," + jp("success", d_ok.to_string())
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                elif tool_name == "debug_terminate":
+                    val d_sid = extract_nested_string(line, "arguments", "session_id")
+                    if d_sid == "":
+                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
+                    else:
+                        val d_idx = session_mgr.find_session(d_sid)
+                        if d_idx < 0:
+                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
+                        else:
+                            rt_debug_terminate()
+                            session_mgr.remove_session(d_sid)
+                            var d_r = LB()
+                            d_r = d_r + jp("session_id", js(d_sid))
+                            d_r = d_r + "," + jp("status", js("terminated"))
+                            d_r = d_r + RB()
+                            response = make_tool_result(id, d_r)
+                else:
+                    response = make_error_response(id, -32602, "Unknown debug tool: " + tool_name)
+            else:
+                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr)
             if response != "":
                 write_stdout_message(response)
 
@@ -143,7 +578,7 @@ fn write_stdout_message(body: String):
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager) -> String:
+fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager) -> String:
     if debug_mode:
         debug_log("Request: " + body)
 
@@ -164,7 +599,7 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return make_tools_list_response(id)
     elif method == "tools/call":
         val tool_name = extract_nested_string(body, "params", "name")
-        return handle_tool_call(id, tool_name, body, debug_mode)
+        return handle_tool_call(id, tool_name, body, debug_mode, session_mgr)
     elif method == "resources/list":
         val cursor = extract_nested_string(body, "params", "cursor")
         return handle_resources_list_paginated(id, resource_mgr, cursor, debug_mode)
@@ -198,7 +633,7 @@ fn make_initialize_response(id: String) -> String:
     server_info = server_info + ","
     server_info = server_info + jp("version", js("2.0.0"))
     server_info = server_info + ","
-    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), feature tracking, and test result tools."
+    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), and debug tools (debug_create_session, debug_list_sessions, debug_close_session, debug_set_breakpoint, debug_remove_breakpoint, debug_continue, debug_step, debug_get_variables, debug_stack_trace, debug_evaluate)."
     server_info = server_info + jp("instructions", js(instructions))
     server_info = server_info + RB()
 
@@ -266,25 +701,54 @@ fn make_tools_list_response(id: String) -> String:
     val t6 = make_tool_schema("bugdb_add", "Add new bug", "bug", "Bug JSON", true, false, false, false)
     val t7 = make_tool_schema("bugdb_update", "Update existing bug", "id", "Bug ID", true, false, false, true)
 
+    # Debug tools (t8-t17) - original 10
+    val t8 = schema_debug_create_session()
+    val t9 = schema_debug_list_sessions()
+    val t10 = schema_debug_close_session()
+    val t11 = schema_debug_set_breakpoint()
+    val t12 = schema_debug_remove_breakpoint()
+    val t13 = schema_debug_continue()
+    val t14 = schema_debug_step()
+    val t15 = schema_debug_get_variables()
+    val t16 = schema_debug_stack_trace()
+    val t17 = schema_debug_evaluate()
+    # New debug tools (t18-t23) - Phase 1.5
+    val t18 = schema_debug_set_function_breakpoint()
+    val t19 = schema_debug_enable_breakpoint()
+    val t20 = schema_debug_get_source()
+    val t21 = schema_debug_watch()
+    val t22 = schema_debug_set_variable()
+    val t23 = schema_debug_terminate()
+
     var tools = "["
     tools = tools + t1
-    tools = tools + ","
-    tools = tools + t2
-    tools = tools + ","
-    tools = tools + t3
-    tools = tools + ","
-    tools = tools + t4
-    tools = tools + ","
-    tools = tools + t5
-    tools = tools + ","
-    tools = tools + t6
-    tools = tools + ","
-    tools = tools + t7
+    tools = tools + "," + t2
+    tools = tools + "," + t3
+    tools = tools + "," + t4
+    tools = tools + "," + t5
+    tools = tools + "," + t6
+    tools = tools + "," + t7
+    tools = tools + "," + t8
+    tools = tools + "," + t9
+    tools = tools + "," + t10
+    tools = tools + "," + t11
+    tools = tools + "," + t12
+    tools = tools + "," + t13
+    tools = tools + "," + t14
+    tools = tools + "," + t15
+    tools = tools + "," + t16
+    tools = tools + "," + t17
+    tools = tools + "," + t18
+    tools = tools + "," + t19
+    tools = tools + "," + t20
+    tools = tools + "," + t21
+    tools = tools + "," + t22
+    tools = tools + "," + t23
     tools = tools + "]"
     val result = jo1(jp("tools", tools))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool) -> String:
+fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager) -> String:
     if debug_mode:
         debug_log("Tool call: " + tool_name)
 
@@ -327,6 +791,55 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
         val bug_json = extract_nested_string(body, "arguments", "updates")
         val result = bugdb_resource.update_bug_from_json("doc/bug/bug_db.sdn", bug_id, bug_json)
         return make_tool_result(id, result)
+
+    # Debug tools
+    elif tool_name == "debug_create_session":
+        return handle_debug_create_session(id, body, session_mgr)
+
+    elif tool_name == "debug_list_sessions":
+        return handle_debug_list_sessions(id, session_mgr)
+
+    elif tool_name == "debug_close_session":
+        return handle_debug_close_session(id, body, session_mgr)
+
+    elif tool_name == "debug_set_breakpoint":
+        return handle_debug_set_breakpoint(id, body, session_mgr)
+
+    elif tool_name == "debug_remove_breakpoint":
+        return handle_debug_remove_breakpoint(id, body, session_mgr)
+
+    elif tool_name == "debug_continue":
+        return handle_debug_continue(id, body, session_mgr)
+
+    elif tool_name == "debug_step":
+        return handle_debug_step(id, body, session_mgr)
+
+    elif tool_name == "debug_get_variables":
+        return handle_debug_get_variables(id, body, session_mgr)
+
+    elif tool_name == "debug_stack_trace":
+        return handle_debug_stack_trace(id, body, session_mgr)
+
+    elif tool_name == "debug_evaluate":
+        return handle_debug_evaluate(id, body, session_mgr)
+
+    elif tool_name == "debug_set_function_breakpoint":
+        return handle_debug_set_function_breakpoint(id, body, session_mgr)
+
+    elif tool_name == "debug_enable_breakpoint":
+        return handle_debug_enable_breakpoint(id, body, session_mgr)
+
+    elif tool_name == "debug_get_source":
+        return handle_debug_get_source(id, body, session_mgr)
+
+    elif tool_name == "debug_watch":
+        return handle_debug_watch(id, body, session_mgr)
+
+    elif tool_name == "debug_set_variable":
+        return handle_debug_set_variable(id, body, session_mgr)
+
+    elif tool_name == "debug_terminate":
+        return handle_debug_terminate(id, body, session_mgr)
 
     else:
         return make_error_response(id, -32602, "Unknown tool: " + tool_name)
@@ -620,8 +1133,7 @@ fn handle_prompts_get(id: String, prompt_name: String, body: String, prompt_mgr:
         debug_log("Getting prompt: " + prompt_name)
 
     # Extract arguments from request
-    # TODO: Implement proper JSON argument extraction
-    val arguments: Dict<String, String> = {}  # Empty for now
+    val arguments = extract_arguments_dict(body)
 
     val prompt_result = prompt_mgr.get_prompt(prompt_name, arguments)
 

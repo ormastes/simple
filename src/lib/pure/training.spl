@@ -2,9 +2,12 @@
 #
 # Training loops, loss functions, and optimizers
 # Zero external dependencies
+#
+# NOTE: Optimizer classes use autograd Tensor types with generics
+# and will only work in compiled mode, not in the interpreter.
 
-use lib.pure.tensor.{PureTensor, tensor_from_data}
-use lib.pure.tensor_ops.{sub, mul, mean, sum}
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros_like}
+use lib.pure.tensor_ops.{sub, mul, add, mean, sum, tensor_log, tensor_mul_scalar, tensor_add_scalar, tensor_sqrt, tensor_div}
 
 # ============================================================================
 # Loss Functions
@@ -23,6 +26,36 @@ fn mae_loss(pred: PureTensor<f64>, target: PureTensor<f64>) -> f64:
     for v in diff.data:
         abs_sum = abs_sum + (if v < 0.0: -v else: v)
     abs_sum / diff.numel()
+
+fn binary_cross_entropy_loss(pred: any, target: any) -> any:
+    """Binary Cross-Entropy loss.
+
+    L = -mean(target * log(pred) + (1 - target) * log(1 - pred))
+
+    Args:
+        pred - Predicted probabilities (0-1 range)
+        target - Target labels (0 or 1)
+
+    Returns:
+        Scalar loss tensor
+    """
+    # NOTE: Using 'any' type since Tensor uses generics (compiler-only)
+    # log(pred)
+    val log_pred = tensor_log(pred)
+    # log(1 - pred)
+    val one_minus_pred = tensor_add_scalar(tensor_mul_scalar(pred, -1.0), 1.0)
+    val log_one_minus_pred = tensor_log(one_minus_pred)
+
+    # target * log(pred)
+    val term1 = tensor_mul(target, log_pred)
+    # (1 - target) * log(1 - pred)
+    val one_minus_target = tensor_add_scalar(tensor_mul_scalar(target, -1.0), 1.0)
+    val term2 = tensor_mul(one_minus_target, log_one_minus_pred)
+
+    # -mean(term1 + term2)
+    val sum_terms = tensor_add(term1, term2)
+    val neg_mean = tensor_mul_scalar(tensor_mean(sum_terms), -1.0)
+    neg_mean
 
 # ============================================================================
 # Simple Linear Model (for demos)
@@ -67,8 +100,283 @@ fn compute_gradients(model: LinearModel, x: PureTensor<f64>, y: PureTensor<f64>)
     (grad_w / x.data.len(), grad_b / x.data.len())
 
 # ============================================================================
+# Optimizers
+# ============================================================================
+
+class SGD:
+    """Stochastic Gradient Descent optimizer with momentum."""
+    parameters: [any]  # List of Tensor parameters
+    lr: f64
+    momentum: f64
+    velocity: [any]  # Momentum buffers (one per parameter)
+
+    static fn create(parameters: [any], lr: f64, momentum: f64) -> SGD:
+        """Create SGD optimizer.
+
+        Args:
+            parameters - List of parameters to optimize
+            lr - Learning rate
+            momentum - Momentum coefficient (default 0.0)
+        """
+        # Initialize velocity buffers to zero
+        var velocity: [any] = []
+        for param in parameters:
+            velocity.push(tensor_zeros_like(param.value))
+
+        SGD(parameters: parameters, lr: lr, momentum: momentum, velocity: velocity)
+
+    me step():
+        """Update parameters using gradients."""
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+
+            # Skip if no gradient
+            if param.grad.?:
+                val grad = param.grad.unwrap()
+
+                # Update velocity: v = momentum * v + lr * grad
+                val v_old = self.velocity[i]
+                val v_new = tensor_add(
+                    tensor_mul_scalar(v_old, self.momentum),
+                    tensor_mul_scalar(grad, self.lr)
+                )
+                self.velocity[i] = v_new
+
+                # Update parameter: param = param - v_new
+                param.value = tensor_sub(param.value, v_new)
+
+            i = i + 1
+
+    me zero_grad():
+        """Clear all gradients."""
+        for param in self.parameters:
+            param.grad = None
+
+    fn to_string() -> text:
+        """String representation."""
+        "SGD(lr={self.lr}, momentum={self.momentum}, params={self.parameters.len()})"
+
+class Adam:
+    """Adam optimizer with adaptive learning rates."""
+    parameters: [any]
+    lr: f64
+    betas: (f64, f64)
+    eps: f64
+    t: i64
+    m: [any]  # First moment estimates
+    v: [any]  # Second moment estimates
+
+    static fn create(parameters: [any], lr: f64, betas: (f64, f64), eps: f64) -> Adam:
+        """Create Adam optimizer.
+
+        Args:
+            parameters - List of parameters to optimize
+            lr - Learning rate (default 0.001)
+            betas - Coefficients for moments (default (0.9, 0.999))
+            eps - Term added for numerical stability (default 1e-8)
+        """
+        # Initialize moment buffers to zero
+        var m: [any] = []
+        var v: [any] = []
+        for param in parameters:
+            m.push(tensor_zeros_like(param.value))
+            v.push(tensor_zeros_like(param.value))
+
+        Adam(parameters: parameters, lr: lr, betas: betas, eps: eps, t: 0, m: m, v: v)
+
+    me step():
+        """Update parameters using Adam algorithm."""
+        self.t = self.t + 1
+
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+
+            # Skip if no gradient
+            if param.grad.?:
+                val grad = param.grad.unwrap()
+                val beta1 = self.betas.0
+                val beta2 = self.betas.1
+
+                # Update biased first moment: m = beta1 * m + (1 - beta1) * grad
+                val m_old = self.m[i]
+                val m_new = tensor_add(
+                    tensor_mul_scalar(m_old, beta1),
+                    tensor_mul_scalar(grad, 1.0 - beta1)
+                )
+                self.m[i] = m_new
+
+                # Update biased second moment: v = beta2 * v + (1 - beta2) * grad^2
+                val v_old = self.v[i]
+                val grad_sq = tensor_mul(grad, grad)
+                val v_new = tensor_add(
+                    tensor_mul_scalar(v_old, beta2),
+                    tensor_mul_scalar(grad_sq, 1.0 - beta2)
+                )
+                self.v[i] = v_new
+
+                # Bias correction
+                val m_hat = tensor_div_scalar(m_new, 1.0 - (beta1 ** self.t))
+                val v_hat = tensor_div_scalar(v_new, 1.0 - (beta2 ** self.t))
+
+                # Update parameter: param = param - lr * m_hat / (sqrt(v_hat) + eps)
+                val denominator = tensor_add_scalar(tensor_sqrt(v_hat), self.eps)
+                val update = tensor_div(m_hat, denominator)
+                param.value = tensor_sub(param.value, tensor_mul_scalar(update, self.lr))
+
+            i = i + 1
+
+    me zero_grad():
+        """Clear all gradients."""
+        for param in self.parameters:
+            param.grad = None
+
+    fn to_string() -> text:
+        """String representation."""
+        "Adam(lr={self.lr}, betas={self.betas}, eps={self.eps}, t={self.t})"
+
+# ============================================================================
+# Metrics
+# ============================================================================
+
+fn accuracy(predictions: any, targets: any) -> f64:
+    """Compute classification accuracy.
+
+    Args:
+        predictions - Predicted labels (0 or 1)
+        targets - Target labels (0 or 1)
+
+    Returns:
+        Accuracy as fraction (0.0 to 1.0)
+    """
+    var correct = 0.0
+    var total = 0.0
+
+    var i = 0
+    while i < predictions.value.data.len():
+        val pred = predictions.value.data[i]
+        val target = targets.value.data[i]
+        if pred == target:
+            correct = correct + 1.0
+        total = total + 1.0
+        i = i + 1
+
+    correct / total
+
+fn accuracy_from_logits(logits: any, targets: any) -> f64:
+    """Compute accuracy from logits (apply threshold at 0.5).
+
+    Args:
+        logits - Raw prediction values
+        targets - Target labels (0 or 1)
+
+    Returns:
+        Accuracy as fraction
+    """
+    # Convert logits to binary predictions (threshold 0.5)
+    var correct = 0.0
+    var total = 0.0
+
+    var i = 0
+    while i < logits.value.data.len():
+        val logit = logits.value.data[i]
+        val pred = if logit > 0.5: 1.0 else: 0.0
+        val target = targets.value.data[i]
+        if pred == target:
+            correct = correct + 1.0
+        total = total + 1.0
+        i = i + 1
+
+    correct / total
+
+# ============================================================================
+# Training History
+# ============================================================================
+
+class TrainingHistory:
+    """Records training metrics over epochs."""
+    epochs: [i64]
+    losses: [f64]
+
+    static fn create() -> TrainingHistory:
+        """Create empty training history."""
+        TrainingHistory(epochs: [], losses: [])
+
+    me add_epoch(epoch: i64, loss: f64):
+        """Add epoch data to history."""
+        self.epochs.push(epoch)
+        self.losses.push(loss)
+
+    fn get_final_loss() -> f64:
+        """Get the final loss value."""
+        if self.losses.len() > 0:
+            self.losses[self.losses.len() - 1]
+        else:
+            0.0
+
+    fn to_string() -> text:
+        """String representation."""
+        "TrainingHistory(epochs={self.epochs.len()}, final_loss={self.get_final_loss()})"
+
+# ============================================================================
+# Trainer
+# ============================================================================
+
+class Trainer:
+    """High-level training wrapper."""
+    model: any
+    optimizer: any
+    loss_fn: fn(any, any) -> any
+
+    static fn create(model: any, optimizer: any, loss_fn: fn(any, any) -> any) -> Trainer:
+        """Create trainer.
+
+        Args:
+            model - Model to train
+            optimizer - Optimizer to use
+            loss_fn - Loss function
+        """
+        Trainer(model: model, optimizer: optimizer, loss_fn: loss_fn)
+
+    fn train_step(batch_x: any, batch_y: any) -> f64:
+        """Perform single training step.
+
+        Args:
+            batch_x - Input batch
+            batch_y - Target batch
+
+        Returns:
+            Loss value
+        """
+        # Zero gradients
+        self.optimizer.zero_grad()
+
+        # Forward pass
+        val predictions = self.model.forward(batch_x)
+
+        # Compute loss
+        val loss = self.loss_fn(predictions, batch_y)
+
+        # Backward pass (requires autograd)
+        # NOTE: backward(loss) call would go here when autograd is available
+
+        # Optimizer step
+        self.optimizer.step()
+
+        # Return loss value
+        loss.value.data[0]
+
+    fn to_string() -> text:
+        """String representation."""
+        "Trainer(model={self.model.to_string()})"
+
+# ============================================================================
 # Exports
 # ============================================================================
 
-export mse_loss, mae_loss, compute_mse
+export mse_loss, mae_loss, binary_cross_entropy_loss, compute_mse
+export SGD, Adam
+export accuracy, accuracy_from_logits
+export TrainingHistory, Trainer
 export LinearModel, compute_gradients

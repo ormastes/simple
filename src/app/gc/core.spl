@@ -281,9 +281,16 @@ fn gc_mark_object(gc: GCCore, ptr: i64):
     # Mark this object
     write_u8(header_ptr, 1)
 
-    # TODO: Traverse children based on type_id
-    # For now: simple implementation without child traversal
-    # Full implementation would need type metadata
+    # Traverse children by scanning pointer-sized fields in the object
+    # Objects store child pointers at ptr + 32 (after header)
+    val obj_start = header_ptr + 32
+    val obj_size = read_i64(header_ptr + 1)
+    var offset = 0
+    while offset + 8 <= obj_size:
+        val child_ptr = read_i64(obj_start + offset)
+        if child_ptr != 0:
+            gc_mark_object(child_ptr)
+        offset = offset + 8
 
 fn gc_sweep_phase(gc: GCCore) -> i64:
     """Sweep phase: Free unmarked objects.
@@ -391,25 +398,26 @@ fn gc_destroy(gc: GCCore):
 # Helper Functions (use syscall FFI only)
 # ============================================================================
 
+extern fn rt_mem_read_u8(ptr: i64) -> i64
+extern fn rt_mem_write_u8(ptr: i64, value: i64)
+extern fn rt_mem_read_i64(ptr: i64) -> i64
+extern fn rt_mem_write_i64(ptr: i64, value: i64)
+
 fn read_u8(ptr: i64) -> u8:
-    """Read byte from memory (FFI syscall)."""
-    # TODO: Use FFI to read memory
-    0
+    """Read byte from memory via runtime FFI."""
+    rt_mem_read_u8(ptr) as u8
 
 fn write_u8(ptr: i64, value: u8):
-    """Write byte to memory (FFI syscall)."""
-    # TODO: Use FFI to write memory
-    pass
+    """Write byte to memory via runtime FFI."""
+    rt_mem_write_u8(ptr, value as i64)
 
 fn read_i64(ptr: i64) -> i64:
-    """Read i64 from memory (FFI syscall)."""
-    # TODO: Use FFI to read memory
-    0
+    """Read i64 from memory via runtime FFI."""
+    rt_mem_read_i64(ptr)
 
 fn write_i64(ptr: i64, value: i64):
-    """Write i64 to memory (FFI syscall)."""
-    # TODO: Use FFI to write memory
-    pass
+    """Write i64 to memory via runtime FFI."""
+    rt_mem_write_i64(ptr, value)
 
 fn time_now_micros() -> i64:
     """Get current time in microseconds (FFI syscall)."""
@@ -445,7 +453,8 @@ fn gc_create_with_logger(config: GCConfig, logger_callback: fn(text)) -> GCCore:
     
     Note: Logger callback stored in config for Simple implementation.
     """
-    # TODO: Store logger callback in GCCore
+    # Store logger callback in config and create GC
+    config.logger = Some(logger_callback)
     gc_create(config)
 
 fn gc_tracked_memory(gc: GCCore) -> i64:

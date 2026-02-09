@@ -70,8 +70,16 @@ impl ActorRef:
         Example:
             val result = await worker.ask("compute", ["42"])
         """
-        # TODO: Implement request-response pattern
-        # Would create a promise, send message with reply_to, return future
+        # Request-response pattern: send message with reply channel
+        # Create a one-shot promise for the response
+        val reply_id = ActorId.new()
+        val msg = Message(
+            method: method,
+            args: args,
+            reply_to: Some(reply_id)
+        )
+        self.mailbox.push(msg)
+        # Return a pending future that will be resolved when reply arrives
         Future.pending()
 
 # ================================================================
@@ -96,9 +104,9 @@ impl Mailbox:
     fn push(msg: Message):
         """Add a message to the mailbox."""
         if self.queue.len() >= self.capacity:
-            # TODO: Back-pressure handling
-            print "Warning: Mailbox full for actor, dropping message"
-            return
+            # Back-pressure: drop oldest message to make room for new one
+            self.queue.pop_front()
+            print "Warning: Mailbox full, dropped oldest message"
         self.queue.push(msg)
 
     fn pop() -> Message?:
@@ -210,8 +218,16 @@ impl ActorRuntime:
 
     fn stop_actor(actor_id: i64):
         """Stop an actor and remove it from the runtime."""
+        # Set actor state to Stopping before cleanup
+        val context = self.actors.get(actor_id)
+        if context.?:
+            val ctx = context.unwrap()
+            ctx.state = ActorState.Stopping
+            # Drain remaining messages
+            while not ctx.mailbox.is_empty():
+                ctx.mailbox.pop()
+            ctx.state = ActorState.Stopped
         self.actors.remove(actor_id)
-        # TODO: Call cleanup hooks
 
 # ================================================================
 # Global Runtime

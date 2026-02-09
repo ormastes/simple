@@ -2,9 +2,12 @@
 #
 # Implements common NN layers in pure Simple
 # Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
 
-use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros}
-use lib.pure.tensor_ops.{add, mul_scalar, relu, sigmoid, tanh}
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_randn}
+use lib.pure.tensor_ops.{add, mul, mul_scalar, relu, sigmoid, tanh, softmax, tensor_exp, tensor_sum, tensor_div_scalar}
 
 # ============================================================================
 # Layer Classes
@@ -12,10 +15,27 @@ use lib.pure.tensor_ops.{add, mul_scalar, relu, sigmoid, tanh}
 
 class Linear:
     """Fully-connected layer: y = xW^T + b"""
-    weights: PureTensor<f64>
+    weight: PureTensor<f64>
     bias: PureTensor<f64>?
     in_features: i64
     out_features: i64
+    training: bool
+
+    static fn create(in_features: i64, out_features: i64, bias: bool) -> Linear:
+        """Create Linear layer with simple initialization."""
+        var w_data: [f64] = []
+        var i = 0
+        while i < in_features * out_features:
+            w_data.push(0.1)
+            i = i + 1
+
+        val weight = tensor_from_data(w_data, [out_features, in_features])
+        val bias_tensor = if bias:
+            Some(tensor_zeros([out_features]))
+        else:
+            nil
+
+        Linear(weight: weight, bias: bias_tensor, in_features: in_features, out_features: out_features, training: true)
 
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
         """Forward: y = xW^T + b"""
@@ -25,7 +45,7 @@ class Linear:
             var sum = 0.0
             var j = 0
             while j < self.in_features and j < x.data.len():
-                sum = sum + self.weights.data[i * self.in_features + j] * x.data[j]
+                sum = sum + self.weight.data[i * self.in_features + j] * x.data[j]
                 j = j + 1
 
             if self.bias.?:
@@ -36,39 +56,255 @@ class Linear:
 
         tensor_from_data(result, [self.out_features])
 
-fn linear_create(in_features: i64, out_features: i64, use_bias: bool) -> Linear:
-    """Create Linear layer with simple initialization."""
-    var w_data: [f64] = []
-    var i = 0
-    while i < in_features * out_features:
-        w_data.push(0.1)
-        i = i + 1
+    fn parameters() -> [PureTensor<f64>]:
+        """Get list of parameters (weight, bias if exists)."""
+        if self.bias.?:
+            [self.weight, self.bias.unwrap()]
+        else:
+            [self.weight]
 
-    val weights = tensor_from_data(w_data, [out_features, in_features])
-    val bias = if use_bias:
-        Some(tensor_zeros([out_features]))
-    else:
-        nil
+    me train():
+        """Set layer to training mode."""
+        self.training = true
 
-    Linear(weights: weights, bias: bias, in_features: in_features, out_features: out_features)
+    me eval():
+        """Set layer to evaluation mode."""
+        self.training = false
+
+    fn to_string() -> text:
+        """String representation."""
+        "Linear(in_features={self.in_features}, out_features={self.out_features})"
 
 class ReLU:
     """Rectified Linear Unit: max(0, x)"""
+    training: bool
+
+    static fn create() -> ReLU:
+        ReLU(training: true)
+
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
         relu(x)
 
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "ReLU()"
+
 class Sigmoid:
     """Sigmoid activation"""
+    training: bool
+
+    static fn create() -> Sigmoid:
+        Sigmoid(training: true)
+
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
         sigmoid(x)
 
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "Sigmoid()"
+
 class Tanh:
     """Tanh activation"""
+    training: bool
+
+    static fn create() -> Tanh:
+        Tanh(training: true)
+
     fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
         tanh(x)
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "Tanh()"
+
+class Softmax:
+    """Softmax activation: exp(x_i) / sum(exp(x_j))"""
+    dim: i64
+    training: bool
+
+    static fn create(dim: i64) -> Softmax:
+        Softmax(dim: dim, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        # Simple softmax: exp(x) / sum(exp(x))
+        val exp_x = tensor_exp(x)
+        val sum_exp = tensor_sum(exp_x)
+        tensor_div_scalar(exp_x, sum_exp)
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "Softmax(dim={self.dim})"
+
+class Dropout:
+    """Dropout regularization"""
+    p: f64
+    training: bool
+
+    static fn create(p: f64) -> Dropout:
+        Dropout(p: p, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        # In training mode: randomly drop elements
+        # In eval mode: return input unchanged
+        if self.training:
+            # Dropout mask implementation (Phase 3.4 - TODO ✅)
+            # Generate random values in [0, 1)
+            val rand_tensor = tensor_randn(x.shape)
+
+            # Create binary mask: keep if rand > p, drop if rand <= p
+            var mask_data: [f64] = []
+            val keep_prob = 1.0 - self.p
+            for val in rand_tensor.data:
+                # Shift random values from [-0.5, 0.5) to [0, 1)
+                val normalized = val + 0.5
+                if normalized > self.p:
+                    mask_data.push(1.0)
+                else:
+                    mask_data.push(0.0)
+
+            val mask = tensor_from_data(mask_data, x.shape)
+
+            # Apply mask and scale by 1/(1-p) to maintain expected value
+            val scale = 1.0 / keep_prob
+            val masked = mul(x, mask)
+            mul_scalar(masked, scale)
+        else:
+            x
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "Dropout(p={self.p})"
+
+class Sequential:
+    """Sequential container for chaining layers"""
+    layers: [any]  # List of layers (using 'any' since no Layer trait yet)
+    training: bool
+
+    static fn create(layers: [any]) -> Sequential:
+        Sequential(layers: layers, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Forward pass through all layers."""
+        var result = x
+        for layer in self.layers:
+            result = layer.forward(result)
+        result
+
+    fn parameters() -> [PureTensor<f64>]:
+        """Collect parameters from all layers."""
+        var all_params: [PureTensor<f64>] = []
+        for layer in self.layers:
+            val layer_params = layer.parameters()
+            all_params = all_params + layer_params
+        all_params
+
+    me train():
+        """Set all layers to training mode."""
+        self.training = true
+        for layer in self.layers:
+            layer.train()
+
+    me eval():
+        """Set all layers to evaluation mode."""
+        self.training = false
+        for layer in self.layers:
+            layer.eval()
+
+    fn to_string() -> text:
+        """String representation."""
+        var s = "Sequential(\n"
+        for layer in self.layers:
+            s = s + "  " + layer.to_string() + "\n"
+        s + ")"
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn count_parameters(model: any) -> i64:
+    """Count total number of parameters in a model.
+
+    Args:
+        model - Model with .parameters() method
+
+    Returns:
+        Total number of scalar parameters
+    """
+    val params = model.parameters()
+    var total = 0
+    for param in params:
+        var param_size = 1
+        for dim in param.shape:
+            param_size = param_size * dim
+        total = total + param_size
+    total
+
+fn zero_grad(model: any):
+    """Zero all gradients in the model.
+
+    Args:
+        model - Model with .parameters() method
+
+    Note: This is a placeholder. Actual gradient zeroing requires
+    autograd support which is blocked by interpreter limitations.
+    """
+    # Zero gradients by resetting parameter gradient accumulators
+    # Since autograd is not yet available, manually zero grad tensors
+    val params = model.parameters()
+    for param in params:
+        if param.grad.?:
+            param.grad = PureTensor.zeros_like(param.grad.unwrap())
+    ()
+
+# Module-level factory function (for backwards compatibility)
+fn linear_create(in_features: i64, out_features: i64, use_bias: bool) -> Linear:
+    """Create Linear layer (legacy API)."""
+    Linear.create(in_features, out_features, use_bias)
 
 # ============================================================================
 # Exports
 # ============================================================================
 
-export Linear, linear_create, ReLU, Sigmoid, Tanh
+export Linear, ReLU, Sigmoid, Tanh, Softmax, Dropout, Sequential
+export count_parameters, zero_grad
+export linear_create  # Legacy API

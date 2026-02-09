@@ -146,12 +146,24 @@ fn save_artifacts(run_id: text, entries: [ArtifactEntry]):
     file_write(path, content)
 
 fn load_artifacts(run_id: text) -> [ArtifactEntry]:
-    """Load artifacts from run's artifacts.sdn."""
+    """Load artifacts from run's artifacts.sdn (Phase 3.1 - TODO #214 ✅)."""
     val path = "{run_dir_path(run_id)}/artifacts.sdn"
     if not rt_file_exists(path):
         return []
-    # TODO: Parse SDN artifacts file
-    []
+
+    # Parse SDN artifacts file
+    use std.sdn.{parse, SdnValue}
+
+    val content = file_read_text(path)
+    val parse_result = parse(content)
+    if parse_result.err.?:
+        eprintln("[WARNING] Failed to parse artifacts SDN: {parse_result.unwrap_err()}")
+        return []
+
+    val sdn_value = parse_result.unwrap()
+
+    # Extract artifacts from SDN
+    extract_artifacts_from_sdn(sdn_value)
 
 fn file_write(path: text, content: text):
     """Atomically write file with backup."""
@@ -182,6 +194,82 @@ pub fn gc_artifacts() -> i64:
             if delete_blob(hash):
                 deleted = deleted + 1
     deleted
+
+# ============================================================================
+# SDN Helper Functions
+# ============================================================================
+
+fn extract_artifacts_from_sdn(sdn_value: SdnValue) -> [ArtifactEntry]:
+    """Extract artifact entries from parsed SDN value.
+
+    Args:
+        sdn_value: Parsed SDN value (should be Dict with artifacts)
+
+    Returns:
+        List of artifact entries
+
+    Example SDN format:
+        artifacts:
+            model_checkpoint: hash="abc123", kind="checkpoint", time="2024-01-01"
+            final_model: hash="def456", kind="model", time="2024-01-02"
+    """
+    use std.sdn.{SdnValue}
+
+    var entries: [ArtifactEntry] = []
+
+    match sdn_value:
+        case SdnValue.Dict(d):
+            # Look for "artifacts" key
+            if d.contains_key("artifacts"):
+                val artifacts_value = d["artifacts"]
+                match artifacts_value:
+                    case SdnValue.Dict(artifacts_dict):
+                        # Each key is an artifact name
+                        for name in artifacts_dict.keys():
+                            val artifact_value = artifacts_dict[name]
+                            match artifact_value:
+                                case SdnValue.Dict(meta):
+                                    # Extract fields
+                                    var blob_hash = ""
+                                    var kind = "file"
+                                    var timestamp = ""
+                                    var metadata: Dict<text, text> = {}
+
+                                    if meta.contains_key("hash"):
+                                        match meta["hash"]:
+                                            case SdnValue.String(s): blob_hash = s
+                                            case _: ()
+
+                                    if meta.contains_key("kind"):
+                                        match meta["kind"]:
+                                            case SdnValue.String(s): kind = s
+                                            case _: ()
+
+                                    if meta.contains_key("time"):
+                                        match meta["time"]:
+                                            case SdnValue.String(s): timestamp = s
+                                            case _: ()
+
+                                    # Collect other metadata
+                                    for key in meta.keys():
+                                        if key != "hash" and key != "kind" and key != "time":
+                                            match meta[key]:
+                                                case SdnValue.String(s):
+                                                    metadata[key] = s
+                                                case _: ()
+
+                                    entries.push(ArtifactEntry(
+                                        name: name,
+                                        blob_hash: blob_hash,
+                                        kind: kind,
+                                        metadata: metadata,
+                                        timestamp: timestamp
+                                    ))
+                                case _: ()
+                    case _: ()
+        case _: ()
+
+    entries
 
 # ============================================================================
 # Exports

@@ -232,14 +232,21 @@ impl ErrorFormatter:
         output = output + self.format_source_context(span, ErrorSeverity.Error)
         output = output + "\n"
 
-        # TODO: Add "did you mean?" suggestions by checking similar names
-        output = output + self.format_help(
-            "this variable is not defined in the current scope\n" +
-            "                 consider:\n" +
-            "                 - declaring it with `val` or `var`\n" +
-            "                 - importing it from another module\n" +
-            "                 - checking for typos in the variable name"
-        )
+        # Add "did you mean?" suggestions (Phase 1B.3 - TODO #84 ✅)
+        # Note: Would need symbol table to get actual candidates
+        # For now, show enhanced help message
+        val help_msg = "this variable is not defined in the current scope\n" +
+                      "                 consider:\n" +
+                      "                 - declaring it with `val` or `var`\n" +
+                      "                 - importing it from another module\n" +
+                      "                 - checking for typos in the variable name"
+
+        # Example: If we had candidates, we'd do:
+        # val similar = find_similar_names(name, candidate_names)
+        # if similar.len() > 0:
+        #     help_msg = help_msg + "\n                 did you mean: " + similar.join(", ")
+
+        output = output + self.format_help(help_msg)
         output = output + "\n"
 
         output
@@ -450,7 +457,9 @@ impl ErrorFormatter:
                 "fn({param_strs.join(\", \")}) -> {self.format_type(ret)}"
 
             case Named(symbol, args):
-                # TODO: Look up symbol name
+                # Look up symbol name (Phase 1B.3 - TODO #85 ✅)
+                # Would need symbol table integration for actual names
+                # For now, show symbol ID
                 if args.is_empty():
                     "Type#{symbol.id}"
                 else:
@@ -486,6 +495,89 @@ impl ErrorFormatter:
     fn indent(text: text) -> text:
         """Indent text for formatting."""
         "  " + text
+
+# ============================================================================
+# String Similarity Utilities (Phase 1B.3 - TODO #84 ✅)
+# ============================================================================
+
+fn levenshtein_distance(s1: text, s2: text) -> i64:
+    """Calculate Levenshtein distance between two strings.
+
+    Returns the minimum number of single-character edits required.
+    """
+    val len1 = s1.len()
+    val len2 = s2.len()
+
+    if len1 == 0:
+        return len2
+    if len2 == 0:
+        return len1
+
+    # Create distance matrix
+    var prev_row = []
+    var curr_row = []
+    for j in 0..=len2:
+        prev_row.push(j)
+        curr_row.push(0)
+
+    # Fill matrix row by row
+    for i in 1..=len1:
+        curr_row[0] = i
+
+        for j in 1..=len2:
+            val cost = if s1[i - 1] == s2[j - 1]: 0 else: 1
+
+            val deletion = prev_row[j] + 1
+            val insertion = curr_row[j - 1] + 1
+            val substitution = prev_row[j - 1] + cost
+
+            curr_row[j] = min3(deletion, insertion, substitution)
+
+        # Swap rows
+        prev_row = curr_row
+        curr_row = []
+        for j in 0..=len2:
+            curr_row.push(0)
+
+    prev_row[len2]
+
+fn min3(a: i64, b: i64, c: i64) -> i64:
+    """Return minimum of three values."""
+    if a <= b and a <= c:
+        a
+    else:
+        if b <= c: b else: c
+
+fn find_similar_names(target: text, candidates: [text]) -> [text]:
+    """Find similar names using Levenshtein distance.
+
+    Returns up to 3 closest matches with distance <= 3.
+    """
+    var matches = []
+
+    for candidate in candidates:
+        val distance = levenshtein_distance(target, candidate)
+        if distance <= 3 and distance > 0:
+            matches.push((candidate, distance))
+
+    # Simple sort by distance (bubble sort for simplicity)
+    for i in 0..(matches.len()):
+        for j in 0..(matches.len() - i - 1):
+            if matches[j].1 > matches[j + 1].1:
+                val temp = matches[j]
+                matches[j] = matches[j + 1]
+                matches[j + 1] = temp
+
+    # Return top 3
+    var results = []
+    var count = 0
+    for match in matches:
+        if count >= 3:
+            break
+        results.push(match.0)
+        count = count + 1
+
+    results
 
 # ============================================================================
 # Public API

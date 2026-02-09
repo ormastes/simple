@@ -1,0 +1,221 @@
+# Benchmarking framework for duplicate detection performance
+#
+# Provides utilities to measure and track performance across optimization phases.
+
+use app.duplicate_check.config.{DuplicationConfig, default_config}
+use app.duplicate_check.detector.{find_duplicates, collect_files}
+use app.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
+use app.io.mod.{current_time_ms, file_write, file_read, file_exists, shell}
+
+# Benchmark result for a single run
+struct BenchmarkResult:
+    name: text
+    files_count: i64
+    blocks_found: i64
+    groups_found: i64
+    duration_ms: i64
+    timestamp: i64
+    config_hash: text
+
+# Benchmark statistics
+struct BenchmarkStats:
+    runs: [BenchmarkResult]
+    average_ms: i64
+    min_ms: i64
+    max_ms: i64
+    stddev_ms: i64
+    throughput_files_per_sec: f64
+
+# Run a benchmark and return result
+fn run_benchmark(
+    name: text,
+    files: [text],
+    config: DuplicationConfig
+) -> BenchmarkResult:
+    val cache_manager = new_token_cache_manager()
+    val start = current_time_ms()
+    val groups = find_duplicates(files, config, cache_manager)
+    val duration = current_time_ms() - start
+
+    var total_blocks = 0
+    for group in groups:
+        total_blocks = total_blocks + group.blocks.len()
+
+    BenchmarkResult(
+        name: name,
+        files_count: files.len(),
+        blocks_found: total_blocks,
+        groups_found: groups.len(),
+        duration_ms: duration,
+        timestamp: current_time_ms(),
+        config_hash: compute_simple_config_hash(config)
+    )
+
+# Compute simple hash of config for comparison
+fn compute_simple_config_hash(config: DuplicationConfig) -> text:
+    "{config.min_tokens}_{config.min_lines}_{config.ignore_identifiers}"
+
+# Run multiple iterations and compute statistics
+fn run_benchmark_iterations(
+    name: text,
+    files: [text],
+    config: DuplicationConfig,
+    iterations: i64
+) -> BenchmarkStats:
+    var results = []
+    var i = 0
+
+    while i < iterations:
+        val result = run_benchmark("{name}_iter_{i}", files, config)
+        results = results + [result]
+        i = i + 1
+
+    compute_stats(results)
+
+# Compute statistics from multiple runs
+fn compute_stats(results: [BenchmarkResult]) -> BenchmarkStats:
+    if results.len() == 0:
+        return BenchmarkStats(
+            runs: [],
+            average_ms: 0,
+            min_ms: 0,
+            max_ms: 0,
+            stddev_ms: 0,
+            throughput_files_per_sec: 0.0
+        )
+
+    var total_ms = 0
+    var min_ms = results[0].duration_ms
+    var max_ms = results[0].duration_ms
+
+    for result in results:
+        total_ms = total_ms + result.duration_ms
+        if result.duration_ms < min_ms:
+            min_ms = result.duration_ms
+        if result.duration_ms > max_ms:
+            max_ms = result.duration_ms
+
+    val average_ms = total_ms / results.len()
+
+    # Compute standard deviation
+    var sum_squared_diff = 0
+    for result in results:
+        val diff = result.duration_ms - average_ms
+        sum_squared_diff = sum_squared_diff + (diff * diff)
+
+    val variance = sum_squared_diff / results.len()
+    val stddev_ms = sqrt_approx(variance)
+
+    # Compute throughput (files per second)
+    val total_files = results[0].files_count
+    val throughput = if average_ms > 0:
+        (total_files * 1000) / average_ms
+    else:
+        0
+
+    BenchmarkStats(
+        runs: results,
+        average_ms: average_ms,
+        min_ms: min_ms,
+        max_ms: max_ms,
+        stddev_ms: stddev_ms,
+        throughput_files_per_sec: throughput
+    )
+
+# Approximate integer square root
+fn sqrt_approx(n: i64) -> i64:
+    if n <= 0:
+        return 0
+
+    var x = n
+    var y = (x + 1) / 2
+
+    while y < x:
+        x = y
+        y = (x + n / x) / 2
+
+    x
+
+# Format benchmark result as text
+fn format_benchmark_result(result: BenchmarkResult) -> text:
+    "{result.name}: {result.files_count} files, {result.blocks_found} blocks, {result.groups_found} groups in {result.duration_ms}ms"
+
+# Format benchmark statistics as text
+fn format_benchmark_stats(stats: BenchmarkStats) -> text:
+    val lines = [
+        "Benchmark Statistics ({stats.runs.len()} runs):",
+        "  Average: {stats.average_ms}ms",
+        "  Min:     {stats.min_ms}ms",
+        "  Max:     {stats.max_ms}ms",
+        "  StdDev:  {stats.stddev_ms}ms",
+        "  Throughput: {stats.throughput_files_per_sec} files/sec"
+    ]
+    lines.join("\n")
+
+# Save benchmark results to file
+fn save_benchmark_results(results: [BenchmarkResult], path: text):
+    var lines = ["# Benchmark results"]
+    lines = lines + ["# name|files|blocks|groups|duration_ms|timestamp|config_hash"]
+    lines = lines + [""]
+
+    for result in results:
+        lines = lines + ["{result.name}|{result.files_count}|{result.blocks_found}|{result.groups_found}|{result.duration_ms}|{result.timestamp}|{result.config_hash}"]
+
+    file_write(path, lines.join("\n"))
+
+# Load benchmark results from file
+fn load_benchmark_results(path: text) -> [BenchmarkResult]:
+    if not file_exists(path):
+        return []
+
+    val content = file_read(path)
+    val lines = content.split("\n")
+
+    var results = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.len() == 0 or trimmed.starts_with("#"):
+            continue
+
+        val parts = trimmed.split("|")
+        if parts.len() >= 7:
+            results = results + [BenchmarkResult(
+                name: parts[0],
+                files_count: int(parts[1]),
+                blocks_found: int(parts[2]),
+                groups_found: int(parts[3]),
+                duration_ms: int(parts[4]),
+                timestamp: int(parts[5]),
+                config_hash: parts[6]
+            )]
+
+    results
+
+# Compare two benchmark results
+fn compare_benchmarks(baseline: BenchmarkResult, current: BenchmarkResult) -> text:
+    val speedup = if current.duration_ms > 0:
+        (baseline.duration_ms * 100) / current.duration_ms
+    else:
+        0
+
+    val speedup_pct = speedup - 100
+    val faster_slower = if speedup_pct > 0:
+        "{speedup_pct}% faster"
+    elif speedup_pct < 0:
+        "{0 - speedup_pct}% slower"
+    else:
+        "same speed"
+
+    "Baseline: {baseline.duration_ms}ms -> Current: {current.duration_ms}ms ({faster_slower})"
+
+# Quick benchmark on a directory
+fn quick_benchmark(path: text) -> BenchmarkResult:
+    val config = default_config()
+    val files = collect_files(path, config)
+    run_benchmark("quick_benchmark", files, config)
+
+export BenchmarkResult, BenchmarkStats
+export run_benchmark, run_benchmark_iterations, compute_stats
+export format_benchmark_result, format_benchmark_stats
+export save_benchmark_results, load_benchmark_results
+export compare_benchmarks, quick_benchmark

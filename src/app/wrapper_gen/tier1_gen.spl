@@ -7,7 +7,7 @@
 #   - src/bridge.h (with wrapper structs + function declarations)
 #   - src/bridge.cpp (with #ifdef conditional implementations)
 
-use app.io.{file_write, dir_create, print}
+use app.io.{file_write, dir_create_all, print}
 use app.wrapper_gen.spec_parser.{WrapperSpec, HandleTypeSpec, ParamSpec, FunctionSpec, MethodSpec}
 
 fn generate_tier1(spec: WrapperSpec, dry_run: bool):
@@ -16,8 +16,8 @@ fn generate_tier1(spec: WrapperSpec, dry_run: bool):
     val output_dir = ".build/rust/ffi_{spec.name}"
 
     if not dry_run:
-        dir_create(output_dir)
-        dir_create("{output_dir}/src")
+        dir_create_all(output_dir)
+        dir_create_all("{output_dir}/src")
 
     # Generate all Tier 1 files
     generate_cargo_toml(spec, output_dir, dry_run)
@@ -44,6 +44,26 @@ fn is_handle_type(type_name: text, spec: WrapperSpec) -> bool:
 fn lib_upper(spec: WrapperSpec) -> text:
     """Get uppercase library name for #ifdef macros."""
     spec.name.upper()
+
+fn is_embedded(spec: WrapperSpec) -> bool:
+    """Check if this is an embedded library (no external deps, C++ IS the implementation)."""
+    val no_include = spec.cpp_include == ""
+    val no_libs = spec.link_libs.len() == 0
+    no_include and no_libs
+
+fn qualified_fn_name(spec_name: text, fn_name: text) -> text:
+    """Build qualified function name, avoiding double prefix.
+    E.g. spec_name='debug', fn_name='debug_is_active' -> 'debug_is_active' (not 'debug_debug_is_active')
+    """
+    val prefix = spec_name + "_"
+    if fn_name.starts_with(prefix):
+        return fn_name
+    "{spec_name}_{fn_name}"
+
+fn is_void_return(return_type: text) -> bool:
+    """Check if return type is void (no return value)."""
+    val rt = return_type.trim()
+    rt == "void" or rt == ""
 
 # ============================================================================
 # Cargo.toml Generation
@@ -83,6 +103,7 @@ fn generate_cargo_toml(spec: WrapperSpec, output_dir: text, dry_run: bool):
 
 fn generate_build_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
     val upper = lib_upper(spec)
+    val embedded = is_embedded(spec)
     var content = ""
     content = content + "// Auto-generated build script for {spec.name}\n\n"
     content = content + "fn main() {\n"
@@ -99,8 +120,10 @@ fn generate_build_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
     for inc_path in spec.include_paths:
         content = content + "        .include(\"{inc_path}\")\n"
 
-    # Add conditional define
-    content = content + "        .define(\"HAS_{upper}\", None)\n"
+    if not embedded:
+        # External library: add conditional define
+        content = content + "        .define(\"HAS_{upper}\", None)\n"
+
     content = content + "        .compile(\"simple-{spec.name}-bridge\");\n\n"
 
     # Add library search paths
@@ -110,6 +133,11 @@ fn generate_build_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
     # Add library linking
     for lib in spec.link_libs:
         content = content + "    println!(\"cargo:rustc-link-lib={lib}\");\n"
+
+    if embedded:
+        # Embedded library: link pthread for mutex/condvar
+        content = content + "    // Embedded library - link pthread for std::mutex/condition_variable\n"
+        content = content + "    println!(\"cargo:rustc-link-lib=pthread\");\n"
 
     content = content + "}\n"
 
@@ -173,12 +201,12 @@ fn generate_lib_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
     content = content + "// ============================================================================\n\n"
 
     content = content + "#[no_mangle]\n"
-    content = content + "pub extern \"C\" fn simple_{spec.name}_available() -> bool {\n"
+    content = content + "pub extern \"C\" fn rt_{spec.name}_available() -> bool {\n"
     content = content + "    ffi::{spec.name}_available()\n"
     content = content + "}\n\n"
 
     content = content + "#[no_mangle]\n"
-    content = content + "pub extern \"C\" fn simple_{spec.name}_version() -> *mut c_char {\n"
+    content = content + "pub extern \"C\" fn rt_{spec.name}_version() -> *mut c_char {\n"
     content = content + "    let version = ffi::{spec.name}_version();\n"
     content = content + "    CString::new(version).unwrap_or_default().into_raw()\n"
     content = content + "}\n\n"
@@ -187,7 +215,7 @@ fn generate_lib_rs(spec: WrapperSpec, output_dir: text, dry_run: bool):
     for handle in spec.handle_types:
         val h_lower = handle.name.lower()
         content = content + "#[no_mangle]\n"
-        content = content + "pub extern \"C\" fn simple_{spec.name}_{h_lower}_free(ptr: *mut Simple{handle.name}) {\n"
+        content = content + "pub extern \"C\" fn rt_{spec.name}_{h_lower}_free(ptr: *mut Simple{handle.name}) {\n"
         content = content + "    if !ptr.is_null() {\n"
         content = content + "        unsafe {\n"
         content = content + "            let _ = Box::from_raw(ptr);\n"
@@ -226,8 +254,11 @@ fn gen_cxx_fn_decl(func: FunctionSpec, spec: WrapperSpec) -> text:
         val cxx_type = map_type_to_cxx(param.param_type, spec)
         params = params + "{param.name}: {cxx_type}"
 
+    val qname = qualified_fn_name(spec.name, func.name)
+    if is_void_return(func.return_type):
+        return "        fn {qname}({params});\n"
     val ret = map_return_to_cxx(func.return_type, spec)
-    "        fn {spec.name}_{func.name}({params}) -> {ret};\n"
+    "        fn {qname}({params}) -> {ret};\n"
 
 # ---- cxx bridge method declaration (as free function) ----
 fn gen_cxx_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
@@ -237,14 +268,18 @@ fn gen_cxx_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
         val cxx_type = map_type_to_cxx(param.param_type, spec)
         params = params + ", {param.name}: {cxx_type}"
 
+    val qname = qualified_fn_name(spec.name, "{h_lower}_{method.name}")
+    if is_void_return(method.return_type):
+        return "        fn {qname}({params});\n"
     val ret = map_return_to_cxx(method.return_type, spec)
-    "        fn {spec.name}_{h_lower}_{method.name}({params}) -> {ret};\n"
+    "        fn {qname}({params}) -> {ret};\n"
 
 # ---- C ABI export for function ----
 fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
+    val qname = qualified_fn_name(spec.name, func.name)
     var content = ""
     content = content + "#[no_mangle]\n"
-    content = content + "pub extern \"C\" fn simple_{spec.name}_{func.name}(\n"
+    content = content + "pub extern \"C\" fn rt_{qname}(\n"
 
     # Parameters
     var param_idx = 0
@@ -256,10 +291,13 @@ fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
             content = content + "    {param.name}_len: usize,\n"
         param_idx = param_idx + 1
 
-    val ret_type = map_return_to_c_abi(func.return_type, spec)
-    content = content + ") -> {ret_type} {\n"
+    if is_void_return(func.return_type):
+        content = content + ") {\n"
+    else:
+        val ret_type = map_return_to_c_abi(func.return_type, spec)
+        content = content + ") -> {ret_type} {\n"
 
-    # Null safety checks
+    # Null safety checks (skip for void returns - just return early)
     var has_null_check = false
     for param in func.params:
         if param.param_type == "[i64]" or param.param_type == "[f64]":
@@ -267,51 +305,72 @@ fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
                 content = content + "    // Null safety\n"
                 has_null_check = true
             content = content + "    if {param.name}.is_null() || {param.name}_len == 0 {\n"
-            val default_ret = default_return_value(func.return_type, spec)
-            content = content + "        return {default_ret};\n"
+            if is_void_return(func.return_type):
+                content = content + "        return;\n"
+            else:
+                val default_ret = default_return_value(func.return_type, spec)
+                content = content + "        return {default_ret};\n"
             content = content + "    }\n"
         elif param.param_type == "text":
             if not has_null_check:
                 content = content + "    // Null safety\n"
                 has_null_check = true
             content = content + "    if {param.name}.is_null() {\n"
-            val default_ret = default_return_value(func.return_type, spec)
-            content = content + "        return {default_ret};\n"
+            if is_void_return(func.return_type):
+                content = content + "        return;\n"
+            else:
+                val default_ret = default_return_value(func.return_type, spec)
+                content = content + "        return {default_ret};\n"
             content = content + "    }\n"
         elif is_handle_type(param.param_type, spec):
             if not has_null_check:
                 content = content + "    // Null safety\n"
                 has_null_check = true
             content = content + "    if {param.name}.is_null() {\n"
-            val default_ret = default_return_value(func.return_type, spec)
-            content = content + "        return {default_ret};\n"
+            if is_void_return(func.return_type):
+                content = content + "        return;\n"
+            else:
+                val default_ret = default_return_value(func.return_type, spec)
+                content = content + "        return {default_ret};\n"
             content = content + "    }\n"
 
     if has_null_check:
         content = content + "\n"
 
-    content = content + "    unsafe {\n"
+    # Check if any params need unsafe (pointer conversions)
+    var needs_unsafe = false
+    for param in func.params:
+        if param.param_type == "[i64]" or param.param_type == "[f64]":
+            needs_unsafe = true
+        elif param.param_type == "text":
+            needs_unsafe = true
+        elif is_handle_type(param.param_type, spec):
+            needs_unsafe = true
+
+    if needs_unsafe:
+        content = content + "    unsafe {\n"
 
     # Convert parameters
     var call_args = ""
+    val indent = if needs_unsafe: "        " else: "    "
     for param in func.params:
         if param.param_type == "[i64]":
-            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            content = content + "{indent}let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
             if call_args != "":
                 call_args = call_args + ", "
             call_args = call_args + "{param.name}_slice"
         elif param.param_type == "[f64]":
-            content = content + "        let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
+            content = content + "{indent}let {param.name}_slice = std::slice::from_raw_parts({param.name}, {param.name}_len);\n"
             if call_args != "":
                 call_args = call_args + ", "
             call_args = call_args + "{param.name}_slice"
         elif param.param_type == "text":
-            content = content + "        let {param.name}_str = CStr::from_ptr({param.name}).to_str().unwrap_or(\"\");\n"
+            content = content + "{indent}let {param.name}_str = CStr::from_ptr({param.name}).to_str().unwrap_or(\"\");\n"
             if call_args != "":
                 call_args = call_args + ", "
             call_args = call_args + "{param.name}_str"
         elif is_handle_type(param.param_type, spec):
-            content = content + "        let {param.name}_ref = &*{param.name};\n"
+            content = content + "{indent}let {param.name}_ref = &*{param.name};\n"
             if call_args != "":
                 call_args = call_args + ", "
             call_args = call_args + "&{param.name}_ref.inner"
@@ -321,20 +380,29 @@ fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
             call_args = call_args + "{param.name}"
 
     # Call ffi function and return
-    if is_handle_type(func.return_type, spec):
-        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
-        content = content + "        Box::into_raw(Box::new(Simple{func.return_type} { inner: result }))\n"
+    if is_void_return(func.return_type):
+        content = content + "{indent}ffi::{qname}({call_args});\n"
+    elif is_handle_type(func.return_type, spec):
+        content = content + "{indent}let result = ffi::{qname}({call_args});\n"
+        content = content + "{indent}Box::into_raw(Box::new(Simple{func.return_type} { inner: result }))\n"
     elif func.return_type == "text":
-        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
-        content = content + "        CString::new(result).unwrap_or_default().into_raw()\n"
+        content = content + "{indent}let result = ffi::{qname}({call_args});\n"
+        content = content + "{indent}CString::new(result).unwrap_or_default().into_raw()\n"
     elif func.return_type == "[i64]":
-        content = content + "        let result = ffi::{spec.name}_{func.name}({call_args});\n"
-        content = content + "        // Caller must provide output buffer; returning length here\n"
-        content = content + "        result.len() as i64\n"
+        content = content + "{indent}let result = ffi::{qname}({call_args});\n"
+        content = content + "{indent}// Caller must provide output buffer; returning length here\n"
+        content = content + "{indent}result.len() as i64\n"
+    elif func.return_type == "[f64]":
+        content = content + "{indent}let result = ffi::{qname}({call_args});\n"
+        content = content + "{indent}result.len() as i64\n"
+    elif func.return_type == "[text]":
+        content = content + "{indent}let result = ffi::{qname}({call_args});\n"
+        content = content + "{indent}result.len() as i64\n"
     else:
-        content = content + "        ffi::{spec.name}_{func.name}({call_args})\n"
+        content = content + "{indent}ffi::{qname}({call_args})\n"
 
-    content = content + "    }\n"
+    if needs_unsafe:
+        content = content + "    }\n"
     content = content + "}\n\n"
 
     content
@@ -342,9 +410,10 @@ fn gen_c_export_fn(func: FunctionSpec, spec: WrapperSpec) -> text:
 # ---- C ABI export for method ----
 fn gen_c_export_method(method: MethodSpec, spec: WrapperSpec) -> text:
     val h_lower = method.handle.lower()
+    val qname = qualified_fn_name(spec.name, "{h_lower}_{method.name}")
     var content = ""
     content = content + "#[no_mangle]\n"
-    content = content + "pub extern \"C\" fn simple_{spec.name}_{h_lower}_{method.name}(\n"
+    content = content + "pub extern \"C\" fn rt_{qname}(\n"
     content = content + "    handle: *const Simple{method.handle},\n"
 
     # Additional parameters
@@ -359,25 +428,38 @@ fn gen_c_export_method(method: MethodSpec, spec: WrapperSpec) -> text:
         content = content + "    dims_out: *mut i64,\n"
         content = content + "    max_dims: usize,\n"
         content = content + ") -> i64 {\n"
+    elif is_void_return(method.return_type):
+        content = content + ") {\n"
     else:
         val ret_type = map_return_to_c_abi(method.return_type, spec)
         content = content + ") -> {ret_type} {\n"
 
     # Null safety on handle
     content = content + "    if handle.is_null() {\n"
-    val default_ret = default_return_value(method.return_type, spec)
-    content = content + "        return {default_ret};\n"
+    if is_void_return(method.return_type):
+        content = content + "        return;\n"
+    else:
+        val default_ret = default_return_value(method.return_type, spec)
+        content = content + "        return {default_ret};\n"
     content = content + "    }\n"
 
     # Null checks on pointer params
     for param in method.params:
         if is_handle_type(param.param_type, spec):
             content = content + "    if {param.name}.is_null() {\n"
-            content = content + "        return {default_ret};\n"
+            if is_void_return(method.return_type):
+                content = content + "        return;\n"
+            else:
+                val def_ret = default_return_value(method.return_type, spec)
+                content = content + "        return {def_ret};\n"
             content = content + "    }\n"
         elif param.param_type == "text":
             content = content + "    if {param.name}.is_null() {\n"
-            content = content + "        return {default_ret};\n"
+            if is_void_return(method.return_type):
+                content = content + "        return;\n"
+            else:
+                val def_ret = default_return_value(method.return_type, spec)
+                content = content + "        return {def_ret};\n"
             content = content + "    }\n"
 
     content = content + "\n"
@@ -403,24 +485,26 @@ fn gen_c_export_method(method: MethodSpec, spec: WrapperSpec) -> text:
             call_args = call_args + ", {param.name}"
 
     # Call ffi method and return
-    if is_handle_type(method.return_type, spec):
-        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+    if is_void_return(method.return_type):
+        content = content + "        ffi::{qname}({call_args});\n"
+    elif is_handle_type(method.return_type, spec):
+        content = content + "        let result = ffi::{qname}({call_args});\n"
         content = content + "        Box::into_raw(Box::new(Simple{method.return_type} { inner: result }))\n"
     elif method.return_type == "text":
-        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        let result = ffi::{qname}({call_args});\n"
         content = content + "        CString::new(result).unwrap_or_default().into_raw()\n"
     elif method.return_type == "[i64]":
-        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        let result = ffi::{qname}({call_args});\n"
         content = content + "        let ndims = result.len().min(max_dims);\n"
         content = content + "        for i in 0..ndims {\n"
         content = content + "            *dims_out.add(i) = result[i];\n"
         content = content + "        }\n"
         content = content + "        result.len() as i64\n"
     elif method.return_type == "[text]":
-        content = content + "        let result = ffi::{spec.name}_{h_lower}_{method.name}({call_args});\n"
+        content = content + "        let result = ffi::{qname}({call_args});\n"
         content = content + "        result.len() as i64\n"
     else:
-        content = content + "        ffi::{spec.name}_{h_lower}_{method.name}({call_args})\n"
+        content = content + "        ffi::{qname}({call_args})\n"
 
     content = content + "    }\n"
     content = content + "}\n\n"
@@ -433,13 +517,22 @@ fn gen_c_export_method(method: MethodSpec, spec: WrapperSpec) -> text:
 
 fn generate_bridge_h(spec: WrapperSpec, output_dir: text, dry_run: bool):
     val upper = lib_upper(spec)
+    val embedded = is_embedded(spec)
     var content = ""
     content = content + "// Auto-generated C++ bridge header for {spec.name}\n"
     content = content + "#pragma once\n\n"
+    content = content + "#include <cstdint>\n"
     content = content + "#include <memory>\n"
     content = content + "#include <vector>\n"
     content = content + "#include <string>\n"
-    content = content + "#include \"rust/cxx.h\"\n\n"
+    content = content + "#include <map>\n"
+    content = content + "#include \"rust/cxx.h\"\n"
+
+    if embedded:
+        # Embedded library: add extra includes for implementation
+        content = content + "#include <mutex>\n"
+        content = content + "#include <condition_variable>\n"
+    content = content + "\n"
 
     # Conditional library include
     if spec.cpp_include != "":
@@ -503,8 +596,9 @@ fn gen_h_fn_decl(func: FunctionSpec, spec: WrapperSpec) -> text:
         val cpp_type = map_type_to_cpp_param(param.param_type, spec)
         params = params + "{cpp_type} {param.name}"
 
+    val qname = qualified_fn_name(spec.name, func.name)
     val ret = map_return_to_cpp(func.return_type, spec)
-    "{ret} {spec.name}_{func.name}({params});\n"
+    "{ret} {qname}({params});\n"
 
 fn gen_h_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
     val h_lower = method.handle.lower()
@@ -513,8 +607,9 @@ fn gen_h_method_decl(method: MethodSpec, spec: WrapperSpec) -> text:
         val cpp_type = map_type_to_cpp_param(param.param_type, spec)
         params = params + ", {cpp_type} {param.name}"
 
+    val qname = qualified_fn_name(spec.name, "{h_lower}_{method.name}")
     val ret = map_return_to_cpp(method.return_type, spec)
-    "{ret} {spec.name}_{h_lower}_{method.name}({params});\n"
+    "{ret} {qname}({params});\n"
 
 # ============================================================================
 # bridge.cpp Generation (C++ implementation)
@@ -586,21 +681,33 @@ fn generate_bridge_cpp(spec: WrapperSpec, output_dir: text, dry_run: bool):
     content = content + "// Library Info\n"
     content = content + "// ============================================================================\n\n"
 
-    content = content + "bool {spec.name}_available() {\n"
-    content = content + "#ifdef HAS_{upper}\n"
-    content = content + "    return true;\n"
-    content = content + "#else\n"
-    content = content + "    return false;\n"
-    content = content + "#endif\n"
-    content = content + "}\n\n"
+    val embedded = is_embedded(spec)
 
-    content = content + "rust::String {spec.name}_version() {\n"
-    content = content + "#ifdef HAS_{upper}\n"
-    content = content + "    return rust::String(\"{spec.name} {spec.version} (cxx bridge)\");\n"
-    content = content + "#else\n"
-    content = content + "    return rust::String(\"{spec.name} stub (library not linked)\");\n"
-    content = content + "#endif\n"
-    content = content + "}\n"
+    if embedded:
+        # Embedded library: always available
+        content = content + "bool {spec.name}_available() {\n"
+        content = content + "    return true;\n"
+        content = content + "}\n\n"
+
+        content = content + "rust::String {spec.name}_version() {\n"
+        content = content + "    return rust::String(\"{spec.name} {spec.version} (embedded)\");\n"
+        content = content + "}\n"
+    else:
+        content = content + "bool {spec.name}_available() {\n"
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "    return true;\n"
+        content = content + "#else\n"
+        content = content + "    return false;\n"
+        content = content + "#endif\n"
+        content = content + "}\n\n"
+
+        content = content + "rust::String {spec.name}_version() {\n"
+        content = content + "#ifdef HAS_{upper}\n"
+        content = content + "    return rust::String(\"{spec.name} {spec.version} (cxx bridge)\");\n"
+        content = content + "#else\n"
+        content = content + "    return rust::String(\"{spec.name} stub (library not linked)\");\n"
+        content = content + "#endif\n"
+        content = content + "}\n"
 
     if dry_run:
         print "--- src/bridge.cpp ---"
@@ -640,6 +747,8 @@ fn build_param_conversions(params: [ParamSpec], spec: WrapperSpec) -> (text, tex
 
 fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
     val upper = lib_upper(spec)
+    val qname = qualified_fn_name(spec.name, func.name)
+    val embedded = is_embedded(spec)
 
     # Build parameter list
     var params = ""
@@ -651,44 +760,59 @@ fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
 
     val ret = map_return_to_cpp(func.return_type, spec)
     var content = ""
-    content = content + "{ret} {spec.name}_{func.name}({params}) {\n"
-    content = content + "#ifdef HAS_{upper}\n"
+    content = content + "{ret} {qname}({params}) {\n"
 
-    # Build argument conversions and call
-    val (conv_content, call_args) = build_param_conversions(func.params, spec)
-    content = content + conv_content
+    # For embedded libraries (no external deps), always generate stub body
+    # For external libraries with cpp_fn, use #ifdef pattern
+    val has_cpp_fn = func.cpp_fn != ""
 
-    # Generate the call and return
-    if is_handle_type(func.return_type, spec):
-        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
-        content = content + "    return std::make_unique<{func.return_type}>(result);\n"
-    elif func.return_type == "text":
-        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
-        content = content + "    return rust::String(result);\n"
-    elif func.return_type == "[i64]":
-        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
-        content = content + "    rust::Vec<int64_t> out;\n"
-        content = content + "    for (auto v : result) {\n"
-        content = content + "        out.push_back(v);\n"
-        content = content + "    }\n"
-        content = content + "    return out;\n"
-    elif func.return_type == "[text]":
-        content = content + "    auto result = {func.cpp_fn}({call_args});\n"
-        content = content + "    rust::Vec<rust::String> out;\n"
-        content = content + "    for (auto& v : result) {\n"
-        content = content + "        out.push_back(rust::String(v));\n"
-        content = content + "    }\n"
-        content = content + "    return out;\n"
+    if embedded or not has_cpp_fn:
+        # Embedded mode or no cpp_fn: generate direct stub (no #ifdef)
+        content = content + "    // TODO: Implement {qname}\n"
+        val stub_ret = cpp_default_return(func.return_type, spec)
+        content = content + "    {stub_ret}\n"
     else:
-        content = content + "    return {func.cpp_fn}({call_args});\n"
+        # External library mode: use #ifdef pattern
+        content = content + "#ifdef HAS_{upper}\n"
 
-    content = content + "#else\n"
+        # Build argument conversions and call
+        val (conv_content, call_args) = build_param_conversions(func.params, spec)
+        content = content + conv_content
 
-    # Stub return
-    val stub_ret = cpp_default_return(func.return_type, spec)
-    content = content + "    {stub_ret}\n"
+        # Generate the call and return
+        if is_void_return(func.return_type):
+            content = content + "    {func.cpp_fn}({call_args});\n"
+        elif is_handle_type(func.return_type, spec):
+            content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+            content = content + "    return std::make_unique<{func.return_type}>(result);\n"
+        elif func.return_type == "text":
+            content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+            content = content + "    return rust::String(result);\n"
+        elif func.return_type == "[i64]":
+            content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+            content = content + "    rust::Vec<int64_t> out;\n"
+            content = content + "    for (auto v : result) {\n"
+            content = content + "        out.push_back(v);\n"
+            content = content + "    }\n"
+            content = content + "    return out;\n"
+        elif func.return_type == "[text]":
+            content = content + "    auto result = {func.cpp_fn}({call_args});\n"
+            content = content + "    rust::Vec<rust::String> out;\n"
+            content = content + "    for (auto& v : result) {\n"
+            content = content + "        out.push_back(rust::String(v));\n"
+            content = content + "    }\n"
+            content = content + "    return out;\n"
+        else:
+            content = content + "    return {func.cpp_fn}({call_args});\n"
 
-    content = content + "#endif\n"
+        content = content + "#else\n"
+
+        # Stub return
+        val stub_ret = cpp_default_return(func.return_type, spec)
+        content = content + "    {stub_ret}\n"
+
+        content = content + "#endif\n"
+
     content = content + "}\n\n"
 
     content
@@ -696,6 +820,8 @@ fn gen_cpp_fn_impl(func: FunctionSpec, spec: WrapperSpec) -> text:
 fn gen_cpp_method_impl(method: MethodSpec, spec: WrapperSpec) -> text:
     val upper = lib_upper(spec)
     val h_lower = method.handle.lower()
+    val qname = qualified_fn_name(spec.name, "{h_lower}_{method.name}")
+    val embedded = is_embedded(spec)
 
     # Build parameter list
     var params = "const {method.handle}& h"
@@ -705,44 +831,56 @@ fn gen_cpp_method_impl(method: MethodSpec, spec: WrapperSpec) -> text:
 
     val ret = map_return_to_cpp(method.return_type, spec)
     var content = ""
-    content = content + "{ret} {spec.name}_{h_lower}_{method.name}({params}) {\n"
-    content = content + "#ifdef HAS_{upper}\n"
+    content = content + "{ret} {qname}({params}) {\n"
 
-    # Build call arguments (method call on handle's inner)
-    val (conv_content, call_args) = build_param_conversions(method.params, spec)
-    content = content + conv_content
+    val has_cpp_method = method.cpp_method != ""
 
-    # Generate the call and return (method call on inner)
-    if is_handle_type(method.return_type, spec):
-        content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
-        content = content + "    return std::make_unique<{method.return_type}>(result);\n"
-    elif method.return_type == "text":
-        content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
-        content = content + "    return rust::String(result);\n"
-    elif method.return_type == "[i64]":
-        content = content + "    auto sizes = h.inner.{method.cpp_method}({call_args});\n"
-        content = content + "    rust::Vec<int64_t> result;\n"
-        content = content + "    for (auto size : sizes) {\n"
-        content = content + "        result.push_back(size);\n"
-        content = content + "    }\n"
-        content = content + "    return result;\n"
-    elif method.return_type == "[text]":
-        content = content + "    auto items = h.inner.{method.cpp_method}({call_args});\n"
-        content = content + "    rust::Vec<rust::String> result;\n"
-        content = content + "    for (auto& item : items) {\n"
-        content = content + "        result.push_back(rust::String(item));\n"
-        content = content + "    }\n"
-        content = content + "    return result;\n"
+    if embedded or not has_cpp_method:
+        # Embedded mode: generate direct stub
+        content = content + "    // TODO: Implement {qname}\n"
+        val stub_ret = cpp_default_return(method.return_type, spec)
+        content = content + "    {stub_ret}\n"
     else:
-        content = content + "    return h.inner.{method.cpp_method}({call_args});\n"
+        content = content + "#ifdef HAS_{upper}\n"
 
-    content = content + "#else\n"
+        # Build call arguments (method call on handle's inner)
+        val (conv_content, call_args) = build_param_conversions(method.params, spec)
+        content = content + conv_content
 
-    # Stub return
-    val stub_ret = cpp_default_return(method.return_type, spec)
-    content = content + "    {stub_ret}\n"
+        # Generate the call and return (method call on inner)
+        if is_void_return(method.return_type):
+            content = content + "    h.inner.{method.cpp_method}({call_args});\n"
+        elif is_handle_type(method.return_type, spec):
+            content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
+            content = content + "    return std::make_unique<{method.return_type}>(result);\n"
+        elif method.return_type == "text":
+            content = content + "    auto result = h.inner.{method.cpp_method}({call_args});\n"
+            content = content + "    return rust::String(result);\n"
+        elif method.return_type == "[i64]":
+            content = content + "    auto sizes = h.inner.{method.cpp_method}({call_args});\n"
+            content = content + "    rust::Vec<int64_t> result;\n"
+            content = content + "    for (auto size : sizes) {\n"
+            content = content + "        result.push_back(size);\n"
+            content = content + "    }\n"
+            content = content + "    return result;\n"
+        elif method.return_type == "[text]":
+            content = content + "    auto items = h.inner.{method.cpp_method}({call_args});\n"
+            content = content + "    rust::Vec<rust::String> result;\n"
+            content = content + "    for (auto& item : items) {\n"
+            content = content + "        result.push_back(rust::String(item));\n"
+            content = content + "    }\n"
+            content = content + "    return result;\n"
+        else:
+            content = content + "    return h.inner.{method.cpp_method}({call_args});\n"
 
-    content = content + "#endif\n"
+        content = content + "#else\n"
+
+        # Stub return
+        val stub_ret = cpp_default_return(method.return_type, spec)
+        content = content + "    {stub_ret}\n"
+
+        content = content + "#endif\n"
+
     content = content + "}\n\n"
 
     content
@@ -864,7 +1002,9 @@ fn map_type_to_cpp_param(simple_type: text, spec: WrapperSpec) -> text:
         return simple_type
 
 fn map_return_to_cpp(simple_type: text, spec: WrapperSpec) -> text:
-    if is_handle_type(simple_type, spec):
+    if is_void_return(simple_type):
+        return "void"
+    elif is_handle_type(simple_type, spec):
         return "std::unique_ptr<{simple_type}>"
     elif simple_type == "text":
         return "rust::String"
@@ -884,7 +1024,9 @@ fn map_return_to_cpp(simple_type: text, spec: WrapperSpec) -> text:
         return "std::unique_ptr<{simple_type}>"
 
 fn cpp_default_return(simple_type: text, spec: WrapperSpec) -> text:
-    if is_handle_type(simple_type, spec):
+    if is_void_return(simple_type):
+        return "return;"
+    elif is_handle_type(simple_type, spec):
         return "return std::make_unique<{simple_type}>();"
     elif simple_type == "text":
         return "return rust::String(\"\");"

@@ -41,14 +41,9 @@ val LSMF_VERSION_MINOR: u8 = 0
 # Lib SMF Header
 # ============================================================================
 
-"""Library SMF header structure (128 bytes).
-
-The header is located at the beginning of the file and contains:
-- Magic number for format identification
-- Version information
-- Module count and index metadata
-- Reserved space for future extensions
-"""
+# Library SMF header structure (128 bytes).
+# The header is at the beginning of the file and contains:
+# - Magic number, version, module count, index metadata
 struct LibSmfHeader:
     # Identification (8 bytes)
     magic: [u8]              # Magic number "LSMF" (4 bytes)
@@ -70,7 +65,7 @@ struct LibSmfHeader:
     reserved2: [u8]
 
 impl LibSmfHeader:
-    """Create a new library SMF header with defaults."""
+    # Create a new library SMF header with defaults.
     static fn new_default() -> LibSmfHeader:
         LibSmfHeader(
             magic: LSMF_MAGIC,
@@ -92,17 +87,17 @@ impl LibSmfHeader:
             ]
         )
 
-    """Check if magic number is valid."""
+    # Check if magic number is valid.
     fn is_valid() -> bool:
         val check1 = self.magic[0] == 76 and self.magic[1] == 83
         val check2 = self.magic[2] == 77 and self.magic[3] == 70
         check1 and check2
 
-    """Get version as (major, minor) tuple."""
+    # Get version as (major, minor) tuple.
     fn version() -> (u8, u8):
         (self.version_major, self.version_minor)
 
-    """Serialize header to bytes (exactly 128 bytes)."""
+    # Serialize header to bytes (exactly 128 bytes).
     fn to_bytes() -> [u8]:
         var bytes: [u8] = []
 
@@ -127,7 +122,7 @@ impl LibSmfHeader:
 
         bytes
 
-    """Deserialize header from bytes."""
+    # Deserialize header from bytes.
     static fn from_bytes(bytes: [u8]) -> Result<LibSmfHeader, text>:
         if bytes.len() < 128:
             return Err("Invalid header size: expected 128 bytes")
@@ -154,10 +149,8 @@ impl LibSmfHeader:
 
         # Read reserved
         var reserved2: [u8] = []
-        var i = 52
-        while i < 128:
+        for i in 52..128:
             reserved2.push(bytes[i])
-            i = i + 1
 
         Ok(LibSmfHeader(
             magic: magic,
@@ -177,13 +170,9 @@ impl LibSmfHeader:
 # Module Index Entry
 # ============================================================================
 
-"""Module index entry (128 bytes).
-
-Each entry describes one module in the library:
-- Module path/name (unique identifier)
-- Location in file (offset and size) for both SMF and object file
-- Verification hashes
-"""
+# Module index entry (128 bytes).
+# Each entry describes one module in the library:
+# - Module path/name, location (offset/size), verification hashes
 struct ModuleIndexEntry:
     # Module name (64 bytes) - null-terminated UTF-8
     name: [u8]               # Module path (e.g., "std/io/mod")
@@ -204,24 +193,21 @@ struct ModuleIndexEntry:
     reserved: [u8]
 
 impl ModuleIndexEntry:
-    """Create a new module index entry (SMF only)."""
+    # Create a new module index entry (SMF only).
     static fn new(name: text, offset: u64, size: u64, hash: u64) -> ModuleIndexEntry:
         var name_bytes: [u8] = []
-        var i = 0
-        while i < name.len() and i < 63:
+        var name_limit = name.len()
+        if name_limit > 63:
+            name_limit = 63
+        for i in 0..name_limit:
             name_bytes.push(name[i] as u8)
-            i = i + 1
-        # Null-terminate
-        name_bytes.push(0)
-        # Pad to 64 bytes
-        while name_bytes.len() < 64:
+        # Null-terminate and pad to 64 bytes
+        for i in name_bytes.len()..64:
             name_bytes.push(0)
 
         var reserved: [u8] = []
-        i = 0
-        while i < 16:
+        for i in 0..16:
             reserved.push(0)
-            i = i + 1
 
         ModuleIndexEntry(
             name: name_bytes,
@@ -234,7 +220,7 @@ impl ModuleIndexEntry:
             reserved: reserved
         )
 
-    """Create a new module index entry with object file."""
+    # Create a new module index entry with object file.
     static fn new_with_object(
         name: text,
         smf_offset: u64,
@@ -245,21 +231,18 @@ impl ModuleIndexEntry:
         obj_hash: u64
     ) -> ModuleIndexEntry:
         var name_bytes: [u8] = []
-        var i = 0
-        while i < name.len() and i < 63:
+        var name_limit = name.len()
+        if name_limit > 63:
+            name_limit = 63
+        for i in 0..name_limit:
             name_bytes.push(name[i] as u8)
-            i = i + 1
-        # Null-terminate
-        name_bytes.push(0)
-        # Pad to 64 bytes
-        while name_bytes.len() < 64:
+        # Null-terminate and pad to 64 bytes
+        for i in name_bytes.len()..64:
             name_bytes.push(0)
 
         var reserved: [u8] = []
-        i = 0
-        while i < 16:
+        for i in 0..16:
             reserved.push(0)
-            i = i + 1
 
         ModuleIndexEntry(
             name: name_bytes,
@@ -272,20 +255,20 @@ impl ModuleIndexEntry:
             reserved: reserved
         )
 
-    """Check if this entry includes an object file."""
+    # Check if this entry includes an object file.
     fn has_object() -> bool:
         self.obj_size > 0
 
-    """Get module name as text."""
+    # Get module name as text.
     fn get_name() -> text:
         var chars: [text] = []
-        var i = 0
-        while i < self.name.len() and self.name[i] != 0:
+        for i in 0..self.name.len():
+            if self.name[i] == 0:
+                return chars.join("")
             chars.push(char_from_byte(self.name[i]))
-            i = i + 1
         chars.join("")
 
-    """Serialize entry to bytes (exactly 128 bytes)."""
+    # Serialize entry to bytes (exactly 128 bytes).
     fn to_bytes() -> [u8]:
         var bytes: [u8] = []
 
@@ -309,17 +292,15 @@ impl ModuleIndexEntry:
 
         bytes
 
-    """Deserialize entry from bytes."""
+    # Deserialize entry from bytes.
     static fn from_bytes(bytes: [u8], start: i64) -> Result<ModuleIndexEntry, text>:
         if bytes.len() < start + 128:
             return Err("Invalid entry size")
 
         # Read name (64 bytes)
         var name: [u8] = []
-        var i = start
-        while i < start + 64:
+        for i in start..(start + 64):
             name.push(bytes[i])
-            i = i + 1
 
         # Read SMF location (16 bytes)
         val offset = bytes_to_u64(bytes, start + 64)
@@ -335,10 +316,8 @@ impl ModuleIndexEntry:
 
         # Read reserved (16 bytes)
         var reserved: [u8] = []
-        i = start + 112
-        while i < start + 128:
+        for i in (start + 112)..(start + 128):
             reserved.push(bytes[i])
-            i = i + 1
 
         Ok(ModuleIndexEntry(
             name: name,
@@ -355,60 +334,63 @@ impl ModuleIndexEntry:
 # Helper Functions
 # ============================================================================
 
-"""Convert u32 to bytes (little-endian)."""
+# Convert u32 to bytes (little-endian).
 fn u32_to_bytes(value: u32) -> [u8]:
-    [
-        (value & 0xFF) as u8,
-        ((value >> 8) & 0xFF) as u8,
-        ((value >> 16) & 0xFF) as u8,
-        ((value >> 24) & 0xFF) as u8
-    ]
+    val b0 = (value and 0xFF) as u8
+    val b1 = ((value >> 8) and 0xFF) as u8
+    val b2 = ((value >> 16) and 0xFF) as u8
+    val b3 = ((value >> 24) and 0xFF) as u8
+    [b0, b1, b2, b3]
 
-"""Convert u64 to bytes (little-endian)."""
+# Convert u64 to bytes (little-endian).
 fn u64_to_bytes(value: u64) -> [u8]:
-    [
-        (value & 0xFF) as u8,
-        ((value >> 8) & 0xFF) as u8,
-        ((value >> 16) & 0xFF) as u8,
-        ((value >> 24) & 0xFF) as u8,
-        ((value >> 32) & 0xFF) as u8,
-        ((value >> 40) & 0xFF) as u8,
-        ((value >> 48) & 0xFF) as u8,
-        ((value >> 56) & 0xFF) as u8
-    ]
+    val b0 = (value and 0xFF) as u8
+    val b1 = ((value >> 8) and 0xFF) as u8
+    val b2 = ((value >> 16) and 0xFF) as u8
+    val b3 = ((value >> 24) and 0xFF) as u8
+    val b4 = ((value >> 32) and 0xFF) as u8
+    val b5 = ((value >> 40) and 0xFF) as u8
+    val b6 = ((value >> 48) and 0xFF) as u8
+    val b7 = ((value >> 56) and 0xFF) as u8
+    [b0, b1, b2, b3, b4, b5, b6, b7]
 
-"""Read u32 from bytes (little-endian)."""
+# Read u32 from bytes (little-endian).
 fn bytes_to_u32(bytes: [u8], offset: i64) -> u32:
-    (bytes[offset] as u32) |
-    ((bytes[offset + 1] as u32) << 8) |
-    ((bytes[offset + 2] as u32) << 16) |
-    ((bytes[offset + 3] as u32) << 24)
+    val v0 = bytes[offset] as u32
+    val v1 = (bytes[offset + 1] as u32) << 8
+    val v2 = (bytes[offset + 2] as u32) << 16
+    val v3 = (bytes[offset + 3] as u32) << 24
+    v0 or v1 or v2 or v3
 
-"""Read u64 from bytes (little-endian)."""
+# Read u64 from bytes (little-endian).
 fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
-    (bytes[offset] as u64) |
-    ((bytes[offset + 1] as u64) << 8) |
-    ((bytes[offset + 2] as u64) << 16) |
-    ((bytes[offset + 3] as u64) << 24) |
-    ((bytes[offset + 4] as u64) << 32) |
-    ((bytes[offset + 5] as u64) << 40) |
-    ((bytes[offset + 6] as u64) << 48) |
-    ((bytes[offset + 7] as u64) << 56)
+    val v0 = bytes[offset] as u64
+    val v1 = (bytes[offset + 1] as u64) << 8
+    val v2 = (bytes[offset + 2] as u64) << 16
+    val v3 = (bytes[offset + 3] as u64) << 24
+    val v4 = (bytes[offset + 4] as u64) << 32
+    val v5 = (bytes[offset + 5] as u64) << 40
+    val v6 = (bytes[offset + 6] as u64) << 48
+    val v7 = (bytes[offset + 7] as u64) << 56
+    v0 or v1 or v2 or v3 or v4 or v5 or v6 or v7
 
-"""Convert byte to single-character text."""
+# Convert byte to single-character text.
 fn char_from_byte(b: u8) -> text:
-    # Use string interpolation for byte-to-char conversion
     val c = b as i64
     "{c}"
 
-"""Calculate FNV-1a hash."""
+# Calculate FNV-1a hash.
 fn fnv1a_hash(data: [u8]) -> u64:
-    val FNV_OFFSET: u64 = 14695981039346656037
-    val FNV_PRIME: u64 = 1099511628211
+    # FNV_OFFSET = 14695981039346656037 (too large for literal, compute from parts)
+    # 0xCBF29CE4_84222325
+    val FNV_OFFSET_HI: u64 = 0x4BF29CE4
+    val fnv_hi_shifted = (FNV_OFFSET_HI + 0x80000000) << 32
+    val FNV_OFFSET: u64 = fnv_hi_shifted + 0x84222325
+    val FNV_PRIME: u64 = 4294967296 + 435
 
     var hash = FNV_OFFSET
     for byte in data:
-        hash = hash ^ (byte as u64)
+        hash = hash xor (byte as u64)
         hash = hash * FNV_PRIME
 
     hash

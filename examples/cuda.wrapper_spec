@@ -1,0 +1,223 @@
+# CUDA Direct FFI Wrapper Specification
+#
+# Native CUDA C API bindings without PyTorch dependency
+# Generates 3-tier SFFI wrapper for CUDA runtime
+
+wrapper_lib:
+  name: cuda
+  version: "0.1.0"
+  link: [cudart]
+  search_paths: ["/usr/local/cuda/lib64", "/usr/lib/x86_64-linux-gnu"]
+  cpp_include: "cuda_runtime.h"
+  include_paths: ["/usr/local/cuda/include"]
+
+# ============================================================================
+# Handle Types
+# ============================================================================
+
+handle_types:
+  # CUDA Stream (async execution)
+  - name: CudaStream
+    cpp_type: "cudaStream_t"
+    drop_fn: "rt_cuda_stream_destroy"
+
+  # CUDA Event (synchronization primitive)
+  - name: CudaEvent
+    cpp_type: "cudaEvent_t"
+    drop_fn: "rt_cuda_event_destroy"
+
+  # Device Memory (GPU allocation)
+  - name: CudaDeviceMem
+    cpp_type: "void*"
+    drop_fn: "rt_cuda_free"
+
+# ============================================================================
+# Backend Detection
+# ============================================================================
+
+functions:
+  # CUDA availability check
+  - name: cuda_available
+    cpp_fn: "[]() { int count = 0; cudaError_t err = cudaGetDeviceCount(&count); return (err == cudaSuccess && count > 0); }"
+    params: []
+    return: bool
+
+  # Get CUDA version
+  - name: cuda_version
+    cpp_fn: "[]() { int ver = 0; cudaRuntimeGetVersion(&ver); return static_cast<i32>(ver); }"
+    params: []
+    return: i32
+
+  # Get device count
+  - name: cuda_device_count
+    cpp_fn: "[]() { int count = 0; cudaGetDeviceCount(&count); return static_cast<i32>(count); }"
+    params: []
+    return: i32
+
+  # ============================================================================
+  # Device Management
+  # ============================================================================
+
+  # Set active device
+  - name: cuda_set_device
+    cpp_fn: "[](i32 device_id) { return cudaSetDevice(device_id) == cudaSuccess; }"
+    params:
+      - name: device_id
+        type: i32
+    return: bool
+
+  # Get active device
+  - name: cuda_get_device
+    cpp_fn: "[]() { int dev = 0; cudaGetDevice(&dev); return static_cast<i32>(dev); }"
+    params: []
+    return: i32
+
+  # Synchronize device
+  - name: cuda_device_synchronize
+    cpp_fn: "[]() { return cudaDeviceSynchronize() == cudaSuccess; }"
+    params: []
+    return: bool
+
+  # Get device properties
+  - name: cuda_get_device_name
+    cpp_fn: "[](i32 device_id) { cudaDeviceProp prop; if (cudaGetDeviceProperties(&prop, device_id) == cudaSuccess) { return std::string(prop.name); } return std::string(\"Unknown\"); }"
+    params:
+      - name: device_id
+        type: i32
+    return: text
+
+  # Get total device memory
+  - name: cuda_get_device_memory
+    cpp_fn: "[](i32 device_id) { cudaDeviceProp prop; if (cudaGetDeviceProperties(&prop, device_id) == cudaSuccess) { return static_cast<i64>(prop.totalGlobalMem); } return static_cast<i64>(0); }"
+    params:
+      - name: device_id
+        type: i32
+    return: i64
+
+  # ============================================================================
+  # Memory Management
+  # ============================================================================
+
+  # Allocate device memory
+  - name: cuda_malloc
+    cpp_fn: "[](i64 size_bytes) { void* ptr = nullptr; cudaMalloc(&ptr, size_bytes); return ptr; }"
+    params:
+      - name: size_bytes
+        type: i64
+    return: CudaDeviceMem
+
+  # Copy device to device
+  - name: cuda_memcpy_d2d
+    cpp_fn: "[](const CudaDeviceMem& dst, const CudaDeviceMem& src, i64 size_bytes) { return cudaMemcpy(dst.inner, src.inner, size_bytes, cudaMemcpyDeviceToDevice) == cudaSuccess; }"
+    params:
+      - name: dst
+        type: CudaDeviceMem
+      - name: src
+        type: CudaDeviceMem
+      - name: size_bytes
+        type: i64
+    return: bool
+
+  # Memset device memory
+  - name: cuda_memset
+    cpp_fn: "[](const CudaDeviceMem& ptr, i32 value, i64 size_bytes) { return cudaMemset(ptr.inner, value, size_bytes) == cudaSuccess; }"
+    params:
+      - name: ptr
+        type: CudaDeviceMem
+      - name: value
+        type: i32
+      - name: size_bytes
+        type: i64
+    return: bool
+
+  # ============================================================================
+  # Stream Management
+  # ============================================================================
+
+  # Create stream
+  - name: cuda_stream_create
+    cpp_fn: "[]() { cudaStream_t stream; cudaStreamCreate(&stream); return stream; }"
+    params: []
+    return: CudaStream
+
+  # Create stream with flags
+  - name: cuda_stream_create_with_flags
+    cpp_fn: "[](i32 flags) { cudaStream_t stream; cudaStreamCreateWithFlags(&stream, flags); return stream; }"
+    params:
+      - name: flags
+        type: i32
+    return: CudaStream
+
+  # ============================================================================
+  # Event Management
+  # ============================================================================
+
+  # Create event
+  - name: cuda_event_create
+    cpp_fn: "[]() { cudaEvent_t event; cudaEventCreate(&event); return event; }"
+    params: []
+    return: CudaEvent
+
+  # Record event on stream
+  - name: cuda_event_record
+    cpp_fn: "[](const CudaEvent& event, const CudaStream& stream) { return cudaEventRecord(event.inner, stream.inner) == cudaSuccess; }"
+    params:
+      - name: event
+        type: CudaEvent
+      - name: stream
+        type: CudaStream
+    return: bool
+
+# ============================================================================
+# Methods on Handle Types
+# ============================================================================
+
+methods:
+  # CudaStream methods
+  - handle: CudaStream
+    name: synchronize
+    cpp_method: "[](const CudaStream& h) { return cudaStreamSynchronize(h.inner) == cudaSuccess; }"
+    params: []
+    return: bool
+
+  - handle: CudaStream
+    name: query
+    cpp_method: "[](const CudaStream& h) { return cudaStreamQuery(h.inner) == cudaSuccess; }"
+    params: []
+    return: bool
+
+  - handle: CudaStream
+    name: wait_event
+    cpp_method: "[](const CudaStream& h, const CudaEvent& event) { return cudaStreamWaitEvent(h.inner, event.inner, 0) == cudaSuccess; }"
+    params:
+      - name: event
+        type: CudaEvent
+    return: bool
+
+  # CudaEvent methods
+  - handle: CudaEvent
+    name: synchronize
+    cpp_method: "[](const CudaEvent& h) { return cudaEventSynchronize(h.inner) == cudaSuccess; }"
+    params: []
+    return: bool
+
+  - handle: CudaEvent
+    name: query
+    cpp_method: "[](const CudaEvent& h) { return cudaEventQuery(h.inner) == cudaSuccess; }"
+    params: []
+    return: bool
+
+  - handle: CudaEvent
+    name: elapsed_time
+    cpp_method: "[](const CudaEvent& h, const CudaEvent& end_event) { float ms = 0.0f; cudaEventElapsedTime(&ms, h.inner, end_event.inner); return ms; }"
+    params:
+      - name: end_event
+        type: CudaEvent
+    return: f32
+
+  # CudaDeviceMem methods
+  - handle: CudaDeviceMem
+    name: is_null
+    cpp_method: "[](const CudaDeviceMem& h) { return h.inner == nullptr; }"
+    params: []
+    return: bool
