@@ -12,6 +12,8 @@ enum TokenKind:
     Keyword(text)
     Operator(text)
     Newline
+    Indent
+    Dedent
     Eof
     Error(text)
 
@@ -21,19 +23,41 @@ struct Token:
     line: i64
     column: i64
 
-# Lex source code into tokens
+# Lex source code into tokens with indentation tracking
 fn lex_source(source: text) -> [Token]:
     var tokens: [Token] = []
     var line = 1
     var column = 1
     var i = 0
+    var indent_stack: [i64] = [0]  # Track indentation levels
+    var at_line_start = true
 
     while i < source.len():
         val ch = source[i:i + 1]
         var handled = false
 
+        # Handle indentation at line start
+        if at_line_start and ch != "\n" and ch != "#":
+            val (indent_level, spaces_consumed) = measure_indentation(source[i:])
+
+            # Emit Indent/Dedent tokens
+            val current_indent = indent_stack[indent_stack.len() - 1]
+            if indent_level > current_indent:
+                indent_stack.push(indent_level)
+                tokens.push(Token(kind: TokenKind.Indent, line: line, column: column))
+            elif indent_level < current_indent:
+                # Emit dedents for all popped levels
+                while indent_stack.len() > 0 and indent_stack[indent_stack.len() - 1] > indent_level:
+                    indent_stack.pop()
+                    tokens.push(Token(kind: TokenKind.Dedent, line: line, column: column))
+
+            i = i + spaces_consumed
+            column = column + spaces_consumed
+            at_line_start = false
+            handled = true
+
         # Skip whitespace (except newlines)
-        if ch == " " or ch == "\t":
+        if not handled and (ch == " " or ch == "\t"):
             i = i + 1
             column = column + 1
             handled = true
@@ -44,6 +68,7 @@ fn lex_source(source: text) -> [Token]:
             line = line + 1
             column = 1
             i = i + 1
+            at_line_start = true
             handled = true
 
         # Comments
@@ -92,8 +117,29 @@ fn lex_source(source: text) -> [Token]:
             tokens.push(Token(kind: TokenKind.Error("Unknown: {ch}"), line: line, column: column))
             i = i + 1
 
+    # Emit remaining dedents at EOF
+    while indent_stack.len() > 1:
+        indent_stack.pop()
+        tokens.push(Token(kind: TokenKind.Dedent, line: line, column: column))
+
     tokens.push(Token(kind: TokenKind.Eof, line: line, column: column))
     tokens
+
+# Measure indentation at start of line
+fn measure_indentation(source: text) -> (i64, i64):
+    var spaces = 0
+    var i = 0
+    while i < source.len():
+        val ch = source[i:i + 1]
+        if ch == " ":
+            spaces = spaces + 1
+            i = i + 1
+        elif ch == "\t":
+            spaces = spaces + 4  # Tab = 4 spaces
+            i = i + 1
+        else:
+            break
+    (spaces, i)
 
 # Lex number
 fn lex_number(source: text) -> (text, i64):
@@ -147,15 +193,21 @@ fn lex_identifier(source: text) -> (text, i64):
 
 # Lex operator
 fn lex_operator(source: text) -> (text, i64):
+    # Three-character operators
+    if source.len() >= 3:
+        val three_char = source[0:3]
+        if three_char == ">>>" or three_char == "<<=" or three_char == ">>=" or three_char == "**=":
+            return (three_char, 3)
+
     # Two-character operators
     if source.len() >= 2:
         val two_char = source[0:2]
-        if two_char == "->" or two_char == "=>" or two_char == "==" or two_char == "!=" or two_char == "<=" or two_char == ">=" or two_char == "&&" or two_char == "||":
+        if two_char == "->" or two_char == "=>" or two_char == "==" or two_char == "!=" or two_char == "<=" or two_char == ">=" or two_char == "&&" or two_char == "||" or two_char == "|>" or two_char == "<<" or two_char == ">>" or two_char == "~>" or two_char == "//" or two_char == "**" or two_char == "?." or two_char == "??" or two_char == ".+" or two_char == ".-" or two_char == ".*" or two_char == "./" or two_char == ".^" or two_char == "+=" or two_char == "-=" or two_char == "*=" or two_char == "/=" or two_char == "%=" or two_char == "&=" or two_char == "|=" or two_char == "^=":
             return (two_char, 2)
 
     # Single-character operators
     val ch = source[0:1]
-    if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "=" or ch == "<" or ch == ">" or ch == "!" or ch == "(" or ch == ")" or ch == "{" or ch == "}" or ch == "[" or ch == "]" or ch == ":" or ch == "," or ch == ".":
+    if ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%" or ch == "=" or ch == "<" or ch == ">" or ch == "!" or ch == "?" or ch == "&" or ch == "|" or ch == "^" or ch == "~" or ch == "(" or ch == ")" or ch == "{" or ch == "}" or ch == "[" or ch == "]" or ch == ":" or ch == "," or ch == "." or ch == "@" or ch == "\\":
         return (ch, 1)
 
     ("", 0)
@@ -174,4 +226,4 @@ fn is_keyword(id: text) -> bool:
 
 # Check if string is operator
 fn is_operator(op: text) -> bool:
-    op == "+" or op == "-" or op == "*" or op == "/" or op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" or op == "&&" or op == "||" or op == "=" or op == "->" or op == "=>"
+    op == "+" or op == "-" or op == "*" or op == "/" or op == "%" or op == "**" or op == "==" or op == "!=" or op == "<" or op == ">" or op == "<=" or op == ">=" or op == "&&" or op == "||" or op == "!" or op == "=" or op == "+=" or op == "-=" or op == "*=" or op == "/=" or op == "%=" or op == "|>" or op == ">>" or op == "<<" or op == "~>" or op == "//" or op == "?." or op == "??" or op == "?" or op == ".+" or op == ".-" or op == ".*" or op == "./" or op == ".^" or op == "&" or op == "|" or op == "^" or op == "~" or op == "<<=" or op == ">>=" or op == "->" or op == "=>" or op == "@" or op == "\\"
