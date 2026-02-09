@@ -1,0 +1,346 @@
+"""
+# MCP Content Types and Structured Output Specification
+
+**Feature ID:** #MCP-071
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+The MCP server supports multiple content types and structured output:
+- Image content for binary files (PNG, JPEG, GIF, WebP, BMP, ICO)
+- SVG content as text with image/svg+xml mime type
+- Structured output (outputSchema) for bugdb tools and search_code
+- Content type detection helpers for file paths
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| detect_file_content_type | Returns "image", "audio", or "text" for a file path |
+| detect_mime_type | Returns full MIME type string for a file path |
+| outputSchema | JSON Schema describing structured tool output |
+| structuredContent | Structured JSON returned alongside text content |
+
+## Behavior
+
+- read_code detects image files and returns base64-encoded ImageContent
+- SVG files are returned as text with image/svg+xml mime type
+- bugdb_get/add/update tools declare outputSchema in tool schema
+- search_code declares outputSchema as array of match objects
+
+## Implementation Notes
+
+Content type detection uses file extension matching. Base64 encoding
+uses shell command `base64 -w0`. Structured content is returned via
+make_tool_result_with_structured().
+"""
+
+use std.sspec.*
+use app.mcp.helpers.{detect_file_content_type, detect_mime_type, make_image_content, make_tool_result_with_structured, make_tool_schema_with_output, LB, RB, jp, js, jo1, jo2, escape_json}
+
+# ============================================================================
+# Test Group 1: Content Type Detection
+# ============================================================================
+
+describe "MCP Content Type Detection":
+    """
+    ## File Extension Categorization
+
+    Tests that detect_file_content_type correctly categorizes files.
+    """
+
+    context "when detecting image files":
+        """
+        ### Scenario: Image Extensions
+
+        Common image formats are detected as "image".
+        """
+
+        it "detects PNG files":
+            expect(detect_file_content_type("photo.png")).to_equal("image")
+
+        it "detects JPEG files":
+            expect(detect_file_content_type("photo.jpg")).to_equal("image")
+
+        it "detects JPEG with long extension":
+            expect(detect_file_content_type("photo.jpeg")).to_equal("image")
+
+        it "detects GIF files":
+            expect(detect_file_content_type("anim.gif")).to_equal("image")
+
+        it "detects SVG files":
+            expect(detect_file_content_type("icon.svg")).to_equal("image")
+
+        it "detects WebP files":
+            expect(detect_file_content_type("modern.webp")).to_equal("image")
+
+        it "detects ICO files":
+            expect(detect_file_content_type("favicon.ico")).to_equal("image")
+
+        it "detects BMP files":
+            expect(detect_file_content_type("legacy.bmp")).to_equal("image")
+
+    context "when detecting audio files":
+        """
+        ### Scenario: Audio Extensions
+
+        Common audio formats are detected as "audio".
+        """
+
+        it "detects WAV files":
+            expect(detect_file_content_type("sound.wav")).to_equal("audio")
+
+        it "detects MP3 files":
+            expect(detect_file_content_type("song.mp3")).to_equal("audio")
+
+        it "detects OGG files":
+            expect(detect_file_content_type("clip.ogg")).to_equal("audio")
+
+        it "detects FLAC files":
+            expect(detect_file_content_type("lossless.flac")).to_equal("audio")
+
+    context "when detecting text files":
+        """
+        ### Scenario: Text and Code Extensions
+
+        Source code and text files are detected as "text".
+        """
+
+        it "detects Simple source files":
+            expect(detect_file_content_type("main.spl")).to_equal("text")
+
+        it "detects JSON files":
+            expect(detect_file_content_type("config.json")).to_equal("text")
+
+        it "detects Markdown files":
+            expect(detect_file_content_type("README.md")).to_equal("text")
+
+        it "defaults unknown extensions to text":
+            expect(detect_file_content_type("data.xyz")).to_equal("text")
+
+# ============================================================================
+# Test Group 2: MIME Type Detection
+# ============================================================================
+
+describe "MCP MIME Type Detection":
+    """
+    ## MIME Type Mapping
+
+    Tests that detect_mime_type returns correct MIME type strings.
+    """
+
+    context "when detecting image MIME types":
+        """
+        ### Scenario: Image MIME Types
+
+        Each image format maps to its standard MIME type.
+        """
+
+        it "PNG maps to image/png":
+            expect(detect_mime_type("test.png")).to_equal("image/png")
+
+        it "JPEG maps to image/jpeg":
+            expect(detect_mime_type("test.jpg")).to_equal("image/jpeg")
+
+        it "JPEG long ext maps to image/jpeg":
+            expect(detect_mime_type("test.jpeg")).to_equal("image/jpeg")
+
+        it "GIF maps to image/gif":
+            expect(detect_mime_type("test.gif")).to_equal("image/gif")
+
+        it "SVG maps to image/svg+xml":
+            expect(detect_mime_type("test.svg")).to_equal("image/svg+xml")
+
+        it "WebP maps to image/webp":
+            expect(detect_mime_type("test.webp")).to_equal("image/webp")
+
+    context "when detecting text MIME types":
+        """
+        ### Scenario: Text MIME Types
+
+        Source and document files map to appropriate text MIME types.
+        """
+
+        it "Simple files map to text/x-simple":
+            expect(detect_mime_type("main.spl")).to_equal("text/x-simple")
+
+        it "JSON files map to application/json":
+            expect(detect_mime_type("data.json")).to_equal("application/json")
+
+        it "Markdown files map to text/markdown":
+            expect(detect_mime_type("doc.md")).to_equal("text/markdown")
+
+        it "HTML files map to text/html":
+            expect(detect_mime_type("page.html")).to_equal("text/html")
+
+        it "unknown files default to text/plain":
+            expect(detect_mime_type("file.xyz")).to_equal("text/plain")
+
+    context "when detecting audio MIME types":
+        """
+        ### Scenario: Audio MIME Types
+
+        Audio formats map to standard audio MIME types.
+        """
+
+        it "WAV maps to audio/wav":
+            expect(detect_mime_type("sound.wav")).to_equal("audio/wav")
+
+        it "MP3 maps to audio/mpeg":
+            expect(detect_mime_type("song.mp3")).to_equal("audio/mpeg")
+
+        it "OGG maps to audio/ogg":
+            expect(detect_mime_type("clip.ogg")).to_equal("audio/ogg")
+
+# ============================================================================
+# Test Group 3: Image Content Builder
+# ============================================================================
+
+describe "MCP Image Content Builder":
+    """
+    ## ImageContent Object
+
+    Tests that make_image_content produces valid MCP ImageContent.
+    """
+
+    context "when building image content":
+        """
+        ### Scenario: ImageContent Fields
+
+        ImageContent includes type, data (base64), and mimeType.
+        """
+
+        it "includes type field as image":
+            val content = make_image_content("base64data", "image/png")
+            expect(content).to_contain("image")
+
+        it "includes base64 data":
+            val content = make_image_content("ABCD1234==", "image/png")
+            expect(content).to_contain("ABCD1234==")
+
+        it "includes MIME type":
+            val content = make_image_content("data", "image/jpeg")
+            expect(content).to_contain("image/jpeg")
+
+# ============================================================================
+# Test Group 4: Structured Output Schemas
+# ============================================================================
+
+describe "MCP Structured Output Schemas":
+    """
+    ## outputSchema for Tools
+
+    Tests that tools with structured output include outputSchema in their schema.
+    """
+
+    context "when building tool schema with outputSchema":
+        """
+        ### Scenario: Schema Declaration
+
+        make_tool_schema_with_output includes outputSchema field.
+        """
+
+        it "includes outputSchema field":
+            val props = LB() + jp("id", jo1(jp("type", js("string")))) + RB()
+            val out_schema = jo2(jp("type", js("object")), jp("properties", props))
+            val in_prop = jo2(jp("type", js("string")), jp("description", js("ID")))
+            val in_props = jo1(jp("id", in_prop))
+            val schema = make_tool_schema_with_output("test_tool", "Test", in_props, "[\"id\"]", out_schema, true, false, true)
+            expect(schema).to_contain("outputSchema")
+
+        it "includes tool name":
+            val props = LB() + RB()
+            val out_schema = jo1(jp("type", js("object")))
+            val in_props = jo1(jp("x", jo1(jp("type", js("string")))))
+            val schema = make_tool_schema_with_output("my_tool", "My tool", in_props, "[]", out_schema, true, false, true)
+            expect(schema).to_contain("my_tool")
+
+    context "when building structured tool result":
+        """
+        ### Scenario: Structured Response
+
+        make_tool_result_with_structured includes both content and structuredContent.
+        """
+
+        it "includes content array":
+            val result = make_tool_result_with_structured("1", "hello", "{}")
+            expect(result).to_contain("content")
+
+        it "includes structuredContent":
+            val structured = jo1(jp("status", js("ok")))
+            val result = make_tool_result_with_structured("1", "text", structured)
+            expect(result).to_contain("structuredContent")
+
+        it "includes jsonrpc version":
+            val result = make_tool_result_with_structured("1", "text", "{}")
+            expect(result).to_contain("2.0")
+
+# ============================================================================
+# Test Group 5: Bugdb Output Schemas
+# ============================================================================
+
+describe "MCP Bugdb Structured Output":
+    """
+    ## Bug Database Output Schemas
+
+    Tests that bugdb tools declare appropriate output schemas.
+    """
+
+    context "when bugdb_get has outputSchema":
+        """
+        ### Scenario: Bug Object Schema
+
+        bugdb_get declares output with id, severity, status, title, description.
+        """
+
+        it "output has id field":
+            val fields = ["id", "severity", "status", "title", "description"]
+            expect(fields).to_contain("id")
+
+        it "output has severity field":
+            val fields = ["id", "severity", "status", "title", "description"]
+            expect(fields).to_contain("severity")
+
+        it "output has status field":
+            val fields = ["id", "severity", "status", "title", "description"]
+            expect(fields).to_contain("status")
+
+    context "when bugdb_add has outputSchema":
+        """
+        ### Scenario: Add Result Schema
+
+        bugdb_add declares output with id and status.
+        """
+
+        it "output has id field":
+            val fields = ["id", "status"]
+            expect(fields).to_contain("id")
+
+        it "output has status field":
+            val fields = ["id", "status"]
+            expect(fields).to_contain("status")
+
+    context "when search_code has outputSchema":
+        """
+        ### Scenario: Search Results Array Schema
+
+        search_code declares output as array of {file, line, content}.
+        """
+
+        it "output type is array":
+            val output_type = "array"
+            expect(output_type).to_equal("array")
+
+        it "items have file field":
+            val item_fields = ["file", "line", "content"]
+            expect(item_fields).to_contain("file")
+
+        it "items have line field":
+            val item_fields = ["file", "line", "content"]
+            expect(item_fields).to_contain("line")
+
+        it "items have content field":
+            val item_fields = ["file", "line", "content"]
+            expect(item_fields).to_contain("content")

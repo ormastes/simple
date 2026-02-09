@@ -640,6 +640,119 @@ fn make_elicitation_request(id: String, message: String, schema: String) -> Stri
     params = params + RB()
     make_server_request(id, "elicitation/create", params)
 
+# --- Tool registration helper ---
+
+# Register a tool with simplified parameters (reduces boilerplate)
+# Returns a tool schema JSON string ready for inclusion in tools list.
+# params_list: array of [name, type, description] triples as flat string array
+fn register_tool(name: String, desc: String, param_names: [String], param_descs: [String], required_names: [String], read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
+    var props = LB()
+    var first_prop = true
+    var i = 0
+    for pname in param_names:
+        if not first_prop:
+            props = props + ","
+        first_prop = false
+        var pdesc = ""
+        if i < param_descs.len():
+            pdesc = param_descs[i]
+        val prop = jo2(jp("type", js("string")), jp("description", js(pdesc)))
+        props = props + jp(pname, prop)
+        i = i + 1
+    props = props + RB()
+
+    var req_arr = "["
+    var first_req = true
+    for rname in required_names:
+        if not first_req:
+            req_arr = req_arr + ","
+        first_req = false
+        req_arr = req_arr + js(rname)
+    req_arr = req_arr + "]"
+
+    make_tool_schema_multi(name, desc, props, req_arr, read_only, destructive, idempotent)
+
+# --- Content type detection helpers ---
+
+# Detect content type category from file path
+fn detect_file_content_type(path: String) -> String:
+    if path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".jpeg") or path.ends_with(".gif") or path.ends_with(".svg") or path.ends_with(".webp") or path.ends_with(".ico") or path.ends_with(".bmp"):
+        return "image"
+    if path.ends_with(".wav") or path.ends_with(".mp3") or path.ends_with(".ogg") or path.ends_with(".flac"):
+        return "audio"
+    "text"
+
+# Detect MIME type for a file
+fn detect_mime_type(path: String) -> String:
+    # Images
+    if path.ends_with(".png"):
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
+    if path.ends_with(".gif"):
+        return "image/gif"
+    if path.ends_with(".svg"):
+        return "image/svg+xml"
+    if path.ends_with(".webp"):
+        return "image/webp"
+    if path.ends_with(".ico"):
+        return "image/x-icon"
+    if path.ends_with(".bmp"):
+        return "image/bmp"
+    # Audio
+    if path.ends_with(".wav"):
+        return "audio/wav"
+    if path.ends_with(".mp3"):
+        return "audio/mpeg"
+    if path.ends_with(".ogg"):
+        return "audio/ogg"
+    if path.ends_with(".flac"):
+        return "audio/flac"
+    # Text
+    if path.ends_with(".spl"):
+        return "text/x-simple"
+    if path.ends_with(".json"):
+        return "application/json"
+    if path.ends_with(".md"):
+        return "text/markdown"
+    if path.ends_with(".html"):
+        return "text/html"
+    if path.ends_with(".css"):
+        return "text/css"
+    if path.ends_with(".js"):
+        return "text/javascript"
+    "text/plain"
+
+# --- Send notification over stdio ---
+
+# Send a JSON-RPC 2.0 notification via Content-Length framed stdio
+fn send_notification_message(notification: String):
+    var header = "Content-Length: "
+    header = header + notification.len().to_string()
+    header = header + "\r\n\r\n"
+    print_raw(header)
+    print_raw(notification)
+
+# Send a log notification if level passes the threshold
+fn send_log(level: String, data: String, logger: String, current_log_level: Int):
+    val msg_level = log_level_to_int(level)
+    if current_log_level < 0:
+        return
+    if msg_level < current_log_level:
+        return
+    val notification = make_log_notification(level, data, logger)
+    send_notification_message(notification)
+
+# Send a progress notification
+fn send_progress(token: String, progress: Int, total: Int, message: String):
+    val notification = make_progress_notification(token, progress, total, message)
+    send_notification_message(notification)
+
+# Send a resource updated notification
+fn send_resource_updated(uri: String):
+    val notification = make_resource_updated_notification(uri)
+    send_notification_message(notification)
+
 # --- Exports ---
 
 export LB, RB, Q
@@ -665,3 +778,9 @@ export make_tool_result_with_structured, make_tool_schema_with_output
 export make_server_request, make_sampling_request, make_sampling_request_full, make_elicitation_request
 # Raw JSON variants
 export make_log_notification_raw
+# Send helpers (stdio framed)
+export send_notification_message, send_log, send_progress, send_resource_updated
+# Tool registration helper
+export register_tool
+# Content type detection
+export detect_file_content_type, detect_mime_type
