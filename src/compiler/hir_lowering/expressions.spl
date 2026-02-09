@@ -423,7 +423,52 @@ impl HirLowering:
 
         var stmts: [HirStmt] = []
         for s in b.stmts:
-            stmts = stmts.push(self.lower_stmt(s))
+            val lowered = self.lower_stmt(s)
+            stmts = stmts.push(lowered)
+
+            # Workaround: lower_stmt's mutations to self.symbols don't propagate
+            # through the interpreter's method dispatch. Re-register symbol for
+            # Val/Var statements so subsequent expressions can resolve the name.
+            # Also sync next_symbol_id so the next define() gets a unique ID.
+            match s.kind:
+                case StmtKind.Val(name, _, _):
+                    match lowered.kind:
+                        case Let(symbol_id, _, _):
+                            var syms = self.symbols
+                            # Ensure next_symbol_id is past this symbol
+                            if syms.next_symbol_id <= symbol_id.id:
+                                syms.next_symbol_id = symbol_id.id + 1
+                            var scope = syms.scopes[syms.current_scope.id]
+                            var scope_syms = scope.symbols
+                            scope_syms[name] = symbol_id
+                            scope.symbols = scope_syms
+                            syms.scopes[syms.current_scope.id] = scope
+                            syms.symbols[symbol_id.id] = Symbol(
+                                id: symbol_id, name: name, kind: SymbolKind.Variable,
+                                type_: nil, scope: syms.current_scope, span: s.span,
+                                is_public: false, is_mutable: false, defining_module: nil
+                            )
+                            self.symbols = syms
+                        case _: pass
+                case StmtKind.Var(name, _, _):
+                    match lowered.kind:
+                        case Let(symbol_id, _, _):
+                            var syms = self.symbols
+                            if syms.next_symbol_id <= symbol_id.id:
+                                syms.next_symbol_id = symbol_id.id + 1
+                            var scope = syms.scopes[syms.current_scope.id]
+                            var scope_syms = scope.symbols
+                            scope_syms[name] = symbol_id
+                            scope.symbols = scope_syms
+                            syms.scopes[syms.current_scope.id] = scope
+                            syms.symbols[symbol_id.id] = Symbol(
+                                id: symbol_id, name: name, kind: SymbolKind.Variable,
+                                type_: nil, scope: syms.current_scope, span: s.span,
+                                is_public: false, is_mutable: true, defining_module: nil
+                            )
+                            self.symbols = syms
+                        case _: pass
+                case _: pass
 
         symbols_table = self.symbols
         symbols_table.pop_scope()

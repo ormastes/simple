@@ -828,239 +828,231 @@ impl Lexer:
     # ========================================================================
 
     me scan_operator_or_delimiter() -> Token:
-        """Scan an operator or delimiter."""
+        """Scan an operator or delimiter.
+
+        NOTE: Uses if-elif instead of match expression because self.advance()
+        mutations inside match arms do not propagate back in the interpreter.
+        """
         val start = self.pos
         val line = self.line
         val col = self.col
         val c = self.advance()
 
-        val kind = match c:
-            # Single character
-            case '+':
-                if self.peek() == '=':
-                    self.advance()
-                    TokenKind.PlusEq
-                else:
-                    TokenKind.Plus
-            case '-':
-                if self.peek() == '>':
-                    self.advance()
-                    TokenKind.Arrow
-                elif self.peek() == '=':
-                    self.advance()
-                    TokenKind.MinusEq
-                else:
-                    TokenKind.Minus
-            case '*':
-                if self.peek() == '*':
-                    self.advance()
-                    TokenKind.StarStar
-                elif self.peek() == '=':
-                    self.advance()
-                    TokenKind.StarEq
-                else:
-                    TokenKind.Star
-            case '/':
-                if self.peek() == '/':
-                    self.advance()
-                    TokenKind.Parallel
-                elif self.peek() == '=':
-                    self.advance()
-                    TokenKind.SlashEq
-                else:
-                    TokenKind.Slash
-            case '%':
-                if self.peek() == '=':
-                    self.advance()
-                    TokenKind.PercentEq
-                else:
-                    TokenKind.Percent
-            case '=':
-                if self.peek() == '=':
-                    self.advance()
-                    TokenKind.Eq
-                elif self.peek() == '>':
-                    self.advance()
-                    TokenKind.FatArrow
-                else:
-                    TokenKind.Assign
-            case '!':
-                if self.peek() == '=':
-                    self.advance()
-                    TokenKind.NotEq
-                else:
-                    TokenKind.Bang
-            case '<':
+        var kind = TokenKind.Error
+
+        if c == '+':
+            if self.peek() == '=':
+                self.advance()
+                kind = TokenKind.PlusEq
+            else:
+                kind = TokenKind.Plus
+        elif c == '-':
+            if self.peek() == '>':
+                self.advance()
+                kind = TokenKind.Arrow
+            elif self.peek() == '=':
+                self.advance()
+                kind = TokenKind.MinusEq
+            else:
+                kind = TokenKind.Minus
+        elif c == '*':
+            if self.peek() == '*':
+                self.advance()
+                kind = TokenKind.StarStar
+            elif self.peek() == '=':
+                self.advance()
+                kind = TokenKind.StarEq
+            else:
+                kind = TokenKind.Star
+        elif c == '/':
+            if self.peek() == '/':
+                self.advance()
+                kind = TokenKind.Parallel
+            elif self.peek() == '=':
+                self.advance()
+                kind = TokenKind.SlashEq
+            else:
+                kind = TokenKind.Slash
+        elif c == '%':
+            if self.peek() == '=':
+                self.advance()
+                kind = TokenKind.PercentEq
+            else:
+                kind = TokenKind.Percent
+        elif c == '=':
+            if self.peek() == '=':
+                self.advance()
+                kind = TokenKind.Eq
+            elif self.peek() == '>':
+                self.advance()
+                kind = TokenKind.FatArrow
+            else:
+                kind = TokenKind.Assign
+        elif c == '!':
+            if self.peek() == '=':
+                self.advance()
+                kind = TokenKind.NotEq
+            else:
+                kind = TokenKind.Bang
+        elif c == '<':
+            if self.peek() == '<':
+                self.advance()
+                # Check for <<< (kernel launch)
                 if self.peek() == '<':
                     self.advance()
-                    # Check for <<< (kernel launch)
-                    if self.peek() == '<':
-                        self.advance()
-                        TokenKind.TripleLess
-                    else:
-                        TokenKind.ComposeBack
-                elif self.peek() == '=':
-                    self.advance()
-                    TokenKind.LtEq
+                    kind = TokenKind.TripleLess
                 else:
-                    # Track generic depth: < after Ident likely opens a generic
-                    if self.prev_token_kind == TokenKind.Ident:
-                        self.generic_depth = self.generic_depth + 1
-                    TokenKind.Lt
-            case '>':
-                if self.peek() == '>' and self.generic_depth == 0:
-                    self.advance()
-                    # Check for >>> (kernel launch end)
-                    if self.peek() == '>':
-                        self.advance()
-                        TokenKind.TripleGreater
-                    else:
-                        TokenKind.Compose
-                elif self.peek() == '=':
-                    self.advance()
-                    TokenKind.GtEq
-                else:
-                    # Track generic depth: > closes a generic
-                    if self.generic_depth > 0:
-                        self.generic_depth = self.generic_depth - 1
-                    TokenKind.Gt
-            case '&':
-                if self.peek() == '&':
-                    self.advance()
-                    TokenKind.AmpAmp
-                else:
-                    TokenKind.Ampersand
-            case '|':
+                    kind = TokenKind.ComposeBack
+            elif self.peek() == '=':
+                self.advance()
+                kind = TokenKind.LtEq
+            else:
+                # Track generic depth: < after Ident likely opens a generic
+                if self.prev_token_kind == TokenKind.Ident:
+                    self.generic_depth = self.generic_depth + 1
+                kind = TokenKind.Lt
+        elif c == '>':
+            if self.peek() == '>' and self.generic_depth == 0:
+                self.advance()
+                # Check for >>> (kernel launch end)
                 if self.peek() == '>':
                     self.advance()
-                    TokenKind.PipeForward
-                elif self.peek() == '|':
-                    self.advance()
-                    TokenKind.PipePipe
+                    kind = TokenKind.TripleGreater
                 else:
-                    TokenKind.Pipe
-            case '^':
-                if self.in_math_block:
-                    # Inside m{} block, ^ is power operator
-                    TokenKind.Caret
-                else:
-                    # Outside m{} block, ^ returns error
-                    return Token.new(
-                        TokenKind.Error,
-                        Span.new(start, self.pos, line, col),
-                        "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
-                    )
-            case '~':
-                if self.peek() == '>':
-                    self.advance()
-                    TokenKind.LayerConnect
-                else:
-                    TokenKind.Tilde
-            case '?':
+                    kind = TokenKind.Compose
+            elif self.peek() == '=':
+                self.advance()
+                kind = TokenKind.GtEq
+            else:
+                # Track generic depth: > closes a generic
+                if self.generic_depth > 0:
+                    self.generic_depth = self.generic_depth - 1
+                kind = TokenKind.Gt
+        elif c == '&':
+            if self.peek() == '&':
+                self.advance()
+                kind = TokenKind.AmpAmp
+            else:
+                kind = TokenKind.Ampersand
+        elif c == '|':
+            if self.peek() == '>':
+                self.advance()
+                kind = TokenKind.PipeForward
+            elif self.peek() == '|':
+                self.advance()
+                kind = TokenKind.PipePipe
+            else:
+                kind = TokenKind.Pipe
+        elif c == '^':
+            if self.in_math_block:
+                kind = TokenKind.Caret
+            else:
+                return Token.new(
+                    TokenKind.Error,
+                    Span.new(start, self.pos, line, col),
+                    "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
+                )
+        elif c == '~':
+            if self.peek() == '>':
+                self.advance()
+                kind = TokenKind.LayerConnect
+            else:
+                kind = TokenKind.Tilde
+        elif c == '?':
+            if self.peek() == '.':
+                self.advance()
+                kind = TokenKind.QuestionDot
+            elif self.peek() == '?':
+                self.advance()
+                kind = TokenKind.QuestionQuestion
+            else:
+                kind = TokenKind.Question
+        elif c == '.':
+            if self.peek() == '.':
+                self.advance()
                 if self.peek() == '.':
                     self.advance()
-                    TokenKind.QuestionDot
-                elif self.peek() == '?':
+                    kind = TokenKind.Ellipsis
+                elif self.peek() == '=':
                     self.advance()
-                    TokenKind.QuestionQuestion
+                    kind = TokenKind.DotDotEq
                 else:
-                    TokenKind.Question
-            case '.':
-                if self.peek() == '.':
-                    self.advance()
-                    if self.peek() == '.':
-                        self.advance()
-                        TokenKind.Ellipsis
-                    elif self.peek() == '=':
-                        self.advance()
-                        TokenKind.DotDotEq
-                    else:
-                        TokenKind.DotDot
-                elif self.peek() == '?':
-                    self.advance()
-                    TokenKind.DotQuestion
-                elif self.peek() == '+':
-                    self.advance()
-                    TokenKind.DotPlus
-                elif self.peek() == '-':
-                    self.advance()
-                    TokenKind.DotMinus
-                elif self.peek() == '*':
-                    self.advance()
-                    TokenKind.DotStar
-                elif self.peek() == '/':
-                    self.advance()
-                    TokenKind.DotSlash
-                elif self.peek() == '^':
-                    self.advance()
-                    TokenKind.DotCaret
-                else:
-                    TokenKind.Dot
-            case ',':
-                TokenKind.Comma
-            case ':':
-                TokenKind.Colon
-            case ';':
-                TokenKind.Semicolon
-            case '(':
-                self.paren_depth = self.paren_depth + 1
-                TokenKind.LParen
-            case ')':
-                self.paren_depth = max(0, self.paren_depth - 1)
-                TokenKind.RParen
-            case '{':
-                self.paren_depth = self.paren_depth + 1
-                if self.in_math_block:
-                    self.math_brace_depth = self.math_brace_depth + 1
-                # Track block depth
-                if self.current_block_kind.?:
-                    self.block_brace_depth = self.block_brace_depth + 1
-                    # For raw mode blocks, mark that we need to capture payload
-                    # Use -1 as marker (next scan_token will start capturing)
-                    if self.in_raw_block and self.block_brace_depth == 1:
-                        self.raw_block_start = -1  # Signal to scan payload on next token
-                TokenKind.LBrace
-            case '}':
-                self.paren_depth = max(0, self.paren_depth - 1)
-                if self.in_math_block:
-                    self.math_brace_depth = self.math_brace_depth - 1
-                    if self.math_brace_depth < 0:
-                        # Exiting math block
-                        self.in_math_block = false
-                        self.math_brace_depth = 0
-                # Handle block exit
-                if self.current_block_kind.?:
-                    self.block_brace_depth = self.block_brace_depth - 1
-                    if self.block_brace_depth < 0:
-                        # Exiting the block
-                        val block_kind = self.current_block_kind.unwrap()
-                        self.current_block_kind = nil
-                        self.current_lexer_mode = LexerMode.Normal
-                        self.in_raw_block = false
-                        self.block_brace_depth = 0
-                        # Return BlockEnd token
-                        return Token.new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
-                TokenKind.RBrace
-            case '[':
-                self.paren_depth = self.paren_depth + 1
-                TokenKind.LBracket
-            case ']':
-                self.paren_depth = max(0, self.paren_depth - 1)
-                # Check for array suffix after ]
-                val suffix = self.try_scan_array_suffix()
-                if suffix.?:
-                    return Token.new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix.unwrap())
-                TokenKind.RBracket
-            case '@':
-                TokenKind.At
-            case '$':
-                TokenKind.Dollar
-            case '\\':
-                TokenKind.Backslash
-            case '_':
-                TokenKind.Underscore
-            case _:
-                TokenKind.Error
+                    kind = TokenKind.DotDot
+            elif self.peek() == '?':
+                self.advance()
+                kind = TokenKind.DotQuestion
+            elif self.peek() == '+':
+                self.advance()
+                kind = TokenKind.DotPlus
+            elif self.peek() == '-':
+                self.advance()
+                kind = TokenKind.DotMinus
+            elif self.peek() == '*':
+                self.advance()
+                kind = TokenKind.DotStar
+            elif self.peek() == '/':
+                self.advance()
+                kind = TokenKind.DotSlash
+            elif self.peek() == '^':
+                self.advance()
+                kind = TokenKind.DotCaret
+            else:
+                kind = TokenKind.Dot
+        elif c == ',':
+            kind = TokenKind.Comma
+        elif c == ':':
+            kind = TokenKind.Colon
+        elif c == ';':
+            kind = TokenKind.Semicolon
+        elif c == '(':
+            self.paren_depth = self.paren_depth + 1
+            kind = TokenKind.LParen
+        elif c == ')':
+            self.paren_depth = max(0, self.paren_depth - 1)
+            kind = TokenKind.RParen
+        elif c == '{':
+            self.paren_depth = self.paren_depth + 1
+            if self.in_math_block:
+                self.math_brace_depth = self.math_brace_depth + 1
+            if self.current_block_kind.?:
+                self.block_brace_depth = self.block_brace_depth + 1
+                if self.in_raw_block and self.block_brace_depth == 1:
+                    self.raw_block_start = -1
+            kind = TokenKind.LBrace
+        elif c == '}':
+            self.paren_depth = max(0, self.paren_depth - 1)
+            if self.in_math_block:
+                self.math_brace_depth = self.math_brace_depth - 1
+                if self.math_brace_depth < 0:
+                    self.in_math_block = false
+                    self.math_brace_depth = 0
+            if self.current_block_kind.?:
+                self.block_brace_depth = self.block_brace_depth - 1
+                if self.block_brace_depth < 0:
+                    val block_kind = self.current_block_kind.unwrap()
+                    self.current_block_kind = nil
+                    self.current_lexer_mode = LexerMode.Normal
+                    self.in_raw_block = false
+                    self.block_brace_depth = 0
+                    return Token.new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
+            kind = TokenKind.RBrace
+        elif c == '[':
+            self.paren_depth = self.paren_depth + 1
+            kind = TokenKind.LBracket
+        elif c == ']':
+            self.paren_depth = max(0, self.paren_depth - 1)
+            val suffix = self.try_scan_array_suffix()
+            if suffix.?:
+                return Token.new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix.unwrap())
+            kind = TokenKind.RBracket
+        elif c == '@':
+            kind = TokenKind.At
+        elif c == '$':
+            kind = TokenKind.Dollar
+        elif c == '\\':
+            kind = TokenKind.Backslash
+        elif c == '_':
+            kind = TokenKind.Underscore
 
         val text = self.source[start:self.pos]
         Token.new(kind, Span.new(start, self.pos, line, col), text)

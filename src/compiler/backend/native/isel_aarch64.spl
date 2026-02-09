@@ -101,7 +101,7 @@ fn isel_add_string_data(ctx: ISelContext, s: text) -> ISelContext:
     var str_bytes: [i64] = []
     for i in 0..s.len():
         val ch = s[i]
-        var ascii = char_to_ascii(ch)
+        var ascii = a64_char_to_ascii(ch)
         str_bytes = str_bytes + [ascii]
     str_bytes = str_bytes + [0]
     val entry = DataEntry(name: label, data: str_bytes, is_readonly: true)
@@ -123,7 +123,7 @@ fn isel_last_string_label(ctx: ISelContext) -> text:
 # Character to ASCII (shared utility)
 # ============================================================================
 
-fn char_to_ascii(ch: text) -> i64:
+fn a64_char_to_ascii(ch: text) -> i64:
     if ch == "a": 97
     elif ch == "b": 98
     elif ch == "c": 99
@@ -219,10 +219,10 @@ fn char_to_ascii(ch: text) -> i64:
 # Local to Virtual Register Mapping
 # ============================================================================
 
-fn local_to_vreg(local_id: i64) -> MachReg:
+fn a64_local_to_vreg(local_id: i64) -> MachReg:
     virtual_reg(local_id)
 
-fn local_vreg_op(local_id: i64) -> Operand:
+fn a64_local_vreg_op(local_id: i64) -> Operand:
     op_reg(virtual_reg(local_id))
 
 # ============================================================================
@@ -234,19 +234,19 @@ struct LoweredOperand:
     result: Operand
     ctx: ISelContext
 
-fn lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
+fn a64_lower_operand(ctx: ISelContext, operand: MirOperand) -> LoweredOperand:
     match operand.kind:
         case Copy(local):
-            LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
+            LoweredOperand(insts: [], result: a64_local_vreg_op(local.id), ctx: ctx)
         case Move(local):
-            LoweredOperand(insts: [], result: local_vreg_op(local.id), ctx: ctx)
+            LoweredOperand(insts: [], result: a64_local_vreg_op(local.id), ctx: ctx)
         case Const(value, type_):
-            lower_const(ctx, value, type_)
+            a64_lower_const(ctx, value, type_)
 
-fn lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
+fn a64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> LoweredOperand:
     match value:
         case Int(v):
-            lower_const_int(ctx, v)
+            a64_lower_const_int(ctx, v)
         case Bool(v):
             val imm_val = if v: 1 else: 0
             var new_ctx = isel_alloc_vreg(ctx)
@@ -278,7 +278,7 @@ fn lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lowere
             val inst = new_mach_inst(A64_OP_MOVZ, [dest, op_imm(0)])
             LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
 
-fn lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
+fn a64_lower_const_int(ctx: ISelContext, v: i64) -> LoweredOperand:
     # AArch64 MOVZ can load a 16-bit immediate with optional shift.
     # For values fitting in 16 bits: single MOVZ
     # For larger values: MOVZ for lowest chunk, then MOVK for upper chunks
@@ -329,7 +329,7 @@ fn isel_module_aarch64(module: MirModule) -> MachModule:
     val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
-        var result = isel_function(ctx, func)
+        var result = a64_isel_function(ctx, func)
         ctx = result.ctx
         mach_module = mach_module_add_func(mach_module, result.func)
 
@@ -347,7 +347,7 @@ struct ISelFuncResult:
     func: MachFunction
     ctx: ISelContext
 
-fn isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
+fn a64_isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
     var mach_func = new_mach_function(func.name)
 
     # Reset vreg counter - use local IDs directly, start high for temps
@@ -382,14 +382,14 @@ fn isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
             case Arg(index):
                 if index < AARCH64_ARG_REGS.len():
                     val arg_reg = AARCH64_ARG_REGS[index]
-                    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(A64_OP_MOV, [local_vreg_op(local.id.id), op_phys(arg_reg)]))
+                    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(A64_OP_MOV, [a64_local_vreg_op(local.id.id), op_phys(arg_reg)]))
             case _: ()
 
     mach_func = mach_func_add_block(mach_func, prologue_block)
 
     # Translate each MIR block
     for block in func.blocks:
-        var result = isel_block(local_ctx, block)
+        var result = a64_isel_block(local_ctx, block)
         local_ctx = result.ctx
         mach_func = mach_func_add_block(mach_func, result.block)
 
@@ -415,20 +415,20 @@ struct ISelBlockResult:
     block: MachBlock
     ctx: ISelContext
 
-fn isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
+fn a64_isel_block(ctx: ISelContext, block: MirBlock) -> ISelBlockResult:
     val label = if block.label.?: block.label.unwrap() else: "bb{block.id.id}"
     var mach_block = new_mach_block(label, block.id.id)
     var current_ctx = ctx
 
     # Lower instructions
     for inst in block.instructions:
-        var result = isel_inst(current_ctx, inst)
+        var result = a64_isel_inst(current_ctx, inst)
         current_ctx = result.ctx
         for mi in result.insts:
             mach_block = mach_block_add_inst(mach_block, mi)
 
     # Lower terminator
-    var term_result = isel_terminator(current_ctx, block.terminator)
+    var term_result = a64_isel_terminator(current_ctx, block.terminator)
     current_ctx = term_result.ctx
     for mi in term_result.insts:
         mach_block = mach_block_add_inst(mach_block, mi)
@@ -443,59 +443,59 @@ struct ISelInstResult:
     insts: [MachInst]
     ctx: ISelContext
 
-fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
+fn a64_isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
     match inst.kind:
         case Const(dest, value, type_):
-            isel_const(ctx, dest, value, type_)
+            a64_isel_const(ctx, dest, value, type_)
         case Copy(dest, src):
-            isel_copy(ctx, dest, src)
+            a64_isel_copy(ctx, dest, src)
         case Move(dest, src):
-            isel_copy(ctx, dest, src)
+            a64_isel_copy(ctx, dest, src)
         case BinOp(dest, op, left, right):
-            isel_binop(ctx, dest, op, left, right)
+            a64_isel_binop(ctx, dest, op, left, right)
         case UnaryOp(dest, op, operand):
-            isel_unaryop(ctx, dest, op, operand)
+            a64_isel_unaryop(ctx, dest, op, operand)
         case Load(dest, ptr):
-            isel_load(ctx, dest, ptr)
+            a64_isel_load(ctx, dest, ptr)
         case Store(ptr, value):
-            isel_store(ctx, ptr, value)
+            a64_isel_store(ctx, ptr, value)
         case Call(dest, func_op, args):
-            isel_call(ctx, dest, func_op, args)
+            a64_isel_call(ctx, dest, func_op, args)
         case GetField(dest, base, field):
-            isel_get_field(ctx, dest, base, field)
+            a64_isel_get_field(ctx, dest, base, field)
         case SetField(base, field, value):
-            isel_set_field(ctx, base, field, value)
+            a64_isel_set_field(ctx, base, field, value)
         case Alloc(dest, type_):
-            isel_alloc(ctx, dest, type_)
+            a64_isel_alloc(ctx, dest, type_)
         case Cast(dest, operand, target):
-            isel_cast(ctx, dest, operand, target)
+            a64_isel_cast(ctx, dest, operand, target)
         case Nop:
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
         case _:
             # Unsupported instruction - emit NOP
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
 
-fn isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> ISelInstResult:
-    val lowered = lower_const(ctx, value, type_)
-    val dest_op = local_vreg_op(dest.id)
+fn a64_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> ISelInstResult:
+    val lowered = a64_lower_const(ctx, value, type_)
+    val dest_op = a64_local_vreg_op(dest.id)
     # Move the const result to the destination vreg
     var insts = lowered.insts
     insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, lowered.result])]
     ISelInstResult(insts: insts, ctx: lowered.ctx)
 
-fn isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> ISelInstResult:
-    val inst = new_mach_inst(A64_OP_MOV, [local_vreg_op(dest.id), local_vreg_op(src.id)])
+fn a64_isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> ISelInstResult:
+    val inst = new_mach_inst(A64_OP_MOV, [a64_local_vreg_op(dest.id), a64_local_vreg_op(src.id)])
     ISelInstResult(insts: [inst], ctx: ctx)
 
 # ============================================================================
 # Binary Operations
 # ============================================================================
 
-fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> ISelInstResult:
-    val left_low = lower_operand(ctx, left)
-    val right_low = lower_operand(left_low.ctx, right)
+fn a64_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> ISelInstResult:
+    val left_low = a64_lower_operand(ctx, left)
+    val right_low = a64_lower_operand(left_low.ctx, right)
     var current_ctx = right_low.ctx
-    val dest_op = local_vreg_op(dest.id)
+    val dest_op = a64_local_vreg_op(dest.id)
     var insts: [MachInst] = []
     insts = insts + left_low.insts
     insts = insts + right_low.insts
@@ -527,24 +527,24 @@ fn isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, r
         case Shr:
             insts = insts + [new_mach_inst(A64_OP_ASR, [dest_op, left_low.result, right_low.result])]
         case Eq:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_EQ)
         case Ne:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_NE)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_NE)
         case Lt:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_LT)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LT)
         case Le:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_LE)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_LE)
         case Gt:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_GT)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GT)
         case Ge:
-            insts = insts + isel_comparison(dest_op, left_low.result, right_low.result, COND_GE)
+            insts = insts + a64_isel_comparison(dest_op, left_low.result, right_low.result, COND_GE)
         case _:
             # Unsupported binop - zero result
             insts = insts + [new_mach_inst(A64_OP_MOVZ, [dest_op, op_imm(0)])]
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
-fn isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) -> [MachInst]:
+fn a64_isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) -> [MachInst]:
     # CMP left, right (alias: SUBS xzr, left, right)
     # CSET dest, <cond>
     var insts: [MachInst] = []
@@ -556,9 +556,9 @@ fn isel_comparison(dest: Operand, left: Operand, right: Operand, cond: i64) -> [
 # Unary Operations
 # ============================================================================
 
-fn isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: MirOperand) -> ISelInstResult:
-    val low = lower_operand(ctx, operand)
-    val dest_op = local_vreg_op(dest.id)
+fn a64_isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: MirOperand) -> ISelInstResult:
+    val low = a64_lower_operand(ctx, operand)
+    val dest_op = a64_local_vreg_op(dest.id)
     var insts = low.insts
 
     match op:
@@ -598,35 +598,35 @@ fn isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: MirOpe
 # Memory Operations
 # ============================================================================
 
-fn isel_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand) -> ISelInstResult:
-    val low = lower_operand(ctx, ptr)
-    val dest_op = local_vreg_op(dest.id)
+fn a64_isel_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand) -> ISelInstResult:
+    val low = a64_lower_operand(ctx, ptr)
+    val dest_op = a64_local_vreg_op(dest.id)
     var insts = low.insts
     # LDR dest, [base, #0]
     insts = insts + [new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(low.result), 0)])]
     ISelInstResult(insts: insts, ctx: low.ctx)
 
-fn isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstResult:
-    val ptr_low = lower_operand(ctx, ptr)
-    val val_low = lower_operand(ptr_low.ctx, value)
+fn a64_isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> ISelInstResult:
+    val ptr_low = a64_lower_operand(ctx, ptr)
+    val val_low = a64_lower_operand(ptr_low.ctx, value)
     var insts = ptr_low.insts
     insts = insts + val_low.insts
     # STR value, [base, #0]
     insts = insts + [new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(ptr_low.result), 0)])]
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
-fn isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> ISelInstResult:
-    val base_low = lower_operand(ctx, base)
-    val dest_op = local_vreg_op(dest.id)
+fn a64_isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> ISelInstResult:
+    val base_low = a64_lower_operand(ctx, base)
+    val dest_op = a64_local_vreg_op(dest.id)
     val offset = field * 8
     var insts = base_low.insts
     # LDR dest, [base, #offset]
     insts = insts + [new_mach_inst(A64_OP_LDR, [dest_op, op_mem(operand_get_reg(base_low.result), offset)])]
     ISelInstResult(insts: insts, ctx: base_low.ctx)
 
-fn isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> ISelInstResult:
-    val base_low = lower_operand(ctx, base)
-    val val_low = lower_operand(base_low.ctx, value)
+fn a64_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> ISelInstResult:
+    val base_low = a64_lower_operand(ctx, base)
+    val val_low = a64_lower_operand(base_low.ctx, value)
     val offset = field * 8
     var insts = base_low.insts
     insts = insts + val_low.insts
@@ -634,14 +634,14 @@ fn isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOper
     insts = insts + [new_mach_inst(A64_OP_STR, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)])]
     ISelInstResult(insts: insts, ctx: val_low.ctx)
 
-fn isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
+fn a64_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult:
     val size = type_.size_bytes()
     val aligned = if size < 16: 16 else: size
     # Round up to multiple of 16
     var alloc_size = aligned
     if alloc_size % 16 != 0:
         alloc_size = alloc_size + (16 - (alloc_size % 16))
-    val dest_op = local_vreg_op(dest.id)
+    val dest_op = a64_local_vreg_op(dest.id)
     var insts: [MachInst] = []
     # SUB sp, sp, #size
     insts = insts + [new_mach_inst(A64_OP_SUB_IMM, [op_phys(AARCH64_SP), op_phys(AARCH64_SP), op_imm(alloc_size)])]
@@ -649,9 +649,9 @@ fn isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> ISelInstResult
     insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, op_phys(AARCH64_SP)])]
     ISelInstResult(insts: insts, ctx: ctx)
 
-fn isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirType) -> ISelInstResult:
-    val low = lower_operand(ctx, operand)
-    val dest_op = local_vreg_op(dest.id)
+fn a64_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirType) -> ISelInstResult:
+    val low = a64_lower_operand(ctx, operand)
+    val dest_op = a64_local_vreg_op(dest.id)
     var insts = low.insts
     # Simple move - truncation/extension handled by encoder based on type
     insts = insts + [new_mach_inst(A64_OP_MOV, [dest_op, low.result])]
@@ -661,13 +661,13 @@ fn isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirTy
 # Function Calls
 # ============================================================================
 
-fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
+fn a64_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
 
     # Lower arguments into ABI registers (x0-x7)
     for i in 0..args.len():
-        val arg_low = lower_operand(current_ctx, args[i])
+        val arg_low = a64_lower_operand(current_ctx, args[i])
         current_ctx = arg_low.ctx
         insts = insts + arg_low.insts
         if i < AARCH64_ARG_REGS.len():
@@ -687,16 +687,16 @@ fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOp
             insts = insts + [new_mach_inst(A64_OP_BL, [op_sym(name)])]
         case Copy(local):
             # Indirect call through register: BLR xN
-            insts = insts + [new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)])]
+            insts = insts + [new_mach_inst(A64_OP_BL, [a64_local_vreg_op(local.id)])]
         case Move(local):
-            insts = insts + [new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)])]
+            insts = insts + [new_mach_inst(A64_OP_BL, [a64_local_vreg_op(local.id)])]
         case _:
             insts = insts + [new_mach_inst(A64_OP_NOP, [])]
 
     # Move return value from x0
     if dest.?:
         val d = dest.unwrap()
-        insts = insts + [new_mach_inst(A64_OP_MOV, [local_vreg_op(d.id), op_phys(AARCH64_X0)])]
+        insts = insts + [new_mach_inst(A64_OP_MOV, [a64_local_vreg_op(d.id), op_phys(AARCH64_X0)])]
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -704,28 +704,28 @@ fn isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOp
 # Instruction Selection - Terminators
 # ============================================================================
 
-fn isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
+fn a64_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
     match term:
         case Goto(target):
             # B target_label
             val inst = new_mach_inst(A64_OP_B, [op_label(target.id)])
             ISelInstResult(insts: [inst], ctx: ctx)
         case Return(value):
-            isel_return(ctx, value)
+            a64_isel_return(ctx, value)
         case If(cond, then_, else_):
-            isel_if(ctx, cond, then_, else_)
+            a64_isel_if(ctx, cond, then_, else_)
         case Switch(value, targets, default_target):
-            isel_switch(ctx, value, targets, default_target)
+            a64_isel_switch(ctx, value, targets, default_target)
         case Unreachable:
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
         case _:
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
 
-fn isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
+fn a64_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []
     if value.?:
         val v = value.unwrap()
-        val low = lower_operand(ctx, v)
+        val low = a64_lower_operand(ctx, v)
         insts = insts + low.insts
         # MOV x0, result
         insts = insts + [new_mach_inst(A64_OP_MOV, [op_phys(AARCH64_X0), low.result])]
@@ -738,8 +738,8 @@ fn isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     insts = insts + [new_mach_inst(A64_OP_RET, [])]
     ISelInstResult(insts: insts, ctx: ctx)
 
-fn isel_if(ctx: ISelContext, cond: MirOperand, then_: BlockId, else_: BlockId) -> ISelInstResult:
-    val cond_low = lower_operand(ctx, cond)
+fn a64_isel_if(ctx: ISelContext, cond: MirOperand, then_: BlockId, else_: BlockId) -> ISelInstResult:
+    val cond_low = a64_lower_operand(ctx, cond)
     var insts = cond_low.insts
     # CBNZ cond, then_label (branch if nonzero = true)
     insts = insts + [new_mach_inst(A64_OP_CBNZ, [cond_low.result, op_label(then_.id)])]
@@ -747,8 +747,8 @@ fn isel_if(ctx: ISelContext, cond: MirOperand, then_: BlockId, else_: BlockId) -
     insts = insts + [new_mach_inst(A64_OP_B, [op_label(else_.id)])]
     ISelInstResult(insts: insts, ctx: cond_low.ctx)
 
-fn isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], default_target: BlockId) -> ISelInstResult:
-    val val_low = lower_operand(ctx, value)
+fn a64_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], default_target: BlockId) -> ISelInstResult:
+    val val_low = a64_lower_operand(ctx, value)
     var insts = val_low.insts
 
     # Generate CMP + BEQ chain for each case

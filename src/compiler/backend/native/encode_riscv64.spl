@@ -157,13 +157,13 @@ fn get_sym_name_rv(op: Operand) -> text:
 # Encode Context
 # ============================================================================
 
-struct EncodeContext:
+struct Rv64EncodeContext:
     code: [i64]
     relocations: [EncodedReloc]
     block_offsets: Dict<i64, i64>
-    pending_jumps: [PendingJump]
+    pending_jumps: [Rv64PendingJump]
 
-struct PendingJump:
+struct Rv64PendingJump:
     code_offset: i64
     target_block: i64
     jump_kind: i64
@@ -172,8 +172,8 @@ struct PendingJump:
 val JUMP_JAL = 0       # J-type (JAL)
 val JUMP_BRANCH = 1    # B-type (BEQ/BNE/BLT/BGE)
 
-fn new_encode_context() -> EncodeContext:
-    EncodeContext(code: [], relocations: [], block_offsets: {}, pending_jumps: [])
+fn rv64_new_encode_context() -> Rv64EncodeContext:
+    Rv64EncodeContext(code: [], relocations: [], block_offsets: {}, pending_jumps: [])
 
 # Relocation type for RISC-V CALL (AUIPC+JALR pair)
 val R_RISCV_CALL_PLT = 19
@@ -254,7 +254,7 @@ fn rv_branch_funct3(opcode: i64) -> i64:
 # Instruction Encoding
 # ============================================================================
 
-fn encode_inst_riscv64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
+fn encode_inst_riscv64(ectx: Rv64EncodeContext, inst: MachInst) -> Rv64EncodeContext:
     var code = ectx.code
     var relocs = ectx.relocations
     var pending = ectx.pending_jumps
@@ -395,7 +395,7 @@ fn encode_inst_riscv64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 val jump_offset = code.len()
                 val enc = encode_j_type_riscv64(0, rd, 0x6F)
                 code = emit_u32_le_riscv64(code, enc)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_JAL)]
+                pending = pending + [Rv64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_JAL)]
             case Imm(v):
                 val enc = encode_j_type_riscv64(v, rd, 0x6F)
                 code = emit_u32_le_riscv64(code, enc)
@@ -421,7 +421,7 @@ fn encode_inst_riscv64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 val jump_offset = code.len()
                 val enc = encode_b_type_riscv64(0, rs2, rs1, funct3, 0x63)
                 code = emit_u32_le_riscv64(code, enc)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_BRANCH)]
+                pending = pending + [Rv64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_BRANCH)]
             case _:
                 val enc = encode_b_type_riscv64(0, rs2, rs1, funct3, 0x63)
                 code = emit_u32_le_riscv64(code, enc)
@@ -451,7 +451,7 @@ fn encode_inst_riscv64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
                 val jump_offset = code.len()
                 val enc = encode_j_type_riscv64(0, RV_X1, 0x6F)
                 code = emit_u32_le_riscv64(code, enc)
-                pending = pending + [PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_JAL)]
+                pending = pending + [Rv64PendingJump(code_offset: jump_offset, target_block: block_id, jump_kind: JUMP_JAL)]
             case _:
                 # Fallback: emit NOP pair
                 code = emit_u32_le_riscv64(code, 0x00000013)
@@ -461,7 +461,7 @@ fn encode_inst_riscv64(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         # Unknown opcode - emit EBREAK (0x00100073) for debug
         code = emit_u32_le_riscv64(code, 0x00100073)
 
-    EncodeContext(code: code, relocations: relocs, block_offsets: ectx.block_offsets, pending_jumps: pending)
+    Rv64EncodeContext(code: code, relocations: relocs, block_offsets: ectx.block_offsets, pending_jumps: pending)
 
 # ============================================================================
 # Jump Patching
@@ -510,13 +510,13 @@ fn patch_jump_riscv64(code: [i64], byte_offset: i64, rel_offset: i64, kind: i64)
 # ============================================================================
 
 fn encode_function_riscv64(func: MachFunction) -> EncodedFunction:
-    var ectx = new_encode_context()
+    var ectx = rv64_new_encode_context()
 
     # Pass 1: encode all instructions, record block offsets and pending jumps
     for block in func.blocks:
         var offsets = ectx.block_offsets
         offsets[block.block_id] = ectx.code.len()
-        ectx = EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
+        ectx = Rv64EncodeContext(code: ectx.code, relocations: ectx.relocations, block_offsets: offsets, pending_jumps: ectx.pending_jumps)
 
         for inst in block.insts:
             ectx = encode_inst_riscv64(ectx, inst)
@@ -548,6 +548,6 @@ fn encode_module_riscv64(module: MachModule) -> [EncodedFunction]:
 # Exports
 # ============================================================================
 
-export EncodeContext, new_encode_context, PendingJump
+export Rv64EncodeContext, rv64_new_encode_context, Rv64PendingJump
 export JUMP_JAL, JUMP_BRANCH, R_RISCV_CALL_PLT
 export encode_function_riscv64, encode_inst_riscv64, encode_module_riscv64

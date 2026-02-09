@@ -89,11 +89,35 @@ fn interval_length(interval: LiveInterval) -> i64:
 # Compute Live Intervals
 # ============================================================================
 
+fn is_jump_opcode(opcode: i64) -> bool:
+    if opcode == 40: return true
+    if opcode == 41: return true
+    if opcode == 42: return true
+    if opcode == 43: return true
+    if opcode == 44: return true
+    if opcode == 45: return true
+    if opcode == 46: return true
+    if opcode == 47: return true
+    if opcode == 48: return true
+    false
+
+fn get_jump_label(inst: MachInst) -> i64:
+    if inst.operands.len() > 0:
+        match inst.operands[0].kind:
+            case Label(id): return id
+            case _: ()
+    -999
+
 fn compute_live_intervals(func: MachFunction) -> [LiveInterval]:
     var intervals: Dict<i64, LiveInterval> = {}
     var pos = 0
 
+    # Track block start positions and end positions
+    var block_start_pos: Dict<i64, i64> = {}
+    var block_end_pos: Dict<i64, i64> = {}
+
     for block in func.blocks:
+        block_start_pos[block.block_id] = pos
         for inst in block.insts:
             # Scan operands for virtual register uses/defs
             for operand in inst.operands:
@@ -120,6 +144,36 @@ fn compute_live_intervals(func: MachFunction) -> [LiveInterval]:
                             case _: ()
                     case _: ()
             pos = pos + 1
+        block_end_pos[block.block_id] = pos
+
+    # Detect back-edges and extend intervals for loops.
+    # A back-edge is a jump from block B to an earlier block A (lower start_pos).
+    # All intervals overlapping the loop body [A_start, B_end] must be extended
+    # to cover the full range, so they stay live across loop iterations.
+    for block in func.blocks:
+        for inst in block.insts:
+            if is_jump_opcode(inst.opcode):
+                val target_id = get_jump_label(inst)
+                if target_id != -999:
+                    if block_start_pos.contains(target_id):
+                        val target_start = block_start_pos[target_id]
+                        val src_end = block_end_pos[block.block_id]
+                        if target_start < block_start_pos[block.block_id]:
+                            # Back-edge detected: target_start..src_end is the loop
+                            val ikeys = intervals.keys()
+                            for ik in ikeys:
+                                var iv = intervals[ik]
+                                # Only extend intervals that START before the loop header
+                                # and are still alive at the header. This captures loop-carried
+                                # variables (defined before loop, used inside) without extending
+                                # loop-internal temps that are recalculated each iteration.
+                                val needs_extension = iv.start_pos < target_start and iv.end_pos >= target_start
+                                if needs_extension:
+                                    if iv.start_pos > target_start:
+                                        iv = interval_update_start(iv, target_start)
+                                    if iv.end_pos < src_end:
+                                        iv = interval_update_end(iv, src_end)
+                                    intervals[ik] = iv
 
     # Collect intervals into a list
     var result: [LiveInterval] = []
@@ -157,7 +211,7 @@ struct RegAllocResult:
     frame_size_addition: i64
     used_callee_saved: [i64]
 
-fn linear_scan_x86_64(intervals: [LiveInterval]) -> RegAllocResult:
+fn linear_scan_x86_64(intervals: [LiveInterval], allocatable: [i64]) -> RegAllocResult:
     val sorted = sort_intervals(intervals)
     var assignments: Dict<i64, i64> = {}
     var spills: Dict<i64, i64> = {}
@@ -169,7 +223,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval]) -> RegAllocResult:
     # Initialize free register pool
     for i in 0..16:
         free_regs = free_regs + [false]
-    for reg in X86_ALLOCATABLE:
+    for reg in allocatable:
         free_regs[reg] = true
 
     for interval in sorted:
@@ -186,7 +240,7 @@ fn linear_scan_x86_64(intervals: [LiveInterval]) -> RegAllocResult:
 
         # Try to find a free register
         var found_reg = -1
-        for reg in X86_ALLOCATABLE:
+        for reg in allocatable:
             if free_regs[reg]:
                 found_reg = reg
                 break
@@ -261,6 +315,38 @@ fn linear_scan_x86_64(intervals: [LiveInterval]) -> RegAllocResult:
     )
 
 # ============================================================================
+# Helper: physical register ID extraction
+# ============================================================================
+
+fn get_phys_reg_id(op: Operand) -> i64:
+    match op.kind:
+        case Reg(reg):
+            match reg.kind:
+                case Physical(id): id
+                case _: -1
+        case _: -1
+
+fn is_mov_rsp_rbp(inst: MachInst) -> bool:
+    if inst.opcode != X86_OP_MOV_REG_REG:
+        return false
+    if inst.operands.len() < 2:
+        return false
+    if get_phys_reg_id(inst.operands[0]) != X86_RSP:
+        return false
+    if get_phys_reg_id(inst.operands[1]) != X86_RBP:
+        return false
+    true
+
+fn function_has_calls(func: MachFunction) -> bool:
+    for block in func.blocks:
+        for inst in block.insts:
+            if inst.opcode == X86_OP_CALL:
+                return true
+            if inst.opcode == X86_OP_CALL_INDIRECT:
+                return true
+    false
+
+# ============================================================================
 # Apply Register Allocation
 # ============================================================================
 
@@ -268,8 +354,24 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
     # Compute live intervals
     val intervals = compute_live_intervals(func)
 
+    # For functions with calls, restrict to callee-saved registers only.
+    # This ensures all allocated values survive across CALL instructions.
+    # Functions without calls can use the full register set.
+    var alloc_regs = X86_ALLOCATABLE
+    if function_has_calls(func):
+        alloc_regs = X86_CALLEE_SAVED
+
     # Run linear scan
-    val result = linear_scan_x86_64(intervals)
+    val result = linear_scan_x86_64(intervals, alloc_regs)
+
+    # Calculate frame layout including callee-saved register storage
+    val callee_save_count = result.used_callee_saved.len()
+    val base_frame = func.frame_size + result.frame_size_addition
+    val callee_save_size = callee_save_count * 8
+    val total_frame = base_frame + callee_save_size
+    var aligned_frame = total_frame
+    if aligned_frame % 16 != 0:
+        aligned_frame = aligned_frame + (16 - (aligned_frame % 16))
 
     # Apply assignments to all instructions
     var new_blocks: [MachBlock] = []
@@ -281,43 +383,51 @@ fn regalloc_function(func: MachFunction) -> MachFunction:
                 new_block = mach_block_add_inst(new_block, ri)
         new_blocks = new_blocks + [new_block]
 
-    # Calculate total frame size
-    val total_frame = func.frame_size + result.frame_size_addition
-    var aligned_frame = total_frame
-    if aligned_frame % 16 != 0:
-        aligned_frame = aligned_frame + (16 - (aligned_frame % 16))
-
-    # Patch prologue SUB RSP instruction
+    # Patch prologue: update SUB RSP frame size and save callee-saved registers
     if new_blocks.len() > 0:
         var prologue = new_blocks[0]
         var patched_insts: [MachInst] = []
         for inst in prologue.insts:
+            var handled = false
             if inst.opcode == X86_OP_SUB_IMM:
                 if inst.operands.len() >= 2:
-                    match inst.operands[0].kind:
-                        case Reg(reg):
-                            match reg.kind:
-                                case Physical(id):
-                                    if id == X86_RSP:
-                                        patched_insts = patched_insts + [new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(aligned_frame)])]
-                                    else:
-                                        patched_insts = patched_insts + [inst]
-                                case _:
-                                    patched_insts = patched_insts + [inst]
-                        case _:
-                            patched_insts = patched_insts + [inst]
-                else:
-                    patched_insts = patched_insts + [inst]
-            else:
+                    if get_phys_reg_id(inst.operands[0]) == X86_RSP:
+                        handled = true
+                        # Patch frame size to include callee save area
+                        patched_insts = patched_insts + [new_mach_inst(X86_OP_SUB_IMM, [op_phys(X86_RSP), op_imm(aligned_frame)])]
+                        # Save callee-saved registers to stack slots after SUB RSP
+                        for i in 0..callee_save_count:
+                            val cs_reg = result.used_callee_saved[i]
+                            val offset = base_frame + (i + 1) * 8
+                            patched_insts = patched_insts + [new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(physical_reg(X86_RBP), 0 - offset), op_phys(cs_reg)])]
+            if not handled:
                 patched_insts = patched_insts + [inst]
-        # Rebuild the prologue block
         var new_prologue = new_mach_block(prologue.label, prologue.block_id)
-        # Add callee-saved register pushes
-        for cs_reg in result.used_callee_saved:
-            new_prologue = mach_block_add_inst(new_prologue, new_mach_inst(X86_OP_MOV_REG_REG, [op_phys(cs_reg), op_phys(cs_reg)]))
         for pi in patched_insts:
             new_prologue = mach_block_add_inst(new_prologue, pi)
         new_blocks[0] = new_prologue
+
+    # Patch epilogues: restore callee-saved registers before MOV RSP, RBP
+    for block_idx in 0..new_blocks.len():
+        var block = new_blocks[block_idx]
+        var has_epilogue = false
+        for inst in block.insts:
+            if is_mov_rsp_rbp(inst):
+                has_epilogue = true
+        if has_epilogue:
+            var ep_insts: [MachInst] = []
+            for inst in block.insts:
+                if is_mov_rsp_rbp(inst):
+                    # Restore callee-saved registers from stack before epilogue
+                    for i in 0..callee_save_count:
+                        val cs_reg = result.used_callee_saved[i]
+                        val offset = base_frame + (i + 1) * 8
+                        ep_insts = ep_insts + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(cs_reg), op_mem(physical_reg(X86_RBP), 0 - offset)])]
+                ep_insts = ep_insts + [inst]
+            var new_block = new_mach_block(block.label, block.block_id)
+            for pi in ep_insts:
+                new_block = mach_block_add_inst(new_block, pi)
+            new_blocks[block_idx] = new_block
 
     var out_func = new_mach_function(func.name)
     for blk in new_blocks:
@@ -336,6 +446,10 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
     var new_operands: [Operand] = []
     var spill_loads: [MachInst] = []
     var spill_stores: [MachInst] = []
+    # Use different scratch registers for different spilled operands
+    # to avoid clobbering when two operands are both spilled.
+    # First spilled operand → R11, second → R10.
+    var scratch_idx = 0
 
     for operand in inst.operands:
         match operand.kind:
@@ -351,16 +465,23 @@ fn rewrite_inst(inst: MachInst, result: RegAllocResult) -> [MachInst]:
                                 if result.spills.contains(id):
                                     val slot = result.spills[id]
                                     val offset = (slot + 1) * 8
-                                    # Use R11 as scratch for spills
-                                    spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(X86_R11), op_mem(physical_reg(X86_RBP), 0 - offset)])]
-                                    new_operands = new_operands + [op_phys(X86_R11)]
+                                    var scratch = X86_R11
+                                    if scratch_idx > 0:
+                                        scratch = X86_R10
+                                    scratch_idx = scratch_idx + 1
+                                    spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)])]
+                                    new_operands = new_operands + [op_phys(scratch)]
                                 else:
                                     new_operands = new_operands + [op_phys(X86_RAX)]
                         elif result.spills.contains(id):
                             val slot = result.spills[id]
                             val offset = (slot + 1) * 8
-                            spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(X86_R11), op_mem(physical_reg(X86_RBP), 0 - offset)])]
-                            new_operands = new_operands + [op_phys(X86_R11)]
+                            var scratch = X86_R11
+                            if scratch_idx > 0:
+                                scratch = X86_R10
+                            scratch_idx = scratch_idx + 1
+                            spill_loads = spill_loads + [new_mach_inst(X86_OP_MOV_REG_MEM, [op_phys(scratch), op_mem(physical_reg(X86_RBP), 0 - offset)])]
+                            new_operands = new_operands + [op_phys(scratch)]
                         else:
                             new_operands = new_operands + [op_phys(X86_RAX)]
                     case Physical(_):
@@ -424,4 +545,5 @@ fn regalloc_module(module: MachModule) -> MachModule:
 export LiveInterval, new_live_interval
 export compute_live_intervals, sort_intervals
 export RegAllocResult, linear_scan_x86_64
+export get_phys_reg_id, is_mov_rsp_rbp, function_has_calls
 export regalloc_function, regalloc_module

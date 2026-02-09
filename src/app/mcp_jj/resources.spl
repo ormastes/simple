@@ -1,0 +1,115 @@
+# resources.spl - MCP Resources for jj-git server
+#
+# Provides 5 resources exposing jj repository state:
+#   jj://status    - Current repo status
+#   jj://log       - Recent commit log
+#   jj://bookmarks - All bookmarks
+#   jj://conflicts - Current conflicts
+#   jj://op-log    - Operation history
+
+use app.mcp_jj.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json}
+use app.mcp_jj.jj_runner.{jj_run}
+
+fn get_all_resources(repo_path: String) -> String:
+    var resources = "["
+
+    # jj://status
+    var r1 = LB()
+    r1 = r1 + jp("uri", js("jj://status"))
+    r1 = r1 + "," + jp("name", js("Repository Status"))
+    r1 = r1 + "," + jp("description", js("Current jj repository status including working copy changes"))
+    r1 = r1 + "," + jp("mimeType", js("text/plain"))
+    r1 = r1 + RB()
+    resources = resources + r1
+
+    # jj://log
+    var r2 = LB()
+    r2 = r2 + jp("uri", js("jj://log"))
+    r2 = r2 + "," + jp("name", js("Commit Log"))
+    r2 = r2 + "," + jp("description", js("Recent commit history (last 20 commits)"))
+    r2 = r2 + "," + jp("mimeType", js("text/plain"))
+    r2 = r2 + RB()
+    resources = resources + "," + r2
+
+    # jj://bookmarks
+    var r3 = LB()
+    r3 = r3 + jp("uri", js("jj://bookmarks"))
+    r3 = r3 + "," + jp("name", js("Bookmarks"))
+    r3 = r3 + "," + jp("description", js("All bookmarks including remote tracking"))
+    r3 = r3 + "," + jp("mimeType", js("text/plain"))
+    r3 = r3 + RB()
+    resources = resources + "," + r3
+
+    # jj://conflicts
+    var r4 = LB()
+    r4 = r4 + jp("uri", js("jj://conflicts"))
+    r4 = r4 + "," + jp("name", js("Conflicts"))
+    r4 = r4 + "," + jp("description", js("Unresolved conflicts in the repository"))
+    r4 = r4 + "," + jp("mimeType", js("text/plain"))
+    r4 = r4 + RB()
+    resources = resources + "," + r4
+
+    # jj://op-log
+    var r5 = LB()
+    r5 = r5 + jp("uri", js("jj://op-log"))
+    r5 = r5 + "," + jp("name", js("Operation Log"))
+    r5 = r5 + "," + jp("description", js("Recent operation history (last 10 operations)"))
+    r5 = r5 + "," + jp("mimeType", js("text/plain"))
+    r5 = r5 + RB()
+    resources = resources + "," + r5
+
+    resources = resources + "]"
+    resources
+
+fn read_resource(uri: String, repo_path: String) -> String:
+    if uri == "jj://status":
+        val result = jj_run("status", repo_path)
+        if result.success:
+            return make_resource_content(uri, result.stdout)
+        else:
+            return make_resource_content(uri, "Error: " + result.stderr)
+
+    elif uri == "jj://log":
+        val result = jj_run("log -n 20", repo_path)
+        if result.success:
+            return make_resource_content(uri, result.stdout)
+        else:
+            return make_resource_content(uri, "Error: " + result.stderr)
+
+    elif uri == "jj://bookmarks":
+        val result = jj_run("bookmark list --all-remotes", repo_path)
+        if result.success:
+            return make_resource_content(uri, result.stdout)
+        else:
+            return make_resource_content(uri, "Error: " + result.stderr)
+
+    elif uri == "jj://conflicts":
+        val result = jj_run("resolve --list", repo_path)
+        if result.success:
+            var content = result.stdout
+            if content.trim() == "":
+                content = "No conflicts found."
+            return make_resource_content(uri, content)
+        else:
+            # resolve --list may fail if no conflicts, which is normal
+            return make_resource_content(uri, "No conflicts found.")
+
+    elif uri == "jj://op-log":
+        val result = jj_run("op log -n 10", repo_path)
+        if result.success:
+            return make_resource_content(uri, result.stdout)
+        else:
+            return make_resource_content(uri, "Error: " + result.stderr)
+
+    else:
+        return ""
+
+fn make_resource_content(uri: String, text_content: String) -> String:
+    var content = LB()
+    content = content + jp("uri", js(escape_json(uri)))
+    content = content + "," + jp("mimeType", js("text/plain"))
+    content = content + "," + jp("text", js(escape_json(text_content)))
+    content = content + RB()
+    content
+
+export get_all_resources, read_resource

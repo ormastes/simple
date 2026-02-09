@@ -1,0 +1,57 @@
+# Test: Variable declaration debugging
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+use compiler.parser.*
+use compiler.parser_types.*
+use compiler.lexer.*
+use compiler.blocks.*
+use compiler.treesitter.*
+use compiler.hir_lowering.*
+use compiler.mir_lowering.*
+use compiler.mir_data.*
+
+val source = "fn main():\n    var total = 0\n    var i = 0\n    while i < 3:\n        var j = 0\n        while j < 4:\n            total = total + 1\n            j = j + 1\n        i = i + 1\n    total\n"
+print "Source: {source}"
+
+var parser = Parser.new(source)
+val ast_module = parser.parse()
+print "Parse errors: {parser.errors.len()}"
+
+# Print AST
+for name in ast_module.functions.keys():
+    val fn_ = ast_module.functions[name]
+    print "AST fn: {fn_.name}"
+    for stmt in fn_.body.stmts:
+        print "  stmt kind: {stmt.kind}"
+
+# HIR
+print "HIR lowering..."
+var hir_lowering = HirLowering.new()
+val hir_module = hir_lowering.lower_module(ast_module)
+print "HIR: done, functions: {hir_module.functions.len()}"
+
+for key in hir_module.functions.keys():
+    val fn_ = hir_module.functions[key]
+    print "  HIR fn: {fn_.name}"
+    for stmt in fn_.body.stmts:
+        print "    stmt: {stmt.kind}"
+    if fn_.body.value.?:
+        print "  body value: {fn_.body.value.unwrap().kind}"
+
+# MIR
+print "MIR lowering..."
+var mir_ctx = MirLowering.new(hir_lowering.symbols)
+val mir_module = mir_ctx.lower_module(hir_module)
+print "MIR: done"
+
+for key in mir_module.functions.keys():
+    val fn_ = mir_module.functions[key]
+    print "  MIR fn: {fn_.name}"
+    for blk in fn_.blocks:
+        print "    block {blk.id.id}: {blk.instructions.len()} insts"
+        for inst in blk.instructions:
+            print "      {inst.kind}"
+        print "      term: {blk.terminator}"
+
+print "Done!"
