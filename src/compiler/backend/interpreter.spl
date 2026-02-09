@@ -11,11 +11,53 @@ use compiler.ffi_minimal as ffi  # FFI wrappers for RuntimeValue
 use ffi.debug.{debug_is_active, debug_should_break, debug_wait_for_continue, debug_set_current_location}
 
 # ============================================================================
+# Interpreter Mode Configuration
+# ============================================================================
+
+enum InterpreterMode:
+    Classic       # Interpreter-like: GC, debug hooks, FFI arithmetic
+    Optimized     # Compiler-like: no GC, direct computation, no barriers
+
+struct InterpreterConfig:
+    mode: InterpreterMode
+    enable_debug_hooks: bool
+    enable_gc: bool
+    use_ffi_arithmetic: bool
+
+impl InterpreterConfig:
+    static fn classic() -> InterpreterConfig:
+        InterpreterConfig(mode: InterpreterMode.Classic, enable_debug_hooks: true,
+            enable_gc: true, use_ffi_arithmetic: true)
+
+    static fn optimized() -> InterpreterConfig:
+        InterpreterConfig(mode: InterpreterMode.Optimized, enable_debug_hooks: false,
+            enable_gc: false, use_ffi_arithmetic: false)
+
+    me with_gc(enabled: bool) -> InterpreterConfig:
+        self.enable_gc = enabled
+        self
+
+    me with_debug(enabled: bool) -> InterpreterConfig:
+        self.enable_debug_hooks = enabled
+        self
+
+# ============================================================================
 # Interpreter Backend Implementation
 # ============================================================================
 
 struct InterpreterBackendImpl:
     """Tree-walking interpreter backend."""
+    config: InterpreterConfig
+
+impl InterpreterBackendImpl:
+    static fn new() -> InterpreterBackendImpl:
+        InterpreterBackendImpl(config: InterpreterConfig.classic())
+
+    static fn with_config(config: InterpreterConfig) -> InterpreterBackendImpl:
+        InterpreterBackendImpl(config: config)
+
+    static fn optimized() -> InterpreterBackendImpl:
+        InterpreterBackendImpl(config: InterpreterConfig.optimized())
 
 impl Backend for InterpreterBackendImpl:
     fn name() -> text:
@@ -25,8 +67,9 @@ impl Backend for InterpreterBackendImpl:
         BackendKind.Interpreter
 
     fn process_module(module: HirModule) -> Result<BackendResult, BackendError>:
-        # Initialize GC for RuntimeValue FFI operations
-        ffi.gc_init()
+        # Initialize GC for RuntimeValue FFI operations (only in classic mode)
+        if self.config.enable_gc:
+            ffi.gc_init()
 
         # Create evaluation context
         val env = Environment.new()
@@ -70,8 +113,8 @@ impl Backend for InterpreterBackendImpl:
         Ok(BackendResult.Unit)
 
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
-        # Debug hooks for DAP integration
-        if debug_is_active():
+        # Debug hooks for DAP integration (only in classic mode)
+        if self.config.enable_debug_hooks and debug_is_active():
             val span = expr.span
             debug_set_current_location(span.file, span.line as i64, span.column as i64)
             if debug_should_break():
@@ -289,31 +332,43 @@ impl InterpreterBackendImpl:
     # Helper functions for comparison operators
     fn eval_gt(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match (left, right):
-            case (Int(_), Int(_)):
-                val left_ptr = self.value_to_runtime_ptr(left)
-                val right_ptr = self.value_to_runtime_ptr(right)
-                val result = ffi.value_lt(right_ptr, left_ptr)
-                Ok(Value.bool(result))
-            case (Float(_), Float(_)):
-                val left_ptr = self.value_to_runtime_ptr(left)
-                val right_ptr = self.value_to_runtime_ptr(right)
-                val result = ffi.value_lt(right_ptr, left_ptr)
-                Ok(Value.bool(result))
+            case (Int(l), Int(r)):
+                if self.config.use_ffi_arithmetic:
+                    val left_ptr = self.value_to_runtime_ptr(left)
+                    val right_ptr = self.value_to_runtime_ptr(right)
+                    val result = ffi.value_lt(right_ptr, left_ptr)
+                    Ok(Value.bool(result))
+                else:
+                    Ok(Value.bool(l > r))
+            case (Float(l), Float(r)):
+                if self.config.use_ffi_arithmetic:
+                    val left_ptr = self.value_to_runtime_ptr(left)
+                    val right_ptr = self.value_to_runtime_ptr(right)
+                    val result = ffi.value_lt(right_ptr, left_ptr)
+                    Ok(Value.bool(result))
+                else:
+                    Ok(Value.bool(l > r))
             case _:
                 Err(BackendError.type_error("invalid operands for >", Some(span)))
 
     fn eval_gteq(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
         match (left, right):
-            case (Int(_), Int(_)):
-                val left_ptr = self.value_to_runtime_ptr(left)
-                val right_ptr = self.value_to_runtime_ptr(right)
-                val result = ffi.value_lt(left_ptr, right_ptr)
-                Ok(Value.bool(not result))
-            case (Float(_), Float(_)):
-                val left_ptr = self.value_to_runtime_ptr(left)
-                val right_ptr = self.value_to_runtime_ptr(right)
-                val result = ffi.value_lt(left_ptr, right_ptr)
-                Ok(Value.bool(not result))
+            case (Int(l), Int(r)):
+                if self.config.use_ffi_arithmetic:
+                    val left_ptr = self.value_to_runtime_ptr(left)
+                    val right_ptr = self.value_to_runtime_ptr(right)
+                    val result = ffi.value_lt(left_ptr, right_ptr)
+                    Ok(Value.bool(not result))
+                else:
+                    Ok(Value.bool(l >= r))
+            case (Float(l), Float(r)):
+                if self.config.use_ffi_arithmetic:
+                    val left_ptr = self.value_to_runtime_ptr(left)
+                    val right_ptr = self.value_to_runtime_ptr(right)
+                    val result = ffi.value_lt(left_ptr, right_ptr)
+                    Ok(Value.bool(not result))
+                else:
+                    Ok(Value.bool(l >= r))
             case _:
                 Err(BackendError.type_error("invalid operands for >=", Some(span)))
 
@@ -321,18 +376,22 @@ impl InterpreterBackendImpl:
         match op:
             case Add:
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        # Use FFI for arithmetic operations
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_add(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
-                    case (Float(_), Float(_)):
-                        # Use FFI for float arithmetic
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_add(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_add(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.int(l + r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_add(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.float(l + r))
                     case (Int(l), Float(r)): Ok(Value.float(l.to_f64() + r))
                     case (Float(l), Int(r)): Ok(Value.float(l + r.to_f64()))
                     case (String(l), String(r)): Ok(Value.string(l + r))
@@ -340,32 +399,42 @@ impl InterpreterBackendImpl:
 
             case Sub:
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        # Use FFI for subtraction
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_sub(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_sub(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_sub(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.int(l - r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_sub(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.float(l - r))
                     case _: Err(BackendError.type_error("invalid operands for -", Some(span)))
 
             case Mul:
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        # Use FFI for multiplication
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_mul(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_mul(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_mul(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.int(l * r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result_ptr = ffi.value_mul(left_ptr, right_ptr)
+                            Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.float(l * r))
                     case _: Err(BackendError.type_error("invalid operands for *", Some(span)))
 
             case Div:
@@ -374,16 +443,21 @@ impl InterpreterBackendImpl:
                         if r == 0:
                             Err(BackendError.runtime_error("division by zero", Some(span)))
                         else:
-                            # Use FFI for division
+                            if self.config.use_ffi_arithmetic:
+                                val left_ptr = self.value_to_runtime_ptr(left)
+                                val right_ptr = self.value_to_runtime_ptr(right)
+                                val result_ptr = ffi.value_div(left_ptr, right_ptr)
+                                Ok(self.runtime_ptr_to_value(result_ptr))
+                            else:
+                                Ok(Value.int(l / r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
                             val left_ptr = self.value_to_runtime_ptr(left)
                             val right_ptr = self.value_to_runtime_ptr(right)
                             val result_ptr = ffi.value_div(left_ptr, right_ptr)
                             Ok(self.runtime_ptr_to_value(result_ptr))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result_ptr = ffi.value_div(left_ptr, right_ptr)
-                        Ok(self.runtime_ptr_to_value(result_ptr))
+                        else:
+                            Ok(Value.float(l / r))
                     case _: Err(BackendError.type_error("invalid operands for /", Some(span)))
 
             case Mod:
@@ -398,16 +472,22 @@ impl InterpreterBackendImpl:
             case Eq:
                 # Use FFI for equality comparison (Phase 3)
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_eq(left_ptr, right_ptr)
-                        Ok(Value.bool(result))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_eq(left_ptr, right_ptr)
-                        Ok(Value.bool(result))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_eq(left_ptr, right_ptr)
+                            Ok(Value.bool(result))
+                        else:
+                            Ok(Value.bool(l == r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_eq(left_ptr, right_ptr)
+                            Ok(Value.bool(result))
+                        else:
+                            Ok(Value.bool(l == r))
                     case _:
                         # Fallback to Simple comparison for complex types
                         Ok(Value.bool(self.values_equal(left, right)))
@@ -415,48 +495,64 @@ impl InterpreterBackendImpl:
             case NotEq:
                 # Use FFI for inequality
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_eq(left_ptr, right_ptr)
-                        Ok(Value.bool(not result))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_eq(left_ptr, right_ptr)
-                        Ok(Value.bool(not result))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_eq(left_ptr, right_ptr)
+                            Ok(Value.bool(not result))
+                        else:
+                            Ok(Value.bool(l != r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_eq(left_ptr, right_ptr)
+                            Ok(Value.bool(not result))
+                        else:
+                            Ok(Value.bool(l != r))
                     case _:
                         Ok(Value.bool(not self.values_equal(left, right)))
 
             case Lt:
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        # Use FFI for less-than comparison
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_lt(left_ptr, right_ptr)
-                        Ok(Value.bool(result))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_lt(left_ptr, right_ptr)
-                        Ok(Value.bool(result))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_lt(left_ptr, right_ptr)
+                            Ok(Value.bool(result))
+                        else:
+                            Ok(Value.bool(l < r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_lt(left_ptr, right_ptr)
+                            Ok(Value.bool(result))
+                        else:
+                            Ok(Value.bool(l < r))
                     case (String(l), String(r)): Ok(Value.bool(l < r))
                     case _: Err(BackendError.type_error("invalid operands for <", Some(span)))
 
             case LtEq:
                 match (left, right):
-                    case (Int(_), Int(_)):
-                        # a <= b = not (b < a) using FFI
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
-                        Ok(Value.bool(not result))
-                    case (Float(_), Float(_)):
-                        val left_ptr = self.value_to_runtime_ptr(left)
-                        val right_ptr = self.value_to_runtime_ptr(right)
-                        val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
-                        Ok(Value.bool(not result))
+                    case (Int(l), Int(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                            Ok(Value.bool(not result))
+                        else:
+                            Ok(Value.bool(l <= r))
+                    case (Float(l), Float(r)):
+                        if self.config.use_ffi_arithmetic:
+                            val left_ptr = self.value_to_runtime_ptr(left)
+                            val right_ptr = self.value_to_runtime_ptr(right)
+                            val result = ffi.value_lt(right_ptr, left_ptr)  # b < a
+                            Ok(Value.bool(not result))
+                        else:
+                            Ok(Value.bool(l <= r))
                     case _: Err(BackendError.type_error("invalid operands for <=", Some(span)))
 
             case Gt:
@@ -666,21 +762,23 @@ impl InterpreterBackendImpl:
 
             # Memory management operations (Phase 6)
             case "gc_collect":
-                # Trigger garbage collection
-                ffi.gc_collect()
+                if self.config.enable_gc:
+                    ffi.gc_collect()
                 Some(Ok(Value.Unit))
 
             case "gc_malloc":
-                if args.len() > 0:
-                    match args[0]:
-                        case Int(size):
-                            # Allocate memory via GC
-                            val ptr = ffi.gc_malloc(size)
-                            Some(Ok(Value.Int(ptr)))
-                        case _:
-                            Some(Err(BackendError.type_error("gc_malloc requires int size", nil)))
+                if self.config.enable_gc:
+                    if args.len() > 0:
+                        match args[0]:
+                            case Int(size):
+                                val ptr = ffi.gc_malloc(size)
+                                Some(Ok(Value.Int(ptr)))
+                            case _:
+                                Some(Err(BackendError.type_error("gc_malloc requires int size", nil)))
+                    else:
+                        Some(Err(BackendError.runtime_error("gc_malloc requires size argument", nil)))
                 else:
-                    Some(Err(BackendError.runtime_error("gc_malloc requires size argument", nil)))
+                    Some(Err(BackendError.runtime_error("gc_malloc unavailable in optimized mode", nil)))
 
             # File I/O operations (Phase 4)
             case "file_exists":
@@ -828,4 +926,4 @@ impl InterpreterBackendImpl:
 # Exports
 # ============================================================================
 
-export InterpreterBackendImpl
+export InterpreterMode, InterpreterConfig, InterpreterBackendImpl
