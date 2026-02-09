@@ -10,7 +10,7 @@
 #
 # Supports both static resources and dynamic resource templates.
 
-use app.io.mod (file_read, file_exists, dir_list, is_dir)
+use app.io.mod (file_read, file_exists, dir_list, is_dir, shell)
 use app.mcp.bugdb_resource (get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats)
 # TEMPORARILY DISABLED due to parse error in lib.database.feature.spl
 # use app.mcp.featuredb_resource (get_all_features, get_features_by_category, get_features_by_status, get_feature_stats)
@@ -330,20 +330,66 @@ class ResourceManager:
         val contents = file_read(full_path)
         Ok(contents)
 
-    # Provide symbol information
+    # Provide symbol information via grep-based search
     fn provide_symbol_info(symbol_name: text) -> Result<text, text>:
-        # Simple implementation - search for symbol in files
-        var info = "Symbol: " + symbol_name + "\n"
-        info = info + "Status: Symbol search not fully implemented\n"
-        info = info + "Hint: Use file:// resource to read file contents"
+        # Strip leading slashes from URI path
+        var name = symbol_name
+        if name.starts_with("/"):
+            name = name.substring(1)
+        if name == "":
+            return Err("Symbol name is required")
+
+        # Search for function definitions matching the name
+        val fn_result = shell("grep -rn 'fn " + name + "(' --include='*.spl' " + self.project_root + "/src/ 2>/dev/null | head -20")
+        val fn_output = fn_result.stdout ?? ""
+
+        # Search for method definitions
+        val me_result = shell("grep -rn 'me " + name + "(' --include='*.spl' " + self.project_root + "/src/ 2>/dev/null | head -20")
+        val me_output = me_result.stdout ?? ""
+
+        var info = "Symbol: " + name + "\n\n"
+
+        if fn_output.trim() != "":
+            info = info + "Function definitions:\n" + fn_output + "\n"
+        if me_output.trim() != "":
+            info = info + "Method definitions:\n" + me_output + "\n"
+        if fn_output.trim() == "" and me_output.trim() == "":
+            info = info + "No definitions found for: " + name + "\n"
+
         Ok(info)
 
-    # Provide type information
+    # Provide type information via grep-based search
     fn provide_type_info(type_name: text) -> Result<text, text>:
-        # Simple implementation
-        var info = "Type: " + type_name + "\n"
-        info = info + "Status: Type search not fully implemented\n"
-        info = info + "Hint: Use file:// resource to read file contents"
+        # Strip leading slashes from URI path
+        var name = type_name
+        if name.starts_with("/"):
+            name = name.substring(1)
+        if name == "":
+            return Err("Type name is required")
+
+        # Search for class definitions
+        val class_result = shell("grep -rn 'class " + name + "' --include='*.spl' " + self.project_root + "/src/ 2>/dev/null | head -20")
+        val class_output = class_result.stdout ?? ""
+
+        # Search for struct definitions
+        val struct_result = shell("grep -rn 'struct " + name + "' --include='*.spl' " + self.project_root + "/src/ 2>/dev/null | head -20")
+        val struct_output = struct_result.stdout ?? ""
+
+        # Search for enum definitions
+        val enum_result = shell("grep -rn 'enum " + name + "' --include='*.spl' " + self.project_root + "/src/ 2>/dev/null | head -20")
+        val enum_output = enum_result.stdout ?? ""
+
+        var info = "Type: " + name + "\n\n"
+
+        if class_output.trim() != "":
+            info = info + "Class definitions:\n" + class_output + "\n"
+        if struct_output.trim() != "":
+            info = info + "Struct definitions:\n" + struct_output + "\n"
+        if enum_output.trim() != "":
+            info = info + "Enum definitions:\n" + enum_output + "\n"
+        if class_output.trim() == "" and struct_output.trim() == "" and enum_output.trim() == "":
+            info = info + "No type definitions found for: " + name + "\n"
+
         Ok(info)
 
     # Provide documentation

@@ -18,7 +18,8 @@ use app.mcp.prompts
 use app.mcp.bugdb_resource
 use app.mcp.completions
 use app.mcp.session.{McpState}
-use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_tool_result_with_structured, make_tool_schema_with_output, make_server_request, make_sampling_request, make_elicitation_request}
+use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_tool_result_with_structured, make_tool_schema_with_output, make_server_request, make_sampling_request, make_elicitation_request, send_notification_message, send_log, send_progress, send_resource_updated, make_image_content}
+use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string}
 use app.mcp.debug_tools.{SessionManager, SessionBreakpoint, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate, parse_var_entry, parse_stack_frame, step_mode_to_int}
 
 # Main entry point
@@ -97,6 +98,7 @@ fn start_server(debug_mode: Bool):
     val prompt_mgr = prompts.PromptManager.create(project_root)
     var session_mgr = SessionManager.empty()
     var mcp_state = McpState.create()
+    var task_mgr = TaskManager.create()
 
     if debug_mode:
         debug_log("Initialized with project root: " + project_root)
@@ -530,7 +532,7 @@ fn start_server(debug_mode: Bool):
                     val meta_token = extract_nested_string(line, "_meta", "progressToken")
                     if meta_token != "":
                         mcp_state.register_progress_token(meta_token, id)
-                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr, mcp_state)
+                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr, mcp_state, task_mgr)
                 # Clean up in-flight tracking
                 if id != "null" and id != "":
                     mcp_state.complete_request(id)
@@ -574,7 +576,7 @@ fn write_stdout_message(body: String):
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager, mcp_state: McpState) -> String:
+fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager, mcp_state: McpState, task_mgr: TaskManager) -> String:
     if debug_mode:
         debug_log("Request: " + body)
 
@@ -583,7 +585,8 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
     val id = extract_json_value(body, "id")
 
     if method == "initialize":
-        return make_initialize_response(id)
+        val client_protocol = extract_nested_string(body, "params", "protocolVersion")
+        return make_initialize_response(id, client_protocol)
     elif method == "initialized":
         return ""  # Notification, no response
     elif method == "shutdown":
@@ -598,7 +601,7 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return handle_tools_list_paginated(id, cursor, debug_mode)
     elif method == "tools/call":
         val tool_name = extract_nested_string(body, "params", "name")
-        return handle_tool_call(id, tool_name, body, debug_mode, session_mgr)
+        return handle_tool_call(id, tool_name, body, debug_mode, session_mgr, mcp_state)
     elif method == "resources/list":
         val cursor = extract_nested_string(body, "params", "cursor")
         return handle_resources_list_paginated(id, resource_mgr, cursor, debug_mode)
@@ -630,25 +633,75 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return handle_completion_request(id, body, resource_mgr, prompt_mgr, debug_mode)
     elif method == "roots/list":
         return handle_roots_list(id, debug_mode)
+    # Task methods
+    elif method == "tasks/create":
+        val task_method = extract_nested_string(body, "params", "method")
+        val task_params = extract_json_value(body, "params")
+        val task_id = task_mgr.enqueue(task_method, task_params)
+        # In stdio mode, tasks run synchronously - mark as completed immediately
+        task_mgr.start_task(task_id)
+        task_mgr.complete_task(task_id, LB() + jp("status", js("created")) + RB())
+        val task_info = task_mgr.get_task(task_id)
+        var task_json = LB() + jp("id", js(task_id)) + "," + jp("status", js("completed")) + RB()
+        if task_info.?:
+            task_json = task_info.unwrap().to_json()
+        return make_result_response(id, task_json)
+    elif method == "tasks/list":
+        val tasks_json = task_mgr.list_tasks_json()
+        val result = jo1(jp("tasks", tasks_json))
+        return make_result_response(id, result)
+    elif method == "tasks/get":
+        val task_id = extract_nested_string(body, "params", "id")
+        val task_info = task_mgr.get_task(task_id)
+        if task_info.?:
+            return make_result_response(id, task_info.unwrap().to_json())
+        return make_error_response(id, -32602, "Task not found: " + task_id)
+    elif method == "tasks/cancel":
+        val task_id = extract_nested_string(body, "params", "id")
+        val cancelled = task_mgr.cancel_task(task_id)
+        if cancelled:
+            val result = jo1(jp("cancelled", js(task_id)))
+            return make_result_response(id, result)
+        return make_error_response(id, -32602, "Task not found: " + task_id)
+    # Sampling response handler (client responding to server's sampling/createMessage request)
+    elif method == "sampling/createMessage":
+        val role = extract_nested_string(body, "result", "role")
+        val content_text = extract_nested_string(body, "result", "text")
+        val model = extract_nested_string(body, "result", "model")
+        if debug_mode:
+            debug_log("Sampling response: role=" + role + " model=" + model)
+        send_log("info", "Received sampling response from: " + model, "simple-mcp", mcp_state.log_level)
+        return make_result_response(id, LB() + jp("status", js("received")) + RB())
+    # Elicitation response handler (client responding to server's elicitation/create request)
+    elif method == "elicitation/create":
+        val action = extract_nested_string(body, "result", "action")
+        if debug_mode:
+            debug_log("Elicitation response: action=" + action)
+        send_log("info", "Received elicitation response: " + action, "simple-mcp", mcp_state.log_level)
+        return make_result_response(id, LB() + jp("action", js(action)) + RB())
     else:
         if debug_mode:
             debug_log("Unknown method: " + method)
         return make_error_response(id, -32601, "Method not found: " + method)
 
 
-fn make_initialize_response(id: String) -> String:
+fn make_initialize_response(id: String, client_protocol: String) -> String:
+    # Log protocol version negotiation
+    val server_protocol = "2025-06-18"
+    if client_protocol != "" and client_protocol != server_protocol:
+        eprint("WARN: Client requested protocol " + client_protocol + ", server supports " + server_protocol)
+
     # Server info with instructions for MCPSearch
     var server_info = LB()
     server_info = server_info + jp("name", js("simple-mcp"))
     server_info = server_info + ","
-    server_info = server_info + jp("version", js("2.0.0"))
+    server_info = server_info + jp("version", js("2.1.0"))
     server_info = server_info + ","
-    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), and debug tools (debug_create_session, debug_list_sessions, debug_close_session, debug_set_breakpoint, debug_remove_breakpoint, debug_continue, debug_step, debug_get_variables, debug_stack_trace, debug_evaluate)."
+    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), task management (tasks/create, tasks/list, tasks/get, tasks/cancel), and debug tools (debug_create_session, debug_list_sessions, debug_close_session, debug_set_breakpoint, debug_remove_breakpoint, debug_continue, debug_step, debug_get_variables, debug_stack_trace, debug_evaluate)."
     server_info = server_info + jp("instructions", js(instructions))
     server_info = server_info + RB()
 
-    # Capabilities: tools, resources, prompts, logging, completions
-    # Each with listChanged: true and resources with subscribe: true
+    # Capabilities: tools, resources, prompts, logging, completions, tasks
     var tools_cap = jo1(jp("listChanged", "true"))
     var resources_cap = LB()
     resources_cap = resources_cap + jp("subscribe", "true")
@@ -666,8 +719,10 @@ fn make_initialize_response(id: String) -> String:
     caps = caps + jp("logging", LB() + RB())
     caps = caps + ","
     caps = caps + jp("completions", LB() + RB())
+    caps = caps + ","
+    caps = caps + jp("tasks", LB() + RB())
     caps = caps + RB()
-    val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server_info))
+    val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
@@ -717,7 +772,13 @@ fn get_all_tools() -> [String]:
     # Tool annotations: (read_only, destructive, idempotent)
     all_tools.push(make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true, true, false, true))
     all_tools.push(make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false, true, false, true))
-    all_tools.push(make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true, true, false, true))
+    # search_code with outputSchema (array of matches)
+    val sc_item_props = LB() + jp("file", jo1(jp("type", js("string")))) + "," + jp("line", jo1(jp("type", js("integer")))) + "," + jp("content", jo1(jp("type", js("string")))) + RB()
+    val sc_item = jo2(jp("type", js("object")), jp("properties", sc_item_props))
+    val sc_out = jo2(jp("type", js("array")), jp("items", sc_item))
+    val sc_in_prop = jo2(jp("type", js("string")), jp("description", js("Search query")))
+    val sc_in_props = jo1(jp("query", sc_in_prop))
+    all_tools.push(make_tool_schema_with_output("search_code", "Search for code patterns", sc_in_props, "[" + js("query") + "]", sc_out, true, false, true))
 
     # file_info with outputSchema
     val fi_out_props = LB() + jp("path", jo1(jp("type", js("string")))) + "," + jp("lines", jo1(jp("type", js("integer")))) + "," + jp("functions", jo1(jp("type", js("integer")))) + "," + jp("classes", jo1(jp("type", js("integer")))) + RB()
@@ -726,10 +787,24 @@ fn get_all_tools() -> [String]:
     val fi_in_props = jo1(jp("path", fi_in_prop))
     all_tools.push(make_tool_schema_with_output("file_info", "Get file information", fi_in_props, "[" + js("path") + "]", fi_out_schema, true, false, true))
 
-    # Bug database tools
-    all_tools.push(make_tool_schema("bugdb_get", "Get bug by ID", "id", "Bug ID", true, true, false, true))
-    all_tools.push(make_tool_schema("bugdb_add", "Add new bug", "bug", "Bug JSON", true, false, false, false))
-    all_tools.push(make_tool_schema("bugdb_update", "Update existing bug", "id", "Bug ID", true, false, false, true))
+    # Bug database tools with outputSchema
+    val bugdb_get_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("severity", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + "," + jp("title", jo1(jp("type", js("string")))) + "," + jp("description", jo1(jp("type", js("string")))) + RB()
+    val bugdb_get_out = jo2(jp("type", js("object")), jp("properties", bugdb_get_out_props))
+    val bugdb_get_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug ID")))
+    val bugdb_get_in_props = jo1(jp("id", bugdb_get_in_prop))
+    all_tools.push(make_tool_schema_with_output("bugdb_get", "Get bug by ID", bugdb_get_in_props, "[" + js("id") + "]", bugdb_get_out, true, false, true))
+
+    val bugdb_add_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + RB()
+    val bugdb_add_out = jo2(jp("type", js("object")), jp("properties", bugdb_add_out_props))
+    val bugdb_add_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug JSON")))
+    val bugdb_add_in_props = jo1(jp("bug", bugdb_add_in_prop))
+    all_tools.push(make_tool_schema_with_output("bugdb_add", "Add new bug", bugdb_add_in_props, "[" + js("bug") + "]", bugdb_add_out, false, false, false))
+
+    val bugdb_upd_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("updated", jo1(jp("type", js("boolean")))) + RB()
+    val bugdb_upd_out = jo2(jp("type", js("object")), jp("properties", bugdb_upd_out_props))
+    val bugdb_upd_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug ID")))
+    val bugdb_upd_in_props = jo1(jp("id", bugdb_upd_in_prop))
+    all_tools.push(make_tool_schema_with_output("bugdb_update", "Update existing bug", bugdb_upd_in_props, "[" + js("id") + "]", bugdb_upd_out, false, false, true))
 
     # Debug tools - original 10
     all_tools.push(schema_debug_create_session())
@@ -794,14 +869,38 @@ fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> 
     result = result + RB()
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager) -> String:
+fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager, mcp_state: McpState) -> String:
     if debug_mode:
         debug_log("Tool call: " + tool_name)
 
+    # Emit log notification before tool execution
+    send_log("info", "Tool call: " + tool_name, "simple-mcp", mcp_state.log_level)
+
+    # Extract progress token from _meta if present
+    val progress_token = extract_nested_string(body, "_meta", "progressToken")
+
     if tool_name == "read_code":
         val path = extract_nested_string(body, "arguments", "path")
+        # Check for image files
+        val content_type = detect_content_type(path)
+        if content_type == "image":
+            val mime = detect_image_mime(path)
+            if mime == "image/svg+xml":
+                val svg_content = read_file_safe(path)
+                val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(svg_content))))
+                val result_obj = jo1(jp("content", "[" + text_obj + "]"))
+                send_log("info", "Tool complete: read_code (svg)", "simple-mcp", mcp_state.log_level)
+                return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result_obj))
+            val b64_result = shell("base64 -w0 " + path + " 2>/dev/null")
+            val b64_data = b64_result.stdout ?? ""
+            if b64_data != "":
+                val img_obj = make_image_content(b64_data.trim(), mime)
+                val result_obj = jo1(jp("content", "[" + img_obj + "]"))
+                send_log("info", "Tool complete: read_code (image)", "simple-mcp", mcp_state.log_level)
+                return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result_obj))
         val content = read_file_safe(path)
         val escaped = escape_json(content)
+        send_log("info", "Tool complete: read_code", "simple-mcp", mcp_state.log_level)
         return make_tool_result(id, escaped)
 
     elif tool_name == "list_files":
@@ -809,18 +908,31 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
         var dir = path
         if dir == "":
             dir = "."
+        if progress_token != "":
+            send_progress(progress_token, 0, 100, "Listing files...")
         val listing = list_spl_files(dir)
+        if progress_token != "":
+            send_progress(progress_token, 100, 100, "Done")
+        send_log("info", "Tool complete: list_files", "simple-mcp", mcp_state.log_level)
         return make_tool_result(id, listing)
 
     elif tool_name == "search_code":
         val query = extract_nested_string(body, "arguments", "query")
+        if progress_token != "":
+            send_progress(progress_token, 0, 100, "Searching...")
         val results = search_files(query)
-        return make_tool_result(id, results)
+        if progress_token != "":
+            send_progress(progress_token, 50, 100, "Grep complete")
+            send_progress(progress_token, 100, 100, "Done")
+        send_log("debug", "search_code results for: " + query, "simple-mcp", mcp_state.log_level)
+        send_log("info", "Tool complete: search_code", "simple-mcp", mcp_state.log_level)
+        return make_tool_result_with_structured(id, results, results)
 
     elif tool_name == "file_info":
         val path = extract_nested_string(body, "arguments", "path")
         val info = get_file_info(path)
         val structured = get_file_info_structured(path)
+        send_log("info", "Tool complete: file_info", "simple-mcp", mcp_state.log_level)
         if structured != "":
             return make_tool_result_with_structured(id, info, structured)
         return make_tool_result(id, info)
@@ -828,17 +940,30 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
     elif tool_name == "bugdb_get":
         val bug_id = extract_nested_string(body, "arguments", "id")
         val result = bugdb_resource.get_bug_by_id("doc/bug/bug_db.sdn", bug_id)
+        send_log("info", "Tool complete: bugdb_get", "simple-mcp", mcp_state.log_level)
         return make_tool_result(id, result)
 
     elif tool_name == "bugdb_add":
         val bug_json = extract_nested_string(body, "arguments", "bug")
         val result = bugdb_resource.add_bug_from_json("doc/bug/bug_db.sdn", bug_json)
+        # Emit resource update notifications for subscribed URIs
+        if mcp_state.is_subscribed("bugdb:///all"):
+            send_resource_updated("bugdb:///all")
+        if mcp_state.is_subscribed("bugdb:///open"):
+            send_resource_updated("bugdb:///open")
+        send_log("info", "Tool complete: bugdb_add", "simple-mcp", mcp_state.log_level)
         return make_tool_result(id, result)
 
     elif tool_name == "bugdb_update":
         val bug_id = extract_nested_string(body, "arguments", "id")
         val bug_json = extract_nested_string(body, "arguments", "updates")
         val result = bugdb_resource.update_bug_from_json("doc/bug/bug_db.sdn", bug_id, bug_json)
+        # Emit resource update notifications for subscribed URIs
+        if mcp_state.is_subscribed("bugdb:///all"):
+            send_resource_updated("bugdb:///all")
+        if mcp_state.is_subscribed("bugdb:///open"):
+            send_resource_updated("bugdb:///open")
+        send_log("info", "Tool complete: bugdb_update", "simple-mcp", mcp_state.log_level)
         return make_tool_result(id, result)
 
     # Debug tools
@@ -894,12 +1019,44 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
         val path = extract_nested_string(body, "arguments", "path")
         if path == "":
             return make_error_response(id, -32602, "Missing required parameter: path")
+        if progress_token != "":
+            send_progress(progress_token, 0, 100, "Running diagnostics...")
         val result = run_check_diagnostics(path)
+        if progress_token != "":
+            send_progress(progress_token, 100, 100, "Done")
+        send_log("debug", "check_diagnostics for: " + path, "simple-mcp", mcp_state.log_level)
+        send_log("info", "Tool complete: check_diagnostics", "simple-mcp", mcp_state.log_level)
         return make_tool_result_with_structured(id, result, result)
 
     else:
         return make_error_response(id, -32602, "Unknown tool: " + tool_name)
 
+
+# --- Content type detection ---
+
+fn detect_content_type(path: String) -> String:
+    if path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".jpeg") or path.ends_with(".gif") or path.ends_with(".svg") or path.ends_with(".webp") or path.ends_with(".ico") or path.ends_with(".bmp"):
+        return "image"
+    if path.ends_with(".wav") or path.ends_with(".mp3") or path.ends_with(".ogg") or path.ends_with(".flac"):
+        return "audio"
+    "text"
+
+fn detect_image_mime(path: String) -> String:
+    if path.ends_with(".png"):
+        return "image/png"
+    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
+        return "image/jpeg"
+    if path.ends_with(".gif"):
+        return "image/gif"
+    if path.ends_with(".svg"):
+        return "image/svg+xml"
+    if path.ends_with(".webp"):
+        return "image/webp"
+    if path.ends_with(".ico"):
+        return "image/x-icon"
+    if path.ends_with(".bmp"):
+        return "image/bmp"
+    "application/octet-stream"
 
 # --- Tool implementations ---
 
