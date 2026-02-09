@@ -152,6 +152,8 @@ struct CompileOptions:
     profile: text           # dev, test, prod
     no_borrow_check: bool   # Skip borrow checking
     backend: text           # "auto", "cranelift", "llvm" - backend selection
+    interpreter_mode: text  # "classic" or "optimized" - interpreter mode selection
+    gc_off: bool            # Disable garbage collection
 
     static fn default() -> CompileOptions:
         CompileOptions(
@@ -167,7 +169,9 @@ struct CompileOptions:
             log_level: 4,       # Info
             profile: "dev",
             no_borrow_check: false,
-            backend: "auto"
+            backend: "auto",
+            interpreter_mode: "classic",
+            gc_off: false
         )
 
 # Manually desugared static method for bootstrap runtime compatibility
@@ -185,7 +189,9 @@ fn CompileOptions__default() -> CompileOptions:
         log_level: 4,       # Info
         profile: "dev",
         no_borrow_check: false,
-        backend: "auto"
+        backend: "auto",
+        interpreter_mode: "classic",
+        gc_off: false
     )
 
 # ------------------------------------------------------------------------------
@@ -279,7 +285,15 @@ class CompileContext:
         # Register backend based on mode (eagerly, no closures)
         match options.mode:
             case CompileMode.Interpret:
-                di.bind_instance("Backend", InterpreterBackendImpl())
+                val interp_config = if options.interpreter_mode == "optimized":
+                    InterpreterConfig.optimized()
+                else:
+                    InterpreterConfig.classic()
+                val interp_config_final = if options.gc_off:
+                    interp_config.with_gc(false)
+                else:
+                    interp_config
+                di.bind_instance("Backend", InterpreterBackendImpl.with_config(interp_config_final))
             case CompileMode.Jit:
                 di.bind_instance("Backend", CompilerBackendImpl.jit())
             case CompileMode.Aot:
