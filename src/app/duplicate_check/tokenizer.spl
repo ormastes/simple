@@ -1,9 +1,9 @@
 # Tokenizer for duplication detection
-# Reuses compiler lexer with normalization
+# Uses pure Simple lexer for performance
 
 use app.duplicate_check.config (DuplicationConfig)
 
-enum TokenKind:
+enum SimpleTokenKind:
     Identifier
     Keyword
     Operator
@@ -12,148 +12,134 @@ enum TokenKind:
     Comment
     Whitespace
 
-struct Token:
-    kind: TokenKind
+struct SimpleToken:
+    kind: SimpleTokenKind
     value: text
     line: i64
     column: i64
 
-fn token_to_string(token: Token) -> text:
+fn token_to_string(token: SimpleToken) -> text:
     "{token.kind}:{token.value}"
 
-fn normalize_token(token: Token, config: DuplicationConfig) -> Token:
-    var normalized_value = token.value
-
-    match token.kind:
-        case TokenKind.Identifier:
-            if config.ignore_identifiers:
-                normalized_value = "IDENTIFIER"
-        case TokenKind.Literal:
-            if config.ignore_literals:
-                normalized_value = "LITERAL"
-        case TokenKind.Comment:
-            if config.ignore_comments:
-                return Token(
-                    kind: TokenKind.Whitespace,
-                    value: "",
-                    line: token.line,
-                    column: token.column
-                )
-        case TokenKind.Whitespace:
-            if config.ignore_whitespace:
-                normalized_value = " "
-
-    Token(
-        kind: token.kind,
-        value: normalized_value,
-        line: token.line,
-        column: token.column
-    )
-
-fn simple_tokenize(source: text) -> [Token]:
-    var tokens = []
+fn tokenize(source: text, config: DuplicationConfig) -> [SimpleToken]:
+    """Tokenize source code for duplication detection."""
+    var result = []
+    var i = 0
     var line = 1
     var column = 1
-    var i = 0
 
     while i < source.len():
         val ch = source[i:i+1]
+        var handled = false
 
         if ch == "\n":
-            tokens = tokens + [Token(kind: TokenKind.Whitespace, value: ch, line: line, column: column)]
+            if not config.ignore_whitespace:
+                result = result + [SimpleToken(kind: SimpleTokenKind.Whitespace, value: "\n", line: line, column: column)]
             line = line + 1
             column = 1
             i = i + 1
-            continue
+            handled = true
 
-        if ch == " " or ch == "\t":
-            tokens = tokens + [Token(kind: TokenKind.Whitespace, value: ch, line: line, column: column)]
-            column = column + 1
+        if not handled:
+            if ch == " " or ch == "\t":
+                if not config.ignore_whitespace:
+                    result = result + [SimpleToken(kind: SimpleTokenKind.Whitespace, value: ch, line: line, column: column)]
+                i = i + 1
+                column = column + 1
+                handled = true
+
+        if not handled:
+            if ch == "#":
+                while i < source.len() and source[i:i+1] != "\n":
+                    i = i + 1
+                handled = true
+
+        if not handled:
+            val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+            if is_letter:
+                var ident = ""
+                var start_col = column
+                while i < source.len():
+                    val c = source[i:i+1]
+                    val is_alnum = (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+                    if not is_alnum:
+                        break
+                    ident = ident + c
+                    i = i + 1
+                    column = column + 1
+
+                val keywords = ["fn", "val", "var", "if", "else", "while", "for", "match", "case", "return", "break", "continue", "class", "struct", "enum", "use", "export"]
+                val is_keyword = keywords.contains(ident)
+
+                val kind = if is_keyword: SimpleTokenKind.Keyword else: SimpleTokenKind.Identifier
+                var value = ident
+                if kind == SimpleTokenKind.Identifier and config.ignore_identifiers:
+                    value = "IDENTIFIER"
+
+                result = result + [SimpleToken(kind: kind, value: value, line: line, column: start_col)]
+                handled = true
+
+        if not handled:
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                var num = ""
+                var start_col = column
+                while i < source.len():
+                    val c = source[i:i+1]
+                    val is_numchar = (c >= "0" and c <= "9") or c == "."
+                    if not is_numchar:
+                        break
+                    num = num + c
+                    i = i + 1
+                    column = column + 1
+
+                var value = num
+                if config.ignore_literals:
+                    value = "LITERAL"
+
+                result = result + [SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col)]
+                handled = true
+
+        if not handled:
+            if ch == "\"":
+                var str_val = "\""
+                var start_col = column
+                i = i + 1
+                column = column + 1
+                while i < source.len() and source[i:i+1] != "\"":
+                    str_val = str_val + source[i:i+1]
+                    i = i + 1
+                    column = column + 1
+                if i < source.len():
+                    str_val = str_val + "\""
+                    i = i + 1
+                    column = column + 1
+
+                var value = str_val
+                if config.ignore_literals:
+                    value = "LITERAL"
+
+                result = result + [SimpleToken(kind: SimpleTokenKind.Literal, value: value, line: line, column: start_col)]
+                handled = true
+
+        if not handled:
+            val operators = ["==", "!=", "<=", ">=", "->", "+", "-", "*", "/", "=", "<", ">", ":", ".", ",", "(", ")", "[", "]", "{", "}"]
+            var matched = false
+            for op in operators:
+                if i + op.len() <= source.len() and source[i:i+op.len()] == op:
+                    result = result + [SimpleToken(kind: SimpleTokenKind.Operator, value: op, line: line, column: column)]
+                    i = i + op.len()
+                    column = column + op.len()
+                    matched = true
+                    break
+
+            if matched:
+                handled = true
+
+        if not handled:
             i = i + 1
-            continue
-
-        if ch == "#":
-            var comment = ""
-            var start_col = column
-            while i < source.len() and source[i:i+1] != "\n":
-                comment = comment + source[i:i+1]
-                i = i + 1
-                column = column + 1
-            tokens = tokens + [Token(kind: TokenKind.Comment, value: comment, line: line, column: start_col)]
-            continue
-
-        if ch.match("[a-zA-Z_]"):
-            var ident = ""
-            var start_col = column
-            while i < source.len() and source[i:i+1].match("[a-zA-Z0-9_]"):
-                ident = ident + source[i:i+1]
-                i = i + 1
-                column = column + 1
-
-            val keywords = ["fn", "val", "var", "if", "else", "while", "for", "match", "case", "return", "break", "continue", "class", "struct", "enum", "use", "export"]
-            val is_keyword = keywords.contains(ident)
-
-            tokens = tokens + [Token(
-                kind: if is_keyword: TokenKind.Keyword else: TokenKind.Identifier,
-                value: ident,
-                line: line,
-                column: start_col
-            )]
-            continue
-
-        if ch.match("[0-9]"):
-            var num = ""
-            var start_col = column
-            while i < source.len() and source[i:i+1].match("[0-9.]"):
-                num = num + source[i:i+1]
-                i = i + 1
-                column = column + 1
-            tokens = tokens + [Token(kind: TokenKind.Literal, value: num, line: line, column: start_col)]
-            continue
-
-        if ch == "\"":
-            var str_val = "\""
-            var start_col = column
-            i = i + 1
             column = column + 1
-            while i < source.len() and source[i:i+1] != "\"":
-                str_val = str_val + source[i:i+1]
-                i = i + 1
-                column = column + 1
-            if i < source.len():
-                str_val = str_val + "\""
-                i = i + 1
-                column = column + 1
-            tokens = tokens + [Token(kind: TokenKind.Literal, value: str_val, line: line, column: start_col)]
-            continue
 
-        val operators = ["==", "!=", "<=", ">=", "->", "+", "-", "*", "/", "=", "<", ">", ":", ".", ",", "(", ")", "[", "]", "{", "}"]
-        var matched = false
-        for op in operators:
-            if i + op.len() <= source.len() and source[i:i+op.len()] == op:
-                tokens = tokens + [Token(kind: TokenKind.Operator, value: op, line: line, column: column)]
-                i = i + op.len()
-                column = column + op.len()
-                matched = true
-                break
+    result
 
-        if matched:
-            continue
-
-        i = i + 1
-        column = column + 1
-
-    tokens
-
-fn tokenize(source: text, config: DuplicationConfig) -> [Token]:
-    val raw_tokens = simple_tokenize(source)
-    var normalized = []
-
-    for token in raw_tokens:
-        val norm = normalize_token(token, config)
-        if norm.kind != TokenKind.Whitespace or not config.ignore_whitespace:
-            normalized = normalized + [norm]
-
-    normalized
-
-export tokenizer, Token, TokenKind, tokenize, normalize_token, token_to_string
+export SimpleToken, SimpleTokenKind, tokenize, token_to_string

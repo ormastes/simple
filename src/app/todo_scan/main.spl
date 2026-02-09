@@ -1,15 +1,377 @@
 # Simple CLI - todo-scan command
-# Delegates to Rust runtime via FFI
+# Pure Simple implementation - scans source for TODO/FIXME comments
+#
+# Detects both formatted and unformatted TODOs:
+#   Formatted:   # TODO: [area][priority] description [#issue]
+#   Unformatted: # TODO: description (assigned area=general, priority=P3)
 
-use app.cli_util (get_cli_args)
-use app.io.mod (cli_todo_scan)
+use app.io.{dir_walk, file_read, file_exists, file_write, dir_create_all, cwd, is_dir}
 
-fn print_help():
-    print "Usage: simple todo-scan [options]"
-    print "Scans source for TODO/FIXME comments"
-    print ""
-    print "Run 'simple todo-scan --help' for Rust-level help."
+# ============================================================================
+# Data Types
+# ============================================================================
+
+struct TodoEntry:
+    id: i64
+    keyword: text      # TODO or FIXME
+    area: text          # runtime, stdlib, compiler, etc.
+    priority: text      # P0, P1, P2, P3
+    description: text
+    file: text
+    line: i64
+    issue: text         # GitHub issue number (optional)
+    blocked: text       # Blocked by issues (optional)
+    status: text        # open, in_progress, closed
+
+# ============================================================================
+# Scanner
+# ============================================================================
+
+fn should_skip_file(content: text) -> bool:
+    val lines = content.split("\n")
+    var i = 0
+    for line in lines:
+        if i >= 20:
+            return false
+        val trimmed = line.trim()
+        if trimmed.contains("skip_todo"):
+            return true
+        i = i + 1
+    false
+
+fn scan_file(file_path: text, start_id: i64) -> [TodoEntry]:
+    var results: [TodoEntry] = []
+    val content = file_read(file_path)
+    if should_skip_file(content):
+        return results
+    val is_markdown = file_path.ends_with(".md")
+    val lines = content.split("\n")
+    var line_num = 0
+    var current_id = start_id
+    var in_code_block = false
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Track fenced code blocks in markdown files
+        if is_markdown:
+            if trimmed.starts_with("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+
+        # Detect TODO or FIXME in comments
+        var keyword = ""
+        var rest = ""
+
+        # Simple/Python-style comments
+        if trimmed.starts_with("# TODO:"):
+            keyword = "TODO"
+            var r1 = trimmed[7:]
+            rest = r1.trim()
+        elif trimmed.starts_with("# FIXME:"):
+            keyword = "FIXME"
+            var r2 = trimmed[8:]
+            rest = r2.trim()
+        # Rust/C-style comments
+        elif trimmed.starts_with("// TODO:"):
+            keyword = "TODO"
+            var r3 = trimmed[8:]
+            rest = r3.trim()
+        elif trimmed.starts_with("// FIXME:"):
+            keyword = "FIXME"
+            var r4 = trimmed[9:]
+            rest = r4.trim()
+
+        if keyword.len() == 0:
+            continue
+
+        # Parse formatted TODO: [area][priority] description [#issue] [blocked:#n]
+        val parsed = parse_todo_text(rest)
+
+        results.push(TodoEntry(
+            id: current_id,
+            keyword: keyword,
+            area: parsed.area,
+            priority: parsed.priority,
+            description: parsed.description,
+            file: file_path,
+            line: line_num,
+            issue: parsed.issue,
+            blocked: parsed.blocked,
+            status: "open"
+        ))
+        current_id = current_id + 1
+    results
+
+struct ParsedTodo:
+    area: text
+    priority: text
+    description: text
+    issue: text
+    blocked: text
+
+fn parse_todo_text(input: text) -> ParsedTodo:
+    var area = "general"
+    var priority = "P3"
+    var description = input
+    var issue = ""
+    var blocked = ""
+
+    var remaining = input
+
+    # Try to parse [area][priority] prefix
+    if remaining.starts_with("["):
+        val close1 = remaining.index_of("]") ?? -1
+        if close1 > 0:
+            area = remaining[1:close1]
+            var after1 = remaining[close1 + 1:]
+            remaining = after1.trim()
+
+            if remaining.starts_with("["):
+                val close2 = remaining.index_of("]") ?? -1
+                if close2 > 0:
+                    priority = remaining[1:close2]
+                    var after2 = remaining[close2 + 1:]
+                    remaining = after2.trim()
+                    # Normalize priority aliases
+                    if priority == "critical":
+                        priority = "P0"
+                    elif priority == "high":
+                        priority = "P1"
+                    elif priority == "medium":
+                        priority = "P2"
+                    elif priority == "low":
+                        priority = "P3"
+
+    # Extract [#issue] from end
+    val issue_start = remaining.index_of("[#") ?? -1
+    if issue_start >= 0:
+        val after_issue = remaining[issue_start:]
+        val issue_end_rel = after_issue.index_of("]") ?? -1
+        if issue_end_rel > 0:
+            issue = after_issue[2:issue_end_rel]
+            var before_issue = remaining[0:issue_start]
+            remaining = before_issue.trim()
+
+    # Extract [blocked:#n,#m] from end
+    val blocked_start = remaining.index_of("[blocked:") ?? -1
+    if blocked_start >= 0:
+        val after_blocked = remaining[blocked_start:]
+        val blocked_end_rel = after_blocked.index_of("]") ?? -1
+        if blocked_end_rel > 0:
+            blocked = after_blocked[9:blocked_end_rel]
+            var before_blocked = remaining[0:blocked_start]
+            remaining = before_blocked.trim()
+
+    description = remaining
+
+    ParsedTodo(area: area, priority: priority, description: description, issue: issue, blocked: blocked)
+
+# ============================================================================
+# File Discovery
+# ============================================================================
+
+fn collect_source_files(root: text) -> [text]:
+    var files: [text] = []
+    val scan_dirs = ["src", "test", "doc", ".claude/skills"]
+
+    for scan_dir in scan_dirs:
+        val full_path = "{root}/{scan_dir}"
+        if not is_dir(full_path):
+            continue
+        val walked = dir_walk(full_path)
+        for f in walked:
+            if should_scan(f):
+                files.push(f)
+    files
+
+fn should_scan(path: text) -> bool:
+    # Skip build artifacts, hidden dirs, etc.
+    if path.contains("/target/"):
+        return false
+    if path.contains("/build/"):
+        return false
+    if path.contains("/.git/"):
+        return false
+    if path.contains("/node_modules/"):
+        return false
+    if path.contains("/archive/"):
+        return false
+    if path.contains("/test-simple/"):
+        return false
+
+    # Only scan known source file types
+    if path.ends_with(".spl"):
+        return true
+    if path.ends_with(".md"):
+        return true
+    false
+
+# ============================================================================
+# Output: SDN Database
+# ============================================================================
+
+fn write_todo_db(entries: [TodoEntry], output_path: text):
+    var lines: [text] = []
+    lines.push("todos |id, keyword, area, priority, description, file, line, issue, blocked, status, valid|")
+
+    for entry in entries:
+        val desc_escaped = entry.description.replace("\"", "'")
+        lines.push("    {entry.id}, {entry.keyword}, {entry.area}, {entry.priority}, \"{desc_escaped}\", {entry.file}, {entry.line}, {entry.issue}, \"{entry.blocked}\", {entry.status}, true")
+
+    val content = lines.join("\n") + "\n"
+    file_write(output_path, content)
+
+# ============================================================================
+# Output: Markdown Report
+# ============================================================================
+
+fn write_todo_md(entries: [TodoEntry], output_path: text):
+    var lines: [text] = []
+    lines.push("# TODO Tracking")
+    lines.push("")
+
+    # Count stats
+    var open_count = 0
+    var blocked_count = 0
+    var p0_count = 0
+    var p1_count = 0
+
+    for entry in entries:
+        if entry.status == "open":
+            open_count = open_count + 1
+        if entry.blocked.len() > 0:
+            blocked_count = blocked_count + 1
+        if entry.priority == "P0":
+            p0_count = p0_count + 1
+        if entry.priority == "P1":
+            p1_count = p1_count + 1
+
+    lines.push("**Total:** {entries.len()} items | **Open:** {open_count} | **Blocked:** {blocked_count}")
+    lines.push("")
+
+    # By priority
+    lines.push("## By Priority")
+    lines.push("")
+    lines.push("| Priority | Count |")
+    lines.push("|----------|-------|")
+
+    var p_counts = {}
+    for entry in entries:
+        val p = entry.priority
+        if p_counts.has(p):
+            p_counts[p] = p_counts[p] + 1
+        else:
+            p_counts[p] = 1
+
+    for p_key in ["P0", "P1", "P2", "P3"]:
+        val p_count = if p_counts.has(p_key): p_counts[p_key] else: 0
+        lines.push("| {p_key} | {p_count} |")
+
+    lines.push("")
+
+    # By area
+    lines.push("## By Area")
+    lines.push("")
+    lines.push("| Area | Count |")
+    lines.push("|------|-------|")
+
+    var a_counts = {}
+    for entry in entries:
+        val a = entry.area
+        if a_counts.has(a):
+            a_counts[a] = a_counts[a] + 1
+        else:
+            a_counts[a] = 1
+
+    for a_key in a_counts.keys():
+        lines.push("| {a_key} | {a_counts[a_key]} |")
+
+    lines.push("")
+
+    # P0 Critical section
+    if p0_count > 0:
+        lines.push("## P0 Critical")
+        lines.push("")
+        for entry in entries:
+            if entry.priority == "P0":
+                val issue_text = if entry.issue.len() > 0: " [#{entry.issue}]" else: ""
+                lines.push("- [{entry.keyword}] **{entry.description}**{issue_text} - `{entry.file}:{entry.line}`")
+        lines.push("")
+
+    # P1 High section
+    if p1_count > 0:
+        lines.push("## P1 High Priority")
+        lines.push("")
+        for entry in entries:
+            if entry.priority == "P1":
+                val issue_text = if entry.issue.len() > 0: " [#{entry.issue}]" else: ""
+                lines.push("- [{entry.keyword}] {entry.description}{issue_text} - `{entry.file}:{entry.line}`")
+        lines.push("")
+
+    # All TODOs
+    lines.push("## All TODOs")
+    lines.push("")
+    lines.push("| # | Type | Area | Priority | Description | File | Line |")
+    lines.push("|---|------|------|----------|-------------|------|------|")
+    for entry in entries:
+        lines.push("| {entry.id} | {entry.keyword} | {entry.area} | {entry.priority} | {entry.description} | `{entry.file}` | {entry.line} |")
+
+    val content = lines.join("\n") + "\n"
+    file_write(output_path, content)
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
 
 fn main() -> i64:
-    val args = get_cli_args()
-    cli_todo_scan(args)
+    val root = cwd()
+    print "Scanning TODOs from {root}"
+
+    # Collect source files
+    val files = collect_source_files(root)
+    print "Found {files.len()} source files to scan"
+
+    # Scan all files
+    var entries: [TodoEntry] = []
+    var next_id = 0
+
+    val root_prefix = root + "/"
+    val prefix_len = root_prefix.len()
+    for f in files:
+        val file_entries = scan_file(f, next_id)
+        for entry in file_entries:
+            # Make path relative by stripping root prefix
+            var rel_path = entry.file
+            if rel_path.starts_with(root_prefix):
+                rel_path = rel_path[prefix_len:]
+            entries.push(TodoEntry(
+                id: entry.id,
+                keyword: entry.keyword,
+                area: entry.area,
+                priority: entry.priority,
+                description: entry.description,
+                file: rel_path,
+                line: entry.line,
+                issue: entry.issue,
+                blocked: entry.blocked,
+                status: entry.status
+            ))
+        next_id = next_id + file_entries.len()
+
+    print "Scan complete: {entries.len()} TODOs found"
+
+    # Write outputs
+    dir_create_all("{root}/doc/todo")
+
+    val db_path = "{root}/doc/todo/todo_db.sdn"
+    write_todo_db(entries, db_path)
+    print "Database saved to {db_path}"
+
+    val md_path = "{root}/doc/TODO.md"
+    write_todo_md(entries, md_path)
+    print "Generated docs to {md_path}"
+
+    0

@@ -35,6 +35,7 @@ class ModuleState:
     trait_impls: Dict<(text, text), [FunctionDef]>
     units: Dict<text, UnitDef>
     unit_families: Dict<text, UnitFamilyInfo>
+    exports: Dict<text, Value>  # Exported items for import system
 
 impl ModuleState:
     static fn empty() -> ModuleState:
@@ -42,7 +43,7 @@ impl ModuleState:
             functions: {}, classes: {}, enums: {},
             impl_methods: {}, extern_functions: {},
             macros: {}, traits: {}, trait_impls: {},
-            units: {}, unit_families: {})
+            units: {}, unit_families: {}, exports: {})
 
 # ================================================================
 # Main Module Evaluator
@@ -213,6 +214,13 @@ fn evaluate_module(interp: Interpreter, items: [Node]) -> Result<i32, Interprete
                 if mod_decl.body.?:
                     eval_inline_module(interp, mod_decl, state)?
 
+            # Export statements - collect exported items
+            case Node.ExportUseStmt(export_use):
+                eval_export_use_stmt(interp, export_use, state)?
+
+            case Node.StructuredExportStmt(structured_export):
+                eval_structured_export_stmt(interp, structured_export, state)?
+
             # No-ops in interpreter
             case Node.Pass(_) | Node.Skip(_) | Node.Guard(_)
                | Node.Defer(_) | Node.Mixin(_) | Node.Bitfield(_)
@@ -222,10 +230,14 @@ fn evaluate_module(interp: Interpreter, items: [Node]) -> Result<i32, Interprete
                | Node.ProofHint(_) | Node.Calc(_)
                | Node.ClassAlias(_) | Node.FunctionAlias(_)
                | Node.MultiUse(_) | Node.CommonUseStmt(_)
-               | Node.ExportUseStmt(_) | Node.StructuredExportStmt(_)
                | Node.AutoImportStmt(_) | Node.RequiresCapabilities(_)
                | Node.HandlePool(_) | Node.LiteralFunction(_):
                 pass
+
+    # ================================================================
+    # Store module exports for import system
+    # ================================================================
+    interp.set_module_exports(Value.dict(state.exports))
 
     # ================================================================
     # Execute main function if present
@@ -412,6 +424,60 @@ fn eval_inline_module(interp: Interpreter, mod_decl: ModDecl,
                 pass
 
     interp.env.define(mod_decl.name, Value.dict(module_dict))
+    Ok(())
+
+# ================================================================
+# Export Statement Processing
+# ================================================================
+
+# Process export use statement: export foo, bar, baz
+fn eval_export_use_stmt(interp: Interpreter, export_use: ExportUseStmt,
+                        state: ModuleState) -> Result<(), InterpreterError>:
+    # Export simple names - look up in current environment
+    for name in export_use.names:
+        # Try to get value from environment
+        val value = interp.env.get(name)
+        if value.?:
+            state.exports[name] = value.unwrap()
+        else:
+            # Try to get function from state
+            if state.functions.has(name):
+                val func = state.functions[name]
+                state.exports[name] = Value.function(name, func, interp.env.clone())
+            else:
+                if state.classes.has(name):
+                    state.exports[name] = Value.constructor(name)
+                else:
+                    if state.enums.has(name):
+                        val enum_def = state.enums[name]
+                        state.exports[name] = Value.enum_type(name)
+
+    Ok(())
+
+# Process structured export statement: export { x, y as z }
+fn eval_structured_export_stmt(interp: Interpreter, structured_export: StructuredExportStmt,
+                                state: ModuleState) -> Result<(), InterpreterError>:
+    # Process each export item with optional aliasing
+    for item in structured_export.items:
+        val source_name = item.name()
+        val export_name = item.local_name()
+
+        # Try to get value from environment
+        val value = interp.env.get(source_name)
+        if value.?:
+            state.exports[export_name] = value.unwrap()
+        else:
+            # Try to get function from state
+            if state.functions.has(source_name):
+                val func = state.functions[source_name]
+                state.exports[export_name] = Value.function(source_name, func, interp.env.clone())
+            else:
+                if state.classes.has(source_name):
+                    state.exports[export_name] = Value.constructor(source_name)
+                else:
+                    if state.enums.has(source_name):
+                        state.exports[export_name] = Value.enum_type(source_name)
+
     Ok(())
 
 # ================================================================

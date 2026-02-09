@@ -102,6 +102,66 @@ fn regex_captures(pattern: text, text: text) -> [text]:
     """
     ffi_regex_captures(pattern, text)
 
+# --- Named Capture Groups ---
+
+fn parse_named_groups(pattern: text) -> {}:
+    """Parse named capture groups from a regex pattern
+
+    Finds all (?P<name>...) groups and returns a dict mapping name to group index.
+    Named groups are also positional, so we track the group index as we scan.
+
+    Returns: Dict {name: group_index}
+    """
+    var groups = {}
+    var group_index = 0
+    var i = 0
+    val plen = pattern.len()
+    for i in range(0, plen):
+        val ch = pattern[i:i + 1]
+        if ch == "(":
+            group_index = group_index + 1
+            # Check for (?P<name> syntax
+            val remaining = plen - i
+            if remaining > 4:
+                val ahead = pattern[i:i + 4]
+                if ahead == "(?P<":
+                    val name_start = i + 4
+                    val rest = pattern[name_start:plen]
+                    var close = -1
+                    var j = 0
+                    for j in range(0, rest.len()):
+                        val rch = rest[j:j + 1]
+                        if rch == ">":
+                            close = j
+                            break
+                    if close > 0:
+                        val name = rest[0:close]
+                        groups[name] = group_index
+    groups
+
+fn regex_named_captures(pattern: text, input: text) -> {}:
+    """Extract named capture groups as a dict
+
+    Uses existing ffi_regex_captures (which returns positional captures)
+    and maps named groups by parsing (?P<name>...) from the pattern.
+
+    Returns: Dict mapping group names to captured text values, empty dict if no match
+
+    Example:
+        caps = regex_named_captures(r"(?P<year>\d{4})-(?P<month>\d{2})", "2026-01")
+        # {"year": "2026", "month": "01"}
+    """
+    val positional = ffi_regex_captures(pattern, input)
+    if positional.len() == 0:
+        return {}
+    val name_map = parse_named_groups(pattern)
+    var result = {}
+    for name in name_map.keys():
+        val idx = name_map[name]
+        if idx < positional.len():
+            result[name] = positional[idx]
+    result
+
 # --- Replace Operations ---
 
 fn regex_replace(pattern: text, text: text, replacement: text) -> text:
@@ -317,7 +377,7 @@ fn regex_trim(text: text) -> text:
 
 export regex_is_match, regex_test
 export regex_find, regex_find_all, regex_match
-export regex_captures
+export regex_captures, regex_named_captures
 export regex_replace, regex_replace_all
 export regex_split, regex_split_n
 export is_valid_email, is_valid_url, is_valid_ipv4, is_valid_uuid

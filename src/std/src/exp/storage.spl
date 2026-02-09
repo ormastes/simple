@@ -13,14 +13,15 @@
 #         <sha256_full>
 #     index.sdn           - Run index for fast queries
 
+use app.io.{dir_create, file_hash_sha256}
+
+# Import app.io functions used via local wrappers to avoid name collisions
 extern fn rt_file_read_text(path: str) -> str
 extern fn rt_file_write_text(path: str, content: str) -> bool
 extern fn rt_file_append_text(path: str, content: str) -> bool
 extern fn rt_file_exists(path: str) -> bool
-extern fn rt_dir_create(path: str) -> bool
 extern fn rt_dir_list(path: str) -> [str]
 extern fn rt_file_delete(path: str) -> bool
-extern fn rt_package_sha256(path: str) -> str
 
 # ============================================================================
 # Directory Management
@@ -159,7 +160,7 @@ pub fn read_run_meta(run_id: text) -> Dict<text, text>:
 pub fn store_blob(data: text) -> text:
     """Store data as content-addressed blob, return SHA256 hash."""
     val hash = sha256_hex(data)
-    val prefix = hash[:2]
+    val prefix = hash[0:2]
     val blob_dir = "{BLOBS_DIR}/{prefix}"
     val blob_path = "{blob_dir}/{hash}"
     if not file_exists(blob_path):
@@ -174,7 +175,7 @@ pub fn store_blob_file(source_path: text) -> text:
 
 pub fn read_blob(hash: text) -> text?:
     """Read a blob by its hash."""
-    val prefix = hash[:2]
+    val prefix = hash[0:2]
     val blob_path = "{BLOBS_DIR}/{prefix}/{hash}"
     if file_exists(blob_path):
         Some(file_read(blob_path))
@@ -183,7 +184,7 @@ pub fn read_blob(hash: text) -> text?:
 
 pub fn blob_exists(hash: text) -> bool:
     """Check if a blob exists."""
-    val prefix = hash[:2]
+    val prefix = hash[0:2]
     file_exists("{BLOBS_DIR}/{prefix}/{hash}")
 
 # ============================================================================
@@ -219,7 +220,7 @@ pub fn list_blob_hashes() -> [text]:
 
 pub fn delete_blob(hash: text) -> bool:
     """Delete a blob by hash."""
-    val prefix = hash[:2]
+    val prefix = hash[0:2]
     file_delete("{BLOBS_DIR}/{prefix}/{hash}")
 
 # ============================================================================
@@ -254,32 +255,25 @@ fn parse_simple_sdn(content: text) -> Dict<text, text>:
     result
 
 fn ensure_dir(path: text):
-    # TODO: Replace direct FFI call with wrapper (dir_create) from app.io or compiler.ffi
-    rt_dir_create(path)
+    dir_create(path, true)
 
 fn file_exists(path: text) -> bool:
-    # TODO: Replace direct FFI call with wrapper (file_exists) from app.io or compiler.ffi
     rt_file_exists(path)
 
 fn file_read(path: text) -> text:
-    # TODO: Replace direct FFI call with wrapper (file_read_text) from app.io or compiler.ffi
     val raw = rt_file_read_text(path)
     "{raw}"
 
 fn file_write(path: text, content: text):
-    # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
     rt_file_write_text(path, content)
 
 fn file_append(path: text, content: text):
-    # TODO: Replace direct FFI call with wrapper (file_append_text) from app.io or compiler.ffi
     rt_file_append_text(path, content)
 
 fn file_delete(path: text) -> bool:
-    # TODO: Replace direct FFI call with wrapper (file_delete) from app.io or compiler.ffi
     rt_file_delete(path)
 
 fn dir_list(path: text) -> [text]:
-    # TODO: Replace direct FFI call with wrapper (dir_list) from app.io or compiler.ffi
     val raw = rt_dir_list(path)
     if not raw.?:
         return []
@@ -289,13 +283,11 @@ fn dir_list(path: text) -> [text]:
     items
 
 fn sha256_hex(data: text) -> text:
-    # rt_package_sha256 expects a file path, so write to temp file first
+    # Write to temp file and use file_hash_sha256
     val tmp_path = ".exp/.tmp_hash"
-    # TODO: Replace direct FFI call with wrapper (file_write_text) from app.io or compiler.ffi
-    rt_file_write_text(tmp_path, data)
-    val hash = rt_package_sha256(tmp_path)
-    # TODO: Replace direct FFI call with wrapper (file_delete) from app.io or compiler.ffi
-    rt_file_delete(tmp_path)
+    file_write(tmp_path, data)
+    val hash = file_hash_sha256(tmp_path)
+    file_delete(tmp_path)
     hash
 
 # ============================================================================

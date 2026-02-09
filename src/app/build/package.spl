@@ -3,7 +3,7 @@
 # Integrates the build system with package creation.
 # Creates distributable packages from build artifacts.
 
-use app.io.mod (file_read_lines, file_exists, file_size_raw, file_copy, dir_create, process_run, file_hash_sha256)
+use app.io.{file_read_lines, file_exists, file_size, file_copy, dir_create, process_run, file_hash_sha256, current_time_ms, host_os, host_arch, dir_walk}
 
 # Read project version from simple.sdn
 fn read_project_version() -> text:
@@ -147,7 +147,7 @@ fn create_bootstrap_package(config: PackageConfig) -> PackageResult:
         )
 
     # Step 6: Calculate checksum
-    val package_size = file_size_raw(output_path)
+    val package_size = file_size(output_path)
     val checksum = file_hash_sha256(output_path)
 
     # Cleanup temporary directory
@@ -201,7 +201,7 @@ fn create_full_package(config: PackageConfig) -> PackageResult:
             build_duration_ms: current_time_ms() - start_time
         )
 
-    val package_size = file_size_raw(output_path)
+    val package_size = file_size(output_path)
     val checksum = file_hash_sha256(output_path)
 
     print "✓ Package created successfully"
@@ -216,40 +216,106 @@ fn create_full_package(config: PackageConfig) -> PackageResult:
 
 # Create custom package
 fn create_custom_package(config: PackageConfig) -> PackageResult:
-    # TODO: Implement custom package with user-defined contents
-    print "Custom packages not yet implemented"
+    val start_time = current_time_ms()
+    print "\nCreating custom package..."
+
+    val package_name = "simple-custom-{config.version}-{config.platform}.tar.gz"
+    val output_path = if config.output_path.len() > 0:
+        config.output_path
+    else:
+        package_name
+
+    # Create temporary directory
+    val pkg_dir = "package_tmp_custom"
+    dir_create(pkg_dir, false)
+    dir_create("{pkg_dir}/bin", false)
+
+    # Always copy runtime
+    val runtime_src = "bin/bootstrap/simple"
+    if file_exists(runtime_src):
+        file_copy(runtime_src, "{pkg_dir}/bin/simple")
+
+    # Copy sources if requested
+    if config.include_sources:
+        dir_create("{pkg_dir}/src", false)
+        val src_files = dir_walk("src")
+        for src_file in src_files:
+            if src_file.ends_with(".spl"):
+                val dst = "{pkg_dir}/{src_file}"
+                val last_slash = dst.last_index_of("/")
+                if last_slash >= 0:
+                    dir_create(dst[0:last_slash], true)
+                file_copy(src_file, dst)
+
+    # Copy tests if requested
+    if config.include_tests:
+        dir_create("{pkg_dir}/test", false)
+        val test_files = dir_walk("test")
+        for test_file in test_files:
+            if test_file.ends_with(".spl"):
+                val dst = "{pkg_dir}/{test_file}"
+                val last_slash = dst.last_index_of("/")
+                if last_slash >= 0:
+                    dir_create(dst[0:last_slash], true)
+                file_copy(test_file, dst)
+
+    # Create archive
+    val result = process_run("tar", ["-czf", output_path, "-C", pkg_dir, "."])
+    cleanup_package_dir(pkg_dir)
+
+    if result[2] != 0:
+        return PackageResult(
+            success: false,
+            package_path: "",
+            package_size: 0,
+            checksum: "",
+            build_duration_ms: current_time_ms() - start_time
+        )
+
+    val package_size = file_size(output_path)
+    val checksum = file_hash_sha256(output_path)
+
+    print "Custom package created successfully"
 
     PackageResult(
-        success: false,
-        package_path: "",
-        package_size: 0,
-        checksum: "",
-        build_duration_ms: 0
+        success: true,
+        package_path: output_path,
+        package_size: package_size,
+        checksum: checksum,
+        build_duration_ms: current_time_ms() - start_time
     )
 
 # Copy standard library files
 fn copy_stdlib(pkg_dir: text):
-    # TODO: Implement stdlib copy
-    # For now, just create the directory
+    val std_src = "src/std"
+    val std_dst = "{pkg_dir}/lib/simple/std"
     dir_create("{pkg_dir}/lib/simple/std", false)
-    print "  (stdlib copy placeholder)"
+    val files = dir_walk(std_src)
+    var copied = 0
+    for src_file in files:
+        if src_file.ends_with(".spl"):
+            # Compute relative path
+            val rel = src_file[std_src.len():]
+            val dst_file = std_dst + rel
+            # Ensure parent directory exists
+            val last_slash = dst_file.last_index_of("/")
+            if last_slash >= 0:
+                val parent = dst_file[0:last_slash]
+                dir_create(parent, true)
+            file_copy(src_file, dst_file)
+            copied = copied + 1
+    print "  Copied {copied} stdlib files"
 
 # Cleanup package temporary directory
 fn cleanup_package_dir(pkg_dir: text):
-    # TODO: Implement directory cleanup
-    # For now, just print
-    print "  (cleanup placeholder for: {pkg_dir})"
-
-# Helper: Current time in milliseconds
-fn current_time_ms() -> i64:
-    # TODO: Use proper time FFI
-    0
+    val result = process_run("rm", ["-rf", pkg_dir])
+    print "  Cleaned up: {pkg_dir}"
 
 # Helper: Detect platform
 fn detect_platform() -> text:
-    # Simple platform detection
-    # TODO: Use proper platform detection
-    "linux-x64"
+    val os = host_os()
+    val arch = host_arch()
+    "{os}-{arch}"
 
 # Print package result
 fn print_package_result(result: PackageResult):
