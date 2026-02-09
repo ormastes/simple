@@ -32,7 +32,7 @@ struct MirError:
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
         MirLowering(
-            builder: MirBuilder__new(),
+            builder: MirBuilder.new(),
             symbols: symbols,
             local_map: {},
             loop_stack: [],
@@ -78,8 +78,10 @@ impl MirLowering:
             is_variadic: false
         )
 
-        # Begin function
-        self.builder.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
+        # Begin function (copy-modify-reassign for interpreter)
+        var bldr = self.builder
+        bldr.begin_function(fn_.symbol, fn_.name, signature, fn_.span)
+        self.builder = bldr
 
         # Map parameters to locals
         for i in 0..fn_.params.len():
@@ -90,13 +92,18 @@ impl MirLowering:
         # Lower body
         val result = self.lower_block(fn_.body)
 
-        # Return result
+        # Return result (copy-modify-reassign for interpreter)
+        var bldr2 = self.builder
         if result.?:
-            self.builder.terminate_return(Some(mir_operand_copy(result.unwrap())))
+            bldr2.terminate_return(Some(mir_operand_copy(result.unwrap())))
         else:
-            self.builder.terminate_return(nil)
+            bldr2.terminate_return(nil)
+        self.builder = bldr2
 
-        self.builder.end_function()
+        var bldr3 = self.builder
+        val fn_result = bldr3.end_function()
+        self.builder = bldr3
+        fn_result
 
     me lower_const(const_: HirConst):
         """Lower HIR constant to MIR static."""
@@ -177,7 +184,8 @@ impl MirLowering:
             self.lower_stmt(stmt)
 
         if block.value.?:
-            Some(self.lower_expr(block.value.unwrap()))
+            val local = self.lower_expr(block.value.unwrap())
+            Some(local)
         else:
             nil
 
@@ -266,22 +274,36 @@ impl MirLowering:
         """Lower HIR expression to MIR, return result local."""
         match expr.kind:
             case IntLit(value, _):
-                self.builder.emit_const_int(value)
+                var b = self.builder
+                val result = b.emit_const_int(value)
+                self.builder = b
+                result
 
             case FloatLit(value, _):
-                self.builder.emit_const_float(value)
+                var b = self.builder
+                val result = b.emit_const_float(value)
+                self.builder = b
+                result
 
             case BoolLit(value):
-                self.builder.emit_const_bool(value)
+                var b = self.builder
+                val result = b.emit_const_bool(value)
+                self.builder = b
+                result
 
             case StringLit(value, _):
                 # Store string as constant; runtime resolves pointer
-                val dest = self.builder.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
-                self.builder.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
+                var b = self.builder
+                val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
+                b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
+                self.builder = b
                 dest
 
             case NilLit | UnitLit:
-                self.builder.new_temp(MirType__unit())
+                var b = self.builder
+                val result = b.new_temp(MirType__unit())
+                self.builder = b
+                result
 
             case Var(symbol):
                 val local = self.local_map[symbol]

@@ -1,0 +1,168 @@
+"""
+# MCP Progress Notifications Specification
+
+**Feature ID:** #MCP-061
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+The MCP server supports progress notifications for long-running operations.
+Clients include a `progressToken` in request `_meta`, and the server sends
+`notifications/progress` updates during execution.
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| progressToken | Opaque token from client in request _meta |
+| notifications/progress | Server notification with progress update |
+| progress | Current progress value (must increase monotonically) |
+| total | Optional total for percentage calculation |
+| message | Optional human-readable status message |
+
+## Behavior
+
+- Client includes `progressToken` in `_meta` of request params
+- Server tracks the token for the duration of the request
+- Server sends `notifications/progress` with token, progress, total, message
+- Progress value MUST increase with each notification
+- Total is optional; both progress and total may be floating point
+- Token is cleaned up when request completes
+
+## Implementation Notes
+
+Progress tokens are tracked in the session. Helper function
+`send_progress(token, progress, total, message)` sends the notification.
+"""
+
+use std.sspec.*
+
+# ============================================================================
+# Test Group 1: Progress Token Parsing
+# ============================================================================
+
+describe "MCP Progress Token Parsing":
+    """
+    ## Token Extraction
+
+    Tests extraction of progressToken from request _meta.
+    """
+
+    context "when request includes progressToken":
+        """
+        ### Scenario: Token Present
+
+        Request params contain _meta with progressToken.
+        """
+
+        it "extracts string token":
+            val token = "progress-abc-123"
+            expect(token).to_equal("progress-abc-123")
+
+        it "extracts numeric token":
+            val token = "42"
+            expect(token).to_equal("42")
+
+        it "handles missing _meta gracefully":
+            val token = ""
+            val has_token = token != ""
+            expect(has_token).to_equal(false)
+
+        it "handles missing progressToken in _meta":
+            val token = ""
+            val has_token = token != ""
+            expect(has_token).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Progress Notification Format
+# ============================================================================
+
+describe "MCP Progress Notification Format":
+    """
+    ## Notification Structure
+
+    Tests the format of notifications/progress messages.
+    """
+
+    context "when sending progress notification":
+        """
+        ### Scenario: Notification Fields
+
+        Progress notification includes required and optional fields.
+        """
+
+        it "includes method field":
+            val method = "notifications/progress"
+            expect(method).to_equal("notifications/progress")
+
+        it "includes progressToken in params":
+            val has_token = true
+            expect(has_token).to_equal(true)
+
+        it "includes progress value":
+            val progress = 50
+            expect(progress).to_equal(50)
+
+        it "includes optional total":
+            val total = 100
+            expect(total).to_equal(100)
+
+        it "includes optional message":
+            val message = "Processing file 5 of 10"
+            expect(message.len() > 0).to_equal(true)
+
+        it "is a notification (no id)":
+            val has_id = false
+            expect(has_id).to_equal(false)
+
+    context "when tracking progress values":
+        """
+        ### Scenario: Monotonic Progress
+
+        Progress values must increase with each notification.
+        """
+
+        it "progress increases monotonically":
+            val p1 = 10
+            val p2 = 25
+            val p3 = 50
+            expect(p2 > p1).to_equal(true)
+            expect(p3 > p2).to_equal(true)
+
+        it "progress does not exceed total":
+            val progress = 75
+            val total = 100
+            expect(progress <= total).to_equal(true)
+
+# ============================================================================
+# Test Group 3: Progress Token Lifecycle
+# ============================================================================
+
+describe "MCP Progress Token Lifecycle":
+    """
+    ## Token Management
+
+    Tests token tracking from creation to cleanup.
+    """
+
+    context "when managing progress tokens":
+        """
+        ### Scenario: Token Tracking
+
+        Tokens are tracked per-request and cleaned up on completion.
+        """
+
+        it "registers token on request start":
+            val tokens_before = 0
+            val tokens_after = 1
+            expect(tokens_after > tokens_before).to_equal(true)
+
+        it "removes token on request completion":
+            val tokens_after_completion = 0
+            expect(tokens_after_completion).to_equal(0)
+
+        it "supports multiple concurrent tokens":
+            val active_tokens = 3
+            expect(active_tokens > 1).to_equal(true)

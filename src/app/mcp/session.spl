@@ -1,5 +1,6 @@
 # Session Manager for MCP Debug Server
 # Manages multiple debug sessions, each targeting a different backend.
+# Also tracks MCP protocol state: progress tokens, cancellations, subscriptions.
 
 use core.*
 
@@ -54,6 +55,99 @@ class SessionBreakpoint:
             enabled: true,
             hit_count: 0
         )
+
+# MCP Protocol State - tracks progress, cancellation, subscriptions, log level
+class McpState:
+    # Progress tokens: maps progressToken -> requestId
+    progress_tokens: Dict<String, String>
+    # Cancelled request IDs
+    cancelled_requests: Dict<String, String>
+    # In-flight request IDs (maps requestId -> method)
+    in_flight: Dict<String, String>
+    # Resource subscriptions (set of URIs)
+    subscriptions: Dict<String, Bool>
+    # Current minimum log level (numeric, -1 = no emission)
+    log_level: Int
+    # Next server-to-client request ID
+    next_request_id: Int
+
+    static fn create() -> McpState:
+        McpState(
+            progress_tokens: {},
+            cancelled_requests: {},
+            in_flight: {},
+            subscriptions: {},
+            log_level: -1,
+            next_request_id: 1
+        )
+
+impl McpState:
+    # --- Progress token management ---
+
+    me register_progress_token(token: String, request_id: String):
+        self.progress_tokens[token] = request_id
+
+    me remove_progress_token(token: String):
+        self.progress_tokens.remove(token)
+
+    fn has_progress_token(token: String) -> Bool:
+        self.progress_tokens.get(token).?
+
+    # --- In-flight request tracking ---
+
+    me register_request(request_id: String, method: String):
+        self.in_flight[request_id] = method
+
+    me complete_request(request_id: String):
+        self.in_flight.remove(request_id)
+
+    fn is_in_flight(request_id: String) -> Bool:
+        self.in_flight.get(request_id).?
+
+    # --- Cancellation ---
+
+    me cancel_request(request_id: String, reason: String):
+        self.cancelled_requests[request_id] = reason
+
+    fn is_cancelled(request_id: String) -> Bool:
+        self.cancelled_requests.get(request_id).?
+
+    me clear_cancelled(request_id: String):
+        self.cancelled_requests.remove(request_id)
+
+    # --- Resource subscriptions ---
+
+    me subscribe(uri: String):
+        self.subscriptions[uri] = true
+
+    me unsubscribe(uri: String):
+        self.subscriptions.remove(uri)
+
+    fn is_subscribed(uri: String) -> Bool:
+        self.subscriptions.get(uri).?
+
+    fn get_subscribed_uris() -> [String]:
+        var result: [String] = []
+        for (uri, _) in self.subscriptions.items():
+            result.push(uri)
+        result
+
+    # --- Log level ---
+
+    me set_log_level(level: Int):
+        self.log_level = level
+
+    fn should_emit_log(msg_level: Int) -> Bool:
+        if self.log_level < 0:
+            return false
+        msg_level >= self.log_level
+
+    # --- Server request ID generation ---
+
+    me next_server_request_id() -> String:
+        val id = "srv-" + self.next_request_id.to_string()
+        self.next_request_id = self.next_request_id + 1
+        id
 
 # Session Manager
 class SessionManager:

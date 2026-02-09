@@ -96,22 +96,51 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
     var all_relocs: [ElfReloc] = []
 
     # Build symbol name -> index mapping for relocations
+    # Symbols are ordered: data labels, extern symbols, function names
     var sym_names: [text] = []
     var sym_name_to_idx: Dict<text, i64> = {}
 
-    # First collect all extern symbols
+    # First collect data entry labels (local symbols in rodata)
+    var rodata_offset = 0
+    var data_label_offsets: Dict<text, i64> = {}
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if not sym_name_to_idx.contains(entry.name):
+                val idx = sym_names.len()
+                sym_names = sym_names + [entry.name]
+                sym_name_to_idx[entry.name] = idx
+                data_label_offsets[entry.name] = rodata_offset
+            rodata_offset = rodata_offset + entry.data.len()
+
+    # Then collect extern symbols
     for ext_sym in module.extern_symbols:
         if not sym_name_to_idx.contains(ext_sym):
             val idx = sym_names.len()
             sym_names = sym_names + [ext_sym]
             sym_name_to_idx[ext_sym] = idx
 
-    # Then collect all function names
+    # Then collect function names
     for func in encoded_funcs:
         if not sym_name_to_idx.contains(func.name):
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
             sym_name_to_idx[func.name] = idx
+
+    # Count content sections for symbol index offset
+    # ELF writer inserts section symbols: [0:null] [1..N:section syms] [N+1..:user syms]
+    var num_content_sections = 1  # .text always present
+    var has_rodata = false
+    var has_data = false
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            has_rodata = true
+        else:
+            has_data = true
+    if has_rodata:
+        num_content_sections = num_content_sections + 1
+    if has_data:
+        num_content_sections = num_content_sections + 1
+    val sym_base = 1 + num_content_sections
 
     # Concatenate function code and track offsets
     for func in encoded_funcs:
@@ -138,12 +167,10 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
             var sym_idx = 0
             if sym_name_to_idx.contains(reloc.symbol_name):
                 sym_idx = sym_name_to_idx[reloc.symbol_name]
-            # Add 1 for null symbol, plus section symbols count
-            # The symbol index in the ELF will be calculated during writing
             val elf_reloc = ElfReloc(
                 offset: code_start + reloc.offset,
                 reloc_type: reloc_type,
-                symbol_index: sym_idx + 1,  # +1 for null symbol
+                symbol_index: sym_base + sym_idx,
                 addend: reloc.addend
             )
             all_relocs = all_relocs + [elf_reloc]
@@ -156,10 +183,8 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
 
     # Create .rodata section for string constants
     var rodata_bytes: [i64] = []
-    var rodata_offsets: Dict<text, i64> = {}
     for entry in module.data_sections:
         if entry.is_readonly:
-            rodata_offsets[entry.name] = rodata_bytes.len()
             rodata_bytes = rodata_bytes + entry.data
     if rodata_bytes.len() > 0:
         writer = elf_add_section(writer, new_rodata_section(rodata_bytes))
@@ -171,6 +196,20 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
             data_bytes = data_bytes + entry.data
     if data_bytes.len() > 0:
         writer = elf_add_section(writer, new_data_section(data_bytes))
+
+    # Add data label symbols (local, in rodata)
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if data_label_offsets.contains(entry.name):
+                val sym = ElfSymbol(
+                    name: entry.name,
+                    sym_bind: ElfSymbolBind.Local,
+                    sym_type: ElfSymbolType.Object,
+                    section_index: 2,
+                    value: data_label_offsets[entry.name],
+                    size: entry.data.len()
+                )
+                writer = elf_add_symbol(writer, sym)
 
     # Add extern symbols (undefined, global)
     for ext_sym in module.extern_symbols:
@@ -196,6 +235,18 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
     var sym_names: [text] = []
     var sym_name_to_idx: Dict<text, i64> = {}
 
+    # Collect data entry labels
+    var rodata_offset_a = 0
+    var data_label_offsets_a: Dict<text, i64> = {}
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if not sym_name_to_idx.contains(entry.name):
+                val idx = sym_names.len()
+                sym_names = sym_names + [entry.name]
+                sym_name_to_idx[entry.name] = idx
+                data_label_offsets_a[entry.name] = rodata_offset_a
+            rodata_offset_a = rodata_offset_a + entry.data.len()
+
     # Collect extern symbols
     for ext_sym in module.extern_symbols:
         if not sym_name_to_idx.contains(ext_sym):
@@ -209,6 +260,21 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
             sym_name_to_idx[func.name] = idx
+
+    # Count content sections for symbol index offset
+    var num_cs_a = 1
+    var has_rodata_a = false
+    var has_data_a = false
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            has_rodata_a = true
+        else:
+            has_data_a = true
+    if has_rodata_a:
+        num_cs_a = num_cs_a + 1
+    if has_data_a:
+        num_cs_a = num_cs_a + 1
+    val sym_base_a = 1 + num_cs_a
 
     # Concatenate function code (AArch64: 4-byte instruction alignment)
     for func in encoded_funcs:
@@ -234,7 +300,7 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             val elf_reloc = ElfReloc(
                 offset: code_start + reloc.offset,
                 reloc_type: reloc_type,
-                symbol_index: sym_idx + 1,
+                symbol_index: sym_base_a + sym_idx,
                 addend: reloc.addend
             )
             all_relocs = all_relocs + [elf_reloc]
@@ -261,6 +327,20 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
     if data_bytes.len() > 0:
         writer = elf_add_section(writer, new_data_section(data_bytes))
 
+    # Add data label symbols (local, in rodata)
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if data_label_offsets_a.contains(entry.name):
+                val sym = ElfSymbol(
+                    name: entry.name,
+                    sym_bind: ElfSymbolBind.Local,
+                    sym_type: ElfSymbolType.Object,
+                    section_index: 2,
+                    value: data_label_offsets_a[entry.name],
+                    size: entry.data.len()
+                )
+                writer = elf_add_symbol(writer, sym)
+
     # Add symbols
     for ext_sym in module.extern_symbols:
         writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
@@ -284,6 +364,18 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
     var sym_names: [text] = []
     var sym_name_to_idx: Dict<text, i64> = {}
 
+    # Collect data entry labels
+    var rodata_offset_r = 0
+    var data_label_offsets_r: Dict<text, i64> = {}
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if not sym_name_to_idx.contains(entry.name):
+                val idx = sym_names.len()
+                sym_names = sym_names + [entry.name]
+                sym_name_to_idx[entry.name] = idx
+                data_label_offsets_r[entry.name] = rodata_offset_r
+            rodata_offset_r = rodata_offset_r + entry.data.len()
+
     # Collect extern symbols
     for ext_sym in module.extern_symbols:
         if not sym_name_to_idx.contains(ext_sym):
@@ -297,6 +389,21 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
             sym_name_to_idx[func.name] = idx
+
+    # Count content sections
+    var num_cs_r = 1
+    var has_rodata_r = false
+    var has_data_r = false
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            has_rodata_r = true
+        else:
+            has_data_r = true
+    if has_rodata_r:
+        num_cs_r = num_cs_r + 1
+    if has_data_r:
+        num_cs_r = num_cs_r + 1
+    val sym_base_r = 1 + num_cs_r
 
     # Concatenate function code (RISC-V: 4-byte instruction alignment)
     for func in encoded_funcs:
@@ -324,7 +431,7 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             val elf_reloc = ElfReloc(
                 offset: code_start + reloc.offset,
                 reloc_type: reloc_type,
-                symbol_index: sym_idx + 1,
+                symbol_index: sym_base_r + sym_idx,
                 addend: reloc.addend
             )
             all_relocs = all_relocs + [elf_reloc]
@@ -350,6 +457,20 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             data_bytes = data_bytes + entry.data
     if data_bytes.len() > 0:
         writer = elf_add_section(writer, new_data_section(data_bytes))
+
+    # Add data label symbols (local, in rodata)
+    for entry in module.data_sections:
+        if entry.is_readonly:
+            if data_label_offsets_r.contains(entry.name):
+                val sym = ElfSymbol(
+                    name: entry.name,
+                    sym_bind: ElfSymbolBind.Local,
+                    sym_type: ElfSymbolType.Object,
+                    section_index: 2,
+                    value: data_label_offsets_r[entry.name],
+                    size: entry.data.len()
+                )
+                writer = elf_add_symbol(writer, sym)
 
     # Add symbols
     for ext_sym in module.extern_symbols:

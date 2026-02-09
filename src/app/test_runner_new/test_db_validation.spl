@@ -1,14 +1,13 @@
 # Test Database Validation
 #
-# Validates run record integrity: stale runs, dead processes,
-# timestamp consistency, count consistency, status consistency.
-#
-# Simplified version for interpreter mode - only includes
-# validate_run_record (no TestDatabase/StringInterner dependencies).
+# Validates database integrity after loading: count consistency,
+# interner bounds, stale runs, unqualified ignores, run record integrity.
 
 use app.io.mod (time_now_unix_micros, is_dir)
 use app.test_runner_new.test_db_compat (parse_rfc3339_to_micros)
 use app.test_runner_new.test_db_types (RunRecord)
+use app.test_runner_new.test_db_core (TestDatabase)
+use app.test_runner_new.string_interner (StringInterner)
 
 # =========================================================================
 # Validation Issue
@@ -61,6 +60,151 @@ impl ValidationReport:
 fn process_exists(pid: i64) -> bool:
     # Check if process exists via /proc filesystem (Linux)
     is_dir("/proc/{pid}")
+
+# =========================================================================
+# Main Validation
+# =========================================================================
+
+fn validate_database(db: TestDatabase) -> List<ValidationIssue>:
+    var issues: List<ValidationIssue> = []
+
+    # Check interner bounds
+    val interner_issues = validate_interner_bounds(db)
+    for issue in interner_issues:
+        issues.push(issue)
+
+    # Check count consistency
+    val count_issues = validate_count_consistency(db)
+    for issue in count_issues:
+        issues.push(issue)
+
+    # Check stale runs
+    val stale_issues = validate_stale_runs(db)
+    for issue in stale_issues:
+        issues.push(issue)
+
+    issues
+
+# =========================================================================
+# Interner Bounds
+# =========================================================================
+
+fn validate_interner_bounds(db: TestDatabase) -> List<ValidationIssue>:
+    var issues: List<ValidationIssue> = []
+    val max_id = db.interner.len()
+
+    for t in db.tests:
+        if t.name_str >= max_id or t.name_str < 0:
+            issues.push(ValidationIssue(
+                violation_type: "InternerBounds",
+                severity: "error",
+                message: "Test name_str {t.name_str} out of interner bounds (max {max_id})",
+                auto_fixable: false
+            ))
+        if t.category_str >= max_id or t.category_str < 0:
+            issues.push(ValidationIssue(
+                violation_type: "InternerBounds",
+                severity: "warning",
+                message: "Test category_str {t.category_str} out of interner bounds",
+                auto_fixable: false
+            ))
+        if t.status_str >= max_id or t.status_str < 0:
+            issues.push(ValidationIssue(
+                violation_type: "InternerBounds",
+                severity: "warning",
+                message: "Test status_str {t.status_str} out of interner bounds",
+                auto_fixable: false
+            ))
+
+    for s in db.suites:
+        if s.name_str >= max_id or s.name_str < 0:
+            issues.push(ValidationIssue(
+                violation_type: "InternerBounds",
+                severity: "error",
+                message: "Suite name_str {s.name_str} out of interner bounds",
+                auto_fixable: false
+            ))
+
+    issues
+
+# =========================================================================
+# Count Consistency
+# =========================================================================
+
+fn validate_count_consistency(db: TestDatabase) -> List<ValidationIssue>:
+    var issues: List<ValidationIssue> = []
+
+    for c in db.counters:
+        if c.passed + c.failed > c.total_runs:
+            issues.push(ValidationIssue(
+                violation_type: "CountInconsistent",
+                severity: "warning",
+                message: "Counter for test {c.test_id}: passed ({c.passed}) + failed ({c.failed}) > total_runs ({c.total_runs})",
+                auto_fixable: true
+            ))
+        if c.total_runs < 0 or c.passed < 0 or c.failed < 0:
+            issues.push(ValidationIssue(
+                violation_type: "CountInconsistent",
+                severity: "error",
+                message: "Counter for test {c.test_id}: negative count detected",
+                auto_fixable: true
+            ))
+
+    issues
+
+# =========================================================================
+# Stale Runs
+# =========================================================================
+
+fn validate_stale_runs(db: TestDatabase) -> List<ValidationIssue>:
+    var issues: List<ValidationIssue> = []
+
+    for r in db.test_runs:
+        if r.status == "running":
+            issues.push(ValidationIssue(
+                violation_type: "StaleRunning",
+                severity: "warning",
+                message: "Run {r.run_id} still marked as running (started {r.start_time})",
+                auto_fixable: true
+            ))
+
+    issues
+
+# =========================================================================
+# Qualification Check
+# =========================================================================
+
+fn needs_qualification(test: TestRecord, interner: StringInterner) -> bool:
+    val status = interner.get(test.status_str)
+    if status == "ignored" and test.qualified_by == "":
+        return true
+    false
+
+fn count_unqualified_ignores(db: TestDatabase) -> i64:
+    var count = 0
+    for t in db.tests:
+        if needs_qualification(t, db.interner):
+            count = count + 1
+    count
+
+# =========================================================================
+# Print Warnings
+# =========================================================================
+
+fn print_validation_warnings(issues: List<ValidationIssue>):
+    var errors = 0
+    var warnings = 0
+    for issue in issues:
+        if issue.severity == "error":
+            print "DB ERROR: {issue.message}"
+            errors = errors + 1
+        elif issue.severity == "warning":
+            warnings = warnings + 1
+
+    if errors > 0:
+        print "Database has {errors} error(s) and {warnings} warning(s)"
+    elif warnings > 0:
+        print "Database has {warnings} warning(s)"
 
 # =========================================================================
 # Run Record Validation
@@ -159,4 +303,8 @@ fn validate_run_record(run: RunRecord) -> ValidationReport:
     )
 
 export ValidationIssue, ValidationReport
+export validate_database, validate_interner_bounds
+export validate_count_consistency, validate_stale_runs
 export validate_run_record, process_exists
+export needs_qualification, count_unqualified_ignores
+export print_validation_warnings
