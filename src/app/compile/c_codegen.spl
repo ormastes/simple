@@ -304,8 +304,8 @@ fn translate_expr(expr: text, types: text) -> text:
         # General integer coalescing
         return "({c_left} >= 0 ? {c_left} : {c_right})"
 
-    # Handle string literals
-    if expr.starts_with("\""):
+    # Handle complete string literals (starts and ends with quote)
+    if expr.starts_with("\"") and expr.ends_with("\""):
         return expr
 
     # Handle string concatenation with +
@@ -402,7 +402,14 @@ fn translate_print(arg: text, types: text) -> text:
     # Print a variable
     if is_text_var(arg, types):
         return "printf(\"%s\\n\", {arg});"
-    "printf(\"%lld\\n\", (long long){arg});"
+    # Translate expression and check if it's a string result
+    val c_arg = translate_expr(arg, types)
+    val c_is_str = c_arg.contains("simple_str_concat") or c_arg.contains("simple_substring")
+    val c_is_str2 = c_arg.contains("simple_trim") or c_arg.contains("simple_replace")
+    val c_is_str3 = c_arg.contains("simple_char_at") or c_arg.contains("simple_string_join")
+    if c_is_str or c_is_str2 or c_is_str3:
+        return "printf(\"%s\\n\", {c_arg});"
+    "printf(\"%lld\\n\", (long long){c_arg});"
 
 # Translate array declaration
 # Returns "code|||;arr:name;" if a string array is declared
@@ -451,9 +458,14 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     if rhs == "nil":
         return "const char* {name} = NULL;|||;text:{name};"
 
-    # Handle string literal
-    if rhs.starts_with("\""):
+    # Handle complete string literal (not concat like "foo" + bar)
+    if rhs.starts_with("\"") and rhs.ends_with("\""):
         return "const char* {name} = {rhs};|||;text:{name};"
+
+    # Handle string concat starting with literal: "prefix" + expr
+    if rhs.starts_with("\""):
+        val c_rhs = translate_expr(rhs, types)
+        return "const char* {name} = {c_rhs};|||;text:{name};"
 
     # Handle boolean
     if rhs == "true" or rhs == "false":
