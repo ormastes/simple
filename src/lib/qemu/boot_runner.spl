@@ -26,33 +26,26 @@ class BootTestConfig:
     machine: text?            # Optional: override default machine
     extra_args: [text]        # Optional: extra QEMU args
 
-impl BootTestConfig:
-    static fn new(arch: QemuArch, kernel: text) -> BootTestConfig:
-        BootTestConfig(
-            arch: arch,
-            kernel_path: kernel,
-            expected_output: "",
-            timeout_ms: 10000,  # 10 seconds default
-            machine: nil,
-            extra_args: []
-        )
+fn BootTestConfig__new(arch: QemuArch, kernel: text) -> BootTestConfig:
+    BootTestConfig(
+        arch: arch,
+        kernel_path: kernel,
+        expected_output: "",
+        timeout_ms: 10000,  # 10 seconds default
+        machine: nil,
+        extra_args: []
+    )
 
-    # Expect specific output substring
+
+impl BootTestConfig:
     me expect_output(pattern: text):
         self.expected_output = pattern
-
-    # Set timeout
     me set_timeout(ms: i64):
         self.timeout_ms = ms
-
-    # Override machine type
     me set_machine(machine_type: text):
         self.machine = Some(machine_type)
-
-    # Add extra QEMU arguments
     me add_args(args: [text]):
         self.extra_args = self.extra_args.merge(args)
-
 # ===========================================================================
 # Boot Test Result
 # ===========================================================================
@@ -65,42 +58,41 @@ class BootTestResult:
     message: text             # Result message
     duration_ms: i64          # Test duration
 
-impl BootTestResult:
-    static fn success(output: text, duration: i64) -> BootTestResult:
-        BootTestResult(
-            success: true,
-            output: output,
-            exit_code: 0,
-            message: "Boot test passed",
-            duration_ms: duration
-        )
+fn BootTestResult__success(output: text, duration: i64) -> BootTestResult:
+    BootTestResult(
+        success: true,
+        output: output,
+        exit_code: 0,
+        message: "Boot test passed",
+        duration_ms: duration
+    )
 
-    static fn failure(msg: text, output: text, exit_code: i32) -> BootTestResult:
-        BootTestResult(
-            success: false,
-            output: output,
-            exit_code: exit_code,
-            message: msg,
-            duration_ms: 0
-        )
+fn BootTestResult__failure(msg: text, output: text, exit_code: i32) -> BootTestResult:
+    BootTestResult(
+        success: false,
+        output: output,
+        exit_code: exit_code,
+        message: msg,
+        duration_ms: 0
+    )
 
-    static fn timeout(output: text, timeout_ms: i64) -> BootTestResult:
-        BootTestResult(
-            success: false,
-            output: output,
-            exit_code: 124,
-            message: "Boot test timed out after {timeout_ms}ms",
-            duration_ms: timeout_ms
-        )
+fn BootTestResult__timeout(output: text, timeout_ms: i64) -> BootTestResult:
+    BootTestResult(
+        success: false,
+        output: output,
+        exit_code: 124,
+        message: "Boot test timed out after {timeout_ms}ms",
+        duration_ms: timeout_ms
+    )
 
-    static fn crash(output: text, exit_code: i32) -> BootTestResult:
-        BootTestResult(
-            success: false,
-            output: output,
-            exit_code: exit_code,
-            message: "Kernel crashed (exit code {exit_code})",
-            duration_ms: 0
-        )
+fn BootTestResult__crash(output: text, exit_code: i32) -> BootTestResult:
+    BootTestResult(
+        success: false,
+        output: output,
+        exit_code: exit_code,
+        message: "Kernel crashed (exit code {exit_code})",
+        duration_ms: 0
+    )
 
 # ===========================================================================
 # Boot Test Runner
@@ -111,23 +103,23 @@ class BootTestRunner:
     config: BootTestConfig
     output_file: text         # Temporary file for serial output
 
+fn BootTestRunner__new(config: BootTestConfig) -> BootTestRunner:
+    # Create temporary file for serial output
+    val timestamp = get_timestamp_ms()
+    val output_file = "/tmp/qemu_boot_test_{timestamp}.log"
+
+    BootTestRunner(
+        config: config,
+        output_file: output_file
+    )
+
+
 impl BootTestRunner:
-    static fn new(config: BootTestConfig) -> BootTestRunner:
-        # Create temporary file for serial output
-        val timestamp = get_timestamp_ms()
-        val output_file = "/tmp/qemu_boot_test_{timestamp}.log"
-
-        BootTestRunner(
-            config: config,
-            output_file: output_file
-        )
-
-    # Run boot test
     fn run() -> BootTestResult:
         val start_time = get_timestamp_ms()
 
         # Build QEMU config
-        var qemu_config = QemuConfig.for_test_runner(
+        var qemu_config = QemuConfig__for_test_runner(
             self.config.arch,
             self.config.kernel_path
         )
@@ -145,9 +137,9 @@ impl BootTestRunner:
         qemu_config.extra_args = self.config.extra_args
 
         # Start QEMU
-        val start_result = QemuInstance.start(qemu_config)
+        val start_result = QemuInstance__start(qemu_config)
         if start_result.err.?:
-            return BootTestResult.failure(
+            return BootTestResult__failure(
                 "Failed to start QEMU: {start_result.err.unwrap()}",
                 "",
                 -1
@@ -172,7 +164,7 @@ impl BootTestRunner:
         # Check result
         if wait_result.err.?:
             # Timeout
-            return BootTestResult.timeout(output, self.config.timeout_ms)
+            return BootTestResult__timeout(output, self.config.timeout_ms)
 
         val exit_code = wait_result.ok.unwrap()
 
@@ -180,42 +172,37 @@ impl BootTestRunner:
         val exit_result = interpret_exit_code(exit_code, qemu_config.debug_exit)
 
         if not exit_result.success:
-            return BootTestResult.crash(output, exit_code)
+            return BootTestResult__crash(output, exit_code)
 
         # Check expected output
         if self.config.expected_output.len() > 0:
             if not output.contains(self.config.expected_output):
-                return BootTestResult.failure(
+                return BootTestResult__failure(
                     "Expected output not found: '{self.config.expected_output}'",
                     output,
                     exit_code
                 )
 
         # Success
-        BootTestResult.success(output, duration)
-
-    # Read output from file
+        BootTestResult__success(output, duration)
     fn read_output_file() -> text:
         val read_result = shell("cat {self.output_file} 2>/dev/null")
         if read_result.exit_code == 0:
             read_result.stdout
         else:
             ""
-
-    # Clean up temporary output file
     fn cleanup_output_file():
         shell("rm -f {self.output_file} 2>/dev/null")
-
 # ===========================================================================
 # Convenience API
 # ===========================================================================
 
 # Run a simple boot test with expected output
 fn run_boot_test(arch: QemuArch, kernel: text, expected: text) -> BootTestResult:
-    var config = BootTestConfig.new(arch, kernel)
+    var config = BootTestConfig__new(arch, kernel)
     config.expect_output(expected)
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # ===========================================================================
@@ -224,52 +211,52 @@ fn run_boot_test(arch: QemuArch, kernel: text, expected: text) -> BootTestResult
 
 # x86 boot test with VGA output expectation
 fn run_x86_boot_test(kernel: text, expected_vga: text) -> BootTestResult:
-    var config = BootTestConfig.new(QemuArch.X86, kernel)
+    var config = BootTestConfig__new(QemuArch.X86, kernel)
     config.expect_output(expected_vga)
     config.set_timeout(5000)  # 5 seconds
 
     # Enable ISA debug-exit device for clean shutdown
     config.add_args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # ARM Cortex-M boot test
 fn run_arm_cortex_m_boot_test(kernel: text, expected_serial: text) -> BootTestResult:
-    var config = BootTestConfig.new(QemuArch.ARM32, kernel)
+    var config = BootTestConfig__new(QemuArch.ARM32, kernel)
     config.set_machine("lm3s6965evb")  # Cortex-M3
     config.expect_output(expected_serial)
     config.set_timeout(5000)
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # ARM Cortex-A boot test (different machine)
 fn run_arm_cortex_a_boot_test(kernel: text, expected_serial: text) -> BootTestResult:
-    var config = BootTestConfig.new(QemuArch.ARM32, kernel)
+    var config = BootTestConfig__new(QemuArch.ARM32, kernel)
     config.set_machine("virt")  # ARM virt machine (Cortex-A)
     config.expect_output(expected_serial)
     config.set_timeout(5000)
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # RISC-V 32 boot test
 fn run_riscv32_boot_test(kernel: text, expected_uart: text) -> BootTestResult:
-    var config = BootTestConfig.new(QemuArch.RiscV32, kernel)
+    var config = BootTestConfig__new(QemuArch.RiscV32, kernel)
     config.expect_output(expected_uart)
     config.set_timeout(5000)
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # RISC-V 64 boot test
 fn run_riscv64_boot_test(kernel: text, expected_uart: text) -> BootTestResult:
-    var config = BootTestConfig.new(QemuArch.RiscV64, kernel)
+    var config = BootTestConfig__new(QemuArch.RiscV64, kernel)
     config.expect_output(expected_uart)
     config.set_timeout(5000)
 
-    val runner = BootTestRunner.new(config)
+    val runner = BootTestRunner__new(config)
     runner.run()
 
 # ===========================================================================

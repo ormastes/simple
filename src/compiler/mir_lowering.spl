@@ -587,9 +587,18 @@ impl MirLowering:
             case _:
                 # Indirect call - lower callee expression and use CallIndirect
                 val callee_local = self.lower_expr(callee)
+                # Infer parameter types from arguments
+                var param_types: [MirType] = []
+                for arg_op in arg_operands:
+                    param_types.push(MirType__i64())
+                # Infer return type from callee's type annotation if available
+                val ret_type = if callee.type_.?:
+                    self.lower_type(callee.type_.unwrap())
+                else:
+                    MirType__i64()
                 val sig = MirSignature(
-                    params: [],  # TODO: Extract parameter types from callee type
-                    return_type: MirType__i64(),
+                    params: param_types,
+                    return_type: ret_type,
                     is_variadic: false
                 )
                 val result = self.builder.emit_call_indirect(mir_operand_copy(callee_local), arg_operands, sig, MirType__i64())
@@ -658,7 +667,10 @@ impl MirLowering:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
 
-        val elem_type = MirType__i64()  # TODO: Infer element type
+        val elem_type = if elements.len() > 0 and elements[0].type_.?:
+            self.lower_type(elements[0].type_.unwrap())
+        else:
+            MirType__i64()
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
 
         self.builder.emit_aggregate(
@@ -674,7 +686,11 @@ impl MirLowering:
         for elem in elements:
             val local = self.lower_expr(elem)
             operands = operands.push(mir_operand_copy(local))
-            types = types.push(MirType__i64())  # TODO: Infer types
+            val elem_ty = if elem.type_.?:
+                self.lower_type(elem.type_.unwrap())
+            else:
+                MirType__i64()
+            types = types.push(elem_ty)
 
         val tuple_type = MirType(kind: MirTypeKind.Tuple(types))
         self.builder.emit_aggregate(AggregateKind.Tuple, operands, tuple_type)
@@ -689,8 +705,8 @@ impl MirLowering:
         Future optimization: emit direct Set.new() + insert() calls.
         """
         # Infer element type from first element, or default to i64
-        val elem_type = if elements.len() > 0:
-            MirType__i64()  # TODO: Proper type inference
+        val elem_type = if elements.len() > 0 and elements[0].type_.?:
+            self.lower_type(elements[0].type_.unwrap())
         else:
             MirType__i64()
 
@@ -753,8 +769,15 @@ impl MirLowering:
         Custom blocks are lowered by calling a runtime handler function
         that processes the block value and returns a result.
         """
-        # Create a local to hold the block kind string
-        val kind_local = self.builder.emit_const_int(0)  # TODO: String handling
+        # Create a local to hold the block kind as a constant
+        # Strings in MIR are lowered as (ptr, len) tuples
+        val str_type = MirType(kind: MirTypeKind.Tuple([
+            MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
+            MirType(kind: MirTypeKind.U64)
+        ]))
+        val kind_dest = self.builder.new_temp(str_type)
+        self.builder.emit_const(kind_dest, MirConstValue.Str(kind), str_type)
+        val kind_local = kind_dest
 
         # Emit call to runtime block handler
         # rt_eval_block(kind: text, value: BlockValue) -> Any

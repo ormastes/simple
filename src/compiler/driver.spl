@@ -26,6 +26,7 @@ use blocks.*
 use config.*
 use driver_types.*
 use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default}
+use compiler.smf_writer.{generate_smf_with_templates, Target}
 
 class CheckBackendImpl(Backend):
     fn name() -> text:
@@ -54,7 +55,7 @@ class CompilerDriver:
     ctx: CompileContext
 
     static fn create(options: CompileOptions) -> CompilerDriver:
-        CompilerDriver(ctx: CompileContext.create(options))
+        CompilerDriver(ctx: CompileContext__create(options))
 
     # --------------------------------------------------------------------------
     # Main compilation entry point
@@ -137,7 +138,7 @@ class CompilerDriver:
         while i < self.ctx.options.input_files.len():
             val path = self.ctx.options.input_files[i]
             log.trace("loading file: {path}")
-            match SourceFile.load(path):
+            match SourceFile__load(path):
                 case Ok(source):
                     log.trace("loaded OK: {source.path}")
                     self.ctx.sources.push(source)
@@ -174,7 +175,7 @@ class CompilerDriver:
 
         # Phase 2a: Outline parsing (TreeSitter)
         log.trace("2a: outline parsing...")
-        var ts = TreeSitter.new(source.content)
+        var ts = TreeSitter__new(source.content)
         val outline = ts.parse_outline()
 
         # Phase 2b: Block resolution
@@ -186,7 +187,7 @@ class CompilerDriver:
 
         # Phase 2c: Full parse with resolved blocks
         log.trace("2c: full parse...")
-        var parser = Parser.with_resolved_blocks(source.content, resolved)
+        var parser = Parser__with_resolved_blocks(source.content, resolved)
         val module = parser.parse()
 
         # Phase 2d: Desugar async/await/spawn/actor syntax
@@ -415,7 +416,7 @@ class CompilerDriver:
         val _async_state_machines = self.process_async()
 
         # Optimize MIR (speed optimization for JIT)
-        self.optimize_mir(OptimizationConfig.speed())
+        self.optimize_mir(OptimizationConfig__speed())
 
         # JIT compile
         var pipeline = CodegenPipeline()
@@ -599,7 +600,7 @@ class CompilerDriver:
                 all_object_bytes = all_object_bytes.concat(module.object_code.unwrap())
 
         # Wrap object code into SMF format
-        val target = Target.host()
+        val target = Target__host()
         val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
         CompileResult.Success(smf_bytes)
 
@@ -619,7 +620,7 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        var lowering = MirLowering.new(create_symbol_table())
+        var lowering = MirLowering__new(create_symbol_table())
 
         val hir_keys = self.ctx.hir_modules.keys()
         for name in hir_keys:
@@ -646,7 +647,7 @@ class CompilerDriver:
 
         log.debug("borrow checking {self.ctx.mir_modules.keys().len()} modules")
 
-        var checker = BorrowChecker.create()
+        var checker = BorrowChecker__create()
         var has_errors = false
 
         for name in self.ctx.mir_modules.keys():
@@ -654,7 +655,7 @@ class CompilerDriver:
 
             for fn_symbol in mir_module.functions.keys():
                 val mir_fn = mir_module.functions[fn_symbol]
-                val body = MirBody.from_function(mir_fn)
+                val body = MirBody__from_function(mir_fn)
                 match checker.check_function(body):
                     case Errors(errors):
                         for err in errors:
@@ -711,19 +712,19 @@ class CompilerDriver:
         if self.ctx.options.opt_level.?:
             val level = self.ctx.options.opt_level.unwrap()
             if level == 0:
-                return OptimizationConfig.debug()
+                return OptimizationConfig__debug()
             elif level == 1:
-                return OptimizationConfig.size()
+                return OptimizationConfig__size()
             elif level == 2:
-                return OptimizationConfig.speed()
+                return OptimizationConfig__speed()
             elif level >= 3:
-                return OptimizationConfig.aggressive()
+                return OptimizationConfig__aggressive()
 
         # Check for release mode or optimize flag
         if self.ctx.options.release or self.ctx.options.optimize:
-            OptimizationConfig.speed()
+            OptimizationConfig__speed()
         else:
-            OptimizationConfig.debug()
+            OptimizationConfig__debug()
 
 # ------------------------------------------------------------------------------
 # Runtime Library Discovery
@@ -771,16 +772,16 @@ fn find_simple_old_binary() -> text:
 # ------------------------------------------------------------------------------
 
 fn compile_file(path: text) -> CompileResult:
-    val options = CompileOptions.default()
+    val options = CompileOptions__default()
     options.input_files = [path]
-    val driver = CompilerDriver.create(options)
+    val driver = CompilerDriver__create(options)
     driver.compile()
 
 fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
-    val options = CompileOptions.default()
+    val options = CompileOptions__default()
     options.input_files = paths
     options.mode = mode
-    val driver = CompilerDriver.create(options)
+    val driver = CompilerDriver__create(options)
     driver.compile()
 
 fn interpret_file(path: text) -> CompileResult:
@@ -790,11 +791,11 @@ fn jit_file(path: text) -> CompileResult:
     compile_files([path], CompileMode.Jit)
 
 fn aot_file(path: text, output: text) -> CompileResult:
-    val options = CompileOptions.default()
+    val options = CompileOptions__default()
     options.input_files = [path]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
-    val driver = CompilerDriver.create(options)
+    val driver = CompilerDriver__create(options)
     driver.compile()
 
 fn check_file(path: text) -> CompileResult:
