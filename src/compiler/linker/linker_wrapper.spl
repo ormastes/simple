@@ -44,6 +44,16 @@ fn NativeLinkConfig__default() -> NativeLinkConfig:
         extra_flags: []
     )
 
+struct CrtFiles:
+    crt1: text           # crt1.o or Scrt1.o (PIE)
+    crti: text           # crti.o
+    crtn: text           # crtn.o
+    crtbegin: text       # crtbegin.o or crtbeginS.o (PIE)
+    crtend: text         # crtend.o or crtendS.o (PIE)
+    dynamic_linker: text # e.g., /lib64/ld-linux-x86-64.so.2
+    lib_dirs: [text]     # System library search paths
+    found: bool
+
 struct SelfContainedConfig:
     runtime_binary: text     # Path to bootstrap/simple binary (empty = auto-detect)
     verbose: bool
@@ -84,6 +94,7 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
 
 fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val os = host_os()
+    val arch = host_arch()
 
     # Try to find platform linker (mold > lld > ld)
     val linker_result = find_linker()
@@ -95,21 +106,65 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     val linker_path = linker_info[0]
     val linker_type = linker_info[1]
 
+    # Discover CRT files needed for direct linker invocation
+    val crt = find_crt_files(config.pie, config.verbose)
+    if not crt.found:
+        if config.verbose:
+            print "[linker-wrapper] CRT files not found, falling back to cc"
+        return link_native_cc(object_files, output, config)
+
     if config.verbose:
         print "[linker-wrapper] Using {linker_type.to_string()} at {linker_path}"
 
-    # Build linker arguments
+    # Build linker arguments in correct order
     var args: [text] = []
 
     # Output file
     args.push("-o")
     args.push(output)
 
-    # Object files
+    # Emulation mode
+    if os == "linux":
+        if arch == "x86_64":
+            args.push("-m")
+            args.push("elf_x86_64")
+        elif arch == "aarch64":
+            args.push("-m")
+            args.push("aarch64linux")
+
+    # Dynamic linker
+    if crt.dynamic_linker != "":
+        args.push("-dynamic-linker")
+        args.push(crt.dynamic_linker)
+
+    # Hardening flags
+    args.push("--eh-frame-hdr")
+    args.push("--build-id")
+    args.push("--hash-style=gnu")
+    args.push("-z")
+    args.push("relro")
+    args.push("-z")
+    args.push("now")
+
+    # PIE
+    if config.pie:
+        args.push("-pie")
+
+    # CRT prologue: crt1.o, crti.o, crtbegin.o (before user objects)
+    args.push(crt.crt1)
+    args.push(crt.crti)
+    args.push(crt.crtbegin)
+
+    # User object files
     for obj in object_files:
         args.push(obj)
 
-    # Library paths
+    # Library search paths from CRT discovery
+    for dir in crt.lib_dirs:
+        args.push("-L")
+        args.push(dir)
+
+    # Library paths from config
     for lp in config.library_paths:
         args.push("-L")
         args.push(lp)
@@ -122,7 +177,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-L")
         args.push(runtime_dir)
         args.push("-lsimple_compiler")
-        args.push("-Wl,-rpath,{runtime_dir}")
+        args.push("-rpath")
+        args.push(runtime_dir)
 
     # Standard libraries
     if os == "linux":
@@ -130,6 +186,7 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-lpthread")
         args.push("-ldl")
         args.push("-lm")
+        args.push("-lgcc")
         args.push("-lgcc_s")
     elif os == "macos":
         args.push("-lc")
@@ -146,10 +203,6 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-l")
         args.push(lib)
 
-    # PIE
-    if config.pie:
-        args.push("-pie")
-
     # Debug info
     if config.debug:
         args.push("-g")
@@ -158,10 +211,17 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     for flag in config.extra_flags:
         args.push(flag)
 
+    # CRT epilogue: crtend.o, crtn.o (after libs)
+    args.push(crt.crtend)
+    args.push(crt.crtn)
+
     # Execute linker
     val exec_result = execute_linker(linker_path, args)
     if exec_result.is_err():
-        return Err(exec_result.unwrap_err())
+        # Fallback to cc on failure
+        if config.verbose:
+            print "[linker-wrapper] Direct linker failed, falling back to cc: {exec_result.unwrap_err()}"
+        return link_native_cc(object_files, output, config)
 
     if config.verbose:
         val size = linker_file_size(output)
@@ -241,6 +301,213 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
     else:
         val err_msg = result.stderr ?? "Unknown linking error"
         Err("Windows linking failed: {err_msg}")
+
+# ============================================================================
+# CRT File Discovery
+# ============================================================================
+
+fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
+    # Primary strategy: use cc -print-file-name=X
+    val cc_result = find_crt_files_via_cc(pie, verbose)
+    if cc_result.found:
+        return cc_result
+
+    # Fallback: probe well-known paths
+    val fallback_result = find_crt_files_fallback(pie, verbose)
+    if fallback_result.found:
+        return fallback_result
+
+    # Return empty (not found)
+    CrtFiles(
+        crt1: "", crti: "", crtn: "",
+        crtbegin: "", crtend: "",
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: [],
+        found: false
+    )
+
+fn find_crt_files_via_cc(pie: bool, verbose: bool) -> CrtFiles:
+    # Use cc -print-file-name to locate CRT files
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    val crt1 = cc_print_file(crt1_name)
+    val crti = cc_print_file("crti.o")
+    val crtn = cc_print_file("crtn.o")
+    val crtbegin = cc_print_file(crtbegin_name)
+    val crtend = cc_print_file(crtend_name)
+
+    # Validate: cc returns the bare filename if not found, absolute path if found
+    val all_found = crt1.contains("/") and crti.contains("/") and crtn.contains("/") and crtbegin.contains("/") and crtend.contains("/")
+
+    if verbose and all_found:
+        print "[linker-wrapper] CRT files found via cc:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    # Collect library directories from CRT paths
+    var lib_dirs: [text] = []
+    if crt1.contains("/"):
+        val dir = path_dirname(crt1)
+        if dir != "":
+            lib_dirs = lib_dirs.push(dir)
+    if crtbegin.contains("/"):
+        val dir = path_dirname(crtbegin)
+        if dir != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs.push(dir)
+
+    CrtFiles(
+        crt1: crt1,
+        crti: crti,
+        crtn: crtn,
+        crtbegin: crtbegin,
+        crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn cc_print_file(name: text) -> text:
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null")
+    val trimmed = result.trim()
+    if trimmed.len() > 0:
+        trimmed
+    else:
+        name
+
+fn find_crt_files_fallback(pie: bool, verbose: bool) -> CrtFiles:
+    # Probe well-known system paths
+    val probe_dirs: [text] = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib"
+    ]
+
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    var crt1 = ""
+    var crti = ""
+    var crtn = ""
+    var crtbegin = ""
+    var crtend = ""
+    var lib_dirs: [text] = []
+
+    # Find crt1, crti, crtn in system dirs
+    for dir in probe_dirs:
+        if crt1 == "" and file_exists("{dir}/{crt1_name}"):
+            crt1 = "{dir}/{crt1_name}"
+        if crti == "" and file_exists("{dir}/crti.o"):
+            crti = "{dir}/crti.o"
+        if crtn == "" and file_exists("{dir}/crtn.o"):
+            crtn = "{dir}/crtn.o"
+        if crt1 != "" or crti != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs.push(dir)
+
+    # Find crtbegin/crtend in GCC lib dirs
+    val gcc_dirs = find_gcc_lib_dirs()
+    for dir in gcc_dirs:
+        if crtbegin == "" and file_exists("{dir}/{crtbegin_name}"):
+            crtbegin = "{dir}/{crtbegin_name}"
+        if crtend == "" and file_exists("{dir}/{crtend_name}"):
+            crtend = "{dir}/{crtend_name}"
+        if crtbegin != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs.push(dir)
+
+    val all_found = crt1 != "" and crti != "" and crtn != "" and crtbegin != "" and crtend != ""
+
+    if verbose and all_found:
+        print "[linker-wrapper] CRT files found via fallback:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    CrtFiles(
+        crt1: crt1, crti: crti, crtn: crtn,
+        crtbegin: crtbegin, crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn find_gcc_lib_dirs() -> [text]:
+    # Find GCC library directories by probing common triplets and versions
+    var dirs: [text] = []
+    val triplets = ["x86_64-linux-gnu", "x86_64-redhat-linux", "x86_64-pc-linux-gnu", "aarch64-linux-gnu"]
+    val versions = ["14", "13", "12", "11", "10", "9"]
+
+    for triplet in triplets:
+        for ver in versions:
+            val dir = "/usr/lib/gcc/{triplet}/{ver}"
+            if file_exists("{dir}/crtbegin.o"):
+                dirs = dirs.push(dir)
+
+    # Also try cc -print-search-dirs for gcc lib path
+    val search_result = shell_output("cc -print-search-dirs 2>/dev/null")
+    if search_result.len() > 0:
+        val lines = search_result.split("\n")
+        for line in lines:
+            if line.starts_with("libraries: ="):
+                val paths_str = line[12:]
+                val paths = paths_str.split(":")
+                for p in paths:
+                    val trimmed = p.trim()
+                    if trimmed.len() > 0 and file_exists("{trimmed}/crtbegin.o"):
+                        dirs = dirs.push(trimmed)
+    dirs
+
+fn find_dynamic_linker() -> text:
+    val os = host_os()
+    val arch = host_arch()
+
+    if os == "linux":
+        if arch == "x86_64":
+            if file_exists("/lib64/ld-linux-x86-64.so.2"):
+                return "/lib64/ld-linux-x86-64.so.2"
+            if file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
+                return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        elif arch == "aarch64":
+            if file_exists("/lib/ld-linux-aarch64.so.1"):
+                return "/lib/ld-linux-aarch64.so.1"
+            if file_exists("/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"):
+                return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+    elif os == "freebsd":
+        return "/libexec/ld-elf.so.1"
+
+    # macOS: dyld handles this, no dynamic linker needed
+    ""
+
+fn path_dirname(path: text) -> text:
+    # Return directory part of a file path
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path[0:last_slash]
+    else:
+        ""
 
 # ============================================================================
 # SMF Linking
@@ -391,12 +658,6 @@ fn find_runtime_lib_dir() -> text:
     if env_path != "" and file_exists(env_path):
         return env_path
 
-    # Check standard paths
-    if file_exists("rust/target/debug/libsimple_compiler.so"):
-        return "rust/target/debug"
-    if file_exists("rust/target/release/libsimple_compiler.so"):
-        return "rust/target/release"
-
     # No runtime library found - return empty (native linking may still work without it)
     ""
 
@@ -546,6 +807,7 @@ fn append_bytes_to_file(path: text, data: [u8]) -> bool:
 # ============================================================================
 
 export NativeLinkConfig, NativeLinkConfig__default
+export CrtFiles, find_crt_files
 export SelfContainedConfig, SelfContainedConfig__default
 export link_to_native, link_to_smf, link_to_self_contained
 export detect_self_contained, find_runtime_binary, find_runtime_lib_dir

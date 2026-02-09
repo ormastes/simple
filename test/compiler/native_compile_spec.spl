@@ -239,6 +239,126 @@ describe "Native Compilation Pipeline":
 
             file_delete(out_path)
 
+    describe "multi-file":
+        it "compiles with use import from sibling module":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val greet_path = "/tmp/simple_native_test_greet.spl"
+            val main_path = "/tmp/simple_native_test_multi_main.spl"
+            val out_path = "/tmp/simple_native_test_multi"
+
+            # Write greet module
+            val greet_src = "fn greet():\n    print \"Hello from greet!\""
+            write_source(greet_path, greet_src)
+
+            # Write main module that imports greet
+            # Use concatenation to avoid Simple interpolation on {greet}
+            val main_src = "use simple_native_test_greet." + "{" + "greet" + "}" + "\n\nfn main():\n    greet()"
+            write_source(main_path, main_src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", main_path, out_path])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("Hello from greet!")
+
+            file_delete(greet_path)
+            file_delete(main_path)
+            file_delete(out_path)
+
+    describe "multi-file linked (separate compile+link)":
+        it "compiles and links single module via --linked":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val src_path = "/tmp/simple_linked_test_hello.spl"
+            val out_path = "/tmp/simple_linked_test_hello"
+            file_write(src_path, "fn main():\n    print \"linked hello\"")
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", src_path, out_path, "--linked"])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("linked hello")
+
+            file_delete(src_path)
+            file_delete(out_path)
+
+        it "compiles multi-file with use import via --linked":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val greet_path = "/tmp/simple_linked_test_greet.spl"
+            val main_path = "/tmp/simple_linked_test_multi_main.spl"
+            val out_path = "/tmp/simple_linked_test_multi"
+
+            # Write greet module
+            val greet_src = "fn greet():\n    print \"Hello from linked greet!\""
+            write_source(greet_path, greet_src)
+
+            # Write main module that imports greet (concat to avoid interpolation)
+            val main_src = "use simple_linked_test_greet." + "{" + "greet" + "}" + "\n\nfn main():\n    greet()"
+            write_source(main_path, main_src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", main_path, out_path, "--linked"])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout).to_contain("Hello from linked greet!")
+
+            file_delete(greet_path)
+            file_delete(main_path)
+            file_delete(out_path)
+
+        it "compiles transitive dependencies via --linked":
+            val gcc_check = shell("command -v gcc >/dev/null 2>&1")
+            if gcc_check.exit_code != 0:
+                print "  (skipped: gcc not found)"
+                return
+
+            val base_path = "/tmp/simple_linked_test_base.spl"
+            val mid_path = "/tmp/simple_linked_test_mid.spl"
+            val main_path = "/tmp/simple_linked_test_trans_main.spl"
+            val out_path = "/tmp/simple_linked_test_trans"
+
+            # Write base module: square function
+            val base_src = "fn square(x: i64) -> i64:\n    return x * x"
+            write_source(base_path, base_src)
+
+            # Write mid module: imports base, defines sum_of_squares
+            val mid_src = "use simple_linked_test_base." + "{" + "square" + "}" + "\n\nfn sum_of_squares(a: i64, b: i64) -> i64:\n    return square(a) + square(b)"
+            write_source(mid_path, mid_src)
+
+            # Write main: imports mid, calls sum_of_squares(3, 4) = 25
+            val main_src = "use simple_linked_test_mid." + "{" + "sum_of_squares" + "}" + "\n\nfn main():\n    val result = sum_of_squares(3, 4)\n    " + interp_print("result")
+            write_source(main_path, main_src)
+
+            val (comp_out, comp_err, comp_code) = process_run("bin/bootstrap/simple", ["src/app/compile/native.spl", main_path, out_path, "--linked"])
+            expect(comp_code).to_equal(0)
+            expect(file_exists(out_path)).to_equal(true)
+
+            val (stdout, stderr, code) = process_run(out_path, [])
+            expect(code).to_equal(0)
+            expect(stdout.trim()).to_equal("25")
+
+            file_delete(base_path)
+            file_delete(mid_path)
+            file_delete(main_path)
+            file_delete(out_path)
+
     describe "LLVM direct pipeline":
         it "compiles hello world via LLVM":
             val clang_check = shell("command -v clang >/dev/null 2>&1")

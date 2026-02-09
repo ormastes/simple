@@ -64,11 +64,13 @@ class LoopInfo:
     - Backedges: Edges that jump back to header
     - Body: All blocks in the loop
     - Exit edges: Edges leaving the loop
+    - Trip count: Constant iteration count if determinable
     """
     header: BlockId
     body: [BlockId]
     backedges: [BlockId]  # Blocks that jump back to header
     exit_edges: [EdgePair]  # Edges leaving the loop
+    trip_count: i64?       # Constant iteration count (if determinable)
 
 impl LoopInfo:
     fn contains_block(block_id: BlockId) -> bool:
@@ -87,14 +89,10 @@ impl LoopInfo:
         Try to determine constant iteration count.
 
         Returns Some(n) if loop has constant iteration count.
+        The trip count is computed during loop detection by analyzing
+        exit edge comparison instructions (e.g., i < N where N is constant).
         """
-        # Iteration count analysis: check exit edges for constant bounds
-        # Look for comparison against constant in exit edges
-        for edge in self.exit_edges:
-            # If we have backedge and exit info, we might infer count
-            # For now, return nil for non-trivial loops
-            pass
-        nil
+        self.trip_count
 
 # ============================================================================
 # Loop Detector
@@ -216,12 +214,121 @@ impl LoopDetector:
                     if not self.is_block_in_list(succ, exit_edges):
                         exit_edges.push(succ)
 
+        # Analyze iteration count from exit conditions
+        # Look at conditional terminators in loop blocks that branch out
+        val trip_count = self.analyze_trip_count(func, header, all_body)
+
         LoopInfo(
             header: header,
             body: body,
             backedges: backedges,
-            exit_edges: exit_edges
+            exit_edges: exit_edges,
+            trip_count: trip_count
         )
+
+    fn analyze_trip_count(func: MirFunction, header: BlockId, loop_blocks: [BlockId]) -> i64?:
+        """
+        Analyze loop exit conditions to determine constant trip count.
+
+        Looks for patterns like:
+        - Header block has If terminator comparing a local against a constant
+        - The comparison is Lt (i < N) where N is a constant integer
+        - One branch exits the loop, the other stays in
+
+        Returns Some(N) if a constant bound is found, nil otherwise.
+        """
+        # Check each block in the loop for conditional exits
+        for block in func.blocks:
+            if not self.is_block_in_list(block.id, loop_blocks):
+                continue
+
+            # Look for If terminators that compare against a constant
+            match block.terminator:
+                case If(cond, then_, else_):
+                    # Check if one target exits the loop and the other stays
+                    val then_in_loop = self.is_block_in_list(then_, loop_blocks)
+                    val else_in_loop = self.is_block_in_list(else_, loop_blocks)
+
+                    # Exactly one branch should exit for a counted loop
+                    if then_in_loop and not else_in_loop:
+                        # else_ is the exit branch; cond being true continues
+                        val bound = self.extract_comparison_bound(block.instructions, cond)
+                        if bound.?:
+                            return bound
+                    elif not then_in_loop and else_in_loop:
+                        # then_ is the exit branch; cond being false continues
+                        val bound = self.extract_comparison_bound(block.instructions, cond)
+                        if bound.?:
+                            return bound
+                case _:
+                    pass
+
+        nil
+
+    fn extract_comparison_bound(instructions: [MirInst], cond: MirOperand) -> i64?:
+        """
+        Extract constant bound from a comparison used as loop exit condition.
+
+        Looks for BinOp instructions that define the condition operand and have
+        a comparison op (Lt, Le, Gt, Ge) with a constant integer operand.
+
+        For `i < N` returns N, for `i <= N` returns N + 1.
+        """
+        # Find which local the condition references
+        val cond_local_id = match cond.kind:
+            case Copy(local): Some(local.id)
+            case Move(local): Some(local.id)
+            case _: nil
+
+        if not cond_local_id.?:
+            return nil
+
+        val target_id = cond_local_id.unwrap()
+
+        # Scan instructions for the BinOp that defines this local
+        for inst in instructions:
+            match inst.kind:
+                case BinOp(dest, op, left, right):
+                    if dest.id == target_id:
+                        # Found the comparison instruction
+                        # Check if it's a comparison with a constant bound
+                        val const_val = self.operand_const_int(right)
+                        if const_val.?:
+                            match op:
+                                case Lt:
+                                    # i < N -> trip count is N
+                                    return const_val
+                                case Le:
+                                    # i <= N -> trip count is N + 1
+                                    return Some(const_val.unwrap() + 1)
+                                case _:
+                                    pass
+
+                        # Also check left operand (for reversed comparisons like N > i)
+                        val const_val_l = self.operand_const_int(left)
+                        if const_val_l.?:
+                            match op:
+                                case Gt:
+                                    # N > i -> trip count is N
+                                    return const_val_l
+                                case Ge:
+                                    # N >= i -> trip count is N + 1
+                                    return Some(const_val_l.unwrap() + 1)
+                                case _:
+                                    pass
+                case _:
+                    pass
+
+        nil
+
+    fn operand_const_int(op: MirOperand) -> i64?:
+        """Extract constant integer value from operand, if it is one."""
+        match op.kind:
+            case Const(value, _):
+                match value:
+                    case Int(n): Some(n)
+                    case _: nil
+            case _: nil
 
     fn block_index(func: MirFunction, block_id: BlockId) -> i64:
         """Find index of block in function."""

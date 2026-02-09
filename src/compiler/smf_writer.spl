@@ -12,10 +12,10 @@
 #
 # Enables .smf files to store both native code AND templates for deferred instantiation.
 
-use compiler.monomorphize.partition (GenericTemplates)
-use compiler.monomorphize.metadata (MonomorphizationMetadata)
-use compiler.monomorphize.note_sdn (NoteSdnMetadata)
-use compiler.ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
+use monomorphize.partition (GenericTemplates)
+use monomorphize.metadata (MonomorphizationMetadata)
+use monomorphize.note_sdn (NoteSdnMetadata)
+use ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use linker.smf_header (SmfHeader, SMF_FLAG_EXECUTABLE)
 use linker.smf_enums (Platform, Arch)
 use std.platform.{get_host_os, get_host_arch}
@@ -46,9 +46,9 @@ struct SmfBuildOptions:
 impl SmfBuildOptions:
     static fn create(target: Target) -> SmfBuildOptions:
         SmfBuildOptions(
-            templates: None,
-            metadata: None,
-            note_sdn: None,
+            templates: nil,
+            metadata: nil,
+            note_sdn: nil,
             target: target
         )
 
@@ -68,7 +68,7 @@ fn generate_smf_with_templates(
     val options = SmfBuildOptions(
         templates: templates,
         metadata: metadata,
-        note_sdn: None,
+        note_sdn: nil,
         target: target
     )
     generate_smf_with_options(object_code, options)
@@ -343,16 +343,17 @@ fn serialize_templates(templates: GenericTemplates) -> [u8]:
     buf = buf.concat([0x47, 0x54, 0x50, 0x4C])  # "GTPL" magic
     buf = buf.concat([0x01, 0x00])  # version 1
 
-    val total_count = templates.functions.len() +
+    val total_count = (templates.functions.len() +
         templates.structs.len() +
         templates.classes.len() +
         templates.enums.len() +
-        templates.traits.len()
+        templates.traits.len())
 
     buf = buf.concat(u32_to_bytes(total_count))
 
-    # TODO: Implement actual AST serialization (Phase 3)
-    # For now, just write placeholders
+    # AST serialization framework (Phase 3)
+    # Currently writes name + generic param count per template as structural placeholders.
+    # Full AST body serialization will be added when the AST serializer is available.
 
     # Functions
     for func in templates.functions:
@@ -395,7 +396,38 @@ fn serialize_metadata(metadata: MonomorphizationMetadata) -> [u8]:
     buf = buf.concat(u32_to_bytes(metadata.enums.len()))
     buf = buf.concat(u32_to_bytes(metadata.traits.len()))
 
-    # TODO: Implement full metadata serialization (Phase 3)
+    # Metadata serialization framework (Phase 3)
+    # Currently writes category counts as a structural skeleton.
+    # Full per-entry serialization (specialization entries, bindings, mangled names)
+    # will be added when the metadata serializer is available.
+
+    # Serialize function metadata entries
+    for (name, func_meta) in metadata.functions.items():
+        val name_bytes = name.to_bytes()
+        buf = buf.concat(u32_to_bytes(name_bytes.len()))
+        buf = buf.concat(name_bytes)
+        buf = buf.concat(u32_to_bytes(func_meta.specializations.len()))
+
+    # Serialize struct metadata entries
+    for (name, struct_meta) in metadata.structs.items():
+        val name_bytes = name.to_bytes()
+        buf = buf.concat(u32_to_bytes(name_bytes.len()))
+        buf = buf.concat(name_bytes)
+        buf = buf.concat(u32_to_bytes(struct_meta.specializations.len()))
+
+    # Serialize enum metadata entries
+    for (name, enum_meta) in metadata.enums.items():
+        val name_bytes = name.to_bytes()
+        buf = buf.concat(u32_to_bytes(name_bytes.len()))
+        buf = buf.concat(name_bytes)
+        buf = buf.concat(u32_to_bytes(enum_meta.specializations.len()))
+
+    # Serialize trait metadata entries
+    for (name, trait_meta) in metadata.traits.items():
+        val name_bytes = name.to_bytes()
+        buf = buf.concat(u32_to_bytes(name_bytes.len()))
+        buf = buf.concat(name_bytes)
+        buf = buf.concat(u32_to_bytes(trait_meta.impl_specializations.len()))
 
     buf
 
@@ -476,8 +508,9 @@ fn code_bytes_to_object(code: [u8]) -> [u8]:
 
 # Extract code section from object file
 fn extract_code_from_object(object_code: [u8]) -> [u8]:
-    # TODO: Proper ELF/object parsing
-    # For now, return as-is
+    # Proper ELF/object parsing not yet implemented
+    # Would parse ELF header, find .text section, and extract code bytes
+    eprint("Warning: ELF/object parsing not yet implemented; treating input as raw code bytes")
     object_code
 
 # Binary format helpers
@@ -524,7 +557,7 @@ fn hash_name(name: text) -> i32:
     # Simple FNV-1a hash
     var hash = 2166136261
     for byte in name.to_bytes():
-        hash = hash.xor(byte.to_i32())
+        hash = hash xor byte.to_i32()
         hash = hash * 16777619
     hash
 

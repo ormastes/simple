@@ -1,0 +1,139 @@
+#!/usr/bin/env simple
+# Test Simple Cross-Compilation for Windows via MinGW
+#
+# Cross-compiles a multi-file Simple program to a Windows PE binary
+# using x86_64-w64-mingw32-gcc on the Linux host. Optionally runs
+# the binary via Wine if available.
+#
+# Prerequisites: sudo apt install gcc-mingw-w64-x86-64
+# Optional: sudo apt install wine64
+#
+# Usage: bin/bootstrap/simple script/test_windows_mingw.spl
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_cli_get_args() -> [str]
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete}
+
+fn main() -> i64:
+    print "=========================================="
+    print "Simple Windows MinGW Cross-Compile Test"
+    print "=========================================="
+    print ""
+
+    # Step 1: Check MinGW cross-compiler
+    print "Step 1: Check Prerequisites"
+    print "----------------------------------------"
+    val mingw_check = shell_output("which x86_64-w64-mingw32-gcc 2>/dev/null")
+    if mingw_check == "":
+        print "SKIP: x86_64-w64-mingw32-gcc not found"
+        print "Install: sudo apt install gcc-mingw-w64-x86-64"
+        return 0
+
+    if not rt_file_exists("bin/bootstrap/simple"):
+        print "FAIL: Simple bootstrap binary not found"
+        return 1
+
+    val mingw_version = shell_output("x86_64-w64-mingw32-gcc --version 2>/dev/null").split("\n")[0]
+    print "MinGW: {mingw_version}"
+    print ""
+
+    # Step 2: Write multi-file test sources
+    print "Step 2: Create Multi-File Test Sources"
+    print "----------------------------------------"
+    val test_dir = "/tmp/simple_mingw_test"
+    shell("mkdir -p {test_dir}")
+
+    val base_spl = "fn square(x: i64) -> i64:\n    return x * x\n\nexport square\n"
+    val mid_spl = "use base.{square}\n\nfn sum_of_squares(a: i64, b: i64) -> i64:\n    return square(a) + square(b)\n\nexport sum_of_squares\n"
+    val main_spl = "use mid.{sum_of_squares}\n\nfn main():\n    val result = sum_of_squares(3, 4)\n    print \"{result}\"\n"
+
+    file_write("{test_dir}/base.spl", base_spl)
+    file_write("{test_dir}/mid.spl", mid_spl)
+    file_write("{test_dir}/main.spl", main_spl)
+    print "Test sources written to {test_dir}"
+    print ""
+
+    # Step 3: Generate combined C code on host
+    print "Step 3: Generate C Code"
+    print "----------------------------------------"
+    val gen_cmd = "bin/bootstrap/simple src/app/compile/native.spl {test_dir}/main.spl {test_dir}/test.c --gen-c-only"
+    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
+    if gen_exit != 0:
+        print "FAIL: C code generation failed"
+        if gen_err != "":
+            print gen_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print gen_out
+    print ""
+
+    # Step 4: Cross-compile with MinGW
+    print "Step 4: Cross-Compile with MinGW"
+    print "----------------------------------------"
+    val compile_cmd = "x86_64-w64-mingw32-gcc -o {test_dir}/test.exe {test_dir}/test.c"
+    val (cc_out, cc_err, cc_exit) = shell(compile_cmd)
+    if cc_exit != 0:
+        print "FAIL: MinGW compilation failed"
+        if cc_err != "":
+            print cc_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Compiled: {test_dir}/test.exe"
+    print ""
+
+    # Step 5: Verify PE binary created
+    print "Step 5: Verify Binary"
+    print "----------------------------------------"
+    val file_info = shell_output("file {test_dir}/test.exe")
+    if not file_info.contains("PE32+"):
+        print "FAIL: Not a valid PE32+ executable"
+        print "file output: {file_info}"
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Binary: {file_info}"
+    print ""
+
+    # Step 6: Optionally run via Wine
+    print "Step 6: Run via Wine (optional)"
+    print "----------------------------------------"
+    val wine_check = shell_output("which wine64 2>/dev/null")
+    var wine_output = ""
+    var wine_tested = false
+    if wine_check != "":
+        val (wine_out, wine_err, wine_exit) = shell("wine64 {test_dir}/test.exe 2>/dev/null")
+        wine_output = wine_out.trim()
+        wine_tested = true
+        if wine_output == "25":
+            print "Wine output: {wine_output}"
+        else:
+            print "Wine output: '{wine_output}' (expected '25')"
+            if wine_err != "":
+                print "Wine stderr: {wine_err}"
+    else:
+        print "Wine not available, skipping runtime test"
+    print ""
+
+    # Cleanup
+    shell("rm -rf {test_dir}")
+
+    # Report
+    print "=========================================="
+    if wine_tested and wine_output == "25":
+        print "PASS: Windows MinGW Cross-Compile Test"
+    elif not wine_tested:
+        print "PASS: Windows MinGW Cross-Compile Test (PE binary verified, no Wine)"
+    else:
+        print "FAIL: Wine execution returned wrong output"
+        return 1
+    print "=========================================="
+    print ""
+    print "Summary:"
+    print "  Compiler: x86_64-w64-mingw32-gcc"
+    print "  Binary: PE32+ executable (Windows x86_64)"
+    print "  Test: 3-file dependency chain"
+    print "  Expected: 25 (3^2 + 4^2)"
+    if wine_tested:
+        print "  Got: {wine_output}"
+    print ""
+    0

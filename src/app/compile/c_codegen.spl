@@ -50,7 +50,7 @@ fn get_c_indent(line: text) -> i64:
 # Convert Simple type to C type
 fn simple_type_to_c(stype: text) -> text:
     if stype == "i64" or stype == "int":
-        return "long"
+        return "long long"
     if stype == "i32":
         return "int"
     if stype == "f64" or stype == "float":
@@ -64,8 +64,8 @@ fn simple_type_to_c(stype: text) -> text:
     if stype == "[text]" or stype == "[str]":
         return "SimpleStringArray"
     if stype == "[i64]" or stype == "[int]":
-        return "long*"
-    "long"
+        return "long long*"
+    "long long"
 
 # Translate Simple parameter list to C
 fn translate_params(params_str: text) -> text:
@@ -80,7 +80,7 @@ fn translate_params(params_str: text) -> text:
             val ctype = simple_type_to_c(ptype)
             c_parts.push("{ctype} {pname}")
         else:
-            c_parts.push("long {p}")
+            c_parts.push("long long {p}")
     c_parts.join(", ")
 
 # Parse a Simple function signature into [name, c_signature_body, forward_decl]
@@ -92,13 +92,13 @@ fn parse_fn_signature(trimmed: text) -> [text]:
     # Find function name (up to first paren)
     val paren_idx = sig.index_of("(") ?? -1
     if paren_idx < 0:
-        return [sig, "long {sig}(void)", "long {sig}(void);"]
+        return [sig, "long long {sig}(void)", "long long {sig}(void);"]
 
     val name = sig.substring(0, paren_idx).trim()
 
     # Find return type
     val arrow_idx = sig.index_of("->") ?? -1
-    var ret_type = "long"
+    var ret_type = "long long"
     if arrow_idx >= 0:
         val ret_str = sig.substring(arrow_idx + 2).trim()
         ret_type = simple_type_to_c(ret_str)
@@ -379,8 +379,8 @@ fn translate_interpolated_print(inner: text, types: text) -> text:
                 fmt = fmt + "%s"
                 interp_args.push(c_expr)
             else:
-                fmt = fmt + "%ld"
-                interp_args.push("(long)(" + c_expr + ")")
+                fmt = fmt + "%lld"
+                interp_args.push("(long long)(" + c_expr + ")")
             i = end_idx + 1
         elif idx >= i:
             fmt = fmt + ch
@@ -402,7 +402,7 @@ fn translate_print(arg: text, types: text) -> text:
     # Print a variable
     if is_text_var(arg, types):
         return "printf(\"%s\\n\", {arg});"
-    "printf(\"%ld\\n\", (long){arg});"
+    "printf(\"%lld\\n\", (long long){arg});"
 
 # Translate array declaration
 # Returns "code|||;arr:name;" if a string array is declared
@@ -422,14 +422,14 @@ fn translate_array_decl(name: text, rhs: text, type_hint: text, types: text) -> 
 
     val inner = rhs.substring(1, rhs.len() - 1).trim()
     if inner == "":
-        return "long {name}[] = {{}}; long {name}_len = 0;"
+        return "long long {name}[] = {{}}; long long {name}_len = 0;"
     val elements = inner.split(",")
     var c_elems: [text] = []
     for elem in elements:
         c_elems.push(translate_expr(elem.trim(), types))
     val arr_init = c_elems.join(", ")
     val arr_len = c_elems.len()
-    "long {name}[] = {{{arr_init}}}; long {name}_len = {arr_len};"
+    "long long {name}[] = {{{arr_init}}}; long long {name}_len = {arr_len};"
 
 # Translate variable declaration
 # Returns "code|||;type_entries;" if new types are registered
@@ -470,7 +470,7 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     if rhs == "[]":
         if type_hint == "[text]" or type_hint == "[str]":
             return "SimpleStringArray {name} = simple_new_string_array();|||;arr:{name};"
-        return "long {name}[] = {{}}; long {name}_len = 0;"
+        return "long long {name}[] = {{}}; long long {name}_len = 0;"
 
     # Handle method call results
     val c_rhs = translate_expr(rhs, types)
@@ -502,8 +502,8 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         if is_fn_returning_text(fn_name, types):
             return "const char* {name} = {c_rhs};|||;text:{name};"
 
-    # Default: long
-    "long {name} = {c_rhs};"
+    # Default: long long
+    "long long {name} = {c_rhs};"
 
 # Translate for loop
 # Returns "code|||;type_entries;" if loop var is registered as text
@@ -522,28 +522,28 @@ fn translate_for_loop(trimmed: text, types: text) -> text:
         if comma_idx >= 0:
             val start_expr = range_args.substring(0, comma_idx).trim()
             val end_expr = range_args.substring(comma_idx + 1).trim()
-            return "for (long {loop_var} = {translate_expr(start_expr, types)}; {loop_var} < {translate_expr(end_expr, types)}; {loop_var}++) {"
+            return "for (long long {loop_var} = {translate_expr(start_expr, types)}; {loop_var} < {translate_expr(end_expr, types)}; {loop_var}++) {"
         else:
-            return "for (long {loop_var} = 0; {loop_var} < {translate_expr(range_args, types)}; {loop_var}++) {"
+            return "for (long long {loop_var} = 0; {loop_var} < {translate_expr(range_args, types)}; {loop_var}++) {"
 
     # start..end range
     val dotdot_idx = iterable.index_of("..") ?? -1
     if dotdot_idx >= 0:
         val start_expr = iterable.substring(0, dotdot_idx).trim()
         val end_expr = iterable.substring(dotdot_idx + 2).trim()
-        return "for (long {loop_var} = {translate_expr(start_expr, types)}; {loop_var} < {translate_expr(end_expr, types)}; {loop_var}++) {"
+        return "for (long long {loop_var} = {translate_expr(start_expr, types)}; {loop_var} < {translate_expr(end_expr, types)}; {loop_var}++) {"
 
     # for item in string_array (SimpleStringArray)
     if is_string_array_var(iterable, types):
-        return "for (long _idx_{loop_var} = 0; _idx_{loop_var} < {iterable}.len; _idx_{loop_var}++) {{ const char* {loop_var} = {iterable}.items[_idx_{loop_var}];|||;text:{loop_var};"
+        return "for (long long _idx_{loop_var} = 0; _idx_{loop_var} < {iterable}.len; _idx_{loop_var}++) {{ const char* {loop_var} = {iterable}.items[_idx_{loop_var}];|||;text:{loop_var};"
 
     # for item in split result - detect .split( in iterable
     if iterable.contains(".split("):
         val c_split = translate_expr(iterable, types)
-        return "{{ SimpleStringArray _split_{loop_var} = {c_split}; for (long _idx_{loop_var} = 0; _idx_{loop_var} < _split_{loop_var}.len; _idx_{loop_var}++) {{ const char* {loop_var} = _split_{loop_var}.items[_idx_{loop_var}];|||;text:{loop_var};"
+        return "{{ SimpleStringArray _split_{loop_var} = {c_split}; for (long long _idx_{loop_var} = 0; _idx_{loop_var} < _split_{loop_var}.len; _idx_{loop_var}++) {{ const char* {loop_var} = _split_{loop_var}.items[_idx_{loop_var}];|||;text:{loop_var};"
 
     # Default: integer array iteration
-    "for (long _idx_{loop_var} = 0; _idx_{loop_var} < {iterable}_len; _idx_{loop_var}++) {{ long {loop_var} = {iterable}[_idx_{loop_var}];"
+    "for (long long _idx_{loop_var} = 0; _idx_{loop_var} < {iterable}_len; _idx_{loop_var}++) {{ long long {loop_var} = {iterable}[_idx_{loop_var}];"
 
 # Translate case statement
 fn translate_case(trimmed: text, types: text) -> text:
@@ -552,7 +552,7 @@ fn translate_case(trimmed: text, types: text) -> text:
         return "/* default: */"
     if case_body.starts_with("\""):
         return "if (strcmp(_match_val, {case_body}) == 0) {"
-    "if (_match_val == {case_body}) {"
+    "if (_match_val == (long long){case_body}) {"
 
 # Translate Simple statement to C
 # Returns "code|||;type_entries;" if new types are registered
@@ -610,7 +610,7 @@ fn translate_statement(trimmed: text, types: text) -> text:
         # Detect string vs integer match
         if is_text_var(match_expr, types):
             return "{{ const char* _match_val = {c_match_expr};"
-        return "{{ long _match_val = {c_match_expr};"
+        return "{{ long long _match_val = {c_match_expr};"
     if trimmed.starts_with("case ") and trimmed.ends_with(":"):
         return translate_case(trimmed, types)
 
@@ -939,6 +939,22 @@ fn generate_c_code(source_text: text) -> text:
                 val is_text_ret = ret_type == "text" or ret_type == "str"
                 if is_text_ret:
                     types = types + "fn_text:" + current_fn_name + ";"
+            # Track parameter types (text/str params, string array params)
+            val fn_paren_idx = trimmed.index_of("(") ?? -1
+            val fn_close_idx = trimmed.index_of(")") ?? -1
+            if fn_paren_idx >= 0 and fn_close_idx > fn_paren_idx + 1:
+                val fn_params_str = trimmed.substring(fn_paren_idx + 1, fn_close_idx)
+                val fn_params = fn_params_str.split(",")
+                for fn_param in fn_params:
+                    val fp = fn_param.trim()
+                    val fp_colon = fp.index_of(":") ?? -1
+                    if fp_colon >= 0:
+                        val fp_name = fp.substring(0, fp_colon).trim()
+                        val fp_type = fp.substring(fp_colon + 1).trim()
+                        if fp_type == "text" or fp_type == "str":
+                            types = types + "text:" + fp_name + ";"
+                        if fp_type == "[text]" or fp_type == "[str]":
+                            types = types + "arr:" + fp_name + ";"
             continue
 
         # Static fn - skip (would need struct-qualified name)
@@ -1010,6 +1026,8 @@ fn generate_c_code(source_text: text) -> text:
 
     # Build final C code
     var c_code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+    c_code = c_code + "#include <stdint.h>\n"
+    c_code = c_code + "#ifdef _MSC_VER\n#define strdup _strdup\n#endif\n"
 
     # Add C runtime helpers
     c_code = c_code + generate_c_runtime()

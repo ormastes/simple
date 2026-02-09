@@ -12,7 +12,7 @@ use app.build.types (TestConfig, TestResult, TestResults)
 use app.build.cargo (Cargo, print_test_result)
 use app.build.baremetal (BaremetalConfig, QemuRunner)
 
-use app.io.{cli_run_tests, file_exists, current_time_ms, file_read}
+use app.io.{cli_run_tests, file_exists, current_time_ms, file_read, process_run}
 
 # Test orchestrator class
 class TestOrchestrator:
@@ -200,20 +200,23 @@ fn run_serial_impl(config: TestConfig, start_time: i64) -> TestResults:
         )
 
 # Run Rust workspace tests via cargo
+# NOTE: Rust source removed (v0.5.0+), project is 100% pure Simple.
+# Rust tests are no longer applicable - return empty result.
 fn run_rust_tests(config: TestConfig) -> TestResult:
-    val package = ""  # Empty = all workspace tests
-    Cargo__test(package, config.filter)
+    empty_test_result()
 
 # Run doc-tests via cargo
+# NOTE: Rust source removed (v0.5.0+), doc-tests are no longer applicable.
 fn run_doc_tests(config: TestConfig) -> TestResult:
-    Cargo__test_doc("")
+    empty_test_result()
 
 # Run Simple/SSpec tests via test runner
+# NOTE: Uses subprocess (process_run) instead of FFI re-entry (cli_run_tests)
+# to avoid stack overflow when running 345+ test files inside build context.
 fn run_simple_tests(config: TestConfig) -> TestResult:
     # Build args for Simple test runner
-    var args = []
+    var args = ["test"]
 
-    # OPTIMIZATION: Use .? existence check instead of .len() > 0
     # Add filter if specified
     if config.filter.?:
         args = args.merge([config.filter])
@@ -226,9 +229,6 @@ fn run_simple_tests(config: TestConfig) -> TestResult:
     if config.tag.?:
         args = args.merge(["--tag", config.tag])
 
-    # Skip Rust tests here (already run separately by the orchestrator)
-    args = args.merge(["--no-rust-tests"])
-
     # Add fail-fast
     if config.fail_fast:
         args = args.merge(["--fail-fast"])
@@ -237,8 +237,11 @@ fn run_simple_tests(config: TestConfig) -> TestResult:
     if config.timeout > 0:
         args = args.merge(["--timeout", config.timeout.to_string()])
 
-    # Run via FFI (this calls the Rust test runner which then runs Simple tests)
-    val exit_code = cli_run_tests(args, false, false)
+    # Run as subprocess to avoid stack overflow from FFI re-entry
+    val (stdout, stderr, exit_code) = process_run("bin/simple", args)
+    print stdout
+    if stderr.?:
+        print stderr
 
     # Parse detailed results from test_db.sdn
     val parsed = parse_test_db_results()
@@ -393,6 +396,11 @@ fn run_baremetal_tests(config: TestConfig) -> TestResult:
     # Create QEMU runner and execute
     val runner = QemuRunner.new(bm_config, config.baremetal_timeout)
     runner.run(kernel_path)
+
+# Standalone wrapper for TestOrchestrator.run() to avoid name-mangling issues
+# in the bootstrap runtime (which can't resolve ClassName__method static calls)
+fn run_test_orchestrator(config: TestConfig) -> TestResults:
+    TestOrchestrator.run(config)
 
 # ============================================================================
 # PHASE 1 OPTIMIZATIONS COMPLETE + PURE SIMPLE OPTIMIZATIONS

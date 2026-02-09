@@ -158,7 +158,7 @@ impl MirLowering:
             case Ref(inner, mutable):
                 MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
             case Optional(inner):
-                # Optional is enum { None, Some(T) }
+                # Optional is enum { nil, Some(T) }
                 MirType(kind: MirTypeKind.Tuple([
                     MirType(kind: MirTypeKind.Bool),  # has_value
                     self.lower_type(inner)
@@ -558,13 +558,85 @@ impl MirLowering:
         self.builder.new_temp(MirType__unit())
 
     me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
-        """Lower for expression."""
-        # TODO: Proper iterator lowering
-        # For now, treat as simple range loop
-        self.lower_while(
-            HirExpr(kind: HirExprKind.BoolLit(true), type_: nil, span: body.span),
-            body
+        """Lower for expression using the iterator protocol.
+
+        Lowers:
+            for x in collection:
+                body
+
+        Into:
+            val _iter = collection.iter()
+            while _iter.has_next():
+                val x = _iter.next()
+                body
+        """
+        # Step 1: Lower the iterable expression
+        val collection_local = self.lower_expr(iter)
+
+        # Step 2: Call iter() on the collection to get an iterator
+        val iter_func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Symbol placeholder (resolved in codegen as .iter())
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType__i64(), is_variadic: false)))
+        ))
+        val iter_result = self.builder.emit_call(
+            iter_func_operand,
+            [mir_operand_copy(collection_local)],
+            MirType__i64()
         )
+        val iter_local = iter_result ?? self.builder.new_temp(MirType__i64())
+
+        # Step 3: Create loop blocks
+        val cond_block = self.builder.new_block(Some("for_cond"))
+        val body_block = self.builder.new_block(Some("for_body"))
+        val exit_block = self.builder.new_block(Some("for_exit"))
+
+        self.loop_stack = self.loop_stack.push((cond_block, exit_block))
+
+        # Jump to condition check
+        self.builder.terminate_goto(cond_block)
+
+        # Step 4: Condition block - call has_next() on iterator
+        self.builder.switch_to_block(cond_block)
+        val has_next_func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Symbol placeholder (resolved in codegen as .has_next())
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType__bool(), is_variadic: false)))
+        ))
+        val has_next_result = self.builder.emit_call(
+            has_next_func_operand,
+            [mir_operand_copy(iter_local)],
+            MirType__bool()
+        )
+        val has_next_local = has_next_result ?? self.builder.emit_const_bool(false)
+        self.builder.terminate_if(mir_operand_copy(has_next_local), body_block, exit_block)
+
+        # Step 5: Body block - call next() to get element, bind to loop variable
+        self.builder.switch_to_block(body_block)
+        val next_func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Symbol placeholder (resolved in codegen as .next())
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType__i64(), is_variadic: false)))
+        ))
+        val next_result = self.builder.emit_call(
+            next_func_operand,
+            [mir_operand_copy(iter_local)],
+            MirType__i64()
+        )
+        val next_local = next_result ?? self.builder.new_temp(MirType__i64())
+
+        # Bind the loop variable to the next() result
+        val loop_var = self.builder.new_local(nil, MirType__i64(), LocalKind.Var)
+        self.local_map[var_] = loop_var
+        self.builder.emit_copy(loop_var, next_local)
+
+        # Lower the loop body
+        self.lower_block(body)
+
+        # Jump back to condition
+        self.builder.terminate_goto(cond_block)
+
+        # Step 6: Exit block
+        self.loop_stack = self.loop_stack[0:self.loop_stack.len() - 1]
+        self.builder.switch_to_block(exit_block)
+        self.builder.new_temp(MirType__unit())
 
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
