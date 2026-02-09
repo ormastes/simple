@@ -10,7 +10,7 @@
 #   simple mcp json <file.spl>     # Generate JSON output
 
 # I/O imports
-use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
+use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
 
 # MCP modules
 use app.mcp.resources
@@ -342,38 +342,8 @@ fn start_server(debug_mode: Bool):
                             d_r = d_r + RB()
                             response = make_tool_result(id, d_r)
                 elif tool_name == "debug_evaluate":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_expr = extract_nested_string(line, "arguments", "expression")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_expr == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: expression")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_frame_str = extract_nested_string(line, "arguments", "frame_index")
-                            var d_fi = 0
-                            if d_frame_str != "":
-                                val d_fir = parse_int(d_frame_str)
-                                match d_fir:
-                                    Ok(v): d_fi = v
-                                    Err(_): pass
-                            val d_ej = rt_debug_eval_expression(d_expr, d_fi)
-                            val d_res = extract_json_string_v2(d_ej, "result")
-                            val d_typ = extract_json_string_v2(d_ej, "type")
-                            val d_err = extract_json_string_v2(d_ej, "error")
-                            var d_display = d_res
-                            if d_err != "":
-                                d_display = d_err
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
-                            d_r = d_r + "," + jp("result", js(escape_json(d_display)))
-                            d_r = d_r + "," + jp("type", js(d_typ))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
+                    # Delegate to handler (no session_mgr mutation needed)
+                    response = handle_debug_evaluate(id, line, session_mgr)
                 elif tool_name == "debug_set_function_breakpoint":
                     val d_sid = extract_nested_string(line, "arguments", "session_id")
                     val d_func = extract_nested_string(line, "arguments", "function_name")
@@ -719,6 +689,9 @@ fn make_tools_list_response(id: String) -> String:
     val t21 = schema_debug_watch()
     val t22 = schema_debug_set_variable()
     val t23 = schema_debug_terminate()
+    val t24 = make_tool_schema("check_diagnostics",
+        "Type-check a Simple source file and return structured error/warning diagnostics (like VSCode problems panel)",
+        "path", "Path to .spl file to check", true, true, false, true)
 
     var tools = "["
     tools = tools + t1
@@ -744,6 +717,7 @@ fn make_tools_list_response(id: String) -> String:
     tools = tools + "," + t21
     tools = tools + "," + t22
     tools = tools + "," + t23
+    tools = tools + "," + t24
     tools = tools + "]"
     val result = jo1(jp("tools", tools))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
@@ -841,6 +815,13 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
     elif tool_name == "debug_terminate":
         return handle_debug_terminate(id, body, session_mgr)
 
+    elif tool_name == "check_diagnostics":
+        val path = extract_nested_string(body, "arguments", "path")
+        if path == "":
+            return make_error_response(id, -32602, "Missing required parameter: path")
+        val result = run_check_diagnostics(path)
+        return make_tool_result(id, result)
+
     else:
         return make_error_response(id, -32602, "Unknown tool: " + tool_name)
 
@@ -890,6 +871,114 @@ fn search_files(query: String) -> String:
 
     matches_json = matches_json + "]"
     matches_json
+
+fn run_check_diagnostics(path: text) -> text:
+    val cmd = "bin/simple check " + path + " 2>&1"
+    val result = shell(cmd)
+    val exit_code = result.exit_code ?? 1
+    val output = result.stdout ?? ""
+
+    var status = "ok"
+    if exit_code == 1:
+        status = "type_errors"
+    elif exit_code == 2:
+        status = "parse_errors"
+    elif exit_code == 3:
+        status = "file_not_found"
+    elif exit_code != 0:
+        status = "unknown_error"
+
+    val diagnostics = parse_check_output(output, exit_code)
+
+    var r = LB()
+    r = r + jp("file", js(escape_json(path)))
+    r = r + "," + jp("status", js(status))
+    r = r + "," + jp("exit_code", exit_code.to_string())
+    r = r + "," + jp("diagnostics", diagnostics)
+    r = r + RB()
+    r
+
+fn parse_check_output(output: text, exit_code: i64) -> text:
+    if exit_code == 0:
+        return "[]"
+
+    val lines = output.split("\n")
+    var arr = "["
+    var first = true
+    var cur_sev = "error"
+    var cur_file = ""
+    var cur_msg = ""
+    var cur_details: [text] = []
+
+    for line in lines:
+        val t = line.trim()
+        if t == "":
+            continue
+
+        if t.starts_with("Type error in ") or t.starts_with("Parse error in "):
+            # Flush previous diagnostic
+            if cur_msg != "":
+                if not first:
+                    arr = arr + ","
+                first = false
+                arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
+            cur_file = extract_file_header(t)
+            cur_sev = if t.starts_with("Parse"): "parse_error" else: "type_error"
+            cur_msg = ""
+            cur_details = []
+        elif t.starts_with("error: "):
+            # Runtime error format: "error: semantic: ..." or "error: parse: ..."
+            if cur_msg != "":
+                if not first:
+                    arr = arr + ","
+                first = false
+                arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
+            cur_sev = if t.starts_with("error: parse"): "parse_error" else: "type_error"
+            cur_msg = t
+            cur_details = []
+        elif t.starts_with("Error: ") or t.starts_with("Undefined ") or t.starts_with("Type mismatch") or t.starts_with("Unknown key") or t.starts_with("Missing required") or t.starts_with("Trait coherence"):
+            if cur_msg == "":
+                cur_msg = t
+            else:
+                cur_details.push(t)
+        elif t.ends_with("type error(s) found"):
+            ()  # skip summary line
+        else:
+            cur_details.push(t)
+
+    # Flush last diagnostic
+    if cur_msg != "":
+        if not first:
+            arr = arr + ","
+        arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
+
+    arr + "]"
+
+fn fmt_diag(file: text, severity: text, message: text, details: [text]) -> text:
+    var d = LB()
+    d = d + jp("severity", js(severity))
+    d = d + "," + jp("file", js(escape_json(file)))
+    d = d + "," + jp("message", js(escape_json(message)))
+    if details.len() > 0:
+        var da = "["
+        var f = true
+        for det in details:
+            if not f:
+                da = da + ","
+            f = false
+            da = da + js(escape_json(det))
+        da = da + "]"
+        d = d + "," + jp("details", da)
+    d + RB()
+
+fn extract_file_header(header: text) -> text:
+    # "Type error in foo.spl:" -> "foo.spl"
+    val without_colon = header.trim().trim_end(":")
+    val parts = without_colon.split(" ")
+    if parts.len() > 0:
+        parts[parts.len() - 1]
+    else:
+        ""
 
 fn get_file_info(path: String) -> String:
     val content = file_read(path)
