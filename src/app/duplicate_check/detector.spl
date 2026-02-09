@@ -26,6 +26,16 @@ fn intern_token(interner: TokenInterner, token_str: text) -> i64:
         interner.next_id = interner.next_id + 1
         id
 
+fn log_progress(config: DuplicationConfig, message: text):
+    """Print progress message if not quiet."""
+    if not config.quiet:
+        print message
+
+fn log_verbose(config: DuplicationConfig, message: text):
+    """Print verbose message if verbose mode enabled."""
+    if config.verbose and not config.quiet:
+        print message
+
 struct DuplicateBlock:
     file: text
     line_start: i64
@@ -96,7 +106,7 @@ fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
 
     result
 
-fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateBlock]:
+fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
     val tokens = get_tokens_cached(cache_manager, file_path, fn(path: text) -> [SimpleToken]:
         val content = file_read(path)
         tokenize(content, config)
@@ -111,7 +121,9 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_man
     var token_codes = []
     var idx = 0
     while idx < tokens.len():
-        token_codes = token_codes + [compute_token_code(tokens[idx])]
+        val token_str = token_to_string(tokens[idx])
+        val token_id = intern_token(interner, token_str)
+        token_codes = token_codes + [token_id]
         idx = idx + 1
 
     val window_size = config.min_tokens
@@ -259,7 +271,7 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     val max_blocks_to_analyze = 500
     var blocks_to_analyze = all_blocks
     if all_blocks.len() > max_blocks_to_analyze:
-        print "WARNING: Too many blocks ({all_blocks.len()}), limiting to first {max_blocks_to_analyze}"
+        log_progress(config, "WARNING: Too many blocks ({all_blocks.len()}), limiting to first {max_blocks_to_analyze}")
         var limited = []
         var idx = 0
         while idx < max_blocks_to_analyze:
@@ -267,15 +279,17 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
             idx = idx + 1
         blocks_to_analyze = limited
 
-    print "Extracting features from {blocks_to_analyze.len()} blocks..."
+    log_progress(config, "Using lazy feature extraction for {blocks_to_analyze.len()} blocks...")
     var file_cache = {}
     var feature_vector_map = {}
 
-    var block_idx = 0
-    var total_blocks = blocks_to_analyze.len()
-    for block in blocks_to_analyze:
-        if block_idx % 20 == 0 or block_idx == total_blocks - 1:
-            print "  Extracted features: {block_idx}/{total_blocks}"
+    fn extract_feature_lazy(block_idx: i64) -> FeatureVec:
+        """Extract feature vector on-demand with caching."""
+        val key = "{block_idx}"
+        if feature_vector_map.contains_key(key):
+            return feature_vector_map[key]
+
+        val block = blocks_to_analyze[block_idx]
 
         var tokens = []
         if file_cache.contains_key(block.file):
@@ -297,27 +311,27 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 break
             i = i + 1
 
+        var feature_vec = FeatureVec(block_id: block_idx, features: {}, magnitude: 0.0)
+
         if found_start:
             var token_end = token_start + block.token_count
             if token_end > tokens.len():
                 token_end = tokens.len()
 
             val freq_map = extract_token_frequencies(tokens, token_start, token_end)
-            val feature_vec = build_feature_vector(block_idx, freq_map)
-            feature_vector_map["{block_idx}"] = feature_vec
+            feature_vec = build_feature_vector(block_idx, freq_map)
 
-        block_idx = block_idx + 1
-
-    print "Extracted {feature_vector_map.keys().len()} feature vectors"
+        feature_vector_map[key] = feature_vec
+        feature_vec
 
     var refined_groups = []
 
     for group in exact_groups:
         refined_groups = refined_groups + [group]
 
-    print "Starting pairwise comparison of {blocks_to_analyze.len()} blocks..."
+    log_progress(config, "Starting pairwise comparison of {blocks_to_analyze.len()} blocks...")
     val total_possible = (blocks_to_analyze.len() * (blocks_to_analyze.len() - 1)) / 2
-    print "  Max comparisons: {total_possible} (optimizations will reduce this)"
+    log_verbose(config, "  Max comparisons: {total_possible} (optimizations will reduce this)")
 
     var comparison_count = 0
     var skipped_same_file = 0
@@ -329,21 +343,14 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     var i = 0
     while i < blocks_to_analyze.len() and comparison_count < max_total_comparisons:
         if i % 10 == 0:
-            print "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches, skipped {skipped_same_file} same-file + {skipped_same_hash} same-hash"
+            val extracted_count = feature_vector_map.keys().len()
+            log_verbose(config, "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches, {extracted_count} features extracted")
 
         if comparison_count >= max_total_comparisons:
-            print "  Reached comparison limit ({max_total_comparisons}), stopping early"
+            log_progress(config, "  Reached comparison limit ({max_total_comparisons}), stopping early")
             break
 
         val block1 = blocks_to_analyze[i]
-        val key_i = "{i}"
-        val has_vec_i = feature_vector_map.contains_key(key_i)
-
-        if not has_vec_i:
-            i = i + 1
-            continue
-
-        val feature_vec1 = feature_vector_map[key_i]
         var comparisons_this_block = 0
         var j = i + 1
 
@@ -362,51 +369,53 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
                 j = j + 1
                 continue
 
-            val key_j = "{j}"
-            val has_vec_j = feature_vector_map.contains_key(key_j)
+            comparison_count = comparison_count + 1
+            comparisons_this_block = comparisons_this_block + 1
 
-            if has_vec_j:
-                comparison_count = comparison_count + 1
-                comparisons_this_block = comparisons_this_block + 1
+            val feature_vec1 = extract_feature_lazy(i)
+            val feature_vec2 = extract_feature_lazy(j)
+            val similarity = cosine_similarity(feature_vec1, feature_vec2)
 
-                val feature_vec2 = feature_vector_map[key_j]
-                val similarity = cosine_similarity(feature_vec1, feature_vec2)
+            val above_threshold = similarity >= config.similarity_threshold
+            if above_threshold:
+                match_count = match_count + 1
+                val new_group = DuplicateGroup(
+                    blocks: [block1, block2],
+                    occurrences: 2,
+                    total_lines: (block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1),
+                    impact_score: 2 * ((block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1))
+                )
 
-                val above_threshold = similarity >= config.similarity_threshold
-                if above_threshold:
-                    match_count = match_count + 1
-                    val new_group = DuplicateGroup(
-                        blocks: [block1, block2],
-                        occurrences: 2,
-                        total_lines: (block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1),
-                        impact_score: 2 * ((block1.line_end - block1.line_start + 1) + (block2.line_end - block2.line_start + 1))
-                    )
-
-                    val meets_impact = new_group.impact_score >= config.min_impact
-                    if meets_impact:
-                        refined_groups = refined_groups + [new_group]
+                val meets_impact = new_group.impact_score >= config.min_impact
+                if meets_impact:
+                    refined_groups = refined_groups + [new_group]
 
             j = j + 1
         i = i + 1
 
-    print "Completed {comparison_count} comparisons, found {match_count} similar pairs"
+    val extracted_count = feature_vector_map.keys().len()
+    log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
+    log_verbose(config, "Lazy extraction: {extracted_count}/{blocks_to_analyze.len()} features extracted ({100 * extracted_count / blocks_to_analyze.len()}% reduction)")
     refined_groups
 
 fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     var all_blocks = []
 
-    print "Scanning {files.len()} files..."
+    val interner = new_token_interner()
+
+    log_progress(config, "Scanning {files.len()} files...")
 
     for file in files:
-        val blocks = find_duplicates_in_file(file, config, cache_manager)
+        val blocks = find_duplicates_in_file(file, config, cache_manager, interner)
         all_blocks = all_blocks + blocks
+        log_verbose(config, "  {file}: {blocks.len()} blocks")
 
-    print "Found {all_blocks.len()} potential duplicate blocks"
+    log_progress(config, "Found {all_blocks.len()} potential duplicate blocks")
 
     val exact_groups = group_by_hash(all_blocks, config)
 
     val refined_groups = if config.use_cosine_similarity:
-        print "Refining with cosine similarity..."
+        log_progress(config, "Refining with cosine similarity...")
         val result = refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
         result
     else:
@@ -414,7 +423,7 @@ fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: Toke
 
     val sorted = sort_by_impact(refined_groups)
 
-    print "Grouped into {sorted.len()} duplicate groups"
+    log_progress(config, "Grouped into {sorted.len()} duplicate groups")
 
     sorted
 
