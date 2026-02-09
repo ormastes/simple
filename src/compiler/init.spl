@@ -137,12 +137,17 @@ struct InterpreterExecutionEngine:
 
 impl ExecutionEngine for InterpreterExecutionEngine:
     fn execute(source: text) -> Result<ExecutionResult, text>:
-        # TODO: Parse and interpret
-        Ok(ExecutionResult.None)
+        # Parse source and evaluate via interpreter
+        val ast = parse_source(source)?
+        val result = interpret_ast(ast)?
+        Ok(result)
 
     fn execute_file(path: text) -> Result<ExecutionResult, text>:
-        # TODO: Load and interpret file
-        Ok(ExecutionResult.None)
+        # Read file, parse, and interpret
+        val source = file_read(path)
+        if source == "":
+            return Err("Failed to read file: {path}")
+        self.execute(source)
 
     fn compile(source: text) -> Result<CompiledUnit, text>:
         Err("Interpreter mode does not support compilation")
@@ -156,16 +161,34 @@ struct JitExecutionEngine:
 
 impl ExecutionEngine for JitExecutionEngine:
     fn execute(source: text) -> Result<ExecutionResult, text>:
-        # TODO: JIT compile and execute
-        Ok(ExecutionResult.None)
+        # JIT compile and execute
+        val compiled = self.compile(source)?
+        if compiled.entry_point.?:
+            val entry = compiled.entry_point.unwrap()
+            Ok(execute_compiled(compiled, entry))
+        else:
+            Err("No entry point found in compiled unit")
 
     fn execute_file(path: text) -> Result<ExecutionResult, text>:
-        # TODO: JIT compile and execute file
-        Ok(ExecutionResult.None)
+        # Read file, JIT compile, and execute
+        val source = file_read(path)
+        if source == "":
+            return Err("Failed to read file: {path}")
+        # Check cache
+        if self.cache.contains_key(path):
+            val cached = self.cache[path]
+            if cached.entry_point.?:
+                return Ok(execute_compiled(cached, cached.entry_point.unwrap()))
+        val result = self.execute(source)
+        result
 
     fn compile(source: text) -> Result<CompiledUnit, text>:
-        # TODO: Compile to native code
-        Ok(CompiledUnit(bytes: [], symbols: {}, entry_point: nil))
+        # Parse, lower to MIR, optimize, and compile to native code
+        val ast = parse_source(source)?
+        val mir = lower_to_mir(ast)?
+        val optimized = optimize_mir(mir)?
+        val code = codegen(optimized)?
+        Ok(code)
 
     fn name() -> text:
         "JitExecutionEngine"
@@ -181,8 +204,12 @@ impl ExecutionEngine for AotExecutionEngine:
         Err("AOT mode requires compilation first")
 
     fn compile(source: text) -> Result<CompiledUnit, text>:
-        # TODO: Compile to object file
-        Ok(CompiledUnit(bytes: [], symbols: {}, entry_point: nil))
+        # Parse, lower to MIR, optimize, and compile to object file
+        val ast = parse_source(source)?
+        val mir = lower_to_mir(ast)?
+        val optimized = optimize_mir(mir)?
+        val code = codegen_to_object(optimized)?
+        Ok(code)
 
     fn name() -> text:
         "AotExecutionEngine"

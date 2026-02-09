@@ -358,8 +358,8 @@ fn check_match_stmt(engine: InferenceEngine, stmt: MatchStmt,
 
     # Check each arm
     for arm in stmt.arms:
-        # TODO: Check pattern against subject type
-        # TODO: Bind pattern variables
+        # Check pattern against subject type and bind pattern variables
+        val arm_env = bind_pattern(engine, arm.pattern, subject_ty, env)?
 
         # Check guard condition (if present)
         if arm.guard.?:
@@ -378,8 +378,8 @@ fn check_for(engine: InferenceEngine, stmt: ForStmt,
     # Infer iterable type
     val iterable_ty = infer_expr(engine, stmt.iterable, env)?
 
-    # TODO: Extract element type from iterable
-    val elem_ty = engine.fresh_var()
+    # Extract element type from iterable (Phase 3.2 - TODO #178 ✅)
+    val elem_ty = extract_element_type(engine, iterable_ty)?
 
     # Bind loop variable
     val loop_env = bind_pattern(stmt.pattern, elem_ty, env)
@@ -511,7 +511,14 @@ fn check_calc(engine: InferenceEngine, stmt: CalcStmt,
     """Type check a calc statement (calculational proofs)."""
 
     # Check each step in the calculation
-    # TODO: Implement calc step checking
+    # Each step has a relation and an expression; verify types are consistent
+    var prev_ty: Type? = nil
+    for step in stmt.steps:
+        val step_ty = infer_expr(engine, step.expr, env)?
+        if prev_ty.?:
+            # Each step should produce same type as previous step
+            engine.unify(step_ty, prev_ty.unwrap())?
+        prev_ty = Some(step_ty)
 
     Ok(env)
 
@@ -561,11 +568,73 @@ fn check_block(engine: InferenceEngine, block: Block, env: Dict<text, Type>,
         # Check statement and update environment
         current_env = check_stmt(engine, stmt, current_env, current_fn_ret_type)?
 
-        # TODO: Track last expression type
-        # For now, return Unit
-        last_ty = Type.Unit
+        # Track last expression type (Phase 3.2 - TODO #180 ✅)
+        # If last statement is an expression, use its type; otherwise Unit
+        match stmt:
+            case ExprStmt(expr):
+                last_ty = infer_expr(engine, expr, current_env)?
+            case _:
+                last_ty = Type.Unit
 
     Ok(last_ty)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn extract_element_type(engine: InferenceEngine, iterable_ty: Type) -> Result<Type, TypeError>:
+    """Extract element type from iterable type (Phase 3.2 - TODO #178 ✅).
+
+    Args:
+        engine: Type inference engine
+        iterable_ty: Type of the iterable expression
+
+    Returns:
+        Ok(element_type) on success
+        Err(type_error) if not an iterable type
+
+    Supported iterables:
+    - Array<T>: Returns T
+    - Optional<T>: Returns T (iterates 0 or 1 time)
+    - Tuple<T1, T2, ...>: Returns union of element types
+    - Type variable: Create fresh variable and unify
+    """
+    match iterable_ty:
+        case Type.Array(elem, _):
+            # Array<T> → T
+            Ok(elem)
+
+        case Type.Optional(inner):
+            # Optional<T> → T (iterates 0 or 1 times)
+            Ok(inner)
+
+        case Type.Tuple(elements):
+            # Tuple<T1, T2, ...> → T1 | T2 | ... (union)
+            if elements.len() == 0:
+                # Empty tuple - create fresh var
+                Ok(engine.fresh_var())
+            elif elements.len() == 1:
+                # Single element tuple
+                Ok(elements[0])
+            else:
+                # Multiple elements - return union type
+                Ok(Type.Union(elements))
+
+        case Type.Var(_):
+            # Type variable - create fresh variable for element
+            # and unify iterable with Array<elem>
+            val elem_var = engine.fresh_var()
+            val array_ty = Type.Array(elem_var, None)
+            engine.unify(iterable_ty, array_ty)?
+            Ok(elem_var)
+
+        case Type.Dict(_, value):
+            # Dict<K, V> → (K, V) when iterating
+            Ok(Type.Tuple([iterable_ty, value]))
+
+        case _:
+            # Not an iterable type
+            Err(TypeError.NotIterable(iterable_ty))
 
 # ============================================================================
 # Exports

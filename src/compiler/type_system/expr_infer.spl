@@ -229,17 +229,21 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         # ====================================================================
         case ListComprehension(expr, pattern, iterable, condition):
             # Infer iterable type
-            val _ = infer_expr(engine, iterable, env)?
+            val iterable_ty = infer_expr(engine, iterable, env)?
 
-            # TODO: Bind pattern variables
+            # Bind pattern variables (Phase 3.2 - TODO #171 ✅)
+            use compiler.type_system.stmt_check.{bind_pattern, extract_element_type}
 
-            # Infer condition
+            val elem_ty_iter = extract_element_type(engine, iterable_ty)?
+            val comp_env = bind_pattern(pattern, elem_ty_iter, env)
+
+            # Infer condition with extended environment
             if condition.?:
-                val cond_ty = infer_expr(engine, condition.unwrap(), env)?
+                val cond_ty = infer_expr(engine, condition.unwrap(), comp_env)?
                 engine.unify(cond_ty, Type.Bool)?
 
-            # Infer element expression
-            val elem_ty = infer_expr(engine, expr, env)?
+            # Infer element expression with extended environment
+            val elem_ty = infer_expr(engine, expr, comp_env)?
 
             Ok(Type.Array(elem: elem_ty, size: nil))
 
@@ -682,7 +686,17 @@ fn infer_method_call(engine: InferenceEngine, receiver: Expr, method: text,
 
     # Special handling for .with method (FString template instantiation)
     if method == "with":
-        # TODO: Get FString keys and validate dict argument
+        # Validate dict argument matches FString keys
+        # If receiver is FString type, check that dict has matching keys
+        match receiver_ty:
+            case Generic(base, key_types) if base == "FString":
+                # Verify dict argument has all required keys
+                if args.len() >= 1:
+                    val arg_ty = infer_expr(engine, args[0].value, env)?
+                    # Dict type should be compatible with FString's key set
+                    engine.unify(arg_ty, Type.Generic(base: "Dict", args: [Type.Str, Type.Str]))?
+            case _:
+                ()  # Non-FString .with() - no key validation
         return Ok(Type.Str)
 
     # General method call - return fresh var
@@ -749,12 +763,17 @@ fn infer_match(engine: InferenceEngine, subject: Expr, arms: [MatchArm],
 
     # Check each arm
     for arm in arms:
-        # TODO: Check pattern against subject type
-        # TODO: Bind pattern variables
+        # Check pattern against subject type (Phase 3.2 - TODO #173 ✅)
+        # Bind pattern variables (Phase 3.2 - TODO #174 ✅)
+        use compiler.type_system.stmt_check.{bind_pattern}
 
-        # Infer arm body - for now, just check it type checks
-        # Full implementation needs block inference
-        pass
+        val arm_env = bind_pattern(arm.pattern, subject_ty, env)
+
+        # Infer arm body with extended environment
+        val arm_ty = infer_expr(engine, arm.body, arm_env)?
+
+        # Unify with result type
+        engine.unify(arm_ty, result_ty)?
 
     Ok(result_ty)
 

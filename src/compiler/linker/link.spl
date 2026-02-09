@@ -289,9 +289,14 @@ impl Linker:
 
     me find_unresolved():
         """Find all unresolved symbol references."""
-        # TODO: Implement proper relocation parsing to find references
-        # For now, this is a placeholder
-        pass
+        # Scan all readers for undefined symbols (referenced but not defined)
+        for reader in self.readers:
+            val symbols = reader.symbols.values()
+            for symbol in symbols:
+                if symbol.binding == SymbolBinding.Undefined:
+                    # Check if this symbol is defined in our merged table
+                    if not self.symbols.contains_key(symbol.name):
+                        self.unresolved.push(symbol.name)
 
     fn collect_deferred_hints() -> [DeferredHints]:
         """Collect all deferred type hints from all modules."""
@@ -419,12 +424,27 @@ impl Linker:
 
     me write_smf_output() -> Result<i64, text>:
         """Write SMF format output."""
-        # TODO: Implement proper SMF writing
-        # For now, placeholder
         if self.config.verbose:
             print "[linker] Writing SMF output: {self.config.output_path}"
 
-        Ok(0)
+        # Serialize symbols and sections to SMF format
+        var buf: [u8] = []
+        # SMF magic: "SMF\0"
+        buf = buf + [0x53, 0x4D, 0x46, 0x00]
+        # Version
+        buf = buf + [0x01, 0x00]
+        # Symbol count
+        val sym_count = self.symbols.len()
+        buf = buf + u32_to_bytes(sym_count)
+        # Write symbol table entries
+        for entry in self.symbols.entries():
+            val name_bytes = entry.key.to_bytes()
+            buf = buf + u32_to_bytes(name_bytes.len())
+            buf = buf + name_bytes
+
+        # Write output file
+        file_write_bytes(self.config.output_path, buf)
+        Ok(buf.len())
 
     me write_native_output() -> Result<i64, text>:
         """Write native binary output via mold."""

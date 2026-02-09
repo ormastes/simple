@@ -180,10 +180,9 @@ impl HirLowering:
             for error in check.errors:
                 self.error(error, func.span)
 
-            # TODO: Report detailed errors when diagnostics system supports them
-            # For now, we've generated the detailed errors but don't have a way
-            # to report them through the lowering context. This will be added
-            # when the diagnostics system is extended to handle AsyncError objects.
+            # Report detailed errors through lowering context
+            for detail in check.detailed_errors:
+                self.warning("async: {detail.message} at {detail.span}", detail.span)
 
 struct AsyncFunctionCheck:
     """Validation results for an async function.
@@ -493,9 +492,60 @@ impl HirLowering:
         Returns:
             true if types are equal, false otherwise
         """
-        # For now, compare string representations
-        # TODO: Implement proper structural equality
-        self.format_type(a) == self.format_type(b)
+        # Structural equality for HIR types (Phase 1B.4 - TODO #87 ✅)
+        match (a, b):
+            case (Int, Int): true
+            case (Float, Float): true
+            case (Bool, Bool): true
+            case (String, String): true
+            case (Unit, Unit): true
+            case (Never, Never): true
+            case (Error, Error): true
+
+            case (Array(inner_a), Array(inner_b)):
+                self.types_equal(inner_a, inner_b)
+
+            case (Tuple(fields_a), Tuple(fields_b)):
+                if fields_a.len() != fields_b.len():
+                    return false
+                for i in 0..(fields_a.len()):
+                    if not self.types_equal(fields_a[i], fields_b[i]):
+                        return false
+                true
+
+            case (Function(params_a, ret_a, _), Function(params_b, ret_b, _)):
+                if params_a.len() != params_b.len():
+                    return false
+                for i in 0..(params_a.len()):
+                    if not self.types_equal(params_a[i], params_b[i]):
+                        return false
+                self.types_equal(ret_a, ret_b)
+
+            case (Optional(inner_a), Optional(inner_b)):
+                self.types_equal(inner_a, inner_b)
+
+            case (Result(ok_a, err_a), Result(ok_b, err_b)):
+                self.types_equal(ok_a, ok_b) and self.types_equal(err_a, err_b)
+
+            case (Named(sym_a, args_a), Named(sym_b, args_b)):
+                if sym_a.id != sym_b.id:
+                    return false
+                if args_a.len() != args_b.len():
+                    return false
+                for i in 0..(args_a.len()):
+                    if not self.types_equal(args_a[i], args_b[i]):
+                        return false
+                true
+
+            case (TypeParam(name_a, _), TypeParam(name_b, _)):
+                name_a == name_b
+
+            case (Infer(id_a, _), Infer(id_b, _)):
+                id_a == id_b
+
+            case _:
+                # Different type constructors
+                false
 
     fn format_type(hir_type: HirType) -> text:
         """Format HIR type as string for error messages.

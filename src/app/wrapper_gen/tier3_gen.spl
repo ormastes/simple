@@ -2,7 +2,7 @@
 #
 # Generates src/lib/<library>/mod.spl with user-facing API
 
-use app.io.{file_write, dir_create, print}
+use app.io.{file_write, dir_create_all, print}
 use app.wrapper_gen.spec_parser.{WrapperSpec, HandleTypeSpec, FunctionSpec, MethodSpec}
 
 fn generate_tier3(spec: WrapperSpec, dry_run: bool):
@@ -12,7 +12,7 @@ fn generate_tier3(spec: WrapperSpec, dry_run: bool):
     val output_file = "{output_dir}/mod.spl"
 
     if not dry_run:
-        dir_create(output_dir)
+        dir_create_all(output_dir)
 
     var content = ""
     content = content + "# {spec.name} Simple API (Tier 3)\n"
@@ -67,7 +67,7 @@ fn generate_wrapper_class(handle: HandleTypeSpec, spec: WrapperSpec) -> text:
     content = content + "    Automatically manages memory via RAII pattern.\n"
     content = content + "    \"\"\"\n\n"
 
-    content = content + "    handle: {handle.name}\n"
+    content = content + "    handle: i64  # Opaque FFI handle (pointer)\n"
     content = content + "    owns_handle: bool\n\n"
 
     # Static constructor methods
@@ -141,9 +141,11 @@ fn generate_instance_method(method: MethodSpec, handle_name: text, spec: Wrapper
         if params != "":
             params = params + ", "
         call_args = call_args + ", {param.name}"
-        params = params + "{param.name}: {param.param_type}"
+        val param_type = map_handle_to_wrapper(param.param_type, spec)
+        params = params + "{param.name}: {param_type}"
 
-    val return_decl = if method.return_type != "": " -> {method.return_type}" else: ""
+    val mapped_return = map_handle_to_wrapper(method.return_type, spec)
+    val return_decl = if mapped_return != "": " -> {mapped_return}" else: ""
 
     var content = ""
     content = content + "    fn {method.name}({params}){return_decl}:\n"
@@ -157,5 +159,22 @@ fn generate_instance_method(method: MethodSpec, handle_name: text, spec: Wrapper
         content = content + "        rt_{spec.name}_{handle_name.lower()}_{method.name}({call_args})\n\n"
 
     content
+
+# Helper: Map handle types to i64 (for FFI layer interaction)
+# In the API layer, we accept wrapper types, but internally use i64 handles
+fn map_handle_to_wrapper(type_name: text, spec: WrapperSpec) -> text:
+    # Check if this is a handle type - if so, use i64
+    for handle in spec.handle_types:
+        if type_name == handle.name:
+            return "i64"
+
+    # Not a handle type, return as-is
+    type_name
+
+fn is_handle_type(type_name: text, spec: WrapperSpec) -> bool:
+    for handle in spec.handle_types:
+        if type_name == handle.name:
+            return true
+    false
 
 export generate_tier3

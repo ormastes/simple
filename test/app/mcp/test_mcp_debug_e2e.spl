@@ -1,0 +1,415 @@
+#!/usr/bin/env simple
+# E2E integration test: MCP Debug Tools via stdio JSON-RPC
+#
+# Sends real JSON-RPC requests to the MCP server process and validates
+# each debug tool's response against expected output patterns.
+#
+# Usage: bin/simple test/app/mcp/test_mcp_debug_e2e.spl
+
+use app.io.mod (shell, process_run, file_write, file_read, file_delete, file_exists, cwd)
+
+# --- JSON-RPC message builder ---
+
+fn msg(body: String) -> String:
+    # Build Content-Length framed message
+    val len = body.len()
+    "Content-Length: {len}\r\n\r\n{body}\n"
+
+fn rpc_call(id_num: Int, method: String, params: String) -> String:
+    var body = ""
+    if params == "":
+        body = "{\"jsonrpc\":\"2.0\",\"id\":{id_num},\"method\":\"{method}\"}"
+    else:
+        body = "{\"jsonrpc\":\"2.0\",\"id\":{id_num},\"method\":\"{method}\",\"params\":{params}}"
+    msg(body)
+
+fn tool_call(id_num: Int, tool_name: String, arguments: String) -> String:
+    var params = ""
+    if arguments == "":
+        params = "{\"name\":\"{tool_name}\"}"
+    else:
+        params = "{\"name\":\"{tool_name}\",\"arguments\":{arguments}}"
+    rpc_call(id_num, "tools/call", params)
+
+# --- Test runner ---
+
+var test_count = 0
+var pass_count = 0
+var fail_count = 0
+
+fn check_contains(label: String, response: String, expected: String):
+    test_count = test_count + 1
+    if response.contains(expected):
+        pass_count = pass_count + 1
+        print "  PASS  {label}"
+    else:
+        fail_count = fail_count + 1
+        print "  FAIL  {label}"
+        print "    expected to contain: {expected}"
+        print "    got: {response}"
+
+fn check_not_contains(label: String, response: String, unexpected: String):
+    test_count = test_count + 1
+    if not response.contains(unexpected):
+        pass_count = pass_count + 1
+        print "  PASS  {label}"
+    else:
+        fail_count = fail_count + 1
+        print "  FAIL  {label}"
+        print "    expected NOT to contain: {unexpected}"
+        print "    got: {response}"
+
+# --- Parse MCP responses from raw stdout ---
+# Each response has: Content-Length: N\n\n{json}
+# We split by "Content-Length:" and extract the JSON bodies
+
+fn parse_responses(raw: String) -> [String]:
+    var responses = []
+    val parts = raw.split("Content-Length: ")
+    for part in parts:
+        if part.len() > 0:
+            # Split part by newlines, skip first line (length number) and blank lines
+            val lines = part.split("\n")
+            var body_lines = []
+            var skip_header = true
+            for line in lines:
+                val trimmed = line.trim()
+                if skip_header:
+                    skip_header = false
+                else:
+                    if trimmed.len() > 0:
+                        body_lines = body_lines + [trimmed]
+            # Join body lines (typically just one JSON line)
+            if body_lines.len() > 0:
+                var body = ""
+                for bl in body_lines:
+                    if body.len() > 0:
+                        body = body + " "
+                    body = body + bl
+                responses = responses + [body]
+    responses
+
+fn main():
+    print "=== MCP Debug Tools E2E Integration Test ==="
+    print "Working directory: {cwd()}"
+    print ""
+
+    # Build the full sequence of MCP requests
+    var input_data = ""
+
+    # 1. Initialize handshake
+    input_data = input_data + rpc_call(1, "initialize", "{\"protocolVersion\":\"2025-06-18\"}")
+    input_data = input_data + msg("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}")
+
+    # 2. debug_create_session
+    input_data = input_data + tool_call(10, "debug_create_session", "{\"program\":\"examples/hello.spl\",\"target_type\":\"interpreter\"}")
+
+    # 3. debug_list_sessions
+    input_data = input_data + tool_call(11, "debug_list_sessions", "")
+
+    # 4. debug_set_breakpoint
+    input_data = input_data + tool_call(12, "debug_set_breakpoint", "{\"session_id\":\"session_1\",\"file\":\"examples/hello.spl\",\"line\":\"5\"}")
+
+    # 5. debug_set_breakpoint (second, with condition)
+    input_data = input_data + tool_call(13, "debug_set_breakpoint", "{\"session_id\":\"session_1\",\"file\":\"examples/hello.spl\",\"line\":\"10\",\"condition\":\"x > 5\"}")
+
+    # 6. debug_continue
+    input_data = input_data + tool_call(14, "debug_continue", "{\"session_id\":\"session_1\"}")
+
+    # 7. debug_step (over)
+    input_data = input_data + tool_call(15, "debug_step", "{\"session_id\":\"session_1\",\"mode\":\"over\"}")
+
+    # 8. debug_step (in)
+    input_data = input_data + tool_call(16, "debug_step", "{\"session_id\":\"session_1\",\"mode\":\"in\"}")
+
+    # 9. debug_step (out)
+    input_data = input_data + tool_call(17, "debug_step", "{\"session_id\":\"session_1\",\"mode\":\"out\"}")
+
+    # 10. debug_get_variables
+    input_data = input_data + tool_call(18, "debug_get_variables", "{\"session_id\":\"session_1\"}")
+
+    # 11. debug_stack_trace
+    input_data = input_data + tool_call(19, "debug_stack_trace", "{\"session_id\":\"session_1\"}")
+
+    # 12. debug_evaluate
+    input_data = input_data + tool_call(20, "debug_evaluate", "{\"session_id\":\"session_1\",\"expression\":\"x + 1\"}")
+
+    # 13. debug_remove_breakpoint
+    input_data = input_data + tool_call(21, "debug_remove_breakpoint", "{\"session_id\":\"session_1\",\"breakpoint_id\":\"1\"}")
+
+    # 14. debug_close_session
+    input_data = input_data + tool_call(22, "debug_close_session", "{\"session_id\":\"session_1\"}")
+
+    # 15. debug_list_sessions (should be empty)
+    input_data = input_data + tool_call(23, "debug_list_sessions", "")
+
+    # 16. Error case: missing program
+    input_data = input_data + tool_call(30, "debug_create_session", "{}")
+
+    # 17. Error case: invalid step mode
+    input_data = input_data + tool_call(31, "debug_step", "{\"session_id\":\"session_2\",\"mode\":\"sideways\"}")
+
+    # 18. Error case: session not found
+    input_data = input_data + tool_call(32, "debug_get_variables", "{\"session_id\":\"session_999\"}")
+
+    # Exit
+    input_data = input_data + rpc_call(99, "exit", "")
+
+    # Write input to temp file
+    val temp_input = "/tmp/mcp_debug_e2e_input.txt"
+    val temp_output = "/tmp/mcp_debug_e2e_output.txt"
+    file_write(temp_input, input_data)
+
+    # Run MCP server with piped input
+    print "Sending 18 JSON-RPC requests to MCP server..."
+    print ""
+    val result = shell("cat '{temp_input}' | timeout 30 bin/bootstrap/simple src/app/mcp/main.spl server 2>/dev/null")
+    val raw_output = result.stdout
+
+    if raw_output.len() == 0:
+        print "ERROR: No output from MCP server (exit code: {result.exit_code})"
+        file_delete(temp_input)
+        return
+
+    # Save raw output for inspection
+    file_write(temp_output, raw_output)
+    print "Raw output saved to: {temp_output}"
+
+    # Parse individual responses
+    val responses = parse_responses(raw_output)
+    print "Received {responses.len()} responses"
+    print ""
+
+    # === Validate each response ===
+
+    # Response 0: initialize
+    print "--- 1. Initialize Handshake ---"
+    if responses.len() > 0:
+        check_contains("initialize returns protocol version", responses[0], "protocolVersion")
+        check_contains("initialize returns server info", responses[0], "simple-mcp")
+        check_contains("initialize lists debug tools", responses[0], "debug_create_session")
+    else:
+        print "  FAIL  No initialize response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 1: debug_create_session (id=10)
+    print ""
+    print "--- 2. debug_create_session ---"
+    if responses.len() > 1:
+        check_contains("returns session_id", responses[1], "session_1")
+        check_contains("returns program path", responses[1], "examples/hello.spl")
+        check_contains("returns target_type", responses[1], "interpreter")
+        check_contains("returns created state", responses[1], "created")
+        check_contains("has jsonrpc 2.0", responses[1], "jsonrpc")
+    else:
+        print "  FAIL  No create_session response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 2: debug_list_sessions (id=11)
+    print ""
+    print "--- 3. debug_list_sessions ---"
+    if responses.len() > 2:
+        check_contains("lists session_1", responses[2], "session_1")
+        check_contains("shows program", responses[2], "examples/hello.spl")
+    else:
+        print "  FAIL  No list_sessions response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 3: debug_set_breakpoint (id=12)
+    print ""
+    print "--- 4. debug_set_breakpoint (line 5) ---"
+    if responses.len() > 3:
+        check_contains("returns breakpoint_id", responses[3], "breakpoint_id")
+        check_contains("returns file", responses[3], "examples/hello.spl")
+        check_contains("returns line 5", responses[3], "\"line\":5")
+        check_contains("returns verified true", responses[3], "\"verified\":true")
+    else:
+        print "  FAIL  No set_breakpoint response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 4: debug_set_breakpoint (id=13, with condition)
+    print ""
+    print "--- 5. debug_set_breakpoint (line 10, conditional) ---"
+    if responses.len() > 4:
+        check_contains("returns breakpoint_id 2", responses[4], "breakpoint_id")
+        check_contains("returns line 10", responses[4], "\"line\":10")
+    else:
+        print "  FAIL  No second set_breakpoint response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 5: debug_continue (id=14)
+    print ""
+    print "--- 6. debug_continue ---"
+    if responses.len() > 5:
+        check_contains("returns session_id", responses[5], "session_1")
+        check_contains("state is running", responses[5], "running")
+    else:
+        print "  FAIL  No continue response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 6: debug_step over (id=15)
+    print ""
+    print "--- 7. debug_step (over) ---"
+    if responses.len() > 6:
+        check_contains("returns mode over", responses[6], "over")
+        check_contains("state is paused", responses[6], "paused")
+    else:
+        print "  FAIL  No step over response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 7: debug_step in (id=16)
+    print ""
+    print "--- 8. debug_step (in) ---"
+    if responses.len() > 7:
+        check_contains("returns mode in", responses[7], "\"in\"")
+        check_contains("state is paused", responses[7], "paused")
+    else:
+        print "  FAIL  No step in response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 8: debug_step out (id=17)
+    print ""
+    print "--- 9. debug_step (out) ---"
+    if responses.len() > 8:
+        check_contains("returns mode out", responses[8], "out")
+        check_contains("state is paused", responses[8], "paused")
+    else:
+        print "  FAIL  No step out response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 9: debug_get_variables (id=18)
+    print ""
+    print "--- 10. debug_get_variables ---"
+    if responses.len() > 9:
+        check_contains("returns session_id", responses[9], "session_1")
+        check_contains("returns variables array", responses[9], "variables")
+    else:
+        print "  FAIL  No get_variables response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 10: debug_stack_trace (id=19)
+    print ""
+    print "--- 11. debug_stack_trace ---"
+    if responses.len() > 10:
+        check_contains("returns session_id", responses[10], "session_1")
+        check_contains("returns frames array", responses[10], "frames")
+        check_contains("returns total_frames", responses[10], "total_frames")
+    else:
+        print "  FAIL  No stack_trace response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 11: debug_evaluate (id=20)
+    print ""
+    print "--- 12. debug_evaluate ---"
+    if responses.len() > 11:
+        check_contains("returns expression", responses[11], "x + 1")
+        check_contains("returns eval not connected", responses[11], "eval not connected")
+        check_contains("returns type unknown", responses[11], "unknown")
+    else:
+        print "  FAIL  No evaluate response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 12: debug_remove_breakpoint (id=21)
+    print ""
+    print "--- 13. debug_remove_breakpoint ---"
+    if responses.len() > 12:
+        check_contains("returns removed bp id", responses[12], "\"removed\"")
+        check_contains("status ok", responses[12], "ok")
+    else:
+        print "  FAIL  No remove_breakpoint response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 13: debug_close_session (id=22)
+    print ""
+    print "--- 14. debug_close_session ---"
+    if responses.len() > 13:
+        check_contains("returns closed session_id", responses[13], "session_1")
+        check_contains("status ok", responses[13], "ok")
+    else:
+        print "  FAIL  No close_session response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 14: debug_list_sessions (empty, id=23)
+    print ""
+    print "--- 15. debug_list_sessions (after close) ---"
+    if responses.len() > 14:
+        check_contains("returns empty list", responses[14], "[]")
+    else:
+        print "  FAIL  No second list_sessions response"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 15: error - missing program (id=30)
+    print ""
+    print "--- 16. Error: missing program ---"
+    if responses.len() > 15:
+        check_contains("returns error", responses[15], "error")
+        check_contains("mentions missing program", responses[15], "program")
+    else:
+        print "  FAIL  No error response for missing program"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 16: error - invalid step mode (id=31)
+    print ""
+    print "--- 17. Error: invalid step mode ---"
+    if responses.len() > 16:
+        check_contains("returns error", responses[16], "error")
+        check_contains("mentions invalid mode", responses[16], "Invalid step mode")
+    else:
+        print "  FAIL  No error response for invalid step"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # Response 17: error - session not found (id=32)
+    print ""
+    print "--- 18. Error: session not found ---"
+    if responses.len() > 17:
+        check_contains("returns error", responses[17], "error")
+        check_contains("mentions session not found", responses[17], "Session not found")
+    else:
+        print "  FAIL  No error response for session not found"
+        fail_count = fail_count + 1
+        test_count = test_count + 1
+
+    # --- Summary ---
+    print ""
+    print "==========================================="
+    print "E2E Results: {test_count} total, {pass_count} passed, {fail_count} failed"
+    print "==========================================="
+
+    # Cleanup
+    file_delete(temp_input)
+
+    if fail_count == 0:
+        print "All E2E tests passed!"
+    else:
+        print "{fail_count} test(s) failed - check output above"
+
+    # --- Save reference output ---
+    if fail_count == 0:
+        val ref_path = "test/app/mcp/mcp_debug_e2e_reference.txt"
+        var ref_content = "# MCP Debug Tools E2E Reference Output\n"
+        ref_content = ref_content + "# Generated by test_mcp_debug_e2e.spl\n"
+        ref_content = ref_content + "# {responses.len()} responses captured\n\n"
+        var i = 0
+        for resp in responses:
+            ref_content = ref_content + "--- Response {i} ---\n"
+            ref_content = ref_content + resp + "\n\n"
+            i = i + 1
+        file_write(ref_path, ref_content)
+        print "Reference output saved to: {ref_path}"

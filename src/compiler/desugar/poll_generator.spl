@@ -153,9 +153,13 @@ fn generate_state0_arm(
     if analysis.suspension_points.len() > 0:
         val first_sp = analysis.suspension_points[0]
 
-        # TODO: Extract code before first await from func_body
-        # For now, create simple placeholder:
-        # val future = <awaited_expression>
+        # Extract code before first await from func_body
+        # Find statements before the first suspension point and include them
+        var pre_await_stmts: [Stmt] = []
+        for stmt in func_body.stmts:
+            if stmt.span.start < first_sp.span.start:
+                pre_await_stmts.push(stmt)
+        body_stmts = body_stmts + pre_await_stmts
 
         val future_binding = Stmt(
             kind: StmtKind.Val(
@@ -176,8 +180,15 @@ fn generate_state0_arm(
         ))
     else:
         # No awaits - immediately return ready
-        # TODO: Extract return value from func_body
-        val return_val = Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+        # Extract return value from function body's last expression
+        val return_val = if func_body.stmts.len() > 0:
+            val last_stmt = func_body.stmts[func_body.stmts.len() - 1]
+            match last_stmt.kind:
+                case Expr(e): e
+                case Return(Some(e)): e
+                case _: Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+        else:
+            Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
         val return_expr = make_poll_tuple(
             make_state_constructor("State0", []),
             make_ready(return_val)

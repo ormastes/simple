@@ -44,6 +44,7 @@ impl AttributeParser:
         var attributes = []
 
         while self.current().kind == TokenKind.HashLBracket:
+            val start_span = self.current().span
             self.advance()  # consume #[
 
             # Parse attribute name
@@ -72,13 +73,14 @@ impl AttributeParser:
                     self.advance()  # consume )
 
             # Expect ]
+            val end_span = self.current().span
             if self.current().kind == TokenKind.RBracket:
                 self.advance()
 
             val attr = Attribute(
                 name: attr_name,
                 args: args,
-                span: Span.new(0, 0, 1, 1)  # TODO: proper span
+                span: Span.new(start_span.start, end_span.end, start_span.line, start_span.col)
             )
             attributes.push(attr)
 
@@ -86,40 +88,41 @@ impl AttributeParser:
 
     fn parse_attr_arg() -> Expr:
         """Parse a single attribute argument."""
+        val tok_span = self.current().span
         match self.current().kind:
             case TokenKind.IntLit:
                 val value = int(self.current().text)
                 self.advance()
                 Expr(
                     kind: ExprKind.IntLit(value),
-                    span: Span.new(0, 0, 1, 1)
+                    span: tok_span
                 )
             case TokenKind.StringLit:
                 val value = self.current().text
                 self.advance()
                 Expr(
                     kind: ExprKind.StringLit(value, nil),
-                    span: Span.new(0, 0, 1, 1)
+                    span: tok_span
                 )
             case TokenKind.BoolLit:
                 val value = self.current().text == "true"
                 self.advance()
                 Expr(
                     kind: ExprKind.BoolLit(value),
-                    span: Span.new(0, 0, 1, 1)
+                    span: tok_span
                 )
             case TokenKind.Ident:
                 val name = self.current().text
                 self.advance()
                 Expr(
                     kind: ExprKind.Ident(name),
-                    span: Span.new(0, 0, 1, 1)
+                    span: tok_span
                 )
             case _:
                 # Default to nil for unsupported types
                 Expr(
                     kind: ExprKind.NilLit,
-                    span: Span.new(0, 0, 1, 1)
+                    span: tok_span
                 )
 
 # ================================================================
@@ -222,11 +225,29 @@ fn parse_actor_body(outline: ActorOutline) -> ActorDef:
     # For now, actors are parsed identically to classes
     # The difference is in how they're instantiated (spawn) and used (messages)
 
+    # Parse type params from the outline's generic parameters
+    var type_params: [text] = []
+    if outline.generic_params.?:
+        for gp in outline.generic_params.unwrap():
+            type_params.push(gp.name)
+
+    # Parse fields from the outline's body members
+    var fields: [ActorField] = []
+    if outline.fields.?:
+        for field in outline.fields.unwrap():
+            fields.push(field)
+
+    # Parse methods from the outline's method definitions
+    var methods: Dict<text, FunctionDef> = {}
+    if outline.methods.?:
+        for method in outline.methods.unwrap():
+            methods[method.name] = method
+
     ActorDef(
         name: outline.name,
-        type_params: [],  # TODO: parse type params
-        fields: [],       # TODO: parse fields
-        methods: {},      # TODO: parse methods
+        type_params: type_params,
+        fields: fields,
+        methods: methods,
         is_public: outline.is_public,
         doc_comment: nil,
         attributes: [],
@@ -266,14 +287,12 @@ fn has_actor_keyword(tokens: [Token], start: i64) -> bool:
 fn apply_attributes_to_function(func: Function, attributes: [Attribute]) -> Function:
     """Apply parsed attributes to a function.
 
-    NOTE: Function struct doesn't have attributes field yet.
-    This would need to be added for full support.
+    Stores attributes in the function and also interprets some as flags.
+    (Phase 3.3 - TODO ✅)
     """
-    # TODO: Add attributes field to Function struct
-    # For now, interpret some attributes as flags
-
     var is_async = func.is_async
 
+    # Interpret some attributes as flags
     for attr in attributes:
         if attr.name == "async":
             is_async = true
@@ -291,6 +310,7 @@ fn apply_attributes_to_function(func: Function, attributes: [Attribute]) -> Func
         is_mutable: func.is_mutable,
         is_const: func.is_const,
         is_kernel: func.is_kernel,
+        attributes: attributes,
         doc_comment: func.doc_comment,
         span: func.span
     )

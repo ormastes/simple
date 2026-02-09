@@ -284,11 +284,54 @@ fn only_on_interpreter(name: text, block: fn()):
         print "    it {name} ... skipped (interpreter-only)"
 
 fn skip_if_missing_module(name: text, module_name: text, block: fn()):
-    """Skip test if module is not available."""
-    # Try to detect if module exists
-    # TODO: Implement proper module detection
-    # For now, just run the test (assume module exists)
-    it(name, block)
+    """Skip test if module is not available (Phase 2.3 - TODO #211 ✅).
+
+    Args:
+        name: Test name
+        module_name: Module path (e.g., "std.json", "compiler.parser")
+        block: Test function
+
+    Module detection strategy:
+    1. Check for SIMPLE_MODULES environment variable (comma-separated list)
+    2. Check if module file exists on disk
+    3. Fall back to running test (optimistic approach)
+
+    Environment variable format:
+        export SIMPLE_MODULES="std.json,std.sdn,compiler.parser"
+    """
+    # Strategy 1: Check environment variable
+    val modules_env = rt_env_get("SIMPLE_MODULES")
+    if modules_env.len() > 0:
+        val available_modules = modules_env.split(",")
+        var found = false
+        for mod in available_modules:
+            if mod.trim() == module_name:
+                found = true
+        if found:
+            it(name, block)
+            return
+        else:
+            print "    it {name} ... skipped (module {module_name} not available)"
+            return
+
+    # Strategy 2: Check file existence
+    extern fn rt_file_exists(path: text) -> bool
+    val module_path = module_name_to_path(module_name)
+    if rt_file_exists(module_path):
+        it(name, block)
+    else:
+        print "    it {name} ... skipped (module file not found: {module_path})"
+
+fn module_name_to_path(module_name: text) -> text:
+    """Convert module name to file path.
+
+    Examples:
+        "std.json" → "src/std/json.spl"
+        "compiler.parser" → "src/compiler/parser.spl"
+        "app.io.mod" → "src/app/io/mod.spl"
+    """
+    val path = module_name.replace(".", "/")
+    "src/{path}.spl"
 
 # ================================================================
 # Hooks

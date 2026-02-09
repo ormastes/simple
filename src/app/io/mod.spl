@@ -20,6 +20,9 @@ extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
 extern fn rt_cli_handle_compile(args: [str]) -> i64
 extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
 
+# Note: String ptr+len conversions are handled by Simple runtime internally
+# No additional FFI functions needed - strings already work with existing rt_* functions
+
 # --- System & Concurrency SFFI (Phase 4) ---
 # Note: These use the exact runtime function names.
 # Wrapper functions (getpid, hostname, etc.) call these externs.
@@ -39,13 +42,107 @@ extern fn rt_thread_available_parallelism() -> i64
 # extern fn declarations now in jit.spl
 
 # --- Debug/Hook Functions ---
-# Note: These are stubs - runtime doesn't support debug hooks yet
+# C++ backend available: libsimple_debug.so (SFFI three-tier pattern)
+# Tier 1: .build/rust/ffi_debug/ (C++ bridge, 499K .so)
+# Tier 2: src/ffi/debug.spl (extern fn declarations for compiled mode)
+# Spec: examples/debug.wrapper_spec
+# Interpreter mode: Simple stubs below return defaults
+# Compiled mode: links against libsimple_debug.so via Tier 2 extern fn
+
 fn rt_debug_set_active(active: bool):
-    # Stub: Debug hooks not yet implemented in runtime
     pass
 
 fn rt_hook_enable_debugging(enable: bool):
-    # Stub: Hook debugging not yet implemented in runtime
+    pass
+
+fn rt_debug_add_breakpoint_at(bp_file: text, bp_line: i64) -> i64:
+    0
+
+fn rt_debug_remove_breakpoint_at(bp_file: text, bp_line: i64):
+    pass
+
+fn rt_debug_continue_exec():
+    pass
+
+fn rt_debug_pause_exec():
+    pass
+
+fn rt_debug_set_step_mode_val(mode: i64):
+    pass
+
+fn rt_debug_stack_trace_lines() -> [text]:
+    []
+
+fn rt_debug_local_vars() -> [text]:
+    []
+
+fn rt_debug_get_current_file() -> text:
+    ""
+
+fn rt_debug_get_current_line() -> i64:
+    0
+
+fn rt_debug_run_file_debug(path: text, debug_mode: bool) -> i64:
+    0
+
+# --- Rich Breakpoints (Phase 1.5) ---
+fn rt_debug_add_breakpoint_rich(bp_file: text, bp_line: i64, condition: text, hit_condition: text, log_message: text, is_temporary: i64) -> i64:
+    0
+
+fn rt_debug_add_function_breakpoint(func_name: text, condition: text) -> i64:
+    0
+
+fn rt_debug_set_breakpoint_enabled(bp_id: i64, enabled: i64):
+    pass
+
+fn rt_debug_get_breakpoint_info(bp_id: i64) -> text:
+    "{}"
+
+fn rt_debug_list_breakpoints() -> text:
+    "[]"
+
+fn rt_debug_get_pending_condition() -> text:
+    ""
+
+fn rt_debug_report_condition_result(cond_result: i64):
+    pass
+
+# --- Frame Navigation ---
+fn rt_debug_select_frame(index: i64) -> i64:
+    0
+
+fn rt_debug_get_selected_frame() -> i64:
+    0
+
+fn rt_debug_frame_locals(frame_index: i64) -> text:
+    ""
+
+# --- Source File Reading ---
+fn rt_debug_get_source_lines(src_file: text, start_line: i64, line_count: i64) -> text:
+    ""
+
+# --- Watch Expressions ---
+fn rt_debug_add_watch(expr: text) -> i64:
+    0
+
+fn rt_debug_remove_watch(expr: text) -> i64:
+    0
+
+fn rt_debug_list_watches() -> text:
+    "[]"
+
+# --- Variable Modification ---
+fn rt_debug_set_variable(var_name: text, value_str: text, frame_index: i64) -> i64:
+    0
+
+# --- Expression Evaluation ---
+# Stub for interpreter mode - the real evaluator is in debug_tools.spl
+# which has access to imported rt_debug_local_vars etc.
+fn rt_debug_eval_expression(expr: text, frame_index: i64) -> text:
+    "{\"result\":\"(stub)\",\"type\":\"error\"}"
+
+# --- Terminate ---
+fn rt_debug_terminate():
     pass
 
 # --- Fault Detection Functions ---
@@ -86,11 +183,62 @@ fn upx_is_available() -> bool:
     # Check if upx command exists in PATH
     shell_bool("command -v upx >/dev/null 2>&1")
 
+# --- String Helper Functions (Phase 1.1 - Pure Simple) ---
+# These are Pure Simple implementations, no FFI needed
+
+fn hex_to_char(hex_code: i64) -> text:
+    """Convert hexadecimal code to character.
+
+    Pure Simple implementation using string formatting.
+    Example: hex_to_char(0x41) → "A"
+    """
+    # Use chr() builtin if available, otherwise format as char
+    if hex_code >= 0 and hex_code <= 127:
+        # ASCII range - safe to convert
+        "{hex_code as char}"
+    else:
+        # Non-ASCII - return hex representation
+        "\\x{hex_code:x}"
+
+fn byte_to_char(byte: i64) -> text:
+    """Convert byte value to character.
+
+    Pure Simple implementation.
+    Example: byte_to_char(65) → "A"
+    """
+    hex_to_char(byte)
+
+fn char_code(c: text) -> i64:
+    """Get numeric code of first character.
+
+    Pure Simple implementation.
+    Example: char_code("A") → 65
+    """
+    if c.len() == 0:
+        0
+    else:
+        # Get first byte - Simple strings are UTF-8
+        c[0].to_i64()
+
 export rt_debug_set_active, rt_hook_enable_debugging
+export rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at
+export rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val
+export rt_debug_stack_trace_lines, rt_debug_local_vars
+export rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_run_file_debug
+export rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint
+export rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info
+export rt_debug_list_breakpoints, rt_debug_get_pending_condition, rt_debug_report_condition_result
+export rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals
+export rt_debug_get_source_lines
+export rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches
+export rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate
 export rt_fault_set_stack_overflow_detection, rt_fault_set_max_recursion_depth
 export rt_fault_set_timeout, rt_fault_set_execution_limit
 export atomic_i64_new, atomic_bool_new
 export rt_vulkan_is_available, upx_is_available
+
+# String helper exports (Phase 1.1)
+export hex_to_char, byte_to_char, char_code
 
 export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines

@@ -1,0 +1,129 @@
+#!/usr/bin/env simple
+# Multi-Phase Bootstrap Runner
+#
+# Runs the multi-phase bootstrap pipeline that uses Pure Simple
+# compilation paths (C → GCC/LLVM) to avoid Cranelift hang bugs.
+#
+# Usage:
+#   ./script/bootstrap-multiphase.spl [--no-verify] [--no-llvm] [--keep-artifacts]
+#
+# The final binary will include all backends (Cranelift, LLVM, C codegen,
+# interpreter), but bootstrap itself uses only reliable C → GCC path.
+
+use app.build.bootstrap_multiphase (
+    MultiphaseBootstrap,
+    MultiphaseConfig,
+    BuildProfile,
+    CompilationBackend,
+    default_multiphase_config
+)
+use app.io.mod (cli_get_args, file_exists, shell)
+
+fn main():
+    val args = cli_get_args()
+
+    # Parse command line arguments
+    var verify = true
+    var use_llvm = true
+    var keep_artifacts = false
+
+    for arg in args:
+        match arg:
+            case "--no-verify": verify = false
+            case "--no-llvm": use_llvm = false
+            case "--keep-artifacts": keep_artifacts = true
+            case "--help":
+                print_help()
+                return ()
+            case _:
+                if arg.starts_with("--"):
+                    print "Unknown option: {arg}"
+                    print "Run with --help for usage information"
+                    return ()
+
+    # Create configuration
+    val config = MultiphaseConfig(
+        profile: BuildProfile.Bootstrap,
+        verify_reproducibility: verify,
+        use_llvm_for_final: use_llvm,
+        keep_artifacts: keep_artifacts,
+        workspace_root: ".",
+        output_dir: "build/bootstrap",
+        bootstrap_backend: CompilationBackend.Native,
+        production_backend: CompilationBackend.LLVM
+    )
+
+    # Run multi-phase bootstrap
+    val result = MultiphaseBootstrap.run(config)
+
+    # Exit with appropriate code
+    if result.overall_success:
+        print "╔══════════════════════════════════════════════════════════════════╗"
+        print "║                   ✓ Bootstrap Successful                         ║"
+        print "╚══════════════════════════════════════════════════════════════════╝"
+        print ""
+
+        # Copy final binary to standard location
+        val final_binary = if result.phase4.success:
+            result.phase4.binary_path
+        else:
+            result.phase3.binary_path
+
+        print "Installing final binary to bin/simple..."
+        val copy_result = shell("cp {final_binary} bin/simple && chmod +x bin/simple")
+        if copy_result.exit_code == 0:
+            print "✓ Installed to bin/simple"
+            print ""
+            print "You can now use: bin/simple <command>"
+        else:
+            print "✗ Failed to install binary"
+
+        return ()
+    else:
+        print "╔══════════════════════════════════════════════════════════════════╗"
+        print "║                   ✗ Bootstrap Failed                             ║"
+        print "╚══════════════════════════════════════════════════════════════════╝"
+        print ""
+        print "Check error messages above for details."
+
+        # Exit with error code (note: need runtime support for exit codes)
+        return ()
+
+fn print_help():
+    print "Multi-Phase Bootstrap Runner"
+    print ""
+    print "Usage:"
+    print "  ./script/bootstrap-multiphase.spl [options]"
+    print ""
+    print "Options:"
+    print "  --no-verify        Skip Phase2/Phase3 reproducibility check"
+    print "  --no-llvm          Skip Phase4 LLVM optimization"
+    print "  --keep-artifacts   Keep intermediate binaries after build"
+    print "  --help             Show this help message"
+    print ""
+    print "Description:"
+    print "  Builds the Simple compiler using a multi-phase bootstrap process"
+    print "  that uses Pure Simple compilation paths (C → GCC/LLVM) to avoid"
+    print "  Cranelift hang bugs during bootstrap."
+    print ""
+    print "  Phase 0: Verify pre-built bootstrap binary"
+    print "  Phase 1: Build minimal compiler (C → GCC, fast)"
+    print "  Phase 2: Build full compiler (C → GCC)"
+    print "  Phase 3: Rebuild for reproducibility check"
+    print "  Phase 4: LLVM optimized production binary (optional)"
+    print ""
+    print "  The final binary includes all backends:"
+    print "    - Interpreter (always available)"
+    print "    - C codegen → GCC (native.spl)"
+    print "    - C codegen → LLVM (llvm_direct.spl)"
+    print "    - Cranelift JIT (available but not used during bootstrap)"
+    print ""
+    print "Examples:"
+    print "  # Full bootstrap with all phases:"
+    print "  ./script/bootstrap-multiphase.spl"
+    print ""
+    print "  # Quick bootstrap without LLVM optimization:"
+    print "  ./script/bootstrap-multiphase.spl --no-llvm"
+    print ""
+    print "  # Debug build keeping all intermediate artifacts:"
+    print "  ./script/bootstrap-multiphase.spl --keep-artifacts"

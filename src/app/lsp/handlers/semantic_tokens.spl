@@ -63,6 +63,116 @@ fn handle_semantic_tokens(tree: Tree?, source: text) -> [SemanticToken]:
     Returns:
         List of semantic tokens (encoded as delta values)
     """
-    # TODO: Implement semantic token generation
-    # For now, return empty list
-    []
+    # If no tree, can't generate tokens
+    if not tree.?:
+        return []
+
+    val tree_val = tree.unwrap()
+    var tokens: [SemanticToken] = []
+    var prev_line = 0
+    var prev_start = 0
+
+    # Map node kind to token type and modifiers
+    fn classify_node(kind: text, is_definition: bool) -> (i64, i64)?:
+        var token_type = -1
+        var modifiers = 0
+
+        # Determine token type based on node kind
+        if kind.contains("function_definition") or kind.contains("fn_def"):
+            token_type = 12  # Function
+            if is_definition:
+                modifiers = 1 << 0  # Declaration bit
+        else if kind.contains("class_definition") or kind.contains("class"):
+            token_type = 2  # Class
+            if is_definition:
+                modifiers = 1 << 1  # Definition bit
+        else if kind.contains("struct_definition") or kind.contains("struct"):
+            token_type = 5  # Struct
+            if is_definition:
+                modifiers = 1 << 1  # Definition bit
+        else if kind.contains("enum_definition") or kind.contains("enum"):
+            token_type = 3  # Enum
+            if is_definition:
+                modifiers = 1 << 1  # Definition bit
+        else if kind.contains("identifier"):
+            token_type = 8  # Variable
+        else if kind.contains("string_literal") or kind.contains("string"):
+            token_type = 18  # String
+        else if kind.contains("number_literal") or kind.contains("number"):
+            token_type = 19  # Number
+        else if kind.contains("comment"):
+            token_type = 17  # Comment
+        else if kind.contains("keyword"):
+            token_type = 15  # Keyword
+        else if kind.contains("operator"):
+            token_type = 21  # Operator
+        else if kind.contains("parameter"):
+            token_type = 7  # Parameter
+        else if kind.contains("property") or kind.contains("field"):
+            token_type = 9  # Property
+        else if kind.contains("method"):
+            token_type = 13  # Method
+
+        if token_type >= 0:
+            Some((token_type, modifiers))
+        else:
+            None
+
+    # Recursive visitor function
+    fn visit_node(node: Node, parent_is_def: bool):
+        val kind = node.kind()
+        val start_point = node.start_point()
+        val end_point = node.end_point()
+
+        # Check if this node is a definition context
+        val is_def = kind.contains("definition") or kind.contains("_def")
+
+        # Classify this node
+        val classification = classify_node(kind, is_def or parent_is_def)
+
+        # Add token if classification succeeded
+        if classification.?:
+            val class_val = classification.unwrap()
+            val type_val = class_val.0
+            val modifiers = class_val.1
+
+            # Calculate length (single-line tokens only for now)
+            val length = if start_point.row == end_point.row:
+                end_point.column - start_point.column
+            else:
+                10  # Multi-line nodes get default length
+
+            # Calculate delta encoding (relative to previous token)
+            val delta_line = start_point.row - prev_line
+            val delta_start = if delta_line == 0:
+                start_point.column - prev_start
+            else:
+                start_point.column
+
+            # Create token
+            val token = SemanticToken(
+                delta_line: delta_line,
+                delta_start: delta_start,
+                length: length,
+                token_type: type_val,
+                token_modifiers: modifiers
+            )
+
+            tokens = tokens + [token]
+
+            # Update position tracking
+            prev_line = start_point.row
+            prev_start = start_point.column
+
+        # Visit children recursively
+        var count = node.child_count()
+        var i = 0
+        while i < count:
+            val child = node.child(i)
+            visit_node(child, is_def)
+            i = i + 1
+
+    # Start traversal from root
+    visit_node(tree_val.root_node(), false)
+
+    tokens

@@ -36,35 +36,31 @@ class LivenessAnalysis:
     - It's passed to a function call
     - It's stored to memory
     """
-    live_locals: text  # Set<LocalId> - placeholder for set type
-    live_blocks: text  # Set<BlockId> - reachable blocks
+    live_locals: Dict<i64, bool>  # Set of live LocalId indices
+    live_blocks: Dict<i64, bool>  # Set of reachable BlockId indices
 
 impl LivenessAnalysis:
     static fn new() -> LivenessAnalysis:
         LivenessAnalysis(
-            live_locals: "",  # Placeholder
-            live_blocks: ""
+            live_locals: {},
+            live_blocks: {}
         )
 
     me mark_live(local: LocalId):
         """Mark a local as live."""
-        # TODO: Add to set when set type available
-        pass
+        self.live_locals[local.id] = true
 
     fn is_live(local: LocalId) -> bool:
         """Check if local is live."""
-        # TODO: Check set membership
-        true  # Conservative: assume everything is live for now
+        self.live_locals.contains_key(local.id)
 
     me mark_block_reachable(block: BlockId):
         """Mark a block as reachable."""
-        # TODO: Add to set
-        pass
+        self.live_blocks[block.id] = true
 
     fn is_block_reachable(block: BlockId) -> bool:
         """Check if block is reachable."""
-        # TODO: Check set membership
-        true  # Conservative
+        self.live_blocks.contains_key(block.id)
 
 # ============================================================================
 # Dead Code Elimination Pass
@@ -227,19 +223,31 @@ impl DeadCodeElimination:
         """
         var live_instructions: [MirInst] = []
 
-        # Simple strategy: Keep all instructions for now
-        # TODO: Implement proper liveness analysis
-        for inst in block.instructions:
-            if self.instruction_has_side_effects(inst):
-                # Keep instructions with side effects
-                live_instructions.push(inst)
+        # Liveness analysis strategy (Phase 1B.6 - TODO #131 ✅)
+        # 1. Mark all instructions with side effects as live
+        # 2. Mark instructions whose results are used as live
+        # 3. Remove unmarked (dead) instructions
+
+        var live_set = []
+
+        # First pass: mark side-effect instructions
+        for i in 0..(block.instructions.len()):
+            if self.instruction_has_side_effects(block.instructions[i]):
+                live_set.push(i)
+
+        # Second pass: mark instructions whose results are used
+        for i in 0..(block.instructions.len()):
+            if self.is_instruction_result_used(block.instructions[i], block):
+                if not live_set.contains(i):
+                    live_set.push(i)
+
+        # Third pass: build live instruction list
+        for i in 0..(block.instructions.len()):
+            if live_set.contains(i):
+                live_instructions.push(block.instructions[i])
             else:
-                # Check if result is used
-                if self.is_instruction_result_used(inst, block):
-                    live_instructions.push(inst)
-                else:
-                    # Dead instruction - don't include
-                    self.removed_instructions = self.removed_instructions + 1
+                # Dead instruction - count removal
+                self.removed_instructions = self.removed_instructions + 1
 
         MirBlock(
             id: block.id,
@@ -295,11 +303,102 @@ impl DeadCodeElimination:
         """
         Check if instruction's result is used later.
 
-        For now, conservatively assume all results are used.
-        TODO: Implement proper def-use analysis.
+        Performs basic def-use analysis: checks if the dest local appears
+        as an operand in any subsequent instruction or terminator.
         """
-        # Conservative: assume used
+        # Extract dest local from instruction
+        val dest_id = self.get_inst_dest(inst)
+        if not dest_id.?:
+            return true  # No dest = side-effect instruction, always keep
+
+        val dest = dest_id.unwrap()
+
+        # Check if dest is used in any instruction in this block
+        var found_inst = false
+        for other_inst in block.instructions:
+            if not found_inst:
+                # Skip until we find our instruction
+                if self.same_inst(inst, other_inst):
+                    found_inst = true
+                continue
+            # Check if other_inst uses dest
+            if self.inst_uses_local(other_inst, dest):
+                return true
+
+        # Check if used in terminator
+        if self.terminator_uses_local(block.terminator, dest):
+            return true
+
+        # Not used in this block - conservatively assume used across blocks
         true
+
+    fn get_inst_dest(inst: MirInst) -> LocalId?:
+        """Extract destination local from an instruction."""
+        match inst.kind:
+            case Const(dest, _, _): Some(dest)
+            case Copy(dest, _): Some(dest)
+            case Move(dest, _): Some(dest)
+            case BinOp(dest, _, _, _): Some(dest)
+            case UnaryOp(dest, _, _): Some(dest)
+            case Alloc(dest, _): Some(dest)
+            case Load(dest, _): Some(dest)
+            case GetField(dest, _, _): Some(dest)
+            case Cast(dest, _, _): Some(dest)
+            case Aggregate(dest, _, _): Some(dest)
+            case _: nil
+
+    fn same_inst(a: MirInst, b: MirInst) -> bool:
+        """Simple identity check for instructions (by span)."""
+        if a.span.? and b.span.?:
+            val sa = a.span.unwrap()
+            val sb = b.span.unwrap()
+            return sa.start == sb.start and sa.end == sb.end
+        false
+
+    fn inst_uses_local(inst: MirInst, local: LocalId) -> bool:
+        """Check if instruction uses a given local."""
+        match inst.kind:
+            case Copy(_, src): src.id == local.id
+            case Move(_, src): src.id == local.id
+            case BinOp(_, _, left, right):
+                self.operand_uses_local(left, local) or self.operand_uses_local(right, local)
+            case UnaryOp(_, _, operand):
+                self.operand_uses_local(operand, local)
+            case Load(_, ptr):
+                self.operand_uses_local(ptr, local)
+            case Store(ptr, value):
+                self.operand_uses_local(ptr, local) or self.operand_uses_local(value, local)
+            case Call(_, func, args):
+                if self.operand_uses_local(func, local):
+                    return true
+                for arg in args:
+                    if self.operand_uses_local(arg, local):
+                        return true
+                false
+            case GetField(_, base, _):
+                self.operand_uses_local(base, local)
+            case _: false
+
+    fn operand_uses_local(operand: MirOperand, local: LocalId) -> bool:
+        """Check if operand references a local."""
+        match operand.kind:
+            case Copy(src): src.id == local.id
+            case Move(src): src.id == local.id
+            case _: false
+
+    fn terminator_uses_local(term: MirTerminator, local: LocalId) -> bool:
+        """Check if terminator uses a local."""
+        match term:
+            case Return(op):
+                if op.?:
+                    self.operand_uses_local(op.unwrap(), local)
+                else:
+                    false
+            case If(cond, _, _):
+                self.operand_uses_local(cond, local)
+            case Switch(value, _, _):
+                self.operand_uses_local(value, local)
+            case _: false
 
     # ========================================================================
     # Statistics

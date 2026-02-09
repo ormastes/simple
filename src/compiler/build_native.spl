@@ -214,9 +214,92 @@ fn discover_dependencies(sources: [text], verbose: bool) -> [text]:
     for source in sources:
         seen = seen.insert(source)
 
-    # TODO: Implement proper import scanning
-    # For now, return input sources
-    all_sources
+    # Implement import scanning (Phase 1B.5 - TODO #75 ✅)
+    use app.io.{file_read}
+
+    # Scan each source file for imports
+    var to_scan = sources.copy()
+    var scanned = []
+
+    while to_scan.len() > 0:
+        var current = to_scan[0]
+        to_scan = to_scan[1..]  # Remove first element
+
+        if seen.contains(current):
+            ()  # Already processed
+        else:
+            seen = seen.insert(current)
+            scanned.push(current)
+
+            # Read file and find imports
+            if file_exists(current):
+                val content = file_read(current)
+                val imports = extract_imports(content)
+
+                # Add new imports to scan queue
+                for import_path in imports:
+                    if not seen.contains(import_path):
+                        to_scan.push(import_path)
+
+    scanned
+
+fn extract_imports(source_code: text) -> [text]:
+    """Extract import statements from source code.
+
+    Parses 'use' and 'import' statements to find module dependencies.
+    Returns list of module paths (converted to file paths).
+
+    Phase 1B.5 - TODO #75 ✅
+    """
+    var imports = []
+    val lines = source_code.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Match 'use module.path' or 'import module.path'
+        if trimmed.starts_with("use ") or trimmed.starts_with("import "):
+            # Extract module path
+            var module_path = ""
+
+            if trimmed.starts_with("use "):
+                module_path = trimmed[4..].trim()
+            else:
+                module_path = trimmed[7..].trim()
+
+            # Remove curly braces if present (use foo.{bar, baz})
+            if module_path.contains("{"):
+                val parts = module_path.split("{")
+                module_path = parts[0].trim()
+
+            # Remove 'as' aliases
+            if module_path.contains(" as "):
+                val parts = module_path.split(" as ")
+                module_path = parts[0].trim()
+
+            # Convert module path to file path
+            # e.g., "std.json" -> "src/std/json.spl"
+            if module_path.len() > 0 and not module_path.contains("("):
+                val file_path = module_to_file_path(module_path)
+                imports.push(file_path)
+
+    imports
+
+fn module_to_file_path(module_path: text) -> text:
+    """Convert module path to file path.
+
+    Examples:
+        std.json -> src/std/json.spl
+        app.io.mod -> src/app/io/mod.spl
+        compiler.lexer -> src/compiler/lexer.spl
+    """
+    val path = module_path.replace(".", "/")
+    "src/{path}.spl"
+
+fn file_exists(path: text) -> bool:
+    """Check if file exists (helper for import scanning)."""
+    use app.io.{file_exists as io_file_exists}
+    io_file_exists(path)
 
 fn source_to_smf_path(source: text) -> text:
     """Convert source path to SMF output path."""

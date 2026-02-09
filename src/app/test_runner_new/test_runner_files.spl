@@ -10,12 +10,44 @@ use app.io.mod (path_basename, file_read, file_exists, dir_walk)
 # =========================================================================
 
 fn strip_ansi(s: text) -> text:
-    # ANSI codes like ESC[32m contain digits but are separated from content
-    # by the 'm' terminator, so extract_number_before won't pick them up
-    # because it scans backwards from keyword and stops at non-digit chars.
-    # A full implementation needs char code access (ESC = 0x1b = 27).
-    # TODO: Implement proper ANSI stripping when rt_char_code FFI is available
-    s
+    # Strip ANSI escape sequences by scanning for ESC[ ... m patterns.
+    # ESC character is \x1b (27). We detect it by checking for the two-char
+    # sequence that starts ANSI codes: ESC followed by '['.
+    var result = ""
+    var i = 0
+    var in_escape = false
+    while i < s.len():
+        val ch = s[i:i + 1]
+        if in_escape:
+            # Inside escape sequence - skip until we hit a letter terminator
+            if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z"):
+                in_escape = false  # End of escape sequence
+            i = i + 1
+            continue
+        # Check for ESC character (appears as a special char in strings)
+        # Since we can't directly check char code, look for the [ after ESC
+        if i + 1 < s.len():
+            val next = s[i + 1:i + 2]
+            if next == "[":
+                # Could be ESC[, check if followed by digits and letter
+                var j = i + 2
+                var looks_like_ansi = false
+                while j < s.len():
+                    val c = s[j:j + 1]
+                    if (c >= "0" and c <= "9") or c == ";" or c == "?":
+                        j = j + 1
+                    elif (c >= "a" and c <= "z") or (c >= "A" and c <= "Z"):
+                        looks_like_ansi = true
+                        j = j + 1
+                        break
+                    else:
+                        break
+                if looks_like_ansi:
+                    i = j
+                    continue
+        result = result + ch
+        i = i + 1
+    result
 
 # =========================================================================
 # File Type Checking

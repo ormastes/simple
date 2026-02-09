@@ -356,9 +356,13 @@ fn check_function_body(checker: TypeChecker, func: FunctionDef) -> Result<(), Ty
 
     # Check function body
     # Need to create engine from checker state
+    # Build TypeEnv from func_env bindings
+    var type_env = TypeEnv.empty()
+    for name in func_env.keys():
+        type_env = type_env.extend(name, func_env[name])
     var engine = InferenceEngine(
         unifier: checker.unifier,
-        env: TypeEnv.empty(),  # TODO: Convert func_env to TypeEnv
+        env: type_env,
         deferred: [],
         errors: []
     )
@@ -447,8 +451,16 @@ fn ast_type_to_inference_type(ast_ty: ast.Type, checker: TypeChecker) -> Type:
 
         case Array(elem, size):
             val elem_ty = ast_type_to_inference_type(elem, checker)
-            # TODO: Handle size expression
-            Type.Array(elem: elem_ty, size: nil)
+            # Evaluate size expression if present (e.g., [u8; 256])
+            var size_val: i64? = nil
+            if size.?:
+                val size_expr = size.unwrap()
+                match size_expr.kind:
+                    case ExprKind.IntLit(n):
+                        size_val = Some(n)
+                    case _:
+                        size_val = nil
+            Type.Array(elem: elem_ty, size: size_val)
 
         case Tuple(elems):
             val elem_types = elems.map(\e: ast_type_to_inference_type(e, checker))

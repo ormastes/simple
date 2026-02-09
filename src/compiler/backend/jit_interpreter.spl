@@ -223,19 +223,24 @@ impl JitInterpreterBackend:
         if not em.has_function(fn_name):
             return nil
 
-        # Convert args to i64 array
-        # NOTE: This is a simplified implementation
-        # TODO: Implement full type conversion for all Simple types
+        # Convert args to i64 array for JIT calling convention
+        # All values are passed as i64: ints directly, floats as bit patterns,
+        # bools as 0/1, strings as pointer, nil as 0
         var arg_vals: [i64] = []
         for arg in args:
             match arg:
                 case Int(i):
                     arg_vals = arg_vals.push(i)
                 case Float(f):
-                    # TODO: Pass floats as i64 bit pattern
-                    arg_vals = arg_vals.push(f.to_i64())
+                    # Pass float as i64 bit pattern (reinterpret bits)
+                    arg_vals = arg_vals.push(f.to_bits())
                 case Bool(b):
                     arg_vals = arg_vals.push(if b: 1 else: 0)
+                case Str(s):
+                    # String pointer - pass as i64 address
+                    arg_vals = arg_vals.push(s.ptr_as_i64())
+                case Nil:
+                    arg_vals = arg_vals.push(0)
                 case _:
                     # Can't handle complex types via JIT yet
                     # Need to implement struct/array marshaling
@@ -245,9 +250,18 @@ impl JitInterpreterBackend:
         val exec_result = em.execute(fn_name, arg_vals)
         match exec_result:
             case Ok(result_val):
-                # TODO: Determine actual return type from function signature
-                # For now, assume i64
-                Some(Ok(Value.int(result_val)))
+                # Determine return type from function signature
+                val ret_type = em.get_return_type(fn_name)
+                val result = match ret_type:
+                    case "f64":
+                        Value.float(f64.from_bits(result_val))
+                    case "bool":
+                        Value.bool(result_val != 0)
+                    case "()":
+                        Value.unit()
+                    case _:
+                        Value.int(result_val)
+                Some(Ok(result))
             case Err(msg):
                 Some(Err(BackendError.runtime_error("JIT execution failed: {msg}", nil)))
 

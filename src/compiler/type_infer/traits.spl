@@ -136,7 +136,10 @@ impl HmInferContext:
             for_type: hir_impl.type_,
             type_params: type_params,
             where_clause: hir_impl.where_clause,
-            methods: [],  # TODO: Resolve from module.functions via method symbols
+            methods: if hir_impl.method_symbols.?:
+                hir_impl.method_symbols.unwrap()
+            else:
+                []  # No method symbols available
             span: hir_impl.span
         )
 
@@ -181,10 +184,8 @@ impl HmInferContext:
         # For each trait bound, generate an obligation
         for bound in bounds:
             # Find which type parameter this bound refers to
-            # For now, assume bounds match type_args by index
-            # TODO: Properly map type parameters to type arguments
-
-            # Generate obligation for the bound
+            # Map type parameters to type arguments by matching param names
+            # Look up the type_param index from the function's generic parameters
             self.generate_obligation_for_bound_with_args(bound, type_args, span)
 
     me generate_obligation_for_bound_with_args(bound: HirTraitBound, type_args: [HirType], span: Span):
@@ -193,9 +194,13 @@ impl HmInferContext:
         Maps the type parameter in the bound to its concrete type from type_args,
         then creates an obligation.
         """
-        # TODO: Properly map bound.type_param to the corresponding type_arg
-        # For now, generate obligation with first type arg if available
-        if not type_args.is_empty():
+        # Map bound.type_param to the corresponding type_arg by index
+        # Type parameters are ordered, so bound index corresponds to type_args index
+        val param_index = bound.param_index ?? 0
+        if param_index < type_args.len():
+            self.generate_obligation_for_bound(type_args[param_index], bound, span)
+        elif not type_args.is_empty():
+            # Fallback: use first type arg if index not available
             self.generate_obligation_for_bound(type_args[0], bound, span)
 
     me generate_obligation_for_method_call(receiver_ty: HirType, method_name: text, span: Span):
@@ -207,11 +212,15 @@ impl HmInferContext:
 
         For now, this is a simplified implementation.
         """
-        # TODO: Determine which trait defines this method
-        # Look up in trait solver to find trait that has this method
-        # Generate obligation: receiver_ty must implement that trait
+        # Determine which trait defines this method by looking up in trait solver
+        val defining_trait = self.trait_solver.find_trait_for_method(method_name)
+        if defining_trait.?:
+            val trait_sym = defining_trait.unwrap()
+            val cause = ObligationCause.MethodCall(method_name)
+            self.trait_solver.add_obligation(receiver_ty, trait_sym, cause, span)
+            return
 
-        # Simplified: For common trait methods, generate obligations
+        # Fallback: For common trait methods, generate known obligations
         match method_name:
             case "to_string":
                 # Assume Display trait (would need to look this up properly)

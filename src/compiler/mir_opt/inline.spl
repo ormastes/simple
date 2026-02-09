@@ -127,9 +127,27 @@ impl InlineCostAnalyzer:
         Check if function is recursive (calls itself).
 
         Conservative: returns true if any call matches function name.
+
+        Phase 1B.6 - TODO #132 ✅
         """
-        # TODO: Implement recursive detection
-        # For now, conservatively assume non-recursive
+        # Check if function calls itself
+        val func_name = func.name
+
+        # Scan all instructions for calls to self
+        for block in func.blocks:
+            for instr in block.instructions:
+                match instr:
+                    case Call(target, args, dest):
+                        # Check if target is same function
+                        match target:
+                            case Variable(name):
+                                if name == func_name:
+                                    return true
+                            case _:
+                                ()  # Other call types
+                    case _:
+                        ()  # Not a call
+
         false
 
 # ============================================================================
@@ -200,16 +218,37 @@ impl FunctionInliner:
             new_instructions.push(caller_block.instructions[i])
             i = i + 1
 
-        # Bind arguments to parameters
-        # TODO: Create copy instructions for argument binding
+        # Bind arguments to parameters: emit Const/Copy for each arg
+        for param_idx in 0..args.len():
+            if param_idx < callee.locals.len():
+                val param_local = callee.locals[param_idx]
+                val dest = param_local.id
+                match args[param_idx].kind:
+                    case Copy(src):
+                        new_instructions.push(MirInst(kind: MirInstKind.Copy(dest, src), span: nil))
+                    case Move(src):
+                        new_instructions.push(MirInst(kind: MirInstKind.Move(dest, src), span: nil))
+                    case Const(cv, ct):
+                        new_instructions.push(MirInst(kind: MirInstKind.Const(dest, cv, ct), span: nil))
 
         # Copy inlined body (rename locals)
         for inst in callee_block.instructions:
             val renamed = self.rename_instruction(inst)
             new_instructions.push(renamed)
 
-        # Handle return value
-        # TODO: Replace return with assignment to call_dest
+        # Handle return value: check terminator for Return and assign to call_dest
+        match callee_block.terminator:
+            case Return(ret_op):
+                if call_dest.? and ret_op.?:
+                    val ret_operand = ret_op.unwrap()
+                    match ret_operand.kind:
+                        case Copy(src):
+                            new_instructions.push(MirInst(kind: MirInstKind.Copy(call_dest.unwrap(), src), span: nil))
+                        case Move(src):
+                            new_instructions.push(MirInst(kind: MirInstKind.Move(call_dest.unwrap(), src), span: nil))
+                        case Const(cv, ct):
+                            new_instructions.push(MirInst(kind: MirInstKind.Const(call_dest.unwrap(), cv, ct), span: nil))
+            case _: ()
 
         # Copy instructions after call
         i = call_inst_idx + 1
@@ -231,10 +270,36 @@ impl FunctionInliner:
         Rename locals in instruction to avoid conflicts.
 
         Creates fresh local IDs for all definitions.
+        For instructions that define a destination, allocate a fresh local ID
+        and substitute it. Uses only local context (no global rename map needed
+        since single-block functions have unique definitions per instruction).
         """
-        # TODO: Implement proper local renaming
-        # For now, return as-is
-        inst
+        # Rename dest locals in defining instructions to avoid conflicts
+        match inst.kind:
+            case Const(dest, value, type_):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.Const(new_dest, value, type_), span: inst.span)
+            case Copy(dest, src):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.Copy(new_dest, src), span: inst.span)
+            case Move(dest, src):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.Move(new_dest, src), span: inst.span)
+            case BinOp(dest, op, left, right):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.BinOp(new_dest, op, left, right), span: inst.span)
+            case UnaryOp(dest, op, operand):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.UnaryOp(new_dest, op, operand), span: inst.span)
+            case Alloc(dest, type_):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.Alloc(new_dest, type_), span: inst.span)
+            case Load(dest, ptr):
+                val new_dest = self.fresh_local()
+                MirInst(kind: MirInstKind.Load(new_dest, ptr), span: inst.span)
+            case _:
+                # Non-defining instructions (Store, Nop, etc.) pass through
+                inst
 
     me fresh_local() -> LocalId:
         """Allocate a fresh local ID."""

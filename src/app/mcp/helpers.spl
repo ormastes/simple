@@ -191,6 +191,85 @@ fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> 
     val after = json.substring(start)
     extract_json_string(after, inner_key)
 
+fn extract_arguments_dict(body: String) -> Dict<String, String>:
+    """Extract arguments dictionary from MCP request body.
+
+    Parses the params.arguments object from JSON-RPC request.
+
+    Args:
+        body - Full JSON-RPC request body
+
+    Returns:
+        Dictionary of argument name -> value pairs
+    """
+    var result: Dict<String, String> = {}
+
+    # Find params object
+    val params_search = Q() + "params" + Q() + ":"
+    val params_idx = unwrap_idx(body.index_of(params_search))
+    if params_idx < 0:
+        return result
+
+    val params_start = params_idx + params_search.len()
+    val params_section = body.substring(params_start)
+
+    # Find arguments object within params
+    val args_search = Q() + "arguments" + Q() + ":"
+    val args_idx = unwrap_idx(params_section.index_of(args_search))
+    if args_idx < 0:
+        return result
+
+    val args_start = args_idx + args_search.len()
+    val after_args = params_section.substring(args_start)
+    val trimmed = after_args.trim()
+
+    # Extract content between braces
+    if not trimmed.starts_with(LB()):
+        return result
+
+    # Find matching closing brace
+    var brace_count = 0
+    var idx = 0
+    var args_content = ""
+
+    for ch in trimmed:
+        if ch == LB():
+            brace_count = brace_count + 1
+        else if ch == RB():
+            brace_count = brace_count - 1
+            if brace_count == 0:
+                # Extract content between braces
+                args_content = trimmed.substring(1, idx)
+                break
+        idx = idx + 1
+
+    if args_content == "":
+        return result
+
+    # Parse key-value pairs from args_content
+    # Simple comma-separated parsing
+    val pairs = args_content.split(",")
+    for pair in pairs:
+        val colon_idx = unwrap_idx(pair.index_of(":"))
+        if colon_idx >= 0:
+            var key = pair.substring(0, colon_idx).trim()
+            var value = pair.substring(colon_idx + 1).trim()
+
+            # Remove quotes from key and value
+            if key.starts_with(Q()):
+                key = key.substring(1)
+            if key.ends_with(Q()):
+                key = key.substring(0, key.len() - 1)
+
+            if value.starts_with(Q()):
+                value = value.substring(1)
+            if value.ends_with(Q()):
+                value = value.substring(0, value.len() - 1)
+
+            result[key] = value
+
+    result
+
 # --- String escaping ---
 # escape_json imported from lib.json.builder
 
@@ -257,14 +336,50 @@ fn has_flag(args: [String], flag: String) -> Bool:
             return true
     return false
 
+fn make_tool_schema_multi(name: String, desc: String, properties_json: String, required_json: String, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
+    val schema = jo3(jp("type", js("object")), jp("properties", properties_json), jp("required", required_json))
+
+    # Build annotations object
+    var annot = LB()
+    var ro = "false"
+    if read_only:
+        ro = "true"
+    annot = annot + jp("readOnlyHint", ro)
+    annot = annot + ","
+    var dest = "false"
+    if destructive:
+        dest = "true"
+    annot = annot + jp("destructiveHint", dest)
+    annot = annot + ","
+    var idemp = "false"
+    if idempotent:
+        idemp = "true"
+    annot = annot + jp("idempotentHint", idemp)
+    annot = annot + ","
+    annot = annot + jp("openWorldHint", "false")
+    annot = annot + RB()
+
+    # Return tool schema with annotations
+    var result = LB()
+    result = result + jp("name", js(name))
+    result = result + ","
+    result = result + jp("description", js(desc))
+    result = result + ","
+    result = result + jp("inputSchema", schema)
+    result = result + ","
+    result = result + jp("annotations", annot)
+    result = result + RB()
+    result
+
 # --- Exports ---
 
 export LB, RB, Q
 export parse_int, min_int, unwrap_idx, unwrap_str
 export get_clean_args
 export jp, js, jo1, jo2, jo3
-export extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string
+export extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict
 export escape_json
 export read_file_safe, list_spl_files
 export make_tool_result, make_result_response, make_error_response
+export make_tool_schema_multi
 export has_flag
