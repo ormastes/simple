@@ -1,0 +1,161 @@
+# tools_git_sync.spl - Remote sync git compatibility tools (5 tools)
+#
+# Tools: fetch, pull, push, remote, tag
+
+use app.mcp_jj.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, make_tool_schema, make_no_param_tool, make_prop, make_prop_bool, make_prop_int, extract_nested_string, extract_arguments_dict}
+use app.mcp_jj.jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
+use app.mcp_jj.warning.{git_compat_warning, git_compat_warning_no_equiv, show_warnings}
+
+# =============================================================================
+# Tool 15: git_fetch -> jj git fetch
+# =============================================================================
+
+fn schema_git_fetch() -> String:
+    make_tool_schema("git_fetch", "[Git compat] Fetch from remote (translates to jj git fetch)", "remote", "Remote name (default: origin)", false, false, false, true)
+
+fn handle_git_fetch(id: String, body: String, repo_path: String) -> String:
+    val remote = extract_nested_string(body, "arguments", "remote")
+    var cmd = "git fetch"
+    if remote != "":
+        cmd = cmd + " --remote " + shell_quote(remote)
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_fetch", "jj git fetch", "jj_fetch")
+        make_tool_result(id, warning + result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 16: git_pull -> jj git fetch (no pull in jj)
+# =============================================================================
+
+fn schema_git_pull() -> String:
+    make_tool_schema("git_pull", "[Git compat] Pull from remote (translates to jj git fetch - no pull in jj)", "remote", "Remote name (default: origin)", false, false, false, true)
+
+fn handle_git_pull(id: String, body: String, repo_path: String) -> String:
+    val remote = extract_nested_string(body, "arguments", "remote")
+    var cmd = "git fetch"
+    if remote != "":
+        cmd = cmd + " --remote " + shell_quote(remote)
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_pull", "jj git fetch", "jj_fetch")
+        var msg = warning
+        msg = msg + "Note: jj has no 'pull' command. 'jj git fetch' is sufficient because:\n"
+        msg = msg + "  - jj automatically rebases your work on top of fetched changes\n"
+        msg = msg + "  - There is no separate merge/rebase step needed after fetching\n"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 17: git_push -> jj git push
+# =============================================================================
+
+fn schema_git_push() -> String:
+    var props = LB()
+    props = props + make_prop("remote", "Remote name (default: origin)")
+    props = props + "," + make_prop("bookmark", "Bookmark (branch) name to push")
+    props = props + "," + make_prop_bool("all", "Push all bookmarks")
+    props = props + RB()
+    make_tool_schema_multi("git_push", "[Git compat] Push to remote (translates to jj git push)", props, "[]", false, false, false)
+
+fn handle_git_push(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val remote = args.get("remote") ?? ""
+    val bookmark = args.get("bookmark") ?? ""
+    val all = args.get("all") ?? ""
+    var cmd = "git push"
+    if remote != "":
+        cmd = cmd + " --remote " + shell_quote(remote)
+    if all == "true":
+        cmd = cmd + " --all"
+    elif bookmark != "":
+        cmd = cmd + " --bookmark " + shell_quote(bookmark)
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_push", "jj git push", "jj_push")
+        make_tool_result(id, warning + result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# Tool 18: git_remote -> jj git remote
+# =============================================================================
+
+fn schema_git_remote() -> String:
+    var props = LB()
+    props = props + make_prop("action", "Action: add, list, remove, rename (required)")
+    props = props + "," + make_prop("name", "Remote name")
+    props = props + "," + make_prop("url", "Remote URL (for add)")
+    props = props + "," + make_prop("new_name", "New name (for rename)")
+    props = props + RB()
+    val required = "[" + js("action") + "]"
+    make_tool_schema_multi("git_remote", "[Git compat] Manage remotes (translates to jj git remote)", props, required, false, false, false)
+
+fn handle_git_remote(id: String, body: String, repo_path: String) -> String:
+    val args = extract_arguments_dict(body)
+    val action = args.get("action") ?? ""
+    val name = args.get("name") ?? ""
+    val url = args.get("url") ?? ""
+    val new_name = args.get("new_name") ?? ""
+    if action == "":
+        return make_error_response(id, -32602, "Missing required parameter: action")
+    val warning = git_compat_warning("git_remote", "jj git remote", "jj_remote")
+    if action == "list":
+        val result = jj_run("git remote list", repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "add":
+        if name == "" or url == "":
+            return make_error_response(id, -32602, "Missing required parameters: name, url (for add)")
+        val result = jj_run("git remote add " + shell_quote(name) + " " + shell_quote(url), repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "remove":
+        if name == "":
+            return make_error_response(id, -32602, "Missing required parameter: name (for remove)")
+        val result = jj_run("git remote remove " + shell_quote(name), repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    elif action == "rename":
+        if name == "" or new_name == "":
+            return make_error_response(id, -32602, "Missing required parameters: name, new_name (for rename)")
+        val result = jj_run("git remote rename " + shell_quote(name) + " " + shell_quote(new_name), repo_path)
+        if result.success:
+            make_tool_result(id, warning + result.stdout)
+        else:
+            make_error_response(id, -32603, result.stderr)
+    else:
+        make_error_response(id, -32602, "Unknown action: " + action + ". Use: add, list, remove, rename")
+
+# =============================================================================
+# Tool 19: git_tag -> jj tag list (list only)
+# =============================================================================
+
+fn schema_git_tag() -> String:
+    make_no_param_tool("git_tag", "[Git compat] List tags (translates to jj tag list). Note: jj only supports listing tags.", true, false, true)
+
+fn handle_git_tag(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("tag list", repo_path)
+    if result.success:
+        val warning = git_compat_warning("git_tag", "jj tag list", "jj_tag")
+        var msg = warning
+        msg = msg + "Note: jj currently only supports listing tags. Creating/deleting tags must be done via the underlying git repo.\n"
+        msg = msg + result.stdout
+        make_tool_result(id, msg)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+export schema_git_fetch, handle_git_fetch
+export schema_git_pull, handle_git_pull
+export schema_git_push, handle_git_push
+export schema_git_remote, handle_git_remote
+export schema_git_tag, handle_git_tag

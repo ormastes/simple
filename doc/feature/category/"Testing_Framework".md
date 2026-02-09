@@ -9,4 +9,3 @@
 | <a id="feature-184"></a>184 | "After Each Hooks" | "BDD after_each hooks for running cleanup code after each test example. Ensures resources are released and state is cleaned up." | planned | planned | planned | 📋 planned |  |
 | <a id="feature-187"></a>187 | "Expect Matchers" | "BDD expect/to assertion DSL with composable matchers. Provides readable assertions with clear failure messages." | planned | planned | planned | 📋 planned |  |
 | <a id="feature-192"></a>192 | Doctest | "Documentation testing framework that extracts and runs code examples from docstrings. Ensures documentation stays in sync with code." | planned | planned | planned | 📋 planned |  |
-

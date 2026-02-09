@@ -1,0 +1,311 @@
+# Network TCP Extern Functions
+#
+# TCP networking operations.
+# Split from network.spl for modularity.
+#
+# Provides Simple wrappers for TCP operations with proper error handling.
+
+from ..core import {Value, InterpreterError}
+
+export tcp_bind, tcp_accept, tcp_connect, tcp_connect_timeout
+export tcp_read, tcp_write, tcp_flush, tcp_shutdown, tcp_close
+export tcp_set_nodelay, tcp_set_read_timeout, tcp_set_write_timeout
+export tcp_get_nodelay, tcp_peek
+
+#==============================================================================
+# FFI Declarations - Call into Rust runtime (TCP)
+#==============================================================================
+
+@extern("native_tcp_bind_interp")
+fn rt_tcp_bind(addr: text) -> (i64, i64)
+
+@extern("native_tcp_accept_interp")
+fn rt_tcp_accept(handle: i64) -> Value
+
+@extern("native_tcp_connect_interp")
+fn rt_tcp_connect(addr: text) -> (i64, text, i64)
+
+@extern("native_tcp_connect_timeout_interp")
+fn rt_tcp_connect_timeout(addr: text, timeout_ns: i64) -> Value
+
+@extern("native_tcp_read_interp")
+fn rt_tcp_read(handle: i64, buf_len: i64) -> Value
+
+@extern("native_tcp_write_interp")
+fn rt_tcp_write(handle: i64, data: [i64]) -> Value
+
+@extern("native_tcp_flush_interp")
+fn rt_tcp_flush(handle: i64) -> Value
+
+@extern("native_tcp_shutdown_interp")
+fn rt_tcp_shutdown(handle: i64, how: Value) -> Value
+
+@extern("native_tcp_close_interp")
+fn rt_tcp_close(handle: i64) -> i64
+
+@extern("native_tcp_set_nodelay_interp")
+fn rt_tcp_set_nodelay(handle: i64, nodelay: bool) -> Value
+
+@extern("native_tcp_set_read_timeout_interp")
+fn rt_tcp_set_read_timeout(handle: i64, timeout_ns: i64) -> Value
+
+@extern("native_tcp_set_write_timeout_interp")
+fn rt_tcp_set_write_timeout(handle: i64, timeout_ns: i64) -> Value
+
+@extern("native_tcp_get_nodelay_interp")
+fn rt_tcp_get_nodelay(handle: i64) -> Value
+
+@extern("native_tcp_peek_interp")
+fn rt_tcp_peek(handle: i64, buf_len: i64) -> Value
+
+#==============================================================================
+# TCP Wrapper Functions
+#==============================================================================
+
+fn tcp_bind(args: [Value]) -> Result<Value, InterpreterError>:
+    """Bind a TCP listener to an address.
+
+    Args:
+        addr: Socket address as string (e.g., "127.0.0.1:8080")
+
+    Returns:
+        Tuple (handle, error_code) where error_code=0 means success
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_bind expects 1 argument"))
+
+    val addr = args[0].as_str() ?? return Err(InterpreterError.TypeError("tcp_bind expects string address"))
+
+    val (handle, err_code) = rt_tcp_bind(addr)
+    Ok(Value.tuple([Value.int(handle), Value.int(err_code)]))
+
+fn tcp_accept(args: [Value]) -> Result<Value, InterpreterError>:
+    """Accept incoming TCP connection.
+
+    Args:
+        handle: TCP listener handle
+
+    Returns:
+        Result<(stream_handle, peer_addr), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_accept expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_accept expects integer handle"))
+
+    Ok(rt_tcp_accept(handle))
+
+fn tcp_connect(args: [Value]) -> Result<Value, InterpreterError>:
+    """Connect to a TCP server.
+
+    Args:
+        addr: Server address as string (e.g., "example.com:80")
+
+    Returns:
+        Tuple (handle, local_addr, error_code) where error_code=0 means success
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_connect expects 1 argument"))
+
+    val addr = args[0].as_str() ?? return Err(InterpreterError.TypeError("tcp_connect expects string address"))
+
+    val (handle, local_addr, err_code) = rt_tcp_connect(addr)
+    Ok(Value.tuple([Value.int(handle), Value.str(local_addr), Value.int(err_code)]))
+
+fn tcp_connect_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Connect to a TCP server with timeout.
+
+    Args:
+        addr: Server address as string
+        timeout_ns: Timeout in nanoseconds
+
+    Returns:
+        Result<(handle, local_addr), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_connect_timeout expects 2 arguments"))
+
+    val addr = args[0].as_str() ?? return Err(InterpreterError.TypeError("tcp_connect_timeout expects string address"))
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("tcp_connect_timeout expects integer timeout"))
+
+    Ok(rt_tcp_connect_timeout(addr, timeout))
+
+fn tcp_read(args: [Value]) -> Result<Value, InterpreterError>:
+    """Read data from TCP stream.
+
+    Args:
+        handle: TCP stream handle
+        buf_len: Buffer length (default 4096)
+
+    Returns:
+        Result<(bytes_read, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("tcp_read expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_read expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 4096 else: 4096
+
+    Ok(rt_tcp_read(handle, buf_len))
+
+fn tcp_write(args: [Value]) -> Result<Value, InterpreterError>:
+    """Write data to TCP stream.
+
+    Args:
+        handle: TCP stream handle
+        data: Byte array to write
+
+    Returns:
+        Result<bytes_written, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_write expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_write expects integer handle"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("tcp_write expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("tcp_write expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_tcp_write(handle, byte_array))
+
+fn tcp_flush(args: [Value]) -> Result<Value, InterpreterError>:
+    """Flush TCP stream write buffer.
+
+    Args:
+        handle: TCP stream handle
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_flush expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_flush expects integer handle"))
+
+    Ok(rt_tcp_flush(handle))
+
+fn tcp_shutdown(args: [Value]) -> Result<Value, InterpreterError>:
+    """Shutdown TCP stream.
+
+    Args:
+        handle: TCP stream handle
+        how: Shutdown mode (Read=0, Write=1, Both=2)
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_shutdown expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_shutdown expects integer handle"))
+
+    Ok(rt_tcp_shutdown(handle, args[1]))
+
+fn tcp_close(args: [Value]) -> Result<Value, InterpreterError>:
+    """Close TCP socket.
+
+    Args:
+        handle: TCP socket handle
+
+    Returns:
+        Error code (0 = success)
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_close expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_close expects integer handle"))
+
+    val err_code = rt_tcp_close(handle)
+    Ok(Value.int(err_code))
+
+fn tcp_set_nodelay(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set TCP_NODELAY flag (disable Nagle's algorithm).
+
+    Args:
+        handle: TCP stream handle
+        nodelay: true to disable Nagle's algorithm
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_set_nodelay expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_set_nodelay expects integer handle"))
+    val nodelay = args[1].as_bool() ?? true
+
+    Ok(rt_tcp_set_nodelay(handle, nodelay))
+
+fn tcp_set_read_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set read timeout for TCP stream.
+
+    Args:
+        handle: TCP stream handle
+        timeout_ns: Timeout in nanoseconds
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_set_read_timeout expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_set_read_timeout expects integer handle"))
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("tcp_set_read_timeout expects integer timeout"))
+
+    Ok(rt_tcp_set_read_timeout(handle, timeout))
+
+fn tcp_set_write_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set write timeout for TCP stream.
+
+    Args:
+        handle: TCP stream handle
+        timeout_ns: Timeout in nanoseconds
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("tcp_set_write_timeout expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_set_write_timeout expects integer handle"))
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("tcp_set_write_timeout expects integer timeout"))
+
+    Ok(rt_tcp_set_write_timeout(handle, timeout))
+
+fn tcp_get_nodelay(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get TCP_NODELAY flag status.
+
+    Args:
+        handle: TCP stream handle
+
+    Returns:
+        Result<bool, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("tcp_get_nodelay expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_get_nodelay expects integer handle"))
+
+    Ok(rt_tcp_get_nodelay(handle))
+
+fn tcp_peek(args: [Value]) -> Result<Value, InterpreterError>:
+    """Peek at data in TCP stream without consuming.
+
+    Args:
+        handle: TCP stream handle
+        buf_len: Buffer length (default 4096)
+
+    Returns:
+        Result<(bytes_read, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("tcp_peek expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("tcp_peek expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 4096 else: 4096
+
+    Ok(rt_tcp_peek(handle, buf_len))

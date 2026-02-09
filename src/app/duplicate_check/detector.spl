@@ -4,7 +4,7 @@ use app.duplicate_check.config.{DuplicationConfig}
 use app.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
 use app.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
 use app.duplicate_check.debug.{debug_log, debug_log_progress}
-use app.duplicate_check.cache.{TokenCacheManager, get_tokens_cached}
+use app.duplicate_check.cache.{TokenCacheManager, get_cached_tokens, set_cached_tokens}
 use app.io.mod.{file_read, shell}
 
 # StringInterner for efficient token code computation
@@ -107,10 +107,14 @@ fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
     result
 
 fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager, interner: TokenInterner) -> [DuplicateBlock]:
-    val tokens = get_tokens_cached(cache_manager, file_path, fn(path: text) -> [SimpleToken]:
-        val content = file_read(path)
-        tokenize(content, config)
-    )
+    val cached = get_cached_tokens(cache_manager, file_path)
+    var tokens = []
+    if cached != nil:
+        tokens = cached
+    else:
+        val content = file_read(file_path)
+        tokens = tokenize(content, config)
+        set_cached_tokens(cache_manager, file_path, tokens)
 
     if tokens.len() < config.min_tokens:
         return []
@@ -295,10 +299,13 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         if file_cache.contains_key(block.file):
             tokens = file_cache[block.file]
         else:
-            tokens = get_tokens_cached(cache_manager, block.file, fn(path: text) -> [SimpleToken]:
-                val content = file_read(path)
-                tokenize(content, config)
-            )
+            val cached2 = get_cached_tokens(cache_manager, block.file)
+            if cached2 != nil:
+                tokens = cached2
+            else:
+                val content = file_read(block.file)
+                tokens = tokenize(content, config)
+                set_cached_tokens(cache_manager, block.file, tokens)
             file_cache[block.file] = tokens
 
         var token_start = 0

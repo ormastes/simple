@@ -1,0 +1,140 @@
+# Process Execution - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# Platform detection - inlined to avoid bootstrap runtime limitations
+fn _is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+# ============================================================================
+# Process Result struct
+# ============================================================================
+
+struct ProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+# ============================================================================
+# Process Execution
+# ============================================================================
+
+fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+    var resolved_cmd = cmd
+    if _is_windows_platform():
+        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
+            val check = rt_process_run("where", [cmd + ".exe"])
+            if check.2 == 0:
+                resolved_cmd = cmd + ".exe"
+    else:
+        if not cmd.contains("/"):
+            val check = rt_process_run("which", [cmd])
+            if check.2 == 0 and check.0.trim() != "":
+                resolved_cmd = check.0.trim()
+    rt_process_run(resolved_cmd, args)
+
+fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    val timeout_secs = if timeout_ms <= 0:
+        120
+    else:
+        val secs = timeout_ms / 1000
+        if secs < 1: 1 else: secs
+
+    if _is_windows_platform():
+        eprint("[WARNING] Windows timeout not implemented; running without timeout enforcement")
+        val (out, err, code) = process_run(cmd, args)
+        (out, err, code)
+    else:
+        var timeout_args: [text] = ["{timeout_secs}", cmd]
+        timeout_args.merge(args)
+
+        val (out, err, code) = rt_process_run("timeout", timeout_args)
+
+        if code == 124:
+            (out, err + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+        else:
+            (out, err, code)
+
+fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
+    if memory_bytes > 0:
+        eprint("[WARNING] memory_bytes limit ({memory_bytes} bytes) not enforced; requires FFI setrlimit support")
+    if cpu_seconds > 0:
+        eprint("[WARNING] cpu_seconds limit ({cpu_seconds}s) not enforced; requires FFI setrlimit support")
+    if max_fds > 0:
+        eprint("[WARNING] max_fds limit ({max_fds}) not enforced; requires FFI setrlimit support")
+    if max_procs > 0:
+        eprint("[WARNING] max_procs limit ({max_procs}) not enforced; requires FFI setrlimit support")
+    process_run_timeout(cmd, args, timeout_ms)
+
+fn process_output(cmd: text, args: [text]) -> text:
+    val (stdout, stderr, code) = process_run(cmd, args)
+    stdout
+
+# ============================================================================
+# Shell Functions
+# ============================================================================
+
+fn shell(command: text) -> ProcessResult:
+    val (shell_path, shell_args) = if _is_windows_platform():
+        ("cmd.exe", ["/c", command])
+    else:
+        ("/bin/sh", ["-c", command])
+
+    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    ProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn shell_bool(command: text) -> bool:
+    val result = shell(command)
+    result.exit_code == 0
+
+fn shell_output(command: text, default: text) -> text:
+    val result = shell(command)
+    if result.exit_code == 0:
+        result.stdout
+    else:
+        default
+
+fn shell_output_trimmed(command: text, default: text) -> text:
+    val result = shell(command)
+    if result.exit_code == 0:
+        result.stdout.trim()
+    else:
+        default
+
+fn shell_lines(command: text) -> [text]:
+    val result = shell(command)
+    if result.exit_code == 0 and result.stdout.?:
+        result.stdout.trim().split("\n")
+    else:
+        []
+
+fn shell_int(command: text, default: i64) -> i64:
+    val result = shell(command)
+    if result.exit_code == 0:
+        val trimmed = result.stdout.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
+    else:
+        default
+
+# ============================================================================
+# Eprint (stderr simulation)
+# ============================================================================
+
+fn eprint(msg: text):
+    print "[STDERR] {msg}"
+
+export ProcessResult
+export process_run, process_run_timeout, process_run_with_limits
+export process_output, shell
+export shell_bool, shell_output, shell_output_trimmed, shell_lines, shell_int
+export eprint

@@ -11,4 +11,3 @@
 | [Types](category/Types.md) | 1 | 0 | 0 | 1 | 0 |
 | [Concurrency](category/Concurrency.md) | 3 | 0 | 0 | 3 | 0 |
 | [Uncategorized](category/Uncategorized.md) | 4 | 0 | 0 | 4 | 0 |
-

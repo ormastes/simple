@@ -6,4 +6,3 @@
 | <a id="feature-f1"></a>f1 | "Feature 1" |  | planned | planned | planned | 📋 planned |  |
 | <a id="feature-f2"></a>f2 | "Feature 2" |  | planned | planned | planned | 📋 planned |  |
 | <a id="feature-feature_001"></a>feature_001 | "My Feature" |  | planned | planned | planned | 📋 planned |  |
-

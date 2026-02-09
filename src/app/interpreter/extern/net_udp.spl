@@ -1,0 +1,516 @@
+# Network UDP Extern Functions
+#
+# UDP networking operations.
+# Split from network.spl for modularity.
+#
+# Provides Simple wrappers for UDP operations with proper error handling.
+
+from ..core import {Value, InterpreterError}
+
+export udp_bind, udp_connect, udp_recv_from, udp_recv
+export udp_send_to, udp_send, udp_set_broadcast, udp_set_ttl
+export udp_close, udp_peek_from, udp_peek, udp_peer_addr
+export udp_set_multicast_loop, udp_set_multicast_ttl
+export udp_set_read_timeout, udp_set_write_timeout
+export udp_get_broadcast, udp_get_ttl
+export udp_join_multicast_v4, udp_leave_multicast_v4
+export udp_join_multicast_v6, udp_leave_multicast_v6
+
+#==============================================================================
+# FFI Declarations - Call into Rust runtime (UDP)
+#==============================================================================
+
+@extern("native_udp_bind_interp")
+fn rt_udp_bind(addr: text) -> (i64, i64)
+
+@extern("native_udp_connect_interp")
+fn rt_udp_connect(handle: i64, addr: text) -> Value
+
+@extern("native_udp_recv_from_interp")
+fn rt_udp_recv_from(handle: i64, buf_len: i64) -> Value
+
+@extern("native_udp_recv_interp")
+fn rt_udp_recv(handle: i64, buf_len: i64) -> Value
+
+@extern("native_udp_send_to_interp")
+fn rt_udp_send_to(handle: i64, data: [i64], len: i64, addr: text) -> (i64, i64)
+
+@extern("native_udp_send_interp")
+fn rt_udp_send(handle: i64, data: [i64]) -> Value
+
+@extern("native_udp_set_broadcast_interp")
+fn rt_udp_set_broadcast(handle: i64, broadcast: bool) -> i64
+
+@extern("native_udp_set_ttl_interp")
+fn rt_udp_set_ttl(handle: i64, ttl: i64) -> i64
+
+@extern("native_udp_close_interp")
+fn rt_udp_close(handle: i64) -> i64
+
+@extern("native_udp_peek_from_interp")
+fn rt_udp_peek_from(handle: i64, buf_len: i64) -> Value
+
+@extern("native_udp_peek_interp")
+fn rt_udp_peek(handle: i64, buf_len: i64) -> Value
+
+@extern("native_udp_peer_addr_interp")
+fn rt_udp_peer_addr(handle: i64) -> Value
+
+@extern("native_udp_set_multicast_loop_interp")
+fn rt_udp_set_multicast_loop(handle: i64, on: bool) -> Value
+
+@extern("native_udp_set_multicast_ttl_interp")
+fn rt_udp_set_multicast_ttl(handle: i64, ttl: i64) -> Value
+
+@extern("native_udp_set_read_timeout_interp")
+fn rt_udp_set_read_timeout(handle: i64, timeout_ns: i64) -> Value
+
+@extern("native_udp_set_write_timeout_interp")
+fn rt_udp_set_write_timeout(handle: i64, timeout_ns: i64) -> Value
+
+@extern("native_udp_get_broadcast_interp")
+fn rt_udp_get_broadcast(handle: i64) -> Value
+
+@extern("native_udp_get_ttl_interp")
+fn rt_udp_get_ttl(handle: i64) -> Value
+
+@extern("native_udp_join_multicast_v4_interp")
+fn rt_udp_join_multicast_v4(handle: i64, multiaddr: i64, interface: i64) -> Value
+
+@extern("native_udp_leave_multicast_v4_interp")
+fn rt_udp_leave_multicast_v4(handle: i64, multiaddr: i64, interface: i64) -> Value
+
+@extern("native_udp_join_multicast_v6_interp")
+fn rt_udp_join_multicast_v6(handle: i64, multiaddr: [i64], interface: i64) -> Value
+
+@extern("native_udp_leave_multicast_v6_interp")
+fn rt_udp_leave_multicast_v6(handle: i64, multiaddr: [i64], interface: i64) -> Value
+
+#==============================================================================
+# UDP Wrapper Functions
+#==============================================================================
+
+fn udp_bind(args: [Value]) -> Result<Value, InterpreterError>:
+    """Bind a UDP socket to an address.
+
+    Args:
+        addr: Socket address as string (e.g., "0.0.0.0:8080")
+
+    Returns:
+        Tuple (handle, error_code) where error_code=0 means success
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("udp_bind expects 1 argument"))
+
+    val addr = args[0].as_str() ?? return Err(InterpreterError.TypeError("udp_bind expects string address"))
+
+    val (handle, err_code) = rt_udp_bind(addr)
+    Ok(Value.tuple([Value.int(handle), Value.int(err_code)]))
+
+fn udp_connect(args: [Value]) -> Result<Value, InterpreterError>:
+    """Connect UDP socket to remote address.
+
+    Args:
+        handle: UDP socket handle
+        addr: Remote address as string
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_connect expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_connect expects integer handle"))
+    val addr = args[1].as_str() ?? return Err(InterpreterError.TypeError("udp_connect expects string address"))
+
+    Ok(rt_udp_connect(handle, addr))
+
+fn udp_recv_from(args: [Value]) -> Result<Value, InterpreterError>:
+    """Receive datagram from any sender.
+
+    Args:
+        handle: UDP socket handle
+        buf_len: Buffer length (default 65535)
+
+    Returns:
+        Result<(bytes_read, sender_addr, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("udp_recv_from expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_recv_from expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 65535 else: 65535
+
+    Ok(rt_udp_recv_from(handle, buf_len))
+
+fn udp_recv(args: [Value]) -> Result<Value, InterpreterError>:
+    """Receive datagram from connected peer.
+
+    Args:
+        handle: UDP socket handle
+        buf_len: Buffer length (default 65535)
+
+    Returns:
+        Result<(bytes_read, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("udp_recv expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_recv expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 65535 else: 65535
+
+    Ok(rt_udp_recv(handle, buf_len))
+
+fn udp_send_to(args: [Value]) -> Result<Value, InterpreterError>:
+    """Send datagram to specific address.
+
+    Args:
+        handle: UDP socket handle
+        data: Byte array to send
+        addr: Destination address as string
+
+    Returns:
+        Tuple (bytes_sent, error_code) where error_code=0 means success
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("udp_send_to expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_send_to expects integer handle"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("udp_send_to expects byte array"))
+    val addr = args[2].as_str() ?? return Err(InterpreterError.TypeError("udp_send_to expects string address"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("udp_send_to expects byte array"))
+        byte_array.push(byte)
+
+    val (bytes_sent, err_code) = rt_udp_send_to(handle, byte_array, byte_array.len(), addr)
+    Ok(Value.tuple([Value.int(bytes_sent), Value.int(err_code)]))
+
+fn udp_send(args: [Value]) -> Result<Value, InterpreterError>:
+    """Send datagram to connected peer.
+
+    Args:
+        handle: UDP socket handle
+        data: Byte array to send
+
+    Returns:
+        Result<bytes_sent, IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_send expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_send expects integer handle"))
+    val data = args[1].as_array() ?? return Err(InterpreterError.TypeError("udp_send expects byte array"))
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in data:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("udp_send expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_udp_send(handle, byte_array))
+
+fn udp_set_broadcast(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set broadcast flag on UDP socket.
+
+    Args:
+        handle: UDP socket handle
+        broadcast: true to enable broadcast
+
+    Returns:
+        Error code (0 = success)
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_broadcast expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_broadcast expects integer handle"))
+    val broadcast = args[1].as_bool() ?? true
+
+    val err_code = rt_udp_set_broadcast(handle, broadcast)
+    Ok(Value.int(err_code))
+
+fn udp_set_ttl(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set TTL (time-to-live) for UDP packets.
+
+    Args:
+        handle: UDP socket handle
+        ttl: TTL value (default 64)
+
+    Returns:
+        Error code (0 = success)
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_ttl expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_ttl expects integer handle"))
+    val ttl = args[1].as_int() ?? 64
+
+    val err_code = rt_udp_set_ttl(handle, ttl)
+    Ok(Value.int(err_code))
+
+fn udp_close(args: [Value]) -> Result<Value, InterpreterError>:
+    """Close UDP socket.
+
+    Args:
+        handle: UDP socket handle
+
+    Returns:
+        Error code (0 = success)
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("udp_close expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_close expects integer handle"))
+
+    val err_code = rt_udp_close(handle)
+    Ok(Value.int(err_code))
+
+fn udp_peek_from(args: [Value]) -> Result<Value, InterpreterError>:
+    """Peek at datagram without consuming.
+
+    Args:
+        handle: UDP socket handle
+        buf_len: Buffer length (default 65535)
+
+    Returns:
+        Result<(bytes_read, sender_addr, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("udp_peek_from expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_peek_from expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 65535 else: 65535
+
+    Ok(rt_udp_peek_from(handle, buf_len))
+
+fn udp_peek(args: [Value]) -> Result<Value, InterpreterError>:
+    """Peek at datagram from connected peer.
+
+    Args:
+        handle: UDP socket handle
+        buf_len: Buffer length (default 65535)
+
+    Returns:
+        Result<(bytes_read, data), IoError>
+    """
+    if args.len() < 1:
+        return Err(InterpreterError.ArityError("udp_peek expects at least 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_peek expects integer handle"))
+    val buf_len = if args.len() > 1: args[1].as_int() ?? 65535 else: 65535
+
+    Ok(rt_udp_peek(handle, buf_len))
+
+fn udp_peer_addr(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get peer address of connected UDP socket.
+
+    Args:
+        handle: UDP socket handle
+
+    Returns:
+        Result<addr_string, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("udp_peer_addr expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_peer_addr expects integer handle"))
+
+    Ok(rt_udp_peer_addr(handle))
+
+fn udp_set_multicast_loop(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set multicast loopback flag.
+
+    Args:
+        handle: UDP socket handle
+        on: true to enable loopback
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_multicast_loop expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_multicast_loop expects integer handle"))
+    val on = args[1].as_bool() ?? true
+
+    Ok(rt_udp_set_multicast_loop(handle, on))
+
+fn udp_set_multicast_ttl(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set multicast TTL.
+
+    Args:
+        handle: UDP socket handle
+        ttl: TTL value (default 1)
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_multicast_ttl expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_multicast_ttl expects integer handle"))
+    val ttl = args[1].as_int() ?? 1
+
+    Ok(rt_udp_set_multicast_ttl(handle, ttl))
+
+fn udp_set_read_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set read timeout for UDP socket.
+
+    Args:
+        handle: UDP socket handle
+        timeout_ns: Timeout in nanoseconds
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_read_timeout expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_read_timeout expects integer handle"))
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("udp_set_read_timeout expects integer timeout"))
+
+    Ok(rt_udp_set_read_timeout(handle, timeout))
+
+fn udp_set_write_timeout(args: [Value]) -> Result<Value, InterpreterError>:
+    """Set write timeout for UDP socket.
+
+    Args:
+        handle: UDP socket handle
+        timeout_ns: Timeout in nanoseconds
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 2:
+        return Err(InterpreterError.ArityError("udp_set_write_timeout expects 2 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_set_write_timeout expects integer handle"))
+    val timeout = args[1].as_int() ?? return Err(InterpreterError.TypeError("udp_set_write_timeout expects integer timeout"))
+
+    Ok(rt_udp_set_write_timeout(handle, timeout))
+
+fn udp_get_broadcast(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get broadcast flag status.
+
+    Args:
+        handle: UDP socket handle
+
+    Returns:
+        Result<bool, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("udp_get_broadcast expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_get_broadcast expects integer handle"))
+
+    Ok(rt_udp_get_broadcast(handle))
+
+fn udp_get_ttl(args: [Value]) -> Result<Value, InterpreterError>:
+    """Get TTL value.
+
+    Args:
+        handle: UDP socket handle
+
+    Returns:
+        Result<ttl, IoError>
+    """
+    if args.len() != 1:
+        return Err(InterpreterError.ArityError("udp_get_ttl expects 1 argument"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_get_ttl expects integer handle"))
+
+    Ok(rt_udp_get_ttl(handle))
+
+fn udp_join_multicast_v4(args: [Value]) -> Result<Value, InterpreterError>:
+    """Join IPv4 multicast group.
+
+    Args:
+        handle: UDP socket handle
+        multiaddr: Multicast address as u32
+        interface: Interface address as u32
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("udp_join_multicast_v4 expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_join_multicast_v4 expects integer handle"))
+    val multiaddr = args[1].as_int() ?? 0
+    val interface = args[2].as_int() ?? 0
+
+    Ok(rt_udp_join_multicast_v4(handle, multiaddr, interface))
+
+fn udp_leave_multicast_v4(args: [Value]) -> Result<Value, InterpreterError>:
+    """Leave IPv4 multicast group.
+
+    Args:
+        handle: UDP socket handle
+        multiaddr: Multicast address as u32
+        interface: Interface address as u32
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("udp_leave_multicast_v4 expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_leave_multicast_v4 expects integer handle"))
+    val multiaddr = args[1].as_int() ?? 0
+    val interface = args[2].as_int() ?? 0
+
+    Ok(rt_udp_leave_multicast_v4(handle, multiaddr, interface))
+
+fn udp_join_multicast_v6(args: [Value]) -> Result<Value, InterpreterError>:
+    """Join IPv6 multicast group.
+
+    Args:
+        handle: UDP socket handle
+        multiaddr: Multicast address as 16-byte array
+        interface: Interface index as u32
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("udp_join_multicast_v6 expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_join_multicast_v6 expects integer handle"))
+    val multiaddr = args[1].as_array() ?? return Err(InterpreterError.TypeError("udp_join_multicast_v6 expects byte array"))
+    val interface = args[2].as_int() ?? 0
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in multiaddr:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("udp_join_multicast_v6 expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_udp_join_multicast_v6(handle, byte_array, interface))
+
+fn udp_leave_multicast_v6(args: [Value]) -> Result<Value, InterpreterError>:
+    """Leave IPv6 multicast group.
+
+    Args:
+        handle: UDP socket handle
+        multiaddr: Multicast address as 16-byte array
+        interface: Interface index as u32
+
+    Returns:
+        Result<(), IoError>
+    """
+    if args.len() != 3:
+        return Err(InterpreterError.ArityError("udp_leave_multicast_v6 expects 3 arguments"))
+
+    val handle = args[0].as_int() ?? return Err(InterpreterError.TypeError("udp_leave_multicast_v6 expects integer handle"))
+    val multiaddr = args[1].as_array() ?? return Err(InterpreterError.TypeError("udp_leave_multicast_v6 expects byte array"))
+    val interface = args[2].as_int() ?? 0
+
+    # Convert Value array to i64 array
+    var byte_array: [i64] = []
+    for val in multiaddr:
+        val byte = val.as_int() ?? return Err(InterpreterError.TypeError("udp_leave_multicast_v6 expects byte array"))
+        byte_array.push(byte)
+
+    Ok(rt_udp_leave_multicast_v6(handle, byte_array, interface))
