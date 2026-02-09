@@ -91,8 +91,7 @@ fn register_function_signature(checker: TypeChecker, func: FunctionDef) -> Resul
     var param_types: [Type] = []
     for param in func.params:
         val param_ty = if param.ty.?:
-            # TODO: Convert AST Type to inference Type
-            checker.fresh_var()
+            ast_type_to_inference_type(param.ty.unwrap(), checker)
         else:
             checker.fresh_var()
 
@@ -100,8 +99,7 @@ fn register_function_signature(checker: TypeChecker, func: FunctionDef) -> Resul
 
     # Get return type
     val ret_ty = if func.return_type.?:
-        # TODO: Convert AST Type to inference Type
-        checker.fresh_var()
+        ast_type_to_inference_type(func.return_type.unwrap(), checker)
     else:
         Type.Unit  # No return type annotation → Unit
 
@@ -131,8 +129,7 @@ fn register_struct(checker: TypeChecker, struct_def: StructDef) -> Result<(), Ty
     var field_types: [Type] = []
     for field in struct_def.fields:
         val field_ty = if field.ty.?:
-            # TODO: Convert AST Type to inference Type
-            checker.fresh_var()
+            ast_type_to_inference_type(field.ty.unwrap(), checker)
         else:
             checker.fresh_var()
 
@@ -259,8 +256,7 @@ fn register_impl_signature(checker: TypeChecker, impl_block: ImplBlock) -> Resul
 fn register_type_alias(checker: TypeChecker, alias: TypeAliasDef) -> Result<(), TypeError>:
     """Register type alias."""
 
-    # TODO: Convert target AST Type to inference Type
-    val target_ty = checker.fresh_var()
+    val target_ty = ast_type_to_inference_type(alias.target_type, checker)
 
     checker.env[alias.name] = target_ty
 
@@ -274,8 +270,7 @@ fn register_const(checker: TypeChecker, const_stmt: ConstStmt) -> Result<(), Typ
     """Register const binding (signature only)."""
 
     val const_ty = if const_stmt.ty.?:
-        # TODO: Convert AST Type to inference Type
-        checker.fresh_var()
+        ast_type_to_inference_type(const_stmt.ty.unwrap(), checker)
     else:
         checker.fresh_var()
 
@@ -287,8 +282,7 @@ fn register_static(checker: TypeChecker, static_stmt: StaticStmt) -> Result<(), 
     """Register static binding (signature only)."""
 
     val static_ty = if static_stmt.ty.?:
-        # TODO: Convert AST Type to inference Type
-        checker.fresh_var()
+        ast_type_to_inference_type(static_stmt.ty.unwrap(), checker)
     else:
         checker.fresh_var()
 
@@ -343,8 +337,7 @@ fn check_function_body(checker: TypeChecker, func: FunctionDef) -> Result<(), Ty
 
     # Get function return type
     val ret_ty = if func.return_type.?:
-        # TODO: Convert AST Type to inference Type
-        checker.fresh_var()
+        ast_type_to_inference_type(func.return_type.unwrap(), checker)
     else:
         Type.Unit
 
@@ -353,8 +346,7 @@ fn check_function_body(checker: TypeChecker, func: FunctionDef) -> Result<(), Ty
 
     for param in func.params:
         val param_ty = if param.ty.?:
-            # TODO: Convert AST Type to inference Type
-            checker.fresh_var()
+            ast_type_to_inference_type(param.ty.unwrap(), checker)
         else:
             checker.fresh_var()
 
@@ -398,7 +390,7 @@ fn check_const_body(checker: TypeChecker, const_stmt: ConstStmt) -> Result<(), T
 
     # Check against annotation (if present)
     if const_stmt.ty.?:
-        val ann_ty = checker.fresh_var()  # TODO: Convert AST Type
+        val ann_ty = ast_type_to_inference_type(const_stmt.ty.unwrap(), checker)
         engine.unify(value_ty, ann_ty)?
 
     Ok(())
@@ -419,7 +411,7 @@ fn check_static_body(checker: TypeChecker, static_stmt: StaticStmt) -> Result<()
 
     # Check against annotation (if present)
     if static_stmt.ty.?:
-        val ann_ty = checker.fresh_var()  # TODO: Convert AST Type
+        val ann_ty = ast_type_to_inference_type(static_stmt.ty.unwrap(), checker)
         engine.unify(value_ty, ann_ty)?
 
     Ok(())
@@ -474,6 +466,51 @@ fn ast_type_to_inference_type(ast_ty: ast.Type, checker: TypeChecker) -> Type:
             # Unsupported type - return fresh variable
             checker.fresh_var()
 
+fn ast_type_to_inference_type_engine(ast_ty: ast.Type, engine: InferenceEngine) -> Type:
+    """Convert AST type to inference type using engine for fresh vars.
+
+    Same logic as ast_type_to_inference_type but accepts InferenceEngine.
+    """
+    match ast_ty:
+        case Simple(name):
+            match name:
+                case "i64": Type.Int(bits: 64, signed: true)
+                case "i32": Type.Int(bits: 32, signed: true)
+                case "f64": Type.Float(bits: 64)
+                case "f32": Type.Float(bits: 32)
+                case "bool": Type.Bool
+                case "text": Type.Str
+                case "()": Type.Unit
+                case _: Type.Named(name)
+
+        case Generic(name, args):
+            val arg_types = args.map(\a: ast_type_to_inference_type_engine(a, engine))
+            Type.Generic(base: name, args: arg_types)
+
+        case Optional(inner):
+            val inner_ty = ast_type_to_inference_type_engine(inner, engine)
+            Type.Optional(inner: inner_ty)
+
+        case Array(elem, size):
+            val elem_ty = ast_type_to_inference_type_engine(elem, engine)
+            Type.Array(elem: elem_ty, size: nil)
+
+        case Tuple(elems):
+            val elem_types = elems.map(\e: ast_type_to_inference_type_engine(e, engine))
+            Type.Tuple(elements: elem_types)
+
+        case Function(params, ret):
+            val param_types = params.map(\p: ast_type_to_inference_type_engine(p, engine))
+            val ret_ty = if ret.?:
+                ast_type_to_inference_type_engine(ret.unwrap(), engine)
+            else:
+                Type.Unit
+            Type.Function(params: param_types, ret: ret_ty)
+
+        case _:
+            # Unsupported type - return fresh variable
+            engine.fresh_var()
+
 # ============================================================================
 # Exports
 # ============================================================================
@@ -484,4 +521,4 @@ export register_function_signature, register_struct, register_class
 export register_enum, register_trait, register_impl_signature
 export register_type_alias, register_const, register_static
 export check_function_body, check_const_body, check_static_body
-export ast_type_to_inference_type
+export ast_type_to_inference_type, ast_type_to_inference_type_engine

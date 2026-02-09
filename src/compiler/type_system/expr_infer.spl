@@ -9,6 +9,7 @@ from inference.types import {Type, TypeVarId, UnifyError, InferError}
 from inference.infer import {InferenceEngine}
 from ast import {Expr, BinOp, UnaryOp, FStringPart, MacroArg}
 from compiler.type_system.checker import {TypeError}
+from compiler.type_system.module_check import {ast_type_to_inference_type_engine}
 
 # ============================================================================
 # Expression Inference (Extension to TypeChecker)
@@ -33,13 +34,24 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             Ok(Type.Float(bits: 64))
 
         case TypedInteger(_, suffix):
-            # Use type suffix to determine exact integer type
-            # suffix encoding: bits + signed flag
-            Ok(Type.Int(bits: 64, signed: true))  # TODO: Decode suffix
+            # Decode numeric suffix to exact integer type
+            match suffix:
+                case I8: Ok(Type.Int(bits: 8, signed: true))
+                case I16: Ok(Type.Int(bits: 16, signed: true))
+                case I32: Ok(Type.Int(bits: 32, signed: true))
+                case I64: Ok(Type.Int(bits: 64, signed: true))
+                case U8: Ok(Type.Int(bits: 8, signed: false))
+                case U16: Ok(Type.Int(bits: 16, signed: false))
+                case U32: Ok(Type.Int(bits: 32, signed: false))
+                case U64: Ok(Type.Int(bits: 64, signed: false))
+                case _: Ok(Type.Int(bits: 64, signed: true))
 
         case TypedFloat(_, suffix):
-            # Use type suffix to determine exact float type
-            Ok(Type.Float(bits: 64))  # TODO: Decode suffix
+            # Decode numeric suffix to exact float type
+            match suffix:
+                case F32: Ok(Type.Float(bits: 32))
+                case F64: Ok(Type.Float(bits: 64))
+                case _: Ok(Type.Float(bits: 64))
 
         case String(_):
             Ok(Type.Str)
@@ -307,8 +319,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         case Cast(expr, target_type):
             # Type annotation - just return the target type
             val _ = infer_expr(engine, expr, env)?
-            # TODO: Convert AST Type to inference Type
-            Ok(engine.fresh_var())
+            Ok(ast_type_to_inference_type_engine(target_type, engine))
 
         # ====================================================================
         # Optional/Result Operations
@@ -392,8 +403,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             # Cast with default value
             val _ = infer_expr(engine, expr, env)?
             val _ = infer_expr(engine, default, env)?
-            # TODO: Convert target_type from AST
-            Ok(engine.fresh_var())
+            Ok(ast_type_to_inference_type_engine(target_type, engine))
 
         case CastElse(expr, target_type, fallback_fn):
             val _ = infer_expr(engine, expr, env)?
@@ -692,8 +702,7 @@ fn infer_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
 
     for param in params:
         val param_ty = if param.ty.?:
-            # TODO: Convert AST type to inference type
-            engine.fresh_var()
+            ast_type_to_inference_type_engine(param.ty.unwrap(), engine)
         else:
             engine.fresh_var()
 

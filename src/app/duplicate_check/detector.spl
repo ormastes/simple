@@ -20,34 +20,8 @@ struct DuplicateGroup:
     total_lines: i64
     impact_score: i64
 
-fn compute_token_hash(token_str: text) -> i64:
-    """Compute hash of a single token string."""
-    val bytes = token_str.bytes()
-    var char_code = 0
-    var j = 0
-    while j < bytes.len():
-        char_code = char_code + bytes[j]
-        j = j + 1
-    char_code
-
-fn rolling_hash_cached(tokens: [SimpleToken], start: i64, window: i64, token_str_cache: {text: text}) -> i64:
-    """Compute rolling hash for token window using pre-computed token strings."""
-    var hash = 0
-    val base = 31
-    val mod_val = 1000000007
-
-    var i = 0
-    while i < window and start + i < tokens.len():
-        val token_str = token_str_cache["{start + i}"]
-        val char_code = compute_token_hash(token_str)
-
-        hash = (hash * base + char_code) % mod_val
-        i = i + 1
-
-    hash
-
 fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
-    """Compute rolling hash for token window. Legacy version without cache."""
+    """Compute rolling hash for token window with inlined character hashing."""
     var hash = 0
     val base = 31
     val mod_val = 1000000007
@@ -56,7 +30,13 @@ fn rolling_hash(tokens: [SimpleToken], start: i64, window: i64) -> i64:
     while i < window and start + i < tokens.len():
         val token = tokens[start + i]
         val token_str = token_to_string(token)
-        val char_code = compute_token_hash(token_str)
+
+        val bytes = token_str.bytes()
+        var char_code = 0
+        var j = 0
+        while j < bytes.len():
+            char_code = char_code + bytes[j]
+            j = j + 1
 
         hash = (hash * base + char_code) % mod_val
         i = i + 1
@@ -71,14 +51,54 @@ fn extract_code_snippet(tokens: [SimpleToken], start: i64, end: i64) -> text:
         i = i + 1
     code
 
+fn compute_token_code(token: SimpleToken) -> i64:
+    """Compute hash code for a single token."""
+    val token_str = token_to_string(token)
+    val bytes = token_str.bytes()
+    var char_code = 0
+    var j = 0
+    while j < bytes.len():
+        char_code = char_code + bytes[j]
+        j = j + 1
+    char_code
+
+fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
+    """Compute base^exp % mod_val efficiently."""
+    var result = 1
+    var b = base % mod_val
+    var e = exp
+
+    while e > 0:
+        if e % 2 == 1:
+            result = (result * b) % mod_val
+        b = (b * b) % mod_val
+        e = e / 2
+
+    result
+
 fn find_duplicates_in_file(file_path: text, config: DuplicationConfig) -> [DuplicateBlock]:
     val content = file_read(file_path)
     val tokens = tokenize(content, config)
 
-    var token_str_cache = {}
+    if tokens.len() < config.min_tokens:
+        return []
+
+    val base = 31
+    val mod_val = 1000000007
+
+    var token_codes = []
+    var idx = 0
+    while idx < tokens.len():
+        token_codes = token_codes + [compute_token_code(tokens[idx])]
+        idx = idx + 1
+
+    val window_size = config.min_tokens
+    val base_power = power_mod(base, window_size - 1, mod_val)
+
+    var hash = 0
     var j = 0
-    while j < tokens.len():
-        token_str_cache["{j}"] = token_to_string(tokens[j])
+    while j < window_size:
+        hash = (hash * base + token_codes[j]) % mod_val
         j = j + 1
 
     var batches = []
@@ -87,7 +107,12 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig) -> [Dupli
     var i = 0
 
     while i + config.min_tokens <= tokens.len():
-        val hash_val = rolling_hash_cached(tokens, i, config.min_tokens, token_str_cache)
+        if i > 0:
+            val old_code = token_codes[i - 1]
+            val new_code = token_codes[i + window_size - 1]
+
+            hash = (hash - (old_code * base_power) % mod_val + mod_val) % mod_val
+            hash = (hash * base + new_code) % mod_val
 
         val start_line = tokens[i].line
         var end_idx = i + config.min_tokens
@@ -103,7 +128,7 @@ fn find_duplicates_in_file(file_path: text, config: DuplicationConfig) -> [Dupli
                 line_start: start_line,
                 line_end: end_line,
                 token_count: config.min_tokens,
-                hash_value: hash_val,
+                hash_value: hash,
                 code: code
             )
 
@@ -209,13 +234,24 @@ fn collect_files(path: text, config: DuplicationConfig) -> [text]:
 
 fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
     """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
-    print "Extracting features from {all_blocks.len()} blocks..."
+    val max_blocks_to_analyze = 500
+    var blocks_to_analyze = all_blocks
+    if all_blocks.len() > max_blocks_to_analyze:
+        print "WARNING: Too many blocks ({all_blocks.len()}), limiting to first {max_blocks_to_analyze}"
+        var limited = []
+        var idx = 0
+        while idx < max_blocks_to_analyze:
+            limited = limited + [all_blocks[idx]]
+            idx = idx + 1
+        blocks_to_analyze = limited
+
+    print "Extracting features from {blocks_to_analyze.len()} blocks..."
     var file_cache = {}
     var feature_vector_map = {}
 
     var block_idx = 0
-    var total_blocks = all_blocks.len()
-    for block in all_blocks:
+    var total_blocks = blocks_to_analyze.len()
+    for block in blocks_to_analyze:
         if block_idx % 20 == 0 or block_idx == total_blocks - 1:
             print "  Extracted features: {block_idx}/{total_blocks}"
 
@@ -255,34 +291,61 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     for group in exact_groups:
         refined_groups = refined_groups + [group]
 
-    print "Starting pairwise comparison of {all_blocks.len()} blocks..."
-    var comparison_count = 0
-    var match_count = 0
-    var i = 0
-    while i < all_blocks.len():
-        if i % 10 == 0:
-            print "  Comparing block {i}/{all_blocks.len()} ({comparison_count} comparisons, {match_count} matches)"
-        var j = i + 1
-        while j < all_blocks.len():
-            comparison_count = comparison_count + 1
-            val block1 = all_blocks[i]
-            val block2 = all_blocks[j]
+    print "Starting pairwise comparison of {blocks_to_analyze.len()} blocks..."
+    val total_possible = (blocks_to_analyze.len() * (blocks_to_analyze.len() - 1)) / 2
+    print "  Max comparisons: {total_possible} (optimizations will reduce this)"
 
-            val same_hash = block1.hash_value == block2.hash_value
-            if same_hash:
+    var comparison_count = 0
+    var skipped_same_file = 0
+    var skipped_same_hash = 0
+    var match_count = 0
+    val max_comparisons_per_block = 50
+    val max_total_comparisons = 10000
+
+    var i = 0
+    while i < blocks_to_analyze.len() and comparison_count < max_total_comparisons:
+        if i % 10 == 0:
+            print "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches, skipped {skipped_same_file} same-file + {skipped_same_hash} same-hash"
+
+        if comparison_count >= max_total_comparisons:
+            print "  Reached comparison limit ({max_total_comparisons}), stopping early"
+            break
+
+        val block1 = blocks_to_analyze[i]
+        val key_i = "{i}"
+        val has_vec_i = feature_vector_map.contains_key(key_i)
+
+        if not has_vec_i:
+            i = i + 1
+            continue
+
+        val feature_vec1 = feature_vector_map[key_i]
+        var comparisons_this_block = 0
+        var j = i + 1
+
+        while j < blocks_to_analyze.len() and comparisons_this_block < max_comparisons_per_block:
+            val block2 = blocks_to_analyze[j]
+
+            val same_file = block1.file == block2.file
+            if same_file:
+                skipped_same_file = skipped_same_file + 1
                 j = j + 1
                 continue
 
-            val key_i = "{i}"
+            val same_hash = block1.hash_value == block2.hash_value
+            if same_hash:
+                skipped_same_hash = skipped_same_hash + 1
+                j = j + 1
+                continue
+
             val key_j = "{j}"
-            val has_vec_i = feature_vector_map.contains_key(key_i)
             val has_vec_j = feature_vector_map.contains_key(key_j)
-            val both_have_vecs = has_vec_i and has_vec_j
 
-            if both_have_vecs:
-                val feature_vec1 = feature_vector_map[key_i]
+            if has_vec_j:
+                comparison_count = comparison_count + 1
+                comparisons_this_block = comparisons_this_block + 1
+
                 val feature_vec2 = feature_vector_map[key_j]
-
                 val similarity = cosine_similarity(feature_vec1, feature_vec2)
 
                 val above_threshold = similarity >= config.similarity_threshold
