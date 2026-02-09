@@ -4,7 +4,27 @@ use app.duplicate_check.config.{DuplicationConfig}
 use app.duplicate_check.tokenizer.{SimpleToken, tokenize, token_to_string}
 use app.duplicate_check.features.{FeatureVec, extract_token_frequencies, build_feature_vector, cosine_similarity}
 use app.duplicate_check.debug.{debug_log, debug_log_progress}
+use app.duplicate_check.cache.{TokenCacheManager, get_tokens_cached}
 use app.io.mod.{file_read, shell}
+
+# StringInterner for efficient token code computation
+struct TokenInterner:
+    strings: {text: i64}
+    reverse: {i64: text}
+    next_id: i64
+
+fn new_token_interner() -> TokenInterner:
+    TokenInterner(strings: {}, reverse: {}, next_id: 0)
+
+fn intern_token(interner: TokenInterner, token_str: text) -> i64:
+    if interner.strings.contains_key(token_str):
+        interner.strings[token_str]
+    else:
+        val id = interner.next_id
+        interner.strings[token_str] = id
+        interner.reverse[id] = token_str
+        interner.next_id = interner.next_id + 1
+        id
 
 struct DuplicateBlock:
     file: text
@@ -76,9 +96,11 @@ fn power_mod(base: i64, exp: i64, mod_val: i64) -> i64:
 
     result
 
-fn find_duplicates_in_file(file_path: text, config: DuplicationConfig) -> [DuplicateBlock]:
-    val content = file_read(file_path)
-    val tokens = tokenize(content, config)
+fn find_duplicates_in_file(file_path: text, config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateBlock]:
+    val tokens = get_tokens_cached(cache_manager, file_path, fn(path: text) -> [SimpleToken]:
+        val content = file_read(path)
+        tokenize(content, config)
+    )
 
     if tokens.len() < config.min_tokens:
         return []
@@ -232,7 +254,7 @@ fn collect_files(path: text, config: DuplicationConfig) -> [text]:
 
     files
 
-fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig) -> [DuplicateGroup]:
+fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [DuplicateBlock], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     """Refine hash-based groups using cosine similarity to catch fuzzy duplicates."""
     val max_blocks_to_analyze = 500
     var blocks_to_analyze = all_blocks
@@ -259,8 +281,10 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         if file_cache.contains_key(block.file):
             tokens = file_cache[block.file]
         else:
-            val content = file_read(block.file)
-            tokens = tokenize(content, config)
+            tokens = get_tokens_cached(cache_manager, block.file, fn(path: text) -> [SimpleToken]:
+                val content = file_read(path)
+                tokenize(content, config)
+            )
             file_cache[block.file] = tokens
 
         var token_start = 0
@@ -368,13 +392,13 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
     print "Completed {comparison_count} comparisons, found {match_count} similar pairs"
     refined_groups
 
-fn find_duplicates(files: [text], config: DuplicationConfig) -> [DuplicateGroup]:
+fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:
     var all_blocks = []
 
     print "Scanning {files.len()} files..."
 
     for file in files:
-        val blocks = find_duplicates_in_file(file, config)
+        val blocks = find_duplicates_in_file(file, config, cache_manager)
         all_blocks = all_blocks + blocks
 
     print "Found {all_blocks.len()} potential duplicate blocks"
@@ -383,7 +407,7 @@ fn find_duplicates(files: [text], config: DuplicationConfig) -> [DuplicateGroup]
 
     val refined_groups = if config.use_cosine_similarity:
         print "Refining with cosine similarity..."
-        val result = refine_groups_with_similarity(exact_groups, all_blocks, config)
+        val result = refine_groups_with_similarity(exact_groups, all_blocks, config, cache_manager)
         result
     else:
         exact_groups
