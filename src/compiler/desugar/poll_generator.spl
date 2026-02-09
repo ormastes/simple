@@ -254,7 +254,7 @@ fn generate_resume_arm(
     # match poll_result:
     #     case Ready(value): ...
     #     case Pending: ...
-    val ready_arm = generate_ready_arm(sp, variant, analysis, state_enum)
+    val ready_arm = generate_ready_arm(sp, variant, func_body, analysis, state_enum)
     val pending_arm = generate_pending_arm(variant)
 
     val poll_match = Expr(
@@ -281,6 +281,7 @@ fn generate_resume_arm(
 fn generate_ready_arm(
     sp: SuspensionPoint,
     variant: StateVariant,
+    func_body: Block,
     analysis: SuspensionAnalysis,
     state_enum: StateEnum
 ) -> MatchArm:
@@ -326,11 +327,28 @@ fn generate_ready_arm(
             span: dummy_span()
         ))
     else:
-        # This was the last await - return the final value
-        # TODO: Apply final computation from function body
+        # This was the last await - apply post-await computation and return
+        # Extract statements from func_body that come after the last suspension point
+        var post_await_stmts: [Stmt] = []
+        for stmt in func_body.stmts:
+            if stmt.span.start > sp.span.start:
+                post_await_stmts = post_await_stmts.push(stmt)
+        body_stmts = body_stmts + post_await_stmts
+
+        # Determine final return value: use the last expression from post-await
+        # statements if any, otherwise use the resolved await value directly
+        val final_value = if post_await_stmts.len() > 0:
+            val last_stmt = post_await_stmts[post_await_stmts.len() - 1]
+            match last_stmt.kind:
+                case Expr(e): e
+                case Return(Some(e)): e
+                case _: Expr(kind: ExprKind.Ident("value"), span: dummy_span())
+        else:
+            Expr(kind: ExprKind.Ident("value"), span: dummy_span())
+
         val return_expr = make_poll_tuple(
             make_state_constructor(variant.name, []),
-            make_ready(Expr(kind: ExprKind.Ident("value"), span: dummy_span()))
+            make_ready(final_value)
         )
 
         body_stmts = body_stmts.push(Stmt(

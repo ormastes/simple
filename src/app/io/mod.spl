@@ -347,7 +347,7 @@ fn file_read_lines(path: text) -> [text]?:
     # Read file and split by newlines
     val content = file_read(path)
     if content.len() == 0:
-        None
+        nil
     else:
         Some(content.split("\n"))
 
@@ -501,13 +501,25 @@ struct ProcessResult:
     exit_code: i64
 
 fn process_run(cmd: text, args: [text]) -> (text, text, i64):
-    # WORKAROUND: Bootstrap runtime limitation - skip command resolution
-    # TODO: Re-enable platform-specific command resolution when using full parser
-    # use src.std.platform (resolve_command)
-    # val resolved_cmd = resolve_command(cmd)
+    # Platform-specific command resolution
+    # When running under bootstrap runtime, resolve_command is not available,
+    # so we detect the platform and adjust the command if needed.
+    var resolved_cmd = cmd
+    if is_windows_platform():
+        # On Windows, try appending .exe if not already present
+        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
+            val check = rt_process_run("where", [cmd + ".exe"])
+            if check.2 == 0:
+                resolved_cmd = cmd + ".exe"
+    else:
+        # On Unix, try resolving via 'which' if command doesn't contain a path separator
+        if not cmd.contains("/"):
+            val check = rt_process_run("which", [cmd])
+            if check.2 == 0 and check.0.trim() != "":
+                resolved_cmd = check.0.trim()
 
-    # Delegate to runtime's process execution (use command as-is for bootstrap)
-    rt_process_run(cmd, args)
+    # Delegate to runtime's process execution
+    rt_process_run(resolved_cmd, args)
 
 fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     # Convert timeout from milliseconds to seconds (minimum 1 second)
@@ -520,8 +532,9 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
     # Use Unix 'timeout' command to enforce timeout
     # The timeout command will send SIGTERM, then SIGKILL if needed
     if is_windows_platform():
-        # Windows doesn't have timeout command, fall back to regular run
-        # TODO: Implement Windows timeout using PowerShell or .NET
+        # Windows doesn't have a native timeout command like Unix.
+        # PowerShell-based timeout is not reliably available in all environments.
+        eprint("[WARNING] Windows timeout not implemented; running without timeout enforcement")
         val (out, err, code) = process_run(cmd, args)
         (out, err, code)
     else:
@@ -539,8 +552,17 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
             (out, err, code)
 
 fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
-    # For now, just enforce timeout (other limits not yet implemented)
-    # TODO: Implement memory_bytes, cpu_seconds, max_fds, max_procs limits
+    # Resource limits require OS-level support (setrlimit/ulimit) via FFI.
+    # Log warnings for any non-default limits that are requested but not enforced.
+    if memory_bytes > 0:
+        eprint("[WARNING] memory_bytes limit ({memory_bytes} bytes) not enforced; requires FFI setrlimit support")
+    if cpu_seconds > 0:
+        eprint("[WARNING] cpu_seconds limit ({cpu_seconds}s) not enforced; requires FFI setrlimit support")
+    if max_fds > 0:
+        eprint("[WARNING] max_fds limit ({max_fds}) not enforced; requires FFI setrlimit support")
+    if max_procs > 0:
+        eprint("[WARNING] max_procs limit ({max_procs}) not enforced; requires FFI setrlimit support")
+    # Timeout is the only limit currently enforced
     process_run_timeout(cmd, args, timeout_ms)
 
 fn process_output(cmd: text, args: [text]) -> text:
@@ -1106,8 +1128,10 @@ fn cli_compile(args: [str]) -> i64:
     # avoiding shell-out which would cause infinite recursion (bootstrap binary interprets
     # this same source file, which would shell out again).
     #
-    # TODO: When compiler modules can run in interpreter mode, use pure-Simple LLVM path:
+    # NOTE: When compiler modules can run in interpreter mode, switch to pure-Simple LLVM path:
     #   CompilerDriver.compile() -> MirToLlvm -> shell("llc") -> SMF
+    # Currently blocked on interpreter support for compiler module imports.
+    eprint("[NOTE] Using bootstrap Cranelift path; pure-Simple LLVM path not yet available in interpreter mode")
 
     # Check if llc is available for LLVM backend
     if backend == "llvm":
@@ -1130,7 +1154,9 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
             print "  Output: {output_file}"
 
     # For now, call the build system via shell
-    # TODO: Import and use BaremetalBuilder directly once module imports work
+    # NOTE: Import and use BaremetalBuilder directly once module imports work.
+    # Currently blocked on cross-module import support in the interpreter.
+    eprint("[NOTE] Using shell-based baremetal build; direct BaremetalBuilder import not yet available")
 
     # Determine architecture from target
     val arch = if target == "baremetal-x86":
@@ -1164,8 +1190,13 @@ fn compile_baremetal(source_file: text, target: text, emit: text, output_file: t
         print "  Target triple: {target_triple}"
 
     # Step 1: Compile Simple source to LLVM IR using pure Simple compiler
-    # TODO: Import and use compiler.driver and compiler.backend.llvm_backend
-    # For now, return helpful error message
+    # NOTE: Import and use compiler.driver and compiler.backend.llvm_backend
+    # once cross-module imports are supported. Requires:
+    #   1. Import compiler.driver (CompilerDriver, compile_file)
+    #   2. Import compiler.backend.llvm_backend (LlvmBackend, MirToLlvm)
+    #   3. Compile source -> MIR -> LLVM IR via MirToLlvm.translate_module()
+    # Currently blocked on interpreter module import support.
+    eprint("[NOTE] Pure Simple LLVM compilation not yet wired up; compiler.driver and compiler.backend.llvm_backend imports pending")
 
     val llvm_ir = ""
     val error_msg = "Pure Simple compilation not yet wired up. To complete this, we need to: 1. Import compiler.driver (CompilerDriver, compile_file) 2. Import compiler.backend.llvm_backend (LlvmBackend, MirToLlvm) 3. Compile source to MIR using CompilerDriver 4. Translate MIR to LLVM IR using MirToLlvm.translate_module() 5. Return the textual LLVM IR. The LLVM backend already generates textual IR in pure Simple! See: src/compiler/backend/llvm_backend.spl line 790. This is ~20-30 lines of Simple code to wire up. No Rust FFI needed - it's pure Simple!"

@@ -162,13 +162,23 @@ fn check_expr(engine: InferenceEngine, expr: Expr, expected: Type,
 
             # Check each arm against expected type
             for arm in arms:
-                # Bind pattern variables: pattern introduces bindings
-                # that can be used in the arm body.
-                # For now, check that arm body is consistent with expected type
-                # Pattern binding is handled by the pattern checker at HIR level
-                val arm_ty = synthesize_expr(engine, arm, env)
-                if arm_ty.?:
-                    engine.unify(arm_ty.unwrap(), expected)
+                # Bind pattern variables from the arm pattern into a local env
+                var arm_env = env.clone()
+                match arm:
+                    case MatchArm(pattern, guard, body):
+                        # Extract bindings from pattern and add to arm environment
+                        val bindings = extract_pattern_bindings(pattern, subject_ty)
+                        for binding in bindings:
+                            arm_env = arm_env.set(binding.name, binding.ty)
+                        # Check arm body against expected type
+                        val body_ty = check_expr(engine, body, expected, arm_env)
+                        if body_ty.?:
+                            engine.unify(body_ty.unwrap(), expected)
+                    case _:
+                        # Fallback: synthesize and unify
+                        val arm_ty = synthesize_expr(engine, arm, env)
+                        if arm_ty.?:
+                            engine.unify(arm_ty.unwrap(), expected)
 
             Ok(expected)
 
@@ -385,6 +395,58 @@ fn synthesize_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
     Ok(Type.Dict(key: engine.resolve(key_ty), value: engine.resolve(value_ty)))
 
 # ============================================================================
+# Pattern Binding Extraction
+# ============================================================================
+
+struct PatternBinding:
+    """A variable binding extracted from a pattern."""
+    name: text
+    ty: Type
+
+fn extract_pattern_bindings(pattern: Pattern, subject_ty: Type) -> [PatternBinding]:
+    """Extract variable bindings from a pattern for use in match arm bodies.
+
+    Walks the pattern structure and creates type bindings for each named variable.
+    """
+    var bindings: [PatternBinding] = []
+    match pattern:
+        case Ident(name):
+            # Simple variable binding captures the whole subject
+            bindings = bindings.push(PatternBinding(name: name, ty: subject_ty))
+        case EnumVariant(variant_name, sub_patterns):
+            # Enum variant - sub-patterns bind payload fields
+            # Each sub-pattern gets a fresh type variable since we don't know
+            # the exact field types without full enum resolution
+            for sub in sub_patterns:
+                match sub:
+                    case Ident(name):
+                        val field_ty = engine.fresh_var()
+                        bindings = bindings.push(PatternBinding(name: name, ty: field_ty))
+                    case _:
+                        pass
+        case Tuple(sub_patterns):
+            # Tuple pattern - bind each element
+            match subject_ty:
+                case Tuple(elem_types):
+                    var i = 0
+                    while i < sub_patterns.len() and i < elem_types.len():
+                        match sub_patterns[i]:
+                            case Ident(name):
+                                bindings = bindings.push(PatternBinding(name: name, ty: elem_types[i]))
+                            case _:
+                                pass
+                        i = i + 1
+                case _:
+                    pass
+        case Wildcard:
+            pass  # No bindings for wildcard
+        case Literal(_):
+            pass  # No bindings for literals
+        case _:
+            pass  # Unknown pattern kind - no bindings
+    bindings
+
+# ============================================================================
 # Bidirectional Statement Checking
 # ============================================================================
 
@@ -393,11 +455,56 @@ fn check_stmt_bidir(engine: InferenceEngine, stmt: Node, env: Dict<text, Type>,
     """Type check statement with bidirectional inference.
 
     Uses expected types where available (e.g., type annotations).
+    For let/val bindings with type annotations, propagates the annotation
+    as the expected type to the initializer expression for better inference.
     """
-    # Delegate to regular statement checking
-    # Bidirectional let binding checking is handled via type annotations
-    # propagating expected types to initializer expressions
-    compiler.type_system.stmt_check.check_stmt(engine, stmt, env, current_fn_ret_type)
+    match stmt:
+        case ValBinding(name, type_annotation, initializer):
+            # val binding with optional type annotation
+            var new_env = env.clone()
+            if type_annotation.? and initializer.?:
+                # Type annotation present - use Check mode for initializer
+                val expected_ty = ast_type_to_inference_type_engine(engine, type_annotation.unwrap())
+                val init_ty = check_expr(engine, initializer.unwrap(), expected_ty, env)?
+                new_env = new_env.set(name, init_ty)
+                Ok(new_env)
+            elif initializer.?:
+                # No annotation - Synthesize mode
+                val init_ty = synthesize_expr(engine, initializer.unwrap(), env)?
+                new_env = new_env.set(name, init_ty)
+                Ok(new_env)
+            else:
+                # No initializer - use annotation or fresh variable
+                val ty = if type_annotation.?:
+                    ast_type_to_inference_type_engine(engine, type_annotation.unwrap())
+                else:
+                    engine.fresh_var()
+                new_env = new_env.set(name, ty)
+                Ok(new_env)
+
+        case VarBinding(name, type_annotation, initializer):
+            # var binding - same logic as val but mutable
+            var new_env = env.clone()
+            if type_annotation.? and initializer.?:
+                val expected_ty = ast_type_to_inference_type_engine(engine, type_annotation.unwrap())
+                val init_ty = check_expr(engine, initializer.unwrap(), expected_ty, env)?
+                new_env = new_env.set(name, init_ty)
+                Ok(new_env)
+            elif initializer.?:
+                val init_ty = synthesize_expr(engine, initializer.unwrap(), env)?
+                new_env = new_env.set(name, init_ty)
+                Ok(new_env)
+            else:
+                val ty = if type_annotation.?:
+                    ast_type_to_inference_type_engine(engine, type_annotation.unwrap())
+                else:
+                    engine.fresh_var()
+                new_env = new_env.set(name, ty)
+                Ok(new_env)
+
+        case _:
+            # Delegate other statements to regular statement checking
+            compiler.type_system.stmt_check.check_stmt(engine, stmt, env, current_fn_ret_type)
 
 # ============================================================================
 # Public API
@@ -421,9 +528,9 @@ fn infer_with_expected(engine: InferenceEngine, expr: Expr,
 # Exports
 # ============================================================================
 
-export InferMode
+export InferMode, PatternBinding
 export infer_expr_bidir, check_expr
 export synthesize_lambda, check_lambda
 export synthesize_array, synthesize_tuple, synthesize_dict
-export check_stmt_bidir
+export check_stmt_bidir, extract_pattern_bindings
 export infer_with_expected

@@ -242,6 +242,60 @@ jobs:
       continue-on-error: true
 
   # ============================================================================
+  # Multi-File Link Tests (Native Compilation)
+  # ============================================================================
+  multi-file-link:
+    name: Multi-File Link Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        chmod +x bin/bootstrap/simple
+        echo "✓ Bootstrap runtime ready"
+
+    - name: Install gcc
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq gcc
+        gcc --version
+
+    - name: Run native compile spec tests
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        bin/bootstrap/simple test test/compiler/native_compile_spec.spl
+
+  # ============================================================================
+  # Windows MinGW Cross-Compilation
+  # ============================================================================
+  windows-mingw:
+    name: Windows MinGW Cross-Compile
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup bootstrap runtime
+      run: |
+        chmod +x bin/bootstrap/simple
+        echo "✓ Bootstrap runtime ready"
+
+    - name: Install MinGW-w64
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq gcc-mingw-w64-x86-64
+        x86_64-w64-mingw32-gcc --version
+
+    - name: Run Windows MinGW cross-compile test
+      run: |
+        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        bin/bootstrap/simple script/test_windows_mingw.spl
+
+  # ============================================================================
   # Build Examples
   # ============================================================================
   build-examples:
@@ -275,7 +329,7 @@ jobs:
   summary:
     name: All Tests Summary
     runs-on: ubuntu-latest
-    needs: [platform-detection, freebsd-tests, path-normalization, process-management, linker-detection, build-examples]
+    needs: [platform-detection, freebsd-tests, path-normalization, process-management, linker-detection, multi-file-link, windows-mingw, build-examples]
     if: always()
 
     steps:
@@ -289,21 +343,25 @@ jobs:
         echo "| Path Normalization | ${{ needs.path-normalization.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Process Management | ${{ needs.process-management.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Linker Detection | ${{ needs.linker-detection.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Multi-File Link | ${{ needs.multi-file-link.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Windows MinGW | ${{ needs.windows-mingw.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| FreeBSD Tests | ${{ needs.freebsd-tests.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| Build Examples | ${{ needs.build-examples.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Note:** macOS and Windows tests are skipped until native binaries are available." >> $GITHUB_STEP_SUMMARY
+        echo "**Note:** macOS and Windows VM tests require local QEMU setup." >> $GITHUB_STEP_SUMMARY
         echo "FreeBSD uses Linux binary via Linuxulator." >> $GITHUB_STEP_SUMMARY
+        echo "Windows MinGW cross-compiles a PE binary from Linux." >> $GITHUB_STEP_SUMMARY
 
     - name: Check critical failures
       run: |
-        # Only Linux tests are critical (we have a native binary for it)
+        # Linux tests and multi-file link are critical
         FAILED=0
         [ "${{ needs.path-normalization.result }}" != "success" ] && FAILED=1
         [ "${{ needs.process-management.result }}" != "success" ] && FAILED=1
+        [ "${{ needs.multi-file-link.result }}" != "success" ] && FAILED=1
 
         if [ $FAILED -eq 1 ]; then
-          echo "❌ Critical Linux tests failed"
+          echo "❌ Critical tests failed"
           exit 1
         fi
 

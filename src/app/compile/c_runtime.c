@@ -4,18 +4,18 @@
 
 // --- String Operations ---
 
-static long simple_strlen(const char* s) {
+static long long simple_strlen(const char* s) {
     if (!s) return 0;
-    return (long)strlen(s);
+    return (long long)strlen(s);
 }
 
-static char* simple_substring(const char* s, long start, long end) {
+static char* simple_substring(const char* s, long long start, long long end) {
     if (!s) return strdup("");
-    long slen = (long)strlen(s);
+    long long slen = (long long)strlen(s);
     if (start < 0) start = 0;
     if (end > slen) end = slen;
     if (start >= end) return strdup("");
-    long len = end - start;
+    long long len = end - start;
     char* result = (char*)malloc(len + 1);
     memcpy(result, s + start, len);
     result[len] = '\0';
@@ -34,8 +34,8 @@ static int simple_starts_with(const char* s, const char* prefix) {
 
 static int simple_ends_with(const char* s, const char* suffix) {
     if (!s || !suffix) return 0;
-    long slen = strlen(s);
-    long suflen = strlen(suffix);
+    long long slen = strlen(s);
+    long long suflen = strlen(suffix);
     if (suflen > slen) return 0;
     return strcmp(s + slen - suflen, suffix) == 0;
 }
@@ -43,7 +43,7 @@ static int simple_ends_with(const char* s, const char* suffix) {
 static char* simple_trim(const char* s) {
     if (!s) return strdup("");
     while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
-    long len = strlen(s);
+    long long len = strlen(s);
     while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\n' || s[len-1] == '\r')) len--;
     char* result = (char*)malloc(len + 1);
     memcpy(result, s, len);
@@ -51,25 +51,25 @@ static char* simple_trim(const char* s) {
     return result;
 }
 
-static long simple_index_of(const char* s, const char* needle) {
+static long long simple_index_of(const char* s, const char* needle) {
     if (!s || !needle) return -1;
     const char* found = strstr(s, needle);
     if (!found) return -1;
-    return (long)(found - s);
+    return (long long)(found - s);
 }
 
 static char* simple_replace(const char* s, const char* old_str, const char* new_str) {
     if (!s) return strdup("");
     if (!old_str || !new_str || strlen(old_str) == 0) return strdup(s);
-    long old_len = strlen(old_str);
-    long new_len = strlen(new_str);
+    long long old_len = strlen(old_str);
+    long long new_len = strlen(new_str);
     // Count occurrences
-    long count = 0;
+    long long count = 0;
     const char* tmp = s;
     while ((tmp = strstr(tmp, old_str)) != NULL) { count++; tmp += old_len; }
     if (count == 0) return strdup(s);
     // Build result
-    long result_len = strlen(s) + count * (new_len - old_len);
+    long long result_len = strlen(s) + count * (new_len - old_len);
     char* result = (char*)malloc(result_len + 1);
     char* dst = result;
     while (*s) {
@@ -89,8 +89,8 @@ static char* simple_replace(const char* s, const char* old_str, const char* new_
 
 typedef struct {
     const char** items;
-    long len;
-    long cap;
+    long long len;
+    long long cap;
 } SimpleStringArray;
 
 static SimpleStringArray simple_new_string_array(void) {
@@ -118,16 +118,16 @@ static const char* simple_string_pop(SimpleStringArray* arr) {
 
 static char* simple_string_join(SimpleStringArray* arr, const char* delim) {
     if (arr->len == 0) return strdup("");
-    long delim_len = strlen(delim);
-    long total = 0;
-    for (long i = 0; i < arr->len; i++) {
+    long long delim_len = strlen(delim);
+    long long total = 0;
+    for (long long i = 0; i < arr->len; i++) {
         total += strlen(arr->items[i]);
         if (i < arr->len - 1) total += delim_len;
     }
     char* result = (char*)malloc(total + 1);
     char* dst = result;
-    for (long i = 0; i < arr->len; i++) {
-        long item_len = strlen(arr->items[i]);
+    for (long long i = 0; i < arr->len; i++) {
+        long long item_len = strlen(arr->items[i]);
         memcpy(dst, arr->items[i], item_len);
         dst += item_len;
         if (i < arr->len - 1) {
@@ -146,11 +146,11 @@ static SimpleStringArray simple_split(const char* s, const char* delim) {
         simple_string_push(&arr, s);
         return arr;
     }
-    long delim_len = strlen(delim);
+    long long delim_len = strlen(delim);
     const char* start = s;
     const char* found;
     while ((found = strstr(start, delim)) != NULL) {
-        long len = found - start;
+        long long len = found - start;
         char* part = (char*)malloc(len + 1);
         memcpy(part, start, len);
         part[len] = '\0';
@@ -167,8 +167,8 @@ static SimpleStringArray simple_split(const char* s, const char* delim) {
 static char* simple_str_concat(const char* a, const char* b) {
     if (!a) a = "";
     if (!b) b = "";
-    long alen = strlen(a);
-    long blen = strlen(b);
+    long long alen = strlen(a);
+    long long blen = strlen(b);
     char* result = (char*)malloc(alen + blen + 1);
     memcpy(result, a, alen);
     memcpy(result + alen, b, blen);
@@ -176,9 +176,9 @@ static char* simple_str_concat(const char* a, const char* b) {
     return result;
 }
 
-static char* simple_char_at(const char* s, long idx) {
+static char* simple_char_at(const char* s, long long idx) {
     if (!s) return strdup("");
-    long slen = strlen(s);
+    long long slen = strlen(s);
     if (idx < 0) idx = slen + idx;
     if (idx < 0 || idx >= slen) return strdup("");
     char result[2];
@@ -193,10 +193,10 @@ static char* simple_file_read(const char* path) {
     FILE* f = fopen(path, "r");
     if (!f) return strdup("");
     fseek(f, 0, SEEK_END);
-    long len = ftell(f);
+    long long len = ftell(f);
     fseek(f, 0, SEEK_SET);
     char* buf = (char*)malloc(len + 1);
-    long read_len = fread(buf, 1, len, f);
+    long long read_len = fread(buf, 1, len, f);
     buf[read_len] = '\0';
     fclose(f);
     return buf;
@@ -218,20 +218,20 @@ static int simple_file_exists(const char* path) {
 
 // --- Process ---
 
-static long simple_shell(const char* cmd) {
-    return (long)system(cmd);
+static long long simple_shell(const char* cmd) {
+    return (long long)system(cmd);
 }
 
 // --- String formatting helper (sprintf wrapper) ---
 
-static char* simple_format_long(const char* fmt_before, long value, const char* fmt_after) {
+static char* simple_format_long(const char* fmt_before, long long value, const char* fmt_after) {
     char buf[256];
-    snprintf(buf, sizeof(buf), "%s%ld%s", fmt_before ? fmt_before : "", value, fmt_after ? fmt_after : "");
+    snprintf(buf, sizeof(buf), "%s%lld%s", fmt_before ? fmt_before : "", value, fmt_after ? fmt_after : "");
     return strdup(buf);
 }
 
 static char* simple_format_str(const char* fmt_before, const char* value, const char* fmt_after) {
-    long total = strlen(fmt_before ? fmt_before : "") + strlen(value ? value : "") + strlen(fmt_after ? fmt_after : "") + 1;
+    long long total = strlen(fmt_before ? fmt_before : "") + strlen(value ? value : "") + strlen(fmt_after ? fmt_after : "") + 1;
     char* buf = (char*)malloc(total);
     snprintf(buf, total, "%s%s%s", fmt_before ? fmt_before : "", value ? value : "", fmt_after ? fmt_after : "");
     return buf;

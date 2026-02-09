@@ -10,7 +10,7 @@
 #   simple -c "code"    - Run code string
 
 use app.cli_util (get_cli_args)
-use app.io.mod (file_exists, file_write, dir_create, cwd, env_get, shell, file_size_raw,
+use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, shell, file_size_raw,
     cli_file_exists, cli_read_file,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -124,6 +124,7 @@ fn print_help():
     print "  --gc-off       Disable garbage collection"
     print ""
     print "Execution Mode:"
+    print "  --run-config=interpreter|compiler  Set execution behavior (default: interpreter)"
     print "  --backend=auto|cranelift|llvm  Select JIT backend (default: auto)"
     print "  --interpret                    Force interpreter mode (no JIT)"
     print "  --interpret-optimized          Interpreter mode without GC/FFI overhead"
@@ -207,6 +208,7 @@ struct GlobalFlags:
     backend: text        # "auto", "cranelift", "llvm" - JIT backend selection
     force_interpret: bool  # --interpret flag to force interpreter mode
     interpreter_mode: text  # "classic" or "optimized" - interpreter mode selection
+    run_config: text        # "interpreter" or "compiler" (public-facing flag)
 
 fn parse_global_flags(args: [str]) -> GlobalFlags:
     var gc_log = false
@@ -220,6 +222,7 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
     var backend = "auto"
     var force_interpret = false
     var interpreter_mode = "classic"
+    var run_config = ""
 
     var i = 0
     while i < args.len():
@@ -240,6 +243,11 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
         elif arg == "--interpreter-mode" and i + 1 < args.len():
             i = i + 1
             interpreter_mode = args[i]
+        elif arg.starts_with("--run-config="):
+            run_config = arg[13:]
+        elif arg == "--run-config" and i + 1 < args.len():
+            i = i + 1
+            run_config = args[i]
         elif arg.starts_with("--backend="):
             backend = arg[10:]
         elif arg == "--backend" and i + 1 < args.len():
@@ -286,11 +294,22 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
         elif env_mode == "jit":
             backend = "auto"
 
+    # Read run-config from simple.sdn if not set via CLI/env
+    if run_config == "":
+        run_config = read_sdn_run_config()
+
+    # Map run_config to interpreter_mode
+    if run_config == "compiler":
+        interpreter_mode = "optimized"
+        force_interpret = true
+    elif run_config == "interpreter":
+        interpreter_mode = "classic"
+
     GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
         max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
         execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection,
         backend: backend, force_interpret: force_interpret,
-        interpreter_mode: interpreter_mode)
+        interpreter_mode: interpreter_mode, run_config: run_config)
 
 fn apply_fault_detection(flags: GlobalFlags):
     if flags.max_recursion_depth > 0:
@@ -309,10 +328,10 @@ fn filter_internal_flags(args: [str]) -> [str]:
     for arg in args:
         if skip_next:
             skip_next = false
-        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit" or arg == "--interpreter-mode":
+        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit" or arg == "--interpreter-mode" or arg == "--run-config":
             skip_next = true
         elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret" and arg != "--interpret-optimized":
-            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode"):
+            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config"):
                 # Keep --backend flags (used by both JIT and compile commands)
                 result.push(arg)
     result
@@ -343,9 +362,9 @@ fn handle_init(args: [str]) -> i64:
         name = "my-project"
 
     # Write simple.sdn manifest atomically
-    val manifest = "# Simple Package Manifest\n# SDN (Simple Data Notation) format\n\npackage:\n  name: {name}\n  version: 0.1.0\n  license: MIT\n  main: src/main.spl\n"
+    val manifest = "# Simple Package Manifest\n# SDN (Simple Data Notation) format\n\npackage:\n  name: {name}\n  version: 0.1.0\n  license: MIT\n  main: src/main.spl\n\nexecution:\n  run-config: interpreter\n"
     val write_result = atomic_write("{current_dir}/simple.sdn", manifest, DbConfig__defaults())
-    if write_result.err.?:
+    if not write_result.is_ok():
         print_error("Failed to write simple.sdn: {write_result.unwrap_err()}")
         return 1
 
@@ -364,6 +383,51 @@ fn handle_init(args: [str]) -> i64:
 
     print "Initialized Simple project '{name}'"
     return 0
+
+fn read_sdn_run_config() -> text:
+    val current_dir = cwd()
+    val sdn_path = "{current_dir}/simple.sdn"
+    if not file_exists(sdn_path):
+        return ""
+    val content = file_read(sdn_path)
+    if content == "":
+        return ""
+    # Simple line-based parsing for execution.run-config
+    var in_execution = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val indent = sdn_line_indent(line)
+        if indent == 0 and trimmed.ends_with(":"):
+            in_execution = trimmed == "execution:"
+            continue
+        if in_execution and indent >= 2:
+            if trimmed.starts_with("run-config:"):
+                val value = trimmed[11:].trim()
+                return strip_sdn_quotes(value)
+    ""
+
+fn sdn_line_indent(line: text) -> i64:
+    var count = 0
+    var i = 0
+    while i < line.len():
+        val ch = line[i:i + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+        i = i + 1
+    count
+
+fn strip_sdn_quotes(s: text) -> text:
+    if s.len() >= 2:
+        if (s.starts_with("\"") and s.ends_with("\"")) or (s.starts_with("'") and s.ends_with("'")):
+            return s[1 : s.len() - 1]
+    s
 
 fn check_self_contained() -> bool:
     # Check if this binary is a self-contained executable (runtime + SMF)

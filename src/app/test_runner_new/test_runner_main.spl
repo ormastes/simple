@@ -11,7 +11,7 @@ use test_runner_args.parse_test_args
 use test_runner_files.{discover_test_files, print_discovery_summary, strip_ansi}
 use test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe_mode}
 use test_runner_output.{print_result, print_summary}
-use test_db_compat.{TestDatabase, micros_to_rfc3339}  # Using compatibility layer
+use test_db_compat.{TestDatabase, load_test_db_compat, micros_to_rfc3339}  # Using compatibility layer
 use test_db_types.*
 use lib.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 use doc_generator.generate_all_docs
@@ -295,8 +295,8 @@ fn has_run_management_flag(args: [text]) -> bool:
     false
 
 fn handle_run_management(args: [text]) -> i64:
-    val db_result = TestDatabase__load()
-    if db_result.err.?:
+    val db_result = load_test_db_compat()
+    if not db_result.is_ok():
         print "Error: Could not load test database: {db_result.unwrap_err()}"
         return 1
 
@@ -317,7 +317,7 @@ fn handle_run_management(args: [text]) -> i64:
         if arg == "--cleanup-runs":
             db.cleanup_stale_runs(2)
             val save_result = db.save()
-            if save_result.err.?:
+            if not save_result.is_ok():
                 print "Error saving: {save_result.unwrap_err()}"
                 return 1
             print "Stale runs cleaned up."
@@ -328,7 +328,7 @@ fn handle_run_management(args: [text]) -> i64:
             val keep = count_str.to_int_or(50)
             db.prune_runs(keep)
             val save_result = db.save()
-            if save_result.err.?:
+            if not save_result.is_ok():
                 print "Error saving: {save_result.unwrap_err()}"
                 return 1
             print "Runs pruned (keeping {keep})."
@@ -351,8 +351,8 @@ fn get_flag_value(args: [text], flag: text) -> text?:
 # =========================================================================
 
 fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
-    val db_result = TestDatabase__load()
-    if db_result.err.?:
+    val db_result = load_test_db_compat()
+    if not db_result.is_ok():
         print "Warning: Could not load test database: {db_result.unwrap_err()}"
         return
 
@@ -411,13 +411,13 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
 
     # Save database
     val save_result = db.save()
-    if save_result.err.?:
+    if not save_result.is_ok():
         print "Warning: Could not save test database: {save_result.unwrap_err()}"
         return
 
     # Generate documentation (M3: includes feature DB auto-update)
     val fdb_opt = load_feature_database("doc/feature/feature_db.sdn")
-    var fdb = if fdb_opt.?: fdb_opt? else: create_feature_database("doc/feature/feature_db.sdn")
+    var fdb = if fdb_opt.?: fdb_opt.unwrap() else: create_feature_database("doc/feature/feature_db.sdn")
     # M3: Auto-update feature status from test results
     update_features_from_tests(fdb, result)
     fdb.save()
