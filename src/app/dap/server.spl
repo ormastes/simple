@@ -27,7 +27,7 @@ class LaunchConfig:
         )
 
     static fn from_json(args: Dict) -> LaunchConfig:
-        var config = LaunchConfig.default()
+        var config = LaunchConfig__default()
 
         # Parse program path (required)
         match args.get("program"):
@@ -138,14 +138,14 @@ class DapServer:
     static fn new() -> DapServer:
         DapServer(
             state: DebuggerState.Uninitialized,
-            breakpoint_manager: breakpoints.BreakpointManager.new(),
+            breakpoint_manager: breakpoints.BreakpointManager__new(),
             current_thread_id: 1,
             current_frame_id: 1,
             stop_reason: None,
-            launch_config: LaunchConfig.default(),
-            debug_context: DebugContext.new(),
+            launch_config: LaunchConfig__default(),
+            debug_context: DebugContext__new(),
             step_mode: None,
-            hook_context: InterpreterHookContext.create(),
+            hook_context: InterpreterHookContext__create(),
             remote_backend: None
         )
 
@@ -153,14 +153,14 @@ class DapServer:
     static fn with_remote(backend: RemoteRiscV32Backend) -> DapServer:
         DapServer(
             state: DebuggerState.Uninitialized,
-            breakpoint_manager: breakpoints.BreakpointManager.new(),
+            breakpoint_manager: breakpoints.BreakpointManager__new(),
             current_thread_id: 1,
             current_frame_id: 1,
             stop_reason: None,
-            launch_config: LaunchConfig.default(),
-            debug_context: DebugContext.new(),
+            launch_config: LaunchConfig__default(),
+            debug_context: DebugContext__new(),
             step_mode: None,
-            hook_context: InterpreterHookContext.create(),
+            hook_context: InterpreterHookContext__create(),
             remote_backend: Some(backend)
         )
 
@@ -171,7 +171,6 @@ enum StepMode:
     StepOut     # Step out of current function
 
 impl DapServer:
-    # Handle initialize request
     fn handle_initialize(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling initialize request")
 
@@ -179,7 +178,7 @@ impl DapServer:
         self.state = DebuggerState.Initialized
 
         # Build capabilities
-        val capabilities = protocol.Capabilities.default()
+        val capabilities = protocol.Capabilities__default()
 
         # Send response
         transport.write_response(request_seq, true, command, Some(capabilities))?
@@ -188,15 +187,13 @@ impl DapServer:
         transport.write_event("initialized", {})?
 
         Ok(nil)
-
-    # Handle launch request
     fn handle_launch(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling launch request")
 
         # Parse launch configuration
         match arguments:
             Some(args):
-                self.launch_config = LaunchConfig.from_json(args)
+                self.launch_config = LaunchConfig__from_json(args)
                 transport.log_debug("Launching program: {self.launch_config.program}")
                 transport.log_debug("Arguments: {self.launch_config.args}")
                 transport.log_debug("Stop on entry: {self.launch_config.stop_on_entry}")
@@ -216,8 +213,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, None)?
 
         Ok(nil)
-
-    # Handle configurationDone request
     fn handle_configuration_done(request_seq: Int, command: String) -> Result<Nil, String>:
         transport.log_debug("Handling configurationDone request")
 
@@ -230,7 +225,7 @@ impl DapServer:
         # Check if we should stop on entry
         if self.launch_config.stop_on_entry:
             # Initialize stack with entry frame
-            val entry_frame = StackEntry.new(
+            val entry_frame = StackEntry__new(
                 "main",
                 self.launch_config.program,
                 1,
@@ -247,8 +242,6 @@ impl DapServer:
             transport.log_debug("Starting execution without stopping on entry")
 
         Ok(nil)
-
-    # Handle setBreakpoints request
     fn handle_set_breakpoints(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         match arguments:
             case None:
@@ -263,7 +256,7 @@ impl DapServer:
                 var source_breakpoints = []
 
                 for bp_data in breakpoints_data:
-                    val source_bp = protocol.SourceBreakpoint.from_json(bp_data)?
+                    val source_bp = protocol.SourceBreakpoint__from_json(bp_data)?
                     source_breakpoints.push(source_bp)
 
                 # Set breakpoints using hook context
@@ -299,11 +292,9 @@ impl DapServer:
                 transport.write_response(request_seq, true, command, Some(body))?
 
                 Ok(nil)
-
-    # Handle threads request
     fn handle_threads(request_seq: Int, command: String) -> Result<Nil, String>:
         # Return single main thread
-        val thread = protocol.Thread.new(self.current_thread_id, "Main Thread")
+        val thread = protocol.Thread__new(self.current_thread_id, "Main Thread")
 
         val body = {
             "threads": [thread.to_json()]
@@ -312,8 +303,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, Some(body))?
 
         Ok(nil)
-
-    # Handle stackTrace request
     fn handle_stack_trace(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         var stack_frames: [Dict] = []
         var frame_id = self.current_frame_id
@@ -325,7 +314,7 @@ impl DapServer:
                 match remote_frames:
                     Ok(frames):
                         for f in frames:
-                            val protocol_frame = protocol.StackFrame.new(
+                            val protocol_frame = protocol.StackFrame__new(
                                 frame_id,
                                 f.function_name,
                                 f.line,
@@ -339,7 +328,7 @@ impl DapServer:
                 # Get stack frames from hook context
                 val frames = self.hook_context.stack_frames()
                 for frame in frames:
-                    val protocol_frame = protocol.StackFrame.new(
+                    val protocol_frame = protocol.StackFrame__new(
                         frame_id,
                         frame.name,
                         frame.line,
@@ -350,7 +339,7 @@ impl DapServer:
 
         # Fallback if no frames
         if stack_frames.len() == 0:
-            val frame = protocol.StackFrame.new(
+            val frame = protocol.StackFrame__new(
                 frame_id,
                 "main",
                 1,
@@ -366,12 +355,10 @@ impl DapServer:
         transport.write_response(request_seq, true, command, Some(body))?
 
         Ok(nil)
-
-    # Handle scopes request
     fn handle_scopes(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         # Return local and global scopes
-        val local_scope = protocol.Scope.new("Local", 1)
-        val global_scope = protocol.Scope.new("Global", 2)
+        val local_scope = protocol.Scope__new("Local", 1)
+        val global_scope = protocol.Scope__new("Global", 2)
 
         var scopes = [
             local_scope.to_json(),
@@ -381,7 +368,7 @@ impl DapServer:
         # Add Registers scope for remote targets
         match self.remote_backend:
             Some(_):
-                val register_scope = protocol.Scope.new("Registers", 3)
+                val register_scope = protocol.Scope__new("Registers", 3)
                 scopes.push(register_scope.to_json())
             None:
                 pass
@@ -393,8 +380,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, Some(body))?
 
         Ok(nil)
-
-    # Handle variables request
     fn handle_variables(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         match arguments:
             None:
@@ -413,7 +398,7 @@ impl DapServer:
                             match remote_vars:
                                 Ok(vars):
                                     for v in vars:
-                                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type_name)
+                                        val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
                                         variables.push(protocol_var.to_json())
                                 Err(_):
                                     pass
@@ -421,12 +406,12 @@ impl DapServer:
                             # Get local variables from hook context (frame 0 = current frame)
                             val vars = self.hook_context.variables_in_scope(0, VariableScope.Local)
                             for v in vars:
-                                val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
+                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type)
                                 variables.push(protocol_var.to_json())
 
                     # Placeholder if no variables
                     if variables.len() == 0:
-                        val placeholder = protocol.Variable.new(
+                        val placeholder = protocol.Variable__new(
                             "(no local variables)",
                             ""
                         ).with_type("")
@@ -440,7 +425,7 @@ impl DapServer:
                             match remote_vars:
                                 Ok(vars):
                                     for v in vars:
-                                        val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type_name)
+                                        val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type_name)
                                         variables.push(protocol_var.to_json())
                                 Err(_):
                                     pass
@@ -448,12 +433,12 @@ impl DapServer:
                             # Get global variables from hook context
                             val vars = self.hook_context.variables_in_scope(0, VariableScope.Global)
                             for v in vars:
-                                val protocol_var = protocol.Variable.new(v.name, v.value).with_type(v.type)
+                                val protocol_var = protocol.Variable__new(v.name, v.value).with_type(v.type)
                                 variables.push(protocol_var.to_json())
 
                     # Placeholder if no variables
                     if variables.len() == 0:
-                        val placeholder = protocol.Variable.new(
+                        val placeholder = protocol.Variable__new(
                             "(no global variables)",
                             ""
                         ).with_type("")
@@ -468,10 +453,10 @@ impl DapServer:
                                 Ok(regs):
                                     for name in regs.keys():
                                         val value = "0x{regs[name]}"
-                                        val protocol_var = protocol.Variable.new(name, value).with_type("u32")
+                                        val protocol_var = protocol.Variable__new(name, value).with_type("u32")
                                         variables.push(protocol_var.to_json())
                                 Err(_):
-                                    val placeholder = protocol.Variable.new(
+                                    val placeholder = protocol.Variable__new(
                                         "(registers unavailable)",
                                         ""
                                     ).with_type("")
@@ -490,7 +475,7 @@ impl DapServer:
                                     match children:
                                         Ok(child_list):
                                             for child in child_list:
-                                                var pvar = protocol.Variable.new(child.name, child.value).with_type(child.type_name)
+                                                var pvar = protocol.Variable__new(child.name, child.value).with_type(child.type_name)
                                                 if child.num_children > 0:
                                                     pvar = pvar.with_children(child.name.hash())
                                                 variables.push(pvar.to_json())
@@ -508,8 +493,6 @@ impl DapServer:
                 transport.write_response(request_seq, true, command, Some(body))?
 
                 Ok(nil)
-
-    # Handle continue request
     fn handle_continue(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling continue request")
 
@@ -533,8 +516,6 @@ impl DapServer:
         self.execute_until_stop()?
 
         Ok(nil)
-
-    # Handle pause request
     fn handle_pause(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling pause request")
 
@@ -548,8 +529,6 @@ impl DapServer:
         self.send_stopped_event(protocol.StopReason.Pause)?
 
         Ok(nil)
-
-    # Handle next (step over) request
     fn handle_next(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling next (step over) request")
 
@@ -561,8 +540,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, None)?
 
         Ok(nil)
-
-    # Handle stepIn request
     fn handle_step_in(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepIn request")
 
@@ -573,8 +550,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, None)?
 
         Ok(nil)
-
-    # Handle stepOut request
     fn handle_step_out(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling stepOut request")
 
@@ -585,8 +560,6 @@ impl DapServer:
         transport.write_response(request_seq, true, command, None)?
 
         Ok(nil)
-
-    # Execute until a stop condition is met (breakpoint or end)
     fn execute_until_stop() -> Result<Nil, String>:
         # NOTE: This is the interpreter integration point
         # When connected to the interpreter, this will:
@@ -613,8 +586,6 @@ impl DapServer:
                 self.send_stopped_event(protocol.StopReason.Step)?
 
         Ok(nil)
-
-    # Execute a single step based on current step mode
     fn execute_step() -> Result<Nil, String>:
         # NOTE: This is the interpreter integration point
         # When connected to the interpreter, this will:
@@ -662,8 +633,6 @@ impl DapServer:
         self.send_stopped_event(protocol.StopReason.Step)?
 
         Ok(nil)
-
-    # Handle evaluate request
     fn handle_evaluate(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         match arguments:
             None:
@@ -693,8 +662,6 @@ impl DapServer:
 
                 transport.write_response(request_seq, true, command, Some(body))?
                 Ok(nil)
-
-    # Handle disconnect request
     fn handle_disconnect(request_seq: Int, command: String, arguments: Option<Dict>) -> Result<Nil, String>:
         transport.log_debug("Handling disconnect request")
 
@@ -708,8 +675,6 @@ impl DapServer:
         transport.write_event("terminated", {})?
 
         Ok(nil)
-
-    # Send stopped event
     fn send_stopped_event(reason: protocol.StopReason) -> Result<Nil, String>:
         self.state = DebuggerState.Stopped
         self.stop_reason = Some(reason)
@@ -723,8 +688,6 @@ impl DapServer:
         transport.write_event("stopped", body)?
 
         Ok(nil)
-
-    # Main request dispatcher
     fn handle_request(request: protocol.DapRequest) -> Result<Nil, String>:
         match request.command:
             case "initialize":
@@ -762,8 +725,6 @@ impl DapServer:
                 transport.log_error("Unknown command: {request.command}")
                 transport.write_response(request.id, false, request.command, None)?
                 Ok(nil)
-
-    # Main server loop
     fn run() -> Result<Nil, String>:
         transport.log_debug("DAP server starting")
 
@@ -789,7 +750,7 @@ impl DapServer:
 
             # Only handle requests (DAP doesn't use notifications from client)
             if msg_type == "request":
-                val request = protocol.DapRequest.from_json(message)?
+                val request = protocol.DapRequest__from_json(message)?
                 self.handle_request(request)?
 
         Ok(nil)
