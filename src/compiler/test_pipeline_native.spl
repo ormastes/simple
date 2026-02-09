@@ -1,0 +1,95 @@
+# Test: Pure Simple Compilation Pipeline -> Native Backend
+#
+# Source -> Parse -> HIR -> MIR -> ISel -> RegAlloc -> Encode -> ELF -> Link -> Run
+#
+# This tests the full Pure Simple compilation pipeline without the Rust runtime.
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn shell(command: text) -> (text, text, i64):
+    rt_process_run("sh", ["-c", command])
+
+# Import parser and dependencies
+use compiler.parser.*
+use compiler.parser_types.*
+use compiler.lexer.*
+use compiler.blocks.*
+use compiler.treesitter.*
+
+# Import HIR lowering
+use compiler.hir_lowering.*
+
+# Import MIR lowering
+use compiler.mir_lowering.*
+use compiler.mir_data.*
+
+# Import native backend
+use compiler.backend.native.mod.{compile_native}
+use compiler.backend.backend_types.{CodegenTarget}
+
+print "=== Pure Simple Pipeline -> Native Backend Test ==="
+
+# Step 1: Parse a simple program
+print "Step 1: Parsing..."
+val source = "fn main():\n    0\n"
+var parser = Parser.new(source)
+val ast_module = parser.parse()
+print "  Parsed: functions={ast_module.functions.keys()}"
+
+# Step 2: Lower to HIR
+print "Step 2: HIR Lowering..."
+var hir_lowering = HirLowering.new()
+val hir_module = hir_lowering.lower_module(ast_module)
+print "  HIR: done"
+
+# Step 3: Lower to MIR
+print "Step 3: MIR Lowering..."
+var mir_lowering_ctx = MirLowering.new(hir_lowering.symbols)
+val mir_module = mir_lowering_ctx.lower_module(hir_module)
+print "  MIR: name={mir_module.name}"
+
+# Step 4: Native backend (ISel -> RegAlloc -> Encode -> ELF)
+print "Step 4: Native backend..."
+val elf_bytes = compile_native(mir_module, CodegenTarget.X86_64)
+print "  ELF: {elf_bytes.len()} bytes"
+
+# Step 5: Write and link
+print "Step 5: Writing and linking..."
+fn byte_to_hex(b: i64) -> text:
+    val digits = "0123456789abcdef"
+    "{digits[b / 16]}{digits[b % 16]}"
+
+var offset = 0
+while offset < elf_bytes.len():
+    var chunk = ""
+    var end_idx = offset + 800
+    if end_idx > elf_bytes.len():
+        end_idx = elf_bytes.len()
+    var j = offset
+    while j < end_idx:
+        chunk = chunk + byte_to_hex(elf_bytes[j])
+        j = j + 1
+    if offset == 0:
+        shell("echo -n '{chunk}' > /tmp/pipeline_test.hex")
+    else:
+        shell("echo -n '{chunk}' >> /tmp/pipeline_test.hex")
+    offset = end_idx
+
+shell("xxd -r -p /tmp/pipeline_test.hex /tmp/pipeline_test.o")
+shell("rm -f /tmp/pipeline_test.hex")
+
+val link_r = rt_process_run("gcc", ["-o", "/tmp/pipeline_test", "/tmp/pipeline_test.o", "-no-pie"])
+if link_r[2] != 0:
+    print "  Link FAILED: {link_r[1]}"
+else:
+    print "  Linked!"
+    val run_r = rt_process_run("/tmp/pipeline_test", [])
+    print "  Exit code: {run_r[2]}"
+    if run_r[2] == 0:
+        print ""
+        print "=== SUCCESS: Pure Simple Pipeline -> Native ==="
+    else:
+        print "=== PARTIAL: Binary returned {run_r[2]} ==="
+
+print "=== Done ==="

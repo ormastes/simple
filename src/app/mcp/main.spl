@@ -16,7 +16,9 @@ use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_d
 use app.mcp.resources
 use app.mcp.prompts
 use app.mcp.bugdb_resource
-use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag}
+use app.mcp.completions
+use app.mcp.session.{McpState}
+use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_tool_result_with_structured, make_tool_schema_with_output, make_server_request, make_sampling_request, make_elicitation_request}
 use app.mcp.debug_tools.{SessionManager, SessionBreakpoint, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate, parse_var_entry, parse_stack_frame, step_mode_to_int}
 
 # Main entry point
@@ -94,6 +96,7 @@ fn start_server(debug_mode: Bool):
     val resource_mgr = resources.ResourceManager.create(project_root)
     val prompt_mgr = prompts.PromptManager.create(project_root)
     var session_mgr = SessionManager.empty()
+    var mcp_state = McpState.create()
 
     if debug_mode:
         debug_log("Initialized with project root: " + project_root)
@@ -117,7 +120,19 @@ fn start_server(debug_mode: Bool):
                 tool_name = extract_nested_string(line, "params", "name")
                 is_debug = tool_name.starts_with("debug_")
 
-            if is_debug:
+            # Handle cancellation notification (no response needed)
+            val is_cancel_notification = method == "notifications/cancelled"
+            if is_cancel_notification:
+                val cancel_req_id = extract_nested_string(line, "params", "requestId")
+                val cancel_reason = extract_nested_string(line, "params", "reason")
+                if cancel_req_id != "":
+                    val cancel_method = mcp_state.in_flight.get(cancel_req_id) ?? ""
+                    if cancel_method != "initialize":
+                        mcp_state.cancel_request(cancel_req_id, cancel_reason)
+                        if debug_mode:
+                            debug_log("Cancelled request: " + cancel_req_id)
+
+            elif is_debug:
                 if debug_mode:
                     debug_log("Debug tool call (inline): " + tool_name)
                 # INLINE debug dispatch: session_mgr mutations must stay in this scope
@@ -508,7 +523,18 @@ fn start_server(debug_mode: Bool):
                 else:
                     response = make_error_response(id, -32602, "Unknown debug tool: " + tool_name)
             else:
-                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr)
+                # Track in-flight requests
+                if id != "null" and id != "":
+                    mcp_state.register_request(id, method)
+                    # Extract progressToken from _meta if present
+                    val meta_token = extract_nested_string(line, "_meta", "progressToken")
+                    if meta_token != "":
+                        mcp_state.register_progress_token(meta_token, id)
+                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr, mcp_state)
+                # Clean up in-flight tracking
+                if id != "null" and id != "":
+                    mcp_state.complete_request(id)
+                    mcp_state.clear_cancelled(id)
             if response != "":
                 write_stdout_message(response)
 
@@ -548,7 +574,7 @@ fn write_stdout_message(body: String):
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager) -> String:
+fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager, mcp_state: McpState) -> String:
     if debug_mode:
         debug_log("Request: " + body)
 
@@ -565,8 +591,11 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
     elif method == "exit":
         exit(0)
         return ""
+    elif method == "ping":
+        return make_result_response(id, LB() + RB())
     elif method == "tools/list":
-        return make_tools_list_response(id)
+        val cursor = extract_nested_string(body, "params", "cursor")
+        return handle_tools_list_paginated(id, cursor, debug_mode)
     elif method == "tools/call":
         val tool_name = extract_nested_string(body, "params", "name")
         return handle_tool_call(id, tool_name, body, debug_mode, session_mgr)
@@ -578,16 +607,27 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return handle_resources_read(id, uri, resource_mgr, debug_mode)
     elif method == "resources/templates/list":
         return handle_resources_templates_list(id, resource_mgr, debug_mode)
+    elif method == "resources/subscribe":
+        val uri = extract_nested_string(body, "params", "uri")
+        return handle_resources_subscribe(id, uri, mcp_state, debug_mode)
+    elif method == "resources/unsubscribe":
+        val uri = extract_nested_string(body, "params", "uri")
+        return handle_resources_unsubscribe(id, uri, mcp_state, debug_mode)
     elif method == "prompts/list":
-        return handle_prompts_list(id, prompt_mgr, debug_mode)
+        val cursor = extract_nested_string(body, "params", "cursor")
+        return handle_prompts_list_paginated(id, prompt_mgr, cursor, debug_mode)
     elif method == "prompts/get":
         val prompt_name = extract_nested_string(body, "params", "name")
         return handle_prompts_get(id, prompt_name, body, prompt_mgr, debug_mode)
     elif method == "logging/setLevel":
         val level = extract_nested_string(body, "params", "level")
+        val level_int = log_level_to_int(level)
+        mcp_state.set_log_level(level_int)
         if debug_mode:
-            debug_log("Log level set to: " + level)
-        return make_result_response(id, "null")
+            debug_log("Log level set to: " + level + " (" + level_int.to_string() + ")")
+        return make_result_response(id, LB() + RB())
+    elif method == "completion/complete":
+        return handle_completion_request(id, body, resource_mgr, prompt_mgr, debug_mode)
     elif method == "roots/list":
         return handle_roots_list(id, debug_mode)
     else:
@@ -607,15 +647,25 @@ fn make_initialize_response(id: String) -> String:
     server_info = server_info + jp("instructions", js(instructions))
     server_info = server_info + RB()
 
-    # Capabilities: tools, resources, prompts, logging
+    # Capabilities: tools, resources, prompts, logging, completions
+    # Each with listChanged: true and resources with subscribe: true
+    var tools_cap = jo1(jp("listChanged", "true"))
+    var resources_cap = LB()
+    resources_cap = resources_cap + jp("subscribe", "true")
+    resources_cap = resources_cap + "," + jp("listChanged", "true")
+    resources_cap = resources_cap + RB()
+    var prompts_cap = jo1(jp("listChanged", "true"))
+
     var caps = LB()
-    caps = caps + jp("tools", jo1(""))
+    caps = caps + jp("tools", tools_cap)
     caps = caps + ","
-    caps = caps + jp("resources", jo1(""))
+    caps = caps + jp("resources", resources_cap)
     caps = caps + ","
-    caps = caps + jp("prompts", jo1(""))
+    caps = caps + jp("prompts", prompts_cap)
     caps = caps + ","
-    caps = caps + jp("logging", jo1(""))
+    caps = caps + jp("logging", LB() + RB())
+    caps = caps + ","
+    caps = caps + jp("completions", LB() + RB())
     caps = caps + RB()
     val result = jo3(jp("protocolVersion", js("2025-06-18")), jp("capabilities", caps), jp("serverInfo", server_info))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
@@ -660,66 +710,88 @@ fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: St
     result = result + RB()
     result
 
-fn make_tools_list_response(id: String) -> String:
-    # Tool annotations: (read_only, destructive, idempotent)
-    val t1 = make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true, true, false, true)
-    val t2 = make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false, true, false, true)
-    val t3 = make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true, true, false, true)
-    val t4 = make_tool_schema("file_info", "Get file information", "path", "File path", true, true, false, true)
-    # Bug database tools
-    val t5 = make_tool_schema("bugdb_get", "Get bug by ID", "id", "Bug ID", true, true, false, true)
-    val t6 = make_tool_schema("bugdb_add", "Add new bug", "bug", "Bug JSON", true, false, false, false)
-    val t7 = make_tool_schema("bugdb_update", "Update existing bug", "id", "Bug ID", true, false, false, true)
+fn get_all_tools() -> [String]:
+    # Build all tool schemas as a list
+    var all_tools: [String] = []
 
-    # Debug tools (t8-t17) - original 10
-    val t8 = schema_debug_create_session()
-    val t9 = schema_debug_list_sessions()
-    val t10 = schema_debug_close_session()
-    val t11 = schema_debug_set_breakpoint()
-    val t12 = schema_debug_remove_breakpoint()
-    val t13 = schema_debug_continue()
-    val t14 = schema_debug_step()
-    val t15 = schema_debug_get_variables()
-    val t16 = schema_debug_stack_trace()
-    val t17 = schema_debug_evaluate()
-    # New debug tools (t18-t23) - Phase 1.5
-    val t18 = schema_debug_set_function_breakpoint()
-    val t19 = schema_debug_enable_breakpoint()
-    val t20 = schema_debug_get_source()
-    val t21 = schema_debug_watch()
-    val t22 = schema_debug_set_variable()
-    val t23 = schema_debug_terminate()
-    val t24 = make_tool_schema("check_diagnostics",
-        "Type-check a Simple source file and return structured error/warning diagnostics (like VSCode problems panel)",
-        "path", "Path to .spl file to check", true, true, false, true)
+    # Tool annotations: (read_only, destructive, idempotent)
+    all_tools.push(make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true, true, false, true))
+    all_tools.push(make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false, true, false, true))
+    all_tools.push(make_tool_schema("search_code", "Search for code patterns", "query", "Search query", true, true, false, true))
+
+    # file_info with outputSchema
+    val fi_out_props = LB() + jp("path", jo1(jp("type", js("string")))) + "," + jp("lines", jo1(jp("type", js("integer")))) + "," + jp("functions", jo1(jp("type", js("integer")))) + "," + jp("classes", jo1(jp("type", js("integer")))) + RB()
+    val fi_out_schema = jo2(jp("type", js("object")), jp("properties", fi_out_props))
+    val fi_in_prop = jo2(jp("type", js("string")), jp("description", js("File path")))
+    val fi_in_props = jo1(jp("path", fi_in_prop))
+    all_tools.push(make_tool_schema_with_output("file_info", "Get file information", fi_in_props, "[" + js("path") + "]", fi_out_schema, true, false, true))
+
+    # Bug database tools
+    all_tools.push(make_tool_schema("bugdb_get", "Get bug by ID", "id", "Bug ID", true, true, false, true))
+    all_tools.push(make_tool_schema("bugdb_add", "Add new bug", "bug", "Bug JSON", true, false, false, false))
+    all_tools.push(make_tool_schema("bugdb_update", "Update existing bug", "id", "Bug ID", true, false, false, true))
+
+    # Debug tools - original 10
+    all_tools.push(schema_debug_create_session())
+    all_tools.push(schema_debug_list_sessions())
+    all_tools.push(schema_debug_close_session())
+    all_tools.push(schema_debug_set_breakpoint())
+    all_tools.push(schema_debug_remove_breakpoint())
+    all_tools.push(schema_debug_continue())
+    all_tools.push(schema_debug_step())
+    all_tools.push(schema_debug_get_variables())
+    all_tools.push(schema_debug_stack_trace())
+    all_tools.push(schema_debug_evaluate())
+    # Debug tools - Phase 1.5
+    all_tools.push(schema_debug_set_function_breakpoint())
+    all_tools.push(schema_debug_enable_breakpoint())
+    all_tools.push(schema_debug_get_source())
+    all_tools.push(schema_debug_watch())
+    all_tools.push(schema_debug_set_variable())
+    all_tools.push(schema_debug_terminate())
+
+    # check_diagnostics with outputSchema
+    val cd_out_props = LB() + jp("file", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + "," + jp("exit_code", jo1(jp("type", js("integer")))) + "," + jp("diagnostics", jo1(jp("type", js("array")))) + RB()
+    val cd_out_schema = jo2(jp("type", js("object")), jp("properties", cd_out_props))
+    val cd_in_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file to check")))
+    val cd_in_props = jo1(jp("path", cd_in_prop))
+    all_tools.push(make_tool_schema_with_output("check_diagnostics", "Type-check a Simple source file and return structured error/warning diagnostics (like VSCode problems panel)", cd_in_props, "[" + js("path") + "]", cd_out_schema, true, false, true))
+
+    all_tools
+
+fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> String:
+    val all_tools = get_all_tools()
+
+    # Pagination settings
+    val page_size = 20
+    var offset = 0
+
+    if cursor != "":
+        if cursor.starts_with("offset:"):
+            val cursor_value = cursor.substring(7)
+            val parse_result = parse_int(cursor_value)
+            if parse_result.ok.?:
+                offset = parse_result.unwrap()
+
+    val total = all_tools.len()
+    val end = min_int(offset + page_size, total)
+    val has_more = end < total
 
     var tools = "["
-    tools = tools + t1
-    tools = tools + "," + t2
-    tools = tools + "," + t3
-    tools = tools + "," + t4
-    tools = tools + "," + t5
-    tools = tools + "," + t6
-    tools = tools + "," + t7
-    tools = tools + "," + t8
-    tools = tools + "," + t9
-    tools = tools + "," + t10
-    tools = tools + "," + t11
-    tools = tools + "," + t12
-    tools = tools + "," + t13
-    tools = tools + "," + t14
-    tools = tools + "," + t15
-    tools = tools + "," + t16
-    tools = tools + "," + t17
-    tools = tools + "," + t18
-    tools = tools + "," + t19
-    tools = tools + "," + t20
-    tools = tools + "," + t21
-    tools = tools + "," + t22
-    tools = tools + "," + t23
-    tools = tools + "," + t24
+    var first = true
+    for i in offset..end:
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + all_tools[i]
     tools = tools + "]"
-    val result = jo1(jp("tools", tools))
+
+    var result = LB()
+    result = result + jp("tools", tools)
+    if has_more:
+        val next_cursor = "offset:" + end.to_string()
+        result = result + "," + jp("nextCursor", js(next_cursor))
+    result = result + RB()
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager) -> String:
@@ -748,6 +820,9 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
     elif tool_name == "file_info":
         val path = extract_nested_string(body, "arguments", "path")
         val info = get_file_info(path)
+        val structured = get_file_info_structured(path)
+        if structured != "":
+            return make_tool_result_with_structured(id, info, structured)
         return make_tool_result(id, info)
 
     elif tool_name == "bugdb_get":
@@ -820,7 +895,7 @@ fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Boo
         if path == "":
             return make_error_response(id, -32602, "Missing required parameter: path")
         val result = run_check_diagnostics(path)
-        return make_tool_result(id, result)
+        return make_tool_result_with_structured(id, result, result)
 
     else:
         return make_error_response(id, -32602, "Unknown tool: " + tool_name)
@@ -1013,6 +1088,30 @@ fn get_file_info(path: String) -> String:
     result = result + RB()
     result
 
+fn get_file_info_structured(path: String) -> String:
+    val content = file_read(path)
+    if content == "":
+        return ""
+
+    val lines = content.split("\n")
+    var line_count = lines.len()
+    var fn_count = 0
+    var class_count = 0
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
+            fn_count = fn_count + 1
+        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
+            class_count = class_count + 1
+
+    var result = LB()
+    result = result + jp("path", js(escape_json(path)))
+    result = result + "," + jp("lines", line_count.to_string())
+    result = result + "," + jp("functions", fn_count.to_string())
+    result = result + "," + jp("classes", class_count.to_string())
+    result = result + RB()
+    result
+
 
 # --- Resource and Prompt handlers ---
 
@@ -1167,6 +1266,120 @@ fn handle_roots_list(id: String, debug_mode: Bool) -> String:
 
     val result = jo1(jp("roots", roots_json))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Subscription handlers ---
+
+fn handle_resources_subscribe(id: String, uri: String, mcp_state: McpState, debug_mode: Bool) -> String:
+    if uri == "":
+        return make_error_response(id, -32602, "Missing required parameter: uri")
+    if debug_mode:
+        debug_log("Subscribe to resource: " + uri)
+    mcp_state.subscribe(uri)
+    make_result_response(id, LB() + RB())
+
+fn handle_resources_unsubscribe(id: String, uri: String, mcp_state: McpState, debug_mode: Bool) -> String:
+    if uri == "":
+        return make_error_response(id, -32602, "Missing required parameter: uri")
+    if debug_mode:
+        debug_log("Unsubscribe from resource: " + uri)
+    mcp_state.unsubscribe(uri)
+    make_result_response(id, LB() + RB())
+
+# --- Completion handler ---
+
+fn handle_completion_request(id: String, body: String, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Completion request")
+
+    # Extract ref type and name
+    val ref_type = extract_nested_string(body, "ref", "type")
+    var ref_name = ""
+    if ref_type == "ref/prompt":
+        ref_name = extract_nested_string(body, "ref", "name")
+    elif ref_type == "ref/resource":
+        ref_name = extract_nested_string(body, "ref", "uri")
+
+    # Extract argument info
+    val arg_name = extract_nested_string(body, "argument", "name")
+    val arg_value = extract_nested_string(body, "argument", "value")
+
+    completions.handle_completion(id, ref_type, ref_name, arg_name, arg_value, resource_mgr, prompt_mgr)
+
+# --- Paginated prompts handler ---
+
+fn handle_prompts_list_paginated(id: String, prompt_mgr: prompts.PromptManager, cursor: String, debug_mode: Bool) -> String:
+    if debug_mode:
+        debug_log("Listing prompts (cursor: " + cursor + ")")
+
+    val prompt_list = prompt_mgr.list_prompts()
+
+    # Pagination settings
+    val page_size = 20
+    var offset = 0
+
+    if cursor != "":
+        if cursor.starts_with("offset:"):
+            val cursor_value = cursor.substring(7)
+            val parse_result = parse_int(cursor_value)
+            if parse_result.ok.?:
+                offset = parse_result.unwrap()
+
+    val total = prompt_list.len()
+    val end = min_int(offset + page_size, total)
+    val has_more = end < total
+
+    var prompts_json = "["
+    var first = true
+
+    for i in offset..end:
+        val prompt_info = prompt_list[i]
+        if not first:
+            prompts_json = prompts_json + ","
+        first = false
+
+        # Build arguments array
+        var args_json = "["
+        var first_arg = true
+        for arg in prompt_info.arguments:
+            if not first_arg:
+                args_json = args_json + ","
+            first_arg = false
+
+            var arg_obj = LB()
+            arg_obj = arg_obj + jp("name", js(arg.name))
+            arg_obj = arg_obj + ","
+            arg_obj = arg_obj + jp("description", js(arg.description))
+            arg_obj = arg_obj + ","
+            val req_str = if arg.required: "true" else: "false"
+            arg_obj = arg_obj + jp("required", req_str)
+            arg_obj = arg_obj + RB()
+
+            args_json = args_json + arg_obj
+
+        args_json = args_json + "]"
+
+        var prompt_obj = LB()
+        prompt_obj = prompt_obj + jp("name", js(prompt_info.name))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("description", js(prompt_info.description))
+        prompt_obj = prompt_obj + ","
+        prompt_obj = prompt_obj + jp("arguments", args_json)
+        prompt_obj = prompt_obj + RB()
+
+        prompts_json = prompts_json + prompt_obj
+
+    prompts_json = prompts_json + "]"
+
+    var result = LB()
+    result = result + jp("prompts", prompts_json)
+    if has_more:
+        val next_cursor = "offset:" + end.to_string()
+        result = result + "," + jp("nextCursor", js(next_cursor))
+    result = result + RB()
+
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# --- Legacy non-paginated prompts handler (kept for backwards compat) ---
 
 fn handle_prompts_list(id: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
     if debug_mode:

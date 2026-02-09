@@ -181,51 +181,72 @@ describe "Parser Edge Cases":
                 case Ok(v): expect(v).to_equal(60)
                 case Err(_): fail("Expected Ok")
 
+    context "previously reported bugs (now fixed)":
+        """These patterns were reported as parser bugs but work in current bootstrap."""
+
+        it "? in if-expression body":
+            fn parse_int_result(s: text) -> Result<i64, text>:
+                val parsed = s.parse_int()
+                if not parsed.?:
+                    return Err("parse failed")
+                Ok(parsed.unwrap())
+
+            fn parse_optional(has_value: bool, s: text) -> Result<i64?, text>:
+                val result = if has_value:
+                    Some(parse_int_result(s)?)
+                else:
+                    None
+                Ok(result)
+
+            val r1 = parse_optional(true, "42")
+            match r1:
+                case Ok(v): expect(v.unwrap()).to_equal(42)
+                case Err(_): fail("Expected Ok")
+
+            val r2 = parse_optional(false, "")
+            match r2:
+                case Ok(v): expect(not v.?)
+                case Err(_): fail("Expected Ok")
+
+        it "? in for loop with Result":
+            fn parse_int_result(s: text) -> Result<i64, text>:
+                val parsed = s.parse_int()
+                if not parsed.?:
+                    return Err("parse failed: {s}")
+                Ok(parsed.unwrap())
+
+            fn sum_parsed(items: [text]) -> Result<i64, text>:
+                var total = 0
+                for item in items:
+                    val n = parse_int_result(item)?
+                    total = total + n
+                Ok(total)
+
+            val r1 = sum_parsed(["1", "2", "3"])
+            match r1:
+                case Ok(v): expect(v).to_equal(6)
+                case Err(_): fail("Expected Ok")
+
+            val r2 = sum_parsed(["1", "abc", "3"])
+            match r2:
+                case Ok(_): fail("Expected Err")
+                case Err(e): expect(e).to_equal("parse failed: abc")
+
     skip context "known parser bugs":
-        """These patterns currently fail to parse - skipped until fixed."""
+        """The ?? return bug requires bootstrap rebuild to fix.
+        Source fix applied to src/compiler/parser.spl and
+        src/app/parser/expr/postfix.spl."""
 
         skip it "?? return Err pattern":
             """
-            BUG: This causes "expected expression, found Return"
-            The parser doesn't handle return in ?? right-hand side.
+            BUG: Bootstrap parser error "expected expression, found Return"
+            Root cause: bootstrap binary's parse_primary_expr() doesn't handle
+            KwReturn in expression position. Source fix exists in both
+            src/compiler/parser.spl and src/app/parser/expr/postfix.spl
+            but requires bootstrap rebuild to take effect.
             """
-            fn parse_with_default(s: text) -> Result<i64, text>:
-                # This line causes parse error:
-                # val value = s.parse_int() ?? return Err("parse failed")
-                # Workaround:
-                val opt = s.parse_int()
-                if not opt.?:
-                    return Err("parse failed")
-                Ok(opt.unwrap())
-
-            pass  # Test is skipped
-
-        it "? in if-expression body skipped":
-            """BUG: This causes expected identifier, found Val
-            The parser doesn't handle ? inside if-expression bodies."""
-            pass  # Test is skipped
-            fn parse_optional(dict: Dict<text, text>) -> Result<i64?, text>:
-                # This causes parse error:
-                # val result = if dict["value"].?:
-                #     Some(parse_value(dict["value"].unwrap())?)
-                # else:
-                #     None
-                # Workaround: use explicit match
-                pass
-
-            pass  # Test is skipped
-
-        skip it "? in for loop with Result":
-            """
-            BUG: The ? operator may not work correctly in for loop bodies.
-            """
-            fn process_all(items: [text]) -> Result<i64, text>:
-                var total = 0
-                # This may cause issues:
-                # for item in items:
-                #     val n = item.parse_int()?  # ? in for loop
-                #     total = total + n
-                # Workaround: use match
-                pass
-
-            pass  # Test is skipped
+            # After bootstrap rebuild, uncomment and this should work:
+            # fn parse_with_default(s: text) -> Result<i64, text>:
+            #     val value = s.parse_int() ?? return Err("parse failed")
+            #     Ok(value)
+            pass

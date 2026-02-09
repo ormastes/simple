@@ -371,6 +371,275 @@ fn make_tool_schema_multi(name: String, desc: String, properties_json: String, r
     result = result + RB()
     result
 
+# --- Notification helpers ---
+
+# Build a JSON-RPC 2.0 notification (no id field)
+fn make_notification(method: String, params: String) -> String:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+# Build a JSON-RPC 2.0 notification with no params
+fn make_notification_no_params(method: String) -> String:
+    jo2(jp("jsonrpc", js("2.0")), jp("method", js(method)))
+
+# Send a progress notification
+fn make_progress_notification(token: String, progress: Int, total: Int, message: String) -> String:
+    var params = LB()
+    params = params + jp("progressToken", js(token))
+    params = params + "," + jp("progress", progress.to_string())
+    if total > 0:
+        params = params + "," + jp("total", total.to_string())
+    if message != "":
+        params = params + "," + jp("message", js(escape_json(message)))
+    params = params + RB()
+    make_notification("notifications/progress", params)
+
+# --- Log level utilities ---
+
+# Convert log level name to numeric priority (RFC 5424)
+fn log_level_to_int(level: String) -> Int:
+    if level == "debug":
+        return 0
+    elif level == "info":
+        return 1
+    elif level == "notice":
+        return 2
+    elif level == "warning":
+        return 3
+    elif level == "error":
+        return 4
+    elif level == "critical":
+        return 5
+    elif level == "alert":
+        return 6
+    elif level == "emergency":
+        return 7
+    return -1  # unknown level
+
+# Build a log message notification (data as string)
+fn make_log_notification(level: String, data: String, logger: String) -> String:
+    var params = LB()
+    params = params + jp("level", js(level))
+    params = params + "," + jp("data", js(escape_json(data)))
+    if logger != "":
+        params = params + "," + jp("logger", js(escape_json(logger)))
+    params = params + RB()
+    make_notification("notifications/message", params)
+
+# Build a log message notification with raw JSON data (object, array, number, etc.)
+fn make_log_notification_raw(level: String, data_json: String, logger: String) -> String:
+    var params = LB()
+    params = params + jp("level", js(level))
+    params = params + "," + jp("data", data_json)
+    if logger != "":
+        params = params + "," + jp("logger", js(escape_json(logger)))
+    params = params + RB()
+    make_notification("notifications/message", params)
+
+# --- List changed notifications ---
+
+fn make_tools_list_changed() -> String:
+    make_notification_no_params("notifications/tools/list_changed")
+
+fn make_resources_list_changed() -> String:
+    make_notification_no_params("notifications/resources/list_changed")
+
+fn make_prompts_list_changed() -> String:
+    make_notification_no_params("notifications/prompts/list_changed")
+
+# --- Resource subscription notifications ---
+
+fn make_resource_updated_notification(uri: String) -> String:
+    val params = jo1(jp("uri", js(escape_json(uri))))
+    make_notification("notifications/resources/updated", params)
+
+# --- Content type helpers ---
+
+# Build ImageContent object
+fn make_image_content(data: String, mime_type: String) -> String:
+    var r = LB()
+    r = r + jp("type", js("image"))
+    r = r + "," + jp("data", js(data))
+    r = r + "," + jp("mimeType", js(mime_type))
+    r = r + RB()
+    r
+
+# Build AudioContent object
+fn make_audio_content(data: String, mime_type: String) -> String:
+    var r = LB()
+    r = r + jp("type", js("audio"))
+    r = r + "," + jp("data", js(data))
+    r = r + "," + jp("mimeType", js(mime_type))
+    r = r + RB()
+    r
+
+# Build ResourceLinkContent object (minimal - uri + name required)
+fn make_resource_link_content(uri: String, name: String) -> String:
+    var r = LB()
+    r = r + jp("type", js("resource_link"))
+    r = r + "," + jp("uri", js(escape_json(uri)))
+    r = r + "," + jp("name", js(escape_json(name)))
+    r = r + RB()
+    r
+
+# Build ResourceLinkContent with all optional fields
+fn make_resource_link_content_full(uri: String, name: String, title: String, description: String, mime_type: String, size: Int) -> String:
+    var r = LB()
+    r = r + jp("type", js("resource_link"))
+    r = r + "," + jp("uri", js(escape_json(uri)))
+    r = r + "," + jp("name", js(escape_json(name)))
+    if title != "":
+        r = r + "," + jp("title", js(escape_json(title)))
+    if description != "":
+        r = r + "," + jp("description", js(escape_json(description)))
+    if mime_type != "":
+        r = r + "," + jp("mimeType", js(mime_type))
+    if size >= 0:
+        r = r + "," + jp("size", size.to_string())
+    r = r + RB()
+    r
+
+# Build EmbeddedResourceContent object
+fn make_embedded_resource_content(uri: String, text_content: String, mime_type: String) -> String:
+    var resource = LB()
+    resource = resource + jp("uri", js(escape_json(uri)))
+    resource = resource + "," + jp("text", js(escape_json(text_content)))
+    if mime_type != "":
+        resource = resource + "," + jp("mimeType", js(mime_type))
+    resource = resource + RB()
+    jo2(jp("type", js("resource")), jp("resource", resource))
+
+# Build content annotation object
+fn make_content_annotations(audience: [String], priority: String, last_modified: String) -> String:
+    var r = LB()
+    var first = true
+    if audience.len() > 0:
+        var arr = "["
+        var af = true
+        for a in audience:
+            if not af:
+                arr = arr + ","
+            af = false
+            arr = arr + js(a)
+        arr = arr + "]"
+        r = r + jp("audience", arr)
+        first = false
+    if priority != "":
+        if not first:
+            r = r + ","
+        r = r + jp("priority", priority)
+        first = false
+    if last_modified != "":
+        if not first:
+            r = r + ","
+        r = r + jp("lastModified", js(last_modified))
+    r = r + RB()
+    r
+
+# Build tool result with structured content
+fn make_tool_result_with_structured(id: String, content: String, structured_content: String) -> String:
+    val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(content))))
+    var result = LB()
+    result = result + jp("content", "[" + text_obj + "]")
+    result = result + "," + jp("structuredContent", structured_content)
+    result = result + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+# Build tool schema with outputSchema
+fn make_tool_schema_with_output(name: String, desc: String, properties_json: String, required_json: String, output_schema: String, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
+    val schema = jo3(jp("type", js("object")), jp("properties", properties_json), jp("required", required_json))
+
+    # Build annotations object
+    var annot = LB()
+    var ro = "false"
+    if read_only:
+        ro = "true"
+    annot = annot + jp("readOnlyHint", ro)
+    annot = annot + ","
+    var dest = "false"
+    if destructive:
+        dest = "true"
+    annot = annot + jp("destructiveHint", dest)
+    annot = annot + ","
+    var idemp = "false"
+    if idempotent:
+        idemp = "true"
+    annot = annot + jp("idempotentHint", idemp)
+    annot = annot + ","
+    annot = annot + jp("openWorldHint", "false")
+    annot = annot + RB()
+
+    var result = LB()
+    result = result + jp("name", js(name))
+    result = result + ","
+    result = result + jp("description", js(desc))
+    result = result + ","
+    result = result + jp("inputSchema", schema)
+    result = result + ","
+    result = result + jp("outputSchema", output_schema)
+    result = result + ","
+    result = result + jp("annotations", annot)
+    result = result + RB()
+    result
+
+# --- Server-to-client request helpers ---
+
+# Build a JSON-RPC 2.0 request (server-to-client)
+fn make_server_request(id: String, method: String, params: String) -> String:
+    var r = LB()
+    r = r + jp("jsonrpc", js("2.0"))
+    r = r + "," + jp("id", id)
+    r = r + "," + jp("method", js(method))
+    r = r + "," + jp("params", params)
+    r = r + RB()
+    r
+
+# Build sampling/createMessage request (basic)
+fn make_sampling_request(id: String, messages: String, model_prefs: String, system_prompt: String, max_tokens: Int) -> String:
+    var params = LB()
+    params = params + jp("messages", messages)
+    if model_prefs != "":
+        params = params + "," + jp("modelPreferences", model_prefs)
+    if system_prompt != "":
+        params = params + "," + jp("systemPrompt", js(escape_json(system_prompt)))
+    params = params + "," + jp("maxTokens", max_tokens.to_string())
+    params = params + RB()
+    make_server_request(id, "sampling/createMessage", params)
+
+# Build sampling/createMessage request with all optional fields
+# temperature: -1.0 means omit, stop_sequences_json: "[]" or "null" means omit,
+# metadata_json: "" means omit, include_context: "" means omit
+fn make_sampling_request_full(id: String, messages: String, model_prefs: String, system_prompt: String, max_tokens: Int, temperature: String, stop_sequences_json: String, metadata_json: String, include_context: String) -> String:
+    var params = LB()
+    params = params + jp("messages", messages)
+    if model_prefs != "":
+        params = params + "," + jp("modelPreferences", model_prefs)
+    if system_prompt != "":
+        params = params + "," + jp("systemPrompt", js(escape_json(system_prompt)))
+    params = params + "," + jp("maxTokens", max_tokens.to_string())
+    if temperature != "":
+        params = params + "," + jp("temperature", temperature)
+    if stop_sequences_json != "" and stop_sequences_json != "[]":
+        params = params + "," + jp("stopSequences", stop_sequences_json)
+    if metadata_json != "":
+        params = params + "," + jp("metadata", metadata_json)
+    if include_context != "":
+        params = params + "," + jp("includeContext", js(include_context))
+    params = params + RB()
+    make_server_request(id, "sampling/createMessage", params)
+
+# Build elicitation/create request
+fn make_elicitation_request(id: String, message: String, schema: String) -> String:
+    var params = LB()
+    params = params + jp("message", js(escape_json(message)))
+    params = params + "," + jp("requestedSchema", schema)
+    params = params + RB()
+    make_server_request(id, "elicitation/create", params)
+
 # --- Exports ---
 
 export LB, RB, Q
@@ -383,3 +652,16 @@ export read_file_safe, list_spl_files
 export make_tool_result, make_result_response, make_error_response
 export make_tool_schema_multi
 export has_flag
+# Notification helpers
+export make_notification, make_notification_no_params, make_progress_notification
+export log_level_to_int, make_log_notification
+export make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed
+export make_resource_updated_notification
+# Content type helpers
+export make_image_content, make_audio_content, make_resource_link_content, make_resource_link_content_full
+export make_embedded_resource_content, make_content_annotations
+export make_tool_result_with_structured, make_tool_schema_with_output
+# Server-to-client request helpers
+export make_server_request, make_sampling_request, make_sampling_request_full, make_elicitation_request
+# Raw JSON variants
+export make_log_notification_raw

@@ -6,7 +6,7 @@
 
 | Metric | Count |
 |--------|-------|
-| Total | 354 |
+| Total | 355 |
 | Passed | 0 |
 | Failed | 0 |
 | Skipped | 0 |

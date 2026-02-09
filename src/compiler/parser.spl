@@ -99,10 +99,11 @@ impl Parser:
             val class_ = self.parse_class_body(class_outline)
             module.classes[class_.name] = class_
 
-        # Parse actor bodies
-        for actor_outline in outline.actors:
-            val actor_decl = self.parse_actor_body(actor_outline)
-            module.actors[actor_decl.name] = actor_decl
+        # Parse actor bodies (guard against nil from TreeSitter)
+        if outline.actors.?:
+            for actor_outline in outline.actors:
+                val actor_decl = self.parse_actor_body(actor_outline)
+                module.actors[actor_decl.name] = actor_decl
 
         # Parse struct bodies
         for struct_outline in outline.structs:
@@ -1044,12 +1045,19 @@ impl Parser:
                     span: expr.span.merge(self.previous.span)
                 )
             elif self.match_token(TokenKind.QuestionQuestion):
-                # Null coalesce
-                val right = self.parse_unary_expr()
-                expr = Expr(
-                    kind: ExprKind.NullCoalesce(expr, right),
-                    span: expr.span.merge(right.span)
-                )
+                # Null coalesce - allow return/break/continue as RHS
+                if self.check(TokenKind.KwReturn) or self.check(TokenKind.KwBreak) or self.check(TokenKind.KwContinue):
+                    val right = self.parse_primary_expr()
+                    expr = Expr(
+                        kind: ExprKind.NullCoalesce(expr, right),
+                        span: expr.span.merge(right.span)
+                    )
+                else:
+                    val right = self.parse_unary_expr()
+                    expr = Expr(
+                        kind: ExprKind.NullCoalesce(expr, right),
+                        span: expr.span.merge(right.span)
+                    )
             elif self.match_token(TokenKind.Transpose):
                 # Postfix transpose (m{} only)
                 expr = Expr(
@@ -2347,7 +2355,26 @@ fn char_to_digit(ch: text, base: i64) -> i64:
 
 
 # ============================================================================
+# Factory functions (standalone, for interpreter compatibility)
+# ============================================================================
+
+fn create_parser(src: text) -> Parser:
+    """Create a Parser from source text. Standalone function for interpreter compatibility.
+    Use this instead of Parser.new() when running in interpreter mode."""
+    var p = Parser(
+        source: src,
+        lexer: create_lexer(src),
+        current: create_token_eof(0, 1),
+        previous: create_token_eof(0, 1),
+        errors: [],
+        outline: nil,
+        resolved_blocks: nil
+    )
+    p.advance()
+    p
+
+# ============================================================================
 # Exports
 # ============================================================================
 
-export Parser
+export Parser, create_parser
