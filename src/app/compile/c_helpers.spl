@@ -1,0 +1,136 @@
+# Simple to C Code Generator - Helper Functions
+#
+# Shared helper utilities for C code generation:
+#   - Indentation tracking
+#   - Type conversion (Simple -> C)
+#   - Parameter translation
+#   - Function signature parsing
+#   - Type registry queries
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+# Get indentation level (counts leading spaces/tabs)
+fn get_indent_level(line: text) -> i64:
+    var spaces = 0
+    for idx in range(0, line.len()):
+        val ch = line[idx]
+        if ch == " ":
+            spaces = spaces + 1
+        elif ch == "\t":
+            spaces = spaces + 4
+        else:
+            break
+    spaces / 4
+
+# Get C-style indentation (spaces only, no tab expansion)
+fn get_c_indent(line: text) -> i64:
+    var spaces = 0
+    for idx in range(0, line.len()):
+        val ch = line[idx]
+        if ch == " ":
+            spaces = spaces + 1
+        else:
+            break
+    spaces / 4
+
+# Convert Simple type to C type
+fn simple_type_to_c(stype: text) -> text:
+    if stype == "i64" or stype == "int":
+        return "long long"
+    if stype == "i32":
+        return "int"
+    if stype == "f64" or stype == "float":
+        return "double"
+    if stype == "f32":
+        return "float"
+    if stype == "bool":
+        return "int"
+    if stype == "text" or stype == "str":
+        return "const char*"
+    if stype == "[text]" or stype == "[str]":
+        return "SimpleStringArray"
+    if stype == "[i64]" or stype == "[int]":
+        return "long long*"
+    "long long"
+
+# Translate Simple parameter list to C
+fn translate_params(params_str: text) -> text:
+    val params = params_str.split(",")
+    var c_parts: [text] = []
+    for param in params:
+        val p = param.trim()
+        val colon_idx = p.index_of(":") ?? -1
+        if colon_idx >= 0:
+            val pname = p.substring(0, colon_idx).trim()
+            val ptype = p.substring(colon_idx + 1).trim()
+            val ctype = simple_type_to_c(ptype)
+            c_parts.push("{ctype} {pname}")
+        else:
+            c_parts.push("long long {p}")
+    c_parts.join(", ")
+
+# Parse a Simple function signature into [name, c_signature_body, forward_decl]
+fn parse_fn_signature(trimmed: text) -> [text]:
+    val without_fn = trimmed.substring(3)  # remove "fn "
+    val colon_pos = without_fn.len() - 1  # trailing colon
+    val sig = without_fn.substring(0, colon_pos).trim()
+
+    # Find function name (up to first paren)
+    val paren_idx = sig.index_of("(") ?? -1
+    if paren_idx < 0:
+        return [sig, "long long {sig}(void)", "long long {sig}(void);"]
+
+    val name = sig.substring(0, paren_idx).trim()
+
+    # Find return type
+    val arrow_idx = sig.index_of("->") ?? -1
+    var ret_type = "long long"
+    if arrow_idx >= 0:
+        val ret_str = sig.substring(arrow_idx + 2).trim()
+        ret_type = simple_type_to_c(ret_str)
+
+    # Parse parameters
+    val close_paren_idx = sig.index_of(")") ?? -1
+    var params_str = ""
+    if close_paren_idx > paren_idx + 1:
+        params_str = sig.substring(paren_idx + 1, close_paren_idx).trim()
+
+    var c_params = "void"
+    if params_str.len() > 0:
+        c_params = translate_params(params_str)
+
+    val c_sig = "{ret_type} {name}({c_params})"
+    [name, c_sig, "{c_sig};"]
+
+# Find matching close paren starting from open_pos (exclusive)
+fn find_close_paren(expr: text, open_pos: i64) -> i64:
+    var depth = 1
+    for idx in range(open_pos + 1, expr.len()):
+        val ch = expr[idx]
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return idx
+    return -1
+
+# --- Type Registry Functions ---
+# Registry format: ";text:name;arr:name;fn_text:funcname;"
+
+fn is_string_array_var(name: text, types: text) -> bool:
+    val marker = ";arr:" + name + ";"
+    types.contains(marker)
+
+fn is_text_var(name: text, types: text) -> bool:
+    val marker = ";text:" + name + ";"
+    types.contains(marker)
+
+fn is_fn_returning_text(name: text, types: text) -> bool:
+    val marker = ";fn_text:" + name + ";"
+    types.contains(marker)
+
+export get_indent_level, get_c_indent, simple_type_to_c, translate_params
+export parse_fn_signature, find_close_paren
+export is_string_array_var, is_text_var, is_fn_returning_text

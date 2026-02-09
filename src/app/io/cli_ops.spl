@@ -1,0 +1,535 @@
+# CLI Functions - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+extern fn rt_cli_get_args() -> [str]
+extern fn rt_exit(code: i64)
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64
+extern fn rt_cli_handle_compile(args: [str]) -> i64
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# --- Shell/file helpers (local copies to avoid circular imports) ---
+
+fn _cli_is_windows_platform() -> bool:
+    val os_env = rt_env_get("OS")
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+
+struct _CliProcessResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn _cli_shell(command: text) -> _CliProcessResult:
+    val (shell_path, shell_args) = if _cli_is_windows_platform():
+        ("cmd.exe", ["/c", command])
+    else:
+        ("/bin/sh", ["-c", command])
+    val (stdout, stderr, code) = rt_process_run(shell_path, shell_args)
+    _CliProcessResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn _cli_shell_bool(command: text) -> bool:
+    val result = _cli_shell(command)
+    result.exit_code == 0
+
+fn _cli_file_exists_impl(path: text) -> bool:
+    _cli_shell_bool("test -f '{path}'")
+
+fn _cli_file_read_impl(path: text) -> text:
+    val result = _cli_shell("cat '{path}' 2>/dev/null")
+    if result.exit_code == 0:
+        result.stdout
+    else:
+        ""
+
+fn _cli_file_write_impl(path: text, content: text) -> bool:
+    val result = _cli_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    result.exit_code == 0
+
+fn _cli_file_copy_impl(src: text, dst: text) -> bool:
+    val result = _cli_shell("cp '{src}' '{dst}'")
+    result.exit_code == 0
+
+fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
+    if recursive:
+        val result = _cli_shell("mkdir -p '{path}'")
+        result.exit_code == 0
+    else:
+        val result = _cli_shell("mkdir '{path}'")
+        result.exit_code == 0
+
+fn _cli_eprint(msg: text):
+    print "[STDERR] {msg}"
+
+fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
+    var resolved_cmd = cmd
+    if _cli_is_windows_platform():
+        if not cmd.ends_with(".exe") and not cmd.ends_with(".cmd") and not cmd.ends_with(".bat"):
+            val check = rt_process_run("where", [cmd + ".exe"])
+            if check.2 == 0:
+                resolved_cmd = cmd + ".exe"
+    else:
+        if not cmd.contains("/"):
+            val check = rt_process_run("which", [cmd])
+            if check.2 == 0 and check.0.trim() != "":
+                resolved_cmd = check.0.trim()
+    rt_process_run(resolved_cmd, args)
+
+# ============================================================================
+# CLI Core Functions
+# ============================================================================
+
+fn get_args() -> [String]:
+    rt_cli_get_args()
+
+fn exit(code: i64):
+    rt_exit(code)
+
+fn cli_get_args() -> [str]:
+    rt_cli_get_args()
+
+fn cli_exit(code: i64):
+    rt_exit(code)
+
+fn cli_file_exists(path: str) -> bool:
+    _cli_file_exists_impl(path)
+
+fn cli_read_file(path: str) -> str:
+    _cli_file_read_impl(path)
+
+# ============================================================================
+# CLI Command Handlers
+# ============================================================================
+
+fn cli_run_code(code: str, gc_log: bool, gc_off: bool) -> i64:
+    print "=== Simple Code Execution ==="
+    print "Code: {code}"
+    print "Note: Interpreter would evaluate this code"
+    1
+
+fn cli_run_file(path: str, args: [str], gc_log: bool, gc_off: bool) -> i64:
+    var run_args: [text] = [path]
+    for arg in args:
+        run_args.push(arg)
+    val result = _cli_process_run("bin/bootstrap/simple", run_args)
+    val stdout = result[0]
+    val exit_code = result[2]
+    if stdout.len() > 0:
+        print stdout
+    exit_code
+
+fn cli_watch_file(path: str) -> i64:
+    print "Watch mode not yet implemented in pure Simple"
+    1
+
+fn cli_run_repl(gc_log: bool, gc_off: bool) -> i64:
+    print "=== Simple REPL ==="
+    print "REPL not yet implemented in pure Simple"
+    print ""
+    print "For now, use: ./bin/bootstrap/simple yourfile.spl"
+    1
+
+fn cli_not_implemented(tool_name: text) -> i64:
+    print "{tool_name} not yet implemented in pure Simple"
+    1
+
+fn cli_run_tests(args: [str], gc_log: bool, gc_off: bool) -> i64:
+    rt_cli_run_tests(args, gc_log, gc_off)
+
+fn cli_run_lint(args: [str]) -> i64:
+    cli_not_implemented("Linter")
+
+fn cli_run_fmt(args: [str]) -> i64:
+    cli_not_implemented("Formatter")
+
+fn cli_run_fix(args: [str]) -> i64:
+    cli_not_implemented("Fix tool")
+
+fn cli_run_verify(args: [str], gc_log: bool, gc_off: bool) -> i64:
+    cli_not_implemented("Verifier")
+
+fn cli_run_migrate(args: [str]) -> i64:
+    cli_not_implemented("Migration tool")
+
+fn cli_run_mcp(args: [str]) -> i64:
+    var cmd = "./bin/bootstrap/simple src/app/mcp/main.spl"
+    var i = 1
+    while i < args.len():
+        cmd = cmd + " " + args[i]
+        i = i + 1
+
+    val result = _cli_shell(cmd)
+    if result.stdout.len() > 0:
+        print(result.stdout)
+    if result.stderr.len() > 0:
+        _cli_eprint(result.stderr)
+    result.exit_code
+
+fn cli_run_diff(args: [str]) -> i64:
+    cli_not_implemented("Diff tool")
+
+fn cli_constr(args: [str]) -> i64:
+    cli_not_implemented("Constraint checker")
+
+fn cli_run_query(args: [str]) -> i64:
+    cli_not_implemented("Query tool")
+
+fn cli_run_spec_coverage(args: [str]) -> i64:
+    cli_not_implemented("Spec coverage")
+
+fn cli_gen_lean(args: [str]) -> i64:
+    cli_not_implemented("Lean generator")
+
+fn cli_run_feature_gen(args: [str]) -> i64:
+    cli_not_implemented("Feature generator")
+
+fn cli_run_task_gen(args: [str]) -> i64:
+    cli_not_implemented("Task generator")
+
+fn cli_run_spec_gen(args: [str]) -> i64:
+    cli_not_implemented("Spec generator")
+
+fn cli_run_sspec_docgen(args: [str]) -> i64:
+    cli_not_implemented("SSpec doc generator")
+
+fn cli_run_todo_gen(args: [str]) -> i64:
+    cli_run_file("src/app/todo_scan/main.spl", args, false, false)
+
+fn cli_todo_scan(args: [str]) -> i64:
+    cli_run_file("src/app/todo_scan/main.spl", args, false, false)
+
+fn cli_run_lex(args: [str]) -> i64:
+    cli_not_implemented("Lexer")
+
+fn cli_run_brief(args: [str]) -> i64:
+    cli_not_implemented("Brief tool")
+
+fn cli_run_ffi_gen(args: [str]) -> i64:
+    cli_not_implemented("FFI generator")
+
+fn cli_run_i18n(args: [str]) -> i64:
+    cli_not_implemented("i18n tool")
+
+fn cli_handle_web(args: [str]) -> i64:
+    cli_not_implemented("Web handler")
+
+fn cli_handle_diagram(args: [str]) -> i64:
+    cli_not_implemented("Diagram generator")
+
+fn cli_handle_run(args: [str], gc_log: bool, gc_off: bool) -> i64:
+    if args.len() > 0:
+        cli_run_file(args[0], args[1:], gc_log, gc_off)
+    else:
+        print "No file specified"
+        1
+
+fn cli_handle_compile(args: [str]) -> i64:
+    rt_cli_handle_compile(args)
+
+fn cli_handle_linkers() -> i64:
+    cli_not_implemented("Linker information")
+
+fn cli_replay(args: [str]) -> i64:
+    cli_not_implemented("Replay tool")
+
+fn cli_check(args: [str]) -> i64:
+    cli_not_implemented("Type checker")
+
+fn cli_compile(args: [str]) -> i64:
+    var source_file: text = ""
+    var output_file: text = ""
+    var target: text = ""
+    var emit: text = "elf"
+    var output_format: text = ""
+    var backend: text = "auto"
+    var verbose: bool = false
+    var release: bool = false
+
+    var i = 0
+    if args.len() > 0 and args[0] == "compile":
+        i = 1
+
+    while i < args.len():
+        val arg = args[i]
+
+        if arg == "--help" or arg == "-h":
+            print "Simple Compiler"
+            print ""
+            print "Usage: simple compile [options] <source.spl>"
+            print ""
+            print "Options:"
+            print "  --target=<target>     Target: baremetal-x86, baremetal-arm, etc."
+            print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
+            print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
+            print "  --native              Compile to native binary via C codegen + gcc"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm (default: auto)"
+            print "  --release             Release build (optimized, prefers LLVM)"
+            print "  -o <output>           Output file path"
+            print "  --verbose, -v         Verbose output"
+            print "  --help, -h            Show this help"
+            print ""
+            print "Output Formats (--format):"
+            print "  native                Native executable (default)"
+            print "  smf                   SMF module file"
+            print "  self-contained, sc    Self-contained binary (runtime + SMF in one file)"
+            print "  both                  Both native executable and SMF module"
+            print ""
+            print "Examples:"
+            print "  simple compile hello.spl"
+            print "  simple compile hello.spl --backend=llvm"
+            print "  simple compile hello.spl --release -o hello.smf"
+            print "  simple compile hello.spl --format=self-contained -o hello"
+            print "  simple compile --native -o hello hello.spl"
+            print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
+            return 0
+        elif arg.starts_with("--target="):
+            target = arg.substring(9)
+        elif arg.starts_with("--emit="):
+            emit = arg.substring(7)
+        elif arg.starts_with("--format="):
+            output_format = arg.substring(9)
+        elif arg.starts_with("--backend="):
+            backend = arg.substring(10)
+        elif arg == "--release":
+            release = true
+        elif arg == "--native":
+            emit = "native"
+        elif arg == "-o":
+            i = i + 1
+            if i < args.len():
+                output_file = args[i]
+            else:
+                _cli_eprint("Error: -o requires an argument")
+                return 1
+        elif arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif not arg.starts_with("-"):
+            if source_file == "":
+                source_file = arg
+            else:
+                _cli_eprint("Error: Multiple source files not supported")
+                return 1
+        else:
+            _cli_eprint("Error: Unknown option: {arg}")
+            return 1
+
+        i = i + 1
+
+    if source_file == "":
+        _cli_eprint("Error: No source file specified")
+        _cli_eprint("Usage: simple compile [options] <source.spl>")
+        return 1
+
+    if not _cli_file_exists_impl(source_file):
+        _cli_eprint("Error: Source file not found: {source_file}")
+        return 1
+
+    if emit == "native":
+        var out = output_file
+        if out == "":
+            out = source_file.replace(".spl", "")
+        var native_cmd = "bin/bootstrap/simple src/app/compile/native.spl '{source_file}' '{out}'"
+        if verbose:
+            native_cmd = "bin/bootstrap/simple src/app/compile/native.spl '{source_file}' '{out}' --verbose"
+        val native_result = _cli_shell(native_cmd)
+        if native_result.stdout != "":
+            print native_result.stdout
+        if native_result.stderr != "" and native_result.exit_code != 0:
+            _cli_eprint(native_result.stderr)
+        return native_result.exit_code
+
+    if target.starts_with("baremetal-"):
+        return compile_baremetal(source_file, target, emit, output_file, verbose)
+
+    var compile_args = args
+    if output_format != "":
+        if output_format != "native" and output_format != "smf" and output_format != "self-contained" and output_format != "sc" and output_format != "both":
+            _cli_eprint("Error: Unknown format: {output_format}")
+            _cli_eprint("Valid formats: native, smf, self-contained (sc), both")
+            return 1
+
+    _cli_eprint("[NOTE] Using bootstrap Cranelift path; pure-Simple LLVM path not yet available in interpreter mode")
+
+    if backend == "llvm":
+        val llc_check = _cli_shell("command -v llc >/dev/null 2>&1")
+        if llc_check.exit_code != 0:
+            _cli_eprint("Error: llc not found. Install LLVM: apt install llvm (Ubuntu) or brew install llvm (macOS)")
+            return 1
+
+    rt_cli_handle_compile(compile_args)
+
+fn compile_baremetal(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    if verbose:
+        print "Compiling {source_file} for {target}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    _cli_eprint("[NOTE] Using shell-based baremetal build; direct BaremetalBuilder import not yet available")
+
+    val arch = if target == "baremetal-x86":
+        "i686"
+    elif target == "baremetal-x86_64":
+        "x86_64"
+    elif target == "baremetal-arm":
+        "armv7"
+    elif target == "baremetal-aarch64":
+        "aarch64"
+    elif target == "baremetal-riscv32":
+        "riscv32"
+    elif target == "baremetal-riscv64":
+        "riscv64"
+    else:
+        _cli_eprint("Error: Unknown bare-metal target: {target}")
+        _cli_eprint("Supported: baremetal-x86, baremetal-x86_64, baremetal-arm,")
+        _cli_eprint("           baremetal-aarch64, baremetal-riscv32, baremetal-riscv64")
+        return 1
+
+    if not _cli_dir_create_impl("build/baremetal", true):
+        _cli_eprint("Error: Failed to create build/baremetal directory")
+        return 1
+
+    val target_triple = arch + "-unknown-none"
+
+    if verbose:
+        print "Compiling Simple -> LLVM IR (pure Simple compiler)..."
+        print "  Target triple: {target_triple}"
+
+    _cli_eprint("[NOTE] Pure Simple LLVM compilation not yet wired up; compiler.driver and compiler.backend.llvm_backend imports pending")
+
+    val llvm_ir = ""
+    val error_msg = "Pure Simple compilation not yet wired up. To complete this, we need to: 1. Import compiler.driver (CompilerDriver, compile_file) 2. Import compiler.backend.llvm_backend (LlvmBackend, MirToLlvm) 3. Compile source to MIR using CompilerDriver 4. Translate MIR to LLVM IR using MirToLlvm.translate_module() 5. Return the textual LLVM IR. The LLVM backend already generates textual IR in pure Simple! See: src/compiler/backend/llvm_backend.spl line 790. This is ~20-30 lines of Simple code to wire up. No Rust FFI needed - it's pure Simple!"
+
+    if llvm_ir == "":
+        _cli_eprint("Error: Compilation not yet wired up")
+        _cli_eprint(error_msg)
+        return 1
+
+    val base_name = source_file.replace(".spl", "").replace("/", "_")
+    val ir_file = "build/baremetal/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not _cli_file_copy_impl(ir_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/baremetal/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    if emit == "object":
+        if output_file != "":
+            if not _cli_file_copy_impl(obj_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    if verbose:
+        print "Linking Object -> ELF binary..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/baremetal/kernel.elf"
+
+    val linker_script = "build/baremetal/linker.ld"
+
+    val (ld_out, ld_err, ld_exit) = _cli_process_run("ld", [
+        "-T", linker_script,
+        "-nostdlib",
+        "--entry=_start",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        _cli_eprint("Error: Linking failed")
+        _cli_eprint(ld_err)
+        _cli_eprint("")
+        _cli_eprint("Note: Linker script should be at: {linker_script}")
+        _cli_eprint("Generate it using: simple linker-gen boards/qemu_x86.sdn")
+        return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
+
+fn cli_info(args: [str]) -> i64:
+    cli_not_implemented("Info tool")
+
+# ============================================================================
+# Advanced Features
+# ============================================================================
+
+fn context_generate(path: str, target: str, format: str) -> str:
+    ""
+
+fn context_stats(path: str, target: str) -> str:
+    ""
+
+fn settlement_main() -> i64:
+    0
+
+fn fault_set_stack_overflow_detection(enabled: bool):
+    ()
+
+fn fault_set_max_recursion_depth(depth: i64):
+    ()
+
+fn fault_set_timeout(secs: i64):
+    ()
+
+fn fault_set_execution_limit(limit: i64):
+    ()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export get_args, exit, cli_get_args, cli_exit, cli_file_exists
+export cli_replay, cli_constr, cli_check, cli_compile, cli_todo_scan, cli_gen_lean, cli_info
+export cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests
+export cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify, cli_run_migrate
+export cli_run_mcp, cli_run_diff, cli_run_query, cli_run_spec_coverage
+export cli_run_feature_gen, cli_run_task_gen, cli_run_spec_gen, cli_run_sspec_docgen
+export cli_run_todo_gen, cli_run_lex, cli_run_brief, cli_run_ffi_gen, cli_run_i18n
+export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_compile, cli_handle_linkers
+export cli_read_file, context_generate, context_stats, settlement_main
+export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
+export fault_set_timeout, fault_set_execution_limit
+export compile_baremetal

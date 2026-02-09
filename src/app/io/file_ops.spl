@@ -1,0 +1,153 @@
+# File Operations - Pure Simple I/O
+# Extracted from mod.spl for modularity
+
+# Extern fn declarations (runtime resolves at file level)
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [i64]
+extern fn rt_file_mmap_read_text(path: text) -> text
+extern fn rt_file_mmap_read_bytes(path: text) -> [i64]
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# --- Shell helpers (local copies to avoid circular imports) ---
+# These are minimal copies needed for file operations.
+# The canonical versions live in process_ops.spl.
+
+fn _file_shell(command: text) -> (text, text, i64):
+    rt_process_run("/bin/sh", ["-c", command])
+
+fn _file_shell_bool(command: text) -> bool:
+    val (out, err, code) = _file_shell(command)
+    code == 0
+
+fn _file_shell_output(command: text, default: text) -> text:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        out
+    else:
+        default
+
+fn _file_shell_int(command: text, default: i64) -> i64:
+    val (out, err, code) = _file_shell(command)
+    if code == 0:
+        val trimmed = out.trim()
+        if trimmed.len() > 0:
+            int(trimmed)
+        else:
+            default
+    else:
+        default
+
+# ============================================================================
+# Core File Operations
+# ============================================================================
+
+fn file_exists(path: text) -> bool:
+    _file_shell_bool("test -f '{path}'")
+
+fn file_size_raw(path: text) -> i64:
+    _file_shell_int("stat -c '%s' '{path}' 2>/dev/null", -1)
+
+fn file_read(path: text) -> text:
+    _file_shell_output("cat '{path}' 2>/dev/null", "")
+
+fn file_write(path: text, content: text) -> bool:
+    val (out, err, code) = _file_shell("cat > '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    code == 0
+
+fn file_copy(src: text, dst: text) -> bool:
+    val (out, err, code) = _file_shell("cp '{src}' '{dst}'")
+    code == 0
+
+fn file_delete(path: text) -> bool:
+    val (out, err, code) = _file_shell("rm -f '{path}'")
+    code == 0
+
+fn file_atomic_write(path: text, content: text) -> bool:
+    val temp = path + ".tmp." + _timestamp_str()
+    if file_write(temp, content):
+        val (out, err, code) = _file_shell("mv '{temp}' '{path}'")
+        code == 0
+    else:
+        false
+
+fn _timestamp_str() -> text:
+    val micros = _time_now_unix_micros()
+    "{micros}"
+
+fn file_append(path: text, content: text) -> bool:
+    val (out, err, code) = _file_shell("cat >> '{path}' << 'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF")
+    code == 0
+
+fn file_modified_time(path: text) -> i64:
+    val (out, err, code) = _file_shell("stat -c '%Y' '{path}' 2>/dev/null || stat -f '%m' '{path}' 2>/dev/null")
+    if code == 0:
+        int(out.trim())
+    else:
+        0
+
+fn file_remove(path: text) -> bool:
+    file_delete(path)
+
+fn file_hash_sha256(path: text) -> text:
+    rt_file_hash_sha256(path)
+
+fn file_read_lines(path: text) -> [text]?:
+    val content = file_read(path)
+    if content.len() == 0:
+        nil
+    else:
+        Some(content.split("\n"))
+
+fn file_lock(path: text, timeout_secs: i64) -> i64:
+    val lock_path = path + ".lock"
+    val lock_exists = file_exists(lock_path)
+    if lock_exists:
+        -1
+    else:
+        val pid = _getpid()
+        file_write(lock_path, "{pid}")
+        1
+
+fn file_unlock(handle: i64) -> bool:
+    true
+
+fn file_size(path: text) -> i64:
+    file_size_raw(path)
+
+# --- Memory-Mapped File I/O (SFFI wrappers) ---
+
+fn file_read_text(path: text) -> text:
+    rt_file_read_text(path)
+
+fn file_read_bytes(path: text) -> [i64]:
+    rt_file_read_bytes(path)
+
+fn file_mmap_read_text(path: text) -> text:
+    rt_file_mmap_read_text(path)
+
+fn file_mmap_read_bytes(path: text) -> [i64]:
+    rt_file_mmap_read_bytes(path)
+
+# --- Additional File Functions ---
+
+fn rt_file_rename(src: text, dst: text) -> bool:
+    val (out, err, code) = _file_shell("mv '{src}' '{dst}'")
+    code == 0
+
+# --- Internal helpers (need extern fns) ---
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+fn _time_now_unix_micros() -> i64:
+    rt_time_now_unix_micros()
+
+fn _getpid() -> i64:
+    rt_getpid()
+
+export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_write
+export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
+export file_lock, file_unlock, file_size, file_size_raw
+export file_read_text, file_read_bytes, file_mmap_read_text, file_mmap_read_bytes
+export rt_file_rename

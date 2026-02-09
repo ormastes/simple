@@ -1,0 +1,69 @@
+# Simple to C Code Generator - Runtime and Struct Helpers
+#
+# C runtime generation and struct/result parsing:
+#   - generate_c_runtime: Produces C runtime helper code (from file or fallback)
+#   - parse_struct_fields: Parses Simple struct fields into C typedef
+#   - split_result: Extracts code and type entries from "code|||entries" format
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+use app.compile.c_helpers.{simple_type_to_c}
+
+# Generate the C runtime helper code
+fn generate_c_runtime() -> text:
+    # Try to read from file first
+    val runtime_path = "src/app/compile/c_runtime.c"
+    if rt_file_exists(runtime_path):
+        val raw = rt_file_read_text(runtime_path)
+        val content = raw ?? ""
+        return "\n" + content + "\n"
+    # Fallback: minimal runtime
+    print "Warning: C runtime not found at {runtime_path}"
+    print "Using minimal embedded runtime."
+    var rt = "\n// === Minimal Simple Runtime ===\n"
+    rt = rt + "static long simple_strlen(const char* s) {{ return s ? (long)strlen(s) : 0; }}\n"
+    rt = rt + "static int simple_contains(const char* s, const char* n) {{ return s && n && strstr(s, n) != NULL; }}\n"
+    rt = rt + "static int simple_starts_with(const char* s, const char* p) {{ return s && p && strncmp(s, p, strlen(p)) == 0; }}\n"
+    rt = rt + "static int simple_ends_with(const char* s, const char* x) {{ long sl = strlen(s), xl = strlen(x); return xl <= sl && strcmp(s+sl-xl, x) == 0; }}\n"
+    rt = rt + "static long simple_index_of(const char* s, const char* n) {{ const char* f = strstr(s, n); return f ? (long)(f-s) : -1; }}\n"
+    rt
+
+# Parse struct definition lines into a C typedef
+fn parse_struct_fields(lines_arr: [text], start_idx: i64) -> [text]:
+    # Returns [end_index, c_typedef]
+    var fields: [text] = []
+    var idx = start_idx + 1
+    for i in range(start_idx + 1, lines_arr.len()):
+        val line = lines_arr[i]
+        val trimmed = line.trim()
+        if trimmed == "":
+            idx = i + 1
+            continue
+        # Check if still indented (part of struct body)
+        val is_indented = line.starts_with("    ")
+        if not is_indented:
+            break
+        # Parse field: name: type
+        val field_colon = trimmed.index_of(":") ?? -1
+        if field_colon >= 0:
+            val field_name = trimmed.substring(0, field_colon).trim()
+            val field_type = trimmed.substring(field_colon + 1).trim()
+            val c_type = simple_type_to_c(field_type)
+            fields.push("    {c_type} {field_name};")
+        idx = i + 1
+
+    var typedef_body = fields.join("\n")
+    ["{idx}", typedef_body]
+
+# Helper to extract code and type entries from a "code|||entries" result
+# Returns [code, type_entries] where type_entries may be ""
+fn split_result(raw: text) -> [text]:
+    val sep_pos = raw.index_of("|||") ?? -1
+    if sep_pos >= 0:
+        val code = raw.substring(0, sep_pos)
+        val entries = raw.substring(sep_pos + 3)
+        return [code, entries]
+    [raw, ""]
+
+export generate_c_runtime, parse_struct_fields, split_result
