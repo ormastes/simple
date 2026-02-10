@@ -4,7 +4,9 @@
 
 use app.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use app.mcp.fileio_temp (TempManager, create_temp_manager)
-use app.io.mod (cli_get_args, env_get, shell)
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi}
+use app.io.mod (cli_get_args, env_get, shell, exit)
+use lib.json.builder.{escape_json}
 
 # MCP Server state
 class FileIOServer:
@@ -368,18 +370,21 @@ class FileIOServer:
 
 # Main entry point
 fn main():
-    val args = get_args()
+    val raw_args = cli_get_args()
+    var has_server = false
+    for arg in raw_args:
+        if arg == "server":
+            has_server = true
 
-    if args.len() < 2:
+    if not has_server:
         print "Usage: fileio_main.spl server"
         return
 
-    if args[1] == "server":
-        run_server()
+    run_server()
 
 # Run MCP server
 fn run_server():
-    val config_path = get_env("SIMPLE_FILEIO_CONFIG")
+    val config_path = env_get("SIMPLE_FILEIO_CONFIG") ?? ""
     val config = if config_path.len() > 0:
         config_path
     else:
@@ -387,21 +392,53 @@ fn run_server():
 
     val server = FileIOServer.init(config)
 
-    print "File I/O Protection MCP Server started"
-    print "Config: {config}"
+    var running = true
+    for _iter in range(0, 999999):
+        if not running:
+            return
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
 
-    # Simple REPL for testing
-    loop:
-        val line = read_line()
-        if line.len() == 0:
-            break
+            if method == "initialize":
+                response = make_initialize_response(id)
+            elif method == "initialized":
+                response = ""  # Notification, no response
+            elif method == "shutdown":
+                response = make_result_response(id, "null")
+            elif method == "exit":
+                exit(0)
+            elif method == "ping":
+                response = make_result_response(id, LB() + RB())
+            elif method == "tools/list":
+                response = handle_tools_list(id)
+            elif method == "tools/call":
+                val tool_name = extract_nested_string(line, "params", "name")
+                if tool_name == "":
+                    response = make_error_response(id, -32602, "Missing tool name")
+                else:
+                    val args = parse_params(line)
+                    val result = server.handle_tool(tool_name, args)
+                    response = make_tool_result(id, result)
+            elif method == "resources/list":
+                response = handle_resources_list(id)
+            elif method == "resources/read":
+                response = make_error_response(id, -32601, "No resources available")
+            elif method == "prompts/list":
+                response = handle_prompts_list(id)
+            elif method == "prompts/get":
+                response = make_error_response(id, -32601, "No prompts available")
+            elif method == "notifications/cancelled":
+                response = ""  # Notification, no response
+            else:
+                response = make_error_response(id, -32601, "Method not found: " + method)
 
-        # Parse JSON-RPC request (simple implementation)
-        if line.contains("method"):
-            val tool = parse_method(line)
-            val args = parse_params(line)
-            val response = server.handle_tool(tool, args)
-            print response
+            if response != "":
+                write_stdout_message(response)
 
 # Helper functions
 fn parse_method(json: text) -> text:
@@ -450,6 +487,167 @@ fn parse_params(json: text) -> text:
                 break
 
     result
+
+fn read_stdin_message() -> String:
+    # Read Content-Length header
+    var header = input()
+    if header == "":
+        return ""
+
+    # Strip trailing \r if present
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+
+    # Parse content length
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int()
+
+    if content_length == 0:
+        return ""
+
+    # Skip blank line after headers
+    input()
+
+    # Read body (JSON-RPC body is typically one line)
+    val body = input()
+    body
+
+fn write_stdout_message(body: String):
+    var header = "Content-Length: "
+    header = header + body.len().to_string()
+    header = header + "\r\n\r\n"
+    print_raw(header)
+    print_raw(body)
+
+fn make_prop(name: String, desc: String) -> String:
+    jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))
+
+fn make_initialize_response(id: String) -> String:
+    val server_protocol = "2025-06-18"
+
+    var server_info = LB()
+    server_info = server_info + jp("name", js("simple-fileio"))
+    server_info = server_info + ","
+    server_info = server_info + jp("version", js("1.0.0"))
+    server_info = server_info + ","
+    val instructions = "Protected file operations (safe_read/safe_write/etc) with rule-based access control."
+    server_info = server_info + jp("instructions", js(escape_json(instructions)))
+    server_info = server_info + RB()
+
+    var tools_cap = jo1(jp("listChanged", "true"))
+    var caps = jo1(jp("tools", tools_cap))
+
+    val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn handle_tools_list(id: String) -> String:
+    var tools = "["
+    var first = true
+    for tool in get_all_tools():
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + tool
+    tools = tools + "]"
+
+    val result = jo1(jp("tools", tools))
+    make_result_response(id, result)
+
+fn handle_resources_list(id: String) -> String:
+    val result = jo1(jp("resources", "[]"))
+    make_result_response(id, result)
+
+fn handle_prompts_list(id: String) -> String:
+    val result = jo1(jp("prompts", "[]"))
+    make_result_response(id, result)
+
+fn get_all_tools() -> [String]:
+    [
+        schema_safe_read(),
+        schema_safe_write(),
+        schema_safe_delete(),
+        schema_safe_copy(),
+        schema_safe_move(),
+        schema_safe_atomic_write(),
+        schema_safe_append(),
+        schema_list_protected_files(),
+        schema_check_protection(),
+        schema_add_protection_rule(),
+        schema_list_temp_files(),
+        schema_cleanup_temp(),
+        schema_get_temp_dir()
+    ]
+
+fn schema_safe_read() -> String:
+    val props = LB() + make_prop("path", "Path to read") + RB()
+    make_tool_schema_multi("safe_read", "Read a file with protection checks", props, "[" + js("path") + "]", true, false, true)
+
+fn schema_safe_write() -> String:
+    var props = LB()
+    props = props + make_prop("path", "Path to write")
+    props = props + "," + make_prop("content", "Content to write")
+    props = props + RB()
+    make_tool_schema_multi("safe_write", "Write a file with protection checks", props, "[" + js("path") + "," + js("content") + "]", false, false, false)
+
+fn schema_safe_delete() -> String:
+    val props = LB() + make_prop("path", "Path to delete") + RB()
+    make_tool_schema_multi("safe_delete", "Delete a file with protection checks", props, "[" + js("path") + "]", false, true, false)
+
+fn schema_safe_copy() -> String:
+    var props = LB()
+    props = props + make_prop("src", "Source path")
+    props = props + "," + make_prop("dest", "Destination path")
+    props = props + RB()
+    make_tool_schema_multi("safe_copy", "Copy a file with protection checks", props, "[" + js("src") + "," + js("dest") + "]", false, false, false)
+
+fn schema_safe_move() -> String:
+    var props = LB()
+    props = props + make_prop("src", "Source path")
+    props = props + "," + make_prop("dest", "Destination path")
+    props = props + RB()
+    make_tool_schema_multi("safe_move", "Move a file with protection checks", props, "[" + js("src") + "," + js("dest") + "]", false, true, false)
+
+fn schema_safe_atomic_write() -> String:
+    var props = LB()
+    props = props + make_prop("path", "Path to write atomically")
+    props = props + "," + make_prop("content", "Content to write")
+    props = props + RB()
+    make_tool_schema_multi("safe_atomic_write", "Write a file atomically with protection checks", props, "[" + js("path") + "," + js("content") + "]", false, false, false)
+
+fn schema_safe_append() -> String:
+    var props = LB()
+    props = props + make_prop("path", "Path to append to")
+    props = props + "," + make_prop("content", "Content to append")
+    props = props + RB()
+    make_tool_schema_multi("safe_append", "Append to a file with protection checks", props, "[" + js("path") + "," + js("content") + "]", false, false, false)
+
+fn schema_list_protected_files() -> String:
+    val props = LB() + make_prop("pattern", "Optional filter pattern") + RB()
+    make_tool_schema_multi("list_protected_files", "List protected files or rules", props, "[]", true, false, true)
+
+fn schema_check_protection() -> String:
+    val props = LB() + make_prop("path", "Path to check") + RB()
+    make_tool_schema_multi("check_protection", "Check protection status for a path", props, "[" + js("path") + "]", true, false, true)
+
+fn schema_add_protection_rule() -> String:
+    var props = LB()
+    props = props + make_prop("pattern", "Path pattern")
+    props = props + "," + make_prop("type", "Rule type: exact|glob|regex")
+    props = props + "," + make_prop("action", "Action: allow|deny|protect|redirect|atomic")
+    props = props + "," + make_prop("reason", "Optional reason")
+    props = props + RB()
+    make_tool_schema_multi("add_protection_rule", "Add a protection rule", props, "[" + js("pattern") + "]", false, true, false)
+
+fn schema_list_temp_files() -> String:
+    make_tool_schema_multi("list_temp_files", "List temp files created by the file I/O server", LB() + RB(), "[]", true, false, true)
+
+fn schema_cleanup_temp() -> String:
+    make_tool_schema_multi("cleanup_temp", "Clean up temp files created by the file I/O server", LB() + RB(), "[]", false, true, false)
+
+fn schema_get_temp_dir() -> String:
+    make_tool_schema_multi("get_temp_dir", "Get temp directory path", LB() + RB(), "[]", true, false, true)
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 

@@ -305,53 +305,49 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
         blocks_to_analyze = limited
         log_verbose(config, "  Sampled from {file_keys.len()} files")
 
-    log_progress(config, "Using lazy feature extraction for {blocks_to_analyze.len()} blocks...")
-    var file_cache = {}
-    var feature_vector_map = {}
-
-    fn extract_feature_lazy(block_idx: i64) -> FeatureVec:
-        """Extract feature vector on-demand with caching."""
-        val key = "{block_idx}"
-        if feature_vector_map.contains_key(key):
-            return feature_vector_map[key]
-
+    log_progress(config, "Pre-computing features for {blocks_to_analyze.len()} blocks...")
+    # Pre-compute all feature vectors upfront (avoids closure capture bug with inner fns)
+    var file_token_cache = {}
+    var feature_vectors = []
+    var block_idx = 0
+    while block_idx < blocks_to_analyze.len():
         val block = blocks_to_analyze[block_idx]
 
         var tokens = []
-        if file_cache.contains_key(block.file):
-            tokens = file_cache[block.file]
+        if file_token_cache.contains_key(block.file):
+            tokens = file_token_cache[block.file]
         else:
-            val cached2 = get_cached_tokens(cache_manager, block.file)
-            if cached2 != nil:
-                tokens = cached2
+            val cached_tok = get_cached_tokens(cache_manager, block.file)
+            if cached_tok != nil:
+                tokens = cached_tok
             else:
                 val content = file_read(block.file)
                 tokens = tokenize(content, config)
                 set_cached_tokens(cache_manager, block.file, tokens)
-            file_cache[block.file] = tokens
+            file_token_cache[block.file] = tokens
 
         var token_start = 0
         var found_start = false
-        var i = 0
-        while i < tokens.len():
-            if tokens[i].line == block.line_start:
-                token_start = i
+        var ti = 0
+        while ti < tokens.len():
+            if tokens[ti].line == block.line_start:
+                token_start = ti
                 found_start = true
                 break
-            i = i + 1
+            ti = ti + 1
 
         var feature_vec = FeatureVec(block_id: block_idx, features: {}, magnitude: 0.0)
-
         if found_start:
             var token_end = token_start + block.token_count
             if token_end > tokens.len():
                 token_end = tokens.len()
-
             val freq_map = extract_token_frequencies(tokens, token_start, token_end)
             feature_vec = build_feature_vector(block_idx, freq_map)
 
-        feature_vector_map[key] = feature_vec
-        feature_vec
+        feature_vectors = feature_vectors + [feature_vec]
+        block_idx = block_idx + 1
+
+    log_progress(config, "Extracted {feature_vectors.len()} feature vectors from {file_token_cache.keys().len()} files")
 
     var refined_groups = []
 
@@ -370,9 +366,8 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
 
     var i = 0
     while i < blocks_to_analyze.len() and comparison_count < max_total_comparisons:
-        if i % 10 == 0:
-            val extracted_count = feature_vector_map.keys().len()
-            log_verbose(config, "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches, {extracted_count} features extracted")
+        if i % 50 == 0:
+            log_verbose(config, "  Block {i}/{blocks_to_analyze.len()}: {comparison_count} comparisons, {match_count} matches")
 
         if comparison_count >= max_total_comparisons:
             log_progress(config, "  Reached comparison limit ({max_total_comparisons}), stopping early")
@@ -394,8 +389,8 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
             comparison_count = comparison_count + 1
             comparisons_this_block = comparisons_this_block + 1
 
-            val feature_vec1 = extract_feature_lazy(i)
-            val feature_vec2 = extract_feature_lazy(j)
+            val feature_vec1 = feature_vectors[i]
+            val feature_vec2 = feature_vectors[j]
             val similarity = cosine_similarity(feature_vec1, feature_vec2)
 
             val above_threshold = similarity >= config.similarity_threshold
@@ -415,9 +410,7 @@ fn refine_groups_with_similarity(exact_groups: [DuplicateGroup], all_blocks: [Du
             j = j + 1
         i = i + 1
 
-    val extracted_count = feature_vector_map.keys().len()
     log_progress(config, "Completed {comparison_count} comparisons, found {match_count} similar pairs")
-    log_verbose(config, "Lazy extraction: {extracted_count}/{blocks_to_analyze.len()} features extracted ({100 * extracted_count / blocks_to_analyze.len()}% reduction)")
     refined_groups
 
 fn find_duplicates(files: [text], config: DuplicationConfig, cache_manager: TokenCacheManager) -> [DuplicateGroup]:

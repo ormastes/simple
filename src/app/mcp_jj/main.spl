@@ -11,12 +11,12 @@
 #   simple src/app/mcp_jj/main.spl version     # Show jj version
 
 use app.io.mod (get_args, exit)
-use app.mcp_jj.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, make_tool_result, make_result_response, make_error_response, has_flag}
-use app.mcp_jj.jj_runner.{get_default_repo_path, get_jj_version, is_jj_repo}
-use app.mcp_jj.tools_jj.{get_all_jj_tool_schemas, handle_jj_tool}
-use app.mcp_jj.tools_git.{get_all_git_tool_schemas, handle_git_tool}
-use app.mcp_jj.resources as res
-use app.mcp_jj.prompts as prompts
+use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, make_tool_result, make_result_response, make_error_response, has_flag}
+use jj_runner.{get_default_repo_path, get_jj_version, is_jj_repo}
+use tools_jj.{get_all_jj_tool_schemas, handle_jj_tool}
+use tools_git.{get_all_git_tool_schemas, handle_git_tool}
+use resources.{get_all_resources, read_resource}
+use prompts.{get_all_prompts, get_prompt}
 
 fn main():
     val raw_args = get_args()
@@ -67,7 +67,7 @@ fn start_server():
 
             if method == "initialize":
                 response = make_initialize_response(id)
-            elif method == "initialized":
+            elif method == "initialized" or method == "notifications/initialized":
                 response = ""  # Notification, no response
             elif method == "shutdown":
                 response = make_result_response(id, "null")
@@ -100,7 +100,11 @@ fn start_server():
             elif method == "notifications/cancelled":
                 response = ""  # Notification, no response
             else:
-                response = make_error_response(id, -32601, "Method not found: " + method)
+                # Notifications (no id) should not get error responses per MCP spec
+                if id == "" or id == "null":
+                    response = ""
+                else:
+                    response = make_error_response(id, -32601, "Method not found: " + method)
 
             if response != "":
                 write_stdout_message(response)
@@ -234,12 +238,12 @@ fn extract_repo_path_change(response: String) -> String:
 # --- Resources ---
 
 fn handle_resources_list(id: String, repo_path: String) -> String:
-    val resources_json = res.get_all_resources(repo_path)
+    val resources_json = get_all_resources(repo_path)
     val result = jo1(jp("resources", resources_json))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn handle_resources_read(id: String, uri: String, repo_path: String) -> String:
-    val content = res.read_resource(uri, repo_path)
+    val content = read_resource(uri, repo_path)
     if content == "":
         return make_error_response(id, -32602, "Resource not found: " + uri)
     val result = jo1(jp("contents", "[" + content + "]"))
@@ -248,12 +252,12 @@ fn handle_resources_read(id: String, uri: String, repo_path: String) -> String:
 # --- Prompts ---
 
 fn handle_prompts_list(id: String) -> String:
-    val prompts_json = prompts.get_all_prompts()
+    val prompts_json = get_all_prompts()
     val result = jo1(jp("prompts", prompts_json))
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn handle_prompts_get(id: String, prompt_name: String) -> String:
-    val content = prompts.get_prompt(prompt_name)
+    val content = get_prompt(prompt_name)
     if content == "":
         return make_error_response(id, -32602, "Prompt not found: " + prompt_name)
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", content))

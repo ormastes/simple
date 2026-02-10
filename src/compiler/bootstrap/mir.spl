@@ -1,0 +1,756 @@
+# Bootstrap Compiler — Arena-Based MIR (Mid-level IR)
+#
+# MIR is organized into functions, basic blocks, and instructions.
+# Each function has a list of basic blocks.
+# Each basic block has a list of instructions and a terminator.
+#
+# All stored in parallel arrays (arena pattern). Integer tags for
+# instruction kinds. No generics, no me methods, no closures.
+
+# ===== MIR Instruction Kind Tags =====
+
+# Constants and moves
+val MIR_CONST_INT = 1
+val MIR_CONST_FLOAT = 2
+val MIR_CONST_BOOL = 3
+val MIR_CONST_STRING = 4
+val MIR_CONST_NIL = 5
+val MIR_COPY = 6
+val MIR_MOVE = 7
+
+# Arithmetic
+val MIR_ADD = 10
+val MIR_SUB = 11
+val MIR_MUL = 12
+val MIR_DIV = 13
+val MIR_MOD = 14
+val MIR_NEG = 15
+val MIR_POW = 16
+
+# Comparison
+val MIR_EQ = 20
+val MIR_NE = 21
+val MIR_LT = 22
+val MIR_LE = 23
+val MIR_GT = 24
+val MIR_GE = 25
+
+# Logical
+val MIR_AND = 30
+val MIR_OR = 31
+val MIR_NOT = 32
+
+# Bitwise
+val MIR_BIT_AND = 35
+val MIR_BIT_OR = 36
+val MIR_BIT_XOR = 37
+val MIR_BIT_NOT = 38
+
+# Memory
+val MIR_ALLOC = 40
+val MIR_LOAD = 41
+val MIR_STORE = 42
+val MIR_GET_ELEMENT_PTR = 43
+
+# Aggregate (struct/array/dict)
+val MIR_AGGREGATE = 50
+val MIR_GET_FIELD = 51
+val MIR_SET_FIELD = 52
+
+# Array operations
+val MIR_ARRAY_NEW = 55
+val MIR_ARRAY_PUSH = 56
+val MIR_ARRAY_GET = 57
+val MIR_ARRAY_SET = 58
+val MIR_ARRAY_LEN = 59
+
+# Dict operations
+val MIR_DICT_NEW = 60
+val MIR_DICT_SET = 61
+val MIR_DICT_GET = 62
+val MIR_DICT_CONTAINS = 63
+val MIR_DICT_KEYS = 64
+val MIR_DICT_LEN = 65
+
+# String operations
+val MIR_STR_CONCAT = 70
+val MIR_STR_LEN = 71
+val MIR_STR_SLICE = 72
+val MIR_STR_INDEX = 73
+val MIR_STR_FORMAT = 74
+
+# Calls
+val MIR_CALL = 80
+val MIR_CALL_EXTERN = 81
+val MIR_CALL_INDIRECT = 82
+
+# Cast
+val MIR_CAST = 85
+
+# Special
+val MIR_NOP = 90
+val MIR_PRINT = 91
+val MIR_PRINTLN = 92
+
+# Aggregate kind sub-tags
+val AGG_STRUCT = 1
+val AGG_ARRAY = 2
+val AGG_TUPLE = 3
+val AGG_DICT = 4
+
+# ===== MIR Terminator Kind Tags =====
+
+val TERM_GOTO = 1
+val TERM_RETURN = 2
+val TERM_RETURN_VOID = 3
+val TERM_IF = 4
+val TERM_SWITCH = 5
+val TERM_UNREACHABLE = 6
+
+# ===== MIR Variable (SSA-like) =====
+# Each variable has a name and type tag.
+# Variables are function-scoped: v0, v1, v2, ...
+
+var mir_var_names: [text] = []
+var mir_var_types: [i64] = []
+
+fn mir_var_new(name: text, type_tag: i64) -> i64:
+    val idx = mir_var_names.len()
+    mir_var_names.push(name)
+    mir_var_types.push(type_tag)
+    idx
+
+fn mir_var_name(var_id: i64) -> text:
+    mir_var_names[var_id]
+
+fn mir_var_type(var_id: i64) -> i64:
+    mir_var_types[var_id]
+
+fn mir_var_count() -> i64:
+    mir_var_names.len()
+
+# ===== MIR Instruction Arena =====
+# Each instruction has:
+#   - kind:   MIR_* tag
+#   - dest:   destination variable index (-1 = no dest)
+#   - src1:   first source variable/value (-1 = none)
+#   - src2:   second source variable/value (-1 = none)
+#   - src3:   third source (for 3-operand instructions) (-1 = none)
+#   - i_val:  integer immediate value
+#   - s_val:  string immediate value
+#   - f_val:  float immediate value (as text)
+#   - args:   argument list (variable indices for calls, etc.)
+
+var inst_kind: [i64] = []
+var inst_dest: [i64] = []
+var inst_src1: [i64] = []
+var inst_src2: [i64] = []
+var inst_src3: [i64] = []
+var inst_i_val: [i64] = []
+var inst_s_val: [text] = []
+var inst_f_val: [text] = []
+var inst_args: [[i64]] = []
+
+fn inst_count() -> i64:
+    inst_kind.len()
+
+fn inst_alloc(kind: i64) -> i64:
+    val idx = inst_kind.len()
+    inst_kind.push(kind)
+    inst_dest.push(-1)
+    inst_src1.push(-1)
+    inst_src2.push(-1)
+    inst_src3.push(-1)
+    inst_i_val.push(0)
+    inst_s_val.push("")
+    inst_f_val.push("")
+    inst_args.push([])
+    idx
+
+# ===== Instruction Constructors =====
+
+fn mir_const_int(dest: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_CONST_INT)
+    inst_dest[idx] = dest
+    inst_i_val[idx] = value
+    idx
+
+fn mir_const_float(dest: i64, value: text) -> i64:
+    val idx = inst_alloc(MIR_CONST_FLOAT)
+    inst_dest[idx] = dest
+    inst_f_val[idx] = value
+    idx
+
+fn mir_const_bool(dest: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_CONST_BOOL)
+    inst_dest[idx] = dest
+    inst_i_val[idx] = value
+    idx
+
+fn mir_const_string(dest: i64, value: text) -> i64:
+    val idx = inst_alloc(MIR_CONST_STRING)
+    inst_dest[idx] = dest
+    inst_s_val[idx] = value
+    idx
+
+fn mir_const_nil(dest: i64) -> i64:
+    val idx = inst_alloc(MIR_CONST_NIL)
+    inst_dest[idx] = dest
+    idx
+
+fn mir_copy(dest: i64, src: i64) -> i64:
+    val idx = inst_alloc(MIR_COPY)
+    inst_dest[idx] = dest
+    inst_src1[idx] = src
+    idx
+
+fn mir_move_inst(dest: i64, src: i64) -> i64:
+    val idx = inst_alloc(MIR_MOVE)
+    inst_dest[idx] = dest
+    inst_src1[idx] = src
+    idx
+
+fn mir_binop(kind: i64, dest: i64, left: i64, right: i64) -> i64:
+    val idx = inst_alloc(kind)
+    inst_dest[idx] = dest
+    inst_src1[idx] = left
+    inst_src2[idx] = right
+    idx
+
+fn mir_unop(kind: i64, dest: i64, operand: i64) -> i64:
+    val idx = inst_alloc(kind)
+    inst_dest[idx] = dest
+    inst_src1[idx] = operand
+    idx
+
+fn mir_call(dest: i64, func_name: text, call_args: [i64]) -> i64:
+    val idx = inst_alloc(MIR_CALL)
+    inst_dest[idx] = dest
+    inst_s_val[idx] = func_name
+    inst_args[idx] = call_args
+    idx
+
+fn mir_call_extern(dest: i64, func_name: text, call_args: [i64]) -> i64:
+    val idx = inst_alloc(MIR_CALL_EXTERN)
+    inst_dest[idx] = dest
+    inst_s_val[idx] = func_name
+    inst_args[idx] = call_args
+    idx
+
+fn mir_call_indirect(dest: i64, func_var: i64, call_args: [i64]) -> i64:
+    val idx = inst_alloc(MIR_CALL_INDIRECT)
+    inst_dest[idx] = dest
+    inst_src1[idx] = func_var
+    inst_args[idx] = call_args
+    idx
+
+fn mir_cast_inst(dest: i64, src: i64, target_type: i64) -> i64:
+    val idx = inst_alloc(MIR_CAST)
+    inst_dest[idx] = dest
+    inst_src1[idx] = src
+    inst_i_val[idx] = target_type
+    idx
+
+fn mir_get_field(dest: i64, base: i64, field_idx: i64) -> i64:
+    val idx = inst_alloc(MIR_GET_FIELD)
+    inst_dest[idx] = dest
+    inst_src1[idx] = base
+    inst_i_val[idx] = field_idx
+    idx
+
+fn mir_set_field(base: i64, field_idx: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_SET_FIELD)
+    inst_src1[idx] = base
+    inst_i_val[idx] = field_idx
+    inst_src2[idx] = value
+    idx
+
+fn mir_aggregate(dest: i64, agg_kind: i64, type_name: text, operands: [i64]) -> i64:
+    val idx = inst_alloc(MIR_AGGREGATE)
+    inst_dest[idx] = dest
+    inst_i_val[idx] = agg_kind
+    inst_s_val[idx] = type_name
+    inst_args[idx] = operands
+    idx
+
+fn mir_array_new(dest: i64) -> i64:
+    val idx = inst_alloc(MIR_ARRAY_NEW)
+    inst_dest[idx] = dest
+    idx
+
+fn mir_array_push(arr: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_ARRAY_PUSH)
+    inst_src1[idx] = arr
+    inst_src2[idx] = value
+    idx
+
+fn mir_array_get(dest: i64, arr: i64, index_var: i64) -> i64:
+    val idx = inst_alloc(MIR_ARRAY_GET)
+    inst_dest[idx] = dest
+    inst_src1[idx] = arr
+    inst_src2[idx] = index_var
+    idx
+
+fn mir_array_set(arr: i64, index_var: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_ARRAY_SET)
+    inst_src1[idx] = arr
+    inst_src2[idx] = index_var
+    inst_src3[idx] = value
+    idx
+
+fn mir_array_len(dest: i64, arr: i64) -> i64:
+    val idx = inst_alloc(MIR_ARRAY_LEN)
+    inst_dest[idx] = dest
+    inst_src1[idx] = arr
+    idx
+
+fn mir_dict_new(dest: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_NEW)
+    inst_dest[idx] = dest
+    idx
+
+fn mir_dict_set(dict_var: i64, key: i64, value: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_SET)
+    inst_src1[idx] = dict_var
+    inst_src2[idx] = key
+    inst_src3[idx] = value
+    idx
+
+fn mir_dict_get(dest: i64, dict_var: i64, key: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_GET)
+    inst_dest[idx] = dest
+    inst_src1[idx] = dict_var
+    inst_src2[idx] = key
+    idx
+
+fn mir_dict_contains(dest: i64, dict_var: i64, key: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_CONTAINS)
+    inst_dest[idx] = dest
+    inst_src1[idx] = dict_var
+    inst_src2[idx] = key
+    idx
+
+fn mir_dict_keys(dest: i64, dict_var: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_KEYS)
+    inst_dest[idx] = dest
+    inst_src1[idx] = dict_var
+    idx
+
+fn mir_dict_len(dest: i64, dict_var: i64) -> i64:
+    val idx = inst_alloc(MIR_DICT_LEN)
+    inst_dest[idx] = dest
+    inst_src1[idx] = dict_var
+    idx
+
+fn mir_str_concat(dest: i64, left: i64, right: i64) -> i64:
+    val idx = inst_alloc(MIR_STR_CONCAT)
+    inst_dest[idx] = dest
+    inst_src1[idx] = left
+    inst_src2[idx] = right
+    idx
+
+fn mir_str_len(dest: i64, str_var: i64) -> i64:
+    val idx = inst_alloc(MIR_STR_LEN)
+    inst_dest[idx] = dest
+    inst_src1[idx] = str_var
+    idx
+
+fn mir_str_slice(dest: i64, str_var: i64, start: i64, end_var: i64) -> i64:
+    val idx = inst_alloc(MIR_STR_SLICE)
+    inst_dest[idx] = dest
+    inst_src1[idx] = str_var
+    inst_src2[idx] = start
+    inst_src3[idx] = end_var
+    idx
+
+fn mir_str_index(dest: i64, str_var: i64, index_var: i64) -> i64:
+    val idx = inst_alloc(MIR_STR_INDEX)
+    inst_dest[idx] = dest
+    inst_src1[idx] = str_var
+    inst_src2[idx] = index_var
+    idx
+
+fn mir_str_format(dest: i64, parts: [i64]) -> i64:
+    val idx = inst_alloc(MIR_STR_FORMAT)
+    inst_dest[idx] = dest
+    inst_args[idx] = parts
+    idx
+
+fn mir_print_inst(value: i64) -> i64:
+    val idx = inst_alloc(MIR_PRINT)
+    inst_src1[idx] = value
+    idx
+
+fn mir_println_inst(value: i64) -> i64:
+    val idx = inst_alloc(MIR_PRINTLN)
+    inst_src1[idx] = value
+    idx
+
+fn mir_nop() -> i64:
+    inst_alloc(MIR_NOP)
+
+# ===== Instruction Accessors =====
+
+fn inst_get_kind(idx: i64) -> i64:
+    inst_kind[idx]
+
+fn inst_get_dest(idx: i64) -> i64:
+    inst_dest[idx]
+
+fn inst_get_src1(idx: i64) -> i64:
+    inst_src1[idx]
+
+fn inst_get_src2(idx: i64) -> i64:
+    inst_src2[idx]
+
+fn inst_get_src3(idx: i64) -> i64:
+    inst_src3[idx]
+
+fn inst_get_int(idx: i64) -> i64:
+    inst_i_val[idx]
+
+fn inst_get_str(idx: i64) -> text:
+    inst_s_val[idx]
+
+fn inst_get_float(idx: i64) -> text:
+    inst_f_val[idx]
+
+fn inst_get_args(idx: i64) -> [i64]:
+    inst_args[idx]
+
+# ===== Terminator Arena =====
+
+var term_kind: [i64] = []
+var term_cond: [i64] = []
+var term_target1: [i64] = []
+var term_target2: [i64] = []
+var term_value: [i64] = []
+var term_targets: [[i64]] = []
+var term_values: [[i64]] = []
+
+fn term_count() -> i64:
+    term_kind.len()
+
+fn term_alloc(kind: i64) -> i64:
+    val idx = term_kind.len()
+    term_kind.push(kind)
+    term_cond.push(-1)
+    term_target1.push(-1)
+    term_target2.push(-1)
+    term_value.push(-1)
+    term_targets.push([])
+    term_values.push([])
+    idx
+
+fn term_goto(target_bb: i64) -> i64:
+    val idx = term_alloc(TERM_GOTO)
+    term_target1[idx] = target_bb
+    idx
+
+fn term_return(value_var: i64) -> i64:
+    val idx = term_alloc(TERM_RETURN)
+    term_value[idx] = value_var
+    idx
+
+fn term_return_void() -> i64:
+    term_alloc(TERM_RETURN_VOID)
+
+fn term_if_branch(cond_var: i64, then_bb: i64, else_bb: i64) -> i64:
+    val idx = term_alloc(TERM_IF)
+    term_cond[idx] = cond_var
+    term_target1[idx] = then_bb
+    term_target2[idx] = else_bb
+    idx
+
+fn term_switch(scrutinee: i64, case_values: [i64], case_targets: [i64], default_bb: i64) -> i64:
+    val idx = term_alloc(TERM_SWITCH)
+    term_cond[idx] = scrutinee
+    term_values[idx] = case_values
+    term_targets[idx] = case_targets
+    term_target1[idx] = default_bb
+    idx
+
+fn term_unreachable() -> i64:
+    term_alloc(TERM_UNREACHABLE)
+
+# Terminator accessors
+fn term_get_kind(idx: i64) -> i64:
+    term_kind[idx]
+
+fn term_get_cond(idx: i64) -> i64:
+    term_cond[idx]
+
+fn term_get_target1(idx: i64) -> i64:
+    term_target1[idx]
+
+fn term_get_target2(idx: i64) -> i64:
+    term_target2[idx]
+
+fn term_get_value(idx: i64) -> i64:
+    term_value[idx]
+
+fn term_get_targets(idx: i64) -> [i64]:
+    term_targets[idx]
+
+fn term_get_values(idx: i64) -> [i64]:
+    term_values[idx]
+
+# ===== Basic Block Arena =====
+# Each basic block has a list of instruction indices and a terminator index.
+
+var bb_instructions: [[i64]] = []
+var bb_terminator: [i64] = []
+var bb_labels: [text] = []
+
+fn bb_count() -> i64:
+    bb_instructions.len()
+
+fn bb_new(label: text) -> i64:
+    val idx = bb_instructions.len()
+    bb_instructions.push([])
+    bb_terminator.push(-1)
+    bb_labels.push(label)
+    idx
+
+fn bb_add_inst(bb_id: i64, inst_id: i64):
+    var insts = bb_instructions[bb_id]
+    insts.push(inst_id)
+    bb_instructions[bb_id] = insts
+
+fn bb_set_terminator(bb_id: i64, term_id: i64):
+    bb_terminator[bb_id] = term_id
+
+fn bb_get_instructions(bb_id: i64) -> [i64]:
+    bb_instructions[bb_id]
+
+fn bb_get_terminator(bb_id: i64) -> i64:
+    bb_terminator[bb_id]
+
+fn bb_get_label(bb_id: i64) -> text:
+    bb_labels[bb_id]
+
+# ===== MIR Function Arena =====
+# Each function has a name, parameters, return type, local variables, and basic blocks.
+
+var mir_fn_names: [text] = []
+var mir_fn_param_names: [[text]] = []
+var mir_fn_param_types: [[i64]] = []
+var mir_fn_ret_types: [i64] = []
+var mir_fn_bbs: [[i64]] = []
+var mir_fn_vars: [[i64]] = []
+var mir_fn_is_extern: [i64] = []
+
+fn mir_fn_count() -> i64:
+    mir_fn_names.len()
+
+fn mir_fn_new(name: text, param_names: [text], param_types: [i64], ret_type: i64, is_ext: i64) -> i64:
+    val idx = mir_fn_names.len()
+    mir_fn_names.push(name)
+    mir_fn_param_names.push(param_names)
+    mir_fn_param_types.push(param_types)
+    mir_fn_ret_types.push(ret_type)
+    mir_fn_bbs.push([])
+    mir_fn_vars.push([])
+    mir_fn_is_extern.push(is_ext)
+    idx
+
+fn mir_fn_add_bb(fn_id: i64, bb_id: i64):
+    var bbs = mir_fn_bbs[fn_id]
+    bbs.push(bb_id)
+    mir_fn_bbs[fn_id] = bbs
+
+fn mir_fn_add_var(fn_id: i64, var_id: i64):
+    var vars = mir_fn_vars[fn_id]
+    vars.push(var_id)
+    mir_fn_vars[fn_id] = vars
+
+fn mir_fn_get_name(fn_id: i64) -> text:
+    mir_fn_names[fn_id]
+
+fn mir_fn_get_param_names(fn_id: i64) -> [text]:
+    mir_fn_param_names[fn_id]
+
+fn mir_fn_get_param_types(fn_id: i64) -> [i64]:
+    mir_fn_param_types[fn_id]
+
+fn mir_fn_get_ret_type(fn_id: i64) -> i64:
+    mir_fn_ret_types[fn_id]
+
+fn mir_fn_get_bbs(fn_id: i64) -> [i64]:
+    mir_fn_bbs[fn_id]
+
+fn mir_fn_get_vars(fn_id: i64) -> [i64]:
+    mir_fn_vars[fn_id]
+
+fn mir_fn_is_extern_fn(fn_id: i64) -> bool:
+    mir_fn_is_extern[fn_id] == 1
+
+# ===== MIR Module =====
+# A module is a list of MIR functions plus struct definitions.
+
+var mir_module_fns: [i64] = []
+var mir_module_structs: [text] = []
+var mir_module_struct_fields: [[text]] = []
+var mir_module_struct_types: [[i64]] = []
+
+fn mir_module_add_fn(fn_id: i64):
+    mir_module_fns.push(fn_id)
+
+fn mir_module_get_fns() -> [i64]:
+    mir_module_fns
+
+fn mir_module_add_struct(name: text, fields: [text], types: [i64]):
+    mir_module_structs.push(name)
+    mir_module_struct_fields.push(fields)
+    mir_module_struct_types.push(types)
+
+fn mir_module_get_structs() -> [text]:
+    mir_module_structs
+
+fn mir_module_struct_count() -> i64:
+    mir_module_structs.len()
+
+fn mir_module_get_struct_fields(idx: i64) -> [text]:
+    mir_module_struct_fields[idx]
+
+fn mir_module_get_struct_types(idx: i64) -> [i64]:
+    mir_module_struct_types[idx]
+
+# ===== MIR Reset =====
+
+fn mir_reset():
+    mir_var_names = []
+    mir_var_types = []
+    inst_kind = []
+    inst_dest = []
+    inst_src1 = []
+    inst_src2 = []
+    inst_src3 = []
+    inst_i_val = []
+    inst_s_val = []
+    inst_f_val = []
+    inst_args = []
+    term_kind = []
+    term_cond = []
+    term_target1 = []
+    term_target2 = []
+    term_value = []
+    term_targets = []
+    term_values = []
+    bb_instructions = []
+    bb_terminator = []
+    bb_labels = []
+    mir_fn_names = []
+    mir_fn_param_names = []
+    mir_fn_param_types = []
+    mir_fn_ret_types = []
+    mir_fn_bbs = []
+    mir_fn_vars = []
+    mir_fn_is_extern = []
+    mir_module_fns = []
+    mir_module_structs = []
+    mir_module_struct_fields = []
+    mir_module_struct_types = []
+
+# ===== Instruction Kind Names (debugging) =====
+
+fn mir_inst_kind_name(kind: i64) -> text:
+    if kind == MIR_CONST_INT: return "ConstInt"
+    if kind == MIR_CONST_FLOAT: return "ConstFloat"
+    if kind == MIR_CONST_BOOL: return "ConstBool"
+    if kind == MIR_CONST_STRING: return "ConstString"
+    if kind == MIR_CONST_NIL: return "ConstNil"
+    if kind == MIR_COPY: return "Copy"
+    if kind == MIR_MOVE: return "Move"
+    if kind == MIR_ADD: return "Add"
+    if kind == MIR_SUB: return "Sub"
+    if kind == MIR_MUL: return "Mul"
+    if kind == MIR_DIV: return "Div"
+    if kind == MIR_MOD: return "Mod"
+    if kind == MIR_NEG: return "Neg"
+    if kind == MIR_POW: return "Pow"
+    if kind == MIR_EQ: return "Eq"
+    if kind == MIR_NE: return "Ne"
+    if kind == MIR_LT: return "Lt"
+    if kind == MIR_LE: return "Le"
+    if kind == MIR_GT: return "Gt"
+    if kind == MIR_GE: return "Ge"
+    if kind == MIR_AND: return "And"
+    if kind == MIR_OR: return "Or"
+    if kind == MIR_NOT: return "Not"
+    if kind == MIR_BIT_AND: return "BitAnd"
+    if kind == MIR_BIT_OR: return "BitOr"
+    if kind == MIR_BIT_XOR: return "BitXor"
+    if kind == MIR_BIT_NOT: return "BitNot"
+    if kind == MIR_ALLOC: return "Alloc"
+    if kind == MIR_LOAD: return "Load"
+    if kind == MIR_STORE: return "Store"
+    if kind == MIR_GET_ELEMENT_PTR: return "GEP"
+    if kind == MIR_AGGREGATE: return "Aggregate"
+    if kind == MIR_GET_FIELD: return "GetField"
+    if kind == MIR_SET_FIELD: return "SetField"
+    if kind == MIR_ARRAY_NEW: return "ArrayNew"
+    if kind == MIR_ARRAY_PUSH: return "ArrayPush"
+    if kind == MIR_ARRAY_GET: return "ArrayGet"
+    if kind == MIR_ARRAY_SET: return "ArraySet"
+    if kind == MIR_ARRAY_LEN: return "ArrayLen"
+    if kind == MIR_DICT_NEW: return "DictNew"
+    if kind == MIR_DICT_SET: return "DictSet"
+    if kind == MIR_DICT_GET: return "DictGet"
+    if kind == MIR_DICT_CONTAINS: return "DictContains"
+    if kind == MIR_DICT_KEYS: return "DictKeys"
+    if kind == MIR_DICT_LEN: return "DictLen"
+    if kind == MIR_STR_CONCAT: return "StrConcat"
+    if kind == MIR_STR_LEN: return "StrLen"
+    if kind == MIR_STR_SLICE: return "StrSlice"
+    if kind == MIR_STR_INDEX: return "StrIndex"
+    if kind == MIR_STR_FORMAT: return "StrFormat"
+    if kind == MIR_CALL: return "Call"
+    if kind == MIR_CALL_EXTERN: return "CallExtern"
+    if kind == MIR_CALL_INDIRECT: return "CallIndirect"
+    if kind == MIR_CAST: return "Cast"
+    if kind == MIR_NOP: return "Nop"
+    if kind == MIR_PRINT: return "Print"
+    if kind == MIR_PRINTLN: return "Println"
+    "Unknown"
+
+export MIR_CONST_INT, MIR_CONST_FLOAT, MIR_CONST_BOOL, MIR_CONST_STRING, MIR_CONST_NIL
+export MIR_COPY, MIR_MOVE
+export MIR_ADD, MIR_SUB, MIR_MUL, MIR_DIV, MIR_MOD, MIR_NEG, MIR_POW
+export MIR_EQ, MIR_NE, MIR_LT, MIR_LE, MIR_GT, MIR_GE
+export MIR_AND, MIR_OR, MIR_NOT
+export MIR_BIT_AND, MIR_BIT_OR, MIR_BIT_XOR, MIR_BIT_NOT
+export MIR_ALLOC, MIR_LOAD, MIR_STORE, MIR_GET_ELEMENT_PTR
+export MIR_AGGREGATE, MIR_GET_FIELD, MIR_SET_FIELD
+export AGG_STRUCT, AGG_ARRAY, AGG_TUPLE, AGG_DICT
+export MIR_ARRAY_NEW, MIR_ARRAY_PUSH, MIR_ARRAY_GET, MIR_ARRAY_SET, MIR_ARRAY_LEN
+export MIR_DICT_NEW, MIR_DICT_SET, MIR_DICT_GET, MIR_DICT_CONTAINS, MIR_DICT_KEYS, MIR_DICT_LEN
+export MIR_STR_CONCAT, MIR_STR_LEN, MIR_STR_SLICE, MIR_STR_INDEX, MIR_STR_FORMAT
+export MIR_CALL, MIR_CALL_EXTERN, MIR_CALL_INDIRECT
+export MIR_CAST, MIR_NOP, MIR_PRINT, MIR_PRINTLN
+export TERM_GOTO, TERM_RETURN, TERM_RETURN_VOID, TERM_IF, TERM_SWITCH, TERM_UNREACHABLE
+export mir_var_new, mir_var_name, mir_var_type, mir_var_count
+export inst_count, inst_alloc
+export mir_const_int, mir_const_float, mir_const_bool, mir_const_string, mir_const_nil
+export mir_copy, mir_move_inst, mir_binop, mir_unop
+export mir_call, mir_call_extern, mir_call_indirect, mir_cast_inst
+export mir_get_field, mir_set_field, mir_aggregate
+export mir_array_new, mir_array_push, mir_array_get, mir_array_set, mir_array_len
+export mir_dict_new, mir_dict_set, mir_dict_get, mir_dict_contains, mir_dict_keys, mir_dict_len
+export mir_str_concat, mir_str_len, mir_str_slice, mir_str_index, mir_str_format
+export mir_print_inst, mir_println_inst, mir_nop
+export inst_get_kind, inst_get_dest, inst_get_src1, inst_get_src2, inst_get_src3
+export inst_get_int, inst_get_str, inst_get_float, inst_get_args
+export term_count, term_alloc
+export term_goto, term_return, term_return_void, term_if_branch, term_switch, term_unreachable
+export term_get_kind, term_get_cond, term_get_target1, term_get_target2
+export term_get_value, term_get_targets, term_get_values
+export bb_count, bb_new, bb_add_inst, bb_set_terminator
+export bb_get_instructions, bb_get_terminator, bb_get_label
+export mir_fn_count, mir_fn_new, mir_fn_add_bb, mir_fn_add_var
+export mir_fn_get_name, mir_fn_get_param_names, mir_fn_get_param_types
+export mir_fn_get_ret_type, mir_fn_get_bbs, mir_fn_get_vars, mir_fn_is_extern_fn
+export mir_module_add_fn, mir_module_get_fns
+export mir_module_add_struct, mir_module_get_structs, mir_module_struct_count
+export mir_module_get_struct_fields, mir_module_get_struct_types
+export mir_reset, mir_inst_kind_name
