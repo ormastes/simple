@@ -1,0 +1,248 @@
+# Visibility and Export Model
+#
+# Implements the visibility and export rules verified in:
+# verification/visibility_export/src/VisibilityExport.lean
+#
+# Proven Properties (Lean theorems):
+# 1. private_stays_private: A private symbol cannot become public
+# 2. private_module_restricts: A symbol in a private module cannot become public
+# 3. must_be_exported: A symbol must be explicitly exported to be visible externally
+# 4. meet_comm, meet_assoc: Visibility meet is commutative and associative
+# 5. any_private_means_private: If any ancestor is private, result is private
+# 6. all_public_means_public: All public ancestors means public result
+#
+# Key Properties:
+# 1. Visibility is the **intersection** of declaration visibility and ancestor visibility
+# 2. A directory's public API consists only of:
+#    - Child modules declared as `pub mod` in its `__init__.spl`
+#    - Symbols listed in `export use` inside that same `__init__.spl`
+# 3. Nothing inside a child `.spl` file can make itself "more public" than its directory allows
+
+# Visibility of a declaration or module
+#
+# Corresponds to Lean: `inductive Visibility | pub | priv`
+enum Visibility:
+    Public
+    Private
+
+
+# ============================================================================
+# Visibility Methods (was: impl Visibility:)
+# ============================================================================
+
+# A symbol identifier
+#
+# Corresponds to Lean: `structure SymbolId where name : String`
+struct SymbolId:
+    name: text
+
+
+# ============================================================================
+# SymbolId Methods (was: impl SymbolId:)
+# ============================================================================
+
+fn symbolid_new(name: text) -> SymbolId:
+        SymbolId(name: name)
+
+
+# A symbol with visibility
+#
+# Corresponds to Lean: `structure Symbol where id : SymbolId; visibility : Visibility`
+struct Symbol:
+    id: SymbolId
+    visibility: Visibility
+
+
+# ============================================================================
+# Symbol Methods (was: impl Symbol:)
+# ============================================================================
+
+fn symbol_new(name: text, visibility: Visibility) -> Symbol:
+        Symbol(id: symbolid_new(name), visibility: visibility)
+
+
+fn symbol_pub_symbol(name: text) -> Symbol:
+        symbol_new(name, Visibility.Public)
+
+
+fn symbol_priv_symbol(name: text) -> Symbol:
+        symbol_new(name, Visibility.Private)
+
+
+# A module declaration in __init__.spl
+#
+# Corresponds to Lean: `structure ModDecl where name : String; isPub : Bool`
+struct ModDecl:
+    name: text
+    is_pub: bool
+
+
+# ============================================================================
+# ModDecl Methods (was: impl ModDecl:)
+# ============================================================================
+
+fn moddecl_new(name: text, is_pub: bool) -> ModDecl:
+        ModDecl(name: name, is_pub: is_pub)
+
+
+fn moddecl_pub_decl(name: text) -> ModDecl:
+        moddecl_new(name, true)
+
+
+fn moddecl_priv_decl(name: text) -> ModDecl:
+        moddecl_new(name, false)
+
+
+# A directory manifest (__init__.spl)
+#
+# Corresponds to Lean: `structure DirManifest where name : String; children : List ModDecl; exports : List SymbolId`
+struct DirManifest:
+    name: text
+    children: [ModDecl]
+    exports: [SymbolId]
+
+
+# ============================================================================
+# DirManifest Methods (was: impl DirManifest:)
+# ============================================================================
+
+fn dirmanifest_new(name: text) -> DirManifest:
+        DirManifest(name: name, children: [], exports: [])
+
+
+# Module contents: symbols defined in a module file
+#
+# Corresponds to Lean: `structure ModuleContents where symbols : List Symbol`
+struct ModuleContents:
+    symbols: [Symbol]
+
+
+# ============================================================================
+# ModuleContents Methods (was: impl ModuleContents:)
+# ============================================================================
+
+fn modulecontents_new() -> ModuleContents:
+        ModuleContents(symbols: [])
+
+
+# Effective visibility combines declaration visibility with directory control
+#
+# A symbol is externally visible only if:
+# 1. It is declared `pub` in its module
+# 2. Its module is declared `pub mod` in the directory's __init__.spl
+# 3. It's in the export list
+#
+# Corresponds to Lean: `def effectiveVisibility`
+fn effective_visibility(
+    manifest: DirManifest,
+    module_name: text,
+    mc: ModuleContents,
+    sym: SymbolId
+) -> Visibility:
+    match mc_symbol_visibility(mc, sym):
+        case nil:
+            # Symbol not found
+            Visibility.Private
+        case has_field = true, field_value = Visibility.Private:
+            # Declaration is private
+            Visibility.Private
+        case has_field = true, field_value = Visibility.Public:
+            # Symbol is declared public; check if directory allows export
+            if manifest_is_child_public(manifest, module_name):
+                if manifest_is_exported(manifest, sym):
+                    Visibility.Public
+                else:
+                    Visibility.Private  # Not in export list
+            else:
+                Visibility.Private  # Module not public
+
+# Visibility meet operation (intersection)
+#
+# Corresponds to Lean: `def visibilityMeet`
+#
+# This is the key operation: visibility is the intersection of all visibility levels
+fn visibility_meet(v1: Visibility, v2: Visibility) -> Visibility:
+    match v1:
+        case Visibility.Public:
+            match v2:
+                case Visibility.Public:
+                    Visibility.Public
+                case Visibility.Private:
+                    Visibility.Private
+        case Visibility.Private:
+            Visibility.Private
+
+# Ancestor visibility through a path
+#
+# Corresponds to Lean: `def ancestorVisibility (path : List Visibility) : Visibility`
+#
+# This computes the effective visibility by folding visibility_meet over the path
+fn ancestor_visibility(path: [Visibility]) -> Visibility:
+    var result = Visibility.Public
+    for v in path:
+        result = visibility_meet(result, v)
+    result
+
+# Access policy for a directory
+#
+# Determines how external code can access contents of a directory:
+# - Open: No __init__.spl present; all public files are freely accessible
+# - Boundary: __init__.spl present; only exported symbols are accessible
+# - Bypass: __init__.spl with #[bypass]; directory is transparent (pass-through)
+enum AccessPolicy:
+    Open
+    Boundary
+    Bypass
+
+
+# ============================================================================
+# AccessPolicy Methods (was: impl AccessPolicy:)
+# ============================================================================
+
+# Determine the access policy for a directory
+#
+# Rules:
+# - No __init__.spl → Open (freely accessible)
+# - __init__.spl with #[bypass] → Bypass (transparent)
+# - __init__.spl without #[bypass] → Boundary (exports only)
+fn effective_access_policy(has_init: bool, is_bypass: bool) -> AccessPolicy:
+    if not has_init:
+        AccessPolicy.Open
+    elif is_bypass:
+        AccessPolicy.Bypass
+    else:
+        AccessPolicy.Boundary
+
+# Check if access to a symbol through a path is allowed
+#
+# When traversing from root to a target symbol, each directory along the path
+# is checked. If a directory has Boundary policy, the symbol must be exported
+# by that directory's __init__.spl. Open and Bypass directories allow pass-through.
+#
+# Returns true if access is allowed.
+fn check_access(
+    manifest: DirManifest,
+    policy: AccessPolicy,
+    sym: SymbolId
+) -> bool:
+    match policy:
+        case AccessPolicy.Open:
+            true
+        case AccessPolicy.Bypass:
+            true
+        case AccessPolicy.Boundary:
+            manifest_is_exported(manifest, sym)
+
+# Public exports
+export Visibility
+export SymbolId
+export Symbol
+export ModDecl
+export DirManifest
+export ModuleContents
+export effective_visibility
+export visibility_meet
+export ancestor_visibility
+export AccessPolicy
+export effective_access_policy
+export check_access

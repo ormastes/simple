@@ -1,0 +1,231 @@
+# Attribute Parsing - Parse and Validate Attributes
+#
+# Handles parsing of layout-related attributes:
+# - @repr("C")         - C ABI compatible layout
+# - @repr("packed")    - No padding between fields
+# - @repr("transparent") - Single-field wrapper layout
+# - @packed            - Shorthand for @repr("packed")
+# - @align(N)          - Minimum alignment (must be power of 2)
+#
+# Handles parsing of volatile attributes:
+# - @volatile          - Full volatile (reads and writes)
+# - @volatile_read     - Read-only volatile
+# - @volatile_write    - Write-only volatile
+# - @nonvolatile       - Explicitly non-volatile (override)
+#
+# Returns a LayoutAttr for use in type layout computation.
+
+use parser_types.{Attribute, Expr, ExprKind}
+use type_layout.{LayoutAttr, LayoutKind}
+use lexer.Span
+
+export parse_layout_attrs, validate_alignment, is_power_of_two
+export parse_volatile_attrs, VolatileMode, VolatileAttr
+
+# ============================================================================
+# Volatile Attribute Types
+# ============================================================================
+
+"""Volatile access mode for memory-mapped I/O."""
+enum VolatileMode:
+    None_            # Normal (not volatile)
+    Full            # Full volatile (reads and writes)
+    ReadOnly        # Volatile reads, normal writes
+    WriteOnly       # Volatile writes, normal reads
+    Explicit        # Explicitly non-volatile (override)
+
+struct VolatileAttr:
+    """Volatile attribute configuration."""
+    mode: VolatileMode
+    # DESUGARED: address: i64?
+    has_address: bool
+    address_value: i64
+    barriers: bool         # Insert memory barriers around access
+
+# ============================================================================
+# Volatile Attribute Parsing
+# ============================================================================
+
+fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
+    """Extract volatile attributes from a list of attributes.
+
+    Handles:
+    - @volatile -> VolatileMode.Full
+    - @volatile_read -> VolatileMode.ReadOnly
+    - @volatile_write -> VolatileMode.WriteOnly
+    - @nonvolatile -> VolatileMode.Explicit
+
+    Returns default VolatileAttr if no volatile attributes found.
+    """
+    var mode = VolatileMode.None
+    var address: i64? = nil
+    var barriers = false
+
+    for attr in attrs:
+        match attr.name:
+            case "volatile":
+                mode = VolatileMode.Full
+                # Check for @volatile(barriers: true)
+                if attr.args_len(args) > 0:
+                    barriers = extract_barriers_arg(attr.args)
+
+            case "volatile_read":
+                mode = VolatileMode.ReadOnly
+
+            case "volatile_write":
+                mode = VolatileMode.WriteOnly
+
+            case "nonvolatile":
+                mode = VolatileMode.Explicit
+
+            case "address" | "addr":
+                # @address(0x40020000) - fixed memory address
+                if attr.args_len(args) > 0:
+                    address = extract_int_arg(attr.args[0])
+
+            case _:
+                # Ignore other attributes
+                pass
+
+    VolatileAttr(
+        mode: mode,
+        address: address,
+        barriers: barriers
+    )
+
+fn is_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile access is required."""
+    match attr.mode:
+        case Full | ReadOnly | WriteOnly: true
+        case _: false
+
+fn is_read_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile reads are required."""
+    match attr.mode:
+        case Full | ReadOnly: true
+        case _: false
+
+fn is_write_volatile(attr: VolatileAttr) -> bool:
+    """Check if volatile writes are required."""
+    match attr.mode:
+        case Full | WriteOnly: true
+        case _: false
+
+# ============================================================================
+# Layout Attribute Parsing
+# ============================================================================
+
+# Parse layout attributes from a list of attributes
+fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
+    """Extract layout attributes from a list of attributes.
+
+    Handles:
+    - @repr("C") -> LayoutKind.C
+    - @repr("packed") -> LayoutKind.Packed, is_packed=true
+    - @repr("transparent") -> LayoutKind.Transparent
+    - @packed -> LayoutKind.Packed, is_packed=true
+    - @align(N) -> explicit_align=N
+
+    Returns default LayoutAttr if no layout attributes found.
+    """
+    var layout_kind = LayoutKind.Simple
+    var explicit_align: i64? = nil
+    var is_packed = false
+
+    for attr in attrs:
+        match attr.name:
+            case "repr":
+                # @repr("C"), @repr("packed"), @repr("transparent")
+                if attr.args_len(args) > 0:
+                    val repr_kind = extract_string_arg(attr.args[0])
+                    match repr_kind:
+                        case "C":
+                            layout_kind = LayoutKind.C
+                        case "packed":
+                            layout_kind = LayoutKind.Packed
+                            is_packed = true
+                        case "transparent":
+                            layout_kind = LayoutKind.Transparent
+                        case _:
+                            # Unknown repr, keep default
+                            pass
+
+            case "packed":
+                # @packed shorthand
+                layout_kind = LayoutKind.Packed
+                is_packed = true
+
+            case "align":
+                # @align(N) - alignment must be power of 2
+                if attr.args_len(args) > 0:
+                    val align_val = extract_int_arg(attr.args[0])
+                    if align_val.? and is_power_of_two(align_val_value):
+                        explicit_align = align_val
+
+            case _:
+                # Ignore other attributes
+                pass
+
+    LayoutAttr(
+        layout_kind: layout_kind,
+        explicit_align: explicit_align,
+        is_packed: is_packed
+    )
+
+# Extract string value from an expression (for @repr("C"))
+fn extract_string_arg(expr: Expr) -> text:
+    match expr.kind:
+        case exprkind_StringLit(value, _):
+            value
+        case _:
+            ""
+
+# Extract barriers option from attribute args
+# Handles: @volatile(true), @volatile(barriers: true)
+fn extract_barriers_arg(args: [Expr]) -> bool:
+    for arg in args:
+        # Check for bare true literal: @volatile(true)
+        match arg.kind:
+            case exprkind_BoolLit(v):
+                return v
+            case exprkind_Assign(left, _, right):
+                # Check for named arg: barriers = true
+                match left.kind:
+                    case exprkind_Ident(name):
+                        if name == "barriers":
+                            match right.kind:
+                                case exprkind_BoolLit(v):
+                                    return v
+                                case _: ()
+                    case _: ()
+            case _: ()
+    false
+
+# Extract integer value from an expression (for @align(16))
+fn extract_int_arg(expr: Expr) -> has_i64:
+    match expr.kind:
+        case exprkind_IntLit(value):
+            has_field = true, field_value = value
+        case _:
+            nil
+
+# Check if a number is a power of 2
+fn is_power_of_two(n: i64) -> bool:
+    """Check if n is a power of 2.
+
+    Uses bitwise trick: n & (n-1) == 0 for powers of 2.
+    """
+    n > 0 and (n & (n - 1)) == 0
+
+# Validate alignment value
+fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
+    """Validate that alignment is a positive power of 2.
+
+    Returns the alignment if valid, or an error message.
+    """
+    if align <= 0:
+        Err("alignment must be positive, got {align}")
+    elif not is_power_of_two(align):
+        Err("alignment must be a power of 2, got {align}")
+    else:
+        Ok(align)

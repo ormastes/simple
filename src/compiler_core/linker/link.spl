@@ -1,0 +1,380 @@
+# Link Pipeline - Main linker orchestration.
+#
+# This module provides the main link pipeline that:
+# 1. Loads input SMF files
+# 2. Collects deferred type hints across modules
+# 3. Resolves cross-module types using HM inference
+# 4. Generates required specializations via ObjTaker
+# 5. Outputs SMF or native binary (via mold)
+#
+# Uses:
+# - compiler.type_infer.HmInferContext for cross-module type unification
+# - ObjTaker for object extraction and instantiation
+# - LazyInstantiator for link-time instantiation
+# - SmfReaderImpl for reading input files
+# - MoldBackend for native binary generation
+
+use ..type_infer.*
+use ..monomorphize.note_sdn.*
+use .obj_taker.*
+use .lazy_instantiator.*
+use .smf_reader.*
+use .mold.*
+
+# ============================================================================
+# Link Configuration
+# ============================================================================
+
+struct LinkConfig:
+    """Configuration for the link pipeline."""
+    output_format: OutputFormat
+    output_path: text
+    libraries: [text]
+    library_paths: [text]
+    pie: bool
+    debug: bool
+    verbose: bool
+    allow_deferred: bool
+    optimization_level: i32
+    target_flags: [text]        # CPU/arch flags (e.g., ["-march=x86-64-v3"])
+    linker_flags: [text]        # Extra linker flags
+
+enum OutputFormat:
+    Smf      # Runtime SMF format
+    Native   # Native binary via mold
+
+
+# ============================================================================
+# LinkConfig Methods (was: impl LinkConfig:)
+# ============================================================================
+
+fn linkconfig_default() -> LinkConfig:
+        LinkConfig(
+            output_format: OutputFormat.Smf,
+            output_path: "a.out",
+            libraries: [],
+            library_paths: [],
+            pie: true,
+            debug: false,
+            verbose: false,
+            allow_deferred: false,
+            optimization_level: 0,
+            target_flags: [],
+            linker_flags: []
+        )
+
+
+fn linkconfig_native(output: text) -> LinkConfig:
+        """Create config for native binary output."""
+        var cfg = LinkConfig__default()
+        cfg.output_format = OutputFormat.Native
+        cfg.output_path = output
+        cfg
+
+
+fn linkconfig_smf(output: text) -> LinkConfig:
+        """Create config for SMF output."""
+        var cfg = LinkConfig__default()
+        cfg.output_format = OutputFormat.Smf
+        cfg.output_path = output
+        cfg
+
+
+# ============================================================================
+# Link Result
+# ============================================================================
+
+enum LinkResult:
+    Success(output_path: text, stats: LinkStats)
+    Error(message: text, errors: [LinkError])
+
+struct LinkStats:
+    """Statistics from linking."""
+    input_count: i32
+    symbol_count: i32
+    instantiated_count: i32
+    deferred_count: i32
+    output_size: i64
+
+struct LinkError:
+    """A link error."""
+    kind: LinkErrorKind
+    message: text
+    # DESUGARED: symbol: text?
+    has_symbol: bool
+    symbol_value: text
+    # DESUGARED: location: text?
+    has_location: bool
+    location_value: text
+
+enum LinkErrorKind:
+    SymbolNotFound
+    DuplicateSymbol
+    TypeMismatch
+    CircularDependency
+    InstantiationFailed
+    OutputFailed
+    InternalError
+
+# ============================================================================
+# Linker
+# ============================================================================
+
+struct Linker:
+    """Main linker that orchestrates the link pipeline."""
+    # Shared inference context for cross-module type unification
+    infer_ctx: HmInferContext
+    # ObjTaker for object extraction
+    obj_taker: ObjTaker
+    # Lazy instantiator for link-time instantiation
+    lazy_inst: LazyInstantiator
+    # Loaded SMF readers
+    readers: [SmfReaderImpl]
+    # Collected symbols (name -> (reader_index, symbol))
+    symbols: Dict<text, (i32, SmfSymbol)>
+    # Unresolved symbols
+    unresolved: Set<text>
+    # Errors accumulated during linking
+    errors: [LinkError]
+    # Configuration
+    config: LinkConfig
+
+
+# ============================================================================
+# Linker Methods (was: impl Linker:)
+# ============================================================================
+
+fn linker_new(config: LinkConfig) -> Linker:
+        """Create a new linker with the given configuration."""
+        val infer_ctx = HmInferContext__with_builtins()
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: true,
+            max_cache_size: 10000,
+            verbose: config.verbose,
+            allow_deferred: config.allow_deferred
+        )
+
+        Linker(
+            infer_ctx: infer_ctx,
+            obj_taker: ObjTaker__with_inference_context(infer_ctx, obj_taker_config),
+            lazy_inst: LazyInstantiator__new(LazyInstantiatorConfig__default()),
+            readers: [],
+            symbols: {},
+            unresolved: {},
+            errors: [],
+            config: config
+        )
+
+
+fn linker_link(self: Linker, input_paths: [text]) -> LinkResult:
+        """Link multiple SMF files into output.
+
+        Pipeline:
+        1. Load all input SMF files
+        2. Collect symbols and identify unresolved references
+        3. Collect deferred type hints
+        4. Resolve cross-module types
+        5. Generate required instantiations
+        6. Write output (SMF or native)
+        """
+        if self.config.verbose:
+            print "[linker] Starting link of {input_paths.len()} inputs"
+
+        # 1. Load all inputs
+        val load_result = self.load_inputs(input_paths)
+        if load_result_is_err(load_result):
+            return LinkResult.Error(
+                message: "Failed to load inputs",
+                errors: self.errors
+            )
+
+        # 2. Collect symbols
+        self.collect_symbols()
+
+        # 3. Identify unresolved symbols
+        self.find_unresolved()
+
+        if self.config.verbose:
+            print "[linker] Found {self.unresolved.len()} unresolved symbols"
+
+        # 4. Collect deferred hints from all modules
+        val all_hints = self.collect_deferred_hints()
+
+        # 5. Resolve cross-module types
+        val resolve_result = self.resolve_cross_module(all_hints)
+        if resolve_result_is_err(resolve_result):
+            return LinkResult.Error(
+                message: "Type resolution failed",
+                errors: self.errors
+            )
+
+        # 6. Generate instantiations for unresolved symbols
+        val inst_result = self.generate_instantiations()
+        if inst_result_is_err(inst_result):
+            return LinkResult.Error(
+                message: "Instantiation failed",
+                errors: self.errors
+            )
+
+        # 7. Check for remaining unresolved
+        if not self.unresolved_is_empty(unresolved) and not self.config.allow_deferred:
+            for sym in self.unresolved:
+                self.errors = self.errors.push(LinkError(
+                    kind: LinkErrorKind.SymbolNotFound,
+                    message: "Undefined symbol: {sym}",
+                    # DESUGARED: symbol: Some(sym)
+            has_symbol: true,
+            symbol_value: sym,
+                    location: nil
+                ))
+            return LinkResult.Error(
+                message: "Unresolved symbols",
+                errors: self.errors
+            )
+
+        # 8. Write output
+        val output_result = self.write_output()
+        if output_result_is_err(output_result):
+            return LinkResult.Error(
+                message: "Output failed",
+                errors: self.errors
+            )
+
+        val stats = LinkStats(
+            input_count: self.readers_len(readers) as i32,
+            symbol_count: self.symbols_len(symbols) as i32,
+            instantiated_count: self.lazy_inst.instantiated_len(instantiated) as i32,
+            deferred_count: self.unresolved_len(unresolved) as i32,
+            output_size: output_result_value
+        )
+
+        LinkResult.Success(
+            output_path: self.config.output_path,
+            stats: stats
+        )
+
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn link(inputs: [text], output: text) -> LinkResult:
+    """Link SMF files to SMF output."""
+    var linker = Linker__new(LinkConfig__smf(output))
+    linker_link(linker, inputs)
+
+fn link_native(inputs: [text], output: text) -> LinkResult:
+    """Link SMF files to native binary."""
+    var linker = Linker__new(LinkConfig__native(output))
+    linker_link(linker, inputs)
+
+fn link_with_config(inputs: [text], config: LinkConfig) -> LinkResult:
+    """Link SMF files with custom configuration."""
+    var linker = Linker__new(config)
+    linker_link(linker, inputs)
+
+# ============================================================================
+# Helper
+# ============================================================================
+
+fn get_file_size(path: text) -> i64:
+    """Get file size in bytes using stat."""
+    linker_file_size(path)
+
+# ============================================================================
+# Linker Auto-Detection
+# ============================================================================
+
+enum SystemLinker:
+    """Supported system linkers across all platforms."""
+    Mold        # mold (Linux - fastest)
+    Lld         # lld (LLVM linker - cross-platform)
+    LldLink     # lld-link (Windows MSVC-compatible)
+    Msvc        # Microsoft link.exe (Windows)
+    Ld          # GNU ld (Linux/Unix)
+    Ld64        # Apple ld64 (macOS)
+
+
+# ============================================================================
+# SystemLinker Methods (was: impl SystemLinker:)
+# ============================================================================
+
+fn auto_detect_linker() -> SystemLinker:
+    """Auto-detect best available linker for current platform."""
+    use std.platform.{is_windows, is_unix}
+    use std.common.target.TargetOS
+
+    val os = TargetOS__host()
+
+    match os:
+        case TargetOS.Linux:
+            # Prefer mold > lld > ld
+            if command_exists("mold"):
+                SystemLinker.Mold
+            elif command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case TargetOS.Windows:
+            # Prefer lld-link > MSVC link.exe
+            use compiler.linker.msvc.{is_lld_link_available, is_msvc_available}
+            if is_lld_link_available():
+                SystemLinker.LldLink
+            elif is_msvc_available():
+                SystemLinker.Msvc
+            else:
+                SystemLinker.Lld  # Fallback (may not work)
+
+        case TargetOS.MacOS:
+            # macOS uses ld64
+            SystemLinker.Ld64
+
+        case TargetOS.FreeBSD:
+            # FreeBSD prefers lld
+            if command_exists("lld"):
+                SystemLinker.Lld
+            else:
+                SystemLinker.Ld
+
+        case _:
+            # Default to LLD for other platforms
+            SystemLinker.Lld
+
+fn command_exists(cmd: text) -> bool:
+    """Check if command exists in PATH."""
+    use app.io.shell
+
+    # Platform-specific command check
+    use std.platform.is_windows
+
+    if is_windows():
+        val result = shell("where {cmd} 2>nul")
+        result.exit_code == 0
+    else:
+        val result = shell("which {cmd} 2>/dev/null")
+        result.exit_code == 0
+
+fn get_linker_info() -> text:
+    """Get information about the detected linker."""
+    val linker = auto_detect_linker()
+    "Detected linker: {linker.name()} (command: {linker.command()})"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Linker
+export LinkConfig
+export OutputFormat
+export LinkResult
+export LinkStats
+export LinkError
+export LinkErrorKind
+export link
+export link_native
+export link_with_config
+export SystemLinker
+export auto_detect_linker
+export command_exists
+export get_linker_info

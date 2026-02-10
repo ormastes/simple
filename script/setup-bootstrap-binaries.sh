@@ -49,7 +49,7 @@ create_placeholders() {
     echo ""
 
     for platform in "${platforms[@]}"; do
-        local dir="$PROJECT_ROOT/bin/bootstrap/$platform"
+        local dir="$PROJECT_ROOT/bin/release/$platform"
         mkdir -p "$dir"
 
         if [[ "$platform" == windows-* ]]; then
@@ -60,7 +60,7 @@ create_placeholders() {
 
         if [ ! -f "$target" ]; then
             # Copy the linux-x86_64 binary as a placeholder
-            cp "$PROJECT_ROOT/bin/bootstrap/linux-x86_64/simple" "$target"
+            cp "$PROJECT_ROOT/bin/release/linux-x86_64/simple" "$target"
             chmod +x "$target"
             echo -e "${YELLOW}⚠${NC} Created placeholder: $target"
             echo "   (Note: This is a copy of linux-x86_64, not a real $platform binary)"
@@ -103,7 +103,7 @@ download_from_release() {
 
     for platform in "${platforms[@]}"; do
         local asset_name="simple-bootstrap-${platform}.tar.gz"
-        local dir="$PROJECT_ROOT/bin/bootstrap/$platform"
+        local dir="$PROJECT_ROOT/bin/release/$platform"
         mkdir -p "$dir"
 
         echo "Downloading $asset_name..."
@@ -162,9 +162,9 @@ check_status() {
 
     for platform in "${platforms[@]}"; do
         if [[ "$platform" == windows-* ]]; then
-            local binary="$PROJECT_ROOT/bin/bootstrap/$platform/simple.exe"
+            local binary="$PROJECT_ROOT/bin/release/$platform/simple.exe"
         else
-            local binary="$PROJECT_ROOT/bin/bootstrap/$platform/simple"
+            local binary="$PROJECT_ROOT/bin/release/$platform/simple"
         fi
 
         if [ -f "$binary" ]; then

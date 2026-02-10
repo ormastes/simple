@@ -125,7 +125,7 @@ bin/simple src/app/mcp/main.spl file_info src/compiler/driver.spl
 
 ### Automated Bug Detection
 
-**Script:** `scripts/mcp_debug_bootstrap.spl`
+**Script:** `script/mcp_debug_bootstrap.spl`
 
 ```simple
 # Tests dictionary semantics
@@ -143,7 +143,7 @@ register_bugs(bugs: [Bug])
 
 **Run:**
 ```bash
-bin/simple scripts/mcp_debug_bootstrap.spl
+bin/simple script/mcp_debug_bootstrap.spl
 ```
 
 **Output:**
@@ -152,12 +152,6 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 - Bug database updates
 
 ### Bug Detection Patterns
-
-**Dictionary Mutation:**
-```simple
-# Pattern: var d = ctx.field; d[k] = v; ctx.field = d
-# Tests if this persists mutations correctly
-```
 
 **Context Flow:**
 ```simple
@@ -178,7 +172,7 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 ### 1. Run Automated Detection
 
 ```bash
-bin/simple scripts/mcp_debug_bootstrap.spl
+bin/simple script/mcp_debug_bootstrap.spl
 ```
 
 **Checks:**
@@ -245,33 +239,11 @@ doc/report/mcp_debugging_session_summary.md
 
 ## MCP Test Scripts
 
-### test_dict_semantics.spl
-Tests dictionary mutation patterns:
-
-```simple
-class Context:
-    modules: Dict<text, i32>
-
-fn test_copy_modify_reassign():
-    ctx = Context(modules: {})
-    var modules = ctx.modules
-    modules["test"] = 42
-    ctx.modules = modules
-    # Verify: ctx.modules.keys().len() == 1
-```
-
-**Run:**
-```bash
-bin/simple scripts/test_dict_semantics.spl
-```
-
-**Expected:** ALL TESTS PASSED
-
 ### bootstrap_extended.spl
 Multi-generation bootstrap tester:
 
 ```bash
-bin/simple scripts/bootstrap_extended.spl --generations=5
+bin/simple script/bootstrap_extended.spl --generations=5
 ```
 
 **Features:**
@@ -285,7 +257,7 @@ bin/simple scripts/bootstrap_extended.spl --generations=5
 Automated bug detection:
 
 ```bash
-bin/simple scripts/mcp_debug_bootstrap.spl
+bin/simple script/mcp_debug_bootstrap.spl
 ```
 
 **Detects:**
@@ -355,11 +327,8 @@ bin/simple scripts/mcp_debug_bootstrap.spl
 
 **Example:**
 ```bash
-# Capture debug output
-./scripts/capture_bootstrap_debug.sh
-
 # Analyze with MCP
-bin/simple scripts/mcp_debug_bootstrap.spl
+bin/simple script/mcp_debug_bootstrap.spl
 
 # View results
 cat doc/bug/bug_db.sdn
@@ -548,7 +517,7 @@ SDN File Format
 - `src/app/mcp/main.spl` - MCP server implementation
 - `src/app/mcp/bugdb_resource.spl` - Bug database MCP integration
 - `src/lib/database/` - Unified database library
-- `scripts/mcp_debug_bootstrap.spl` - Automated debugging
+- `script/mcp_debug_bootstrap.spl` - Automated debugging
 - `doc/bug/bug_db.sdn` - Bug database
 - `doc/report/mcp_database_integration_2026-02-05.md` - Integration report
 - `doc/report/mcp_fixes_and_tests_2026-02-05.md` - Fixes and tests

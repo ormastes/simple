@@ -8,9 +8,9 @@ Simple Language provides pre-built bootstrap binaries for multiple platforms:
 
 | Architecture | Status | Binary Location | Size |
 |--------------|--------|-----------------|------|
-| x86_64 (Intel/AMD) | ✅ **Production** | `bin/bootstrap/linux-x86_64/simple` | 32 MB |
-| ARM64 (aarch64) | 🔄 Ready to Build | `bin/bootstrap/linux-arm64/simple` | 32 MB |
-| RISC-V 64 | 🔄 Experimental | `bin/bootstrap/linux-riscv64/simple` | 32 MB |
+| x86_64 (Intel/AMD) | ✅ **Production** | `bin/release/linux-x86_64/simple` | 32 MB |
+| ARM64 (aarch64) | 🔄 Ready to Build | `bin/release/linux-arm64/simple` | 32 MB |
+| RISC-V 64 | 🔄 Experimental | `bin/release/linux-riscv64/simple` | 32 MB |
 
 **Requirements:**
 - GLIBC 2.17+ (CentOS 7+, Ubuntu 14.04+, Debian 8+)
@@ -20,8 +20,8 @@ Simple Language provides pre-built bootstrap binaries for multiple platforms:
 
 | Architecture | Status | Binary Location | Size |
 |--------------|--------|-----------------|------|
-| x86_64 (Intel) | 🔄 Ready to Build | `bin/bootstrap/macos-x86_64/simple` | 32 MB |
-| ARM64 (M-series) | 🔄 Ready to Build | `bin/bootstrap/macos-arm64/simple` | 32 MB |
+| x86_64 (Intel) | 🔄 Ready to Build | `bin/release/macos-x86_64/simple` | 32 MB |
+| ARM64 (M-series) | 🔄 Ready to Build | `bin/release/macos-arm64/simple` | 32 MB |
 
 **Requirements:**
 - macOS 10.12+ (Intel)
@@ -32,8 +32,8 @@ Simple Language provides pre-built bootstrap binaries for multiple platforms:
 
 | Architecture | Status | Binary Location | Size |
 |--------------|--------|-----------------|------|
-| x86_64 (Intel/AMD) | 🔄 Ready to Build | `bin/bootstrap/windows-x86_64/simple.exe` | 32 MB |
-| ARM64 | 🔄 Experimental | `bin/bootstrap/windows-arm64/simple.exe` | 32 MB |
+| x86_64 (Intel/AMD) | 🔄 Ready to Build | `bin/release/windows-x86_64/simple.exe` | 32 MB |
+| ARM64 | 🔄 Experimental | `bin/release/windows-arm64/simple.exe` | 32 MB |
 
 **Requirements:**
 - Windows 10+ (x86_64)
@@ -86,7 +86,7 @@ The bootstrap system automatically detects your platform using:
 1. **Architecture:** `uname -m` → x86_64, aarch64, riscv64
 2. **Operating System:** `uname -s` → Linux, Darwin (macOS), Windows
 
-The wrapper then selects the appropriate binary from `bin/bootstrap/<platform>/simple`.
+The wrapper then selects the appropriate binary from `bin/release/<platform>/simple`.
 
 ## Manual Platform Selection
 
@@ -94,10 +94,10 @@ If automatic detection fails or you want to use a specific binary:
 
 ```bash
 # Linux x86_64
-bin/bootstrap/linux-x86_64/simple script.spl
+bin/release/linux-x86_64/simple script.spl
 
 # macOS ARM64 (M1/M2/M3)
-bin/bootstrap/macos-arm64/simple script.spl
+bin/release/macos-arm64/simple script.spl
 
 # Windows x86_64
 bin\bootstrap\windows-x86_64\simple.exe script.spl
@@ -123,8 +123,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo build --release
 
 # Copy to bootstrap directory
-mkdir -p bin/bootstrap/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
-cp target/release/simple_runtime bin/bootstrap/*/simple
+mkdir -p bin/release/$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
+cp target/release/simple_runtime bin/release/*/simple
 ```
 
 ### Multi-Platform Build
@@ -165,8 +165,8 @@ Error: No Simple runtime found for platform: linux-x86_64
 ```
 
 **Solution:**
-1. Check that `bin/bootstrap/linux-x86_64/simple` exists
-2. Make sure the binary is executable: `chmod +x bin/bootstrap/linux-x86_64/simple`
+1. Check that `bin/release/linux-x86_64/simple` exists
+2. Make sure the binary is executable: `chmod +x bin/release/linux-x86_64/simple`
 3. Download the pre-built binary for your platform
 
 ### Permission Denied
@@ -178,7 +178,7 @@ bash: bin/simple: Permission denied
 **Solution:**
 ```bash
 chmod +x bin/simple
-chmod +x bin/bootstrap/*/simple*
+chmod +x bin/release/*/simple*
 ```
 
 ### Wrong Architecture
@@ -209,7 +209,7 @@ error while loading shared libraries: libc.so.6
 **Solution:**
 1. Open System Preferences → Security & Privacy
 2. Click "Allow" next to the warning message
-3. Alternatively: `xattr -d com.apple.quarantine bin/bootstrap/macos-*/simple`
+3. Alternatively: `xattr -d com.apple.quarantine bin/release/macos-*/simple`
 
 ### Windows SmartScreen
 

@@ -1,72 +1,30 @@
 # Test Writing Skill
 
-## Test Levels
-
-| Level | Mock Policy | Coverage Metric | Command |
-|-------|-------------|-----------------|---------|
-| Unit | All mocks allowed | Branch/Condition | `simple build test --level=unit` |
-| Integration | HAL-only mocks | Public func coverage | `simple build test --level=integration` |
-| System | No mocks | Class/struct method | `simple build test --level=system` |
-| Environment | HAL/External/Lib | Branch/Condition | `simple build test --level=env` |
-
 ## Critical Rules
 
 **NEVER ignore tests without explicit user approval:**
-- Do NOT add `#[ignore]` without asking
 - Do NOT comment out test code
 - Do NOT skip failing tests as a "fix"
 - ALWAYS fix root cause or ask user
 
 ## Running Tests
 
-### Rust Tests
 ```bash
-simple build rust test                         # All Rust tests
-simple build rust test -p simple-driver        # Specific crate
-simple build rust test -p simple-driver runner # Pattern match
-simple build test                              # All tests (Rust + Simple)
-```
-
-### Simple (.spl) Tests
-```bash
-# Via simple build (auto-discovered)
-simple build rust test -p simple-driver simple_stdlib
-simple build rust test -p simple-driver simple_stdlib_unit
-simple build rust test -p simple-driver simple_stdlib_system
-
-# Direct interpreter
-./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl
-```
-
-## Writing Rust Tests
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_feature_works() {
-        let result = feature();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn test_edge_case() {
-        // Test edge cases explicitly
-    }
-}
+bin/simple test                          # All tests
+bin/simple test path/to/spec.spl         # Single test file
+bin/simple test --list                   # List tests without running
+bin/simple test --only-slow              # Run slow tests
+bin/simple test --tag=integration        # Filter by tag
 ```
 
 ## Writing Simple BDD Tests
 
-Tests go in `src/std/test/{unit|system|integration}/`
+Tests go in `test/` directory. Use `*_spec.spl` naming.
 
 **CRITICAL: Use docstring markdown, NOT println() for test documentation!**
 
 ```simple
 # feature_spec.spl
-import spec
 
 describe "Feature":
     """
@@ -80,7 +38,7 @@ describe "Feature":
 
     ## Usage
     ```simple
-    val f = Feature.new(10)
+    val f = Feature(value: 10)
     f.increment()
     ```
     """
@@ -98,8 +56,8 @@ describe "Feature":
             **Expected:** value = 0
             **Actual:** Verified via expect() assertion
             """
-            let f = Feature.new()
-            expect(f.value).to(equal(0))
+            val f = Feature(value: 0)
+            expect(f.value).to_equal(0)
 
     context "with operations":
         """
@@ -111,9 +69,6 @@ describe "Feature":
         - add(n): adds n
         """
 
-        before_each:
-            self.f = Feature.new(10)
-
         it "should increment":
             """
             Increment operation should add 1 to current value.
@@ -122,8 +77,9 @@ describe "Feature":
             When: increment() is called
             Then: value should be 11
             """
-            self.f.increment()
-            expect(self.f.value).to(equal(11))
+            val f = Feature(value: 10)
+            f.increment()
+            expect(f.value).to_equal(11)
 ```
 
 **Documentation Guidelines:**
@@ -136,36 +92,50 @@ describe "Feature":
 
 ## Test File Naming
 
-- Rust: `*_tests.rs` in `tests/` or `mod tests` in source
 - Simple: `*_spec.spl` or `*_test.spl`
+- Tests directory: `test/`
+- Feature specs: `src/std/test/features/`
+
+## Test Types
+
+| Type | Syntax | Behavior |
+|------|--------|----------|
+| Regular | `it "..."` | Runs by default |
+| Slow | `slow_it "..."` | Auto-ignored, run with `--only-slow` |
+| Skipped | `skip("name", "reason")` | Not yet implemented |
 
 ## Matchers Reference
 
+Built-in runtime matchers only:
+
 | Matcher | Usage |
 |---------|-------|
-| `equal(val)` | `expect(x).to(equal(5))` |
-| `be_true()` | `expect(x).to(be_true())` |
-| `be_false()` | `expect(x).to(be_false())` |
-| `be_nil()` | `expect(x).to(be_nil())` |
-| `be_greater_than(n)` | `expect(x).to(be_greater_than(5))` |
-| `be_less_than(n)` | `expect(x).to(be_less_than(10))` |
-| `contain(item)` | `expect(list).to(contain(5))` |
-| `have_length(n)` | `expect(list).to(have_length(3))` |
-| `match_regex(pat)` | `expect(s).to(match_regex("\\d+"))` |
-| `raise_error(type)` | `expect(fn).to(raise_error(ValueError))` |
+| `to_equal(val)` | `expect(x).to_equal(5)` |
+| `to_be(val)` | `expect(x).to_be(5)` |
+| `to_be_nil()` | `expect(x).to_be_nil()` |
+| `to_contain(item)` | `expect(list).to_contain(5)` |
+| `to_start_with(s)` | `expect(text).to_start_with("he")` |
+| `to_end_with(s)` | `expect(text).to_end_with("lo")` |
+| `to_be_greater_than(n)` | `expect(x).to_be_greater_than(5)` |
+| `to_be_less_than(n)` | `expect(x).to_be_less_than(10)` |
 
-## Coverage
+**Note:** `to_be_true`/`to_be_false` are NOT built-in. Use `to_equal(true)` / `to_equal(false)` instead.
+
+## Run Tracking
+
+Test results are automatically tracked in `doc/test/test_db.sdn`.
 
 ```bash
-simple build coverage              # HTML report
-simple build coverage --level=unit # Unit coverage
-simple build coverage --level=all  # All reports
+bin/simple test --list-runs              # View run history
+bin/simple test --cleanup-runs           # Clean stale runs
+bin/simple test --prune-runs=50          # Keep 50 most recent
 ```
 
-Target: 100% coverage for all levels.
+Reports are generated at `doc/test/test_result.md` after every test run.
 
 ## See Also
 
-- `doc/test.md` - Full test policy
-- `doc/system_test.md` - System test framework
+- `/sspec` skill - Full SSpec BDD framework details
+- `.claude/templates/sspec_template.spl` - Template for new specs
+- `doc/guide/sspec_complete_example.md` - Complete workflow example
 - `doc/spec/testing/` - Testing framework specs

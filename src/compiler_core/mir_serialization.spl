@@ -1,0 +1,602 @@
+# MIR Serialization - Convert MIR to/from JSON
+#
+# This module provides serialization and deserialization of MIR structures
+# to enable JIT compilation via the execution manager FFI.
+#
+# Features:
+# - JSON format (human-readable, debuggable)
+# - Complete MIR coverage (all instruction types, types, terminators)
+# - Roundtrip support (serialize → deserialize → identical structure)
+# - Efficient for execution manager FFI boundary
+
+use mir_data.*
+use hir.SymbolId
+use lexer.Span
+
+# ============================================================================
+# JSON Serialization Entry Points
+# ============================================================================
+
+fn serialize_mir_module(module: MirModule) -> text:
+    """Serialize complete MIR module to JSON."""
+    var json = "{"
+    json = "{json}\"name\":\"{module.name}\","
+
+    # Serialize functions
+    json = "{json}\"functions\":["
+    var first_fn = true
+    for symbol in module.functions_keys(functions):
+        if not first_fn:
+            json = "{json},"
+        val func = module.functions[symbol]
+        json = "{json}{serialize_mir_function(func)}"
+        first_fn = false
+    json = "{json}],"
+
+    # Serialize statics
+    json = "{json}\"statics\":["
+    var first_static = true
+    for symbol in module.statics_keys(statics):
+        if not first_static:
+            json = "{json},"
+        val static_ = module.statics[symbol]
+        json = "{json}{serialize_mir_static(static_)}"
+        first_static = false
+    json = "{json}],"
+
+    # Serialize constants
+    json = "{json}\"constants\":["
+    var first_const = true
+    for symbol in module.constants_keys(constants):
+        if not first_const:
+            json = "{json},"
+        val const_ = module.constants[symbol]
+        json = "{json}{serialize_mir_constant(const_)}"
+        first_const = false
+    json = "{json}],"
+
+    # Serialize types
+    json = "{json}\"types\":["
+    var first_type = true
+    for symbol in module.types_keys(types):
+        if not first_type:
+            json = "{json},"
+        val typedef = module.types[symbol]
+        json = "{json}{serialize_mir_typedef(typedef)}"
+        first_type = false
+    json = "{json}]"
+
+    json = "{json}}"
+    json
+
+fn serialize_mir_function(func: MirFunction) -> text:
+    """Serialize MIR function to JSON."""
+    var json = "{"
+    json = "{json}\"symbol\":{func.symbol.id},"
+    json = "{json}\"name\":\"{escape_json_string(func.name)}\","
+    json = "{json}\"signature\":{serialize_mir_signature(func.signature)},"
+
+    # Serialize locals
+    json = "{json}\"locals\":["
+    var first_local = true
+    for local in func.locals:
+        if not first_local:
+            json = "{json},"
+        json = "{json}{serialize_mir_local(local)}"
+        first_local = false
+    json = "{json}],"
+
+    # Serialize blocks
+    json = "{json}\"blocks\":["
+    var first_block = true
+    for block in func.blocks:
+        if not first_block:
+            json = "{json},"
+        json = "{json}{serialize_mir_block(block)}"
+        first_block = false
+    json = "{json}],"
+
+    json = "{json}\"entry_block\":{func.entry_block.id},"
+    json = "{json}\"generic_params\":["
+    var first_gp = true
+    for gp in func.generic_params:
+        if not first_gp:
+            json = "{json},"
+        json = "{json}\"{escape_json_string(gp)}\""
+        first_gp = false
+    json = "{json}],"
+    json = "{json}\"is_generic_template\":{if func.is_generic_template: "true" else: "false"}"
+
+    json = "{json}}"
+    json
+
+fn serialize_mir_signature(sig: MirSignature) -> text:
+    """Serialize function signature to JSON."""
+    var json = "{"
+    json = "{json}\"params\":["
+    var first_param = true
+    for param in sig.params:
+        if not first_param:
+            json = "{json},"
+        json = "{json}{serialize_mir_type(param)}"
+        first_param = false
+    json = "{json}],"
+    json = "{json}\"return_type\":{serialize_mir_type(sig.return_type)},"
+    json = "{json}\"is_variadic\":{if sig.is_variadic: "true" else: "false"}"
+    json = "{json}}"
+    json
+
+fn serialize_mir_local(local: MirLocal) -> text:
+    """Serialize local variable to JSON."""
+    var json = "{"
+    json = "{json}\"id\":{local.id.id},"
+    val name_str = if local.has_name: "\"{escape_json_string(local.name_value)}\"" else: "null"
+    json = "{json}\"name\":{name_str},"
+    json = "{json}\"type\":{serialize_mir_type(local.type_)},"
+    json = "{json}\"kind\":{serialize_local_kind(local.kind)}"
+    json = "{json}}"
+    json
+
+fn serialize_local_kind(kind: LocalKind) -> text:
+    """Serialize local kind to JSON."""
+    match kind:
+        case Arg(index):
+            "{\"Arg\":{index}}"
+        case Var:
+            "\"Var\""
+        case Temp:
+            "\"Temp\""
+        case Return:
+            "\"Return\""
+
+fn serialize_mir_block(block: MirBlock) -> text:
+    """Serialize basic block to JSON."""
+    var json = "{"
+    json = "{json}\"id\":{block.id.id},"
+    val label_str = if block.has_label: "\"{escape_json_string(block.label_value)}\"" else: "null"
+    json = "{json}\"label\":{label_str},"
+
+    # Serialize instructions
+    json = "{json}\"instructions\":["
+    var first_inst = true
+    for inst in block.instructions:
+        if not first_inst:
+            json = "{json},"
+        json = "{json}{serialize_mir_inst(inst)}"
+        first_inst = false
+    json = "{json}],"
+
+    json = "{json}\"terminator\":{serialize_mir_terminator(block.terminator)}"
+    json = "{json}}"
+    json
+
+fn serialize_mir_inst(inst: MirInst) -> text:
+    """Serialize instruction to JSON."""
+    var json = "{"
+    json = "{json}\"kind\":{serialize_mir_inst_kind(inst.kind)}"
+    json = "{json}}"
+    json
+
+fn serialize_mir_inst_kind(kind: MirInstKind) -> text:
+    """Serialize instruction kind to JSON."""
+    match kind:
+        case Const(dest, value, type_):
+            "{\"Const\":{\"dest\":{dest.id},\"value\":{serialize_const_value(value)},\"type\":{serialize_mir_type(type_)}}}"
+
+        case Copy(dest, src):
+            "{\"Copy\":{\"dest\":{dest.id},\"src\":{src.id}}}"
+
+        case Move(dest, src):
+            "{\"Move\":{\"dest\":{dest.id},\"src\":{src.id}}}"
+
+        case BinOp(dest, op, left, right):
+            "{\"BinOp\":{\"dest\":{dest.id},\"op\":\"{serialize_binop(op)}\",\"left\":{serialize_operand(left)},\"right\":{serialize_operand(right)}}}"
+
+        case UnaryOp(dest, op, operand):
+            "{\"UnaryOp\":{\"dest\":{dest.id},\"op\":\"{serialize_unaryop(op)}\",\"operand\":{serialize_operand(operand)}}}"
+
+        case Alloc(dest, type_):
+            "{\"Alloc\":{\"dest\":{dest.id},\"type\":{serialize_mir_type(type_)}}}"
+
+        case Load(dest, ptr):
+            "{\"Load\":{\"dest\":{dest.id},\"ptr\":{serialize_operand(ptr)}}}"
+
+        case Store(ptr, value):
+            "{\"Store\":{\"ptr\":{serialize_operand(ptr)},\"value\":{serialize_operand(value)}}}"
+
+        case Call(dest, func, args):
+            var args_json = "["
+            var first = true
+            for arg in args:
+                if not first:
+                    args_json = "{args_json},"
+                args_json = "{args_json}{serialize_operand(arg)}"
+                first = false
+            args_json = "{args_json}]"
+            val dest_json = if has_dest: "{dest_value.id}" else: "null"
+            "{\"Call\":{\"dest\":{dest_json},\"func\":{serialize_operand(func)},\"args\":{args_json}}}"
+
+        case Aggregate(dest, agg_kind, operands):
+            var ops_json = "["
+            var first = true
+            for op in operands:
+                if not first:
+                    ops_json = "{ops_json},"
+                ops_json = "{ops_json}{serialize_operand(op)}"
+                first = false
+            ops_json = "{ops_json}]"
+            "{\"Aggregate\":{\"dest\":{dest.id},\"kind\":{serialize_aggregate_kind(agg_kind)},\"operands\":{ops_json}}}"
+
+        case GetField(dest, base, field):
+            "{\"GetField\":{\"dest\":{dest.id},\"base\":{serialize_operand(base)},\"field\":{field}}}"
+
+        case Cast(dest, operand, target):
+            "{\"Cast\":{\"dest\":{dest.id},\"operand\":{serialize_operand(operand)},\"target\":{serialize_mir_type(target)}}}"
+
+        case Intrinsic(dest, name, args):
+            var args_json = "["
+            var first = true
+            for arg in args:
+                if not first:
+                    args_json = "{args_json},"
+                args_json = "{args_json}{serialize_operand(arg)}"
+                first = false
+            args_json = "{args_json}]"
+            val dest_json = if has_dest: "{dest_value.id}" else: "null"
+            "{\"Intrinsic\":{\"dest\":{dest_json},\"name\":\"{escape_json_string(name)}\",\"args\":{args_json}}}"
+
+        case Nop:
+            "\"Nop\""
+
+        case CheckedBinOp(dest, op, left, right):
+            "{\"CheckedBinOp\":{\"dest\":{dest.id},\"op\":\"{serialize_binop(op)}\",\"left\":{serialize_operand(left)},\"right\":{serialize_operand(right)}}}"
+
+        case Bitcast(dest, operand, target):
+            "{\"Bitcast\":{\"dest\":{dest.id},\"operand\":{serialize_operand(operand)},\"target\":{serialize_mir_type(target)}}}"
+
+        case SetField(base, field, value):
+            "{\"SetField\":{\"base\":{serialize_operand(base)},\"field\":{field},\"value\":{serialize_operand(value)}}}"
+
+        case GetElementPtr(dest, base, indices):
+            var idx_json = "["
+            var first = true
+            for idx in indices:
+                if not first:
+                    idx_json = "{idx_json},"
+                idx_json = "{idx_json}{serialize_operand(idx)}"
+                first = false
+            idx_json = "{idx_json}]"
+            "{\"GetElementPtr\":{\"dest\":{dest.id},\"base\":{serialize_operand(base)},\"indices\":{idx_json}}}"
+
+        case CallIndirect(dest, ptr, args, sig):
+            var args_json = "["
+            var first = true
+            for arg in args:
+                if not first:
+                    args_json = "{args_json},"
+                args_json = "{args_json}{serialize_operand(arg)}"
+                first = false
+            args_json = "{args_json}]"
+            val dest_json = if has_dest: "{dest_value.id}" else: "null"
+            "{\"CallIndirect\":{\"dest\":{dest_json},\"ptr\":{serialize_operand(ptr)},\"args\":{args_json}}}"
+
+        case PipeForward(dest, value, func):
+            "{\"PipeForward\":{\"dest\":{dest.id},\"value\":{serialize_operand(value)},\"func\":{serialize_operand(func)}}}"
+
+        case Compose(dest, f, g, forward):
+            "{\"Compose\":{\"dest\":{dest.id},\"f\":{serialize_operand(f)},\"g\":{serialize_operand(g)},\"forward\":{forward}}}"
+
+        case DebugValue(local, name):
+            "{\"DebugValue\":{\"local\":{local.id},\"name\":\"{escape_json_string(name)}\"}}"
+
+        case _:
+            # Remaining types (GPU, Async, Borrow) need runtime support
+            "{\"Unsupported\":\"complex_type\"}"
+
+fn serialize_mir_terminator(term: MirTerminator) -> text:
+    """Serialize terminator to JSON."""
+    match term:
+        case Goto(target):
+            "{\"Goto\":{target.id}}"
+
+        case Return(value):
+            val val_json = if has_value: serialize_operand(value_value) else: "null"
+            "{\"Return\":{val_json}}"
+
+        case If(cond, then_, else_):
+            "{\"If\":{\"cond\":{serialize_operand(cond)},\"then\":{then_.id},\"else\":{else_.id}}}"
+
+        case Switch(value, targets, default):
+            var targets_json = "["
+            var first = true
+            for case_ in targets:
+                if not first:
+                    targets_json = "{targets_json},"
+                targets_json = "{targets_json}{\"value\":{case_.value},\"target\":{case_.target.id}}"
+                first = false
+            targets_json = "{targets_json}]"
+            "{\"Switch\":{\"value\":{serialize_operand(value)},\"targets\":{targets_json},\"default\":{default.id}}}"
+
+        case Unreachable:
+            "\"Unreachable\""
+
+        case Abort(message):
+            "{\"Abort\":\"{escape_json_string(message)}\"}"
+
+        case CallTerminator(dest, func, args, normal, unwind):
+            var args_json = "["
+            var first = true
+            for arg in args:
+                if not first:
+                    args_json = "{args_json},"
+                args_json = "{args_json}{serialize_operand(arg)}"
+                first = false
+            args_json = "{args_json}]"
+            val dest_json = if has_dest: "{dest_value.id}" else: "null"
+            val unwind_json = if has_unwind: "{unwind_value.id}" else: "null"
+            "{\"CallTerminator\":{\"dest\":{dest_json},\"func\":{serialize_operand(func)},\"args\":{args_json},\"normal\":{normal.id},\"unwind\":{unwind_json}}}"
+
+fn serialize_mir_type(type_: MirType) -> text:
+    """Serialize MIR type to JSON."""
+    match type_.kind:
+        case I8: "\"I8\""
+        case I16: "\"I16\""
+        case I32: "\"I32\""
+        case I64: "\"I64\""
+        case U8: "\"U8\""
+        case U16: "\"U16\""
+        case U32: "\"U32\""
+        case U64: "\"U64\""
+        case F32: "\"F32\""
+        case F64: "\"F64\""
+        case Bool: "\"Bool\""
+        case Char: "\"Char\""
+        case Unit: "\"Unit\""
+        case Never: "\"Never\""
+
+        case Ptr(pointee, mutable):
+            "{\"Ptr\":{\"pointee\":{serialize_mir_type(pointee)},\"mutable\":{if mutable: "true" else: "false"}}}"
+
+        case Ref(referent, mutable):
+            "{\"Ref\":{\"referent\":{serialize_mir_type(referent)},\"mutable\":{if mutable: "true" else: "false"}}}"
+
+        case Array(element, size):
+            "{\"Array\":{\"element\":{serialize_mir_type(element)},\"size\":{size}}}"
+
+        case Slice(element):
+            "{\"Slice\":{serialize_mir_type(element)}}"
+
+        case Tuple(elements):
+            var elems_json = "["
+            var first = true
+            for elem in elements:
+                if not first:
+                    elems_json = "{elems_json},"
+                elems_json = "{elems_json}{serialize_mir_type(elem)}"
+                first = false
+            elems_json = "{elems_json}]"
+            "{\"Tuple\":{elems_json}}"
+
+        case Struct(symbol):
+            "{\"Struct\":{symbol.id}}"
+
+        case Enum(symbol):
+            "{\"Enum\":{symbol.id}}"
+
+        case Opaque(name):
+            "{\"Opaque\":\"{escape_json_string(name)}\"}"
+
+        case Promise(inner):
+            "{\"Promise\":{serialize_mir_type(inner)}}"
+
+        case Generator(yield_, return_):
+            "{\"Generator\":{\"yield\":{serialize_mir_type(yield_)},\"return\":{serialize_mir_type(return_)}}}"
+
+        case ActorType(message):
+            "{\"ActorType\":{serialize_mir_type(message)}}"
+
+        case _:
+            "\"UnknownType\""
+
+fn serialize_operand(op: MirOperand) -> text:
+    """Serialize operand to JSON."""
+    match op.kind:
+        case Copy(local):
+            "{\"Copy\":{local.id}}"
+
+        case Move(local):
+            "{\"Move\":{local.id}}"
+
+        case Const(value, type_):
+            "{\"Const\":{\"value\":{serialize_const_value(value)},\"type\":{serialize_mir_type(type_)}}}"
+
+fn serialize_const_value(value: MirConstValue) -> text:
+    """Serialize constant value to JSON."""
+    match value:
+        case Int(val):
+            "{val}"
+
+        case Float(val):
+            "{val}"
+
+        case Bool(val):
+            if val: "true" else: "false"
+
+        case Str(val):
+            "\"{escape_json_string(val)}\""
+
+        case Array(elements):
+            var json = "["
+            var first = true
+            for elem in elements:
+                if not first:
+                    json = "{json},"
+                json = "{json}{serialize_const_value(elem)}"
+                first = false
+            json = "{json}]"
+            json
+
+        case Tuple(elements):
+            var json = "["
+            var first = true
+            for elem in elements:
+                if not first:
+                    json = "{json},"
+                json = "{json}{serialize_const_value(elem)}"
+                first = false
+            json = "{json}]"
+            json
+
+        case Zero:
+            "\"Zero\""
+
+        case _:
+            "null"
+
+fn serialize_binop(op: MirBinOp) -> text:
+    """Serialize binary operation to string."""
+    match op:
+        case Add: "Add"
+        case Sub: "Sub"
+        case Mul: "Mul"
+        case Div: "Div"
+        case Rem: "Rem"
+        case Pow: "Pow"
+        case MatMul: "MatMul"
+        case BitAnd: "BitAnd"
+        case BitOr: "BitOr"
+        case BitXor: "BitXor"
+        case Shl: "Shl"
+        case Shr: "Shr"
+        case Eq: "Eq"
+        case Ne: "Ne"
+        case Lt: "Lt"
+        case Le: "Le"
+        case Gt: "Gt"
+        case Ge: "Ge"
+        case BroadcastAdd: "BroadcastAdd"
+        case BroadcastSub: "BroadcastSub"
+        case BroadcastMul: "BroadcastMul"
+        case BroadcastDiv: "BroadcastDiv"
+        case BroadcastPow: "BroadcastPow"
+        case Offset: "Offset"
+
+fn serialize_unaryop(op: MirUnaryOp) -> text:
+    """Serialize unary operation to string."""
+    match op:
+        case Neg: "Neg"
+        case Not: "Not"
+        case BitNot: "BitNot"
+        case Transpose: "Transpose"
+
+fn serialize_aggregate_kind(kind: AggregateKind) -> text:
+    """Serialize aggregate kind to JSON."""
+    match kind:
+        case Array(type_):
+            "{\"Array\":{serialize_mir_type(type_)}}"
+        case Tuple:
+            "\"Tuple\""
+        case Struct(symbol):
+            "{\"Struct\":{symbol.id}}"
+        case Enum(symbol, variant):
+            "{\"Enum\":{\"symbol\":{symbol.id},\"variant\":{variant}}}"
+
+fn serialize_mir_static(static_: MirStatic) -> text:
+    """Serialize static variable to JSON."""
+    var json = "{"
+    json = "{json}\"symbol\":{static_.symbol.id},"
+    json = "{json}\"name\":\"{escape_json_string(static_.name)}\","
+    json = "{json}\"type\":{serialize_mir_type(static_.type_)},"
+    json = "{json}\"is_mutable\":{if static_.is_mutable: "true" else: "false"}"
+    json = "{json}}"
+    json
+
+fn serialize_mir_constant(const_: MirConstant) -> text:
+    """Serialize constant to JSON."""
+    var json = "{"
+    json = "{json}\"symbol\":{const_.symbol.id},"
+    json = "{json}\"name\":\"{escape_json_string(const_.name)}\","
+    json = "{json}\"type\":{serialize_mir_type(const_.type_)},"
+    json = "{json}\"value\":{serialize_const_value(const_.value)}"
+    json = "{json}}"
+    json
+
+fn serialize_mir_typedef(typedef: MirTypeDef) -> text:
+    """Serialize type definition to JSON."""
+    var json = "{"
+    json = "{json}\"symbol\":{typedef.symbol.id},"
+    json = "{json}\"name\":\"{escape_json_string(typedef.name)}\","
+    json = "{json}\"kind\":{serialize_typedef_kind(typedef.kind)}"
+    json = "{json}}"
+    json
+
+fn serialize_typedef_kind(kind: MirTypeDefKind) -> text:
+    """Serialize type definition kind to JSON."""
+    match kind:
+        case Struct(fields):
+            var fields_json = "["
+            var first = true
+            for field in fields:
+                if not first:
+                    fields_json = "{fields_json},"
+                fields_json = "{fields_json}{serialize_field_def(field)}"
+                first = false
+            fields_json = "{fields_json}]"
+            "{\"Struct\":{fields_json}}"
+
+        case Enum(variants):
+            var variants_json = "["
+            var first = true
+            for variant in variants:
+                if not first:
+                    variants_json = "{variants_json},"
+                variants_json = "{variants_json}{serialize_variant_def(variant)}"
+                first = false
+            variants_json = "{variants_json}]"
+            "{\"Enum\":{variants_json}}"
+
+        case Union(variants):
+            var variants_json = "["
+            var first = true
+            for variant in variants:
+                if not first:
+                    variants_json = "{variants_json},"
+                variants_json = "{variants_json}{serialize_mir_type(variant)}"
+                first = false
+            variants_json = "{variants_json}]"
+            "{\"Union\":{variants_json}}"
+
+fn serialize_field_def(field: MirFieldDef) -> text:
+    """Serialize field definition to JSON."""
+    "{\"name\":\"{escape_json_string(field.name)}\",\"type\":{serialize_mir_type(field.type_)},\"offset\":{field.offset}}"
+
+fn serialize_variant_def(variant: MirVariantDef) -> text:
+    """Serialize variant definition to JSON."""
+    val payload_json = if variant.has_payload: serialize_mir_type(variant.payload_value) else: "null"
+    "{\"name\":\"{escape_json_string(variant.name)}\",\"discriminant\":{variant.discriminant},\"payload\":{payload_json}}"
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn escape_json_string(s: text) -> text:
+    """Escape string for JSON."""
+    var result = ""
+    for c in s:
+        match c:
+            case "\"": result = "{result}\\\""
+            case "\\": result = "{result}\\\\"
+            case "\n": result = "{result}\\n"
+            case "\r": result = "{result}\\r"
+            case "\t": result = "{result}\\t"
+            case _: result = "{result}{c}"
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export serialize_mir_module, serialize_mir_function, serialize_mir_type
+export serialize_mir_inst, serialize_mir_terminator, serialize_operand
+export serialize_mir_inst_kind, serialize_const_value, serialize_binop, serialize_unaryop
+export escape_json_string

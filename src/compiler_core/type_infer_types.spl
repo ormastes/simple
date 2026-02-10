@@ -1,0 +1,153 @@
+# Type Inference Types - Core Type System Definitions
+#
+# This module contains the core type system for Hindley-Milner type inference:
+# - TypeScheme: Polymorphic type schemes with quantified variables
+# - Substitution: Type variable substitutions for unification
+# - TypeInferError: Type inference error types
+#
+# The inference implementation is in type_infer.spl
+
+use compiler.hir.*
+use compiler.lexer.*
+
+use compiler.dim_constraints.*
+
+# ============================================================================
+# Typed Empty Dict Helpers (for bootstrap compiler inference)
+# ============================================================================
+
+fn empty_subst_map() -> Dict<i64, HirType>:
+    """Create empty substitution map."""
+    var result: Dict<i64, HirType> = {}
+    result
+
+fn empty_type_env() -> Dict<text, TypeScheme>:
+    """Create empty type environment."""
+    var result: Dict<text, TypeScheme> = {}
+    result
+
+# ============================================================================
+# Type Scheme (Polymorphic Types)
+# ============================================================================
+
+struct TypeScheme:
+    """Polymorphic type: forall vars. ty
+
+    A type scheme represents a polymorphic type with quantified variables.
+    For example, the identity function has scheme: forall a. a -> a
+    """
+    # Bound type variable IDs (quantified)
+    vars: [i64]
+    # The type body (may reference vars)
+    ty: HirType
+
+
+# ============================================================================
+# TypeScheme Methods (was: impl TypeScheme:)
+# ============================================================================
+
+fn typescheme_mono(ty: HirType) -> TypeScheme:
+        """Create a monomorphic scheme (no quantified variables)."""
+        TypeScheme(vars: [], ty: ty)
+
+
+fn typescheme_poly(vars: [i64], ty: HirType) -> TypeScheme:
+        """Create a polymorphic scheme with the given bound variables."""
+        TypeScheme(vars: vars, ty: ty)
+
+
+# ============================================================================
+# Substitution
+# ============================================================================
+
+struct Substitution:
+    """Mapping from type variable IDs to types."""
+    map: Dict<i64, HirType>
+
+
+# ============================================================================
+# Substitution Methods (was: impl Substitution:)
+# ============================================================================
+
+fn substitution_new() -> Substitution:
+        Substitution(map: empty_subst_map())
+
+
+# ============================================================================
+# Type Inference Errors
+# ============================================================================
+
+"""Type inference error."""
+enum TypeInferError:
+    Mismatch(expected: HirType, found: HirType, span: Span)
+    OccursCheck(var_id: i64, ty: HirType, span: Span)
+    Undefined(name: text, span: Span)
+    DimensionError(err: DimError)
+    TraitNotImplemented(ty: HirType, trait_name: text, span: Span)
+    Other(message: text, span: Span)
+
+
+# ============================================================================
+# TypeInferError Methods (was: impl TypeInferError:)
+# ============================================================================
+
+# ============================================================================
+# HM Inference Context
+# ============================================================================
+
+struct HmInferContext:
+    """Hindley-Milner inference context with level-based generalization.
+
+    Levels enable efficient generalization control:
+    - Each scope (let-binding, lambda) increments the level
+    - Type variables are created at the current level
+    - Only variables at level > environment level are generalizable
+
+    Includes dimension constraint solver for tensor/layer type checking.
+    Dimension checking happens in two phases:
+    - Compile-time: Static dimension mismatches caught during type inference
+    - Runtime: Dynamic dimension checks generated for before training/inference
+    """
+    # Type environment: maps names to polymorphic type schemes
+    env: Dict<text, TypeScheme>
+    # Current generalization level (incremented on enter_level)
+    level: i64
+    # Counter for generating fresh type variable IDs
+    next_var: i64
+    # Substitution map from type variable IDs to types
+    subst: Substitution
+    # Accumulated errors
+    errors: [TypeInferError]
+    # Dimension constraint solver for tensor/layer operations
+    dim_solver: DimSolver
+    # Runtime dimension check generator
+    runtime_checks: DimCheckGenerator
+    # Dimension check mode (controls runtime check generation)
+    dim_check_mode: DimCheckMode
+
+
+# ============================================================================
+# Bidirectional Type Checking
+# ============================================================================
+
+enum InferMode:
+    """Mode for bidirectional type checking.
+
+    Synthesize: Infer type from expression structure (bottom-up)
+    Check:      Validate expression matches expected type (top-down)
+    """
+    Synthesize
+    Check(expected: HirType)
+
+
+# ============================================================================
+# InferMode Methods (was: impl InferMode:)
+# ============================================================================
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TypeScheme, Substitution, TypeInferError
+export InferMode
+export empty_subst_map, empty_type_env

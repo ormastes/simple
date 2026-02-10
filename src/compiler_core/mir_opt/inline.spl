@@ -1,0 +1,422 @@
+# Function Inlining
+#
+# Replaces function calls with the function body.
+#
+# Transformation:
+#   fn add_one(x: i64) -> i64:
+#       x + 1
+#
+#   val y = add_one(5)
+#
+# After inlining:
+#   val y = 5 + 1
+#
+# Benefits:
+# - Eliminates call overhead (setup, jump, return)
+# - Enables interprocedural optimization (const fold, CSE across call boundaries)
+# - Improves instruction cache locality
+# - Reduces stack pressure
+#
+# Costs:
+# - Increases code size (trade-off)
+# - May increase compile time
+# - Can hurt I-cache if too aggressive
+#
+# Strategy:
+# - Always inline: tiny functions (< 50 bytes)
+# - Aggressively inline: hot functions (< 500 bytes)
+# - Never inline: recursive functions, large functions
+#
+# Heuristics:
+# - Size threshold (configurable)
+# - Call site count (don't inline if called many times)
+# - Recursion detection (prevent infinite inlining)
+
+use compiler.mir_data.*
+use compiler.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Inlining Policy
+# ============================================================================
+
+enum InlinePolicy:
+    """
+    Policy for deciding whether to inline a function.
+    """
+    Always          # Inline regardless of size (for tiny functions)
+    Aggressive      # Inline if below threshold (for optimization)
+    Conservative    # Only inline very small functions (for code size)
+    Never           # Don't inline (for debugging, recursive functions)
+
+
+# ============================================================================
+# InlinePolicy Methods (was: impl InlinePolicy:)
+# ============================================================================
+
+# ============================================================================
+# Inline Cost Analysis
+# ============================================================================
+
+class InlineCostAnalyzer:
+    """
+    Analyzes the cost/benefit of inlining a function.
+
+    Cost factors:
+    - Function body size (instruction count)
+    - Number of call sites (code size multiplication)
+    - Complexity (loops, branches increase cost)
+
+    Benefit factors:
+    - Call overhead saved
+    - Optimization opportunities enabled
+    - Hot path (frequently executed)
+    """
+    threshold: i64  # Size threshold in "instruction units"
+
+
+# ============================================================================
+# InlineCostAnalyzer Methods (was: impl InlineCostAnalyzer:)
+# ============================================================================
+
+fn inlinecostanalyzer_new(threshold: i64) -> InlineCostAnalyzer:
+        InlineCostAnalyzer(threshold: threshold)
+
+
+# ============================================================================
+# Function Inliner
+# ============================================================================
+
+class FunctionInliner:
+    """
+    Performs actual inlining transformation.
+
+    Process:
+    1. Find call instruction
+    2. Copy function body
+    3. Rename locals (avoid conflicts)
+    4. Replace call with inlined body
+    5. Connect control flow
+    """
+    next_local_id: i64
+    inlined_count: i64
+
+
+# ============================================================================
+# FunctionInliner Methods (was: impl FunctionInliner:)
+# ============================================================================
+
+fn functioninliner_new(next_local_id: i64) -> FunctionInliner:
+        FunctionInliner(
+            next_local_id: next_local_id,
+            inlined_count: 0
+        )
+
+
+fn functioninliner_rename_instruction(self: FunctionInliner, inst: MirInst) -> MirInst:
+        """
+        Rename locals in instruction to avoid conflicts.
+
+        Creates fresh local IDs for all definitions.
+        For instructions that define a destination, allocate a fresh local ID
+        and substitute it. Uses only local context (no global rename map needed
+        since single-block functions have unique definitions per instruction).
+        """
+        # Rename dest locals in defining instructions to avoid conflicts
+        match inst.kind:
+            case Const(dest, value, type_):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_Const(new_dest, value, type_), span: inst.span)
+            case Copy(dest, src):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_Copy(new_dest, src), span: inst.span)
+            case Move(dest, src):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_Move(new_dest, src), span: inst.span)
+            case BinOp(dest, op, left, right):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_BinOp(new_dest, op, left, right), span: inst.span)
+            case UnaryOp(dest, op, operand):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_UnaryOp(new_dest, op, operand), span: inst.span)
+            case Alloc(dest, type_):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_Alloc(new_dest, type_), span: inst.span)
+            case Load(dest, ptr):
+                val new_dest = self.fresh_local()
+                MirInst(kind: mirinstkind_Load(new_dest, ptr), span: inst.span)
+            case _:
+                # Non-defining instructions (Store, Nop, etc.) pass through
+                inst
+
+
+fn functioninliner_fresh_local(self: FunctionInliner) -> LocalId:
+        """Allocate a fresh local ID."""
+        val id = self.next_local_id
+        self.next_local_id = self.next_local_id + 1
+        LocalId(id: id)
+
+
+# ============================================================================
+# Function Inlining Pass
+# ============================================================================
+
+class FunctionInlining:
+    """
+    Function inlining optimization pass.
+
+    Configuration:
+    - threshold: Maximum function size to inline (in instruction units)
+    - policy: Inlining aggressiveness policy
+
+    Algorithm:
+    1. Analyze all functions (build call graph, compute sizes)
+    2. For each function:
+       a. Find inline candidates (call sites)
+       b. Check inlining heuristics
+       c. Perform inlining if beneficial
+    3. Repeat until fixed point or max iterations
+    """
+    threshold: i64
+    policy: InlinePolicy
+    cost_analyzer: InlineCostAnalyzer
+    inlined_functions: i64
+    inlined_call_sites: i64
+    iterations: i64
+
+
+# ============================================================================
+# FunctionInlining Methods (was: impl FunctionInlining:)
+# ============================================================================
+
+fn functioninlining_new(threshold: i64, policy: InlinePolicy) -> FunctionInlining:
+        FunctionInlining(
+            threshold: threshold,
+            policy: policy,
+            cost_analyzer: inlinecostanalyzer_new(threshold),
+            inlined_functions: 0,
+            inlined_call_sites: 0,
+            iterations: 0
+        )
+
+
+fn functioninlining_small_functions() -> FunctionInlining:
+        """Inline only very small functions (for code size)."""
+        functioninlining_new(50, InlinePolicy.Conservative)
+
+
+fn functioninlining_aggressive() -> FunctionInlining:
+        """Aggressive inlining (for speed)."""
+        functioninlining_new(500, InlinePolicy.Aggressive)
+
+
+fn functioninlining_very_aggressive() -> FunctionInlining:
+        """Very aggressive inlining (max speed, may increase code size)."""
+        functioninlining_new(2000, InlinePolicy.Aggressive)
+
+
+fn functioninlining_run_on_function(self: FunctionInlining, func: MirFunction) -> MirFunction:
+        """
+        Run inlining on a function.
+
+        Note: This pass needs access to other functions in the module
+        to perform inlining. For now, we implement a simplified version
+        that only handles single-block functions.
+        """
+        self.iterations = self.iterations + 1
+
+        # Find call sites in this function
+        var modified = false
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            val optimized = self.inline_calls_in_block(block, func)
+            if optimized.id.id != block.id.id or optimized.instructions_len(instructions) != block.instructions_len(instructions):
+                modified = true
+            optimized_blocks_push(optimized_blocks, optimized)
+
+        if modified:
+            self.inlined_functions = self.inlined_functions + 1
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+
+fn functioninlining_inline_calls_in_block(self: FunctionInlining, block: MirBlock, func: MirFunction) -> MirBlock:
+        """
+        Inline eligible calls in a block.
+
+        For each call instruction:
+        1. Scan for Call instructions targeting small single-block functions
+        2. Check if callee should be inlined via cost analyzer and policy
+        3. Replace call with inlined body using FunctionInliner
+
+        Note: Cross-function inlining requires module-level context.
+        This pass handles intra-function patterns: calls to functions
+        already visible in the current function's module context.
+        """
+        # Scan block instructions for Call instructions
+        var new_instructions: [MirInst] = []
+        var did_inline = false
+
+        for inst in block.instructions:
+            match inst.kind:
+                case Call(dest, callee_op, args):
+                    # Check if the callee references a function in the same module
+                    # by looking for Const operand with FuncPtr type
+                    val callee_func = self.find_callee_function(callee_op, func)
+                    if has_callee_func:
+                        val callee = callee_func_value
+                        # Check if callee is worth inlining
+                        val size = self.cost_analyzer_estimate_function_size(cost_analyzer, callee)
+                        val should = self.cost_analyzer_should_inline(cost_analyzer, callee, self.policy)
+                        val is_recursive = self.cost_analyzer_is_recursive(cost_analyzer, callee)
+
+                        if should and not is_recursive and callee.blocks_len(blocks) == 1:
+                            # Inline: create inliner and replace call with body
+                            var inliner = functioninliner_new(func.locals.len() + 100)
+                            val inlined_blocks = inliner.inline_call(
+                                MirBlock(id: block.id, label: block.label, instructions: new_instructions, terminator: block.terminator),
+                                new_instructions_len(new_instructions),
+                                callee,
+                                dest,
+                                args
+                            )
+                            # Take instructions from the inlined result
+                            if inlined_blocks_len(inlined_blocks) > 0:
+                                new_instructions = inlined_blocks[0].instructions
+                                self.inlined_call_sites = self.inlined_call_sites + 1
+                                did_inline = true
+                                continue
+                    # Not inlineable - keep original instruction
+                    new_instructions_push(new_instructions, inst)
+                case _:
+                    new_instructions_push(new_instructions, inst)
+
+        if did_inline:
+            MirBlock(
+                id: block.id,
+                label: block.label,
+                instructions: new_instructions,
+                terminator: block.terminator
+            )
+        else:
+            block
+
+
+# ============================================================================
+# Module-Level Inlining
+# ============================================================================
+
+class ModuleInliner:
+    """
+    Module-level inlining pass.
+
+    Operates on entire module to inline cross-function calls.
+    """
+    threshold: i64
+    policy: InlinePolicy
+    inlined_total: i64
+
+
+# ============================================================================
+# ModuleInliner Methods (was: impl ModuleInliner:)
+# ============================================================================
+
+fn moduleinliner_new(threshold: i64, policy: InlinePolicy) -> ModuleInliner:
+        ModuleInliner(
+            threshold: threshold,
+            policy: policy,
+            inlined_total: 0
+        )
+
+
+fn moduleinliner_inline_module(self: ModuleInliner, module: MirModule) -> MirModule:
+        """
+        Perform inlining across module.
+
+        Strategy:
+        1. Build call graph
+        2. Identify inline candidates (leaf functions first)
+        3. Bottom-up inlining (inline callees into callers)
+        4. Repeat until fixed point
+        """
+        val cost_analyzer = inlinecostanalyzer_new(self.threshold)
+
+        # Phase 1: Identify small single-block functions eligible for inlining
+        var inline_candidates: Dict<i64, MirFunction> = {}
+        for func_symbol in module.functions_keys(functions):
+            val func = module.functions[func_symbol]
+            val size = cost_analyzer_estimate_function_size(cost_analyzer, func)
+            val is_recursive = cost_analyzer_is_recursive(cost_analyzer, func)
+
+            if not is_recursive and func.blocks_len(blocks) == 1 and self.policy_should_inline(policy, size, self.threshold):
+                inline_candidates[func_symbol.id] = func
+
+        if inline_candidates_len(inline_candidates) == 0:
+            return module
+
+        # Phase 2: For each function in the module, inline eligible callees
+        var optimized_functions = module.functions
+        for func_symbol in module.functions_keys(functions):
+            val func = module.functions[func_symbol]
+            var optimized_blocks: [MirBlock] = []
+            var modified = false
+
+            for block in func.blocks:
+                val result = self.inline_calls_in_block_with_candidates(
+                    block, func, inline_candidates, cost_analyzer
+                )
+                optimized_blocks_push(optimized_blocks, result.block)
+                if result.did_inline:
+                    modified = true
+
+            if modified:
+                optimized_functions[func_symbol] = copy_mir_function_with_blocks(func, optimized_blocks)
+                self.inlined_total = self.inlined_total + 1
+
+        MirModule(
+            name: module.name,
+            functions: optimized_functions,
+            statics: module.statics,
+            constants: module.constants,
+            types: module.types
+        )
+
+
+# ============================================================================
+# Inline Result
+# ============================================================================
+
+struct InlineResult:
+    """Result of attempting to inline calls in a block."""
+    block: MirBlock
+    did_inline: bool
+
+
+# ============================================================================
+# ModuleInliner Methods (was: impl ModuleInliner:)
+# ============================================================================
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn create_inline_small_pass() -> FunctionInlining:
+    """Create inlining pass for small functions (code size optimization)."""
+    functioninlining_small_functions()
+
+fn create_inline_pass() -> FunctionInlining:
+    """Create standard inlining pass (speed optimization)."""
+    functioninlining_aggressive()
+
+fn create_inline_aggressive_pass() -> FunctionInlining:
+    """Create aggressive inlining pass (maximum speed)."""
+    functioninlining_very_aggressive()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export FunctionInlining, ModuleInliner, InlineResult
+export InlinePolicy, InlineCostAnalyzer, FunctionInliner
+export create_inline_small_pass, create_inline_pass, create_inline_aggressive_pass

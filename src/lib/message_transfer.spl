@@ -1,0 +1,365 @@
+# Message Transfer
+#
+# Intelligent message transfer between actors.
+# Uses copy-on-write strategy based on value size.
+
+use memory.refc_binary.{
+    BinaryRef, BinaryRef__new,
+    SharedHeap, SharedHeap__new, SharedHeapConfig, SharedHeapConfig__default, SharedHeapConfig__small
+}
+
+val SMALL_BINARY_THRESHOLD = 64
+
+fn copy_strategy_for(size: i64) -> text:
+    if size < SMALL_BINARY_THRESHOLD:
+        return "DeepCopy"
+    "ShareRef"
+
+# --- ValueType constants ---
+
+val VALUE_TYPE_NIL = "Nil"
+val VALUE_TYPE_INT = "Int"
+val VALUE_TYPE_FLOAT = "Float"
+val VALUE_TYPE_BOOL = "Bool"
+val VALUE_TYPE_BINARY = "Binary"
+val VALUE_TYPE_TEXT = "Text"
+
+fn estimate_size(type_tag: text, raw_size: i64) -> i64:
+    if type_tag == VALUE_TYPE_NIL: return 1
+    if type_tag == VALUE_TYPE_INT: return 8
+    if type_tag == VALUE_TYPE_FLOAT: return 8
+    if type_tag == VALUE_TYPE_BOOL: return 1
+    raw_size
+
+# --- ValueWrapper ---
+
+class ValueWrapper:
+    tag: text
+    int_val: i64
+    float_val: f64
+    bool_val: bool
+    text_val: text
+    items: []
+    ref_id: i64
+    ref_offset: i64
+    ref_length: i64
+
+    fn is_shared() -> bool:
+        self.tag == "shared_ref"
+
+    fn estimated_size() -> i64:
+        if self.tag == "nil": return 1
+        if self.tag == "int": return 8
+        if self.tag == "float": return 8
+        if self.tag == "bool": return 1
+        if self.tag == "small_text": return self.text_val.len()
+        if self.tag == "small_array":
+            var total = 0
+            for item in self.items:
+                total = total + item.estimated_size()
+            return total
+        if self.tag == "shared_ref": return self.ref_length
+        if self.tag == "composite":
+            var total = 0
+            for item in self.items:
+                total = total + item.estimated_size()
+            return total
+        0
+
+    fn shared_refs():
+        if self.tag == "shared_ref":
+            return [BinaryRef__new(self.ref_id, self.ref_offset, self.ref_length)]
+        var is_container = false
+        if self.tag == "composite": is_container = true
+        if self.tag == "small_array": is_container = true
+        if is_container:
+            var refs = []
+            for item in self.items:
+                val sub = item.shared_refs()
+                for r in sub:
+                    refs.push(r)
+            return refs
+        []
+
+    fn fmt() -> text:
+        if self.tag == "nil": return "nil"
+        if self.tag == "int": return "Int({self.int_val})"
+        if self.tag == "float": return "Float({self.float_val})"
+        if self.tag == "bool": return "Bool({self.bool_val})"
+        if self.tag == "small_text": return "SmallText({self.text_val})"
+        if self.tag == "small_array": return "SmallArray({self.items.len()} items)"
+        if self.tag == "shared_ref": return "Shared(id={self.ref_id}, len={self.ref_length})"
+        if self.tag == "composite": return "Composite({self.items.len()} items)"
+        "Unknown"
+
+fn vw_base() -> ValueWrapper:
+    ValueWrapper(tag: "nil", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__nil() -> ValueWrapper:
+    vw_base()
+
+fn ValueWrapper__int(v: i64) -> ValueWrapper:
+    ValueWrapper(tag: "int", int_val: v, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__float(v: f64) -> ValueWrapper:
+    ValueWrapper(tag: "float", int_val: 0, float_val: v, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__bool(v: bool) -> ValueWrapper:
+    ValueWrapper(tag: "bool", int_val: 0, float_val: 0.0, bool_val: v, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__small_text(s: text) -> ValueWrapper:
+    ValueWrapper(tag: "small_text", int_val: 0, float_val: 0.0, bool_val: false, text_val: s, items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__small_array(arr) -> ValueWrapper:
+    ValueWrapper(tag: "small_array", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: arr, ref_id: 0, ref_offset: 0, ref_length: 0)
+
+fn ValueWrapper__shared_ref_from(ref_id: i64, ref_offset: i64, ref_length: i64) -> ValueWrapper:
+    ValueWrapper(tag: "shared_ref", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: ref_id, ref_offset: ref_offset, ref_length: ref_length)
+
+fn ValueWrapper__composite(items) -> ValueWrapper:
+    ValueWrapper(tag: "composite", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: items, ref_id: 0, ref_offset: 0, ref_length: 0)
+
+# --- CopyStrategy helpers ---
+
+fn CopyStrategy__DeepCopy__should_share(size: i64) -> bool:
+    false
+
+fn CopyStrategy__ShareRef__should_share(size: i64) -> bool:
+    true
+
+fn CopyStrategy__Hybrid__should_share(size: i64) -> bool:
+    size >= SMALL_BINARY_THRESHOLD
+
+# --- TransferResult ---
+
+class TransferResult:
+    tag: text
+    wrapper_val: ValueWrapper
+
+    fn is_success() -> bool:
+        self.tag == "success"
+
+    fn unwrap() -> ValueWrapper:
+        self.wrapper_val
+
+    fn wrapper():
+        if self.tag == "success":
+            return self.wrapper_val
+        nil
+
+    fn fmt() -> text:
+        if self.tag == "success": return "Success({self.wrapper_val.fmt()})"
+        if self.tag == "out_of_memory": return "OutOfMemory"
+        if self.tag == "too_large": return "TooLarge"
+        self.tag
+
+fn TransferResult__success(w: ValueWrapper) -> TransferResult:
+    TransferResult(tag: "success", wrapper_val: w)
+
+fn TransferResult__out_of_memory() -> TransferResult:
+    TransferResult(tag: "out_of_memory", wrapper_val: vw_base())
+
+fn TransferResult__too_large() -> TransferResult:
+    TransferResult(tag: "too_large", wrapper_val: vw_base())
+
+# --- TransferStats ---
+
+class TransferStats:
+    total_transfers: i64
+    inline_transfers: i64
+    shared_transfers: i64
+    inline_bytes: i64
+    shared_bytes: i64
+    bytes_saved: i64
+
+    fn sharing_ratio() -> f64:
+        if self.total_transfers == 0: return 0.0
+        self.shared_transfers * 1.0 / self.total_transfers
+
+    fn efficiency() -> f64:
+        val total_bytes = self.inline_bytes + self.shared_bytes
+        if total_bytes == 0: return 1.0
+        self.shared_bytes * 1.0 / total_bytes
+
+    fn fmt() -> text:
+        "TransferStats(total={self.total_transfers}, shared={self.shared_transfers})"
+
+fn TransferStats__new() -> TransferStats:
+    TransferStats(total_transfers: 0, inline_transfers: 0, shared_transfers: 0, inline_bytes: 0, shared_bytes: 0, bytes_saved: 0)
+
+# --- MailboxMessage ---
+
+class MailboxMessage:
+    id: i64
+    sender_id: i64
+    has_sender: bool
+    wrapped: ValueWrapper
+
+    fn size() -> i64:
+        self.wrapped.estimated_size()
+
+    fn is_shared() -> bool:
+        self.wrapped.is_shared()
+
+    fn fmt() -> text:
+        "MailboxMessage(id={self.id}, size={self.size()})"
+
+fn MailboxMessage__new(msg_id: i64, sender, wrapper: ValueWrapper) -> MailboxMessage:
+    var sid = 0
+    var has_s = false
+    if sender.?:
+        sid = sender
+        has_s = true
+    MailboxMessage(id: msg_id, sender_id: sid, has_sender: has_s, wrapped: wrapper)
+
+# --- MessageTransfer ---
+
+class MessageTransfer:
+    strategy: text
+    heap: SharedHeap
+    has_heap: bool
+    stats: TransferStats
+
+    me wrap_nil() -> TransferResult:
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + 1
+        TransferResult__success(ValueWrapper__nil())
+
+    me wrap_int(v: i64) -> TransferResult:
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        TransferResult__success(ValueWrapper__int(v))
+
+    me wrap_float(v: f64) -> TransferResult:
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        TransferResult__success(ValueWrapper__float(v))
+
+    me wrap_bool(v: bool) -> TransferResult:
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + 1
+        TransferResult__success(ValueWrapper__bool(v))
+
+    me wrap_text(s: text) -> TransferResult:
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        if s.len() < SMALL_BINARY_THRESHOLD:
+            self.stats.inline_transfers = self.stats.inline_transfers + 1
+            self.stats.inline_bytes = self.stats.inline_bytes + s.len()
+            return TransferResult__success(ValueWrapper__small_text(s))
+        self.stats.shared_transfers = self.stats.shared_transfers + 1
+        self.stats.shared_bytes = self.stats.shared_bytes + s.len()
+        self.stats.bytes_saved = self.stats.bytes_saved + s.len()
+        if self.has_heap:
+            val result = self.heap.allocate(0, s.len())
+            if result.is_success():
+                val ref_val = result.unwrap()
+                return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id, ref_val.offset, ref_val.length))
+            return TransferResult__out_of_memory()
+        val fake_ref = ValueWrapper__shared_ref_from(0, 0, s.len())
+        TransferResult__success(fake_ref)
+
+    me wrap_for_send(process_id: i64, size: i64, type_tag: text) -> TransferResult:
+        val should_share = self.should_share(size)
+        if should_share:
+            self.stats.total_transfers = self.stats.total_transfers + 1
+            self.stats.shared_transfers = self.stats.shared_transfers + 1
+            self.stats.shared_bytes = self.stats.shared_bytes + size
+            self.stats.bytes_saved = self.stats.bytes_saved + size
+            if self.has_heap:
+                val result = self.heap.allocate(process_id, size)
+                if result.is_success():
+                    val ref_val = result.unwrap()
+                    return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id, ref_val.offset, ref_val.length))
+                return TransferResult__out_of_memory()
+            val fake = ValueWrapper__shared_ref_from(0, 0, size)
+            return TransferResult__success(fake)
+        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.inline_transfers = self.stats.inline_transfers + 1
+        self.stats.inline_bytes = self.stats.inline_bytes + size
+        TransferResult__success(ValueWrapper__int(0))
+
+    fn should_share(size: i64) -> bool:
+        if self.strategy == "deep_copy": return false
+        if self.strategy == "share_ref": return true
+        size >= SMALL_BINARY_THRESHOLD
+
+    me share_wrapper(wrapper: ValueWrapper):
+        if wrapper.is_shared():
+            if self.has_heap:
+                self.heap.incref(wrapper.ref_id)
+
+    me release_wrapper(wrapper: ValueWrapper):
+        if wrapper.is_shared():
+            if self.has_heap:
+                self.heap.decref(wrapper.ref_id)
+
+    fn get_stats() -> TransferStats:
+        TransferStats(
+            total_transfers: self.stats.total_transfers,
+            inline_transfers: self.stats.inline_transfers,
+            shared_transfers: self.stats.shared_transfers,
+            inline_bytes: self.stats.inline_bytes,
+            shared_bytes: self.stats.shared_bytes,
+            bytes_saved: self.stats.bytes_saved
+        )
+
+    fn heap_stats():
+        if self.has_heap:
+            return self.heap.get_stats()
+        nil
+
+fn MessageTransfer__new() -> MessageTransfer:
+    MessageTransfer(
+        strategy: "hybrid",
+        heap: SharedHeap__new(SharedHeapConfig__default()),
+        has_heap: true,
+        stats: TransferStats__new()
+    )
+
+fn MessageTransfer__always_copy() -> MessageTransfer:
+    MessageTransfer(
+        strategy: "deep_copy",
+        heap: SharedHeap__new(SharedHeapConfig__default()),
+        has_heap: false,
+        stats: TransferStats__new()
+    )
+
+fn MessageTransfer__always_share() -> MessageTransfer:
+    MessageTransfer(
+        strategy: "share_ref",
+        heap: SharedHeap__new(SharedHeapConfig__default()),
+        has_heap: true,
+        stats: TransferStats__new()
+    )
+
+fn MessageTransfer__with_heap(heap: SharedHeap) -> MessageTransfer:
+    MessageTransfer(
+        strategy: "hybrid",
+        heap: heap,
+        has_heap: true,
+        stats: TransferStats__new()
+    )
+
+# --- Convenience functions ---
+
+fn send_value(process_id: i64, size: i64, type_tag: text) -> TransferResult:
+    var transfer = MessageTransfer__new()
+    transfer.wrap_for_send(process_id, size, type_tag)
+
+fn receive_value(wrapper: ValueWrapper):
+    wrapper
+
+export ValueWrapper, ValueWrapper__nil, ValueWrapper__int, ValueWrapper__float, ValueWrapper__bool
+export ValueWrapper__small_text, ValueWrapper__small_array, ValueWrapper__shared_ref_from, ValueWrapper__composite
+export CopyStrategy__DeepCopy__should_share, CopyStrategy__ShareRef__should_share, CopyStrategy__Hybrid__should_share
+export TransferResult, TransferResult__success, TransferResult__out_of_memory, TransferResult__too_large
+export TransferStats, TransferStats__new
+export MailboxMessage, MailboxMessage__new
+export MessageTransfer, MessageTransfer__new, MessageTransfer__always_copy, MessageTransfer__always_share, MessageTransfer__with_heap
+export send_value, receive_value, estimate_size, copy_strategy_for
+export VALUE_TYPE_NIL, VALUE_TYPE_INT, VALUE_TYPE_FLOAT, VALUE_TYPE_BOOL, VALUE_TYPE_BINARY, VALUE_TYPE_TEXT
+export SMALL_BINARY_THRESHOLD, vw_base

@@ -1,0 +1,356 @@
+# Native Simple mmap Implementation for SMF Files
+#
+# Pure Simple implementation using unsafe blocks and direct syscalls.
+# No Rust FFI required - uses Simple's unsafe pointer operations.
+#
+# Architecture:
+# - Direct libc syscalls via unsafe blocks
+# - Raw pointer operations (*u8, pointer arithmetic)
+# - Zero-copy reads from mapped memory
+
+use app.io.mod (file_size_for_mmap)
+
+# ============================================================================
+# Constants (libc values)
+# ============================================================================
+
+val PROT_NONE: i32 = 0x0
+val PROT_READ: i32 = 0x1
+val PROT_WRITE: i32 = 0x2
+val PROT_EXEC: i32 = 0x4
+
+val MAP_SHARED: i32 = 0x1
+val MAP_PRIVATE: i32 = 0x2
+val MAP_ANONYMOUS: i32 = 0x20
+val MAP_FAILED: i64 = -1
+
+val MADV_NORMAL: i32 = 0
+val MADV_RANDOM: i32 = 1
+val MADV_SEQUENTIAL: i32 = 2
+val MADV_WILLNEED: i32 = 3
+val MADV_DONTNEED: i32 = 4
+
+# ============================================================================
+# Native mmap Implementation (Simple + unsafe)
+# ============================================================================
+
+fn native_mmap_file(path: text, prot: i32, flags: i32, offset: i64, length: i64) -> (i64, i64):
+    """Map file using native Simple unsafe operations.
+
+    Returns: (address, size) or (0, 0) on error
+    """
+    # Open file first
+    val fd = unsafe_open(path, 0)  # O_RDONLY = 0
+    if fd < 0:
+        return (0, 0)
+
+    # Get file size if length == 0
+    val actual_size = if length == 0:
+        val size = file_size_for_mmap(path)
+        if size < 0:
+            unsafe_close(fd)
+            return (0, 0)
+        size
+    else:
+        length
+
+    # Call mmap syscall
+    val addr = unsafe_mmap(0, actual_size, prot, flags, fd, offset)
+
+    # Close file descriptor (mmap keeps reference)
+    unsafe_close(fd)
+
+    # Check for error
+    if addr == MAP_FAILED:
+        return (0, 0)
+
+    (addr, actual_size)
+
+fn native_munmap(address: i64, size: i64) -> bool:
+    """Unmap memory region."""
+    val result = unsafe_munmap(address, size)
+    result == 0
+
+fn native_mmap_read_bytes(address: i64, offset: i64, length: i64) -> [u8]:
+    """Read bytes from mapped memory using unsafe pointer operations."""
+    unsafe:
+        # Calculate pointer to data
+        val ptr = (address + offset) as *u8
+
+        # Create slice from raw pointer
+        val slice = slice_from_raw_parts(ptr, length as usize)
+
+        # Copy to array (safer than returning slice)
+        var result: [u8] = []
+        result_reserve(result, length as i32)
+
+        for i in 0..length:
+            result_push(result, slice[i as usize])
+
+        result
+
+fn native_mmap_read_string(address: i64, offset: i64, max_length: i64) -> text:
+    """Read string from mapped memory."""
+    unsafe:
+        val ptr = (address + offset) as *u8
+
+        # Find string length (until null terminator or max_length)
+        var len = 0i64
+        val max_len = if max_length == 0: 4096 else: max_length
+
+        while len < max_len:
+            val byte = ptr_read_u8(ptr, len)
+            if byte == 0:
+                break
+            len = len + 1
+
+        # Create slice and convert to string
+        val slice = slice_from_raw_parts(ptr, len as usize)
+        str_from_utf8_lossy(slice)
+
+fn native_madvise(address: i64, size: i64, advice: i32) -> bool:
+    """Give kernel memory advice."""
+    val result = unsafe_madvise(address, size, advice)
+    result == 0
+
+fn native_msync(address: i64, size: i64, is_async: bool) -> bool:
+    """Sync memory to disk."""
+    val flags = if is_async: 1 else: 2  # MS_ASYNC=1, MS_SYNC=2
+    val result = unsafe_msync(address, size, flags)
+    result == 0
+
+fn native_mlock(address: i64, size: i64) -> bool:
+    """Lock memory in RAM."""
+    val result = unsafe_mlock(address, size)
+    result == 0
+
+fn native_munlock(address: i64, size: i64) -> bool:
+    """Unlock memory."""
+    val result = unsafe_munlock(address, size)
+    result == 0
+
+# ============================================================================
+# Native Executable Memory (Simple + unsafe)
+# ============================================================================
+
+# Global tracking for statistics (using dictionary as simple storage)
+var EXEC_MEMORY_ALLOCS: Dict<i64, i64> = {}
+
+fn native_alloc_exec_memory(size: i64) -> i64:
+    """Allocate executable memory (RWX)."""
+    val prot = PROT_READ | PROT_WRITE | PROT_EXEC
+    val flags = MAP_PRIVATE | MAP_ANONYMOUS
+
+    val addr = unsafe_mmap(0, size, prot, flags, -1, 0)
+
+    if addr == MAP_FAILED:
+        return 0
+
+    # Track allocation
+    EXEC_MEMORY_ALLOCS[addr] = size
+
+    addr
+
+fn native_alloc_rw_memory(size: i64) -> i64:
+    """Allocate read-write memory (no execute)."""
+    val prot = PROT_READ | PROT_WRITE
+    val flags = MAP_PRIVATE | MAP_ANONYMOUS
+
+    val addr = unsafe_mmap(0, size, prot, flags, -1, 0)
+
+    if addr == MAP_FAILED:
+        return 0
+
+    addr
+
+fn native_free_exec_memory(address: i64, size: i64) -> bool:
+    """Free executable memory."""
+    val result = unsafe_munmap(address, size)
+
+    if result == 0:
+        # Remove from tracking
+        exec_memory_allocs_remove(address)
+        true
+    else:
+        false
+
+fn native_write_exec_memory(address: i64, code: [u8], offset: i64) -> i64:
+    """Write code to executable memory."""
+    unsafe:
+        val dest_ptr = (address + offset) as *u8
+
+        for i in 0..code_len(code):
+            ptr_write_u8(dest_ptr, i as i64, code[i])
+
+        code_len(code) as i64
+
+fn native_make_executable(address: i64, size: i64) -> bool:
+    """Change protection to read-execute (W^X security)."""
+    val prot = PROT_READ | PROT_EXEC
+    val result = unsafe_mprotect(address, size, prot)
+    result == 0
+
+fn native_flush_icache(address: i64, size: i64):
+    """Flush instruction cache (required on ARM/RISC-V)."""
+    # x86/x64: no-op (hardware cache coherence)
+    # ARM: would need __clear_cache syscall
+    # For now, just document the requirement
+    pass
+
+fn native_get_function_pointer(address: i64) -> i64:
+    """Get function pointer from address."""
+    address  # Function pointer is same as address
+
+fn native_call_function_0(fn_ptr: i64) -> i64:
+    """Call function with no arguments."""
+    unsafe:
+        # Cast pointer to function type and call
+        val func = fn_ptr as fn() -> i64
+        func()
+
+fn native_call_function_1(fn_ptr: i64, arg1: i64) -> i64:
+    """Call function with one argument."""
+    unsafe:
+        val func = fn_ptr as fn(i64) -> i64
+        func(arg1)
+
+fn native_call_function_2(fn_ptr: i64, arg1: i64, arg2: i64) -> i64:
+    """Call function with two arguments."""
+    unsafe:
+        val func = fn_ptr as fn(i64, i64) -> i64
+        func(arg1, arg2)
+
+fn native_exec_memory_total() -> i64:
+    """Get total executable memory allocated."""
+    var total = 0i64
+    for (addr, size) in EXEC_MEMORY_ALLOCS:
+        total = total + size
+    total
+
+fn native_exec_memory_count() -> i64:
+    """Get number of executable memory allocations."""
+    exec_memory_allocs_len() as i64
+
+# ============================================================================
+# Unsafe Syscall Wrappers (Platform-specific)
+# ============================================================================
+
+fn unsafe_open(path: text, flags: i32) -> i32:
+    """Open file - platform-specific syscall."""
+    unsafe:
+        # On Linux: syscall number 2 (open)
+        # On macOS: different syscall number
+        # For now, stub - need platform detection
+        -1  # Return error until implemented
+
+fn unsafe_close(fd: i32):
+    """Close file descriptor."""
+    unsafe:
+        # Linux: syscall 3 (close)
+        pass
+
+fn unsafe_mmap(addr: i64, length: i64, prot: i32, flags: i32, fd: i32, offset: i64) -> i64:
+    """Direct mmap syscall."""
+    unsafe:
+        # Linux x86_64: syscall 9
+        # This needs inline assembly or FFI to libc
+        # For now, stub
+        MAP_FAILED
+
+fn unsafe_munmap(addr: i64, length: i64) -> i32:
+    """Direct munmap syscall."""
+    unsafe:
+        # Linux x86_64: syscall 11
+        -1
+
+fn unsafe_mprotect(addr: i64, length: i64, prot: i32) -> i32:
+    """Change memory protection."""
+    unsafe:
+        # Linux x86_64: syscall 10
+        -1
+
+fn unsafe_madvise(addr: i64, length: i64, advice: i32) -> i32:
+    """Memory advice to kernel."""
+    unsafe:
+        # Linux x86_64: syscall 28
+        -1
+
+fn unsafe_msync(addr: i64, length: i64, flags: i32) -> i32:
+    """Sync memory to disk."""
+    unsafe:
+        # Linux x86_64: syscall 26
+        -1
+
+fn unsafe_mlock(addr: i64, length: i64) -> i32:
+    """Lock memory in RAM."""
+    unsafe:
+        # Linux x86_64: syscall 149
+        -1
+
+fn unsafe_munlock(addr: i64, length: i64) -> i32:
+    """Unlock memory."""
+    unsafe:
+        # Linux x86_64: syscall 150
+        -1
+
+fn ptr_read_u8(ptr: *u8, offset: i64) -> u8:
+    """Read byte from pointer with offset."""
+    unsafe:
+        val offset_ptr = (ptr as i64 + offset) as *u8
+        *offset_ptr
+
+fn ptr_write_u8(ptr: *u8, offset: i64, value: u8):
+    """Write byte to pointer with offset."""
+    unsafe:
+        val offset_ptr = (ptr as i64 + offset) as *mut u8
+        *offset_ptr = value
+
+fn slice_from_raw_parts(ptr: *u8, len: usize) -> [u8]:
+    """Create slice from raw pointer (built-in in Simple)."""
+    unsafe:
+        # This is a built-in operation in Simple
+        # Returns a view into the memory
+        []  # Stub - needs compiler support
+
+fn str_from_utf8_lossy(bytes: [u8]) -> text:
+    """Convert bytes to string, replacing invalid UTF-8."""
+    # Convert byte array to string
+    var chars: [text] = []
+    for b in bytes:
+        chars_push(chars, char_from_byte(b))
+    chars.join("")
+
+fn char_from_byte(b: u8) -> text:
+    """Convert byte to character."""
+    # Simple char conversion
+    "{b as char}"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export native_mmap_file
+export native_munmap
+export native_mmap_read_bytes
+export native_mmap_read_string
+export native_madvise
+export native_msync
+export native_mlock
+export native_munlock
+export native_alloc_exec_memory
+export native_alloc_rw_memory
+export native_free_exec_memory
+export native_write_exec_memory
+export native_make_executable
+export native_flush_icache
+export native_get_function_pointer
+export native_call_function_0
+export native_call_function_1
+export native_call_function_2
+export native_exec_memory_total
+export native_exec_memory_count
+
+# Constants
+export PROT_READ, PROT_WRITE, PROT_EXEC
+export MAP_PRIVATE, MAP_SHARED, MAP_ANONYMOUS
+export MADV_SEQUENTIAL, MADV_WILLNEED

@@ -71,6 +71,9 @@ use core.ast.{ast_reset}
 use core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL}
 use core.types.{TYPE_NIL}
+use core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
+use core.types.{TYPE_RESULT}
+use core.types.{int_to_str}
 
 # ===== Parser State =====
 
@@ -111,13 +114,13 @@ fn parser_expect(expected: i64) -> bool:
     if par_kind == expected:
         parser_advance()
         return true
-    val msg = "line {par_line}:{par_col}: expected {tok_kind_name(expected)}, got {tok_kind_name(par_kind)} '{par_text}'"
+    val msg = "line " + int_to_str(par_line) + ":" + int_to_str(par_col) + ": expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind) + " '" + par_text + "'"
     par_errors.push(msg)
     par_had_error = true
     false
 
 fn parser_error(msg: text):
-    val full = "line {par_line}:{par_col}: {msg}"
+    val full = "line " + int_to_str(par_line) + ":" + int_to_str(par_col) + ": " + msg
     par_errors.push(full)
     par_had_error = true
 
@@ -144,6 +147,40 @@ fn parser_parse_type() -> i64:
     val type_name = par_text
     if par_kind == TOK_IDENT:
         parser_advance()
+        # Check for generic type: Option<T>, Result<T, E>, etc.
+        if par_kind == TOK_LT:
+            parser_advance()
+            val inner_type = parser_parse_type()
+            parser_expect(TOK_GT)
+            # Handle Option<T>
+            if type_name == "Option":
+                if inner_type == TYPE_I64:
+                    return TYPE_OPTION_I64
+                if inner_type == TYPE_F64:
+                    return TYPE_OPTION_F64
+                if inner_type == TYPE_TEXT:
+                    return TYPE_OPTION_TEXT
+                if inner_type == TYPE_BOOL:
+                    return TYPE_OPTION_BOOL
+                return TYPE_OPTION
+            # Handle Result<T, E> (simplified - just return TYPE_RESULT)
+            if type_name == "Result":
+                return TYPE_RESULT
+            # Unknown generic type - return TYPE_ANY
+            return TYPE_VOID
+        # Check for postfix ? for Option shorthand: i64? -> Option<i64>
+        if par_kind == TOK_QUESTION:
+            parser_advance()
+            if type_name == "i64":
+                return TYPE_OPTION_I64
+            if type_name == "f64":
+                return TYPE_OPTION_F64
+            if type_name == "text":
+                return TYPE_OPTION_TEXT
+            if type_name == "bool":
+                return TYPE_OPTION_BOOL
+            return TYPE_OPTION
+        # Simple primitive types
         if type_name == "i64":
             return TYPE_I64
         if type_name == "f64":
@@ -152,12 +189,26 @@ fn parser_parse_type() -> i64:
             return TYPE_TEXT
         if type_name == "bool":
             return TYPE_BOOL
+        if type_name == "Option":
+            return TYPE_OPTION
+        if type_name == "Result":
+            return TYPE_RESULT
         return TYPE_VOID
     if par_kind == TOK_LBRACKET:
         # Array type: [i64], [text], etc.
         parser_advance()
         val elem_type = parser_parse_type()
         parser_expect(TOK_RBRACKET)
+        # Nested array types [[T]] -> TYPE_ARRAY_ANY
+        val is_nested = elem_type == TYPE_ARRAY_I64
+        val is_nested2 = elem_type == TYPE_ARRAY_TEXT
+        val is_nested3 = elem_type == TYPE_ARRAY_BOOL
+        val is_nested4 = elem_type == TYPE_ARRAY_ANY
+        val any_nested = is_nested or is_nested2
+        val any_nested2 = any_nested or is_nested3
+        val any_nested3 = any_nested2 or is_nested4
+        if any_nested3:
+            return TYPE_ARRAY_ANY
         if elem_type == TYPE_I64:
             return TYPE_ARRAY_I64
         if elem_type == TYPE_TEXT:
@@ -265,14 +316,26 @@ fn parse_comparison() -> i64:
     left
 
 fn parse_null_coalesce() -> i64:
-    var left = parse_addition()
+    var left = parse_range()
     for i in 0..100:
         if par_kind == TOK_DOUBLE_QUESTION:
             parser_advance()
-            val right = parse_addition()
+            val right = parse_range()
             left = expr_null_coalesce(left, right, 0)
         else:
             break
+    left
+
+fn parse_range() -> i64:
+    val left = parse_addition()
+    if par_kind == TOK_DOTDOT:
+        parser_advance()
+        val right = parse_addition()
+        return expr_range(left, right, 0, 0)
+    if par_kind == TOK_DOTDOT_EQ:
+        parser_advance()
+        val right = parse_addition()
+        return expr_range(left, right, 1, 0)
     left
 
 fn parse_addition() -> i64:
@@ -324,6 +387,93 @@ fn parse_unary() -> i64:
         return expr_unary(TOK_NOT, operand, 0)
     parse_postfix()
 
+fn parse_call_arg() -> i64:
+    # Parse a call argument as a full expression
+    # Named args (name: value) are not needed for core self-compilation
+    parse_expr()
+
+fn parse_postfix_on(base_expr: i64) -> i64:
+    # Continue postfix parsing from an already-parsed base expression
+    var base = base_expr
+    for i in 0..1000:
+        if par_kind == TOK_DOT:
+            parser_advance()
+            val field_name = par_text
+            if par_kind != TOK_IDENT:
+                parser_error("expected field name after '.'")
+                break
+            parser_advance()
+            if par_kind == TOK_LPAREN:
+                parser_advance()
+                var call_args: [i64] = []
+                if par_kind != TOK_RPAREN:
+                    call_args.push(parse_call_arg())
+                    for j in 0..100:
+                        if par_kind != TOK_COMMA:
+                            break
+                        parser_advance()
+                        call_args.push(parse_call_arg())
+                parser_expect(TOK_RPAREN)
+                base = expr_method_call(base, field_name, call_args, 0)
+            else:
+                base = expr_field_access(base, field_name, 0)
+        elif par_kind == TOK_LBRACKET:
+            parser_advance()
+            if par_kind == TOK_COLON:
+                parser_advance()
+                val end_idx = parse_expr()
+                parser_expect(TOK_RBRACKET)
+                val zero = expr_int_lit(0, 0)
+                base = expr_slice(base, zero, end_idx, 0)
+            else:
+                val index_expr = parse_expr()
+                if par_kind == TOK_COLON:
+                    parser_advance()
+                    if par_kind == TOK_RBRACKET:
+                        parser_advance()
+                        val neg1 = expr_int_lit(-1, 0)
+                        base = expr_slice(base, index_expr, neg1, 0)
+                    else:
+                        val end_idx = parse_expr()
+                        parser_expect(TOK_RBRACKET)
+                        base = expr_slice(base, index_expr, end_idx, 0)
+                else:
+                    parser_expect(TOK_RBRACKET)
+                    base = expr_index(base, index_expr, 0)
+        elif par_kind == TOK_LPAREN:
+            parser_advance()
+            var call_args: [i64] = []
+            if par_kind != TOK_RPAREN:
+                call_args.push(parse_call_arg())
+                for j in 0..100:
+                    if par_kind != TOK_COMMA:
+                        break
+                    parser_advance()
+                    call_args.push(parse_call_arg())
+            parser_expect(TOK_RPAREN)
+            base = expr_call(base, call_args, 0)
+        elif par_kind == TOK_QUESTION_DOT:
+            parser_advance()
+            val field_name = par_text
+            parser_expect(TOK_IDENT)
+            base = expr_field_access(base, field_name, 0)
+        else:
+            break
+    # Continue with assignment operators
+    if par_kind == TOK_ASSIGN:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_assign(base, right, 0)
+    if par_kind == TOK_PLUS_ASSIGN:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(TOK_PLUS, base, right, 0)
+    if par_kind == TOK_MINUS_ASSIGN:
+        parser_advance()
+        val right = parse_assignment()
+        return expr_compound_assign(TOK_MINUS, base, right, 0)
+    base
+
 fn parse_postfix() -> i64:
     var base = parse_primary()
     for i in 0..1000:
@@ -339,12 +489,12 @@ fn parse_postfix() -> i64:
                 parser_advance()
                 var call_args: [i64] = []
                 if par_kind != TOK_RPAREN:
-                    call_args.push(parse_expr())
+                    call_args.push(parse_call_arg())
                     for j in 0..100:
                         if par_kind != TOK_COMMA:
                             break
                         parser_advance()
-                        call_args.push(parse_expr())
+                        call_args.push(parse_call_arg())
                 parser_expect(TOK_RPAREN)
                 base = expr_method_call(base, field_name, call_args, 0)
             else:
@@ -380,12 +530,12 @@ fn parse_postfix() -> i64:
             parser_advance()
             var call_args: [i64] = []
             if par_kind != TOK_RPAREN:
-                call_args.push(parse_expr())
+                call_args.push(parse_call_arg())
                 for j in 0..100:
                     if par_kind != TOK_COMMA:
                         break
                     parser_advance()
-                    call_args.push(parse_expr())
+                    call_args.push(parse_call_arg())
             parser_expect(TOK_RPAREN)
             base = expr_call(base, call_args, 0)
         elif par_kind == TOK_QUESTION_DOT:
@@ -510,7 +660,7 @@ fn parse_primary() -> i64:
         parser_advance()
         return expr_ident("_", 0)
 
-    parser_error("unexpected token in expression: {tok_kind_name(par_kind)} '{par_text}'")
+    parser_error("unexpected token in expression: " + tok_kind_name(par_kind) + " '" + par_text + "'")
     parser_advance()
     expr_nil_lit(0)
 
@@ -518,17 +668,24 @@ fn parse_primary() -> i64:
 
 fn parse_block() -> [i64]:
     var stmts: [i64] = []
-    parser_expect(TOK_INDENT)
-    for i in 0..100000:
-        parser_skip_newlines()
-        if par_kind == TOK_DEDENT:
-            parser_advance()
-            break
-        if par_kind == TOK_EOF:
-            break
-        val s = parse_statement()
-        stmts.push(s)
-        parser_skip_newlines_and_semicolons()
+    parser_skip_newlines()
+    if par_kind == TOK_INDENT:
+        # Multi-line indented block
+        parser_advance()
+        for i in 0..100000:
+            parser_skip_newlines()
+            if par_kind == TOK_DEDENT:
+                parser_advance()
+                break
+            if par_kind == TOK_EOF:
+                break
+            val s = parse_statement()
+            stmts.push(s)
+            parser_skip_newlines_and_semicolons()
+        return stmts
+    # Single-line body (no indent): parse one statement
+    val s = parse_statement()
+    stmts.push(s)
     stmts
 
 fn parse_statement() -> i64:
@@ -571,6 +728,27 @@ fn parse_statement() -> i64:
     if par_kind == TOK_KW_PASS:
         parser_advance()
         return stmt_expr_stmt(expr_pass(0), 0)
+
+    # Handle bare 'print' keyword (print expr — no parens)
+    if par_kind == TOK_IDENT:
+        if par_text == "print":
+            parser_advance()
+            val is_nl = par_kind == TOK_NEWLINE
+            val is_ded = par_kind == TOK_DEDENT
+            val is_eof = par_kind == TOK_EOF
+            val no_arg = is_nl or is_ded
+            val no_arg2 = no_arg or is_eof
+            if no_arg2:
+                val callee0 = expr_ident("print", 0)
+                var args0: [i64] = []
+                val call0 = expr_call(callee0, args0, 0)
+                return stmt_expr_stmt(call0, 0)
+            val print_arg = parse_expr()
+            val callee1 = expr_ident("print", 0)
+            var args1: [i64] = []
+            args1.push(print_arg)
+            val call1 = expr_call(callee1, args1, 0)
+            return stmt_expr_stmt(call1, 0)
 
     # Expression statement (including assignment)
     val expression = parse_expr()
@@ -626,7 +804,7 @@ fn parse_if_stmt() -> i64:
 
     # Store elif chain using elif arena
     val elif_idx = elif_new(cond, then_body, else_body)
-    stmt_if_stmt(cond, then_body, else_body, 0)
+    stmt_if_stmt(cond, then_body, elif_idx, 0)
 
 fn parse_for_stmt() -> i64:
     parser_advance()
@@ -894,18 +1072,53 @@ fn parse_var_decl() -> i64:
     val init = parse_expr()
     decl_var_binding(name, type_tag, init, 0)
 
+# ===== Expression-Level Control Flow (for module-level statements) =====
+
+fn parse_if_expr() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val then_body = parse_block()
+    val then_expr = expr_block(then_body, -1, 0)
+    parser_skip_newlines()
+    var else_expr: i64 = expr_unit(0)
+    if par_kind == TOK_KW_ELIF:
+        else_expr = parse_if_expr()
+    elif par_kind == TOK_KW_ELSE:
+        parser_advance()
+        parser_expect(TOK_COLON)
+        val else_body = parse_block()
+        else_expr = expr_block(else_body, -1, 0)
+    expr_if_expr(cond, then_expr, else_expr, 0)
+
+fn parse_for_expr() -> i64:
+    parser_advance()
+    val iter_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_KW_IN)
+    val iterable = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    expr_for_expr(iter_name, iterable, body, 0)
+
+fn parse_while_expr() -> i64:
+    parser_advance()
+    val cond = parse_expr()
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+    expr_while_expr(cond, body, 0)
+
 # ===== Top-Level Module Parsing =====
 
-fn parse_module(source: text, path: text):
-    parser_init(source)
-    module_set_path(path)
-
+fn parse_module_body():
     for i in 0..100000:
         parser_skip_newlines_and_semicolons()
         if par_kind == TOK_EOF:
             break
-
-        if par_kind == TOK_KW_FN:
+        if par_kind == TOK_DEDENT:
+            # Stray dedent at module level — skip it
+            parser_advance()
+        elif par_kind == TOK_KW_FN:
             val d = parse_fn_decl()
             module_add_decl(d)
         elif par_kind == TOK_KW_EXTERN:
@@ -930,14 +1143,67 @@ fn parse_module(source: text, path: text):
         elif par_kind == TOK_KW_VAR:
             val d = parse_var_decl()
             module_add_decl(d)
-        else:
-            # Module-level expression/statement
-            val expression = parse_expr()
-            val s = stmt_expr_stmt(expression, 0)
-            # Wrap in a pseudo declaration
-            val d = decl_val_binding("_expr_{i}", 0, expression, 0)
+        elif par_kind == TOK_KW_IF:
+            val if_expr = parse_if_expr()
+            val d = decl_val_binding("_if_" + int_to_str(i), -1, if_expr, 0)
             module_add_decl(d)
-            parser_skip_newlines_and_semicolons()
+        elif par_kind == TOK_KW_FOR:
+            val for_expr = parse_for_expr()
+            val d = decl_val_binding("_for_" + int_to_str(i), -1, for_expr, 0)
+            module_add_decl(d)
+        elif par_kind == TOK_KW_WHILE:
+            val while_expr = parse_while_expr()
+            val d = decl_val_binding("_while_" + int_to_str(i), -1, while_expr, 0)
+            module_add_decl(d)
+        else:
+            # Handle bare 'print' at module level
+            if par_kind == TOK_IDENT:
+                if par_text == "print":
+                    parser_advance()
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_ded = par_kind == TOK_DEDENT
+                    val is_eof = par_kind == TOK_EOF
+                    val no_arg = is_nl or is_ded
+                    val no_arg2 = no_arg or is_eof
+                    var print_call: i64 = 0
+                    if no_arg2:
+                        val callee0 = expr_ident("print", 0)
+                        var args0: [i64] = []
+                        print_call = expr_call(callee0, args0, 0)
+                    else:
+                        val print_arg = parse_expr()
+                        val callee1 = expr_ident("print", 0)
+                        var args1: [i64] = []
+                        args1.push(print_arg)
+                        print_call = expr_call(callee1, args1, 0)
+                    val d = decl_val_binding("_expr_" + int_to_str(i), -1, print_call, 0)
+                    module_add_decl(d)
+                    parser_skip_newlines_and_semicolons()
+                else:
+                    val expression = parse_expr()
+                    val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, 0)
+                    module_add_decl(d)
+                    parser_skip_newlines_and_semicolons()
+            else:
+                # Module-level expression/statement
+                val expression = parse_expr()
+                val d = decl_val_binding("_expr_" + int_to_str(i), -1, expression, 0)
+                module_add_decl(d)
+                parser_skip_newlines_and_semicolons()
+
+fn parse_module(source: text, path: text):
+    parser_init(source)
+    module_set_path(path)
+    parse_module_body()
+
+fn parse_module_file(source: text, path: text):
+    # Parse additional file without resetting AST
+    lex_init(source)
+    par_errors = []
+    par_had_error = false
+    parser_advance()
+    module_set_path(path)
+    parse_module_body()
 
 fn parser_has_errors() -> bool:
     par_had_error
@@ -954,12 +1220,15 @@ export parser_init, parser_advance, parser_check, parser_match_tok, parser_expec
 export parser_error, parser_skip_newlines, parser_skip_newlines_and_semicolons
 export parser_parse_type
 export parse_expr, parse_assignment, parse_or, parse_and, parse_not
-export parse_comparison, parse_null_coalesce
+export parse_comparison, parse_null_coalesce, parse_range
 export parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary
+export parse_call_arg, parse_postfix_on
 export parse_block, parse_statement
 export parse_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
+export parse_if_expr, parse_for_expr, parse_while_expr
 export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
 export parse_use_decl, parse_export_decl, parse_val_decl, parse_var_decl
-export parse_module, parser_has_errors, parser_get_errors, parser_error_count
+export parse_module, parse_module_file, parse_module_body
+export parser_has_errors, parser_get_errors, parser_error_count
 export par_kind, par_text, par_line, par_col, par_errors, par_had_error

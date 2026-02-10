@@ -52,7 +52,7 @@ Phase 4: LLVM Optimized (production binary)
 
 **Purpose:** Verify that the starting point exists
 
-**Input:** `bin/bootstrap/simple` (pre-built runtime)
+**Input:** `bin/release/simple` (pre-built runtime)
 
 **Output:** Validated bootstrap binary
 
@@ -69,7 +69,7 @@ Phase 4: LLVM Optimized (production binary)
 
 **Command:**
 ```bash
-bin/bootstrap/simple src/app/compile/native.spl src/app/cli/main.spl build/bootstrap/simple_phase1
+bin/release/simple src/app/compile/native.spl src/app/cli/main.spl build/bootstrap/simple_phase1
 ```
 
 **Features:**
@@ -301,8 +301,8 @@ Phase 4: Phase3 + LLVM → simple_phase4 (production)
 **Solutions:**
 ```bash
 # Verify bootstrap binary
-file bin/bootstrap/simple
-bin/bootstrap/simple --version
+file bin/release/simple
+bin/release/simple --version
 
 # Check GCC
 gcc --version
@@ -409,7 +409,7 @@ sudo swapon -a
 
 ### Phase 0: Reproducible Bootstrap Binary
 
-**Goal:** Ensure `bin/bootstrap/simple` is built deterministically
+**Goal:** Ensure `bin/release/simple` is built deterministically
 
 **Approach:**
 - Document exact build process

@@ -173,7 +173,7 @@ fn parse_device(device_str: text) -> Device:
 #### Step 1.5: Verify fix
 ```bash
 # Test that config.spl parses:
-bin/bootstrap/simple test_gpu_config.spl 2>&1 | grep -i "parse"
+bin/release/simple test_gpu_config.spl 2>&1 | grep -i "parse"
 
 # Should NOT see: "Failed to parse module...Gpu"
 # Should see: "error: semantic: function `torch_available` not found"
@@ -195,11 +195,11 @@ bin/bootstrap/simple test_gpu_config.spl 2>&1 | grep -i "parse"
 
 #### Step 2.1: Run each example
 ```bash
-bin/bootstrap/simple examples/torch/basics/01_tensor_creation.spl 2>&1 | tee test_01.log
-bin/bootstrap/simple examples/torch/basics/02_tensor_operations.spl 2>&1 | tee test_02.log
-bin/bootstrap/simple examples/torch/basics/03_device_selection.spl 2>&1 | tee test_03.log
-bin/bootstrap/simple examples/torch/training/xor_pytorch.spl 2>&1 | tee test_04.log
-bin/bootstrap/simple examples/torch/training/mnist_classifier.spl 2>&1 | tee test_05.log
+bin/release/simple examples/torch/basics/01_tensor_creation.spl 2>&1 | tee test_01.log
+bin/release/simple examples/torch/basics/02_tensor_operations.spl 2>&1 | tee test_02.log
+bin/release/simple examples/torch/basics/03_device_selection.spl 2>&1 | tee test_03.log
+bin/release/simple examples/torch/training/xor_pytorch.spl 2>&1 | tee test_04.log
+bin/release/simple examples/torch/training/mnist_classifier.spl 2>&1 | tee test_05.log
 ```
 
 #### Step 2.2: Expected output pattern
@@ -399,7 +399,7 @@ sudo cp target/release/libsimple_torch_ffi.so /usr/local/lib/
 sudo ldconfig
 
 # 3. Run examples
-bin/bootstrap/simple examples/torch/basics/01_tensor_creation.spl
+bin/release/simple examples/torch/basics/01_tensor_creation.spl
 
 # Expected:
 # - Semantic analysis: PASS (accepts extern fn)

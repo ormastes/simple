@@ -34,12 +34,59 @@ struct CoverageData:
     condition_pct: i64
 
 # =========================================================================
+# In-Memory Aggregation (cross-process)
+# =========================================================================
+
+var coverage_parts: [text] = []
+
+var decision_keys: [text] = []
+var decision_true: Dict<text, i64> = {}
+var decision_false: Dict<text, i64> = {}
+
+var condition_keys: [text] = []
+var condition_true: Dict<text, i64> = {}
+var condition_false: Dict<text, i64> = {}
+
+fn reset_coverage_state():
+    coverage_parts = []
+    decision_keys = []
+    decision_true = {}
+    decision_false = {}
+    condition_keys = []
+    condition_true = {}
+    condition_false = {}
+
+fn decision_key(file: text, line: text, col: text, decision_id: text) -> text:
+    "{file}|{line}|{col}|{decision_id}"
+
+fn condition_key(file: text, line: text, col: text, decision_id: text, condition_id: text) -> text:
+    "{file}|{line}|{col}|{decision_id}|{condition_id}"
+
+fn merge_counts(keys: [text], tmap: Dict<text, i64>, fmap: Dict<text, i64>, key: text, t: i64, f: i64):
+    if not tmap.contains_key(key) and not fmap.contains_key(key):
+        keys.push(key)
+    if t > 0:
+        val prev_t = tmap[key] ?? 0
+        tmap[key] = prev_t + t
+    if f > 0:
+        val prev_f = fmap[key] ?? 0
+        fmap[key] = prev_f + f
+
+fn parse_i64_safe(s: text) -> i64:
+    val trimmed = s.trim()
+    if trimmed == "":
+        return 0
+    # Fallback to 0 if parsing fails (avoid runtime errors)
+    to_int(trimmed)
+
+# =========================================================================
 # Setup: Enable coverage before test run
 # =========================================================================
 
 fn setup_coverage():
     env_set("SIMPLE_COVERAGE", "1")
     rt_coverage_clear()
+    reset_coverage_state()
     print "[Coverage] Enabled - tracking decisions and conditions"
     # Ensure output directory exists
     dir_create_all(".coverage")
@@ -49,14 +96,113 @@ fn setup_coverage():
 # =========================================================================
 
 fn collect_coverage() -> CoverageData:
-    val sdn = rt_coverage_dump_sdn()
-    parse_coverage_sdn(sdn)
+    if coverage_parts.len() > 0:
+        val merged_sdn = render_coverage_sdn()
+        build_coverage_data_from_state(merged_sdn)
+    else:
+        val sdn = rt_coverage_dump_sdn()
+        parse_coverage_sdn(sdn)
 
 # =========================================================================
 # SDN Parsing: Extract per-file coverage from raw SDN
 # =========================================================================
 
 fn parse_coverage_sdn(sdn: text) -> CoverageData:
+    reset_coverage_state()
+    accumulate_coverage_sdn(sdn)
+    build_coverage_data_from_state(sdn)
+
+fn record_coverage_sdn(sdn: text):
+    if sdn == "":
+        return
+    coverage_parts.push(sdn)
+    accumulate_coverage_sdn(sdn)
+
+fn accumulate_coverage_sdn(sdn: text):
+    val lines = sdn.split("\n")
+    var section = ""
+
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        if trimmed.starts_with("decisions"):
+            section = "decisions"
+            continue
+        if trimmed.starts_with("conditions"):
+            section = "conditions"
+            continue
+        if trimmed.starts_with("paths") or trimmed.starts_with("summary"):
+            section = ""
+            continue
+
+        # Event-format lines: "decision file:line id taken"
+        if trimmed.starts_with("decision "):
+            val parts = trimmed.split(" ")
+            if parts.len() >= 4:
+                val file_loc = parts[1]
+                val decision_id = parts[2]
+                val taken_str = parts[3]
+                val colon_idx = file_loc.last_index_of(":") ?? -1
+                var fpath = file_loc
+                var line_str = "0"
+                if colon_idx > 0:
+                    fpath = file_loc[0:colon_idx]
+                    line_str = file_loc[colon_idx + 1:]
+                val key = decision_key(fpath, line_str, "0", decision_id)
+                val t = if taken_str == "true": 1 else: 0
+                val f = if taken_str == "true": 0 else: 1
+                merge_counts(decision_keys, decision_true, decision_false, key, t, f)
+            continue
+
+        # Event-format lines: "condition file:line id result"
+        if trimmed.starts_with("condition "):
+            val parts = trimmed.split(" ")
+            if parts.len() >= 4:
+                val file_loc = parts[1]
+                val cond_id = parts[2]
+                val result_str = parts[3]
+                val colon_idx = file_loc.last_index_of(":") ?? -1
+                var fpath = file_loc
+                var line_str = "0"
+                if colon_idx > 0:
+                    fpath = file_loc[0:colon_idx]
+                    line_str = file_loc[colon_idx + 1:]
+                val key = condition_key(fpath, line_str, "0", "0", cond_id)
+                val t = if result_str == "true": 1 else: 0
+                val f = if result_str == "true": 0 else: 1
+                merge_counts(condition_keys, condition_true, condition_false, key, t, f)
+            continue
+
+        # SDN table format parsing
+        if section == "decisions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 6:
+                val decision_id = parts[0].trim()
+                val fpath = parts[1].trim()
+                val line_str = parts[2].trim()
+                val col_str = parts[3].trim()
+                val t = parse_i64_safe(parts[4])
+                val f = parse_i64_safe(parts[5])
+                val key = decision_key(fpath, line_str, col_str, decision_id)
+                merge_counts(decision_keys, decision_true, decision_false, key, t, f)
+            continue
+
+        if section == "conditions":
+            val parts = trimmed.split(",")
+            if parts.len() >= 7:
+                val decision_id = parts[0].trim()
+                val condition_id = parts[1].trim()
+                val fpath = parts[2].trim()
+                val line_str = parts[3].trim()
+                val col_str = parts[4].trim()
+                val t = parse_i64_safe(parts[5])
+                val f = parse_i64_safe(parts[6])
+                val key = condition_key(fpath, line_str, col_str, decision_id, condition_id)
+                merge_counts(condition_keys, condition_true, condition_false, key, t, f)
+
+fn build_coverage_data_from_state(raw_sdn: text) -> CoverageData:
     var files: [FileCoverage] = []
     var total_dec = 0
     var total_dec_covered = 0
@@ -70,48 +216,33 @@ fn parse_coverage_sdn(sdn: text) -> CoverageData:
     var file_cond_total: [i64] = []
     var file_cond_covered: [i64] = []
 
-    val lines = sdn.split("\n")
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed == "":
-            continue
+    for key in decision_keys:
+        val parts = key.split("|")
+        if parts.len() >= 4:
+            val fpath = parts[0]
+            val t = decision_true[key] ?? 0
+            val f = decision_false[key] ?? 0
+            val covered = t > 0 and f > 0
+            val fi = find_or_add_file(file_paths, file_dec_total, file_dec_covered, file_cond_total, file_cond_covered, fpath)
+            file_dec_total[fi] = file_dec_total[fi] + 1
+            total_dec = total_dec + 1
+            if covered:
+                file_dec_covered[fi] = file_dec_covered[fi] + 1
+                total_dec_covered = total_dec_covered + 1
 
-        # Parse decision lines: "decision file:line id taken"
-        if trimmed.starts_with("decision "):
-            val parts = trimmed.split(" ")
-            if parts.len() >= 4:
-                val file_loc = parts[1]
-                val taken_str = parts[3]
-                # Extract file path from "file:line"
-                val colon_idx = file_loc.last_index_of(":") ?? -1
-                var fpath = file_loc
-                if colon_idx > 0:
-                    fpath = file_loc[0:colon_idx]
-
-                val fi = find_or_add_file(file_paths, file_dec_total, file_dec_covered, file_cond_total, file_cond_covered, fpath)
-                file_dec_total[fi] = file_dec_total[fi] + 1
-                total_dec = total_dec + 1
-                if taken_str == "true":
-                    file_dec_covered[fi] = file_dec_covered[fi] + 1
-                    total_dec_covered = total_dec_covered + 1
-
-        # Parse condition lines: "condition file:line id result"
-        elif trimmed.starts_with("condition "):
-            val parts = trimmed.split(" ")
-            if parts.len() >= 4:
-                val file_loc = parts[1]
-                val result_str = parts[3]
-                val colon_idx = file_loc.last_index_of(":") ?? -1
-                var fpath = file_loc
-                if colon_idx > 0:
-                    fpath = file_loc[0:colon_idx]
-
-                val fi = find_or_add_file(file_paths, file_dec_total, file_dec_covered, file_cond_total, file_cond_covered, fpath)
-                file_cond_total[fi] = file_cond_total[fi] + 1
-                total_cond = total_cond + 1
-                if result_str == "true":
-                    file_cond_covered[fi] = file_cond_covered[fi] + 1
-                    total_cond_covered = total_cond_covered + 1
+    for key in condition_keys:
+        val parts = key.split("|")
+        if parts.len() >= 5:
+            val fpath = parts[0]
+            val t = condition_true[key] ?? 0
+            val f = condition_false[key] ?? 0
+            val covered = t > 0 and f > 0
+            val fi = find_or_add_file(file_paths, file_dec_total, file_dec_covered, file_cond_total, file_cond_covered, fpath)
+            file_cond_total[fi] = file_cond_total[fi] + 1
+            total_cond = total_cond + 1
+            if covered:
+                file_cond_covered[fi] = file_cond_covered[fi] + 1
+                total_cond_covered = total_cond_covered + 1
 
     # Build FileCoverage list
     var i = 0
@@ -141,8 +272,9 @@ fn parse_coverage_sdn(sdn: text) -> CoverageData:
     if total_cond > 0:
         overall_cpct = (total_cond_covered * 100) / total_cond
 
+    val out_sdn = if raw_sdn != "": raw_sdn else: render_coverage_sdn()
     CoverageData(
-        raw_sdn: sdn,
+        raw_sdn: out_sdn,
         files: files,
         total_decisions: total_dec,
         total_decisions_covered: total_dec_covered,
@@ -151,6 +283,63 @@ fn parse_coverage_sdn(sdn: text) -> CoverageData:
         decision_pct: overall_dpct,
         condition_pct: overall_cpct
     )
+
+fn render_coverage_sdn() -> text:
+    var lines: [text] = []
+    lines.push("# Coverage Report")
+    lines.push("version: 1.0")
+    lines.push("")
+    lines.push("decisions |id, file, line, column, true_count, false_count|")
+    for key in decision_keys:
+        val parts = key.split("|")
+        if parts.len() >= 4:
+            val fpath = parts[0]
+            val line_str = parts[1]
+            val col_str = parts[2]
+            val decision_id = parts[3]
+            val t = decision_true[key] ?? 0
+            val f = decision_false[key] ?? 0
+            lines.push("    {decision_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
+
+    lines.push("")
+    lines.push("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
+    for key in condition_keys:
+        val parts = key.split("|")
+        if parts.len() >= 5:
+            val fpath = parts[0]
+            val line_str = parts[1]
+            val col_str = parts[2]
+            val decision_id = parts[3]
+            val condition_id = parts[4]
+            val t = condition_true[key] ?? 0
+            val f = condition_false[key] ?? 0
+            lines.push("    {decision_id}, {condition_id}, {fpath}, {line_str}, {col_str}, {t}, {f}")
+
+    lines.push("")
+    lines.push("summary:")
+    val total_dec = decision_keys.len()
+    val total_cond = condition_keys.len()
+    var covered_dec = 0
+    var covered_cond = 0
+    for key in decision_keys:
+        val t = decision_true[key] ?? 0
+        val f = decision_false[key] ?? 0
+        if t > 0 and f > 0:
+            covered_dec = covered_dec + 1
+    for key in condition_keys:
+        val t = condition_true[key] ?? 0
+        val f = condition_false[key] ?? 0
+        if t > 0 and f > 0:
+            covered_cond = covered_cond + 1
+    val dec_pct = if total_dec > 0: (covered_dec * 100) / total_dec else: 0
+    val cond_pct = if total_cond > 0: (covered_cond * 100) / total_cond else: 0
+    lines.push("    total_decisions: {total_dec}")
+    lines.push("    covered_decisions: {covered_dec}")
+    lines.push("    total_conditions: {total_cond}")
+    lines.push("    covered_conditions: {covered_cond}")
+    lines.push("    decision_percent: {dec_pct}")
+    lines.push("    condition_percent: {cond_pct}")
+    lines.join("\n")
 
 fn find_or_add_file(paths: [text], dec_t: [i64], dec_c: [i64], cond_t: [i64], cond_c: [i64], fpath: text) -> i64:
     # Find existing file index
@@ -316,5 +505,6 @@ export FileCoverage, CoverageData
 export setup_coverage, collect_coverage
 export print_coverage_summary, generate_coverage_reports
 export parse_coverage_sdn, sort_files_by_coverage
+export record_coverage_sdn
 export check_coverage_threshold, get_coverage_threshold
 export save_coverage_baseline, load_coverage_baseline, print_coverage_delta

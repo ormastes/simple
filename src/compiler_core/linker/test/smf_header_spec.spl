@@ -1,0 +1,255 @@
+# SMF Header Specification
+#
+# Unit tests for SmfHeader struct:
+# - Construction and initialization
+# - Version methods
+# - Platform and architecture methods
+# - Flag methods
+# - Compression methods
+# - Stub methods
+# - App type and hints methods
+# - Serialization (128-byte validation)
+
+use ..smf_header.*
+use ..smf_enums.*
+use testing.{describe, it, expect}
+
+describe "SmfHeader construction":
+    it "creates new v1.1 header with defaults":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+
+        expect(header.version_major == 1)
+        expect(header.version_minor == 1)
+        expect(header_get_platform(header) == Platform.Linux)
+        expect(header_get_arch(header) == Arch.X86_64)
+        expect(header.flags == 0)
+        expect(header.compression == 0)
+        expect(header.stub_size == 0)
+        expect(header.app_type == 0)
+        expect(header.window_width == 1280)
+        expect(header.window_height == 720)
+
+    it "creates header for different platforms and architectures":
+        val header1 = smfheader_new_v1_1(Platform.Windows, Arch.Aarch64)
+        expect(header1_get_platform(header1) == Platform.Windows)
+        expect(header1_get_arch(header1) == Arch.Aarch64)
+
+        val header2 = smfheader_new_v1_1(Platform.MacOS, Arch.Arm)
+        expect(header2_get_platform(header2) == Platform.MacOS)
+        expect(header2_get_arch(header2) == Arch.Arm)
+
+describe "Version methods":
+    it "returns correct version tuple":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        val (major, minor) = header_version(header)
+        expect(major == 1)
+        expect(minor == 1)
+
+    it "correctly identifies v1.1 headers":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_is_v1_1(header))
+        expect(not header_is_v1_0(header))
+
+describe "Platform and architecture methods":
+    it "gets and sets platform correctly":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_platform(header) == Platform.Linux)
+
+        header_set_platform(header, Platform.Windows)
+        expect(header_get_platform(header) == Platform.Windows)
+
+        header_set_platform(header, Platform.FreeBSD)
+        expect(header_get_platform(header) == Platform.FreeBSD)
+
+    it "gets and sets architecture correctly":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_arch(header) == Arch.X86_64)
+
+        header_set_arch(header, Arch.Aarch64)
+        expect(header_get_arch(header) == Arch.Aarch64)
+
+        header_set_arch(header, Arch.Riscv64)
+        expect(header_get_arch(header) == Arch.Riscv64)
+
+describe "Flag methods":
+    it "sets and checks executable flag":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_is_executable(header))
+
+        header_set_executable(header, true)
+        expect(header_is_executable(header))
+
+        header_set_executable(header, false)
+        expect(not header_is_executable(header))
+
+    it "sets and checks reloadable flag":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_is_reloadable(header))
+
+        header_set_reloadable(header, true)
+        expect(header_is_reloadable(header))
+
+        header_set_reloadable(header, false)
+        expect(not header_is_reloadable(header))
+
+    it "sets and checks debug_info flag":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_has_debug_info(header))
+
+        header_set_debug_info(header, true)
+        expect(header_has_debug_info(header))
+
+        header_set_debug_info(header, false)
+        expect(not header_has_debug_info(header))
+
+    it "sets and checks PIC flag":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_is_pic(header))
+
+        header_set_pic(header, true)
+        expect(header_is_pic(header))
+
+        header_set_pic(header, false)
+        expect(not header_is_pic(header))
+
+    it "sets multiple flags independently":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+
+        header_set_executable(header, true)
+        header_set_reloadable(header, true)
+        expect(header_is_executable(header))
+        expect(header_is_reloadable(header))
+        expect(not header_has_debug_info(header))
+        expect(not header_is_pic(header))
+
+        header_set_debug_info(header, true)
+        expect(header_is_executable(header))
+        expect(header_is_reloadable(header))
+        expect(header_has_debug_info(header))
+
+describe "Compression methods":
+    it "checks compression status":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_is_compressed(header))
+
+        header_set_compression(header, CompressionType.Zstd, 3)
+        expect(header_is_compressed(header))
+
+    it "gets and sets compression type":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_compression(header) == CompressionType.None_)
+
+        header_set_compression(header, CompressionType.Zstd, 5)
+        expect(header_get_compression(header) == CompressionType.Zstd)
+        expect(header.compression_level == 5)
+
+        header_set_compression(header, CompressionType.Lz4, 1)
+        expect(header_get_compression(header) == CompressionType.Lz4)
+        expect(header.compression_level == 1)
+
+describe "Stub methods":
+    it "gets stub size":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_stub_size(header) == 0)
+
+    it "gets SMF data offset":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_smf_data_offset(header) == 0)
+
+    it "sets stub info and updates flags":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_has_stub(header))
+
+        header_set_stub_info(header, 1024, 1024)
+        expect(header_get_stub_size(header) == 1024)
+        expect(header_get_smf_data_offset(header) == 1024)
+        expect(header_has_stub(header))
+
+    it "does not set stub flag when stub_size is 0":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        header_set_stub_info(header, 0, 0)
+        expect(not header_has_stub(header))
+
+describe "App type and hints methods":
+    it "gets and sets app type":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header_get_app_type(header) == SmfAppType.Cli)
+
+        header_set_app_type(header, SmfAppType.Gui)
+        expect(header_get_app_type(header) == SmfAppType.Gui)
+
+        header_set_app_type(header, SmfAppType.Service)
+        expect(header_get_app_type(header) == SmfAppType.Service)
+
+    it "sets window hints":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(header.window_width == 1280)
+        expect(header.window_height == 720)
+
+        header_set_window_hints(header, 1920, 1080)
+        expect(header.window_width == 1920)
+        expect(header.window_height == 1080)
+
+    it "checks and sets prefetch hints":
+        var header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        expect(not header_should_prefetch(header))
+        expect(header_expected_prefetch_count(header) == 0)
+
+        header_set_prefetch_hint(header, true, 10)
+        expect(header_should_prefetch(header))
+        expect(header_expected_prefetch_count(header) == 10)
+
+        header_set_prefetch_hint(header, false, 0)
+        expect(not header_should_prefetch(header))
+
+describe "Serialization":
+    it "serializes to exactly 128 bytes":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header_to_bytes(header)
+        expect(bytes_len(bytes) == 128)
+
+    it "serializes header with all fields set":
+        var header = smfheader_new_v1_1(Platform.Windows, Arch.Aarch64)
+        header_set_executable(header, true)
+        header_set_reloadable(header, true)
+        header_set_debug_info(header, true)
+        header_set_compression(header, CompressionType.Zstd, 5)
+        header.section_count = 10
+        header.section_table_offset = 512
+        header.symbol_table_offset = 1024
+        header.symbol_count = 25
+        header.exported_count = 5
+        header.entry_point = 0x1000
+        header_set_stub_info(header, 2048, 2048)
+        header.module_hash = 0x123456789ABCDEF0
+        header.source_hash = 0x7EDCBA9876543210
+        header_set_app_type(header, SmfAppType.Gui)
+        header_set_window_hints(header, 1920, 1080)
+        header_set_prefetch_hint(header, true, 15)
+
+        val bytes = header_to_bytes(header)
+        expect(bytes_len(bytes) == 128)
+
+    it "serializes magic number correctly":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header_to_bytes(header)
+
+        # Magic "SMF\0"
+        expect(bytes[0] == 83)   # 'S'
+        expect(bytes[1] == 77)   # 'M'
+        expect(bytes[2] == 70)   # 'F'
+        expect(bytes[3] == 0)    # '\0'
+
+    it "serializes version correctly":
+        val header = smfheader_new_v1_1(Platform.Linux, Arch.X86_64)
+        val bytes = header_to_bytes(header)
+
+        expect(bytes[4] == 1)    # version_major
+        expect(bytes[5] == 1)    # version_minor
+
+    it "serializes platform and arch correctly":
+        val header = smfheader_new_v1_1(Platform.Windows, Arch.Aarch64)
+        val bytes = header_to_bytes(header)
+
+        expect(bytes[6] == 2)    # platform: Windows
+        expect(bytes[7] == 1)    # arch: Aarch64

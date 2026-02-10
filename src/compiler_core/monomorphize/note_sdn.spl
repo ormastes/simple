@@ -1,0 +1,220 @@
+# Monomorphization Note SDN
+#
+# Tracks monomorphization metadata and serializes to SDN format.
+# Used for debugging generic template instantiations and dependency analysis.
+#
+# Port of rust/compiler/src/monomorphize/note_sdn.rs (494 lines)
+
+export NoteSdnMetadata, InstantiationEntry, PossibleInstantiationEntry
+export TypeInferenceEntry, DependencyEdge, CircularWarning, CircularError
+export InstantiationStatus, DependencyKind, BuildMetadata
+
+use monomorphize.engine (ConcreteType)
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum InstantiationStatus:
+    Compiled
+    Deferred
+    JitCompiled
+
+
+# ============================================================================
+# InstantiationStatus Methods (was: impl InstantiationStatus:)
+# ============================================================================
+
+enum DependencyKind:
+    TypeParam    # Type parameter dependency (e.g., [T] depends on T)
+    FieldType    # Field type dependency (e.g., struct with field of type T)
+    InnerType    # Inner type dependency (e.g., Option<T> wraps T)
+    MethodDep    # Method dependency (e.g., method returns T)
+
+
+# ============================================================================
+# DependencyKind Methods (was: impl DependencyKind:)
+# ============================================================================
+
+# ============================================================================
+# Build Metadata
+# ============================================================================
+
+struct BuildMetadata:
+    # Build configuration metadata stored in SMF for reproducibility.
+    target: text                  # Target architecture (e.g., "x86_64", "aarch64")
+    cpu: text                     # CPU model (e.g., "x86-64-v3", "cortex-a53")
+    optimization: text            # Optimization level (nil, Debug, Size, Speed, Aggressive)
+    features: [text]              # CPU features (e.g., ["+avx2", "+fma", "+bmi2"])
+    linker_flags: [text]          # Linker flags (e.g., ["-march=x86-64-v3"])
+    compiler_version: text        # Compiler version (e.g., "0.4.0-beta.7")
+    build_timestamp: text         # ISO 8601 timestamp
+
+
+# ============================================================================
+# BuildMetadata Methods (was: impl BuildMetadata:)
+# ============================================================================
+
+fn buildmetadata_new(target: text, cpu: text, optimization: text, features: [text], linker_flags: [text], compiler_version: text, build_timestamp: text) -> BuildMetadata:
+        BuildMetadata(
+            target: target,
+            cpu: cpu,
+            optimization: optimization,
+            features: features,
+            linker_flags: linker_flags,
+            compiler_version: compiler_version,
+            build_timestamp: build_timestamp
+        )
+
+
+fn buildmetadata_default() -> BuildMetadata:
+        BuildMetadata(
+            target: "x86_64",
+            cpu: "x86-64-v3",
+            optimization: "None",
+            features: [],
+            linker_flags: [],
+            compiler_version: "unknown",
+            build_timestamp: ""
+        )
+
+
+# ============================================================================
+# Entry Types
+# ============================================================================
+
+struct InstantiationEntry:
+    template: text           # Template base name
+    type_args: text          # Concrete type arguments (comma-separated)
+    mangled_name: text       # Mangled symbol name
+    from_file: text          # Source file
+    from_loc: text           # Source location (file:line:col)
+    output_file: text        # Object file (.o)
+    status: InstantiationStatus
+
+
+# ============================================================================
+# InstantiationEntry Methods (was: impl InstantiationEntry:)
+# ============================================================================
+
+struct PossibleInstantiationEntry:
+    template: text           # Template base name
+    type_args: text          # Concrete type arguments
+    mangled_name: text       # Mangled symbol name
+    required_by: text        # Which module needs this instantiation
+    can_defer: bool          # Can this be deferred to link/load time?
+
+
+# ============================================================================
+# PossibleInstantiationEntry Methods (was: impl PossibleInstantiationEntry:)
+# ============================================================================
+
+struct TypeInferenceEntry:
+    inferred_type: text      # Inferred type (may be placeholder like "?T")
+    expr: text               # Expression text
+    ctx: text                # Inference context (e.g., "literal", "var_init")
+    from_file: text          # Source file
+    from_loc: text           # Source location (file:line:col)
+
+
+# ============================================================================
+# TypeInferenceEntry Methods (was: impl TypeInferenceEntry:)
+# ============================================================================
+
+struct DependencyEdge:
+    from_inst: text          # Source instantiation (e.g., "List$Int")
+    to_inst: text            # Target instantiation (e.g., "Int")
+    dep_kind: DependencyKind
+
+
+# ============================================================================
+# DependencyEdge Methods (was: impl DependencyEdge:)
+# ============================================================================
+
+fn dependencyedge_new(from_inst: text, to_inst: text, dep_kind: DependencyKind) -> DependencyEdge:
+        DependencyEdge(from_inst: from_inst, to_inst: to_inst, dep_kind: dep_kind)
+
+
+struct CircularWarning:
+    cycle_path: text         # Cycle path (e.g., "Node$T->Option$Node$T->Node$T")
+    severity: text           # Severity level
+
+
+# ============================================================================
+# CircularWarning Methods (was: impl CircularWarning:)
+# ============================================================================
+
+fn circularwarning_new(cycle_path: text, severity: text) -> CircularWarning:
+        CircularWarning(cycle_path: cycle_path, severity: severity)
+
+
+struct CircularError:
+    cycle_path: text         # Cycle path (e.g., "A$T->B$T->C$T->A$T")
+    error_code: text         # Error code (e.g., "E0420", "E0421")
+
+
+# ============================================================================
+# CircularError Methods (was: impl CircularError:)
+# ============================================================================
+
+fn circularerror_new(cycle_path: text, error_code: text) -> CircularError:
+        CircularError(cycle_path: cycle_path, error_code: error_code)
+
+
+# ============================================================================
+# Main Metadata Container
+# ============================================================================
+
+struct NoteSdnMetadata:
+    instantiations: [InstantiationEntry]
+    possible: [PossibleInstantiationEntry]
+    type_inferences: [TypeInferenceEntry]
+    dependencies: [DependencyEdge]
+    circular_warnings: [CircularWarning]
+    circular_errors: [CircularError]
+    # DESUGARED: build_metadata: BuildMetadata?
+    has_build_metadata: bool
+    build_metadata_value: BuildMetadata
+
+
+# ============================================================================
+# NoteSdnMetadata Methods (was: impl NoteSdnMetadata:)
+# ============================================================================
+
+fn notesdnmetadata_new() -> NoteSdnMetadata:
+        NoteSdnMetadata(
+            instantiations: [],
+            possible: [],
+            type_inferences: [],
+            dependencies: [],
+            circular_warnings: [],
+            circular_errors: [],
+            has_build_metadata: false,  # DESUGARED: build_metadata: nil
+        )
+
+
+fn notesdnmetadata_with_build_metadata(build_metadata: BuildMetadata) -> NoteSdnMetadata:
+        NoteSdnMetadata(
+            instantiations: [],
+            possible: [],
+            type_inferences: [],
+            dependencies: [],
+            circular_warnings: [],
+            circular_errors: [],
+            # DESUGARED: build_metadata: Some(build_metadata)
+            has_build_metadata: true,
+            build_metadata_value: build_metadata
+        )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn escape_sdn(s: text) -> text:
+    # Escape special characters for SDN format.
+    s.replace("\\", "\\\\")
+     .replace("\"", "\\\"")
+     .replace("\n", "\\n")
+     .replace("\r", "\\r")
+     .replace("\t", "\\t")

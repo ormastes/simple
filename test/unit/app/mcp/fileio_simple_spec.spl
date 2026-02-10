@@ -1,0 +1,75 @@
+"""
+# MCP FileIO Simple Intensive Specification
+
+Covers protection logic and basic read/write handlers
+in `src/app/mcp/fileio_simple.spl`.
+"""
+
+use app.io.mod.{shell}
+import app.mcp.fileio_simple
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+fn read_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+
+describe "FileIO Simple - Protection Rules":
+    it "protects critical files":
+        expect(check_protection("CLAUDE.md", "write")).to_contain("DENIED")
+        expect(check_protection("CLAUDE.md", "read")).to_equal("ALLOWED")
+
+    it "redirects test files and shell scripts":
+        expect(check_protection("test_file.txt", "write")).to_contain("REDIRECT")
+        expect(check_protection("mcp_test_output.txt", "write")).to_contain("REDIRECT")
+        expect(check_protection("script.sh", "write")).to_contain("REDIRECT")
+
+    it "denies version control and lock files":
+        expect(check_protection(".git/config", "write")).to_contain("DENIED")
+        expect(check_protection(".jj/abc", "write")).to_contain("DENIED")
+        expect(check_protection("cache.lock", "write")).to_contain("DENIED")
+
+    it "requires atomic writes for sdn":
+        expect(check_protection("data.sdn", "write")).to_contain("ATOMIC")
+
+    it "allows build and tmp directories":
+        expect(check_protection("build/output.txt", "write")).to_equal("ALLOWED")
+        expect(check_protection("tmp/output.txt", "write")).to_equal("ALLOWED")
+        expect(check_protection(".fileio_temp/output.txt", "write")).to_equal("ALLOWED")
+
+    it "denies root-level files by default":
+        expect(check_protection("root.txt", "write")).to_contain("DENIED")
+
+    it "allows subdirectories by default":
+        expect(check_protection("src/file.txt", "write")).to_equal("ALLOWED")
+
+
+describe "FileIO Simple - Handlers":
+    it "handles safe_write in each mode":
+        shell("mkdir -p .fileio_temp")
+        shell("mkdir -p tmp")
+        val allowed = handle_safe_write("tmp/mcp_simple_allowed.txt", "ok")
+        expect(allowed.starts_with("OK:" )).to_equal(true)
+        val denied = handle_safe_write("CLAUDE.md", "x")
+        expect(denied.starts_with("ERROR:" )).to_equal(true)
+        val atomic = handle_safe_write("data.sdn", "x")
+        expect(atomic.contains("Atomic write required")).to_equal(true)
+        val redirected = handle_safe_write("test_file.txt", "x")
+        expect(redirected.contains("temp" )).to_equal(true)
+        expect(rt_file_exists(".fileio_temp/test_file.txt")).to_equal(true)
+
+    it "handles safe_read":
+        val path = "/tmp/mcp_simple_read.txt"
+        rt_file_write_text(path, "read")
+        val ok = handle_safe_read(path)
+        expect(ok.starts_with("OK:" )).to_equal(true)
+        val missing = handle_safe_read("/tmp/mcp_simple_missing.txt")
+        expect(missing.contains("File not found")).to_equal(true)
+        val denied = handle_safe_read("README.md")
+        expect(denied.starts_with("ERROR:" )).to_equal(true)
+
+    it "handles check_protection handler":
+        val resp = handle_check_protection("data.sdn")
+        expect(resp.contains("PROTECTION:" )).to_equal(true)

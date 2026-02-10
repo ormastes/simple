@@ -1,0 +1,245 @@
+# Compiler Configuration
+#
+# Configuration types and loaders for the compiler.
+# Supports: .sdn files, env vars, CLI args, profile selection.
+
+use compiler.ffi (env_get)
+
+# ============================================================================
+# Profile
+# ============================================================================
+
+enum CompilerProfile:
+    """Compilation profile controlling backend selection and logging."""
+    Dev      # FullHirInst + DebugLogger
+    Test     # FullHirInst + TestLogger (deterministic)
+    Prod     # FullHirInst + ProductionLogger
+    Sdn      # SdnHirInst (no-op) + SdnLogger
+
+
+# ============================================================================
+# CompilerProfile Methods (was: impl CompilerProfile:)
+# ============================================================================
+
+fn compilerprofile_from_text(s: text) -> CompilerProfile:
+        match s_lower(s):
+            case "dev" | "development": CompilerProfile.Dev
+            case "test" | "testing": CompilerProfile.Test
+            case "prod" | "production" | "release": CompilerProfile.Prod
+            case "sdn" | "data": CompilerProfile.Sdn
+            case _: CompilerProfile.Dev
+
+
+# ============================================================================
+# Config (key-value bag)
+# ============================================================================
+
+struct Config:
+    """Runtime configuration."""
+    values: Dict<text, text>
+
+    static fn default() -> Config:
+        Config(values: {})
+
+    fn get(self, key: text) -> has_text:
+        self.values_get(values, key)
+
+    me set(self, key: text, value: text):
+        self.values[key] = value
+
+# ============================================================================
+# CompilerConfig (unified config from all sources)
+# ============================================================================
+
+struct CompilerConfig:
+    """Unified compiler configuration from .sdn, env vars, and CLI args.
+
+    Precedence (highest first): CLI args > env vars > .sdn file > defaults.
+    """
+    profile: CompilerProfile
+    log_level: i64
+    type_inference: TypeInferenceConfig
+    values: Dict<text, text>
+    # Flags
+    use_rust_types: bool      # --use-rust-types fallback
+    use_rust_interp: bool     # --fast-interp Rust interpreter fallback
+    use_rust_lexer: bool      # --fast-lex Rust lexer fallback
+    deterministic: bool       # Deterministic mode (fixed seeds, sorted)
+    coverage_enabled: bool
+
+
+# ============================================================================
+# CompilerConfig Methods (was: impl CompilerConfig:)
+# ============================================================================
+
+fn compilerconfig_default() -> CompilerConfig:
+        CompilerConfig(
+            profile: CompilerProfile.Dev,
+            log_level: 0,
+            type_inference: TypeInferenceConfig__default(),
+            values: {},
+            use_rust_types: false,
+            use_rust_interp: false,
+            use_rust_lexer: false,
+            deterministic: false,
+            coverage_enabled: false
+        )
+
+
+fn compilerconfig_from_env() -> CompilerConfig:
+        """Load config from environment variables."""
+        var config = CompilerConfig__default()
+
+        val profile_env = env_get("SIMPLE_PROFILE")
+        if has_profile_env:
+            config.profile = CompilerProfile__from_text(profile_env_value)
+
+        val log_env = env_get("SIMPLE_LOG")
+        if has_log_env:
+            config.log_level = match log_env_value:
+                case "trace": 20
+                case "debug": 10
+                case "info": 4
+                case "warn": 2
+                case "error": 1
+                case _: 0
+
+        val det_env = env_get("SIMPLE_DETERMINISTIC")
+        if det_env.? and det_env_value == "1":
+            config.deterministic = true
+
+        val cov_env = env_get("SIMPLE_COVERAGE")
+        if cov_env.? and cov_env_value == "1":
+            config.coverage_enabled = true
+
+        config
+
+
+class Logger:
+    """Simple logger.
+
+    Log levels:
+      1 = Error, 2 = Warn, 4 = Info, 10 = Debug, 20 = Trace
+
+    Controlled by SIMPLE_LOG env var:
+      SIMPLE_LOG=debug  -> level 10
+      SIMPLE_LOG=trace  -> level 20
+      SIMPLE_LOG=info   -> level 4
+      SIMPLE_LOG=warn   -> level 2
+      SIMPLE_LOG=error  -> level 1
+      (unset)           -> level 0 (silent)
+    """
+    level: i64
+
+    static fn from_env() -> Logger:
+        """Create logger with level from SIMPLE_LOG env var."""
+        val env_val = env_get("SIMPLE_LOG")
+        val level = if has_env_val:
+            match env_val_value:
+                case "trace": 20
+                case "debug": 10
+                case "info": 4
+                case "warn": 2
+                case "error": 1
+                case _: 0
+        else:
+            0
+        Logger(level: level)
+
+    fn log(level: i64, prefix: text, message: text):
+        if level <= self.level:
+            print "[{prefix}] {message}"
+
+    fn trace(message: text):
+        self.log(20, "TRACE", message)
+
+    fn debug(message: text):
+        self.log(10, "DEBUG", message)
+
+    fn info(message: text):
+        self.log(4, "INFO", message)
+
+    fn warn(message: text):
+        self.log(2, "WARN", message)
+
+    fn error(message: text):
+        self.log(1, "ERROR", message)
+
+# ============================================================================
+# Type Inference Configuration
+# ============================================================================
+
+"""Default element type identifiers.
+
+These match the TypeId constants in the Rust compiler:
+- VOID = 0
+- I32 = 4
+- I64 = 5
+- F64 = 11
+- STRING = 12
+- ANY = 14
+"""
+enum TypeDefault:
+    Void        # TypeId(0)
+    Bool        # TypeId(1)
+    I8          # TypeId(2)
+    I16         # TypeId(3)
+    I32         # TypeId(4)
+    I64         # TypeId(5)
+    U8          # TypeId(6)
+    U16         # TypeId(7)
+    U32         # TypeId(8)
+    U64         # TypeId(9)
+    F32         # TypeId(10)
+    F64         # TypeId(11)
+    String      # TypeId(12)
+    Nil         # TypeId(13)
+    Any         # TypeId(14)
+
+
+# ============================================================================
+# TypeDefault Methods (was: impl TypeDefault:)
+# ============================================================================
+
+struct TypeInferenceConfig:
+    """Configuration for type inference of empty collections.
+
+    Configurable at:
+    1. Project level via simple.sdn type_inference section
+    2. Module level via type_defaults.sdn file
+    """
+    empty_array_default: TypeDefault
+    empty_vector_default: TypeDefault
+    empty_dict_key_default: TypeDefault
+    empty_dict_value_default: TypeDefault
+    strict_empty_collections: bool
+
+
+# ============================================================================
+# TypeInferenceConfig Methods (was: impl TypeInferenceConfig:)
+# ============================================================================
+
+fn typeinferenceconfig_default() -> TypeInferenceConfig:
+        """Default configuration: i32 for arrays, f64 for vectors."""
+        TypeInferenceConfig(
+            empty_array_default: TypeDefault.I32,
+            empty_vector_default: TypeDefault.F64,
+            empty_dict_key_default: TypeDefault.String,
+            empty_dict_value_default: TypeDefault.Any,
+            strict_empty_collections: false
+        )
+
+
+fn typeinferenceconfig_strict() -> TypeInferenceConfig:
+        """Strict mode: require explicit type annotations for empty collections."""
+        TypeInferenceConfig(
+            empty_array_default: TypeDefault.I32,
+            empty_vector_default: TypeDefault.F64,
+            empty_dict_key_default: TypeDefault.String,
+            empty_dict_value_default: TypeDefault.Any,
+            strict_empty_collections: true
+        )
+
+
+export CompilerProfile, Config, CompilerConfig, Logger
+export TypeDefault, TypeInferenceConfig

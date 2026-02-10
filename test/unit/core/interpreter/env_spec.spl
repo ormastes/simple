@@ -1,0 +1,123 @@
+# Core Interpreter — Environment Tests
+use core.interpreter.value.{val_reset, val_make_nil, val_make_int, val_make_text, val_get_int}
+use core.interpreter.env.{env_init, env_reset, env_push_scope, env_pop_scope, env_scope_depth}
+use core.interpreter.env.{env_define, env_assign, env_lookup, env_define_global, env_lookup_global}
+
+describe "Core Interpreter Environment":
+    before_each:
+        val_reset()
+        env_init()
+
+    describe "basic define and lookup":
+        it "defines and looks up a variable":
+            val v = val_make_int(42)
+            env_define("x", v)
+            expect(val_get_int(env_lookup("x"))).to_equal(42)
+
+        it "returns -1 for undefined variable":
+            expect(env_lookup("undefined")).to_equal(-1)
+
+        it "overwrites existing variable in same scope":
+            env_define("x", val_make_int(1))
+            env_define("x", val_make_int(2))
+            expect(val_get_int(env_lookup("x"))).to_equal(2)
+
+    describe "scope management":
+        it "starts with depth 1":
+            expect(env_scope_depth()).to_equal(1)
+
+        it "push increases depth":
+            env_push_scope()
+            expect(env_scope_depth()).to_equal(2)
+
+        it "pop decreases depth":
+            env_push_scope()
+            env_pop_scope()
+            expect(env_scope_depth()).to_equal(1)
+
+        it "inner scope shadows outer":
+            env_define("x", val_make_int(1))
+            env_push_scope()
+            env_define("x", val_make_int(2))
+            expect(val_get_int(env_lookup("x"))).to_equal(2)
+            env_pop_scope()
+            expect(val_get_int(env_lookup("x"))).to_equal(1)
+
+        it "inner scope sees outer variables":
+            env_define("x", val_make_int(10))
+            env_push_scope()
+            expect(val_get_int(env_lookup("x"))).to_equal(10)
+            env_pop_scope()
+
+        it "outer scope does not see inner variables":
+            env_push_scope()
+            env_define("inner_only", val_make_int(99))
+            env_pop_scope()
+            expect(env_lookup("inner_only")).to_equal(-1)
+
+    describe "assignment":
+        it "assigns to existing variable":
+            env_define("x", val_make_int(1))
+            val ok = env_assign("x", val_make_int(2))
+            expect(ok).to_equal(true)
+            expect(val_get_int(env_lookup("x"))).to_equal(2)
+
+        it "assigns to outer scope variable":
+            env_define("x", val_make_int(1))
+            env_push_scope()
+            val ok = env_assign("x", val_make_int(99))
+            expect(ok).to_equal(true)
+            expect(val_get_int(env_lookup("x"))).to_equal(99)
+            env_pop_scope()
+            expect(val_get_int(env_lookup("x"))).to_equal(99)
+
+        it "returns false for undefined variable":
+            val ok = env_assign("nope", val_make_int(1))
+            expect(ok).to_equal(false)
+
+    describe "globals":
+        it "defines and looks up global":
+            env_define_global("G", val_make_int(100))
+            expect(val_get_int(env_lookup_global("G"))).to_equal(100)
+
+        it "global accessible from inner scopes":
+            env_define_global("G", val_make_int(100))
+            env_push_scope()
+            env_push_scope()
+            expect(val_get_int(env_lookup("G"))).to_equal(100)
+            env_pop_scope()
+            env_pop_scope()
+
+        it "assigns to global via env_assign":
+            env_define_global("G", val_make_int(1))
+            val ok = env_assign("G", val_make_int(2))
+            expect(ok).to_equal(true)
+            expect(val_get_int(env_lookup_global("G"))).to_equal(2)
+
+        it "overwrites existing global":
+            env_define_global("G", val_make_int(1))
+            env_define_global("G", val_make_int(2))
+            expect(val_get_int(env_lookup_global("G"))).to_equal(2)
+
+    describe "multiple variables":
+        it "handles multiple variables in one scope":
+            env_define("a", val_make_int(1))
+            env_define("b", val_make_int(2))
+            env_define("c", val_make_int(3))
+            expect(val_get_int(env_lookup("a"))).to_equal(1)
+            expect(val_get_int(env_lookup("b"))).to_equal(2)
+            expect(val_get_int(env_lookup("c"))).to_equal(3)
+
+        it "handles nested scopes with different vars":
+            env_define("x", val_make_int(1))
+            env_push_scope()
+            env_define("y", val_make_int(2))
+            env_push_scope()
+            env_define("z", val_make_int(3))
+            expect(val_get_int(env_lookup("x"))).to_equal(1)
+            expect(val_get_int(env_lookup("y"))).to_equal(2)
+            expect(val_get_int(env_lookup("z"))).to_equal(3)
+            env_pop_scope()
+            expect(env_lookup("z")).to_equal(-1)
+            env_pop_scope()
+            expect(env_lookup("y")).to_equal(-1)

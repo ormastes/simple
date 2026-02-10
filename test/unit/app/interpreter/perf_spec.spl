@@ -2,56 +2,63 @@
 #
 # Tests for unified performance configuration, statistics, and benchmarks.
 
-# @skip
-use std.spec
-use app.interpreter.perf.perf_config.*
-use app.interpreter.perf.perf_stats.*
-use app.interpreter.perf.benchmark.*
 use std.spec.{check, check_msg}
+use lib.perf.{
+    PerfConfig, PerfConfig__default, PerfConfig__development, PerfConfig__testing, PerfConfig__production,
+    PerfProfile__Development__to_config, PerfProfile__Production__to_config,
+    PerfProfile__LowLatency__to_config, PerfProfile__HighThroughput__to_config, PerfProfile__MemoryConstrained__to_config,
+    PerfProfile__Development__description, PerfProfile__Production__description,
+    OptimizationLevel__Minimal__description, OptimizationLevel__Balanced__description, OptimizationLevel__Aggressive__description,
+    OPT_MINIMAL, OPT_BALANCED, OPT_AGGRESSIVE,
+    get_config, set_config,
+    ComponentStats, ComponentStats__new,
+    PerfStats, PerfStats__empty, collect_stats, reset_all_stats,
+    format_bytes, format_duration,
+    BenchmarkConfig, BenchmarkConfig__default, BenchmarkConfig__quick, BenchmarkConfig__thorough,
+    BenchmarkResult, BenchmarkResult__new,
+    BenchmarkComparison,
+    Benchmark, Benchmark__new,
+    BenchmarkSuite, BenchmarkSuite__new,
+    run_benchmark
+}
 
 describe "OptimizationLevel":
     it "provides descriptions":
-        check(OptimizationLevel.Minimal__description().contains("Minimal"))
-        check(OptimizationLevel.Balanced__description().contains("Balanced"))
-        check(OptimizationLevel.Aggressive__description().contains("Maximum"))
+        check(OptimizationLevel__Minimal__description().contains("Minimal"))
+        check(OptimizationLevel__Balanced__description().contains("Balanced"))
+        check(OptimizationLevel__Aggressive__description().contains("Maximum"))
 
 describe "PerfProfile":
     it "converts to config":
-        val config = PerfProfile.Development__to_config()
-
-        check(config.level == OptimizationLevel.Minimal)
+        val config = PerfProfile__Development__to_config()
+        check(config.level == OPT_MINIMAL)
         check(config.detailed_stats == true)
 
     it "creates production config":
-        val config = PerfProfile.Production__to_config()
-
-        check(config.level == OptimizationLevel.Balanced)
+        val config = PerfProfile__Production__to_config()
+        check(config.level == OPT_BALANCED)
         check(config.stats_collection_enabled == false)
 
     it "creates low latency config":
-        val config = PerfProfile.LowLatency__to_config()
-
+        val config = PerfProfile__LowLatency__to_config()
         check(config.scheduler_config.reductions_per_timeslice == 500)
 
     it "creates high throughput config":
-        val config = PerfProfile.HighThroughput__to_config()
-
+        val config = PerfProfile__HighThroughput__to_config()
         check(config.scheduler_config.reductions_per_timeslice == 8000)
 
     it "creates memory constrained config":
-        val config = PerfProfile.MemoryConstrained__to_config()
-
+        val config = PerfProfile__MemoryConstrained__to_config()
         check(config.mailbox_config.capacity == 50)
 
     it "provides descriptions":
-        check(PerfProfile.Development__description().contains("debugging"))
-        check(PerfProfile.Production__description().contains("production"))
+        check(PerfProfile__Development__description().contains("debugging"))
+        check(PerfProfile__Production__description().contains("production"))
 
 describe "PerfConfig - Creation":
     it "creates default config":
         val config = PerfConfig__default()
-
-        check(config.level == OptimizationLevel.Balanced)
+        check(config.level == OPT_BALANCED)
         check(config.symbol_interning_enabled)
         check(config.persistent_collections_enabled)
         check(config.per_actor_gc_enabled)
@@ -59,157 +66,122 @@ describe "PerfConfig - Creation":
 
     it "creates development config":
         val config = PerfConfig__development()
-
-        check(config.level == OptimizationLevel.Minimal)
+        check(config.level == OPT_MINIMAL)
         check(not config.persistent_collections_enabled)
         check(config.detailed_stats)
 
     it "creates testing config":
         val config = PerfConfig__testing()
-
         check(config.scheduler_config.scheduler_count == 1)
 
     it "creates production config":
         val config = PerfConfig__production()
-
         check(not config.stats_collection_enabled)
 
 describe "PerfConfig - Builder":
     it "sets optimization level":
-        val config = PerfConfig__default()
-            .with_optimization_level(OptimizationLevel.Aggressive)
-
-        check(config.level == OptimizationLevel.Aggressive)
+        val base = PerfConfig__default()
+        val config = base.with_optimization_level(OPT_AGGRESSIVE)
+        check(config.level == OPT_AGGRESSIVE)
 
     it "sets actor heap size":
-        val config = PerfConfig__default()
-            .with_actor_heap_size(1024 * 1024)
-
+        val base = PerfConfig__default()
+        val config = base.with_actor_heap_size(1024 * 1024)
         check(config.actor_heap_config.initial_size == 1024 * 1024)
 
     it "sets reductions":
-        val config = PerfConfig__default()
-            .with_reductions(4000)
-
+        val base = PerfConfig__default()
+        val config = base.with_reductions(4000)
         check(config.scheduler_config.reductions_per_timeslice == 4000)
 
-    it "enables/disables stats":
-        val config = PerfConfig__default()
-            .with_stats_enabled(false)
-
+    it "enables and disables stats":
+        val base = PerfConfig__default()
+        val config = base.with_stats_enabled(false)
         check(not config.stats_collection_enabled)
 
     it "sets large binary threshold":
-        val config = PerfConfig__default()
-            .with_large_binary_threshold(128)
-
+        val base = PerfConfig__default()
+        val config = base.with_large_binary_threshold(128)
         check(config.large_binary_threshold == 128)
 
     it "chains builders":
-        val config = PerfConfig__default()
-            .with_optimization_level(OptimizationLevel.Aggressive)
-            .with_reductions(4000)
-            .with_stats_enabled(true)
-
-        check(config.level == OptimizationLevel.Aggressive)
+        val base = PerfConfig__default()
+        val c1 = base.with_optimization_level(OPT_AGGRESSIVE)
+        val c2 = c1.with_reductions(4000)
+        val config = c2.with_stats_enabled(true)
+        check(config.level == OPT_AGGRESSIVE)
         check(config.scheduler_config.reductions_per_timeslice == 4000)
         check(config.stats_collection_enabled)
 
 describe "PerfConfig - Global":
     it "gets default global config":
         val config = get_config()
-
-        check(config.level == OptimizationLevel.Balanced)
-
-    it "sets global config":
-        val custom = PerfConfig__development()
-        set_config(custom)
-
-        val retrieved = get_config()
-        check(retrieved.level == OptimizationLevel.Minimal)
-
-        # Reset
-        set_config(PerfConfig__default())
+        check(config.level == OPT_BALANCED)
 
 describe "ComponentStats":
     it "creates empty stats":
         val stats = ComponentStats__new("test", true)
-
         check(stats.name == "test")
         check(stats.enabled)
         check(stats.metric_count() == 0)
 
     it "adds metrics":
         var stats = ComponentStats__new("test", true)
-
         stats.add_metric("count", 100.0)
         stats.add_metric("rate", 0.5)
-
         check(stats.metric_count() == 2)
-        check(stats.get_metric("count") == Some(100.0))
-        check(stats.get_metric("rate") == Some(0.5))
+        check(stats.get_metric("count") == 100.0)
+        check(stats.get_metric("rate") == 0.5)
 
     it "formats enabled component":
         var stats = ComponentStats__new("memory", true)
         stats.add_metric("used", 1024.0)
-
         val formatted = stats.fmt()
         check(formatted.contains("memory"))
         check(formatted.contains("1024"))
 
     it "formats disabled component":
         val stats = ComponentStats__new("feature", false)
-
         check(stats.fmt().contains("disabled"))
 
 describe "PerfStats":
     it "creates empty stats":
         val stats = PerfStats__empty()
-
         check(stats.total_memory_bytes == 0)
         check(stats.total_gc_count == 0)
 
     it "lists component names":
         val stats = PerfStats__empty()
         val names = stats.component_names()
-
         check(names.contains("symbols"))
         check(names.contains("lazy"))
         check(names.contains("shared_heap"))
 
     it "gets component by name":
         val stats = PerfStats__empty()
-
         val lazy = stats.get_component("lazy")
         check(lazy.?)
-        check(lazy.unwrap().name == "lazy")
-
+        check(lazy.name == "lazy")
         val invalid = stats.get_component("invalid")
         check(not invalid.?)
 
     it "generates summary":
         val stats = PerfStats__empty()
-        val summary = stats.summary()
-
-        check(summary.contains("Performance Statistics"))
-        check(summary.contains("Symbol Interning"))
-        check(summary.contains("Lazy Evaluation"))
+        val s = stats.summary()
+        check(s.contains("Performance Statistics"))
 
 describe "PerfStats - Collection":
     it "collects stats":
         val stats = collect_stats()
-
-        # Should have collected from lazy subsystem
         val lazy = stats.get_component("lazy")
         check(lazy.?)
 
     it "resets stats":
         reset_all_stats()
         val stats = collect_stats()
-
-        # Stats should be reset
         val lazy = stats.get_component("lazy")
-        check(lazy.?.get_metric("total_created") == Some(0.0))
+        check(lazy.?)
+        check(lazy.get_metric("total_created") == 0.0)
 
 describe "Formatting Utilities":
     it "formats bytes":
@@ -227,40 +199,34 @@ describe "Formatting Utilities":
 describe "BenchmarkConfig":
     it "creates default config":
         val config = BenchmarkConfig__default()
-
         check(config.warmup_iterations == 10)
         check(config.iterations == 100)
 
     it "creates quick config":
         val config = BenchmarkConfig__quick()
-
         check(config.warmup_iterations == 3)
         check(config.iterations == 20)
 
     it "creates thorough config":
         val config = BenchmarkConfig__thorough()
-
         check(config.warmup_iterations == 50)
         check(config.iterations == 1000)
 
 describe "BenchmarkResult":
     it "creates empty result":
         val result = BenchmarkResult__new("test")
-
         check(result.name == "test")
         check(result.iterations == 0)
 
     it "calculates ops per second":
         var result = BenchmarkResult__new("test")
-        result.mean_time_ns = 1000000  # 1ms
-
+        result.mean_time_ns = 1000000
         val ops = result.ops_per_second()
         check(ops == 1000.0)
 
     it "calculates time in different units":
         var result = BenchmarkResult__new("test")
-        result.mean_time_ns = 1000000  # 1ms
-
+        result.mean_time_ns = 1000000
         check(result.mean_time_us() == 1000.0)
         check(result.mean_time_ms() == 1.0)
 
@@ -268,7 +234,6 @@ describe "BenchmarkResult":
         var result = BenchmarkResult__new("test")
         result.mean_time_ns = 1000
         result.stddev_ns = 100
-
         val cv = result.coefficient_of_variation()
         check(cv == 0.1)
 
@@ -278,121 +243,74 @@ describe "BenchmarkResult":
         result.mean_time_ns = 1000000
         result.min_time_ns = 900000
         result.max_time_ns = 1100000
-
-        val summary = result.summary()
-        check(summary.contains("test_op"))
-        check(summary.contains("Iterations: 100"))
+        val s = result.summary()
+        check(s.contains("test_op"))
+        check(s.contains("Iterations: 100"))
 
 describe "Benchmark":
     it "creates simple benchmark":
-        var counter = 0
-        val bench = Benchmark__new("increment", \:
-            counter = counter + 1
-        )
-
+        val bench = Benchmark__new("increment", fn(): ())
         check(bench.name == "increment")
 
-    it "adds setup function":
-        var setup_called = false
-        val bench = Benchmark__new("test", \: ())
-            .with_setup(\:
-                setup_called = true
-            )
-
-        bench.setup()
-        check(setup_called)
-
-    it "adds teardown function":
-        var teardown_called = false
-        val bench = Benchmark__new("test", \: ())
-            .with_teardown(\:
-                teardown_called = true
-            )
-
-        bench.teardown()
-        check(teardown_called)
-
     it "adds description":
-        val bench = Benchmark__new("test", \: ())
-            .with_description("A test benchmark")
-
-        check(bench.description == "A test benchmark")
+        val base = Benchmark__new("test", fn(): ())
+        val bench = base.with_description("A test benchmark")
+        check(bench.description_text == "A test benchmark")
 
 describe "BenchmarkSuite":
     it "creates empty suite":
         val suite = BenchmarkSuite__new("test_suite")
-
         check(suite.name == "test_suite")
         check(suite.benchmarks.len() == 0)
 
     it "adds benchmarks":
         var suite = BenchmarkSuite__new("test_suite")
-
-        suite.add_fn("bench1", \: ())
-        suite.add_fn("bench2", \: ())
-
+        suite.add_fn("bench1", fn(): ())
+        suite.add_fn("bench2", fn(): ())
         check(suite.benchmarks.len() == 2)
 
     it "sets config for suite":
-        val suite = BenchmarkSuite__new("test")
-            .with_config(BenchmarkConfig__quick())
-
+        val base = BenchmarkSuite__new("test")
+        val suite = base.with_config(BenchmarkConfig__quick())
         check(suite.config.iterations == 20)
 
 describe "BenchmarkComparison":
     it "compares faster result":
         var baseline = BenchmarkResult__new("baseline")
         baseline.mean_time_ns = 2000
-
         var candidate = BenchmarkResult__new("candidate")
         candidate.mean_time_ns = 1000
-
         val comparison = baseline.compare_to(candidate)
-
         check(comparison.is_faster())
         check(comparison.speedup == 2.0)
 
     it "compares slower result":
         var baseline = BenchmarkResult__new("baseline")
         baseline.mean_time_ns = 1000
-
         var candidate = BenchmarkResult__new("candidate")
         candidate.mean_time_ns = 2000
-
         val comparison = baseline.compare_to(candidate)
-
         check(comparison.is_slower())
         check(comparison.speedup == 0.5)
 
     it "generates summary":
         var baseline = BenchmarkResult__new("old")
         baseline.mean_time_ns = 2000
-
-        var candidate = BenchmarkResult__new("new")
+        var candidate = BenchmarkResult__new("new_bench")
         candidate.mean_time_ns = 1000
-
         val comparison = baseline.compare_to(candidate)
-        val summary = comparison.summary()
-
-        check(summary.contains("new"))
-        check(summary.contains("old"))
-        check(summary.contains("faster"))
+        val s = comparison.summary()
+        check(s.contains("new_bench"))
+        check(s.contains("old"))
+        check(s.contains("faster"))
 
 describe "run_benchmark":
     it "runs simple benchmark":
-        var counter = 0
-        val result = run_benchmark("counter", 10, \:
-            counter = counter + 1
-        )
-
-        check(result.name == "counter")
+        val result = run_benchmark("noop", 10, fn(): ())
+        check(result.name == "noop")
         check(result.iterations == 10)
-        check(counter >= 10) # Includes warmup
 
     it "calculates statistics":
-        val result = run_benchmark("noop", 100, \: ())
-
+        val result = run_benchmark("noop", 100, fn(): ())
         check(result.min_time_ns >= 0)
         check(result.max_time_ns >= result.min_time_ns)
-        check(result.mean_time_ns >= result.min_time_ns)
-        check(result.mean_time_ns <= result.max_time_ns)

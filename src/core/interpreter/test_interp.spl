@@ -1,0 +1,210 @@
+# Core Interpreter — Integration Test
+#
+# Tests all core interpreter modules together.
+# Run via seed compilation:
+#   build/seed src/core/tokens.spl src/core/lexer.spl src/core/parser.spl \
+#     src/core/ast.spl src/core/interpreter/value.spl \
+#     src/core/interpreter/env.spl src/core/interpreter/ops.spl \
+#     src/core/interpreter/eval.spl src/core/interpreter/mod.spl \
+#     src/core/interpreter/test_interp.spl > /tmp/test_interp.cpp
+#   g++ -std=c++20 -o /tmp/test_interp /tmp/test_interp.cpp seed/runtime.c -Iseed -w
+#   /tmp/test_interp
+#
+# Or via runtime interpreter:
+#   bin/release/simple src/core/interpreter/test_interp.spl
+
+var test_pass: i64 = 0
+var test_fail: i64 = 0
+
+fn check_int(label: text, actual: i64, expected: i64):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        print "FAIL: {label} — expected {expected}, got {actual}"
+
+fn check_str(label: text, actual: text, expected: text):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        print "FAIL: {label} — expected '{expected}', got '{actual}'"
+
+fn check_bool(label: text, actual: bool, expected: bool):
+    if actual == expected:
+        test_pass = test_pass + 1
+    else:
+        test_fail = test_fail + 1
+        var actual_s = "false"
+        if actual: actual_s = "true"
+        var expected_s = "false"
+        if expected: expected_s = "true"
+        print "FAIL: {label} — expected {expected_s}, got {actual_s}"
+
+# ===== Test 1: Value Arena =====
+print "--- Value Arena ---"
+
+val_reset()
+val nil_id = val_make_nil()
+check_int("nil kind", val_get_kind(nil_id), VAL_NIL)
+check_bool("nil truthy", val_is_truthy(nil_id), false)
+check_str("nil text", val_to_text(nil_id), "nil")
+
+val bool_t = val_make_bool(true)
+val bool_f = val_make_bool(false)
+check_int("bool true kind", val_get_kind(bool_t), VAL_BOOL)
+check_bool("bool true get", val_get_bool(bool_t), true)
+check_bool("bool true truthy", val_is_truthy(bool_t), true)
+check_bool("bool false truthy", val_is_truthy(bool_f), false)
+check_str("bool true text", val_to_text(bool_t), "true")
+check_str("bool false text", val_to_text(bool_f), "false")
+
+val int_42 = val_make_int(42)
+val int_0 = val_make_int(0)
+check_int("int kind", val_get_kind(int_42), VAL_INT)
+check_int("int get", val_get_int(int_42), 42)
+check_bool("int 42 truthy", val_is_truthy(int_42), true)
+check_bool("int 0 truthy", val_is_truthy(int_0), false)
+check_str("int text", val_to_text(int_42), "42")
+
+val text_hello = val_make_text("hello")
+val text_empty = val_make_text("")
+check_int("text kind", val_get_kind(text_hello), VAL_TEXT)
+check_str("text get", val_get_text(text_hello), "hello")
+check_bool("text hello truthy", val_is_truthy(text_hello), true)
+check_bool("text empty truthy", val_is_truthy(text_empty), false)
+
+var arr_elems: [i64] = []
+arr_elems.push(val_make_int(1))
+arr_elems.push(val_make_int(2))
+arr_elems.push(val_make_int(3))
+val arr_id = val_make_array(arr_elems)
+check_int("array kind", val_get_kind(arr_id), VAL_ARRAY)
+check_bool("array truthy", val_is_truthy(arr_id), true)
+check_str("array text", val_to_text(arr_id), "[1, 2, 3]")
+
+var s_fields: [text] = []
+s_fields.push("x")
+s_fields.push("y")
+var s_values: [i64] = []
+s_values.push(val_make_int(10))
+s_values.push(val_make_int(20))
+val struct_id = val_make_struct("Point", s_fields, s_values)
+check_int("struct kind", val_get_kind(struct_id), VAL_STRUCT)
+check_str("struct name", val_get_struct_name(struct_id), "Point")
+val x_val = val_struct_get_field(struct_id, "x")
+check_int("struct field x", val_get_int(x_val), 10)
+val y_val = val_struct_get_field(struct_id, "y")
+check_int("struct field y", val_get_int(y_val), 20)
+
+val func_id = val_make_function("foo", 0)
+check_int("func kind", val_get_kind(func_id), VAL_FUNCTION)
+check_str("func name", val_get_func_name(func_id), "foo")
+
+# Equality
+check_bool("nil == nil", val_equals(val_make_nil(), val_make_nil()), true)
+check_bool("42 == 42", val_equals(val_make_int(42), val_make_int(42)), true)
+check_bool("42 != 43", val_equals(val_make_int(42), val_make_int(43)), false)
+check_bool("hello == hello", val_equals(val_make_text("hello"), val_make_text("hello")), true)
+check_bool("true == true", val_equals(val_make_bool(true), val_make_bool(true)), true)
+
+# ===== Test 2: Environment =====
+print "--- Environment ---"
+
+env_init()
+env_define("x", val_make_int(10))
+check_int("lookup x", val_get_int(env_lookup("x")), 10)
+
+env_assign("x", val_make_int(20))
+check_int("assign x", val_get_int(env_lookup("x")), 20)
+
+env_push_scope()
+env_define("y", val_make_int(30))
+check_int("inner y", val_get_int(env_lookup("y")), 30)
+check_int("inner x (outer)", val_get_int(env_lookup("x")), 20)
+
+env_pop_scope()
+check_int("outer x after pop", val_get_int(env_lookup("x")), 20)
+check_int("y gone after pop", env_lookup("y"), -1)
+
+env_define_global("g", val_make_int(100))
+check_int("global g", val_get_int(env_lookup_global("g")), 100)
+
+# ===== Test 3: Operations =====
+print "--- Operations ---"
+
+val_reset()
+val a10 = val_make_int(10)
+val b3 = val_make_int(3)
+
+val sum = val_add(a10, b3)
+check_int("10 + 3", val_get_int(sum), 13)
+
+val diff = val_sub(a10, b3)
+check_int("10 - 3", val_get_int(diff), 7)
+
+val prod = val_mul(a10, b3)
+check_int("10 * 3", val_get_int(prod), 30)
+
+val quot = val_div(a10, b3)
+check_int("10 / 3", val_get_int(quot), 3)
+
+val remainder = val_mod(a10, b3)
+check_int("10 % 3", val_get_int(remainder), 1)
+
+val neg = val_negate(a10)
+check_int("-10", val_get_int(neg), -10)
+
+# Comparison
+val lt_result = val_lt(b3, a10)
+check_bool("3 < 10", val_get_bool(lt_result), true)
+val gt_result = val_gt(a10, b3)
+check_bool("10 > 3", val_get_bool(gt_result), true)
+val eq_result = val_eq(a10, a10)
+check_bool("10 == 10", val_get_bool(eq_result), true)
+val neq_result = val_neq(a10, b3)
+check_bool("10 != 3", val_get_bool(neq_result), true)
+
+# Logical
+val and_result = val_and(val_make_bool(true), val_make_bool(false))
+check_bool("true and false", val_get_bool(and_result), false)
+val or_result = val_or(val_make_bool(true), val_make_bool(false))
+check_bool("true or false", val_get_bool(or_result), true)
+val not_result = val_not(val_make_bool(true))
+check_bool("not true", val_get_bool(not_result), false)
+
+# Text concat
+val hello = val_make_text("hello")
+val world = val_make_text(" world")
+val hw = val_add(hello, world)
+check_str("text +", val_get_text(hw), "hello world")
+
+# Division by zero
+val div0 = val_div(a10, val_make_int(0))
+check_int("div by zero returns -1", div0, -1)
+
+# ===== Test 4: Binary Op Dispatch =====
+print "--- Binary Op Dispatch ---"
+
+val_reset()
+val x = val_make_int(5)
+val y = val_make_int(3)
+check_int("binop +", val_get_int(val_binary_op(60, x, y)), 8)   # TOK_PLUS
+check_int("binop -", val_get_int(val_binary_op(61, x, y)), 2)   # TOK_MINUS
+check_int("binop *", val_get_int(val_binary_op(62, x, y)), 15)  # TOK_STAR
+check_int("binop /", val_get_int(val_binary_op(63, x, y)), 1)   # TOK_SLASH
+check_int("binop %", val_get_int(val_binary_op(64, x, y)), 2)   # TOK_PERCENT
+check_bool("binop ==", val_get_bool(val_binary_op(80, x, x)), true)  # TOK_EQ
+check_bool("binop !=", val_get_bool(val_binary_op(81, x, y)), true)  # TOK_NOT_EQ
+check_bool("binop <", val_get_bool(val_binary_op(82, y, x)), true)   # TOK_LT
+check_bool("binop >", val_get_bool(val_binary_op(83, x, y)), true)   # TOK_GT
+
+# ===== Summary =====
+print ""
+print "--- Results ---"
+print "Pass: {test_pass}"
+print "Fail: {test_fail}"
+if test_fail == 0:
+    print "ALL TESTS PASSED"
+else:
+    print "SOME TESTS FAILED"

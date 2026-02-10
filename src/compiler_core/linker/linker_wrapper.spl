@@ -1,0 +1,820 @@
+# Linker Wrapper - Unified Linking API
+#
+# This module provides a single entry point for all linking operations,
+# replacing the hardcoded `cc` calls in driver.spl with platform-aware
+# linker selection and adding self-contained executable SMF support.
+#
+# Three linking modes:
+#   link_to_native()         - Platform-detected native binary (mold/lld/ld)
+#   link_to_smf()            - SMF module file
+#   link_to_self_contained() - Runtime + SMF data in one executable
+#
+# Self-contained binary format (trailer-based):
+#   [Runtime Binary] [SMF Data] [32-byte Trailer]
+#   Trailer: "SMFE"(4) + smf_offset(8) + smf_size(8) + checksum(8) + version(4)
+#
+# Interpreter-safe: no generics (<>) used.
+
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, env_get, host_os, host_arch, process_run, cwd}
+
+use compiler.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler.linker.smf_enums.{Platform, Arch}
+
+# ============================================================================
+# Configuration Structs
+# ============================================================================
+
+struct NativeLinkConfig:
+    libraries: [text]
+    library_paths: [text]
+    runtime_path: text       # Path to libsimple_compiler (empty = auto-detect)
+    pie: bool
+    debug: bool
+    verbose: bool
+    extra_flags: [text]
+
+fn NativeLinkConfig__default() -> NativeLinkConfig:
+    NativeLinkConfig(
+        libraries: [],
+        library_paths: [],
+        runtime_path: "",
+        pie: true,
+        debug: false,
+        verbose: false,
+        extra_flags: []
+    )
+
+struct CrtFiles:
+    crt1: text           # crt1.o or Scrt1.o (PIE)
+    crti: text           # crti.o
+    crtn: text           # crtn.o
+    crtbegin: text       # crtbegin.o or crtbeginS.o (PIE)
+    crtend: text         # crtend.o or crtendS.o (PIE)
+    dynamic_linker: text # e.g., /lib64/ld-linux-x86-64.so.2
+    lib_dirs: [text]     # System library search paths
+    found: bool
+
+struct SelfContainedConfig:
+    runtime_binary: text     # Path to bootstrap/simple binary (empty = auto-detect)
+    verbose: bool
+    strip: bool              # Strip debug symbols from output
+
+fn SelfContainedConfig__default() -> SelfContainedConfig:
+    SelfContainedConfig(
+        runtime_binary: "",
+        verbose: false,
+        strip: false
+    )
+
+# ============================================================================
+# Self-Contained Binary Constants
+# ============================================================================
+
+# Trailer magic bytes: "SMFE" (SMF Executable)
+val SMFE_MAGIC: [u8] = [83, 77, 70, 69]  # S=83, M=77, F=70, E=69
+val SMFE_TRAILER_SIZE: i64 = 32
+val SMFE_VERSION: i64 = 1
+
+# ============================================================================
+# Native Linking
+# ============================================================================
+
+fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    if object_files_len(object_files) == 0:
+        return Err("No object files to link")
+
+    val os = host_os()
+
+    # Platform-specific linking
+    if os == "windows":
+        return link_native_windows(object_files, output, config)
+
+    # Unix-like: Linux, macOS, FreeBSD
+    link_native_unix(object_files, output, config)
+
+fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    val os = host_os()
+    val arch = host_arch()
+
+    # Try to find platform linker (mold > lld > ld)
+    val linker_result = find_linker()
+    if linker_result_is_err(linker_result):
+        # Fall back to cc (always available on Unix)
+        return link_native_cc(object_files, output, config)
+
+    val linker_info = linker_result_value
+    val linker_path = linker_info[0]
+    val linker_type = linker_info[1]
+
+    # Discover CRT files needed for direct linker invocation
+    val crt = find_crt_files(config.pie, config.verbose)
+    if not crt.found:
+        if config.verbose:
+            print "[linker-wrapper] CRT files not found, falling back to cc"
+        return link_native_cc(object_files, output, config)
+
+    if config.verbose:
+        print "[linker-wrapper] Using {linker_type.to_string()} at {linker_path}"
+
+    # Build linker arguments in correct order
+    var args: [text] = []
+
+    # Output file
+    args.push("-o")
+    args_push(args, output)
+
+    # Emulation mode
+    if os == "linux":
+        if arch == "x86_64":
+            args.push("-m")
+            args.push("elf_x86_64")
+        elif arch == "aarch64":
+            args.push("-m")
+            args.push("aarch64linux")
+
+    # Dynamic linker
+    if crt.dynamic_linker != "":
+        args.push("-dynamic-linker")
+        args_push(args, crt.dynamic_linker)
+
+    # Hardening flags
+    args.push("--eh-frame-hdr")
+    args.push("--build-id")
+    args.push("--hash-style=gnu")
+    args.push("-z")
+    args.push("relro")
+    args.push("-z")
+    args.push("now")
+
+    # PIE
+    if config.pie:
+        args.push("-pie")
+
+    # CRT prologue: crt1.o, crti.o, crtbegin.o (before user objects)
+    args_push(args, crt.crt1)
+    args_push(args, crt.crti)
+    args_push(args, crt.crtbegin)
+
+    # User object files
+    for obj in object_files:
+        args_push(args, obj)
+
+    # Library search paths from CRT discovery
+    for dir in crt.lib_dirs:
+        args.push("-L")
+        args_push(args, dir)
+
+    # Library paths from config
+    for lp in config.library_paths:
+        args.push("-L")
+        args_push(args, lp)
+
+    # Auto-detect runtime library if not specified
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "":
+        args.push("-L")
+        args_push(args, runtime_dir)
+        args.push("-lsimple_compiler")
+        args.push("-rpath")
+        args_push(args, runtime_dir)
+
+    # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
+    if os == "linux":
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-ldl")
+        args.push("-lm")
+    elif os == "macos":
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-lm")
+        args.push("-lSystem")
+    elif os == "freebsd":
+        args.push("-lc")
+        args.push("-lpthread")
+        args.push("-lm")
+
+    # Libraries from config
+    for lib in config.libraries:
+        args.push("-l")
+        args_push(args, lib)
+
+    # Debug info
+    if config.debug:
+        args.push("-g")
+
+    # Extra flags
+    for flag in config.extra_flags:
+        args_push(args, flag)
+
+    # CRT epilogue: crtend.o, crtn.o (after libs)
+    args_push(args, crt.crtend)
+    args_push(args, crt.crtn)
+
+    # Execute linker
+    val exec_result = execute_linker(linker_path, args)
+    if exec_result_is_err(exec_result):
+        # Fallback to cc on failure
+        if config.verbose:
+            print "[linker-wrapper] Direct linker failed, falling back to cc: {exec_result.unwrap_err()}"
+        return link_native_cc(object_files, output, config)
+
+    if config.verbose:
+        val size = linker_file_size(output)
+        print "[linker-wrapper] Native binary: {output} ({size} bytes)"
+
+    Ok(output)
+
+fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # Fallback: use cc (gcc/clang) for linking
+    var cmd = "cc"
+    for obj in object_files:
+        cmd = cmd + " " + obj
+
+    # Library paths
+    for lp in config.library_paths:
+        cmd = cmd + " -L" + lp
+
+    # Auto-detect runtime library
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "":
+        runtime_dir = find_runtime_lib_dir()
+    if runtime_dir != "":
+        cmd = cmd + " -L{runtime_dir} -lsimple_compiler"
+        cmd = cmd + " -Wl,-rpath,{runtime_dir}"
+
+    # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
+    var os_name = shell("uname -s").stdout
+    os_name = os_name_trim(os_name)
+    if os_name == "Darwin":
+        cmd = cmd + " -lc -lpthread -lm -lSystem"
+    elif os_name == "FreeBSD":
+        cmd = cmd + " -lc -lpthread -lm"
+    else:
+        cmd = cmd + " -lc -lpthread -ldl -lm"
+
+    # Libraries from config
+    for lib in config.libraries:
+        cmd = cmd + " -l" + lib
+
+    # Extra flags
+    for flag in config.extra_flags:
+        cmd = cmd + " " + flag
+
+    cmd = cmd + " -o " + output
+
+    if config.verbose:
+        print "[linker-wrapper] cc command: {cmd}"
+
+    val result = shell(cmd)
+    if result.exit_code == 0:
+        Ok(output)
+    else:
+        val err_msg = result.stderr ?? "Unknown linking error"
+        Err("cc linking failed: {err_msg}")
+
+fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
+    # Windows linking via lld-link or MSVC link.exe
+    # Try lld-link first
+    val lld_check = shell("where lld-link 2>nul")
+    var linker_cmd = "link"
+    if lld_check.exit_code == 0:
+        linker_cmd = "lld-link"
+
+    var cmd = linker_cmd
+    for obj in object_files:
+        cmd = cmd + " " + obj
+
+    cmd = cmd + " /OUT:{output}"
+
+    # Libraries
+    for lib in config.libraries:
+        cmd = cmd + " {lib}.lib"
+
+    # Extra flags
+    for flag in config.extra_flags:
+        cmd = cmd + " " + flag
+
+    if config.verbose:
+        print "[linker-wrapper] Windows linker: {cmd}"
+
+    val result = shell(cmd)
+    if result.exit_code == 0:
+        Ok(output)
+    else:
+        val err_msg = result.stderr ?? "Unknown linking error"
+        Err("Windows linking failed: {err_msg}")
+
+# ============================================================================
+# CRT File Discovery
+# ============================================================================
+
+fn find_crt_files(pie: bool, verbose: bool) -> CrtFiles:
+    # Primary strategy: use cc -print-file-name=X
+    val cc_result = find_crt_files_via_cc(pie, verbose)
+    if cc_result.found:
+        return cc_result
+
+    # Fallback: probe well-known paths
+    val fallback_result = find_crt_files_fallback(pie, verbose)
+    if fallback_result.found:
+        return fallback_result
+
+    # Return empty (not found)
+    CrtFiles(
+        crt1: "", crti: "", crtn: "",
+        crtbegin: "", crtend: "",
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: [],
+        found: false
+    )
+
+fn find_crt_files_via_cc(pie: bool, verbose: bool) -> CrtFiles:
+    # Use cc -print-file-name to locate CRT files
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    val crt1 = cc_print_file(crt1_name)
+    val crti = cc_print_file("crti.o")
+    val crtn = cc_print_file("crtn.o")
+    val crtbegin = cc_print_file(crtbegin_name)
+    val crtend = cc_print_file(crtend_name)
+
+    # Validate: cc returns the bare filename if not found, absolute path if found
+    val all_found = crt1.contains("/") and crti.contains("/") and crtn.contains("/") and crtbegin.contains("/") and crtend.contains("/")
+
+    if verbose and all_found:
+        print "[linker-wrapper] CRT files found via cc:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    # Collect library directories from CRT paths
+    var lib_dirs: [text] = []
+    if crt1.contains("/"):
+        val dir = path_dirname(crt1)
+        if dir != "":
+            lib_dirs = lib_dirs_push(lib_dirs, dir)
+    if crtbegin.contains("/"):
+        val dir = path_dirname(crtbegin)
+        if dir != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    CrtFiles(
+        crt1: crt1,
+        crti: crti,
+        crtn: crtn,
+        crtbegin: crtbegin,
+        crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn cc_print_file(name: text) -> text:
+    val result = shell_output("cc -print-file-name={name} 2>/dev/null")
+    val trimmed = result_trim(result)
+    if trimmed_len(trimmed) > 0:
+        trimmed
+    else:
+        name
+
+fn find_crt_files_fallback(pie: bool, verbose: bool) -> CrtFiles:
+    # Probe well-known system paths
+    val probe_dirs: [text] = [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib"
+    ]
+
+    var crt1_name = "crt1.o"
+    var crtbegin_name = "crtbegin.o"
+    var crtend_name = "crtend.o"
+    if pie:
+        crt1_name = "Scrt1.o"
+        crtbegin_name = "crtbeginS.o"
+        crtend_name = "crtendS.o"
+
+    var crt1 = ""
+    var crti = ""
+    var crtn = ""
+    var crtbegin = ""
+    var crtend = ""
+    var lib_dirs: [text] = []
+
+    # Find crt1, crti, crtn in system dirs
+    for dir in probe_dirs:
+        if crt1 == "" and file_exists("{dir}/{crt1_name}"):
+            crt1 = "{dir}/{crt1_name}"
+        if crti == "" and file_exists("{dir}/crti.o"):
+            crti = "{dir}/crti.o"
+        if crtn == "" and file_exists("{dir}/crtn.o"):
+            crtn = "{dir}/crtn.o"
+        if crt1 != "" or crti != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    # Find crtbegin/crtend in GCC lib dirs
+    val gcc_dirs = find_gcc_lib_dirs()
+    for dir in gcc_dirs:
+        if crtbegin == "" and file_exists("{dir}/{crtbegin_name}"):
+            crtbegin = "{dir}/{crtbegin_name}"
+        if crtend == "" and file_exists("{dir}/{crtend_name}"):
+            crtend = "{dir}/{crtend_name}"
+        if crtbegin != "":
+            var already = false
+            for d in lib_dirs:
+                if d == dir:
+                    already = true
+            if not already:
+                lib_dirs = lib_dirs_push(lib_dirs, dir)
+
+    val all_found = crt1 != "" and crti != "" and crtn != "" and crtbegin != "" and crtend != ""
+
+    if verbose and all_found:
+        print "[linker-wrapper] CRT files found via fallback:"
+        print "[linker-wrapper]   crt1={crt1} crti={crti} crtn={crtn}"
+        print "[linker-wrapper]   crtbegin={crtbegin} crtend={crtend}"
+
+    CrtFiles(
+        crt1: crt1, crti: crti, crtn: crtn,
+        crtbegin: crtbegin, crtend: crtend,
+        dynamic_linker: find_dynamic_linker(),
+        lib_dirs: lib_dirs,
+        found: all_found
+    )
+
+fn find_gcc_lib_dirs() -> [text]:
+    # Find GCC library directories by probing common triplets and versions
+    var dirs: [text] = []
+    val triplets = ["x86_64-linux-gnu", "x86_64-redhat-linux", "x86_64-pc-linux-gnu", "aarch64-linux-gnu"]
+    val versions = ["14", "13", "12", "11", "10", "9"]
+
+    for triplet in triplets:
+        for ver in versions:
+            val dir = "/usr/lib/gcc/{triplet}/{ver}"
+            if file_exists("{dir}/crtbegin.o"):
+                dirs = dirs_push(dirs, dir)
+
+    # Also try cc -print-search-dirs for gcc lib path
+    val search_result = shell_output("cc -print-search-dirs 2>/dev/null")
+    if search_result_len(search_result) > 0:
+        val lines = search_result.split("\n")
+        for line in lines:
+            if line.starts_with("libraries: ="):
+                val paths_str = line[12:]
+                val paths = paths_str.split(":")
+                for p in paths:
+                    val trimmed = p_trim(p)
+                    if trimmed.len() > 0 and file_exists("{trimmed}/crtbegin.o"):
+                        dirs = dirs_push(dirs, trimmed)
+    dirs
+
+fn find_dynamic_linker() -> text:
+    val os = host_os()
+    val arch = host_arch()
+
+    if os == "linux":
+        if arch == "x86_64":
+            if file_exists("/lib64/ld-linux-x86-64.so.2"):
+                return "/lib64/ld-linux-x86-64.so.2"
+            if file_exists("/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"):
+                return "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+        elif arch == "aarch64":
+            if file_exists("/lib/ld-linux-aarch64.so.1"):
+                return "/lib/ld-linux-aarch64.so.1"
+            if file_exists("/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"):
+                return "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1"
+    elif os == "freebsd":
+        return "/libexec/ld-elf.so.1"
+
+    # macOS: dyld handles this, no dynamic linker needed
+    ""
+
+fn path_dirname(path: text) -> text:
+    # Return directory part of a file path
+    val last_slash = path.rfind("/")
+    if last_slash >= 0:
+        path[0:last_slash]
+    else:
+        ""
+
+# ============================================================================
+# SMF Linking
+# ============================================================================
+
+fn link_to_smf(smf_bytes: [u8], output: text, verbose: bool) -> Result:
+    # Write SMF bytes directly to file
+    # Use shell to write binary data via base64 encoding
+    if smf_bytes_len(smf_bytes) == 0:
+        return Err("No SMF data to write")
+
+    # Write bytes using file_write_bytes helper
+    val wrote = write_bytes_to_file(output, smf_bytes)
+    if not wrote:
+        return Err("Failed to write SMF file: {output}")
+
+    if verbose:
+        print "[linker-wrapper] SMF module: {output} ({smf_bytes.len()} bytes)"
+
+    Ok(output)
+
+# ============================================================================
+# Self-Contained Linking
+# ============================================================================
+
+fn link_to_self_contained(smf_data: [u8], output: text, config: SelfContainedConfig) -> Result:
+    if smf_data_len(smf_data) == 0:
+        return Err("No SMF data for self-contained binary")
+
+    # Find runtime binary
+    var runtime_path = config.runtime_binary
+    if runtime_path == "":
+        val found = find_runtime_binary()
+        if found_is_err(found):
+            return Err(found_unwrap_err(found))
+        runtime_path = found_value
+
+    if config.verbose:
+        print "[linker-wrapper] Runtime binary: {runtime_path}"
+
+    # Step 1: Copy runtime binary to output
+    if not file_copy(runtime_path, output):
+        return Err("Failed to copy runtime binary to {output}")
+
+    # Step 2: Get runtime binary size (= offset where SMF data starts)
+    val runtime_size = file_size_raw(output)
+    if runtime_size <= 0:
+        file_delete(output)
+        return Err("Runtime binary is empty or unreadable")
+
+    # Step 3: Append SMF data to output
+    val append_ok = append_bytes_to_file(output, smf_data)
+    if not append_ok:
+        file_delete(output)
+        return Err("Failed to append SMF data to output")
+
+    # Step 4: Build and append trailer (32 bytes)
+    val smf_offset = runtime_size
+    val smf_size = smf_data_len(smf_data)
+    val checksum = fnv1a_hash(smf_data)
+    val trailer = build_trailer(smf_offset, smf_size, checksum)
+
+    val trailer_ok = append_bytes_to_file(output, trailer)
+    if not trailer_ok:
+        file_delete(output)
+        return Err("Failed to append trailer to output")
+
+    # Step 5: Make output executable
+    val os = host_os()
+    if os != "windows":
+        shell("chmod +x '{output}'")
+
+    val total_size = file_size_raw(output)
+    if config.verbose:
+        print "[linker-wrapper] Self-contained binary: {output}"
+        print "[linker-wrapper]   Runtime: {runtime_size} bytes"
+        print "[linker-wrapper]   SMF data: {smf_size} bytes"
+        print "[linker-wrapper]   Trailer: {SMFE_TRAILER_SIZE} bytes"
+        print "[linker-wrapper]   Total: {total_size} bytes"
+
+    Ok(output)
+
+# ============================================================================
+# Self-Contained Detection
+# ============================================================================
+
+fn detect_self_contained(exe_path: text) -> Result:
+    # Read the last 32 bytes of the binary to check for SMFE trailer
+    val total_size = file_size_raw(exe_path)
+    if total_size < SMFE_TRAILER_SIZE:
+        return Err("File too small for self-contained detection")
+
+    # Read trailer using dd (portable across platforms)
+    val trailer_offset = total_size - SMFE_TRAILER_SIZE
+    val hex_result = shell("dd if='{exe_path}' bs=1 skip={trailer_offset} count={SMFE_TRAILER_SIZE} 2>/dev/null | od -A n -t x1 | tr -d ' \\n'")
+    if hex_result.exit_code != 0:
+        return Err("Failed to read trailer bytes")
+
+    val hex = hex_result.stdout
+    if hex_len(hex) < 8:
+        return Err("Trailer too short")
+
+    # Check magic: "SMFE" = 53 4d 46 45
+    val magic_hex = hex[0:8]
+    if magic_hex != "534d4645":
+        return Err("No SMFE magic found")
+
+    # Parse trailer fields from hex
+    val smf_offset = parse_hex_u64(hex, 8)
+    val smf_size = parse_hex_u64(hex, 24)
+
+    Ok("{smf_offset},{smf_size}")
+
+# ============================================================================
+# Runtime Binary Discovery
+# ============================================================================
+
+fn find_runtime_binary() -> Result:
+    # 1. Check SIMPLE_RUNTIME_BINARY env var
+    val env_path = env_get("SIMPLE_RUNTIME_BINARY")
+    if env_path != "" and file_exists(env_path):
+        return Ok(env_path)
+
+    val current_dir = cwd()
+    val os = host_os()
+    val arch = host_arch()
+
+    # 2. Check platform-specific path
+    var platform_name = os + "-" + arch
+    val platform_path = "{current_dir}/bin/release/{platform_name}/simple"
+    if file_exists(platform_path):
+        return Ok(platform_path)
+
+    # 3. Check generic bootstrap path
+    val generic_path = "{current_dir}/bin/release/simple"
+    if file_exists(generic_path):
+        return Ok(generic_path)
+
+    # 4. Check ./bin/release/simple (relative)
+    if file_exists("./bin/release/simple"):
+        return Ok("./bin/release/simple")
+
+    Err("Runtime binary not found. Set SIMPLE_RUNTIME_BINARY or ensure bin/release/simple exists.")
+
+fn find_runtime_lib_dir() -> text:
+    # Check env var first
+    val env_path = env_get("SIMPLE_RUNTIME_PATH")
+    if env_path != "" and file_exists(env_path):
+        return env_path
+
+    # No runtime library found - return empty (native linking may still work without it)
+    ""
+
+# ============================================================================
+# Trailer Building
+# ============================================================================
+
+fn build_trailer(smf_offset: i64, smf_size: i64, checksum: i64) -> [u8]:
+    var buf: [u8] = []
+
+    # Magic: "SMFE" (4 bytes)
+    buf = buf + (SMFE_MAGIC)
+
+    # SMF offset (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(smf_offset))
+
+    # SMF size (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(smf_size))
+
+    # Checksum (8 bytes, little-endian)
+    buf = buf + (i64_to_le_bytes(checksum))
+
+    # Version (4 bytes, little-endian)
+    buf = buf + (i32_to_le_bytes(SMFE_VERSION))
+
+    buf
+
+# ============================================================================
+# Hash Function
+# ============================================================================
+
+fn fnv1a_hash(data: [u8]) -> i64:
+    # FNV-1a 64-bit hash
+    # Offset basis 0xcbf29ce484222325 as signed i64
+    var hash: i64 = -3750763034362895579
+    for byte in data:
+        val b = byte
+        hash = hash xor b
+        hash = hash * 1099511628211
+    hash
+
+# ============================================================================
+# Binary Helpers
+# ============================================================================
+
+fn i64_to_le_bytes(value: i64) -> [u8]:
+    [
+        (value & 0xFF),
+        ((value >> 8) & 0xFF),
+        ((value >> 16) & 0xFF),
+        ((value >> 24) & 0xFF),
+        ((value >> 32) & 0xFF),
+        ((value >> 40) & 0xFF),
+        ((value >> 48) & 0xFF),
+        ((value >> 56) & 0xFF)
+    ]
+
+fn i32_to_le_bytes(value: i64) -> [u8]:
+    [
+        (value & 0xFF),
+        ((value >> 8) & 0xFF),
+        ((value >> 16) & 0xFF),
+        ((value >> 24) & 0xFF)
+    ]
+
+fn parse_hex_u64(hex: text, offset: i64) -> i64:
+    # Parse 16 hex chars (8 bytes) as little-endian u64
+    var result: i64 = 0
+    var i = 0
+    for idx in range(0, 8):
+        val pos = offset + (idx * 2)
+        if pos + 2 <= hex_len(hex):
+            val byte_hex = hex[pos:pos + 2]
+            val byte_val = hex_byte_to_int(byte_hex)
+            result = result | (byte_val << (idx * 8))
+        i = i + 1
+    result
+
+fn hex_byte_to_int(hex: text) -> i64:
+    if hex_len(hex) < 2:
+        return 0
+    val hi = hex_char_to_int(hex[0:1])
+    val lo = hex_char_to_int(hex[1:2])
+    (hi * 16) + lo
+
+fn hex_char_to_int(c: text) -> i64:
+    match c:
+        case "0": 0
+        case "1": 1
+        case "2": 2
+        case "3": 3
+        case "4": 4
+        case "5": 5
+        case "6": 6
+        case "7": 7
+        case "8": 8
+        case "9": 9
+        case "a" | "A": 10
+        case "b" | "B": 11
+        case "c" | "C": 12
+        case "d" | "D": 13
+        case "e" | "E": 14
+        case "f" | "F": 15
+        case _: 0
+
+# ============================================================================
+# File I/O Helpers (using shell for binary data)
+# ============================================================================
+
+fn write_bytes_to_file(path: text, data: [u8]) -> bool:
+    # For binary data, use a temp file approach with printf
+    # Write each byte using shell's printf with octal escapes
+    # For efficiency, batch into chunks
+    if data_len(data) == 0:
+        val result = shell("touch '{path}'")
+        return result.exit_code == 0
+
+    # Use base64 encoding via shell for reliable binary transfer
+    var hex_str = ""
+    for byte in data:
+        val b = byte & 0xFF
+        val hi = "0123456789abcdef"[(b >> 4):((b >> 4) + 1)]
+        val lo = "0123456789abcdef"[(b & 0xF):((b & 0xF) + 1)]
+        hex_str = hex_str + hi + lo
+
+    # Write hex data and decode with xxd
+    val result = shell("echo '{hex_str}' | xxd -r -p > '{path}'")
+    result.exit_code == 0
+
+fn append_bytes_to_file(path: text, data: [u8]) -> bool:
+    if data_len(data) == 0:
+        return true
+
+    # Convert to hex and append using xxd
+    var hex_str = ""
+    for byte in data:
+        val b = byte & 0xFF
+        val hi = "0123456789abcdef"[(b >> 4):((b >> 4) + 1)]
+        val lo = "0123456789abcdef"[(b & 0xF):((b & 0xF) + 1)]
+        hex_str = hex_str + hi + lo
+
+    val result = shell("echo '{hex_str}' | xxd -r -p >> '{path}'")
+    result.exit_code == 0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export NativeLinkConfig, NativeLinkConfig__default
+export CrtFiles, find_crt_files
+export SelfContainedConfig, SelfContainedConfig__default
+export link_to_native, link_to_smf, link_to_self_contained
+export detect_self_contained, find_runtime_binary, find_runtime_lib_dir
+export build_trailer, fnv1a_hash
+export SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION

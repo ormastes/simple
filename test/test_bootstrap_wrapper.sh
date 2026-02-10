@@ -47,9 +47,9 @@ esac
 # Test 3: Bootstrap binary exists
 echo ""
 echo "Test 3: Bootstrap binary exists"
-if [ -x "bin/bootstrap/linux-x86_64/simple" ]; then
-    echo "✓ Bootstrap binary found: bin/bootstrap/linux-x86_64/simple"
-    ls -lh bin/bootstrap/linux-x86_64/simple | awk '{print "  Size:", $5}'
+if [ -x "bin/release/linux-x86_64/simple" ]; then
+    echo "✓ Bootstrap binary found: bin/release/linux-x86_64/simple"
+    ls -lh bin/release/linux-x86_64/simple | awk '{print "  Size:", $5}'
 else
     echo "⚠ Bootstrap binary not found for linux-x86_64"
 fi
@@ -62,7 +62,7 @@ fn main():
     print "Wrapper test successful"
 EOF
 
-OUTPUT=$(bin/bootstrap/linux-x86_64/simple /tmp/wrapper_test.spl 2>&1)
+OUTPUT=$(bin/release/linux-x86_64/simple /tmp/wrapper_test.spl 2>&1)
 if echo "$OUTPUT" | grep -q "Wrapper test successful"; then
     echo "✓ Wrapper executed script successfully"
 else
@@ -79,7 +79,7 @@ fn main():
     print "Arguments test passed"
 EOF
 
-OUTPUT=$(bin/bootstrap/linux-x86_64/simple /tmp/args_test.spl 2>&1)
+OUTPUT=$(bin/release/linux-x86_64/simple /tmp/args_test.spl 2>&1)
 if echo "$OUTPUT" | grep -q "Arguments test passed"; then
     echo "✓ Arguments passed correctly"
 else
@@ -90,7 +90,7 @@ fi
 # Test 6: Bootstrap binary version
 echo ""
 echo "Test 6: Bootstrap binary version"
-VERSION=$(bin/bootstrap/linux-x86_64/simple --version 2>&1 | head -1 || echo "Version check failed")
+VERSION=$(bin/release/linux-x86_64/simple --version 2>&1 | head -1 || echo "Version check failed")
 echo "  Version: $VERSION"
 if echo "$VERSION" | grep -q "Simple Language"; then
     echo "✓ Version information available"
@@ -112,9 +112,9 @@ PLATFORMS=(
 )
 
 for platform in "${PLATFORMS[@]}"; do
-    if [ -d "bin/bootstrap/$platform" ]; then
-        if [ -f "bin/bootstrap/$platform/simple" ] || [ -f "bin/bootstrap/$platform/simple.exe" ]; then
-            SIZE=$(du -h bin/bootstrap/$platform/simple* 2>/dev/null | awk '{print $1}')
+    if [ -d "bin/release/$platform" ]; then
+        if [ -f "bin/release/$platform/simple" ] || [ -f "bin/release/$platform/simple.exe" ]; then
+            SIZE=$(du -h bin/release/$platform/simple* 2>/dev/null | awk '{print $1}')
             echo "✓ $platform: $SIZE"
         else
             echo "⊘ $platform: directory exists, no binary"
@@ -128,7 +128,7 @@ done
 echo ""
 echo "Test 8: Documentation"
 DOCS=(
-    "bin/bootstrap/README.md"
+    "bin/release/README.md"
     "doc/build/bootstrap_multi_platform.md"
     "PLATFORMS.md"
 )

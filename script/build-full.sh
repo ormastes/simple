@@ -37,7 +37,7 @@ if [ "$1" == "--with-binary" ]; then
         echo ""
     else
         echo -e "${BLUE}Skipping Rust build (pure Simple distribution)${NC}"
-        echo -e "${BLUE}Using pre-built runtime at bin/bootstrap/simple${NC}"
+        echo -e "${BLUE}Using pre-built runtime at bin/release/simple${NC}"
         echo ""
     fi
 fi

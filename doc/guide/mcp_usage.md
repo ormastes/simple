@@ -142,7 +142,7 @@ claude-code
 
 3. Check the runtime binary exists:
    ```bash
-   ls -la /home/ormastes/dev/pub/simple/bin/bootstrap/simple_runtime
+   ls -la /home/ormastes/dev/pub/simple/bin/release/simple_runtime
    ```
 
 ### Configuration Issues

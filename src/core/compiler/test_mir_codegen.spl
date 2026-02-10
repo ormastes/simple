@@ -1,0 +1,62 @@
+# Core Simple — MIR Codegen Tests
+#
+# Seed-compiled test: parse → HIR → MIR → C++, check output contains expected strings.
+
+use core.lexer.{lex_init}
+use core.parser.{parser_init, parse_module}
+use core.ast.{ast_reset}
+use core.types.{reset_all_pools}
+use core.mir.lowering.{mlr_lower_module}
+use core.compiler.mir_codegen.{mir_codegen_program}
+
+var test_pass_count: i64 = 0
+var test_fail_count: i64 = 0
+
+fn check_contains(label: text, haystack: text, needle: text):
+    if haystack.contains(needle):
+        test_pass_count = test_pass_count + 1
+    else:
+        print "FAIL: {label} - output does not contain '{needle}'"
+        test_fail_count = test_fail_count + 1
+
+fn lower_and_codegen(source: text) -> text:
+    reset_all_pools()
+    ast_reset()
+    parse_module(source, "test")
+    mlr_lower_module()
+    mir_codegen_program()
+
+# === Test 1: Preamble ===
+print "--- Test 1: Preamble ---"
+val out1 = lower_and_codegen("fn foo() -> i64:\n    42")
+check_contains("has include", out1, "#include")
+check_contains("has runtime", out1, "runtime.h")
+check_contains("has main", out1, "int main")
+
+# === Test 2: Function declaration ===
+print "--- Test 2: Function ---"
+val out2 = lower_and_codegen("fn add(a: i64, b: i64) -> i64:\n    a + b")
+check_contains("fn decl", out2, "int64_t add(")
+check_contains("has goto or label", out2, "bb_")
+
+# === Test 3: Module init ===
+print "--- Test 3: Module init ---"
+val out3 = lower_and_codegen("val x = 42")
+check_contains("module init", out3, "__module_init")
+
+# === Test 4: If branch generates goto ===
+print "--- Test 4: If goto ---"
+val out4 = lower_and_codegen("fn test_if(x: i64) -> i64:\n    if x > 0:\n        return 1\n    return 0")
+check_contains("if goto", out4, "goto")
+
+# === Test 5: Struct typedef ===
+print "--- Test 5: Struct ---"
+val out5 = lower_and_codegen("struct Point:\n    x: i64\n    y: i64")
+check_contains("struct typedef", out5, "typedef struct Point")
+
+# === Summary ===
+print ""
+val total = test_pass_count + test_fail_count
+print "=== MIR Codegen Tests: {test_pass_count}/{total} passed ==="
+if test_fail_count > 0:
+    print "FAILURES: {test_fail_count}"

@@ -1,0 +1,151 @@
+# Incremental Builder
+#
+# Tracks source files, dependencies, and compilation status for
+# incremental compilation. Only recompiles files that changed or
+# whose dependencies changed.
+#
+# Port of rust/compiler/src/incremental_builder.rs (524 lines)
+
+export IncrementalBuilder, IncrementalState, SourceInfo
+export CompilationStatus, CachedArtifact, IncrementalStats, IncrementalConfig
+
+# ============================================================================
+# Types
+# ============================================================================
+
+enum CompilationStatus:
+    Unknown
+    Dirty
+    Complete
+    Failed
+
+struct IncrementalConfig:
+    persist: bool
+    validate_on_load: bool
+    # DESUGARED: cache_dir: text?
+    has_cache_dir: bool
+    cache_dir_value: text
+
+
+# ============================================================================
+# IncrementalConfig Methods (was: impl IncrementalConfig:)
+# ============================================================================
+
+fn incrementalconfig_default_config() -> IncrementalConfig:
+        IncrementalConfig(persist: true, validate_on_load: true, cache_dir: nil)
+
+
+fn incrementalconfig_memory_only() -> IncrementalConfig:
+        IncrementalConfig(persist: false, validate_on_load: false, cache_dir: nil)
+
+
+struct SourceInfo:
+    path: text
+    content_hash: i64
+    dependencies: [text]
+    functions: [text]
+    types: [text]
+    macros: [text]
+
+
+# ============================================================================
+# SourceInfo Methods (was: impl SourceInfo:)
+# ============================================================================
+
+fn sourceinfo_from_path(path: text) -> SourceInfo:
+        SourceInfo(path: path, content_hash: 0, dependencies: [],
+                   functions: [], types: [], macros: [])
+
+
+struct CachedArtifact:
+    source: SourceInfo
+    has_hir: bool
+    has_mir: bool
+    has_object: bool
+
+
+# ============================================================================
+# CachedArtifact Methods (was: impl CachedArtifact:)
+# ============================================================================
+
+fn cachedartifact_from_source(source: SourceInfo) -> CachedArtifact:
+        CachedArtifact(source: source, has_hir: false, has_mir: false, has_object: false)
+
+
+struct IncrementalStats:
+    files_checked: i64
+    files_dirty: i64
+    cache_hits: i64
+    cache_misses: i64
+
+
+# ============================================================================
+# IncrementalStats Methods (was: impl IncrementalStats:)
+# ============================================================================
+
+fn incrementalstats_empty() -> IncrementalStats:
+        IncrementalStats(files_checked: 0, files_dirty: 0, cache_hits: 0, cache_misses: 0)
+
+
+# ============================================================================
+# Incremental State
+# ============================================================================
+
+class IncrementalState:
+    """Tracks compilation state for all registered source files."""
+    sources: {text: SourceInfo}
+    statuses: {text: CompilationStatus}
+    artifacts: {text: CachedArtifact}
+    stats: IncrementalStats
+
+
+# ============================================================================
+# IncrementalState Methods (was: impl IncrementalState:)
+# ============================================================================
+
+fn incrementalstate_create() -> IncrementalState:
+        IncrementalState(sources: {}, statuses: {},
+                         artifacts: {}, stats: incrementalstats_empty())
+
+
+fn incrementalstate_needs_recompile(self: IncrementalState, path: text) -> bool:
+        self.stats = IncrementalStats(
+            files_checked: self.stats.files_checked + 1,
+            files_dirty: self.stats.files_dirty,
+            cache_hits: self.stats.cache_hits,
+            cache_misses: self.stats.cache_misses)
+
+        val status = self.get_status(path)
+        match status:
+            case Complete:
+                self.stats = IncrementalStats(
+                    files_checked: self.stats.files_checked,
+                    files_dirty: self.stats.files_dirty,
+                    cache_hits: self.stats.cache_hits + 1,
+                    cache_misses: self.stats.cache_misses)
+                false
+            case _:
+                self.stats = IncrementalStats(
+                    files_checked: self.stats.files_checked,
+                    files_dirty: self.stats.files_dirty,
+                    cache_hits: self.stats.cache_hits,
+                    cache_misses: self.stats.cache_misses + 1)
+                true
+
+
+# ============================================================================
+# Incremental Builder
+# ============================================================================
+
+class IncrementalBuilder:
+    """High-level incremental compilation builder."""
+    state: IncrementalState
+
+
+# ============================================================================
+# IncrementalBuilder Methods (was: impl IncrementalBuilder:)
+# ============================================================================
+
+fn incrementalbuilder_create() -> IncrementalBuilder:
+        IncrementalBuilder(state: incrementalstate_create())
+

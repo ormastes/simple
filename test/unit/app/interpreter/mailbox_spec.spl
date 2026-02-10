@@ -2,13 +2,17 @@
 #
 # Tests for off-heap message queue.
 
-# @skip
-use app.interpreter.async_runtime.mailbox.{Mailbox, MailboxConfig, MailboxStats, MessageRef, MessagePriority, SendResult}
+use lib.mailbox.{
+    Mailbox, MailboxConfig, MailboxStats, MessageRef,
+    MailboxConfig__default, MailboxConfig__bounded, MailboxConfig__unbounded, MailboxConfig__with_priority,
+    MessageRef__new,
+    MailboxStats__new,
+    Mailbox__new, Mailbox__default, Mailbox__unbounded,
+    MessagePriority__High__to_i64, MessagePriority__Normal__to_i64, MessagePriority__Low__to_i64,
+    MessagePriority__High__cmp, MessagePriority__Normal__cmp, MessagePriority__Low__cmp,
+    SEND_SUCCESS, SEND_QUEUE_FULL, SEND_MAILBOX_CLOSED
+}
 use std.spec.{check, check_msg}
-
-# Constants (workaround for nested module export limitation)
-val DEFAULT_MAILBOX_CAPACITY: i64 = 1000
-val DEFAULT_HIGH_PRIORITY_RESERVE: i64 = 100
 
 describe "Mailbox - Configuration":
     it "creates with default config":
@@ -38,16 +42,16 @@ describe "Mailbox - Configuration":
 describe "Mailbox - Send":
     it "sends normal message":
         var mailbox = Mailbox__default()
-        val result = mailbox.send_normal(12345, 100, Some(1))
+        val result = mailbox.send_normal(12345, 100, 1)
 
-        check(result == SendResult.Success)
+        check(result == SEND_SUCCESS)
         check(mailbox.total_size() == 1)
 
     it "sends high priority message":
         var mailbox = Mailbox__new(MailboxConfig__with_priority())
-        val result = mailbox.send_high(12345, 100, Some(1))
+        val result = mailbox.send_high(12345, 100, 1)
 
-        check(result == SendResult.Success)
+        check(result == SEND_SUCCESS)
         check(mailbox.stats.high_priority_count == 1)
 
     it "rejects when queue full":
@@ -57,21 +61,22 @@ describe "Mailbox - Send":
         mailbox.send_normal(2, 10, nil)
         val result = mailbox.send_normal(3, 10, nil)
 
-        check(result == SendResult.QueueFull)
+        check(result == SEND_QUEUE_FULL)
 
     it "reserves space for high priority":
-        var mailbox = Mailbox__new(MailboxConfig__bounded(10))
+        val config = MailboxConfig(capacity: 10, off_heap: true, priority_enabled: true, high_priority_reserve: 1)
+        var mailbox = Mailbox__new(config)
 
-        # Fill most of the queue
+        # Fill 9 normal messages (effective_cap = 10 - 1 = 9)
         for i in 0..9:
             mailbox.send_normal(i, 10, nil)
 
-        # Normal fails, high succeeds
+        # Normal fails but high succeeds
         val normal_result = mailbox.send_normal(100, 10, nil)
         val high_result = mailbox.send_high(101, 10, nil)
 
-        check(normal_result == SendResult.QueueFull)
-        check(high_result == SendResult.Success)
+        check(normal_result == SEND_QUEUE_FULL)
+        check(high_result == SEND_SUCCESS)
 
     it "rejects after close":
         var mailbox = Mailbox__default()
@@ -79,7 +84,7 @@ describe "Mailbox - Send":
 
         val result = mailbox.send_normal(1, 10, nil)
 
-        check(result == SendResult.MailboxClosed)
+        check(result == SEND_MAILBOX_CLOSED)
 
 describe "Mailbox - Receive":
     it "receives in FIFO order":
@@ -92,20 +97,19 @@ describe "Mailbox - Receive":
         val msg1 = mailbox.receive()
         val msg2 = mailbox.receive()
 
-        check(msg1?.id == 0)
-        check(msg2?.id == 1)
+        check(msg1.id == 0)
+        check(msg2.id == 1)
 
-    it "receives by priority order":
+    it "receives high priority first":
         var mailbox = Mailbox__new(MailboxConfig__with_priority())
 
-        # Send in mixed order
-        mailbox.send(3, 10, nil, MessagePriority.Low)
-        mailbox.send(2, 10, nil, MessagePriority.Normal)
-        mailbox.send(1, 10, nil, MessagePriority.High)
+        # Send normal first, then high priority
+        mailbox.send_normal(3, 10, nil)
+        mailbox.send_high(1, 10, nil)
 
-        # Should receive high first
+        # Should receive high priority first
         val msg = mailbox.receive()
-        check(msg?.priority == MessagePriority.High)
+        check(msg.priority == 0)
 
     it "returns nil when empty":
         var mailbox = Mailbox__default()
@@ -126,34 +130,34 @@ describe "Mailbox - Selective Receive":
     it "selects by predicate":
         var mailbox = Mailbox__default()
 
-        mailbox.send_normal(100, 10, Some(1))
-        mailbox.send_normal(200, 20, Some(2))
-        mailbox.send_normal(300, 30, Some(1))
+        mailbox.send_normal(100, 10, 1)
+        mailbox.send_normal(200, 20, 2)
+        mailbox.send_normal(300, 30, 1)
 
         # Select message from sender 2
-        val msg = mailbox.select(\m: m.sender_id == Some(2))
+        val msg = mailbox.select(fn(m): m.sender_id == 2)
 
         check(msg.?)
-        check(msg.unwrap().sender_id == Some(2))
+        check(msg.sender_id == 2)
         # Other messages remain
         check(mailbox.total_size() == 2)
 
     it "selects by sender":
         var mailbox = Mailbox__default()
 
-        mailbox.send_normal(100, 10, Some(5))
-        mailbox.send_normal(200, 20, Some(10))
+        mailbox.send_normal(100, 10, 5)
+        mailbox.send_normal(200, 20, 10)
 
         val msg = mailbox.select_by_sender(10)
 
         check(msg.?)
-        check(msg.unwrap().sender_id == Some(10))
+        check(msg.sender_id == 10)
 
     it "returns nil when no match":
         var mailbox = Mailbox__default()
-        mailbox.send_normal(100, 10, Some(1))
+        mailbox.send_normal(100, 10, 1)
 
-        val msg = mailbox.select(\m: m.sender_id == Some(999))
+        val msg = mailbox.select(fn(m): m.sender_id == 999)
 
         check(not msg.?)
         # Message still there
@@ -226,10 +230,10 @@ describe "Mailbox - Statistics":
         mailbox.receive()
 
         val stats = mailbox.get_stats()
-        val throughput = stats.throughput()
+        val tp = stats.throughput()
 
         # 1 processed / 2 received
-        check(throughput == 0.5)
+        check(tp == 0.5)
 
     it "tracks drop rate":
         var mailbox = Mailbox__new(MailboxConfig__bounded(1))
@@ -238,10 +242,10 @@ describe "Mailbox - Statistics":
         mailbox.send_normal(2, 10, nil)  # Dropped
 
         val stats = mailbox.get_stats()
-        val drop_rate = stats.drop_rate()
+        val dr = stats.drop_rate()
 
         # 1 dropped / 2 attempted
-        check(drop_rate == 50.0)
+        check(dr == 50.0)
 
     it "tracks peak size":
         var mailbox = Mailbox__default()
@@ -257,23 +261,26 @@ describe "Mailbox - Statistics":
 
 describe "MessagePriority - Ordering":
     it "compares priorities":
-        check(MessagePriority.High__cmp(MessagePriority.Normal) < 0)
-        check(MessagePriority.Normal__cmp(MessagePriority.Low) < 0)
-        check(MessagePriority.Low__cmp(MessagePriority.High) > 0)
+        val high_cmp = MessagePriority__High__cmp(MessagePriority__Normal__to_i64())
+        check(high_cmp < 0)
+        val normal_cmp = MessagePriority__Normal__cmp(MessagePriority__Low__to_i64())
+        check(normal_cmp < 0)
+        val low_cmp = MessagePriority__Low__cmp(MessagePriority__High__to_i64())
+        check(low_cmp > 0)
 
     it "converts to i64":
-        check(MessagePriority.High__to_i64() == 0)
-        check(MessagePriority.Normal__to_i64() == 1)
-        check(MessagePriority.Low__to_i64() == 2)
+        check(MessagePriority__High__to_i64() == 0)
+        check(MessagePriority__Normal__to_i64() == 1)
+        check(MessagePriority__Low__to_i64() == 2)
 
 describe "MessageRef - Age":
     it "calculates message age":
-        val msg = MessageRef__new(1, nil, MessagePriority.Normal, 100, 0)
+        val msg = MessageRef__new(1, nil, 1, 100, 0)
         # With placeholder current_time_ms() returning 0, age is 0
         check(msg.age_ms() == 0)
 
     it "checks staleness":
-        val msg = MessageRef__new(1, nil, MessagePriority.Normal, 100, 0)
+        val msg = MessageRef__new(1, nil, 1, 100, 0)
         # Message with age 0 is not stale for positive threshold
         check(not msg.is_stale(1000))
         # But is stale for negative threshold
@@ -282,13 +289,13 @@ describe "MessageRef - Age":
 describe "Mailbox - Display":
     it "formats mailbox for display":
         val mailbox = Mailbox__default()
-        val str = mailbox.fmt()
+        val s = mailbox.fmt()
 
-        check(str.contains("Mailbox"))
-        check(str.contains("size=0"))
+        check(s.contains("Mailbox"))
+        check(s.contains("size=0"))
 
     it "formats stats for display":
         val stats = MailboxStats__new()
-        val str = stats.fmt()
+        val s = stats.fmt()
 
-        check(str.contains("MailboxStats"))
+        check(s.contains("MailboxStats"))

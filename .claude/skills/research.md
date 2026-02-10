@@ -6,17 +6,18 @@
 ```bash
 # By pattern
 find . -name "*.spl" -type f
-find . -path "*test*" -name "*.rs"
+find . -path "*test*" -name "*_spec.spl"
 
 # Glob patterns in Claude
 Glob: **/*.spl
-Glob: src/**/*.rs
+Glob: src/**/*.spl
+Glob: test/**/*_spec.spl
 ```
 
 ### Search Code
 ```bash
 # Pattern search
-grep -r "pattern" --include="*.rs"
+grep -r "pattern" --include="*.spl"
 grep -rn "fn main" src/
 
 # In Claude, use Grep tool
@@ -30,7 +31,7 @@ ls -la src/
 tree -L 2 src/
 
 # Module structure
-cat src/lib.rs
+cat src/app/cli/main.spl
 ```
 
 ## Key Documentation
@@ -75,10 +76,10 @@ cat src/lib.rs
 ### 3. Document Findings
 ```
 # For bugs
-→ simple/bug_report.md
+→ doc/bug/bug_report.md
 
 # For improvements
-→ simple/improve_request.md
+→ doc/improve_request.md
 
 # For completed work
 → doc/report/
@@ -88,27 +89,26 @@ cat src/lib.rs
 
 ### "Where is X implemented?"
 1. Search for type/function name
-2. Check module structure in lib.rs
+2. Check module structure in `mod.spl` files
 3. Follow imports/exports
 
 ### "How does X work?"
-1. Find tests (`*_test.rs`, `*_spec.spl`)
+1. Find tests (`*_spec.spl` in `test/`)
 2. Read documentation comments
 3. Trace execution flow
 
 ### "What's the status of X?"
 1. Check `doc/status/` files
-2. Check `doc/features/feature.md`
-3. Search issues/TODO.md
+2. Check `doc/feature/feature.md`
+3. Search `doc/TODO.md`
 
 ## File Patterns
 
 | Pattern | Location |
 |---------|----------|
-| Rust source | `src/*/src/*.rs` |
-| Rust tests | `src/*/tests/*.rs` |
-| Simple source | `src/std/src/**/*.spl` |
-| Simple tests | `src/std/test/**/*_spec.spl` |
+| Simple source | `src/**/*.spl` |
+| Simple tests | `test/**/*_spec.spl` |
+| Feature specs | `src/std/test/features/**/*_spec.spl` |
 | Specs | `doc/spec/*.md` |
 | Status | `doc/status/*.md` |
 
@@ -123,5 +123,4 @@ Lean 4 proofs in `verification/`:
 ## See Also
 
 - `CLAUDE.md` - Full project structure
-- `AGENTS.md` - Agent guidelines
-- `doc/report/README.md` - Report directory
+- `doc/report/` - Report directory

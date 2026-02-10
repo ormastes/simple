@@ -81,7 +81,8 @@ fn lex_init(source: text):
     lex_pos = 0
     lex_line = 1
     lex_col = 1
-    lex_indent_stack = [0]
+    lex_indent_stack = []
+    lex_indent_stack.push(0)
     lex_pending_dedents = 0
     lex_at_line_start = true
     lex_paren_depth = 0
@@ -432,7 +433,29 @@ fn lex_handle_indentation():
 # ===== Main Token Scanner =====
 
 fn lex_scan_token():
-    # Skip spaces (not newlines)
+    # Check EOF first (before indentation or anything else)
+    if lex_at_end():
+        val slen: i64 = lex_indent_stack.len()
+        if slen > 1:
+            lex_indent_stack.pop()
+            lex_pending_dedents = slen - 2
+            lex_make_token(TOK_DEDENT, "", lex_line, lex_col)
+            return
+        lex_make_token(TOK_EOF, "", lex_line, lex_col)
+        return
+
+    # Handle indentation at line start BEFORE skipping spaces
+    # (handle_indentation counts and consumes leading spaces itself)
+    if lex_at_line_start:
+        lex_cur_kind = 0
+        lex_handle_indentation()
+        if lex_cur_kind != 0:
+            return
+        # Same indent or blank/comment line consumed
+        lex_scan_token()
+        return
+
+    # Skip spaces (not newlines) — only for mid-line tokens
     lex_skip_spaces()
 
     if lex_at_end():
@@ -459,11 +482,6 @@ fn lex_scan_token():
             lex_scan_token()
             return
         lex_make_token(TOK_NEWLINE, "\n", start_line, start_col)
-        return
-
-    # Handle indentation at line start
-    if lex_at_line_start:
-        lex_handle_indentation()
         return
 
     # Comment
@@ -671,7 +689,7 @@ fn lex_scan_token():
         return
 
     # Unknown character
-    lex_make_token(TOK_ERROR, "unexpected character: {c}", start_line, start_col)
+    lex_make_token(TOK_ERROR, "unexpected character: " + c, start_line, start_col)
 
 # ===== Public API =====
 

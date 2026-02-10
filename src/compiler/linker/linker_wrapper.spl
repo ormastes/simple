@@ -180,14 +180,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-rpath")
         args.push(runtime_dir)
 
-    # Standard libraries
+    # Standard libraries (no -lgcc/-lgcc_s — clang provides compiler-rt)
     if os == "linux":
         args.push("-lc")
         args.push("-lpthread")
         args.push("-ldl")
         args.push("-lm")
-        args.push("-lgcc")
-        args.push("-lgcc_s")
     elif os == "macos":
         args.push("-lc")
         args.push("-lpthread")
@@ -247,8 +245,15 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         cmd = cmd + " -L{runtime_dir} -lsimple_compiler"
         cmd = cmd + " -Wl,-rpath,{runtime_dir}"
 
-    # Standard libraries
-    cmd = cmd + " -lc -lpthread -ldl -lm -lgcc_s"
+    # Standard libraries (OS-aware; no -lgcc_s — clang provides compiler-rt)
+    var os_name = shell("uname -s").stdout
+    os_name = os_name.trim()
+    if os_name == "Darwin":
+        cmd = cmd + " -lc -lpthread -lm -lSystem"
+    elif os_name == "FreeBSD":
+        cmd = cmd + " -lc -lpthread -lm"
+    else:
+        cmd = cmd + " -lc -lpthread -ldl -lm"
 
     # Libraries from config
     for lib in config.libraries:
@@ -637,20 +642,20 @@ fn find_runtime_binary() -> Result:
 
     # 2. Check platform-specific path
     var platform_name = os + "-" + arch
-    val platform_path = "{current_dir}/bin/bootstrap/{platform_name}/simple"
+    val platform_path = "{current_dir}/bin/release/{platform_name}/simple"
     if file_exists(platform_path):
         return Ok(platform_path)
 
     # 3. Check generic bootstrap path
-    val generic_path = "{current_dir}/bin/bootstrap/simple"
+    val generic_path = "{current_dir}/bin/release/simple"
     if file_exists(generic_path):
         return Ok(generic_path)
 
-    # 4. Check ./bin/bootstrap/simple (relative)
-    if file_exists("./bin/bootstrap/simple"):
-        return Ok("./bin/bootstrap/simple")
+    # 4. Check ./bin/release/simple (relative)
+    if file_exists("./bin/release/simple"):
+        return Ok("./bin/release/simple")
 
-    Err("Runtime binary not found. Set SIMPLE_RUNTIME_BINARY or ensure bin/bootstrap/simple exists.")
+    Err("Runtime binary not found. Set SIMPLE_RUNTIME_BINARY or ensure bin/release/simple exists.")
 
 fn find_runtime_lib_dir() -> text:
     # Check env var first

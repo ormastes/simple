@@ -1,0 +1,840 @@
+# Driver - Compiler Driver Implementation
+#
+# This module contains the main compiler driver implementation:
+# - CheckBackendImpl: Backend for type checking only
+# - CompilerDriver: Main compiler orchestration
+# - Utility functions for file compilation
+#
+# Type definitions are in driver_types.spl
+
+use compiler.hir.*
+use compiler.mir.*
+use compiler.lexer.*
+use compiler.parser.*
+use compiler.desugar_async.{desugar_module}
+use compiler.treesitter.*
+use compiler.backend.*
+use compiler.type_infer.*
+use compiler.ffi.*
+use compiler.monomorphize_integration.*
+use compiler.mir_opt_integration.{OptimizationConfig, optimize_mir_module}
+use compiler.async_integration.{AsyncIntegration, AsyncStateMachine, process_async_mir}
+use compiler.borrow_check.*
+use compiler.visibility_integration.{check_module_visibility}
+use compiler.const_eval.{eval_static_assert, ConstEvalError}
+use blocks.*
+use config.*
+use driver_types.*
+use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default}
+use compiler.smf_writer.{generate_smf_with_templates, Target}
+
+class CheckBackendImpl(Backend):
+    fn name() -> text:
+        "check"
+
+    fn is_allowed(op: text) -> bool:
+        # Allow everything for type checking
+        true
+
+    fn process_module(module: HirModule) -> Result<Any, text>:
+        # Just validate, don't execute
+        Ok(nil)
+
+    fn eval_expr(expr: HirExpr, env: Environment) -> Result<Value, text>:
+        # Don't evaluate, just return unit
+        Ok(Value.Unit)
+
+    fn exec_stmt(stmt: HirStmt, env: Environment) -> Result<Value, text>:
+        Ok(Value.Unit)
+
+# ------------------------------------------------------------------------------
+# Compiler Driver
+# ------------------------------------------------------------------------------
+
+class CompilerDriver:
+    ctx: CompileContext
+
+    static fn create(options: CompileOptions) -> CompilerDriver:
+        CompilerDriver(ctx: compilecontext_create(options))
+
+    # --------------------------------------------------------------------------
+    # Main compilation entry point
+    # --------------------------------------------------------------------------
+
+    me compile() -> CompileResult:
+        val log = self.ctx.logger
+
+        # Phase 1: Load source files
+        log.debug("phase 1: loading sources...")
+        if not self.load_sources_impl():
+            log.error("phase 1 FAILED")
+            return compileresult_ParseError(self.ctx.errors)
+        log.debug("phase 1 done, {self.ctx.sources.len()} sources loaded")
+
+        # Phase 2: Parse all sources
+        log.debug("phase 2: parsing...")
+        if not self.parse_all_impl():
+            log.error("phase 2 FAILED")
+            return compileresult_ParseError(self.ctx.errors)
+        log.debug("phase 2 done")
+
+        # Phase 3: Lower to HIR, resolve methods, and type check (combined loop)
+        log.debug("phase 3: lowering and checking...")
+        log.trace("BEFORE phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        val analyze_ok = self.lower_and_check_impl()
+        log.trace("AFTER phase 3: hir_modules count = {self.ctx.hir_modules.keys().len()}")
+        if not analyze_ok:
+            log.error("phase 3 FAILED")
+            # Determine error type from first error
+            if self.ctx.errors_len(errors) > 0:
+                val first_error = self.ctx.errors[0]
+                if first_error.contains("Method resolution"):
+                    return compileresult_ResolveError(self.ctx.errors)
+            return compileresult_TypeError(self.ctx.errors)
+        log.debug("phase 3 done")
+
+        # Phase 4: Monomorphization (specialize generic functions)
+        log.debug("phase 4: monomorphization...")
+        val mono_ok = self.monomorphize_impl()
+        if not mono_ok:
+            log.error("phase 4 FAILED")
+            return compileresult_TypeError(self.ctx.errors)
+        log.debug("phase 4 done")
+
+        # Phase 5: Mode-specific processing
+        log.debug("phase 5: mode-specific processing...")
+        match self.ctx.options.mode:
+            case CompileMode.Check:
+                log.debug("check mode")
+                return compileresult_Success(nil)
+
+            case CompileMode.Sdn:
+                log.debug("sdn mode")
+                return self.process_sdn()
+
+            case CompileMode.Interpret:
+                log.debug("interpret mode")
+                return self.interpret()
+
+            case CompileMode.Jit:
+                log.debug("jit mode")
+                return self.jit_compile_and_run()
+
+            case CompileMode.Aot:
+                log.debug("aot mode")
+                return self.aot_compile()
+
+        log.warn("no mode matched, falling through")
+        compileresult_Success(nil)
+
+    # --------------------------------------------------------------------------
+    # Phase 1: Load sources
+    # --------------------------------------------------------------------------
+
+    me load_sources_impl() -> bool:
+        val log = self.ctx.logger
+        log.debug("input_files count={self.ctx.options.input_files.len()}")
+        var i = 0
+        while i < self.ctx.options.input_files_len(input_files):
+            val path = self.ctx.options.input_files[i]
+            log.trace("loading file: {path}")
+            match SourceFile__load(path):
+                case Ok(source):
+                    log.trace("loaded OK: {source.path}")
+                    self.ctx.sources_push(sources, source)
+                case Err(e):
+                    log.error("load error: {e}")
+                    self.ctx_add_error(ctx, e)
+            i = i + 1
+        log.debug("sources stored, count={self.ctx.sources.len()}")
+
+        not self.ctx_has_errors(ctx)
+
+    # --------------------------------------------------------------------------
+    # Phase 2: Parse
+    # --------------------------------------------------------------------------
+
+    me parse_all_impl() -> bool:
+        val log = self.ctx.logger
+        val sources = self.ctx.sources
+        log.debug("parsing {sources.len()} sources")
+        var src_idx = 0
+        while src_idx < sources_len(sources):
+            val source = sources[src_idx]
+            log.trace("parsing: {source.path} (module={source.module_name}, len={source.content.len()})")
+            val module = self.parse_source(source)
+            self.ctx.modules[source.module_name] = module
+            log.trace("stored module, total={self.ctx.modules.keys().len()}")
+            src_idx = src_idx + 1
+
+        log.debug("parsing done, modules={self.ctx.modules.keys().len()}")
+        not self.ctx_has_errors(ctx)
+
+    fn parse_source(source: SourceFile) -> Module:
+        val log = self.ctx.logger
+
+        # Phase 2a: Outline parsing (TreeSitter)
+        log.trace("2a: outline parsing...")
+        var ts = TreeSitter__new(source.content)
+        val outline = ts_parse_outline(ts)
+
+        # Phase 2b: Block resolution
+        log.trace("2b: resolving blocks...")
+        var resolver = create_block_resolver()
+        resolver = resolver_with_file(resolver, source.path)
+        resolver = resolver_with_module(resolver, source.module_name)
+        val (resolved, block_diagnostics) = resolver_resolve(resolver, outline)
+
+        # Phase 2c: Full parse with resolved blocks
+        log.trace("2c: full parse...")
+        var parser = Parser__with_resolved_blocks(source.content, resolved)
+        val module = parser_parse(parser)
+
+        # Phase 2d: Desugar async/await/spawn/actor syntax
+        log.trace("2d: desugaring...")
+        val desugared_module = desugar_module(module)
+        desugared_module
+
+    # --------------------------------------------------------------------------
+    # Phase 3: Combined HIR Lowering + Method Resolution + Type Checking
+    # --------------------------------------------------------------------------
+    #
+    # This combined implementation processes each module through all three
+    # phases in a single loop, avoiding redundant iterations and improving
+    # performance on large codebases.
+
+    me lower_and_check_impl() -> bool:
+        val log = self.ctx.logger
+        var lowering = create_hir_lowering()
+
+        val module_names = self.ctx.modules_keys(modules)
+        log.debug("lowering {module_names.len()} modules to HIR")
+        for name in module_names:
+            log.trace("processing module: {name}")
+            val module = self.ctx.modules[name]
+            if module == nil:
+                log.error("module is nil for key {name}")
+                continue
+
+            # Step 1: Lower to HIR
+            val hir_module = lowering_lower_module(lowering, module)
+            log.trace("HIR lowered for {name}")
+
+            # Step 2: Method resolution (UFCS)
+            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+            log.trace("methods resolved, errors={resolve_errors.len()}")
+
+            # Collect method resolution errors
+            var err_idx = 0
+            while err_idx < resolve_errors_len(resolve_errors):
+                val err = resolve_errors[err_idx]
+                self.ctx.add_error("Method resolution error in {name}: {err.message}")
+                err_idx = err_idx + 1
+
+            # Step 2b: Visibility checking (cross-module access validation)
+            val vis_warnings = check_module_visibility(resolved_module, name)
+            log.trace("visibility checked, warnings={vis_warnings.len()}")
+            for warning in vis_warnings:
+                self.ctx_add_visibility_warning(ctx, warning.format())
+
+            # Step 2c: Evaluate static assertions
+            for static_assert in resolved_module.static_asserts:
+                val result = eval_static_assert(resolved_module, static_assert)
+                match result:
+                    case Err(err):
+                        val msg = match err:
+                            case constevalerror_NotConstant(expr, _):
+                                "static assert condition is not constant: {expr}"
+                            case constevalerror_TypeError(expected, got, _):
+                                "static assert condition must be bool, got {got}"
+                            case constevalerror_AssertionFailed(message, _):
+                                if has_message:
+                                    "static assertion failed: {message}"
+                                else:
+                                    "static assertion failed"
+                            case _:
+                                "static assert evaluation error"
+                        self.ctx.add_error("Error in {name}: {msg}")
+                    case _:
+                        pass
+            log.trace("static assertions evaluated")
+
+            # Step 3: Type checking (HM inference) - skipped for bootstrap
+            # Store final module directly (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.hir_modules[name] = resolved_module
+            log.trace("stored HIR module '{name}', total={self.ctx.hir_modules.keys().len()}")
+
+        log.debug("HIR lowering complete: {self.ctx.hir_modules.keys().len()} modules")
+        not self.ctx_has_errors(ctx)
+
+    # --------------------------------------------------------------------------
+    # Phase 3a: Lower to HIR (standalone, kept for compatibility)
+    # --------------------------------------------------------------------------
+
+    fn lower_to_hir_impl() -> (CompileContext, bool):
+        var lowering = create_hir_lowering()
+        var ctx = self.ctx
+
+        val module_names = ctx.modules_keys(modules)
+        for name in module_names:
+            val module = ctx.modules[name]
+            val hir_module = lowering_lower_module(lowering, module)
+            ctx.hir_modules[name] = hir_module
+        (ctx, ctx.errors_len(errors) == 0)
+
+    # --------------------------------------------------------------------------
+    # Phase 3b: Method Resolution (standalone, kept for compatibility)
+    # --------------------------------------------------------------------------
+
+    fn resolve_methods_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+
+        for name in ctx.hir_modules_keys(hir_modules):
+            val hir_module = ctx.hir_modules[name]
+            val (resolved_module, resolve_errors) = resolve_methods(hir_module)
+
+            # Update the module with resolved method calls (direct mutation)
+            ctx.hir_modules[name] = resolved_module
+
+            # Collect errors
+            for err in resolve_errors:
+                ctx.errors.push("Method resolution error in {name}: {err.message}")
+
+        (ctx, ctx.errors_len(errors) == 0)
+
+    # --------------------------------------------------------------------------
+    # Phase 3c: Type Checking (standalone, kept for compatibility)
+    # --------------------------------------------------------------------------
+
+    fn type_check_impl() -> (CompileContext, bool):
+        var ctx = self.ctx
+
+        # Type inference disabled for bootstrap compatibility
+        # for name in ctx.hir_modules.keys():
+        #     val hir_module = ctx.hir_modules[name]
+        #     var infer_ctx = HmInferContext.with_builtins()
+        #     infer_ctx.infer_module(hir_module)
+        #     for err in infer_ctx.errors:
+        #         var errors = ctx.errors
+        #         errors.push("Type error in {name}: {err.message()}")
+        #         ctx.errors = errors
+
+        (ctx, ctx.errors_len(errors) == 0)
+
+    # --------------------------------------------------------------------------
+    # Phase 4: Monomorphization
+    # --------------------------------------------------------------------------
+
+    me monomorphize_impl() -> bool:
+        """Run monomorphization pass on all HIR modules.
+
+        This creates specialized versions of generic functions, structs, and
+        classes by substituting concrete type arguments. Call sites are
+        rewritten to use the mangled names of specialized definitions.
+        """
+        val log = self.ctx.logger
+        log.debug("running monomorphization on {self.ctx.hir_modules.keys().len()} modules")
+
+        # Run the monomorphization pass
+        val (updated_modules, stats) = run_monomorphization(self.ctx.hir_modules)
+
+        # Update context with modified modules
+        self.ctx.hir_modules = updated_modules
+
+        # Log statistics
+        log.debug("monomorphization stats:")
+        log.debug("  generic functions: {stats.generic_functions_found}")
+        log.debug("  generic structs: {stats.generic_structs_found}")
+        log.debug("  generic classes: {stats.generic_classes_found}")
+        log.debug("  call sites: {stats.call_sites_found}")
+        log.debug("  specializations created: {stats.specializations_created}")
+
+        not self.ctx_has_errors(ctx)
+
+    # --------------------------------------------------------------------------
+    # Mode: SDN (Data only)
+    # --------------------------------------------------------------------------
+
+    fn process_sdn() -> CompileResult:
+        val backend = self.ctx.di.resolve("Backend")
+        val results: Dict<text, Any> = {}
+
+        for name in self.ctx.hir_modules_keys(hir_modules):
+            val hir_module = self.ctx.hir_modules[name]
+            match backend_process_module(backend, hir_module):
+                case Ok(value):
+                    results[name] = value
+                case Err(e):
+                    return CompileResult.RuntimeError("SDN error in {name}: {e}")
+
+        compileresult_Success(results)
+
+    # --------------------------------------------------------------------------
+    # Mode: Interpret
+    # --------------------------------------------------------------------------
+
+    fn interpret() -> CompileResult:
+        # Delegate to simple_old runtime for interpretation
+        # The bootstrap compiler's struct field access has codegen issues
+        # that prevent the self-hosted interpreter/JIT from working
+        if self.ctx.options.input_files_len(input_files) == 0:
+            return CompileResult.Error("No source file specified for interpret mode")
+        val source_file = self.ctx.options.input_files[0]
+
+        val simple_old = find_simple_old_binary()
+        if simple_old == "":
+            return CompileResult.Error("Cannot find simple_old binary for interpretation")
+
+        val result = rt_shell("{simple_old} {source_file}")
+        if result.has_stdout:
+            print result.stdout
+        if result.exit_code != 0:
+            if result.has_stderr:
+                return compileresult_Error(result.stderr)
+            return CompileResult.Error("Interpret failed with exit code {result.exit_code}")
+        compileresult_Success(BackendResult.Unit)
+
+    fn run_module(backend: Backend, module: HirModule) -> CompileResult:
+        match backend_process_module(backend, module):
+            case Ok(value): compileresult_Success(value)
+            case Err(e): compileresult_RuntimeError(e)
+
+    # --------------------------------------------------------------------------
+    # Mode: JIT Compile and Run
+    # --------------------------------------------------------------------------
+
+    me jit_compile_and_run() -> CompileResult:
+        # Lower to MIR
+        if not self.lower_to_mir():
+            return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
+
+        # Borrow checking
+        if not self.borrow_check():
+            return compileresult_BorrowError(self.ctx.errors)
+
+        # Process async functions (generate state machines for await/yield)
+        val _async_state_machines = self.process_async()
+
+        # Optimize MIR (speed optimization for JIT)
+        self.optimize_mir(OptimizationConfig__speed())
+
+        # JIT compile
+        var pipeline = CodegenPipeline()
+
+        for name in self.ctx.mir_modules_keys(mir_modules):
+            val mir_module = self.ctx.mir_modules[name]
+            match pipeline_jit_compile(pipeline, mir_module):
+                case Ok(_): pass
+                case Err(e):
+                    return CompileResult.CodegenError("JIT compile error in {name}: {e}")
+
+        # Find and call main
+        val main_fn = pipeline.get_function("main")
+        if main_fn == nil:
+            return CompileResult.RuntimeError("No main function found")
+
+        match pipeline.call_function("main", []):
+            case Ok(result): compileresult_Success(result)
+            case Err(e): compileresult_RuntimeError(e)
+
+    # --------------------------------------------------------------------------
+    # Mode: AOT Compile
+    # --------------------------------------------------------------------------
+
+    me aot_compile() -> CompileResult:
+        val log = self.ctx.logger
+
+        # Lower to MIR
+        log.debug("AOT: lowering to MIR ({self.ctx.hir_modules.keys().len()} HIR modules)")
+        if not self.lower_to_mir():
+            for err in self.ctx.errors:
+                log.error("MIR error: {err}")
+            return CompileResult.CodegenError(self.ctx.errors.first() ?? "MIR lowering failed")
+        log.debug("MIR done, {self.ctx.mir_modules.keys().len()} modules")
+
+        # Borrow checking
+        log.debug("AOT: running borrow check...")
+        if not self.borrow_check():
+            for err in self.ctx.errors:
+                log.error("Borrow error: {err}")
+            return compileresult_BorrowError(self.ctx.errors)
+        log.debug("borrow check done")
+
+        # Process async functions (generate state machines for await/yield)
+        log.debug("AOT: processing async functions")
+        val async_state_machines = self.process_async()
+        log.debug("async processing done, {async_state_machines.keys().len()} state machines")
+
+        # Optimize MIR (use optimization level from options)
+        val opt_config = self.get_optimization_config()
+        log.debug("AOT: optimizing MIR (level: {opt_config.level})")
+        self.optimize_mir(opt_config)
+        log.debug("MIR optimization done")
+
+        # Determine output file
+        val output = self.ctx.options.output_file ?? "a.out"
+
+        # Dispatch based on output format
+        val format = self.ctx.options.output_format
+        match format:
+            case OutputFormat.Smf:
+                return self.compile_to_smf(output)
+            case OutputFormat.SelfContained:
+                return self.compile_to_self_contained(output)
+            case OutputFormat.Both:
+                # Compile native first, then SMF
+                val native_result = self.compile_to_native(output)
+                if not native_result_is_success(native_result):
+                    return native_result
+                val smf_result = self.compile_to_smf("{output}.smf")
+                if not smf_result_is_success(smf_result):
+                    return smf_result
+                return compileresult_Success(output)
+            case _:
+                # Native (default)
+                return self.compile_to_native(output)
+
+    me compile_to_native(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT native: compiling to {output} (backend: {effective_backend})")
+
+        # Compile all modules and collect object files
+        var object_files: [text] = []
+
+        for name in self.ctx.mir_modules_keys(mir_modules):
+            log.trace("compiling module: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled_is_err(compiled):
+                val err = compiled_unwrap_err(compiled)
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
+
+            val module = compiled_value
+            if module.has_object_code:
+                # Write object bytes to file for linking
+                val obj_path = "{output}.{name}.o"
+                if rt_file_write_bytes(obj_path, module.object_code_value):
+                    object_files = object_files_push(object_files, obj_path)
+                else:
+                    return CompileResult.CodegenError("Failed to write object file: {obj_path}")
+            else:
+                return CompileResult.CodegenError("Backend produced no object code for {name}")
+
+        # Link object files into final executable using linker wrapper
+        var link_config = NativeLinkConfig__default()
+        link_config.debug = self.ctx.options.debug_info
+        link_config.verbose = self.ctx.options.verbose
+
+        match link_to_native(object_files, output, link_config):
+            case Ok(_):
+                log.info("Native executable written to {output} (backend: {effective_backend})")
+                compileresult_Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Linking failed: {e}")
+
+    me compile_to_smf(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT SMF: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result_is_success(smf_result):
+            return smf_result
+
+        val smf_bytes = smf_result_get_value(smf_result)
+
+        # Write SMF file using linker wrapper
+        match link_to_smf(smf_bytes, output, self.ctx.options.verbose):
+            case Ok(_):
+                log.info("SMF module written to {output} (backend: {effective_backend})")
+                compileresult_Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Failed to write SMF file: {e}")
+
+    me compile_to_self_contained(output: text) -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+        val effective_backend = get_effective_backend_name(backend_name, is_release)
+        log.debug("AOT self-contained: compiling to {output} (backend: {effective_backend})")
+
+        val smf_result = self.collect_smf_bytes()
+        if not smf_result_is_success(smf_result):
+            return smf_result
+
+        val smf_bytes = smf_result_get_value(smf_result)
+
+        # Build self-contained binary using linker wrapper
+        var sc_config = SelfContainedConfig__default()
+        sc_config.verbose = self.ctx.options.verbose
+
+        match link_to_self_contained(smf_bytes, output, sc_config):
+            case Ok(_):
+                log.info("Self-contained binary written to {output} (backend: {effective_backend})")
+                compileresult_Success(output)
+            case Err(e):
+                CompileResult.CodegenError("Self-contained build failed: {e}")
+
+    me collect_smf_bytes() -> CompileResult:
+        val log = self.ctx.logger
+        val backend_name = self.ctx.options.backend
+        val is_release = self.ctx.options.release
+
+        var all_object_bytes: [u8] = []
+
+        for name in self.ctx.mir_modules_keys(mir_modules):
+            log.trace("compiling module for SMF: {name}")
+            val mir_module = self.ctx.mir_modules[name]
+            val compiled = compile_module_with_backend(backend_name, mir_module, is_release)
+            if compiled_is_err(compiled):
+                val err = compiled_unwrap_err(compiled)
+                return CompileResult.CodegenError("AOT compile error in {name}: {err.to_text()}")
+
+            val module = compiled_value
+            if module.has_object_code:
+                all_object_bytes = all_object_bytes_concat(all_object_bytes, module.object_code_value)
+
+        # Wrap object code into SMF format
+        val target = Target__host()
+        val smf_bytes = generate_smf_with_templates(all_object_bytes, nil, nil, target)
+        compileresult_Success(smf_bytes)
+
+    # --------------------------------------------------------------------------
+    # Linker Helper (legacy - kept for compatibility, delegates to linker_wrapper)
+    # --------------------------------------------------------------------------
+
+    fn link_objects(objects: [text], output: text) -> Result<text, text>:
+        if objects_is_empty(objects):
+            return Err("No object files to link")
+
+        var config = NativeLinkConfig__default()
+        link_to_native(objects, output, config)
+
+    # --------------------------------------------------------------------------
+    # MIR Lowering
+    # --------------------------------------------------------------------------
+
+    me lower_to_mir() -> bool:
+        var lowering = MirLowering__new(create_symbol_table())
+
+        val hir_keys = self.ctx.hir_modules_keys(hir_modules)
+        for name in hir_keys:
+            val hir_module = self.ctx.hir_modules[name]
+            var mir_module = lowering_lower_module(lowering, hir_module)
+            # Ensure module name is set
+            mir_module.name = name
+            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.mir_modules[name] = mir_module
+
+        not self.ctx_has_errors(ctx)
+
+    # --------------------------------------------------------------------------
+    # Borrow Checking
+    # --------------------------------------------------------------------------
+
+    me borrow_check() -> bool:
+        """Run borrow checking on all MIR modules."""
+        val log = self.ctx.logger
+
+        if self.ctx.options.no_borrow_check:
+            log.debug("borrow checking disabled")
+            return true
+
+        log.debug("borrow checking {self.ctx.mir_modules.keys().len()} modules")
+
+        var checker = BorrowChecker__create()
+        var has_errors = false
+
+        for name in self.ctx.mir_modules_keys(mir_modules):
+            val mir_module = self.ctx.mir_modules[name]
+
+            for fn_symbol in mir_module.functions_keys(functions):
+                val mir_fn = mir_module.functions[fn_symbol]
+                val body = MirBody__from_function(mir_fn)
+                match checker_check_function(checker, body):
+                    case Errors(errors):
+                        for err in errors:
+                            self.ctx_add_error(ctx, self.format_borrow_error(err))
+                        has_errors = true
+                    case Ok:
+                        pass
+
+        not has_errors
+
+    fn format_borrow_error(err: NLLError) -> text:
+        """Format a borrow error for display."""
+        var msg = "error[E0502]: {err.message}"
+        if err.has_help:
+            msg = "{msg}\n  = help: {err.help_value}"
+        msg
+
+    # --------------------------------------------------------------------------
+    # Async Processing
+    # --------------------------------------------------------------------------
+
+    me process_async() -> Dict<text, AsyncStateMachine>:
+        """Process async functions and generate state machines.
+
+        This is called after MIR lowering to analyze and transform async functions.
+        State machines are used by codegen for async execution.
+        """
+        val log = self.ctx.logger
+        log.debug("processing async functions in {self.ctx.mir_modules.keys().len()} modules")
+
+        val state_machines = process_async_mir(self.ctx.mir_modules)
+
+        log.debug("generated {state_machines.keys().len()} async state machines")
+        state_machines
+
+    # --------------------------------------------------------------------------
+    # MIR Optimization
+    # --------------------------------------------------------------------------
+
+    me optimize_mir(config: OptimizationConfig):
+        """Apply MIR optimization passes to all modules."""
+        val log = self.ctx.logger
+        log.debug("optimizing {self.ctx.mir_modules.keys().len()} MIR modules")
+
+        for name in self.ctx.mir_modules_keys(mir_modules):
+            val mir_module = self.ctx.mir_modules[name]
+            val optimized = optimize_mir_module(mir_module, config)
+            # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
+            self.ctx.mir_modules[name] = optimized
+
+    fn get_optimization_config() -> OptimizationConfig:
+        """Get optimization config from compiler options."""
+        # Check for explicit optimization level
+        if self.ctx.options.has_opt_level:
+            val level = self.ctx.options.opt_level_value
+            if level == 0:
+                return OptimizationConfig__debug()
+            elif level == 1:
+                return OptimizationConfig__size()
+            elif level == 2:
+                return OptimizationConfig__speed()
+            elif level >= 3:
+                return OptimizationConfig__aggressive()
+
+        # Check for release mode or optimize flag
+        if self.ctx.options.release or self.ctx.options.optimize:
+            OptimizationConfig__speed()
+        else:
+            OptimizationConfig__debug()
+
+# ------------------------------------------------------------------------------
+# Runtime Library Discovery
+# ------------------------------------------------------------------------------
+
+fn find_runtime_lib_dir() -> text:
+    # Check env var first
+    val env_path = rt_env_get("SIMPLE_RUNTIME_PATH")
+    if env_path.? and env_path != "":
+        return env_path
+    # Default to rust/target/debug
+    if rt_file_exists("rust/target/debug/libsimple_compiler.so"):
+        return "rust/target/debug"
+    if rt_file_exists("rust/target/release/libsimple_compiler.so"):
+        return "rust/target/release"
+    "rust/target/debug"
+
+# ------------------------------------------------------------------------------
+# Binary Discovery
+# ------------------------------------------------------------------------------
+
+fn find_simple_old_binary() -> text:
+    # Check env vars (new name first, then legacy)
+    val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH")
+    if runtime_path.? and runtime_path != "":
+        return runtime_path
+    val env_path = rt_env_get("SIMPLE_OLD_PATH")
+    if env_path.? and env_path != "":
+        return env_path
+    # Check dev paths (new name first, then legacy)
+    if rt_file_exists("./bin/release/simple"):
+        return "./bin/release/simple"
+    if rt_file_exists("./rust/target/debug/simple"):
+        return "./rust/target/debug/simple"
+    if rt_file_exists("./rust/target/release/simple"):
+        return "./rust/target/release/simple"
+    if rt_file_exists("./rust/target/debug/simple_old"):
+        return "./rust/target/debug/simple_old"
+    if rt_file_exists("./rust/target/release/simple_old"):
+        return "./rust/target/release/simple_old"
+    ""
+
+# ------------------------------------------------------------------------------
+# Convenience Functions
+# ------------------------------------------------------------------------------
+
+fn compile_file(path: text) -> CompileResult:
+    val options = CompileOptions__default()
+    options.input_files = [path]
+    val driver = CompilerDriver__create(options)
+    driver_compile(driver)
+
+fn compile_files(paths: [text], mode: CompileMode) -> CompileResult:
+    val options = CompileOptions__default()
+    options.input_files = paths
+    options.mode = mode
+    val driver = CompilerDriver__create(options)
+    driver_compile(driver)
+
+fn interpret_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Interpret)
+
+fn jit_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Jit)
+
+fn aot_file(path: text, output: text) -> CompileResult:
+    val options = CompileOptions__default()
+    options.input_files = [path]
+    options.mode = CompileMode.Aot
+    options.output_file = has_field = true, field_value = output
+    val driver = CompilerDriver__create(options)
+    driver_compile(driver)
+
+fn check_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Check)
+
+fn parse_sdn_file(path: text) -> CompileResult:
+    compile_files([path], CompileMode.Sdn)
+
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+
+fn compile_to_smf(path: text, output: text) -> Result<text, text>:
+    """Compile a source file to SMF format.
+
+    Uses the bootstrap binary's native compile command for reliability.
+    Returns Ok(output_path) on success or Err(message) on failure.
+    """
+    val result = rt_process_run("bin/release/simple", ["compile", path, "-o", output])
+    if result.contains("error") or result.contains("Error"):
+        Err(result)
+    else:
+        Ok(output)
+
+# ------------------------------------------------------------------------------
+# FFI Declarations (driver-specific only)
+# ------------------------------------------------------------------------------
+
+extern fn sys_get_args() -> [text]
+extern fn rt_env_get(name: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_shell(cmd: text) -> text
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CheckBackendImpl, CompilerDriver
+export find_runtime_lib_dir, find_simple_old_binary
+export compile_file, compile_files, interpret_file, jit_file, aot_file, check_file, parse_sdn_file, compile_to_smf
+
+# Re-export types from driver_types for convenience
+export use driver_types.{CompileMode, CompileMode__from_text, CompileOptions, CompileOptions__default, CompileResult, SourceFile, CompileContext, OutputFormat, OutputFormat__from_text}

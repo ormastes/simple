@@ -1,0 +1,1395 @@
+# Core Interpreter — Tree-Walking Evaluator
+#
+# Seed-compilable evaluator for core.ast arena-based AST.
+# Dispatches on expr/stmt/decl tags to evaluate the program.
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+#
+# Control flow (return/break/continue) uses global flags since we cannot
+# use exceptions or Result types in seed-compiled code.
+
+# ===== Control Flow Flags =====
+var eval_returning: bool = false
+var eval_return_value: i64 = -1
+var eval_breaking: bool = false
+var eval_continuing: bool = false
+var eval_had_error: bool = false
+var eval_error_msg: text = ""
+
+fn eval_reset():
+    eval_returning = false
+    eval_return_value = -1
+    eval_breaking = false
+    eval_continuing = false
+    eval_had_error = false
+    eval_error_msg = ""
+
+fn eval_set_error(msg: text):
+    eval_had_error = true
+    eval_error_msg = msg
+
+fn eval_get_error() -> text:
+    eval_error_msg
+
+fn eval_has_error() -> bool:
+    eval_had_error
+
+# ===== Function Table =====
+# Maps function name -> decl_id for call resolution
+var func_table_names: [text] = []
+var func_table_decls: [i64] = []
+
+fn func_table_reset():
+    func_table_names = []
+    func_table_decls = []
+
+fn func_table_register(name: text, decl_id: i64):
+    # Check for existing
+    var i: i64 = 0
+    for fn_name in func_table_names:
+        if fn_name == name:
+            func_table_decls[i] = decl_id
+            return
+        i = i + 1
+    func_table_names.push(name)
+    func_table_decls.push(decl_id)
+
+fn func_table_lookup(name: text) -> i64:
+    var i: i64 = 0
+    for fn_name in func_table_names:
+        if fn_name == name:
+            return func_table_decls[i]
+        i = i + 1
+    -1
+
+# ===== Struct Definition Table =====
+# Maps struct name -> decl_id for constructor resolution
+var struct_table_names: [text] = []
+var struct_table_decls: [i64] = []
+
+fn struct_table_reset():
+    struct_table_names = []
+    struct_table_decls = []
+
+fn struct_table_register(name: text, decl_id: i64):
+    var i: i64 = 0
+    for sn in struct_table_names:
+        if sn == name:
+            struct_table_decls[i] = decl_id
+            return
+        i = i + 1
+    struct_table_names.push(name)
+    struct_table_decls.push(decl_id)
+
+fn struct_table_lookup(name: text) -> i64:
+    var i: i64 = 0
+    for sn in struct_table_names:
+        if sn == name:
+            return struct_table_decls[i]
+        i = i + 1
+    -1
+
+# ===== Expression Evaluation =====
+
+fn eval_expr(eid: i64) -> i64:
+    if eid < 0: return val_make_nil()
+    if eval_had_error: return -1
+    if eval_returning: return eval_return_value
+
+    val tag = expr_get(eid).tag
+
+    # Literals
+    if tag == EXPR_INT_LIT: return eval_int_lit(eid)
+    if tag == EXPR_FLOAT_LIT: return eval_float_lit(eid)
+    if tag == EXPR_STRING_LIT: return eval_string_lit(eid)
+    if tag == EXPR_BOOL_LIT: return eval_bool_lit(eid)
+    if tag == EXPR_NIL_LIT: return val_make_nil()
+    if tag == EXPR_UNIT: return val_make_nil()
+    if tag == EXPR_PASS: return val_make_nil()
+
+    # Identifier
+    if tag == EXPR_IDENT: return eval_ident(eid)
+
+    # Operations
+    if tag == EXPR_BINARY: return eval_binary(eid)
+    if tag == EXPR_UNARY: return eval_unary(eid)
+
+    # Control flow
+    if tag == EXPR_IF: return eval_if_expr(eid)
+    if tag == EXPR_BLOCK: return eval_block_expr(eid)
+    if tag == EXPR_FOR: return eval_for_expr(eid)
+    if tag == EXPR_WHILE: return eval_while_expr(eid)
+    if tag == EXPR_MATCH: return eval_match_expr(eid)
+
+    # Calls
+    if tag == EXPR_CALL: return eval_call(eid)
+    if tag == EXPR_METHOD_CALL: return eval_method_call(eid)
+
+    # Access
+    if tag == EXPR_FIELD_ACCESS: return eval_field_access(eid)
+    if tag == EXPR_INDEX: return eval_index_expr(eid)
+
+    # Collections
+    if tag == EXPR_ARRAY_LIT: return eval_array_lit(eid)
+    if tag == EXPR_STRUCT_LIT: return eval_struct_lit(eid)
+
+    # Assignment (as expression)
+    if tag == EXPR_ASSIGN: return eval_assign_expr(eid)
+    if tag == EXPR_COMPOUND_ASSIGN: return eval_compound_assign_expr(eid)
+
+    # Control
+    if tag == EXPR_RETURN: return eval_return_expr(eid)
+    if tag == EXPR_BREAK:
+        eval_breaking = true
+        return val_make_nil()
+    if tag == EXPR_CONTINUE:
+        eval_continuing = true
+        return val_make_nil()
+
+    # String interpolation
+    if tag == EXPR_INTERPOLATED_STRING: return eval_interpolated_string(eid)
+
+    # Null coalesce
+    if tag == EXPR_NULL_COALESCE: return eval_null_coalesce(eid)
+
+    # Range (used in for loops, not directly evaluatable)
+    if tag == EXPR_RANGE: return eval_range(eid)
+
+    eval_set_error("unsupported expression kind: " + expr_kind_name(tag))
+    -1
+
+# ===== Literal Evaluation =====
+
+fn eval_int_lit(eid: i64) -> i64:
+    val_make_int(expr_get(eid).i_val)
+
+fn eval_float_lit(eid: i64) -> i64:
+    val float_text = expr_get(eid).f_val
+    # Parse float from text — seed runtime provides this
+    val_make_float(0.0)  # TODO: proper float parsing when seed supports it
+
+fn eval_string_lit(eid: i64) -> i64:
+    val_make_text(expr_get(eid).s_val)
+
+fn eval_bool_lit(eid: i64) -> i64:
+    val_make_bool(expr_get(eid).i_val != 0)
+
+# ===== Identifier Evaluation =====
+
+fn eval_ident(eid: i64) -> i64:
+    val name = expr_get(eid).s_val
+    val vid = env_lookup(name)
+    if vid >= 0: return vid
+    # Check function table
+    val decl_id = func_table_lookup(name)
+    if decl_id >= 0:
+        return val_make_function(name, decl_id)
+    eval_set_error("undefined variable: " + name)
+    -1
+
+# ===== Binary/Unary =====
+
+fn eval_binary(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val op = e_node.i_val
+    val left = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    val right = eval_expr(e_node.right)
+    if eval_had_error: return -1
+    val result = val_binary_op(op, left, right)
+    if result < 0:
+        val err = ops_get_error()
+        if err != "":
+            eval_set_error(err)
+    result
+
+fn eval_unary(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val op = e_node.i_val
+    val operand = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    val result = val_unary_op(op, operand)
+    if result < 0:
+        val err = ops_get_error()
+        if err != "":
+            eval_set_error(err)
+    result
+
+# ===== If Expression =====
+
+fn eval_if_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val cond_id = e_node.left
+    val then_id = e_node.right
+    val else_id = e_node.extra
+
+    val cond_val = eval_expr(cond_id)
+    if eval_had_error: return -1
+
+    if val_is_truthy(cond_val):
+        return eval_expr(then_id)
+    if else_id >= 0:
+        return eval_expr(else_id)
+    val_make_nil()
+
+# ===== Block Expression =====
+
+fn eval_block_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val stmts = e_node.stmts
+    val value_expr = e_node.left
+    eval_block(stmts, value_expr)
+
+fn eval_block(stmts: [i64], value_expr: i64) -> i64:
+    env_push_scope()
+    var last_val = val_make_nil()
+
+    for sid in stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        if eval_continuing: break
+        last_val = eval_stmt(sid)
+
+    if value_expr >= 0:
+        val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
+        if ctrl_interrupted == false:
+            last_val = eval_expr(value_expr)
+
+    env_pop_scope()
+    last_val
+
+# ===== For Expression =====
+
+fn eval_for_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val iter_name = e_node.s_val
+    val iterable_eid = e_node.left
+    val body_stmts = e_node.stmts
+
+    val iterable = eval_expr(iterable_eid)
+    if eval_had_error: return -1
+
+    val kind = val_get_kind(iterable)
+    var last_val = val_make_nil()
+
+    # Iterate over array
+    if kind == VAL_ARRAY:
+        val elements = val_get_array(iterable)
+        for elem_vid in elements:
+            if eval_breaking: break
+            if eval_returning: break
+            if eval_had_error: break
+            eval_continuing = false
+            env_push_scope()
+            env_define(iter_name, elem_vid)
+            for sid in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                last_val = eval_stmt(sid)
+            env_pop_scope()
+        eval_breaking = false
+        eval_continuing = false
+        return last_val
+
+    # Iterate over range (check if iterable is a range pair)
+    # Range is stored as: left=start, right=end, i_val=inclusive
+    if kind == VAL_INT:
+        # Check if iterable_eid is a RANGE expression
+        val iterable_tag = expr_get(iterable_eid).tag
+        if iterable_tag == EXPR_RANGE:
+            val range_node = expr_get(iterable_eid)
+            val start_val = eval_expr(range_node.left)
+            if eval_had_error: return -1
+            val end_val = eval_expr(range_node.right)
+            if eval_had_error: return -1
+            val inclusive = range_node.i_val
+            val start_n = val_get_int(start_val)
+            val end_n = val_get_int(end_val)
+            var current = start_n
+            val limit = end_n
+            for _unused in func_table_names:
+                if eval_breaking: break
+                if eval_returning: break
+                if eval_had_error: break
+                val should_stop = current > limit
+                val at_limit = current == limit
+                if inclusive != 0:
+                    if should_stop: break
+                else:
+                    if at_limit: break
+                    if should_stop: break
+                eval_continuing = false
+                env_push_scope()
+                env_define(iter_name, val_make_int(current))
+                for sid in body_stmts:
+                    if eval_had_error: break
+                    if eval_returning: break
+                    if eval_breaking: break
+                    if eval_continuing: break
+                    last_val = eval_stmt(sid)
+                env_pop_scope()
+                current = current + 1
+            eval_breaking = false
+            eval_continuing = false
+            return last_val
+
+    eval_set_error("cannot iterate over " + val_kind_name(kind))
+    -1
+
+# ===== Range Expression =====
+# Range creates an array of integers for now
+fn eval_range(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val start_val = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    val end_val = eval_expr(e_node.right)
+    if eval_had_error: return -1
+    val inclusive = e_node.i_val
+    val start_n = val_get_int(start_val)
+    val end_n = val_get_int(end_val)
+    var elements: [i64] = []
+    var current = start_n
+    for _unused in func_table_names:
+        val should_stop = current > end_n
+        val at_limit = current == end_n
+        if inclusive != 0:
+            if should_stop: break
+        else:
+            if at_limit: break
+            if should_stop: break
+        elements.push(val_make_int(current))
+        current = current + 1
+        # safety limit
+        if elements.len() > 10000: break
+    val_make_array(elements)
+
+# ===== While Expression =====
+
+fn eval_while_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val cond_eid = e_node.left
+    val body_stmts = e_node.stmts
+    var last_val = val_make_nil()
+    var iterations: i64 = 0
+    val max_iterations: i64 = 1000000
+
+    for _unused in func_table_names:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        val cond_val = eval_expr(cond_eid)
+        if eval_had_error: break
+        if val_is_truthy(cond_val) == false: break
+        eval_continuing = false
+        for sid in body_stmts:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            if eval_continuing: break
+            last_val = eval_stmt(sid)
+        iterations = iterations + 1
+        if iterations >= max_iterations:
+            eval_set_error("while loop exceeded maximum iterations")
+            break
+
+    eval_breaking = false
+    eval_continuing = false
+    last_val
+
+# ===== Match Expression =====
+
+fn eval_match_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val scrutinee = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    val arm_ids = e_node.args
+
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val guard_eid = arm_get_guard(arm_id)
+        val body_stmts = arm_get_body(arm_id)
+
+        val matched = match_pattern(scrutinee, pattern_eid)
+        if matched:
+            # Check guard
+            if guard_eid >= 0:
+                val guard_val = eval_expr(guard_eid)
+                if eval_had_error: return -1
+                if val_is_truthy(guard_val) == false:
+                    continue
+            # Execute arm body
+            env_push_scope()
+            var last_val = val_make_nil()
+            for sid in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                last_val = eval_stmt(sid)
+            env_pop_scope()
+            return last_val
+
+    # No arm matched
+    val_make_nil()
+
+fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
+    if pattern_eid < 0: return true
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+
+    # Wildcard: _ matches anything
+    if tag == EXPR_IDENT:
+        val name = e_node.s_val
+        if name == "_": return true
+        # Binding: bind value to name
+        env_define(name, value_id)
+        return true
+
+    # Literal patterns: compare values
+    if tag == EXPR_INT_LIT:
+        val pattern_val = eval_int_lit(pattern_eid)
+        return val_equals(value_id, pattern_val)
+
+    if tag == EXPR_STRING_LIT:
+        val pattern_val = eval_string_lit(pattern_eid)
+        return val_equals(value_id, pattern_val)
+
+    if tag == EXPR_BOOL_LIT:
+        val pattern_val = eval_bool_lit(pattern_eid)
+        return val_equals(value_id, pattern_val)
+
+    if tag == EXPR_NIL_LIT:
+        return val_is_nil(value_id)
+
+    # Default: try equality comparison
+    val pattern_val = eval_expr(pattern_eid)
+    if eval_had_error: return false
+    val_equals(value_id, pattern_val)
+
+# ===== Call Expression =====
+
+fn eval_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val callee_eid = e_node.left
+    val arg_eids = e_node.args
+
+    # Evaluate callee
+    val callee_node = expr_get(callee_eid)
+    val callee_tag = callee_node.tag
+
+    # Direct function call by name
+    if callee_tag == EXPR_IDENT:
+        val name = callee_node.s_val
+
+        # Check for struct constructor
+        val struct_decl = struct_table_lookup(name)
+        if struct_decl >= 0:
+            return eval_struct_constructor(name, struct_decl, arg_eids)
+
+        # Check for builtin
+        val builtin_result = eval_builtin_call(name, arg_eids)
+        if builtin_result >= -1:
+            return builtin_result
+
+        # Check function table
+        val decl_id = func_table_lookup(name)
+        if decl_id >= 0:
+            return eval_function_call(decl_id, arg_eids)
+
+        # Check environment for function value
+        val fn_vid = env_lookup(name)
+        if fn_vid >= 0:
+            if val_is_function(fn_vid):
+                val fn_decl = val_get_func_decl(fn_vid)
+                return eval_function_call(fn_decl, arg_eids)
+
+        eval_set_error("undefined function: " + name)
+        return -1
+
+    # Indirect call (call on expression result)
+    val callee_val = eval_expr(callee_eid)
+    if eval_had_error: return -1
+    if val_is_function(callee_val):
+        val fn_decl = val_get_func_decl(callee_val)
+        return eval_function_call(fn_decl, arg_eids)
+
+    eval_set_error("value is not callable")
+    -1
+
+fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
+    val d_node = decl_get(decl_id)
+    val fn_name = d_node.name
+    val param_names = d_node.param_names
+    val body_stmts = d_node.body_stmts
+
+    # Record call for JIT threshold tracking
+    jit_record_call(fn_name)
+
+    # Evaluate arguments
+    var arg_values: [i64] = []
+    for aeid in arg_eids:
+        val av = eval_expr(aeid)
+        if eval_had_error: return -1
+        arg_values.push(av)
+
+    # Try JIT execution if function is compiled
+    if jit_is_compiled(fn_name):
+        # Convert value_ids to raw i64s for JIT calling convention
+        var raw_args: [i64] = []
+        for av in arg_values:
+            if val_is_int(av):
+                raw_args.push(val_get_int(av))
+            else:
+                raw_args.push(av)
+        val jit_result = jit_try_execute(fn_name, raw_args)
+        if jit_result != -1:
+            return val_make_int(jit_result)
+
+    # Fall back to tree-walking
+    env_push_scope()
+    var pi: i64 = 0
+    for pname in param_names:
+        if pi < arg_values.len():
+            env_define(pname, arg_values[pi])
+        else:
+            env_define(pname, val_make_nil())
+        pi = pi + 1
+
+    # Execute body
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    # Handle return
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+
+    env_pop_scope()
+    last_val
+
+fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
+    val field_names = decl_get(decl_id).field_names
+    var field_values: [i64] = []
+
+    # Evaluate arguments (positional mapping to fields)
+    var ai: i64 = 0
+    for aeid in arg_eids:
+        val av = eval_expr(aeid)
+        if eval_had_error: return -1
+        field_values.push(av)
+        ai = ai + 1
+
+    # Fill remaining fields with nil
+    for fi in field_names:
+        if ai >= field_values.len():
+            field_values.push(val_make_nil())
+        ai = ai + 1
+
+    val_make_struct(name, field_names, field_values)
+
+# ===== Method Call =====
+
+fn eval_method_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val receiver_eid = e_node.left
+    val method_name = e_node.s_val
+    val arg_eids = e_node.args
+
+    val receiver = eval_expr(receiver_eid)
+    if eval_had_error: return -1
+
+    # Built-in methods on types
+    val kind = val_get_kind(receiver)
+
+    # Array methods
+    if kind == VAL_ARRAY:
+        return eval_array_method(receiver, method_name, arg_eids)
+
+    # Text methods
+    if kind == VAL_TEXT:
+        return eval_text_method(receiver, method_name, arg_eids)
+
+    # Struct methods — look up Type__method in function table
+    if kind == VAL_STRUCT:
+        val type_name = val_get_struct_name(receiver)
+        val full_name = type_name + "__" + method_name
+        val decl_id = func_table_lookup(full_name)
+        if decl_id >= 0:
+            # Prepend receiver as first arg
+            var all_arg_eids: [i64] = []
+            for aeid in arg_eids:
+                all_arg_eids.push(aeid)
+            # Evaluate args, then call with receiver prepended
+            var arg_values: [i64] = []
+            arg_values.push(receiver)
+            for aeid in all_arg_eids:
+                val av = eval_expr(aeid)
+                if eval_had_error: return -1
+                arg_values.push(av)
+            return eval_method_with_args(decl_id, arg_values)
+
+    eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
+    -1
+
+fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
+    val d_node = decl_get(decl_id)
+    val param_names = d_node.param_names
+    val body_stmts = d_node.body_stmts
+
+    env_push_scope()
+    # Bind self + params
+    var pi: i64 = 0
+    for pname in param_names:
+        if pi < arg_values.len():
+            env_define(pname, arg_values[pi])
+        else:
+            env_define(pname, val_make_nil())
+        pi = pi + 1
+
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+
+    env_pop_scope()
+    last_val
+
+# ===== Array Methods =====
+
+fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val elements = val_get_array(receiver)
+
+    if method_name == "len":
+        return val_make_int(elements.len())
+
+    if method_name == "push":
+        if arg_eids.len() > 0:
+            val new_elem = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            var new_elems: [i64] = []
+            for e in elements:
+                new_elems.push(e)
+            new_elems.push(new_elem)
+            return val_make_array(new_elems)
+        return receiver
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            for e in elements:
+                if val_equals(e, target): return val_make_bool(true)
+            return val_make_bool(false)
+        return val_make_bool(false)
+
+    eval_set_error("no method '" + method_name + "' on array")
+    -1
+
+# ===== Text Methods =====
+
+fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val s = val_get_text(receiver)
+
+    if method_name == "len":
+        return val_make_int(s.len())
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val t = val_get_text(target)
+            return val_make_bool(s.contains(t))
+        return val_make_bool(false)
+
+    eval_set_error("no method '" + method_name + "' on text")
+    -1
+
+# ===== Field Access =====
+
+fn eval_field_access(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val field_name = e_node.s_val
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+
+    if val_is_struct(base_val):
+        val fv = val_struct_get_field(base_val, field_name)
+        if fv >= 0: return fv
+        eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
+        return -1
+
+    eval_set_error("cannot access field on " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Index Expression =====
+
+fn eval_index_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val index_eid = e_node.right
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+    val index_val = eval_expr(index_eid)
+    if eval_had_error: return -1
+
+    if val_is_array(base_val):
+        val elements = val_get_array(base_val)
+        if val_is_int(index_val):
+            val idx = val_get_int(index_val)
+            if idx >= 0:
+                val len = elements.len()
+                if idx < len:
+                    return elements[idx]
+            eval_set_error("array index out of bounds: " + "{idx}")
+            return -1
+
+    if val_is_text(base_val):
+        val s = val_get_text(base_val)
+        if val_is_int(index_val):
+            val idx = val_get_int(index_val)
+            if idx >= 0:
+                if idx < s.len():
+                    return val_make_text(s[idx])
+            eval_set_error("string index out of bounds: " + "{idx}")
+            return -1
+
+    eval_set_error("cannot index " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Array Literal =====
+
+fn eval_array_lit(eid: i64) -> i64:
+    val elem_eids = expr_get(eid).args
+    var elements: [i64] = []
+    for e_eid in elem_eids:
+        val ev = eval_expr(e_eid)
+        if eval_had_error: return -1
+        elements.push(ev)
+    val_make_array(elements)
+
+# ===== Struct Literal =====
+
+fn eval_struct_lit(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val type_name = e_node.s_val
+    val field_name_eids = e_node.args
+    val field_value_eids = e_node.stmts
+
+    # Field names stored as ident expressions
+    var field_names: [text] = []
+    for fn_eid in field_name_eids:
+        field_names.push(expr_get(fn_eid).s_val)
+
+    var field_values: [i64] = []
+    for fv_eid in field_value_eids:
+        val fv = eval_expr(fv_eid)
+        if eval_had_error: return -1
+        field_values.push(fv)
+
+    val_make_struct(type_name, field_names, field_values)
+
+# ===== Assignment Expression =====
+
+fn eval_assign_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val target_eid = e_node.left
+    val value_eid = e_node.right
+
+    val new_val = eval_expr(value_eid)
+    if eval_had_error: return -1
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val ok = env_assign(name, new_val)
+        if ok == false:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        return new_val
+
+    if target_tag == EXPR_FIELD_ACCESS:
+        val base_eid2 = target_node.left
+        val field_name = target_node.s_val
+        val base_val = eval_expr(base_eid2)
+        if eval_had_error: return -1
+        if val_is_struct(base_val):
+            val_struct_set_field(base_val, field_name, new_val)
+            return new_val
+        eval_set_error("cannot set field on " + val_kind_name(val_get_kind(base_val)))
+        return -1
+
+    eval_set_error("invalid assignment target")
+    -1
+
+fn eval_compound_assign_expr(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val op = e_node.i_val
+    val target_eid = e_node.left
+    val value_eid = e_node.right
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val old_val = env_lookup(name)
+        if old_val < 0:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        val rhs_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+        val new_val = val_compound_op(op, old_val, rhs_val)
+        if new_val < 0:
+            val err = ops_get_error()
+            if err != "":
+                eval_set_error(err)
+            return -1
+        env_assign(name, new_val)
+        return new_val
+
+    eval_set_error("invalid compound assignment target")
+    -1
+
+# ===== Return Expression =====
+
+fn eval_return_expr(eid: i64) -> i64:
+    val value_eid = expr_get(eid).left
+    var ret_val = val_make_nil()
+    if value_eid >= 0:
+        ret_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+    eval_returning = true
+    eval_return_value = ret_val
+    ret_val
+
+# ===== Interpolated String =====
+
+fn eval_interpolated_string(eid: i64) -> i64:
+    val parts = expr_get(eid).args
+    var result = ""
+    for part_eid in parts:
+        val part_val = eval_expr(part_eid)
+        if eval_had_error: return -1
+        result = result + val_to_text(part_val)
+    val_make_text(result)
+
+# ===== Null Coalesce =====
+
+fn eval_null_coalesce(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val left = eval_expr(e_node.left)
+    if eval_had_error: return -1
+    if val_is_nil(left) == false: return left
+    eval_expr(e_node.right)
+
+# ===== Builtin Functions =====
+# Returns >= -1 if handled (value_id or -1 for error), returns -2 if not a builtin
+
+fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
+    if name == "print":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            print val_to_text(arg_val)
+        else:
+            print ""
+        return val_make_nil()
+
+    if name == "println":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            print val_to_text(arg_val)
+        else:
+            print ""
+        return val_make_nil()
+
+    if name == "int":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val kind = val_get_kind(arg_val)
+            if kind == VAL_INT: return arg_val
+            if kind == VAL_FLOAT:
+                # Truncate float to int
+                return val_make_int(0)  # TODO: proper conversion
+            if kind == VAL_TEXT:
+                return val_make_int(int(val_get_text(arg_val)))
+            if kind == VAL_BOOL:
+                if val_get_bool(arg_val): return val_make_int(1)
+                return val_make_int(0)
+        return val_make_int(0)
+
+    if name == "type_of":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(val_kind_name(val_get_kind(arg_val)))
+        return val_make_text("nil")
+
+    if name == "len":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val kind = val_get_kind(arg_val)
+            if kind == VAL_ARRAY: return val_make_int(val_get_array(arg_val).len())
+            if kind == VAL_TEXT: return val_make_int(val_get_text(arg_val).len())
+        return val_make_int(0)
+
+    if name == "to_text":
+        if arg_eids.len() > 0:
+            val arg_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(val_to_text(arg_val))
+        return val_make_text("")
+
+    # Not a builtin
+    -2
+
+# ===== Statement Evaluation =====
+
+fn eval_stmt(sid: i64) -> i64:
+    if sid < 0: return val_make_nil()
+    if eval_had_error: return -1
+    if eval_returning: return eval_return_value
+    if eval_breaking: return val_make_nil()
+    if eval_continuing: return val_make_nil()
+
+    val tag = stmt_get(sid).tag
+
+    if tag == STMT_EXPR: return eval_stmt_expr(sid)
+    if tag == STMT_VAL_DECL: return eval_stmt_val_decl(sid)
+    if tag == STMT_VAR_DECL: return eval_stmt_var_decl(sid)
+    if tag == STMT_ASSIGN: return eval_stmt_assign(sid)
+    if tag == STMT_COMPOUND_ASSIGN: return eval_stmt_compound_assign(sid)
+    if tag == STMT_RETURN: return eval_stmt_return(sid)
+    if tag == STMT_IF: return eval_stmt_if(sid)
+    if tag == STMT_FOR: return eval_stmt_for(sid)
+    if tag == STMT_WHILE: return eval_stmt_while(sid)
+    if tag == STMT_MATCH: return eval_stmt_match(sid)
+    if tag == STMT_BLOCK: return eval_stmt_block(sid)
+    if tag == STMT_BREAK:
+        eval_breaking = true
+        return val_make_nil()
+    if tag == STMT_CONTINUE:
+        eval_continuing = true
+        return val_make_nil()
+
+    eval_set_error("unsupported statement kind: " + "{tag}")
+    -1
+
+fn eval_stmt_expr(sid: i64) -> i64:
+    eval_expr(stmt_get(sid).expr_idx)
+
+fn eval_stmt_val_decl(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val name = s_node.name
+    val init_eid = s_node.expr_idx
+    var init_val = val_make_nil()
+    if init_eid >= 0:
+        init_val = eval_expr(init_eid)
+        if eval_had_error: return -1
+    env_define(name, init_val)
+    init_val
+
+fn eval_stmt_var_decl(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val name = s_node.name
+    val init_eid = s_node.expr_idx
+    var init_val = val_make_nil()
+    if init_eid >= 0:
+        init_val = eval_expr(init_eid)
+        if eval_had_error: return -1
+    env_define(name, init_val)
+    init_val
+
+fn eval_stmt_assign(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val target_eid = s_node.expr_idx
+    val value_stmts = s_node.body
+    if value_stmts.len() == 0:
+        eval_set_error("assignment missing value")
+        return -1
+    val value_eid = value_stmts[0]
+
+    val new_val = eval_expr(value_eid)
+    if eval_had_error: return -1
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val ok = env_assign(name, new_val)
+        if ok == false:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        return new_val
+
+    if target_tag == EXPR_FIELD_ACCESS:
+        val base_eid = target_node.left
+        val field_name = target_node.s_val
+        val base_val = eval_expr(base_eid)
+        if eval_had_error: return -1
+        if val_is_struct(base_val):
+            val_struct_set_field(base_val, field_name, new_val)
+            return new_val
+
+    if target_tag == EXPR_INDEX:
+        val base_eid2 = target_node.left
+        val idx_eid = target_node.right
+        val base_val2 = eval_expr(base_eid2)
+        if eval_had_error: return -1
+        val idx_val = eval_expr(idx_eid)
+        if eval_had_error: return -1
+        if val_is_array(base_val2):
+            if val_is_int(idx_val):
+                val idx = val_get_int(idx_val)
+                var elements = val_get_array(base_val2)
+                if idx >= 0:
+                    if idx < elements.len():
+                        elements[idx] = new_val
+                        val_arrays[base_val2] = elements
+                        return new_val
+        eval_set_error("invalid index assignment")
+        return -1
+
+    eval_set_error("invalid assignment target")
+    -1
+
+fn eval_stmt_compound_assign(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val target_eid = s_node.expr_idx
+    val op = s_node.type_tag
+    val value_stmts = s_node.body
+    if value_stmts.len() == 0:
+        eval_set_error("compound assignment missing value")
+        return -1
+    val value_eid = value_stmts[0]
+
+    val target_node = expr_get(target_eid)
+    val target_tag = target_node.tag
+    if target_tag == EXPR_IDENT:
+        val name = target_node.s_val
+        val old_val = env_lookup(name)
+        if old_val < 0:
+            eval_set_error("undefined variable: " + name)
+            return -1
+        val rhs_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+        val new_val = val_compound_op(op, old_val, rhs_val)
+        if new_val < 0:
+            val err = ops_get_error()
+            if err != "":
+                eval_set_error(err)
+            return -1
+        env_assign(name, new_val)
+        return new_val
+
+    eval_set_error("invalid compound assignment target")
+    -1
+
+fn eval_stmt_return(sid: i64) -> i64:
+    val value_eid = stmt_get(sid).expr_idx
+    var ret_val = val_make_nil()
+    if value_eid >= 0:
+        ret_val = eval_expr(value_eid)
+        if eval_had_error: return -1
+    eval_returning = true
+    eval_return_value = ret_val
+    ret_val
+
+fn eval_stmt_if(sid: i64) -> i64:
+    val elif_idx = stmt_get(sid).type_tag
+    val cond_eid = elif_get_cond(elif_idx)
+    val then_stmts = elif_get_body(elif_idx)
+    val else_stmts = elif_get_else(elif_idx)
+
+    val cond_val = eval_expr(cond_eid)
+    if eval_had_error: return -1
+
+    if val_is_truthy(cond_val):
+        env_push_scope()
+        var last_val = val_make_nil()
+        for sid2 in then_stmts:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            if eval_continuing: break
+            last_val = eval_stmt(sid2)
+        env_pop_scope()
+        return last_val
+    if else_stmts.len() > 0:
+        env_push_scope()
+        var last_val2 = val_make_nil()
+        for sid2 in else_stmts:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            if eval_continuing: break
+            last_val2 = eval_stmt(sid2)
+        env_pop_scope()
+        return last_val2
+    val_make_nil()
+
+fn eval_stmt_for(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val iter_name = s_node.name
+    val iterable_eid = s_node.expr_idx
+    val body_stmts = s_node.body
+
+    # Check if iterable is a range expression
+    val iterable_tag = expr_get(iterable_eid).tag
+    if iterable_tag == EXPR_RANGE:
+        val range_node = expr_get(iterable_eid)
+        val start_val = eval_expr(range_node.left)
+        if eval_had_error: return -1
+        val end_val = eval_expr(range_node.right)
+        if eval_had_error: return -1
+        val inclusive = range_node.i_val
+        val start_n = val_get_int(start_val)
+        val end_n = val_get_int(end_val)
+
+        var current = start_n
+        var last_val = val_make_nil()
+        var iterations: i64 = 0
+        for _unused in func_table_names:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            val should_stop = current > end_n
+            val at_limit = current == end_n
+            if inclusive != 0:
+                if should_stop: break
+            else:
+                if at_limit: break
+                if should_stop: break
+            eval_continuing = false
+            env_push_scope()
+            env_define(iter_name, val_make_int(current))
+            for sid2 in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                last_val = eval_stmt(sid2)
+            env_pop_scope()
+            current = current + 1
+            iterations = iterations + 1
+            if iterations > 1000000: break
+        eval_breaking = false
+        eval_continuing = false
+        return last_val
+
+    # Otherwise evaluate the iterable
+    val iterable = eval_expr(iterable_eid)
+    if eval_had_error: return -1
+
+    if val_is_array(iterable):
+        val elements = val_get_array(iterable)
+        var last_val2 = val_make_nil()
+        for elem_vid in elements:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            eval_continuing = false
+            env_push_scope()
+            env_define(iter_name, elem_vid)
+            for sid2 in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                last_val2 = eval_stmt(sid2)
+            env_pop_scope()
+        eval_breaking = false
+        eval_continuing = false
+        return last_val2
+
+    eval_set_error("cannot iterate over " + val_kind_name(val_get_kind(iterable)))
+    -1
+
+fn eval_stmt_while(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val cond_eid = s_node.expr_idx
+    val body_stmts = s_node.body
+    var last_val = val_make_nil()
+    var iterations: i64 = 0
+
+    for _unused in func_table_names:
+        if eval_had_error: break
+        if eval_returning: break
+        if eval_breaking: break
+        val cond_val = eval_expr(cond_eid)
+        if eval_had_error: break
+        if val_is_truthy(cond_val) == false: break
+        eval_continuing = false
+        for sid2 in body_stmts:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            if eval_continuing: break
+            last_val = eval_stmt(sid2)
+        iterations = iterations + 1
+        if iterations >= 1000000:
+            eval_set_error("while loop exceeded maximum iterations")
+            break
+
+    eval_breaking = false
+    eval_continuing = false
+    last_val
+
+fn eval_stmt_match(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val scrutinee_eid = s_node.expr_idx
+    val arm_ids = s_node.body
+
+    val scrutinee = eval_expr(scrutinee_eid)
+    if eval_had_error: return -1
+
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val guard_eid = arm_get_guard(arm_id)
+        val body_stmts = arm_get_body(arm_id)
+
+        env_push_scope()
+        val matched = match_pattern(scrutinee, pattern_eid)
+        if matched:
+            if guard_eid >= 0:
+                val guard_val = eval_expr(guard_eid)
+                if eval_had_error:
+                    env_pop_scope()
+                    return -1
+                if val_is_truthy(guard_val) == false:
+                    env_pop_scope()
+                    continue
+            var last_val = val_make_nil()
+            for sid2 in body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                last_val = eval_stmt(sid2)
+            env_pop_scope()
+            return last_val
+        env_pop_scope()
+
+    val_make_nil()
+
+fn eval_stmt_block(sid: i64) -> i64:
+    val body_stmts = stmt_get(sid).body
+    eval_block(body_stmts, -1)
+
+# ===== Declaration Evaluation =====
+
+fn eval_decl(did: i64) -> i64:
+    if did < 0: return val_make_nil()
+    if eval_had_error: return -1
+
+    val d_node = decl_get(did)
+    val tag = d_node.tag
+
+    if tag == DECL_FN:
+        val name = d_node.name
+        func_table_register(name, did)
+        return val_make_nil()
+
+    if tag == DECL_STRUCT:
+        val name = d_node.name
+        struct_table_register(name, did)
+        return val_make_nil()
+
+    if tag == DECL_VAL:
+        val name = d_node.name
+        val body = d_node.body_stmts
+        var init_val = val_make_nil()
+        if body.len() > 0:
+            init_val = eval_expr(body[0])
+            if eval_had_error: return -1
+        env_define_global(name, init_val)
+        return init_val
+
+    if tag == DECL_VAR:
+        val name = d_node.name
+        val body = d_node.body_stmts
+        var init_val = val_make_nil()
+        if body.len() > 0:
+            init_val = eval_expr(body[0])
+            if eval_had_error: return -1
+        env_define_global(name, init_val)
+        return init_val
+
+    if tag == DECL_ENUM:
+        # Register enum variants as constants
+        val name = d_node.name
+        val variants = d_node.field_names
+        var vi: i64 = 0
+        for variant_name in variants:
+            env_define_global(variant_name, val_make_int(vi))
+            vi = vi + 1
+        return val_make_nil()
+
+    # DECL_USE, DECL_EXPORT, DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
+    val_make_nil()
+
+# ===== Module Evaluation =====
+
+fn eval_module() -> i64:
+    val decls = module_get_decls()
+
+    # Phase 1: Register all functions and structs
+    for did in decls:
+        val d_node = decl_get(did)
+        val tag = d_node.tag
+        if tag == DECL_FN:
+            func_table_register(d_node.name, did)
+        if tag == DECL_STRUCT:
+            struct_table_register(d_node.name, did)
+
+    # Phase 2: Evaluate declarations (val/var bindings, enums)
+    var last_val = val_make_nil()
+    for did in decls:
+        if eval_had_error: break
+        val tag = decl_get(did).tag
+        if tag == DECL_VAL:
+            eval_decl(did)
+        if tag == DECL_VAR:
+            eval_decl(did)
+        if tag == DECL_ENUM:
+            eval_decl(did)
+
+    # Phase 3: Call main() if it exists
+    val main_decl = func_table_lookup("main")
+    if main_decl >= 0:
+        var empty_args: [i64] = []
+        last_val = eval_function_call(main_decl, empty_args)
+
+    last_val
+
+# ===== Full Initialization =====
+
+fn eval_init():
+    val_reset()
+    env_init()
+    func_table_reset()
+    struct_table_reset()
+    eval_reset()
+
+export eval_reset, eval_set_error, eval_get_error, eval_has_error
+export eval_returning, eval_return_value, eval_breaking, eval_continuing
+export func_table_reset, func_table_register, func_table_lookup
+export struct_table_reset, struct_table_register, struct_table_lookup
+export eval_expr, eval_stmt, eval_decl, eval_module
+export eval_block, eval_function_call, eval_builtin_call
+export eval_init

@@ -1,0 +1,176 @@
+# SMF Writer
+#
+# Simple Module Format writer for creating SMF files from compiled code.
+# Handles sections, symbols, relocations, and string tables.
+#
+# Port of rust/compiler/src/linker/smf_writer.rs
+
+export SmfSymbol, SmfRelocation, SmfSection, SmfWriter
+export DataSectionKind, SmfWriteError, SymbolBinding, SymbolType
+export SectionType, RelocationType
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SMF_MAGIC: i64 = 0x534D4600      # "SMF\0"
+val SMF_VERSION_MAJOR: i64 = 0
+val SMF_VERSION_MINOR: i64 = 1
+val SMF_FLAG_EXECUTABLE: i64 = 0x1
+
+val SECTION_FLAG_READ: i64 = 0x1
+val SECTION_FLAG_WRITE: i64 = 0x2
+val SECTION_FLAG_EXEC: i64 = 0x4
+
+# ============================================================================
+# Enums
+# ============================================================================
+
+enum DataSectionKind:
+    """Lean: inductive DataSectionKind | mutable | readonly"""
+    Mutable
+    ReadOnly
+
+
+# ============================================================================
+# DataSectionKind Methods (was: impl DataSectionKind:)
+# ============================================================================
+
+enum SectionType:
+    Code
+    Data
+    RoData
+    Bss
+    SymTab
+    StrTab
+    RelTab
+    Note
+    Debug
+
+
+# ============================================================================
+# SectionType Methods (was: impl SectionType:)
+# ============================================================================
+
+enum SymbolBinding:
+    Local
+    Global
+    Weak
+
+enum SymbolType:
+    NoType
+    Function
+    Object
+    Section
+
+enum RelocationType:
+    Abs64
+    Rel32
+    PltRel32
+    GotRel32
+
+enum SmfWriteError:
+    IoError(text)
+    InvalidData(text)
+
+
+# ============================================================================
+# SmfWriteError Methods (was: impl SmfWriteError:)
+# ============================================================================
+
+# ============================================================================
+# Structs
+# ============================================================================
+
+struct SmfSymbol:
+    name: text
+    binding: SymbolBinding
+    sym_type: SymbolType
+    section_index: i64
+    value: i64
+    size: i64
+    layout_phase: i64           # 0=startup, 1=first_frame, 2=steady, 3=cold
+    is_event_loop_anchor: bool
+    layout_pinned: bool
+
+struct SmfRelocation:
+    offset: i64
+    symbol_index: i64
+    reloc_type: RelocationType
+    addend: i64
+
+struct SmfSection:
+    name: text
+    section_type: SectionType
+    flags: i64
+    data: [i64]        # Byte array
+    alignment: i64
+
+# ============================================================================
+# SMF Writer
+# ============================================================================
+
+class SmfWriter:
+    """Creates SMF files from compiled code."""
+    sections: [SmfSection]
+    symbols: [SmfSymbol]
+    relocations: [SmfRelocation]
+    string_table: [i64]         # Byte array
+    string_offsets: {text: i64}
+
+
+# ============================================================================
+# SmfWriter Methods (was: impl SmfWriter:)
+# ============================================================================
+
+fn smfwriter_create() -> SmfWriter:
+        SmfWriter(sections: [], symbols: [], relocations: [],
+                  string_table: [0], string_offsets: {})
+
+
+fn smfwriter_add_string(self: SmfWriter, s: text) -> i64:
+        """Add a string to the string table, returning its offset."""
+        if self.string_offsets_contains_key(string_offsets, s):
+            return self.string_offsets[s]
+        val offset = self.string_table_len(string_table)
+        # Append bytes (simplified - actual impl uses FFI for encoding)
+        self.string_table = self.string_table_push(string_table, offset)
+        self.string_offsets[s] = offset
+        offset
+
+
+fn smfwriter_add_code_section(self: SmfWriter, name: text, code: [i64]) -> i64:
+        val section = SmfSection(name: name, section_type: SectionType.Code,
+            flags: SECTION_FLAG_READ + SECTION_FLAG_EXEC,
+            data: code, alignment: 16)
+        self.sections = self.sections_push(sections, section)
+        self.sections_len(sections) - 1
+
+
+fn smfwriter_add_data_section(self: SmfWriter, name: text, data: [i64], kind: DataSectionKind) -> i64:
+        val section = SmfSection(name: name, section_type: kind_to_section_type(kind),
+            flags: kind_to_flags(kind), data: data, alignment: 8)
+        self.sections = self.sections_push(sections, section)
+        self.sections_len(sections) - 1
+
+
+fn smfwriter_add_bss_section(self: SmfWriter, name: text, size: i64) -> i64:
+        val zeroes: [i64] = []
+        val section = SmfSection(name: name, section_type: SectionType.Bss,
+            flags: SECTION_FLAG_READ + SECTION_FLAG_WRITE,
+            data: zeroes, alignment: 8)
+        self.sections = self.sections_push(sections, section)
+        self.sections_len(sections) - 1
+
+
+fn smfwriter_add_symbol(self: SmfWriter, symbol: SmfSymbol) -> i64:
+        self.symbols = self.symbols_push(symbols, symbol)
+        self.symbols_len(symbols) - 1
+
+
+fn smfwriter_add_note_section(self: SmfWriter, name: text, data: [i64]) -> i64:
+        val section = SmfSection(name: name, section_type: SectionType.Note,
+            flags: SECTION_FLAG_READ, data: data, alignment: 4)
+        self.sections = self.sections_push(sections, section)
+        self.sections_len(sections) - 1
+

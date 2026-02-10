@@ -1,0 +1,281 @@
+# Block System Module
+#
+# User-definable custom block interface for Simple language.
+#
+# This module provides:
+# - BlockDefinition trait for defining custom blocks (Tier 3: Full control)
+# - BlockBuilder for fluent API (Tier 2: 5-20 lines)
+# - block() and const_block() helpers (Tier 1: 3 lines)
+# - BlockRegistry for registering and looking up blocks
+# - LexerMode and SyntaxFeatures for configuring block behavior
+# - BlockContext and BlockError for block parsing context
+# - BlockValue for typed block results
+# - Pre-built parsers, validators, and utilities
+# - Testing framework for block validation
+# - Built-in blocks (m, loss, nograd, sh, sql, re, json, md)
+#
+# Example usage (Tier 1: Minimal API):
+# ```simple
+# use compiler.blocks.{define_block, register_block}
+# use compiler.blocks.modes.{LexerMode}
+# use compiler.blocks.value.{BlockValue}
+#
+# val heredoc = define_block("heredoc", LexerMode.Raw, \text:
+#     Ok(BlockValue.Raw(text.trim()))
+# )
+# register_block(heredoc)
+#
+# # Now use it:
+# val content = heredoc{ text here }
+# ```
+#
+# Example usage (Tier 2: Builder API):
+# ```simple
+# use compiler.blocks.{BlockBuilder}
+#
+# val sql = BlockBuilder("sql")
+#     .raw_text()
+#     .simple_parser(\text: parse_sql(text))
+#     .build()
+# ```
+#
+# Example usage (Tier 3: Full trait):
+# ```simple
+# use compiler.blocks.{BlockDefinition, BlockRegistry, BlockValue}
+#
+# struct MyBlockDef: BlockDefinition:
+#     fn kind() -> text: "myblock"
+#     fn parse_payload(payload: text, ctx: BlockContext) -> Result<BlockValue, BlockError>:
+#         Ok(BlockValue.Raw(payload))
+#
+# # Register the block
+# block_registry().register(MyBlockDef())
+#
+# # Now myblock{ ... } is recognized
+# ```
+
+# Re-export all public types from submodules
+export BlockDefinition from .definition
+export HighlightToken, HighlightKind from .definition
+export Completion, CompletionKind from .definition
+export HoverInfo, SignatureHelp, Signature, Parameter from .definition
+export ConstValue, Type, BlockExample from .definition
+
+export BlockRegistry, RegistryBuilder from .registry
+export block_registry, register_block, unregister_block, is_block from .registry
+export with_block, register_blocks from .registry
+
+# Easy API (Tier 1: Minimal) - User-Defined Blocks
+export define_block, define_const_block, validated_block from .easy
+
+# Builder API (Tier 2: Fluent)
+export BlockBuilder from .builder
+
+# Utilities (Pre-built parsers, validators, helpers)
+export parse_json, parse_yaml, parse_toml from .utils
+export validate_json, validate_yaml, validate_toml from .utils
+export parse_number, parse_port, parse_url, parse_email from .utils
+export validate_range, validate_regex from .utils
+
+# Testing Framework
+export BlockTestSuite, BlockTest, TestResult from .testing
+export test_block, assert_parses, assert_fails, assert_const_eval from .testing
+
+export LexerMode, LexerConfig, SyntaxFeatures, Span from .modes
+
+export BlockContext, BlockError, BlockErrorKind from .context
+export Diagnostic, DiagnosticLevel from .context
+
+export BlockValue, ResolvedBlock from .value
+export ShellCommands, ShellCommand, Redirect, RedirectKind from .value
+export SqlQuery, SqlKind, SqlParam from .value
+export RegexPattern from .value
+export JsonValue, JsonKind from .value
+export MarkdownDoc, MarkdownBlock from .value
+export GraphDiagram, GraphKind, GraphNode, GraphEdge from .value
+
+export BlockResolver, ResolvedModule, ResolutionResult from .resolver
+export resolve_blocks, resolve_blocks_with_registry, make_block_resolver from .resolver
+
+export MathBlockDef, LossBlockDef, NogradBlockDef from .builtin
+export all_builtin_blocks, builtin_block_kinds from .builtin
+
+# Convenience imports
+use blocks.definition.{BlockDefinition}
+use blocks.registry.{BlockRegistry, block_registry, register_block, is_block, with_block}
+use blocks.modes.{LexerMode, LexerConfig, SyntaxFeatures}
+use blocks.context.{BlockContext, BlockError, BlockErrorKind, Diagnostic}
+use blocks.value.{BlockValue, ResolvedBlock}
+use blocks.resolver.{BlockResolver, ResolvedModule, resolve_blocks}
+use blocks.builtin.{register_builtin_blocks, MathBlockDef, LossBlockDef, NogradBlockDef, ShellBlockDef, SqlBlockDef, RegexBlockDef, JsonBlockDef, MarkdownBlockDef}
+use blocks.easy.{define_block, define_const_block, validated_block}
+use blocks.builder.{BlockBuilder}
+use blocks.utils.{parse_json, parse_yaml, parse_toml, validate_json, validate_yaml, validate_toml}
+use blocks.testing.{BlockTestSuite, BlockTest, test_block, assert_parses}
+
+# ============================================================================
+# Module Documentation
+# ============================================================================
+
+# ## Overview
+#
+# The block system allows users to define custom block types that integrate
+# with the Simple compiler. Blocks are expressions of the form:
+#
+#     blockname{ payload }
+#
+# Where `blockname` is a registered block keyword and `payload` is the
+# content between the braces.
+#
+# ## Built-in Blocks
+#
+# Math/ML blocks:
+# - `m{}` - Math block with power (^), transpose ('), implicit multiplication
+# - `loss{}` - Math block with auto-backward for gradients
+# - `nograd{}` - Math block with gradient tracking disabled
+#
+# DSL blocks:
+# - `sh{}` - Shell command execution
+# - `sql{}` - SQL query with parameter support
+# - `re{}` - Compiled regular expression
+# - `json{}` - JSON literal
+# - `md{}` - Markdown text
+#
+# ## Creating Custom Blocks
+#
+# Three-tier API for progressive complexity:
+#
+# ### Tier 1: Minimal API (3 lines, 80% of use cases)
+# ```simple
+# val heredoc = define_block("heredoc", LexerMode.Raw, \text:
+#     Ok(BlockValue.Raw(text.trim()))
+# )
+# register_block(heredoc)
+# ```
+#
+# ### Tier 2: Builder API (5-20 lines, 15% of use cases)
+# ```simple
+# val sql = BlockBuilder("sql")
+#     .raw_text()
+#     .simple_parser(\text: parse_sql(text))
+#     .highlighter(\text: highlight_sql(text))
+#     .build()
+# register_block(sql)
+# ```
+#
+# ### Tier 3: Full Trait (60+ lines, 5% of use cases - complete control)
+# ```simple
+# struct MyBlockDef: BlockDefinition:
+#     fn kind() -> text: "myblock"
+#     fn parse_payload(payload, ctx): ...
+#     fn validate(value, ctx): ...
+#     # ... all 20+ methods
+# ```
+#
+# Choose the tier that matches your complexity needs!
+#
+# ## Lexer Modes
+#
+# - `Normal` - Standard Simple tokenization
+# - `Math` - Enables ^, ', implicit mul
+# - `Raw` - Capture as raw text (no tokenization)
+# - `Custom` - Fine-grained control via LexerConfig
+#
+# ## Integration Points
+#
+# The block system integrates with the compiler pipeline:
+#
+# 1. Lexer: Detects block keywords, applies lexer mode
+# 2. TreeSitter: Captures block outlines (skips payload parsing)
+# 3. BlockResolver: Parses payloads using registered handlers
+# 4. Parser: Incorporates resolved blocks into AST
+# 5. HIR/MIR: Lowers blocks using handler-defined rules
+
+# ============================================================================
+# Quick Start Functions
+# ============================================================================
+
+fn enable_block(kind: text, block_def: BlockDefinition):
+    """Enable a custom block in the global registry.
+
+    Convenience function for:
+        block_registry().register(block_def)
+    """
+    register_block(block_def)
+
+fn disable_block(kind: text):
+    """Disable a block in the global registry.
+
+    Convenience function for:
+        block_registry().unregister(kind)
+    """
+    block_registry().unregister(kind)
+
+fn list_blocks() -> [text]:
+    """List all registered block keywords."""
+    block_registry().all_keywords()
+
+fn block_info(kind: text) -> has_BlockInfo:
+    """Get information about a registered block."""
+    val blk = block_registry().lookup(kind)
+    if not has_blk:
+        return nil
+
+    val d = blk_value
+    val mode = d_lexer_mode(d)
+    val mode_str = match mode:
+        case LexerMode.Normal: "normal"
+        case LexerMode.Math: "math"
+        case LexerMode.Raw: "raw"
+        case LexerMode.Custom(_): "custom"
+    has_field = true, field_value = BlockInfo(
+        kind: kind,
+        lexer_mode: mode_str,
+        description: d.description(,
+        features: d_syntax_features(d)
+    ))
+
+struct BlockInfo:
+    """Information about a registered block."""
+    kind: text
+    lexer_mode: text
+    description: text
+    features: SyntaxFeatures
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+var _blocks_initialized = false
+
+fn init_blocks():
+    """Initialize the block system with all builtin blocks.
+
+    This should be called once at compiler startup. It registers
+    all builtin blocks (m, loss, nograd, sh, sql, re, json, md)
+    with the global BlockRegistry.
+
+    Safe to call multiple times - only initializes once.
+    """
+    if _blocks_initialized:
+        return
+
+    register_builtin_blocks(block_registry())
+    _blocks_initialized = true
+
+fn reset_blocks():
+    """Reset the block system to initial state.
+
+    Clears all registered blocks and re-initializes with builtins.
+    Useful for testing.
+    """
+    block_registry().clear()
+    _blocks_initialized = false
+    init_blocks()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export enable_block, disable_block, list_blocks, block_info, BlockInfo
+export init_blocks, reset_blocks

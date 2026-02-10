@@ -1,0 +1,256 @@
+# Off-Heap Message Queue (Mailbox)
+#
+# Provides actor mailbox with priority support.
+
+# --- MessagePriority ---
+
+fn MessagePriority__High__to_i64() -> i64:
+    0
+
+fn MessagePriority__Normal__to_i64() -> i64:
+    1
+
+fn MessagePriority__Low__to_i64() -> i64:
+    2
+
+fn MessagePriority__High__cmp(other_priority: i64) -> i64:
+    0 - other_priority
+
+fn MessagePriority__Normal__cmp(other_priority: i64) -> i64:
+    1 - other_priority
+
+fn MessagePriority__Low__cmp(other_priority: i64) -> i64:
+    2 - other_priority
+
+# --- SendResult ---
+
+val SEND_SUCCESS = "Success"
+val SEND_QUEUE_FULL = "QueueFull"
+val SEND_MAILBOX_CLOSED = "MailboxClosed"
+
+# --- MailboxConfig ---
+
+class MailboxConfig:
+    capacity: i64
+    off_heap: bool
+    priority_enabled: bool
+    high_priority_reserve: i64
+
+fn MailboxConfig__default() -> MailboxConfig:
+    MailboxConfig(capacity: 1000, off_heap: true, priority_enabled: false, high_priority_reserve: 100)
+
+fn MailboxConfig__bounded(cap: i64) -> MailboxConfig:
+    MailboxConfig(capacity: cap, off_heap: true, priority_enabled: false, high_priority_reserve: 0)
+
+fn MailboxConfig__unbounded() -> MailboxConfig:
+    MailboxConfig(capacity: 0, off_heap: true, priority_enabled: false, high_priority_reserve: 0)
+
+fn MailboxConfig__with_priority() -> MailboxConfig:
+    MailboxConfig(capacity: 1000, off_heap: true, priority_enabled: true, high_priority_reserve: 100)
+
+# --- MessageRef ---
+
+class MessageRef:
+    id: i64
+    sender_id: i64
+    has_sender: bool
+    priority: i64
+    size_bytes: i64
+    timestamp_ms: i64
+
+    fn age_ms() -> i64:
+        0
+
+    fn is_stale(threshold_ms: i64) -> bool:
+        self.age_ms() > threshold_ms
+
+fn MessageRef__new(msg_id: i64, sender, priority: i64, size_bytes: i64, timestamp: i64) -> MessageRef:
+    var sid = 0
+    var has_s = false
+    if sender.?:
+        sid = sender
+        has_s = true
+    MessageRef(id: msg_id, sender_id: sid, has_sender: has_s, priority: priority, size_bytes: size_bytes, timestamp_ms: timestamp)
+
+# --- MailboxStats ---
+
+class MailboxStats:
+    current_size: i64
+    total_received: i64
+    total_processed: i64
+    total_dropped: i64
+    off_heap_bytes: i64
+    peak_size: i64
+    high_priority_count: i64
+
+    fn throughput() -> f64:
+        if self.total_received == 0:
+            return 0.0
+        self.total_processed * 1.0 / self.total_received
+
+    fn drop_rate() -> f64:
+        if self.total_received == 0:
+            return 0.0
+        self.total_dropped * 100.0 / self.total_received
+
+    fn fmt() -> text:
+        "MailboxStats(received={self.total_received}, processed={self.total_processed})"
+
+fn MailboxStats__new() -> MailboxStats:
+    MailboxStats(current_size: 0, total_received: 0, total_processed: 0, total_dropped: 0, off_heap_bytes: 0, peak_size: 0, high_priority_count: 0)
+
+# --- Mailbox ---
+
+class Mailbox:
+    config: MailboxConfig
+    messages: [MessageRef]
+    high_messages: [MessageRef]
+    next_id: i64
+    is_closed: bool
+    stats: MailboxStats
+
+    me send_normal(data_ref: i64, size_bytes: i64, sender) -> text:
+        self.send_with_priority(data_ref, size_bytes, sender, 1)
+
+    me send_high(data_ref: i64, size_bytes: i64, sender) -> text:
+        self.send_with_priority(data_ref, size_bytes, sender, 0)
+
+    me send_with_priority(data_ref: i64, size_bytes: i64, sender, priority: i64) -> text:
+        if self.is_closed:
+            return SEND_MAILBOX_CLOSED
+        val total = self.total_size()
+        if self.config.capacity > 0:
+            if priority > 0:
+                # Normal: respect capacity minus reserve
+                val effective_cap = self.config.capacity - self.config.high_priority_reserve
+                if total >= effective_cap:
+                    self.stats.total_dropped = self.stats.total_dropped + 1
+                    self.stats.total_received = self.stats.total_received + 1
+                    return SEND_QUEUE_FULL
+            else:
+                # High priority: use full capacity
+                if total >= self.config.capacity:
+                    self.stats.total_dropped = self.stats.total_dropped + 1
+                    self.stats.total_received = self.stats.total_received + 1
+                    return SEND_QUEUE_FULL
+        val msg = MessageRef__new(self.next_id, sender, priority, size_bytes, 0)
+        self.next_id = self.next_id + 1
+        if priority == 0:
+            self.high_messages.push(msg)
+            self.stats.high_priority_count = self.stats.high_priority_count + 1
+        else:
+            self.messages.push(msg)
+        self.stats.current_size = self.stats.current_size + 1
+        self.stats.total_received = self.stats.total_received + 1
+        self.stats.off_heap_bytes = self.stats.off_heap_bytes + size_bytes
+        if self.stats.current_size > self.stats.peak_size:
+            self.stats.peak_size = self.stats.current_size
+        SEND_SUCCESS
+
+    me receive():
+        # High priority first
+        if self.high_messages.len() > 0:
+            val msg = self.high_messages[0]
+            self.high_messages.remove(0)
+            self.stats.current_size = self.stats.current_size - 1
+            self.stats.total_processed = self.stats.total_processed + 1
+            self.stats.off_heap_bytes = self.stats.off_heap_bytes - msg.size_bytes
+            return msg
+        if self.messages.len() > 0:
+            val msg = self.messages[0]
+            self.messages.remove(0)
+            self.stats.current_size = self.stats.current_size - 1
+            self.stats.total_processed = self.stats.total_processed + 1
+            self.stats.off_heap_bytes = self.stats.off_heap_bytes - msg.size_bytes
+            return msg
+        nil
+
+    me select(pred: fn()):
+        var idx = 0
+        for msg in self.messages:
+            if pred(msg):
+                self.messages.remove(idx)
+                self.stats.current_size = self.stats.current_size - 1
+                return msg
+            idx = idx + 1
+        nil
+
+    me select_by_sender(sid: i64):
+        self.select(fn(m): m.sender_id == sid)
+
+    fn total_size() -> i64:
+        self.messages.len() + self.high_messages.len()
+
+    fn is_empty() -> bool:
+        self.total_size() == 0
+
+    fn is_full() -> bool:
+        if self.config.capacity == 0:
+            return false
+        self.total_size() >= self.config.capacity
+
+    me clear():
+        self.messages = []
+        self.high_messages = []
+        self.stats.current_size = 0
+        self.stats.off_heap_bytes = 0
+
+    me drop_stale(threshold_ms: i64) -> i64:
+        var dropped = 0
+        var new_msgs = []
+        for msg in self.messages:
+            if msg.is_stale(threshold_ms):
+                dropped = dropped + 1
+            else:
+                new_msgs.push(msg)
+        self.messages = new_msgs
+        var new_high = []
+        for msg in self.high_messages:
+            if msg.is_stale(threshold_ms):
+                dropped = dropped + 1
+            else:
+                new_high.push(msg)
+        self.high_messages = new_high
+        self.stats.current_size = self.stats.current_size - dropped
+        dropped
+
+    me close():
+        self.is_closed = true
+
+    fn get_stats() -> MailboxStats:
+        MailboxStats(
+            current_size: self.stats.current_size,
+            total_received: self.stats.total_received,
+            total_processed: self.stats.total_processed,
+            total_dropped: self.stats.total_dropped,
+            off_heap_bytes: self.stats.off_heap_bytes,
+            peak_size: self.stats.peak_size,
+            high_priority_count: self.stats.high_priority_count
+        )
+
+    fn fmt() -> text:
+        "Mailbox(size={self.total_size()}, closed={self.is_closed})"
+
+fn Mailbox__new(config: MailboxConfig) -> Mailbox:
+    Mailbox(
+        config: config,
+        messages: [],
+        high_messages: [],
+        next_id: 0,
+        is_closed: false,
+        stats: MailboxStats__new()
+    )
+
+fn Mailbox__default() -> Mailbox:
+    Mailbox__new(MailboxConfig__default())
+
+fn Mailbox__unbounded() -> Mailbox:
+    Mailbox__new(MailboxConfig__unbounded())
+
+export MailboxConfig, MailboxConfig__default, MailboxConfig__bounded, MailboxConfig__unbounded, MailboxConfig__with_priority
+export MessageRef, MessageRef__new
+export MailboxStats, MailboxStats__new
+export Mailbox, Mailbox__new, Mailbox__default, Mailbox__unbounded
+export MessagePriority__High__to_i64, MessagePriority__Normal__to_i64, MessagePriority__Low__to_i64
+export MessagePriority__High__cmp, MessagePriority__Normal__cmp, MessagePriority__Low__cmp
+export SEND_SUCCESS, SEND_QUEUE_FULL, SEND_MAILBOX_CLOSED

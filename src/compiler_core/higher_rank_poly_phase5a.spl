@@ -1,0 +1,332 @@
+"""
+Higher-Rank Polymorphism - Phase 5A: Quantifier Representation
+
+Implements quantifiers, polymorphic types, and kind system basics.
+
+Status: Phase 5A In Progress
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Kind System
+# ============================================================================
+
+enum Kind:
+    """
+    Kind system for types
+
+    Examples:
+        * (Star) - kind of ordinary types (i32, String, Bool)
+        * -> * (Arrow) - kind of type constructors (Vec, Option)
+        * -> * -> * - kind of binary type constructors (Result, Map)
+    """
+    Star
+    Arrow(from: Kind, to: Kind)
+
+
+# ============================================================================
+# Kind Methods (was: impl Kind:)
+# ============================================================================
+
+# ============================================================================
+# Type Variable
+# ============================================================================
+
+class TypeVar:
+    """
+    Type variable with kind
+
+    Examples:
+        T : * (ordinary type variable)
+        F : * -> * (type constructor variable)
+    """
+    id: i64
+    name: text
+    kind: text  # Kind
+
+
+# ============================================================================
+# TyVar Methods (was: impl TyVar:)
+# ============================================================================
+
+fn tyvar_new(id: i64, name: Symbol, kind: Kind) -> TypeVar:
+        TypeVar(
+            id: id,
+            name: name,
+            kind: kind
+        )
+
+
+# ============================================================================
+# Quantifier
+# ============================================================================
+
+enum Quantifier:
+    """
+    Quantifier for polymorphic types
+
+    Forall: universal quantification (forall T. τ)
+    Exists: existential quantification (exists T. τ)
+    """
+    Forall(ty_var: TypeVar)
+    Exists(ty_var: TypeVar)
+
+
+# ============================================================================
+# Quantifier Methods (was: impl Quantifier:)
+# ============================================================================
+
+# ============================================================================
+# Type System (Extended)
+# ============================================================================
+
+enum HirType:
+    Int
+    Str
+    Bool
+    Named(name: Symbol)
+    Generic(name: Symbol, args: [HirType])
+    Arrow(from: HirType, to: HirType)
+    TypeVariable(id: i64)  # Type variable (from quantifier)
+    Forall(quantifiers: [Quantifier], body: HirType)  # NEW
+    Exists(ty_var: TypeVar, body: HirType)  # NEW
+    Skolem(id: i64)  # NEW: Rigid type constant
+    Error
+
+
+# ============================================================================
+# HirType Methods (was: impl HirType:)
+# ============================================================================
+
+# ============================================================================
+# Polymorphic Type
+# ============================================================================
+
+class PolyType:
+    """
+    Polymorphic type with explicit quantifiers
+
+    Examples:
+        forall T. T -> T
+        forall T, U. (T, U) -> U
+        forall T. (forall U. fn(T, U) -> U) -> T (rank-2)
+    """
+    quantifiers: text  # [Quantifier]
+    body: text         # HirType
+
+
+# ============================================================================
+# PolyType Methods (was: impl PolyType:)
+# ============================================================================
+
+fn polytype_new(quantifiers: [Quantifier], body: HirType) -> PolyType:
+        PolyType(
+            quantifiers: quantifiers,
+            body: body
+        )
+
+
+fn polytype_monomorphic(body: HirType) -> PolyType:
+        """Create monomorphic type (no quantifiers)"""
+        PolyType(
+            quantifiers: [],
+            body: body
+        )
+
+
+# ============================================================================
+# Type Schemes (for let-polymorphism)
+# ============================================================================
+
+class TypeScheme:
+    """
+    Type scheme for let-bound variables
+
+    Examples:
+        let id = fn(x): x
+        # Generalize: forall T. T -> T
+
+        let const = fn(x): fn(y): x
+        # Generalize: forall T, U. T -> U -> T
+    """
+    poly_type: text  # PolyType
+
+
+# ============================================================================
+# TypeScheme Methods (was: impl TypeScheme:)
+# ============================================================================
+
+fn typescheme_new(poly_type: PolyType) -> TypeScheme:
+        TypeScheme(poly_type: poly_type)
+
+
+fn typescheme_from_mono(body: HirType) -> TypeScheme:
+        """Create scheme from monomorphic type"""
+        val poly = polytype_monomorphic(body)
+        TypeScheme(poly_type: poly)
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_quantifier_basic():
+    """Test basic quantifier creation"""
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val forall_q = quantifier_Forall(ty_var: t_var)
+    val exists_q = quantifier_Exists(ty_var: t_var)
+
+    assert forall_q.is_forall(), "Is forall"
+    assert not forall_q.is_exists(), "Not exists"
+    assert exists_q.is_exists(), "Is exists"
+    assert forall_q.to_string() == "forall T", "Forall string"
+
+    print "✅ Basic quantifiers"
+
+fn test_poly_type_creation():
+    """Test polymorphic type creation"""
+    # forall T. T -> T
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val quantifier = quantifier_Forall(ty_var: t_var)
+    val body = HirType.Arrow(
+        from: hirtype_TypeVariable(id: 0),
+        to: hirtype_TypeVariable(id: 0)
+    )
+    val poly_type = polytype_new([quantifier], body)
+
+    assert not poly_type.is_monomorphic(), "Is polymorphic"
+    assert poly_type.quantifier_count() == 1, "One quantifier"
+
+    print "✅ Polymorphic type creation"
+
+fn test_nested_forall():
+    """Test nested forall types"""
+    # forall T. (forall U. U -> T) -> T (rank-2)
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val u_var = TypeVar.new(1, "U", Kind.Star)
+
+    val inner_forall = HirType.Forall(
+        quantifiers: [quantifier_Forall(ty_var: u_var)],
+        body: HirType.Arrow(
+            from: hirtype_TypeVariable(id: 1),  # U
+            to: hirtype_TypeVariable(id: 0)     # T
+        )
+    )
+
+    val outer_body = HirType.Arrow(
+        from: inner_forall,
+        to: hirtype_TypeVariable(id: 0)  # T
+    )
+
+    val poly_type = polytype_new([Quantifier.Forall(ty_var: t_var)], outer_body)
+
+    assert poly_type.quantifier_count() == 1, "Outer has 1 quantifier"
+    assert outer_body.type_name() == "Arrow", "Outer is arrow"
+
+    print "✅ Nested forall types"
+
+fn test_skolem_type():
+    """Test skolem constant"""
+    val skolem = hirtype_Skolem(id: 0)
+
+    assert skolem.is_skolem(), "Is skolem"
+    assert not skolem.is_var(), "Not var"
+    assert skolem.to_string() == "sk_0", "Skolem string"
+
+    print "✅ Skolem type"
+
+fn test_kind_basic():
+    """Test kind representation"""
+    val star = Kind.Star
+    val arrow = kind_Arrow(from: Kind.Star, to: Kind.Star)
+
+    assert star.is_star(), "Is star"
+    assert not star.is_arrow(), "Not arrow"
+    assert arrow.is_arrow(), "Is arrow"
+    assert star.to_string() == "*", "Star string"
+    assert arrow.to_string() == "(* -> *)", "Arrow string"
+
+    print "✅ Kind basics"
+
+fn test_type_var():
+    """Test type variable with kind"""
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val f_var = TypeVar.new(1, "F", Kind.Arrow(from: Kind.Star, to: Kind.Star))
+
+    assert t_var.has_star_kind(), "T has star kind"
+    assert not f_var.has_star_kind(), "F has arrow kind"
+    assert t_var.to_string() == "T:*", "T string"
+
+    print "✅ Type variable with kind"
+
+fn test_type_scheme():
+    """Test type schemes for let-polymorphism"""
+    # id: forall T. T -> T
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val id_body = HirType.Arrow(
+        from: hirtype_TypeVariable(id: 0),
+        to: hirtype_TypeVariable(id: 0)
+    )
+    val id_poly = polytype_new([Quantifier.Forall(ty_var: t_var)], id_body)
+    val id_scheme = typescheme_new(id_poly)
+
+    assert id_scheme.is_polymorphic(), "id is polymorphic"
+
+    # Monomorphic scheme
+    val mono_scheme = typescheme_from_mono(HirType.Int)
+    assert not mono_scheme.is_polymorphic(), "Mono is not polymorphic"
+
+    print "✅ Type schemes"
+
+fn test_multiple_quantifiers():
+    """Test multiple quantifiers"""
+    # forall T, U. T -> U -> T
+    val t_var = TypeVar.new(0, "T", Kind.Star)
+    val u_var = TypeVar.new(1, "U", Kind.Star)
+
+    val body = HirType.Arrow(
+        from: hirtype_TypeVariable(id: 0),  # T
+        to: HirType.Arrow(
+            from: hirtype_TypeVariable(id: 1),  # U
+            to: hirtype_TypeVariable(id: 0)     # T
+        )
+    )
+
+    val poly_type = PolyType.new(
+        [quantifier_Forall(ty_var: t_var), quantifier_Forall(ty_var: u_var)],
+        body
+    )
+
+    assert poly_type.quantifier_count() == 2, "Two quantifiers"
+
+    print "✅ Multiple quantifiers"
+
+fn main():
+    print ""
+    print "Higher-Rank Polymorphism Phase 5A Tests"
+    print "========================================"
+
+    test_quantifier_basic()
+    test_poly_type_creation()
+    test_nested_forall()
+    test_skolem_type()
+    test_kind_basic()
+    test_type_var()
+    test_type_scheme()
+    test_multiple_quantifiers()
+
+    print ""
+    print "🎉 Phase 5A Complete!"
+    print ""
+    print "Implemented:"
+    print "  ✅ Quantifier enum (Forall/Exists)"
+    print "  ✅ PolyType - polymorphic types"
+    print "  ✅ Kind system (Star, Arrow)"
+    print "  ✅ TyVar - type variables with kinds"
+    print "  ✅ Extended HirType (Forall/Exists/Skolem)"
+    print "  ✅ TypeScheme for let-polymorphism"
+    print "  ✅ Nested forall support (rank-2+)"
+    print ""
+    print "Progress: 3/12 hours (25% of Phase 5)"
+    print "Next: Phase 5B - Quantifier Context & Scoping (3h)"

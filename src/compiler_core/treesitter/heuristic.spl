@@ -1,0 +1,270 @@
+# TreeSitter Heuristic - Line-Based Error-Tolerant Fallback Parsing
+#
+# Provides fallback parsing when tree-sitter fails or for quick IDE features.
+# Uses simple line scanning and pattern matching instead of full tokenization.
+# Always produces results, even with syntax errors.
+
+use compiler.lexer.*
+use treesitter_types.*
+
+# ============================================================================
+# Heuristic Mode Types (for line-based error-tolerant parsing)
+# ============================================================================
+
+enum HeuristicOutlineKind:
+    """Outline kind for heuristic parsing mode."""
+    Function
+    Method
+    StaticMethod
+    MutableMethod       # me fn()
+    Class
+    Struct
+    Enum
+    EnumVariant
+    Trait
+    Impl
+    Module
+    Import
+    Export
+    Val
+    Var
+    Const
+    TypeAlias
+
+struct HeuristicOutlineItem:
+    """Lightweight outline item for heuristic parsing."""
+    kind: HeuristicOutlineKind
+    name: text
+    line: i64
+    column: i64
+    end_line: i64
+    visibility: text        # "pub", "pub(mod)", or ""
+    # DESUGARED: parent: text?
+    has_parent: bool
+    parent_value: text
+    # DESUGARED: signature: text?
+    has_signature: bool
+    signature_value: text
+    children: [HeuristicOutlineItem]
+
+
+# ============================================================================
+# HeuristicOutlineItem Methods (was: impl HeuristicOutlineItem:)
+# ============================================================================
+
+fn heuristicoutlineitem_new(kind: HeuristicOutlineKind, name: text, line: i64, column: i64) -> HeuristicOutlineItem:
+        HeuristicOutlineItem(kind: kind, name: name, line: line, column: column,
+                             end_line: line, visibility: "", has_parent: false,  # DESUGARED: parent: nil
+                             signature: nil, children: [])
+
+
+# ============================================================================
+# Heuristic Parse Result
+# ============================================================================
+
+struct HeuristicParseResult:
+    """Result of parsing a declaration in heuristic mode."""
+    items: [HeuristicOutlineItem]
+    # DESUGARED: impl_target: text?
+    has_impl_target: bool
+    impl_target_value: text
+
+# ============================================================================
+# Heuristic Parsing Implementation
+# ============================================================================
+
+# Extension to TreeSitter for heuristic mode parsing
+
+# ============================================================================
+# TreeSitter Methods (was: impl TreeSitter:)
+# ============================================================================
+
+fn treesitter_parse_outline_heuristic(self: TreeSitter) -> OutlineModule:
+        """Parse outline using line-based heuristics (error-tolerant).
+
+        Uses simple line scanning and pattern matching instead of full tokenization.
+        Always produces results, even with syntax errors.
+        """
+        val lines = self.lexer.source.split("\n")
+        var items: [HeuristicOutlineItem] = []
+        var current_impl_target: text? = nil
+        var line_num = 0
+
+        while line_num < lines_len(lines):
+            val line = lines[line_num]
+            val trimmed = line_trim(line)
+            val indent = self.heuristic_indent_level(line)
+
+            # Skip empty lines and comments
+            if trimmed.len() == 0 or (trimmed.len() > 0 and trimmed[0] == '#'):
+                line_num = line_num + 1
+                continue
+
+            # Top-level declarations (indent 0)
+            if indent == 0:
+                current_impl_target = nil
+                val result = self.heuristic_parse_declaration(trimmed, line_num + 1, indent, items, current_impl_target)
+                items = result.items
+                current_impl_target = result.impl_target
+
+            # Nested members (indent 4 inside impl)
+            elif indent == 4 and has_current_impl_target:
+                items = self.heuristic_parse_member(trimmed, line_num + 1, items, current_impl_target_value)
+
+            line_num = line_num + 1
+
+        # Convert lightweight items to rich OutlineModule
+        self.heuristic_convert_to_module(items)
+
+
+fn treesitter_heuristic_convert_to_module(self: TreeSitter, items: [HeuristicOutlineItem]) -> OutlineModule:
+        """Convert lightweight OutlineItem list to rich OutlineModule."""
+        var functions: [FunctionOutline] = []
+        var classes: [ClassOutline] = []
+        var structs: [StructOutline] = []
+        var enums: [EnumOutline] = []
+        var traits: [TraitOutline] = []
+        var impls: [ImplOutline] = []
+        var imports: [ImportOutline] = []
+        var exports: [ExportOutline] = []
+        var type_aliases: [TypeAliasOutline] = []
+        var constants: [ConstOutline] = []
+
+        for item in items:
+            match item.kind:
+                case HeuristicOutlineKind.Function | HeuristicOutlineKind.Method | HeuristicOutlineKind.StaticMethod:
+                    functions = functions_push(functions, self.heuristic_item_to_function(item))
+                case HeuristicOutlineKind.Class:
+                    classes = classes_push(classes, self.heuristic_item_to_class(item))
+                case HeuristicOutlineKind.Struct:
+                    structs = structs_push(structs, self.heuristic_item_to_struct(item))
+                case HeuristicOutlineKind.Enum:
+                    enums = enums_push(enums, self.heuristic_item_to_enum(item))
+                case HeuristicOutlineKind.Trait:
+                    traits = traits_push(traits, self.heuristic_item_to_trait(item))
+                case HeuristicOutlineKind.Impl:
+                    impls = impls_push(impls, self.heuristic_item_to_impl(item))
+                case HeuristicOutlineKind.Import:
+                    imports = imports_push(imports, self.heuristic_item_to_import(item))
+                case HeuristicOutlineKind.Export:
+                    exports = exports_push(exports, self.heuristic_item_to_export(item))
+                case _:
+                    pass  # Skip other kinds for now
+
+        OutlineModule(
+            name: "",
+            imports: imports,
+            exports: exports,
+            functions: functions,
+            classes: classes,
+            actors: [],  # Heuristic mode doesn't parse actors yet
+            structs: structs,
+            enums: enums,
+            bitfields: [],  # Heuristic mode doesn't parse bitfields yet
+            traits: traits,
+            impls: impls,
+            type_aliases: type_aliases,
+            constants: constants,
+            static_asserts: [],  # Heuristic mode doesn't parse static asserts yet
+            inline_blocks: [],  # Heuristic mode doesn't track blocks
+            errors: []  # Heuristic mode is error-tolerant
+        )
+
+
+fn treesitter_heuristic_item_to_function(self: TreeSitter, item: HeuristicOutlineItem) -> FunctionOutline:
+        FunctionOutline(
+            name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
+            params: [],  # Heuristic mode doesn't parse params
+            has_return_type: false,  # DESUGARED: return_type: nil
+            type_params: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_class(self: TreeSitter, item: HeuristicOutlineItem) -> ClassOutline:
+        ClassOutline(
+            name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
+            type_params: [],
+            fields: [],
+            methods: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_struct(self: TreeSitter, item: HeuristicOutlineItem) -> StructOutline:
+        StructOutline(
+            name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
+            type_params: [],
+            fields: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_enum(self: TreeSitter, item: HeuristicOutlineItem) -> EnumOutline:
+        EnumOutline(
+            name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
+            type_params: [],
+            variants: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_trait(self: TreeSitter, item: HeuristicOutlineItem) -> TraitOutline:
+        TraitOutline(
+            name: item.name,
+            visibility: self.heuristic_parse_visibility(item.visibility),
+            type_params: [],
+            methods: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_impl(self: TreeSitter, item: HeuristicOutlineItem) -> ImplOutline:
+        ImplOutline(
+            target: item.name,
+            has_trait_name: false,  # DESUGARED: trait_name: nil
+            type_params: [],
+            methods: [],
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.end_line, end_col: 0),
+            has_doc: false,  # DESUGARED: doc: nil
+        )
+
+
+fn treesitter_heuristic_item_to_import(self: TreeSitter, item: HeuristicOutlineItem) -> ImportOutline:
+        ImportOutline(
+            module_path: item.name,
+            items: [],
+            has_alias: false,  # DESUGARED: alias: nil
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.line, end_col: 0)
+        )
+
+
+fn treesitter_heuristic_item_to_export(self: TreeSitter, item: HeuristicOutlineItem) -> ExportOutline:
+        ExportOutline(
+            name: item.name,
+            span: Span(start_line: item.line, start_col: item.column,
+                       end_line: item.line, end_col: 0)
+        )
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export HeuristicOutlineKind, HeuristicOutlineItem, HeuristicParseResult

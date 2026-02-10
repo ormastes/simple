@@ -1,0 +1,239 @@
+# Core Simple — Parser Tests
+use core.parser.{parse_module, parser_has_errors, parser_error_count}
+use core.ast.{ast_reset, module_get_path, module_get_decls}
+use core.ast.{decl_get_tag, decl_get_name, decl_get_param_names, decl_get_ret_type}
+use core.ast.{decl_get_fields, decl_get_field_types, decl_get_imports}
+use core.ast.{decl_get_body, stmt_get_tag, stmt_get_expr, expr_get_tag}
+use core.ast.{DECL_FN, DECL_STRUCT, DECL_ENUM, DECL_USE, DECL_EXPORT, DECL_VAL, DECL_VAR}
+use core.ast.{STMT_EXPR}
+use core.ast.{EXPR_BINARY, EXPR_INT_LIT}
+use core.tokens.{TOK_PLUS}
+use core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+use core.types.{TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL, TYPE_OPTION, TYPE_RESULT}
+
+fn parse(source: text, path: text):
+    ast_reset()
+    parse_module(source, path)
+
+
+describe "core.parser":
+    it "parses a mixed module":
+        val src = "use foo.{bar, baz}\n" +
+            "export bar, baz\n" +
+            "val x: i64 = 1\n" +
+            "var y = 2\n" +
+            "fn add(a: i64, b: i64) -> i64:\n" +
+            "    return a + b\n" +
+            "struct Point:\n" +
+            "    x: i64\n" +
+            "    y: i64\n" +
+            "enum Color:\n" +
+            "    Red\n" +
+            "    Green\n"
+
+        parse(src, "test.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module_get_path()).to_equal("test.spl")
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(6)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_USE)
+        expect(decl_get_tag(decls[1])).to_equal(DECL_EXPORT)
+        expect(decl_get_tag(decls[2])).to_equal(DECL_VAL)
+        expect(decl_get_tag(decls[3])).to_equal(DECL_VAR)
+        expect(decl_get_tag(decls[4])).to_equal(DECL_FN)
+        expect(decl_get_tag(decls[5])).to_equal(DECL_STRUCT)
+
+        # Use/import details
+        expect(decl_get_imports(decls[0]).len()).to_equal(2)
+
+        # Function details
+        expect(decl_get_name(decls[4])).to_equal("add")
+        expect(decl_get_param_names(decls[4]).len()).to_equal(2)
+        expect(decl_get_ret_type(decls[4])).to_equal(TYPE_I64)
+
+        # Struct details
+        expect(decl_get_name(decls[5])).to_equal("Point")
+        expect(decl_get_fields(decls[5]).len()).to_equal(2)
+        expect(decl_get_field_types(decls[5])[0]).to_equal(TYPE_I64)
+
+    it "parses enum declaration":
+        val src = "enum E:\n  A\n  B\n"
+        parse(src, "enum.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_ENUM)
+        expect(decl_get_name(decls[0])).to_equal("E")
+
+    it "parses module-level expression as pseudo-decl":
+        val src = "1 + 2\n"
+        parse(src, "expr.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        # The module-level expression is wrapped in a decl_val_binding
+        expect(decl_get_tag(decls[0])).to_equal(DECL_VAL)
+        val body = decl_get_body(decls[0])
+        expect(body.len()).to_equal(1)
+        val s = body[0]
+        expect(stmt_get_tag(s)).to_equal(STMT_EXPR)
+        val e = stmt_get_expr(s)
+        expect(expr_get_tag(e)).to_equal(EXPR_BINARY)
+
+    it "records parse errors":
+        val src = "fn\n"
+        parse(src, "bad.spl")
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_error_count() > 0).to_equal(true)
+
+    # Option<T> generic type parsing - all inner type branches
+    it "parses Option<i64> type annotation":
+        val src = "fn get_value() -> Option<i64>:\n    return nil\n"
+        parse(src, "option_i64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_I64)
+
+    it "parses Option<f64> type annotation":
+        val src = "fn get_float() -> Option<f64>:\n    return nil\n"
+        parse(src, "option_f64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_F64)
+
+    it "parses Option<text> type annotation":
+        val src = "fn get_name() -> Option<text>:\n    return nil\n"
+        parse(src, "option_text.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_TEXT)
+
+    it "parses Option<bool> type annotation":
+        val src = "fn get_flag() -> Option<bool>:\n    return nil\n"
+        parse(src, "option_bool.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_BOOL)
+
+    it "parses Option with unknown inner type":
+        # Option<SomeStruct> falls back to TYPE_OPTION
+        val src = "fn get_custom() -> Option<SomeStruct>:\n    return nil\n"
+        parse(src, "option_custom.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION)
+
+    # Postfix ? type annotation - all type branches
+    it "parses i64? postfix type":
+        val src = "fn find_int() -> i64?:\n    return nil\n"
+        parse(src, "postfix_i64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_I64)
+
+    it "parses f64? postfix type":
+        val src = "fn find_float() -> f64?:\n    return nil\n"
+        parse(src, "postfix_f64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_F64)
+
+    it "parses text? postfix type":
+        val src = "fn find_name() -> text?:\n    return nil\n"
+        parse(src, "postfix_text.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_TEXT)
+
+    it "parses bool? postfix type":
+        val src = "fn find_flag() -> bool?:\n    return nil\n"
+        parse(src, "postfix_bool.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION_BOOL)
+
+    it "parses custom? postfix type":
+        # CustomType? falls back to TYPE_OPTION
+        val src = "fn find_custom() -> CustomType?:\n    return nil\n"
+        parse(src, "postfix_custom.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION)
+
+    # Result type parsing
+    it "parses Result<i64> type":
+        val src = "fn load() -> Result<i64>:\n    return nil\n"
+        parse(src, "result.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_RESULT)
+
+    # Unknown generic type
+    it "parses unknown generic type as void":
+        val src = "fn get_list() -> List<i64>:\n    return nil\n"
+        parse(src, "unknown_generic.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_VOID)
+
+    # Simple primitive types without generics
+    it "parses simple i64 type":
+        val src = "fn get_int() -> i64:\n    return 42\n"
+        parse(src, "simple_i64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_I64)
+
+    it "parses simple f64 type":
+        val src = "fn get_float() -> f64:\n    return 3.14\n"
+        parse(src, "simple_f64.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_F64)
+
+    it "parses simple text type":
+        val src = "fn get_text() -> text:\n    return \"hello\"\n"
+        parse(src, "simple_text.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_TEXT)
+
+    it "parses simple bool type":
+        val src = "fn get_bool() -> bool:\n    return true\n"
+        parse(src, "simple_bool.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_BOOL)
+
+    # Bare Option/Result without angle brackets
+    it "parses bare Option type":
+        val src = "fn get_opt() -> Option:\n    return nil\n"
+        parse(src, "bare_option.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_OPTION)
+
+    it "parses bare Result type":
+        val src = "fn get_res() -> Result:\n    return nil\n"
+        parse(src, "bare_result.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_RESULT)
+
+    # Unknown identifier type
+    it "parses unknown type as void":
+        val src = "fn get_custom() -> CustomStruct:\n    return nil\n"
+        parse(src, "unknown_type.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decl_get_ret_type(decls[0])).to_equal(TYPE_VOID)
+
+    # val with Option type
+    it "parses val with Option type":
+        val src = "val x: Option<i64> = nil\n"
+        parse(src, "val_option.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        expect(decl_get_tag(decls[0])).to_equal(DECL_VAL)

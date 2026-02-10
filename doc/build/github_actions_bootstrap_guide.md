@@ -10,7 +10,7 @@ Since the Rust source code (`rust/` directory) has been removed as part of the P
 ## Directory Structure (Complete)
 
 ```
-bin/bootstrap/
+bin/release/
 ├── linux-x86_64/simple       ✅ 32 MB (real binary)
 ├── linux-arm64/simple        ⚠️  32 MB (placeholder - awaiting CI/CD)
 ├── linux-riscv64/simple      ⚠️  32 MB (placeholder - awaiting CI/CD)
@@ -54,7 +54,7 @@ The workflow `.github/workflows/bootstrap-build.yml` automatically builds all pl
    # Extract to bootstrap directories
    for platform in linux-x86_64 linux-arm64 linux-riscv64 macos-x86_64 macos-arm64 windows-x86_64 windows-arm64; do
        if [ -d "bootstrap-$platform" ]; then
-           cp bootstrap-$platform/simple* bin/bootstrap/$platform/
+           cp bootstrap-$platform/simple* bin/release/$platform/
        fi
    done
    ```
@@ -62,12 +62,12 @@ The workflow `.github/workflows/bootstrap-build.yml` automatically builds all pl
 4. **Verify Binaries**
    ```bash
    # Check all binaries
-   ls -lh bin/bootstrap/*/simple*
+   ls -lh bin/release/*/simple*
 
    # Test each platform (if on that platform)
-   bin/bootstrap/linux-x86_64/simple --version
-   bin/bootstrap/macos-arm64/simple --version
-   bin/bootstrap/windows-x86_64/simple.exe --version
+   bin/release/linux-x86_64/simple --version
+   bin/release/macos-arm64/simple --version
+   bin/release/windows-x86_64/simple.exe --version
    ```
 
 ### Option 2: Manual Dispatch
@@ -89,7 +89,7 @@ Once a release is published with all platform binaries:
 ```bash
 # Download specific platform
 gh release download v0.5.0 -p "simple-bootstrap-linux-arm64.tar.gz"
-tar xzf simple-bootstrap-linux-arm64.tar.gz -C bin/bootstrap/linux-arm64/
+tar xzf simple-bootstrap-linux-arm64.tar.gz -C bin/release/linux-arm64/
 
 # Or download multi-platform package
 gh release download v0.5.0 -p "simple-multi-platform-*.tar.gz"
@@ -153,7 +153,7 @@ actionlint .github/workflows/bootstrap-build.yml  # if actionlint is installed
 test/test_bootstrap_comprehensive.sh
 
 # Test specific platform
-bin/bootstrap/linux-arm64/simple test/test_bootstrap.spl
+bin/release/linux-arm64/simple test/test_bootstrap.spl
 
 # Test wrapper with all platforms
 test/test_bootstrap_wrapper.sh
@@ -187,7 +187,7 @@ gh run download <run-id> --name bootstrap-linux-arm64
 
 **Fix permissions:**
 ```bash
-chmod +x bin/bootstrap/*/simple*
+chmod +x bin/release/*/simple*
 ```
 
 ### Platform Not Building
@@ -202,7 +202,7 @@ gh run view <run-id> --web
 
 ## Current Placeholder Binaries
 
-The placeholder binaries in `bin/bootstrap/` are **copies of `linux-x86_64`** for testing purposes only.
+The placeholder binaries in `bin/release/` are **copies of `linux-x86_64`** for testing purposes only.
 
 **They will NOT work on other platforms!**
 
@@ -212,11 +212,11 @@ To get real binaries, use GitHub Actions as described above.
 
 ```bash
 # Check file type
-file bin/bootstrap/macos-arm64/simple
+file bin/release/macos-arm64/simple
 # If it says "x86-64" instead of "arm64", it's a placeholder
 
 # Compare checksums
-md5sum bin/bootstrap/*/simple*
+md5sum bin/release/*/simple*
 # If all have the same checksum, they're placeholders
 ```
 

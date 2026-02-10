@@ -1,0 +1,176 @@
+# Per-Actor Heap Isolation
+#
+# Provides ActorHeap with generational GC support.
+
+class HeapConfig:
+    initial_size: i64
+    max_size: i64
+    gc_enabled: bool
+    generational: bool
+    pretenure_threshold: i64
+
+fn HeapConfig__default() -> HeapConfig:
+    HeapConfig(
+        initial_size: 2048,
+        max_size: 16777216,
+        gc_enabled: true,
+        generational: true,
+        pretenure_threshold: 5
+    )
+
+fn HeapConfig__small() -> HeapConfig:
+    HeapConfig(
+        initial_size: 512,
+        max_size: 4096,
+        gc_enabled: true,
+        generational: true,
+        pretenure_threshold: 3
+    )
+
+fn HeapConfig__large() -> HeapConfig:
+    HeapConfig(
+        initial_size: 65536,
+        max_size: 67108864,
+        gc_enabled: true,
+        generational: true,
+        pretenure_threshold: 10
+    )
+
+fn HeapConfig__no_gc(size: i64) -> HeapConfig:
+    HeapConfig(
+        initial_size: size,
+        max_size: size,
+        gc_enabled: false,
+        generational: false,
+        pretenure_threshold: 0
+    )
+
+# --- HeapRegion ---
+
+class HeapRegion:
+    used: i64
+    capacity: i64
+
+fn HeapRegion__new(capacity: i64) -> HeapRegion:
+    HeapRegion(used: 0, capacity: capacity)
+
+# --- HeapStats ---
+
+class HeapStats:
+    used_bytes: i64
+    allocated_bytes: i64
+    object_count: i64
+    gc_count: i64
+    peak_used_bytes: i64
+    young_gen_size: i64
+    old_gen_size: i64
+
+    fn fmt() -> text:
+        "HeapStats(used={self.used_bytes}, objects={self.object_count}, gc={self.gc_count})"
+
+fn HeapStats__new() -> HeapStats:
+    HeapStats(
+        used_bytes: 0,
+        allocated_bytes: 0,
+        object_count: 0,
+        gc_count: 0,
+        peak_used_bytes: 0,
+        young_gen_size: 0,
+        old_gen_size: 0
+    )
+
+# --- AllocationResult ---
+
+class AllocationResult:
+    tag: text
+    offset: i64
+
+    fn is_success() -> bool:
+        self.tag == "success"
+
+fn AllocationResult__success(offset: i64) -> AllocationResult:
+    AllocationResult(tag: "success", offset: offset)
+
+fn AllocationResult__failure() -> AllocationResult:
+    AllocationResult(tag: "failure", offset: -1)
+
+# --- ActorHeap ---
+
+class ActorHeap:
+    config: HeapConfig
+    young_generation: HeapRegion
+    old_generation_used: i64
+    old_generation_cap: i64
+    has_old_generation: bool
+    used_bytes: i64
+    allocated_bytes: i64
+    object_count: i64
+    gc_count: i64
+    peak_used_bytes: i64
+
+    me allocate(size: i64) -> AllocationResult:
+        val new_used = self.used_bytes + size
+        if self.config.max_size > 0:
+            if new_used > self.config.max_size:
+                return AllocationResult__failure()
+        val offset = self.used_bytes
+        self.used_bytes = new_used
+        self.allocated_bytes = self.allocated_bytes + size
+        self.object_count = self.object_count + 1
+        self.young_generation.used = self.young_generation.used + size
+        if self.used_bytes > self.peak_used_bytes:
+            self.peak_used_bytes = self.used_bytes
+        AllocationResult__success(offset)
+
+    me collect_garbage():
+        if not self.config.gc_enabled:
+            return ()
+        self.gc_count = self.gc_count + 1
+
+    me collect_young_generation():
+        if not self.config.gc_enabled:
+            return ()
+        self.gc_count = self.gc_count + 1
+
+    fn usage_percent() -> i64:
+        if self.config.initial_size == 0:
+            return 0
+        self.used_bytes * 100 / self.config.initial_size
+
+    fn is_healthy() -> bool:
+        self.usage_percent() < 95
+
+    fn get_stats() -> HeapStats:
+        HeapStats(
+            used_bytes: self.used_bytes,
+            allocated_bytes: self.allocated_bytes,
+            object_count: self.object_count,
+            gc_count: self.gc_count,
+            peak_used_bytes: self.peak_used_bytes,
+            young_gen_size: self.young_generation.used,
+            old_gen_size: self.old_generation_used
+        )
+
+    fn fmt() -> text:
+        "ActorHeap(used={self.used_bytes}, objects={self.object_count})"
+
+fn ActorHeap__new(config: HeapConfig) -> ActorHeap:
+    val has_old = config.generational
+    ActorHeap(
+        config: config,
+        young_generation: HeapRegion__new(config.initial_size),
+        old_generation_used: 0,
+        old_generation_cap: config.initial_size,
+        has_old_generation: has_old,
+        used_bytes: 0,
+        allocated_bytes: 0,
+        object_count: 0,
+        gc_count: 0,
+        peak_used_bytes: 0
+    )
+
+export HeapConfig, HeapConfig__default, HeapConfig__small, HeapConfig__large, HeapConfig__no_gc
+export HeapRegion, HeapRegion__new
+export HeapStats, HeapStats__new
+export AllocationResult, AllocationResult__success, AllocationResult__failure
+export ActorHeap, ActorHeap__new

@@ -43,10 +43,10 @@ jobs:
       if: runner.os != 'Windows'
       id: validate-unix
       run: |
-        if [ -f "bin/bootstrap/simple" ]; then
-          chmod +x bin/bootstrap/simple
+        if [ -f "bin/release/simple" ]; then
+          chmod +x bin/release/simple
           # Verify binary can actually execute on this platform
-          if bin/bootstrap/simple -c "print 1" > /dev/null 2>&1; then
+          if bin/release/simple -c "print 1" > /dev/null 2>&1; then
             echo "can_execute=true" >> $GITHUB_OUTPUT
             echo "✓ Bootstrap runtime validated"
           else
@@ -63,7 +63,7 @@ jobs:
       if: runner.os == 'Windows'
       id: validate-windows
       run: |
-        if (Test-Path "bin\bootstrap\simple") {
+        if (Test-Path "bin\release\simple") {
           # Linux ELF binary - cannot execute on Windows
           echo "can_execute=false" >> $env:GITHUB_OUTPUT
           Write-Host "⚠ Bootstrap binary exists but is Linux ELF (cannot execute on Windows)"
@@ -77,7 +77,7 @@ jobs:
     - name: Test platform detection (Linux)
       if: runner.os == 'Linux' && steps.validate-unix.outputs.can_execute == 'true'
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
         DETECTED=$(simple -c "use std.platform.{is_linux}; print is_linux()")
         echo "Detected is_linux: $DETECTED"
         if [[ "$DETECTED" == *"true"* ]]; then
@@ -90,7 +90,7 @@ jobs:
     - name: Test separators (Linux)
       if: runner.os == 'Linux' && steps.validate-unix.outputs.can_execute == 'true'
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
         DIR_SEP=$(simple -c "use std.platform.{dir_sep}; print dir_sep()")
         PATH_SEP=$(simple -c "use std.platform.{path_sep}; print path_sep()")
         echo "Directory separator: '$DIR_SEP'"
@@ -128,13 +128,13 @@ jobs:
           sysctl kern.elf64.fallback_brand=Linux
 
           # Setup bootstrap (Linux binary runs via Linuxulator)
-          chmod +x bin/bootstrap/simple
+          chmod +x bin/release/simple
 
           # Install Linux runtime libraries and gcc
           pkg install -y linux_base-c7 gcc
 
           # Test basic execution
-          if bin/bootstrap/simple -c "print 42" 2>/dev/null; then
+          if bin/release/simple -c "print 42" 2>/dev/null; then
             echo "✅ Bootstrap binary works on FreeBSD (via Linuxulator)"
           else
             echo "⚠ Bootstrap binary cannot run on FreeBSD"
@@ -143,7 +143,7 @@ jobs:
           fi
 
           # Test platform detection
-          export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+          export PATH="$PWD/bin:$PWD/bin/release:$PATH"
           simple -c "use std.platform.{is_unix, dir_sep}; print is_unix(); print dir_sep()" || true
 
           # Test shell execution
@@ -154,7 +154,7 @@ jobs:
           echo "=== Running native compile spec on FreeBSD ==="
           gcc --version | head -1 || true
           clang --version | head -1 || true
-          bin/bootstrap/simple test test/compiler/native_compile_spec.spl
+          bin/release/simple test test/compiler/native_compile_spec.spl
       continue-on-error: true
 
   # ============================================================================
@@ -170,12 +170,12 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
     - name: Test path functions
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
 
         # Test normalize_path
         RESULT=$(simple -c "use std.platform.{normalize_path}; print normalize_path(\"/usr//bin/../local/bin\")")
@@ -203,12 +203,12 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
     - name: Test shell execution
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
         OUTPUT=$(simple -c "use app.io.mod (shell); val r = shell(\"echo test\"); print r.stdout")
         echo "Shell output: '$OUTPUT'"
         if [[ "$OUTPUT" == *"test"* ]]; then
@@ -231,7 +231,7 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
     - name: Install mold
@@ -244,7 +244,7 @@ jobs:
 
     - name: Test linker detection
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
         simple -c "use compiler.linker.link (get_linker_info); print get_linker_info()"
       continue-on-error: true
 
@@ -252,8 +252,12 @@ jobs:
   # Multi-File Link Tests (Native Compilation)
   # ============================================================================
   multi-file-link:
-    name: Multi-File Link Tests
+    name: Multi-File Link (${{ matrix.compiler }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [clang, gcc]
 
     steps:
     - name: Checkout code
@@ -261,19 +265,25 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
-    - name: Install gcc
+    - name: Install compiler
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq gcc
-        gcc --version
+        sudo apt-get install -y -qq ${{ matrix.compiler }}
+        ${{ matrix.compiler }} --version
+
+    - name: Set cc symlink
+      run: |
+        # Ensure 'cc' resolves to the matrix compiler
+        sudo update-alternatives --install /usr/bin/cc cc $(which ${{ matrix.compiler }}) 100
+        cc --version
 
     - name: Run native compile spec tests
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
-        bin/bootstrap/simple test test/compiler/native_compile_spec.spl
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        bin/release/simple test test/compiler/native_compile_spec.spl
 
   # ============================================================================
   # Windows MinGW Cross-Compilation
@@ -288,7 +298,7 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
     - name: Install MinGW-w64
@@ -299,8 +309,8 @@ jobs:
 
     - name: Run Windows MinGW cross-compile test
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
-        bin/bootstrap/simple script/test_windows_mingw.spl
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
+        bin/release/simple script/test_windows_mingw.spl
 
   # ============================================================================
   # Build Examples
@@ -315,12 +325,12 @@ jobs:
 
     - name: Setup bootstrap runtime
       run: |
-        chmod +x bin/bootstrap/simple
+        chmod +x bin/release/simple
         echo "✓ Bootstrap runtime ready"
 
     - name: Build hello example
       run: |
-        export PATH="$PWD/bin:$PWD/bin/bootstrap:$PATH"
+        export PATH="$PWD/bin:$PWD/bin/release:$PATH"
         if [ -f examples/hello.spl ]; then
           simple build examples/hello.spl -o hello
           ./hello

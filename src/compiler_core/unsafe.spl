@@ -1,0 +1,183 @@
+# Unsafe Context Tracking
+#
+# Tracks and validates unsafe operations in the compiler.
+# Unsafe blocks are required for operations that could violate
+# memory safety if misused.
+#
+# Unsafe operations:
+# - Raw pointer dereference
+# - Inline assembly
+# - FFI calls to C functions
+# - Accessing mutable statics
+# - Transmuting between types
+#
+# Syntax:
+#   unsafe:
+#       val ptr = 0x1000 as *u32
+#       val value = *ptr
+
+from hir_types import {HirType, SymbolId}
+from hir_definitions import {HirExpr, HirExprKind, HirStmt}
+from lexer import {Span}
+
+export UnsafeContext, UnsafeOp, UnsafeError
+export is_unsafe_op, check_unsafe_context, require_unsafe
+
+# Types of unsafe operations
+enum UnsafeOp:
+    # Raw pointer operations
+    PointerDeref          # *ptr
+    PointerArithmetic     # ptr_offset(ptr, n)
+    PointerCast           # expr as *T
+
+    # Memory operations
+    Transmute             # transmute<T, U>(value)
+    ReadUninitialized     # MaybeUninit::assume_init()
+    WriteToRaw            # ptr_write(ptr, value)
+
+    # FFI operations
+    FfiCall               # extern "C" fn call
+    InlineAssembly        # asm { ... }
+
+    # Global state
+    MutableStatic         # static mut VAR
+    StaticReference       # &static or &mut static
+
+    # Type system escapes
+    UncheckedCast         # unchecked type cast
+    UnionFieldAccess      # accessing union fields
+
+
+# ============================================================================
+# UnsafeOp Methods (was: impl UnsafeOp:)
+# ============================================================================
+
+# Unsafe operation instance
+struct UnsafeOperation:
+    op: UnsafeOp
+    span: Span
+    # DESUGARED: context: text?
+    has_context: bool
+    context_value: text
+
+# Unsafe context tracks whether we're in an unsafe block
+class UnsafeContext:
+    # Stack of unsafe block depths
+    unsafe_depth: i64
+    # Accumulated unsafe operations (for lint reporting)
+    operations: [UnsafeOperation]
+    # Whether the current function is marked unsafe
+    function_unsafe: bool
+    # Whether to allow unsafe implicitly (for FFI modules)
+    allow_implicit_unsafe: bool
+
+
+# ============================================================================
+# UnsafeContext Methods (was: impl UnsafeContext:)
+# ============================================================================
+
+fn unsafecontext_new() -> UnsafeContext:
+        UnsafeContext(
+            unsafe_depth: 0,
+            operations: [],
+            function_unsafe: false,
+            allow_implicit_unsafe: false
+        )
+
+
+# Unsafe error types
+enum UnsafeError:
+    # Operation requires unsafe block
+    RequiresUnsafe(op: UnsafeOp, span: Span)
+    # Unsafe block with no unsafe operations (lint)
+    UnnecessaryUnsafe(span: Span)
+    # Unsafe function called outside unsafe
+    UnsafeFnCall(fn_name: text, span: Span)
+
+
+# ============================================================================
+# UnsafeError Methods (was: impl UnsafeError:)
+# ============================================================================
+
+# Check if an expression is an unsafe operation
+fn is_unsafe_op(expr: HirExpr) -> has_UnsafeOp:
+    match expr.kind:
+        # Pointer dereference: *ptr
+        case hirexprkind_Unary(op, operand):
+            match op:
+                case HirUnaryOp.Deref:
+                    if is_raw_pointer_type(operand.type_):
+                        return has_field = true, field_value = UnsafeOp.PointerDeref
+                case _: pass
+
+        # Inline assembly
+        case hirexprkind_InlineAsm(_):
+            return has_field = true, field_value = UnsafeOp.InlineAssembly
+
+        # Cast to raw pointer
+        case hirexprkind_Cast(_, target_type):
+            if is_raw_pointer_type(target_type):
+                return has_field = true, field_value = UnsafeOp.PointerCast
+
+        # FFI call
+        case hirexprkind_Call(callee, _, _):
+            if is_ffi_function(callee):
+                return has_field = true, field_value = UnsafeOp.FfiCall
+
+        case _:
+            pass
+
+    nil
+
+# Check if type is a raw pointer
+fn is_raw_pointer_type(type_: HirType?) -> bool:
+    if not has_type_:
+        return false
+    val t = type__value
+    # Check for *T, *mut T, ptr<T> types
+    val name = t_to_text(t)
+    name.starts_with("*") or name.starts_with("ptr<")
+
+# Check if callee is an FFI function
+fn is_ffi_function(callee: HirExpr) -> bool:
+    # Would need symbol table lookup to check if function is extern
+    false  # Placeholder
+
+# Check unsafe context for an operation
+fn check_unsafe_context(ctx: UnsafeContext, op: UnsafeOp, span: Span) -> Result<(), UnsafeError>:
+    if ctx_is_unsafe(ctx):
+        ctx_record_op(ctx, op, span, nil)
+        Ok(())
+    else:
+        Err(unsafeerror_RequiresUnsafe(op, span))
+
+# Require unsafe context, returning error if not in one
+fn require_unsafe(ctx: UnsafeContext, op: UnsafeOp, span: Span) -> Result<(), UnsafeError>:
+    check_unsafe_context(ctx, op, span)
+
+# Validate that an unsafe block contains unsafe operations
+fn validate_unsafe_block(ctx: UnsafeContext, block_span: Span) -> Result<(), UnsafeError>:
+    if ctx.operations_len(operations) == 0:
+        return Err(unsafeerror_UnnecessaryUnsafe(block_span))
+    Ok(())
+
+# Built-in unsafe functions
+val UNSAFE_BUILTINS: [text] = [
+    "transmute",
+    "read_volatile",
+    "write_volatile",
+    "copy_nonoverlapping",
+    "copy",
+    "swap",
+    "drop_in_place",
+    "forget",
+    "zeroed",
+    "uninitialized"
+]
+
+# Check if a function name is an unsafe builtin
+fn is_unsafe_builtin(name: text) -> bool:
+    for builtin in UNSAFE_BUILTINS:
+        if builtin == name:
+            return true
+    false

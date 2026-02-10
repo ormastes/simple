@@ -1,31 +1,24 @@
 # Architecture Skill - Simple Compiler
 
-## Crate Dependency Graph
+## Module Dependency Graph
 
 ```
-driver (CLI) ─────────────────────────────────┐
+cli (CLI entry) ──────────────────────────────┐
     │                                         │
     ├── compiler (HIR, MIR, Codegen) ─────────┤
     │       │                                 │
-    │       ├── parser (Lexer, AST) ──────────┤
-    │       │       │                         │
-    │       │       └── common ───────────────┤
+    │       ├── core (Lexer, Parser, AST) ────┤
     │       │                                 │
-    │       ├── type (Type checker) ──────────┤
-    │       │                                 │
-    │       ├── codegen/lean (Lean gen) ──────┤  ← Lean 4 verification
-    │       │                                 │
-    │       └── runtime (GC, Values) ─────────┤
-    │               │                         │
-    │               └── log ──────────────────┤
+    │       └── std (Standard library) ───────┤
     │                                         │
-    ├── loader (SMF binary loader) ───────────┤
+    ├── app (Applications) ───────────────────┤
+    │   ├── build (Build system)              │
+    │   ├── mcp (MCP server)                  │
+    │   ├── io (SFFI I/O)                     │
+    │   └── test_runner (Test framework)      │
     │                                         │
-    ├── native_loader (OS dylib) ─────────────┤
-    │                                         │
-    ├── arch_test (Dependency analysis) ──────┤
-    │                                         │
-    └── pkg (Package manager) ────────────────┘
+    └── lib (Libraries) ──────────────────────┘
+        └── database (SDN tables, atomic ops)
 ```
 
 ## Compilation Pipeline
@@ -68,40 +61,37 @@ Source (.spl)
 
 ## Key Directories
 
-### Rust Compiler (`src/`)
+### Source Code (`src/`)
 ```
 src/
-├── common/      # DynLoader, ConfigEnv (no deps)
-├── parser/      # Lexer, Parser, AST
-├── type/        # Type checker (HM scaffold)
-├── compiler/    # HIR, MIR, Codegen, Interpreter
-│   ├── hir/     # High-level IR
-│   ├── mir/     # Mid-level IR
-│   ├── codegen/ # Cranelift backend
-│   └── linker/  # SMF emission
-├── runtime/     # GC, RuntimeValue, Actors
-├── loader/      # SMF binary loader
-├── native_loader/ # OS dylib loader
-├── pkg/         # Package manager
-└── driver/      # CLI entry point
-```
-
-### Simple Language (`simple/`)
-```
-simple/
-├── app/         # Self-hosted tools
-│   ├── formatter/
-│   ├── lint/
-│   ├── lsp/
-│   └── dap/
-├── std_lib/     # Standard library
-│   ├── src/     # .spl source
-│   │   ├── core/        # GC + mutable
-│   │   ├── core_nogc/   # No GC + mutable
-│   │   ├── host/        # OS-based overlays
-│   │   └── concurrency/ # Actors, channels
-│   └── test/    # BDD tests
-└── build/       # Intermediate .smf files
+├── app/         # Applications (100% Simple)
+│   ├── build/   # Self-hosting build system
+│   ├── cli/     # CLI entry point
+│   ├── mcp/     # MCP server
+│   ├── desugar/ # Static method desugaring
+│   ├── fix/     # EasyFix auto-corrections
+│   ├── lint/    # Linter
+│   ├── io/      # I/O module (SFFI)
+│   └── test_runner_new/ # Test runner + SDoctest
+├── lib/         # Libraries
+│   └── database/ # Database library (SDN tables, atomic ops)
+├── std/         # Standard library
+│   ├── spec.spl # SSpec BDD framework
+│   ├── string.spl
+│   ├── array.spl
+│   ├── math.spl
+│   ├── path.spl
+│   └── platform/ # Cross-platform support
+├── core/        # Core Simple library (self-hosting)
+│   ├── tokens.spl
+│   ├── types.spl
+│   ├── ast.spl
+│   ├── mir.spl
+│   ├── lexer.spl
+│   ├── parser.spl
+│   └── error.spl
+└── compiler/    # Compiler source (Simple)
+    └── seed/      # Seed compiler (C/C++)
 ```
 
 ## MIR Instruction Categories
@@ -141,21 +131,21 @@ host/
 
 ## Adding New Features
 
-1. **Parser changes**: `src/parser/src/`
-2. **Type system**: `src/type/src/`
-3. **HIR lowering**: `src/compiler/src/hir/`
-4. **MIR lowering**: `src/compiler/src/mir/`
-5. **Codegen**: `src/compiler/src/codegen/`
-6. **Runtime support**: `src/runtime/src/`
-7. **Tests**: `src/driver/tests/`
+1. **Parser changes**: `src/core/parser.spl`, `src/core/lexer.spl`
+2. **Type system**: `src/core/types.spl`
+3. **HIR lowering**: `src/compiler/`
+4. **MIR lowering**: `src/core/mir.spl`
+5. **Standard library**: `src/std/`
+6. **Applications/tools**: `src/app/`
+7. **Tests**: `test/`
 
 ## Architecture Rules
 
-- `common` has no dependencies
-- `parser` depends only on `common`
-- `runtime` is independent of `compiler`
-- `driver` is the only CLI entry point
-- No circular dependencies between crates
+- `src/core/` has no dependencies on other Simple modules
+- `src/std/` depends only on `src/core/`
+- `src/lib/` depends on `src/std/` and `src/core/`
+- `src/app/cli/` is the only CLI entry point
+- No circular dependencies between modules
 
 ---
 
@@ -202,22 +192,6 @@ simple gen-lean write --force               # Regenerate all
 # 0 = identical, 1 = differences (safe to replace), 2 = missing definitions
 ```
 
-### Lean Codegen Architecture
-
-```
-src/compiler/src/codegen/lean/
-├── mod.rs              # LeanCodegen entry point
-├── types.rs            # TypeTranslator (Simple→Lean types)
-├── functions.rs        # FunctionTranslator
-├── contracts.rs        # ContractTranslator (in:/out: → theorems)
-├── expressions.rs      # ExprTranslator
-├── traits.rs           # TraitTranslator (→ Lean type classes)
-├── emitter.rs          # LeanEmitter (code generation)
-├── runner.rs           # LeanRunner (proof checking)
-├── verification_checker.rs
-└── verification_diagnostics.rs
-```
-
 ### Type Inference Verification Impact
 
 The `type_inference_compile` project proves:
@@ -228,7 +202,7 @@ The `type_inference_compile` project proves:
 4. **Contracts**: Pre/postcondition contract verification
 
 **When modifying type inference:**
-1. Update `src/type/src/lib.rs` (Rust implementation)
+1. Update `src/core/types.spl` (Simple implementation)
 2. Update corresponding Lean theorems in `verification/type_inference_compile/`
 3. Run `lake build` in verification project to check proofs
 4. Run `simple gen-lean compare` to verify alignment
@@ -264,72 +238,31 @@ theorem safe_swap_preserves_memory : ∀ a b,
 
 ---
 
-## Dependency Analysis
+## Dependency Management
 
-### arch_test Crate
+### Module Dependency Rules
 
-Static analysis for enforcing architectural rules.
-
-```rust
-use arch_test::{Architecture, Layer};
-
-let arch = Architecture::new()
-    .layer("presentation", &["src/ui/**"])
-    .layer("business", &["src/services/**"])
-    .layer("data", &["src/repos/**"])
-    .rule(Layer("presentation").may_only_access(&["business"]))
-    .rule(Layer("business").may_not_access(&["presentation"]))
-    .rule(Layer("data").may_not_be_accessed_by(&["presentation"]));
-
-let result = arch.check("src/");
-assert!(result.is_ok());
-```
-
-### Running Architecture Tests
-
-```bash
-simple build rust test arch              # Run architecture tests
-simple build rust test arch --visualize  # Generate DOT/Mermaid graphs
-```
+| Layer | May Access | May Not Access |
+|-------|------------|----------------|
+| `src/app/cli/` | all | - |
+| `src/compiler/` | core, std | app |
+| `src/core/` | (no deps) | compiler, app |
+| `src/std/` | core | compiler, app |
+| `src/lib/` | std, core | compiler |
 
 ### Circular Dependency Prevention
 
 **Before Design:**
 1. Draw dependency graph of affected modules
 2. Identify potential cycles
-3. Use `make arch-test` to validate current state
 
 **After Implementation:**
-1. Run `make arch-test` to verify no new cycles
-2. Run `simple gen-lean compare` if verification-related
-3. Check `cargo tree -p <crate>` for unexpected dependencies
-
-### Dependency Rules by Layer
-
-| Layer | May Access | May Not Access |
-|-------|------------|----------------|
-| `driver` | all | - |
-| `compiler` | parser, type, runtime, common | driver |
-| `parser` | common | compiler, runtime |
-| `runtime` | log, common | compiler, parser |
-| `common` | - | all |
-
-### Detecting Cycles
-
-```bash
-# Rust crate cycles (diagnostic query)
-cargo tree --edges features
-
-# Simple module cycles (via arch_test)
-simple build rust test arch
-
-# Lean project dependencies
-cd verification/type_inference_compile && lake build
-```
+1. Run `simple gen-lean compare` if verification-related
+2. Verify no new circular imports
 
 ### Breaking Dependency Cycles
 
-1. **Extract shared interface** → move to `common`
+1. **Extract shared interface** → move to `src/core/`
 2. **Invert dependency** → use trait/callback
 3. **Split module** → separate concerns
 4. **Use dependency injection** → runtime configuration
@@ -340,16 +273,14 @@ cd verification/type_inference_compile && lake build
 
 ### Before Implementing
 
-- [ ] Read relevant feature spec (`doc/features/`)
-- [ ] Check existing architecture (`simple build rust test arch`)
-- [ ] Identify affected verification projects
+- [ ] Read relevant feature spec (`doc/feature/`)
+- [ ] Identify affected modules and verification projects
 - [ ] Draw dependency impact diagram
 
 ### After Implementing
 
-- [ ] Run `simple build rust test arch` - no new violations
+- [ ] Run `bin/simple test` - all tests pass
 - [ ] Run `simple gen-lean compare` - if verification affected
-- [ ] Run `simple build rust test` - all tests pass
 - [ ] Update Lean proofs if needed (`lake build`)
 
 ## See Also

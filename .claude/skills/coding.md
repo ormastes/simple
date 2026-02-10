@@ -88,7 +88,7 @@ fn main():
     return 0
 ```
 
-Run: `./rust/target/debug/simple scripts/my_tool.spl arg1 arg2`
+Run: `bin/simple scripts/my_tool.spl arg1 arg2`
 
 ## Coding Standards
 
@@ -109,49 +109,6 @@ Run: `./rust/target/debug/simple scripts/my_tool.spl arg1 arg2`
 - Don't create helpers for one-time operations
 - Prefer 3 similar lines over premature abstraction
 - Delete unused code completely (no `_vars`, `// removed`)
-
-## Rust Conventions
-
-### Module Structure
-```rust
-// lib.rs
-pub mod feature;
-pub use feature::Feature;
-
-// feature.rs
-pub struct Feature { ... }
-
-impl Feature {
-    pub fn new() -> Self { ... }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn test_feature() { ... }
-}
-```
-
-### Error Handling
-```rust
-use anyhow::{Result, Context};
-
-fn do_something() -> Result<Value> {
-    operation().context("failed to do operation")?;
-    Ok(value)
-}
-```
-
-### Logging
-```rust
-use tracing::{debug, info, warn, error};
-
-#[tracing::instrument]
-fn traced_function() {
-    info!("operation started");
-}
-```
 
 ## Simple Language Conventions
 
@@ -375,30 +332,25 @@ File in `simple/bug_report.md`:
 
 ```bash
 # Build project
-simple build                              # Debug build
-simple build --release                    # Release (optimized)
+bin/simple build                              # Debug build
+bin/simple build --release                    # Release (optimized)
 
 # Check for warnings — fix all before committing
-simple build rust lint
-
-# Common Rust warning fixes:
-# "shared reference to mutable static" → Use OnceLock + AtomicUsize
-# "unused variable" → Prefix with _ or remove
-# "dead code" → Remove or add #[allow(dead_code)]
+bin/simple build lint
 
 # Run Simple lint with auto-fix
-./bin/wrappers/simple lint file.spl --fix          # Safe fixes only
-./bin/wrappers/simple lint file.spl --fix-all      # All fixes
-./bin/wrappers/simple lint file.spl --fix-dry-run  # Preview only
+bin/simple lint file.spl --fix          # Safe fixes only
+bin/simple lint file.spl --fix-all      # All fixes
+bin/simple lint file.spl --fix-dry-run  # Preview only
 
 # Standalone fix tool
-./bin/wrappers/simple fix file.spl --dry-run
-./bin/wrappers/simple fix file.spl --fix-interactive
+bin/simple fix file.spl --dry-run
+bin/simple fix file.spl --fix-interactive
 ```
 
 ## EasyFix Rules
 
-9 auto-fix rules in `src/app/fix/rules.spl` (Simple) and `rust/common/src/easy_fix_rules.rs` (Rust):
+9 auto-fix rules in `src/app/fix/rules.spl`:
 
 | Rule | Fix | Confidence |
 |------|-----|------------|

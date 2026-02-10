@@ -1,0 +1,99 @@
+# Compile-Time Constant Evaluation
+#
+# Evaluates constant expressions at compile time, used for:
+# - Static assertions: static assert size_of<T>() == N
+# - Const functions: const fn compute_table() -> [i64]
+# - Array sizes: [i64; N] where N is const
+# - Generic const parameters: Array<T, N> where N: const i64
+#
+# This implements a subset of the MIR interpreter optimized for
+# compile-time evaluation with no side effects.
+
+from hir_types import {HirType, SymbolId, HirModule}
+from hir_definitions import {HirExpr, HirExprKind, HirConst, HirStaticAssert, HirStmt, HirStmtKind, HirBlock, HirFunction, HirCallArg}
+from lexer import {Span}
+
+export ConstValue, ConstEvalError, ConstEvaluator
+export eval_const_expr, eval_static_assert
+
+# Constant value types (compile-time evaluated)
+enum ConstValue:
+    Int(value: i64)
+    Float(value: f64)
+    Bool(value: bool)
+    Char(value: char)
+    String(value: text)
+    Unit
+    Array(elements: [ConstValue])
+    Tuple(elements: [ConstValue])
+    Struct(type_name: text, fields: Dict<text, ConstValue>)
+
+
+# ============================================================================
+# ConstValue Methods (was: impl ConstValue:)
+# ============================================================================
+
+# Compile-time evaluation errors
+enum ConstEvalError:
+    NotConstant(expr: text, span: Span)
+    UndefinedVariable(name: text, span: Span)
+    TypeError(expected: text, got: text, span: Span)
+    DivisionByZero(span: Span)
+    Overflow(op: text, span: Span)
+    UnsupportedOperation(op: text, span: Span)
+    AssertionFailed(message: text, span: Span)
+    ArrayBoundsError(index: i64, len: i64, span: Span)
+
+
+# ============================================================================
+# ConstEvalError Methods (was: impl ConstEvalError:)
+# ============================================================================
+
+# Maximum recursion depth for const function calls
+val MAX_CONST_CALL_DEPTH: i64 = 100
+
+# Constant evaluator context
+class ConstEvaluator:
+    module: HirModule
+    constants: Dict<text, ConstValue>    # Named constants in scope
+    type_sizes: Dict<text, i64>          # Type → size in bytes
+    type_aligns: Dict<text, i64>         # Type → alignment
+    locals: Dict<text, ConstValue>       # Local variable bindings (for const fn params)
+    call_depth: i64                       # Current recursion depth
+
+
+# ============================================================================
+# ConstEvaluator Methods (was: impl ConstEvaluator:)
+# ============================================================================
+
+fn constevaluator_new(module: HirModule) -> ConstEvaluator:
+        var eval = ConstEvaluator(
+            module: module,
+            constants: {},
+            type_sizes: {},
+            type_aligns: {},
+            locals: {},
+            call_depth: 0
+        )
+        eval_init_builtin_sizes(eval)
+        eval
+
+
+# Convenience function: evaluate a constant expression
+fn eval_const_expr(module: HirModule, expr: HirExpr) -> Result<ConstValue, ConstEvalError>:
+    val evaluator = constevaluator_new(module)
+    evaluator_eval(evaluator, expr)
+
+# Evaluate a static assertion
+fn eval_static_assert(module: HirModule, assert_: HirStaticAssert) -> Result<(), ConstEvalError>:
+    val evaluator = constevaluator_new(module)
+    val result = evaluator_eval(evaluator, assert_.condition)?
+
+    match result:
+        case constvalue_Bool(true):
+            Ok(())
+        case constvalue_Bool(false):
+            val msg = assert_.message ?? "assertion failed"
+            Err(constevalerror_AssertionFailed(msg, assert_.span))
+        case _:
+            Err(ConstEvalError.TypeError("bool", result.to_text(), assert_.span))
