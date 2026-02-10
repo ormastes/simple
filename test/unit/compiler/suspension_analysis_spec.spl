@@ -1,0 +1,219 @@
+#!/usr/bin/env simple
+# Suspension Point Analysis Tests
+#
+# Tests that the suspension point analyzer correctly identifies await
+# expressions and computes live variables.
+
+use compiler.desugar.suspension_analysis.{
+    analyze_suspensions,
+    has_await_expressions,
+    format_suspension_analysis
+}
+use compiler.parser_types.*
+use lexer.Span
+
+# Helper to create a dummy span
+fn dummy_span() -> Span:
+    Span.new(0, 0, 1, 1)
+
+# Helper to create a simple async function for testing
+fn make_async_function(name: text, body: Block) -> Function:
+    Function(
+        name: name,
+        type_params: [],
+        params: [],
+        return_type: nil,
+        body: body,
+        is_async: true,
+        is_static: false,
+        is_public: false,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_kernel: false,
+        doc_comment: nil,
+        span: dummy_span()
+    )
+
+# Helper to create await expression
+fn make_await(awaited: Expr) -> Expr:
+    Expr(
+        kind: ExprKind.Await(awaited),
+        span: dummy_span()
+    )
+
+# Helper to create identifier expression
+fn make_ident(name: text) -> Expr:
+    Expr(
+        kind: ExprKind.Ident(name),
+        span: dummy_span()
+    )
+
+# Helper to create call expression
+fn make_call(func_name: text) -> Expr:
+    Expr(
+        kind: ExprKind.Call(
+            make_ident(func_name),
+            []
+        ),
+        span: dummy_span()
+    )
+
+# Helper to create block
+fn make_block(stmts: [Stmt]) -> Block:
+    Block(
+        statements: stmts,
+        span: dummy_span()
+    )
+
+# Helper to create expression statement
+fn make_expr_stmt(expr: Expr) -> Stmt:
+    Stmt(
+        kind: StmtKind.Expr(expr),
+        span: dummy_span()
+    )
+
+describe "Suspension Analysis - Basic Cases":
+    it "analyzes function with no awaits":
+        # async fn example():
+        #     print "hello"
+
+        val body = make_block([
+            make_expr_stmt(make_call("print"))
+        ])
+        val func = make_async_function("example", body)
+
+        val analysis = analyze_suspensions(func)
+
+        expect(analysis.suspension_points.len()).to_equal(0)
+        expect(analysis.total_states).to_equal(1)  # Only State0
+
+    it "analyzes function with single await":
+        # async fn example():
+        #     await fetch()
+
+        val await_expr = make_await(make_call("fetch"))
+        val body = make_block([make_expr_stmt(await_expr)])
+        val func = make_async_function("example", body)
+
+        val analysis = analyze_suspensions(func)
+
+        expect(analysis.suspension_points.len()).to_equal(1)
+        expect(analysis.total_states).to_equal(2)  # State0, State1
+        expect(analysis.suspension_points[0].id).to_equal(0)
+
+    it "analyzes function with multiple awaits":
+        # async fn example():
+        #     await fetch1()
+        #     await fetch2()
+        #     await fetch3()
+
+        val body = make_block([
+            make_expr_stmt(make_await(make_call("fetch1"))),
+            make_expr_stmt(make_await(make_call("fetch2"))),
+            make_expr_stmt(make_await(make_call("fetch3")))
+        ])
+        val func = make_async_function("example", body)
+
+        val analysis = analyze_suspensions(func)
+
+        expect(analysis.suspension_points.len()).to_equal(3)
+        expect(analysis.total_states).to_equal(4)  # State0, State1, State2, State3
+
+        # Check IDs are sequential
+        expect(analysis.suspension_points[0].id).to_equal(0)
+        expect(analysis.suspension_points[1].id).to_equal(1)
+        expect(analysis.suspension_points[2].id).to_equal(2)
+
+describe "Suspension Analysis - Control Flow":
+    it "finds await in if expression":
+        # async fn example():
+        #     val x = if true: await fetch() else: 0
+
+        val if_expr = Expr(
+            kind: ExprKind.If(
+                make_ident("true"),
+                make_block([make_expr_stmt(make_await(make_call("fetch")))]),
+                make_block([make_expr_stmt(make_ident("zero"))])
+            ),
+            span: dummy_span()
+        )
+        val body = make_block([make_expr_stmt(if_expr)])
+        val func = make_async_function("example", body)
+
+        val analysis = analyze_suspensions(func)
+
+        expect(analysis.suspension_points.len()).to_equal(1)
+        expect(analysis.suspension_points[0].context_depth).to_equal(1)
+
+    it "finds await in while loop":
+        # async fn example():
+        #     while true:
+        #         await fetch()
+
+        val while_stmt = Stmt(
+            kind: StmtKind.While(
+                make_ident("true"),
+                make_block([make_expr_stmt(make_await(make_call("fetch")))])
+            ),
+            span: dummy_span()
+        )
+        val body = make_block([while_stmt])
+        val func = make_async_function("example", body)
+
+        val analysis = analyze_suspensions(func)
+
+        expect(analysis.suspension_points.len()).to_equal(1)
+        expect(analysis.suspension_points[0].context_depth).to_equal(1)
+
+describe "Suspension Analysis - has_await_expressions":
+    it "returns false for block with no awaits":
+        val block = make_block([
+            make_expr_stmt(make_call("print"))
+        ])
+
+        expect(has_await_expressions(block)).to_equal(false)
+
+    it "returns true for block with await":
+        val block = make_block([
+            make_expr_stmt(make_await(make_call("fetch")))
+        ])
+
+        expect(has_await_expressions(block)).to_equal(true)
+
+    it "returns true for block with nested await":
+        val if_expr = Expr(
+            kind: ExprKind.If(
+                make_ident("true"),
+                make_block([make_expr_stmt(make_await(make_call("fetch")))]),
+                nil
+            ),
+            span: dummy_span()
+        )
+        val block = make_block([make_expr_stmt(if_expr)])
+
+        expect(has_await_expressions(block)).to_equal(true)
+
+describe "Suspension Analysis - Formatting":
+    it "formats analysis with no suspension points":
+        val body = make_block([])
+        val func = make_async_function("example", body)
+        val analysis = analyze_suspensions(func)
+
+        val formatted = format_suspension_analysis(analysis)
+
+        expect(formatted).to_contain("Total states: 1")
+        expect(formatted).to_contain("Suspension points: 0")
+
+    it "formats analysis with suspension points":
+        val body = make_block([
+            make_expr_stmt(make_await(make_call("fetch")))
+        ])
+        val func = make_async_function("example", body)
+        val analysis = analyze_suspensions(func)
+
+        val formatted = format_suspension_analysis(analysis)
+
+        expect(formatted).to_contain("Total states: 2")
+        expect(formatted).to_contain("Suspension points: 1")
+        expect(formatted).to_contain("SP0")

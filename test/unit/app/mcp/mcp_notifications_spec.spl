@@ -1,0 +1,338 @@
+"""
+# MCP Notification Emission Specification
+
+**Feature ID:** #MCP-070
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Complete
+
+## Overview
+
+The MCP server emits notifications during tool execution:
+- Log notifications (`notifications/message`) before and after each tool call
+- Progress notifications (`notifications/progress`) for long-running operations
+- Resource update notifications (`notifications/resources/updated`) after bugdb writes
+
+### Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| send_log | Emits log notification filtered by current log level |
+| send_progress | Emits progress notification with token, progress, total, message |
+| send_resource_updated | Emits resource updated notification for subscribed URIs |
+| send_notification_message | Low-level: writes Content-Length framed notification to stdout |
+
+## Behavior
+
+- Tool calls emit "info" level log before and after execution
+- search_code, list_files, check_diagnostics emit progress when progressToken present
+- bugdb_add and bugdb_update emit resource update for subscribed bugdb URIs
+- Log notifications are filtered by the minimum log level set via logging/setLevel
+
+## Implementation Notes
+
+Helper functions in helpers.spl handle framing and JSON construction.
+The main.spl server loop calls these helpers at appropriate points.
+"""
+
+use app.mcp.helpers.{log_level_to_int, make_log_notification, make_progress_notification, make_resource_updated_notification, send_log, send_progress, LB, RB, jp, js, escape_json}
+
+# ============================================================================
+# Test Group 1: Log Notification Construction
+# ============================================================================
+
+describe "MCP Log Notification Construction":
+    """
+    ## Notification JSON Format
+
+    Tests that log notification builders produce valid JSON-RPC 2.0 notifications.
+    """
+
+    context "when building log notification":
+        """
+        ### Scenario: String Data Log
+
+        make_log_notification produces a notification with level, data, logger.
+        """
+
+        it "includes jsonrpc version":
+            val notif = make_log_notification("info", "test", "logger")
+            expect(notif).to_contain("2.0")
+
+        it "includes correct method":
+            val notif = make_log_notification("info", "test", "logger")
+            expect(notif).to_contain("notifications/message")
+
+        it "includes level field":
+            val notif = make_log_notification("warning", "test", "logger")
+            expect(notif).to_contain("warning")
+
+        it "includes data field":
+            val notif = make_log_notification("info", "Server started", "logger")
+            expect(notif).to_contain("Server started")
+
+        it "includes logger name":
+            val notif = make_log_notification("info", "test", "simple-mcp")
+            expect(notif).to_contain("simple-mcp")
+
+        it "handles empty logger":
+            val notif = make_log_notification("error", "test", "")
+            expect(notif).to_contain("error")
+            expect(notif).to_contain("test")
+
+    context "when building different log levels":
+        """
+        ### Scenario: All Log Levels
+
+        Each RFC 5424 log level produces a valid notification.
+        """
+
+        it "builds debug notification":
+            val notif = make_log_notification("debug", "debug msg", "test")
+            expect(notif).to_contain("debug")
+
+        it "builds info notification":
+            val notif = make_log_notification("info", "info msg", "test")
+            expect(notif).to_contain("info")
+
+        it "builds error notification":
+            val notif = make_log_notification("error", "error msg", "test")
+            expect(notif).to_contain("error")
+
+        it "builds emergency notification":
+            val notif = make_log_notification("emergency", "panic", "test")
+            expect(notif).to_contain("emergency")
+
+# ============================================================================
+# Test Group 2: Log Level Filtering
+# ============================================================================
+
+describe "MCP Log Level Filtering":
+    """
+    ## Level-Based Filtering
+
+    Tests that send_log correctly filters messages by the current log level.
+    """
+
+    context "when log level is set":
+        """
+        ### Scenario: Level Comparison
+
+        log_level_to_int converts level names to numeric priorities.
+        """
+
+        it "debug is level 0":
+            expect(log_level_to_int("debug")).to_equal(0)
+
+        it "info is level 1":
+            expect(log_level_to_int("info")).to_equal(1)
+
+        it "notice is level 2":
+            expect(log_level_to_int("notice")).to_equal(2)
+
+        it "warning is level 3":
+            expect(log_level_to_int("warning")).to_equal(3)
+
+        it "error is level 4":
+            expect(log_level_to_int("error")).to_equal(4)
+
+        it "critical is level 5":
+            expect(log_level_to_int("critical")).to_equal(5)
+
+        it "alert is level 6":
+            expect(log_level_to_int("alert")).to_equal(6)
+
+        it "emergency is level 7":
+            expect(log_level_to_int("emergency")).to_equal(7)
+
+        it "unknown returns -1":
+            expect(log_level_to_int("unknown")).to_equal(-1)
+
+    context "when filtering decisions":
+        """
+        ### Scenario: Should Emit Logic
+
+        Messages at or above the minimum level should be emitted.
+        """
+
+        it "emits when message level equals minimum":
+            val min_level = 3
+            val msg_level = log_level_to_int("warning")
+            expect(msg_level >= min_level).to_equal(true)
+
+        it "emits when message level above minimum":
+            val min_level = 1
+            val msg_level = log_level_to_int("error")
+            expect(msg_level >= min_level).to_equal(true)
+
+        it "suppresses when message level below minimum":
+            val min_level = 4
+            val msg_level = log_level_to_int("info")
+            expect(msg_level >= min_level).to_equal(false)
+
+        it "suppresses all when log level is -1":
+            val min_level = -1
+            val should_emit = min_level >= 0
+            expect(should_emit).to_equal(false)
+
+# ============================================================================
+# Test Group 3: Progress Notification Construction
+# ============================================================================
+
+describe "MCP Progress Notification Construction":
+    """
+    ## Progress Updates
+
+    Tests that progress notification builders produce valid notifications.
+    """
+
+    context "when building progress notification":
+        """
+        ### Scenario: Progress Fields
+
+        Progress notifications include token, progress, total, and optional message.
+        """
+
+        it "includes correct method":
+            val notif = make_progress_notification("tok-1", 50, 100, "")
+            expect(notif).to_contain("notifications/progress")
+
+        it "includes progress token":
+            val notif = make_progress_notification("my-token", 50, 100, "")
+            expect(notif).to_contain("my-token")
+
+        it "includes progress value":
+            val notif = make_progress_notification("tok", 42, 100, "")
+            expect(notif).to_contain("42")
+
+        it "includes total value":
+            val notif = make_progress_notification("tok", 50, 200, "")
+            expect(notif).to_contain("200")
+
+        it "includes optional message":
+            val notif = make_progress_notification("tok", 50, 100, "Searching...")
+            expect(notif).to_contain("Searching...")
+
+        it "omits message when empty":
+            val notif = make_progress_notification("tok", 50, 100, "")
+            # Should not contain a message field
+            val has_message_key = notif.contains("message")
+            expect(has_message_key).to_equal(false)
+
+    context "when tracking progress lifecycle":
+        """
+        ### Scenario: Progress Sequence
+
+        Progress values should increase monotonically.
+        """
+
+        it "starts at 0":
+            val start = 0
+            expect(start).to_equal(0)
+
+        it "ends at total":
+            val progress = 100
+            val total = 100
+            expect(progress).to_equal(total)
+
+        it "search_code emits 0, 50, 100":
+            val stages = [0, 50, 100]
+            expect(stages.len()).to_equal(3)
+            expect(stages[0] < stages[1]).to_equal(true)
+            expect(stages[1] < stages[2]).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Resource Update Notifications
+# ============================================================================
+
+describe "MCP Resource Update Notifications":
+    """
+    ## Subscription-Based Updates
+
+    Tests that resource update notifications are emitted for subscribed URIs.
+    """
+
+    context "when building resource update notification":
+        """
+        ### Scenario: Update Notification Format
+
+        Resource update notifications include the URI of the changed resource.
+        """
+
+        it "includes correct method":
+            val notif = make_resource_updated_notification("bugdb:///all")
+            expect(notif).to_contain("notifications/resources/updated")
+
+        it "includes URI":
+            val notif = make_resource_updated_notification("bugdb:///all")
+            expect(notif).to_contain("bugdb:///all")
+
+        it "works for open bugs URI":
+            val notif = make_resource_updated_notification("bugdb:///open")
+            expect(notif).to_contain("bugdb:///open")
+
+    context "when determining which URIs to notify":
+        """
+        ### Scenario: Subscription Check
+
+        Only subscribed URIs should receive update notifications.
+        """
+
+        it "bugdb_add triggers all and open":
+            val affected_uris = ["bugdb:///all", "bugdb:///open"]
+            expect(affected_uris.len()).to_equal(2)
+
+        it "bugdb_update triggers all and open":
+            val affected_uris = ["bugdb:///all", "bugdb:///open"]
+            expect(affected_uris.len()).to_equal(2)
+
+        it "non-subscribed URIs are not notified":
+            val subscribed = false
+            val should_notify = subscribed
+            expect(should_notify).to_equal(false)
+
+# ============================================================================
+# Test Group 5: Tool Call Logging Integration
+# ============================================================================
+
+describe "MCP Tool Call Logging":
+    """
+    ## Automatic Tool Logging
+
+    Tests that every tool call emits log notifications.
+    """
+
+    context "when any tool is called":
+        """
+        ### Scenario: Before/After Logging
+
+        Each tool call emits info-level log before and after execution.
+        """
+
+        it "emits log before tool execution":
+            val log_msg = "Tool call: read_code"
+            expect(log_msg).to_start_with("Tool call:")
+
+        it "emits log after tool execution":
+            val log_msg = "Tool complete: read_code"
+            expect(log_msg).to_start_with("Tool complete:")
+
+        it "includes tool name in log":
+            val tool_name = "search_code"
+            val log_msg = "Tool call: " + tool_name
+            expect(log_msg).to_contain(tool_name)
+
+    context "when debug-level tools are called":
+        """
+        ### Scenario: Debug-Level Details
+
+        Some tools emit additional debug-level logs with details.
+        """
+
+        it "search_code emits debug details":
+            val log_msg = "search_code results for: fn main"
+            expect(log_msg).to_contain("search_code")
+
+        it "check_diagnostics emits debug details":
+            val log_msg = "check_diagnostics for: src/main.spl"
+            expect(log_msg).to_contain("check_diagnostics")

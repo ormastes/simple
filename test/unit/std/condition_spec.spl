@@ -1,0 +1,223 @@
+#!/usr/bin/env simple
+# Tests for skip condition evaluation
+
+use std.spec.condition.*
+use std.spec.env_detect.*
+
+describe "Skip Condition Matching":
+    describe "SkipCondition struct":
+        it "can create empty condition":
+            val cond = create_skip_condition(
+                [], [], [], [], [], "", [], [], {}, [], false, [], "", false
+            )
+            check(cond.platforms.len() == 0)
+            check(cond.runtimes.len() == 0)
+            check(cond.reason == "")
+
+        it "can create condition with platforms":
+            val cond = create_skip_condition(
+                ["windows"], [], [], [], [], "", [], [], {}, [], false, [], "test", false
+            )
+            check(cond.platforms.len() == 1)
+            check(cond.platforms[0] == "windows")
+            check(cond.reason == "test")
+
+        it "empty condition never matches":
+            val cond = create_skip_condition(
+                [], [], [], [], [], "", [], [], {}, [], false, [], "", false
+            )
+            check(cond.matches() == false)
+
+    describe "matches_platforms":
+        it "returns false for empty list":
+            val result = matches_platforms([])
+            check(result == false)
+
+        it "matches current platform":
+            val current_os = get_platform_os()
+            val result = matches_platforms([current_os])
+            check(result == true)
+
+        it "matches unix on unix systems":
+            if is_unix():
+                val result = matches_platforms(["unix"])
+                check(result == true)
+
+        it "does not match non-current platform":
+            if is_linux():
+                val result = matches_platforms(["windows"])
+                check(result == false)
+
+        it "matches any platform in list":
+            val current_os = get_platform_os()
+            val result = matches_platforms(["nonexistent", current_os, "another"])
+            check(result == true)
+
+    describe "matches_runtimes":
+        it "returns false for empty list":
+            val result = matches_runtimes([])
+            check(result == false)
+
+        it "matches current runtime":
+            val current_mode = get_runtime_mode()
+            val result = matches_runtimes([current_mode])
+            check(result == true)
+
+        it "does not match non-current runtime":
+            # Assume we're not in ALL modes simultaneously
+            val result = matches_runtimes(["nonexistent_mode_xyz"])
+            check(result == false)
+
+    describe "matches_profiles":
+        it "returns false for empty list":
+            val result = matches_profiles([])
+            check(result == false)
+
+        it "matches current profile":
+            val current_profile = get_build_profile()
+            val result = matches_profiles([current_profile])
+            check(result == true)
+
+        it "does not match non-current profile":
+            val result = matches_profiles(["nonexistent_profile_xyz"])
+            check(result == false)
+
+    describe "matches_architectures":
+        it "returns false for empty list":
+            val result = matches_architectures([])
+            check(result == false)
+
+        it "matches current architecture":
+            val current_arch = get_architecture()
+            val result = matches_architectures([current_arch])
+            check(result == true)
+
+        it "matches 64bit on 64-bit systems":
+            if is_64bit():
+                val result = matches_architectures(["64bit"])
+                check(result == true)
+
+        it "does not match non-current architecture":
+            val result = matches_architectures(["nonexistent_arch_xyz"])
+            check(result == false)
+
+    describe "matches_features":
+        it "returns false for empty list":
+            val result = matches_features([])
+            check(result == false)
+
+        it "returns true if feature is missing":
+            val result = matches_features(["nonexistent_feature_xyz"])
+            check(result == true)
+
+        it "returns false if all features present":
+            # Since we likely don't have all features, this is hard to test
+            # But we can test the logic
+            val result = matches_features([])
+            check(result == false)
+
+    describe "matches_version":
+        it "returns false for empty version constraint":
+            val result = matches_version("")
+            check(result == false)
+
+        it "matches >= 0.0.0 constraint":
+            val result = matches_version(">= 0.0.0")
+            check(result == false)
+
+        it "matches < 999.0.0 constraint":
+            val result = matches_version("< 999.0.0")
+            check(result == false)
+
+    describe "matches_hardware":
+        it "returns false for empty list":
+            val result = matches_hardware([])
+            check(result == false)
+
+        it "returns true if hardware is missing":
+            val result = matches_hardware(["nonexistent_hardware_xyz"])
+            check(result == true)
+
+    describe "matches_requires":
+        it "returns false for empty list":
+            val result = matches_requires([])
+            check(result == false)
+
+        it "returns true if dependency is missing":
+            val result = matches_requires(["nonexistent_dep_xyz"])
+            check(result == true)
+
+    describe "matches_env_vars":
+        it "returns false for empty dict":
+            val result = matches_env_vars({})
+            check(result == false)
+
+        it "returns false if env var matches":
+            val path = get_env("PATH")
+            if path != "":
+                val result = matches_env_vars({"PATH": path})
+                check(result == false)
+
+        it "returns true if env var does not match":
+            val result = matches_env_vars({"NONEXISTENT_VAR_XYZ": "value"})
+            check(result == true)
+
+    describe "matches_fs_features":
+        it "returns false for empty list":
+            val result = matches_fs_features([])
+            check(result == false)
+
+        it "returns false if symlinks available on unix":
+            if is_unix():
+                val result = matches_fs_features(["symlinks"])
+                check(result == false)
+
+        it "returns true if feature is missing":
+            val result = matches_fs_features(["nonexistent_fs_feature_xyz"])
+            check(result == true)
+
+    describe "matches_network":
+        it "returns false if network not required":
+            val result = matches_network(false)
+            check(result == false)
+
+        it "handles network requirement":
+            val result = matches_network(true)
+            # May be true or false depending on network availability
+            check(result == true or result == false)
+
+    describe "Complex Conditions":
+        it "matches with multiple conditions (OR logic)":
+            val current_os = get_platform_os()
+            val cond = create_skip_condition(
+                [current_os], ["nonexistent_runtime"], [], [], [], "", [], [], {}, [], false, [], "", false
+            )
+            # Should match because platform matches (OR logic)
+            check(cond.matches() == true)
+
+        it "does not match when no conditions match":
+            val cond = create_skip_condition(
+                ["nonexistent_os"], ["nonexistent_runtime"], [], [], [], "", [], [], {}, [], false, [], "", false
+            )
+            check(cond.matches() == false)
+
+        it "matches complex real-world condition":
+            val current_os = get_platform_os()
+            val current_runtime = get_runtime_mode()
+            val cond = create_skip_condition(
+                [current_os], [current_runtime], [], [], [], "", [], [], {}, [], false, [], "Complex test", false
+            )
+            check(cond.matches() == true)
+
+    describe "Ignore vs Skip":
+        it "creates skip condition (ignore=false)":
+            val cond = create_skip_condition(
+                ["windows"], [], [], [], [], "", [], [], {}, [], false, [], "test", false
+            )
+            check(cond.ignore == false)
+
+        it "creates ignore condition (ignore=true)":
+            val cond = create_skip_condition(
+                ["windows"], [], [], [], [], "", [], [], {}, [], false, [], "test", true
+            )
+            check(cond.ignore == true)

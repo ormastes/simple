@@ -1,0 +1,111 @@
+# @pending
+"""
+# Experiment Run Specification
+
+**Feature IDs:** #exp-run
+**Category:** Stdlib
+**Status:** In Progress
+
+## Overview
+
+Tests for run lifecycle, metric logging, system info capture,
+and run status management.
+"""
+
+use std.exp.config.*
+use std.exp.run.*
+
+# ============================================================================
+# Run Status
+# ============================================================================
+
+describe "RunStatus":
+    it "converts to text":
+        expect RunStatus.Running__to_text() == "running"
+        expect RunStatus.Completed__to_text() == "completed"
+        expect RunStatus.Failed__to_text() == "failed"
+        expect RunStatus.Interrupted__to_text() == "interrupted"
+
+    it "parses from text":
+        expect RunStatus__from_text("running") == RunStatus.Running
+        expect RunStatus__from_text("completed") == RunStatus.Completed
+        expect RunStatus__from_text("failed") == RunStatus.Failed
+
+    it "defaults to Failed for unknown status":
+        expect RunStatus__from_text("garbage") == RunStatus.Failed
+
+# ============================================================================
+# System Info
+# ============================================================================
+
+describe "SystemInfo":
+    it "captures current system info":
+        val info = SystemInfo__capture()
+        expect info.hostname.?
+        expect info.start_time.?
+        expect info.start_time_micros > 0
+
+# ============================================================================
+# Run Lifecycle
+# ============================================================================
+
+describe "Run Lifecycle":
+    context "start_run":
+        it "creates a run with unique ID":
+            val config = ExpConfig__empty()
+            val run = start_run(config, [])
+            expect run.run_id.?
+            expect run.run_id.len() == 12
+            expect run.status == RunStatus.Running
+
+        it "accepts tags":
+            val config = ExpConfig__empty()
+            val run = start_run(config, ["baseline", "v2"])
+            expect run.tags.len() == 2
+
+    context "metric logging":
+        it "logs scalar metrics":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.log_metric("loss", 0.5, 0)
+            run.log_metric("loss", 0.3, 1)
+            val entries = run.get_metric("loss")
+            expect entries.len() == 2
+
+        it "gets last metric value":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.log_metric("acc", 0.8, 0)
+            run.log_metric("acc", 0.95, 1)
+            expect run.get_last_metric("acc") == Some(0.95)
+
+        it "returns nil for missing metric":
+            val config = ExpConfig__empty()
+            val run = start_run(config, [])
+            expect run.get_last_metric("nonexistent") == nil
+
+    context "tags and notes":
+        it "adds tags":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.add_tag("experiment-v3")
+            expect run.tags.len() == 1
+
+        it "adds notes":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.add_note("Increased batch size to 64")
+            expect run.notes.len() == 1
+
+    context "completion":
+        it "marks run as completed":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.complete()
+            expect run.status == RunStatus.Completed
+
+        it "marks run as failed with reason":
+            val config = ExpConfig__empty()
+            var run = start_run(config, [])
+            run.fail("OOM error")
+            expect run.status == RunStatus.Failed

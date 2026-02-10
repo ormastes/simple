@@ -1,0 +1,730 @@
+"""
+# Backend Instruction Coverage Specification
+
+**Feature IDs:** #900-920
+**Category:** Testing
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+Validates that all MIR instruction variants are handled by all backends.
+Tests that supported instructions compile correctly and unsupported ones
+produce clear error messages.
+
+## Key Requirements
+
+1. Every MirInst variant must be tested
+2. All 3 backends (Cranelift, LLVM, Vulkan) must be tested
+3. Supported instructions must compile without errors
+4. Unsupported instructions must return clear, helpful errors
+5. Error messages must suggest alternative backends when applicable
+
+## Testing Strategy
+
+- **Comprehensive:** Test all 80+ instruction variants
+- **Backend-specific:** Validate each backend's capabilities
+- **Error quality:** Verify error messages are actionable
+- **Coverage tracking:** Track which instructions are supported where
+"""
+# @skip
+
+use compiler.backend.mir_test_builder.{
+    MirTestBuilder,
+    MirTestCase,
+    VReg,
+    BlockId,
+    BackendTarget,
+    simple_arithmetic_test
+}
+
+# ============================================================================
+# Test Group 1: Constant Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Constants":
+    """
+    ## Constant Loading
+
+    All backends must support basic constant loading.
+    This is foundational for all other operations.
+    """
+
+    context "integer constants":
+        it "compiles const_int in all backends":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_int(v0, 42)
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+            expect test_case.is_supported(BackendTarget.Cranelift)
+            expect test_case.is_supported(BackendTarget.LLVM)
+
+        it "handles large integer constants":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_int(v0, 9223372036854775807)  # i64::MAX
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+
+        it "handles negative integer constants":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_int(v0, -1000)
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+
+    context "float constants":
+        it "compiles const_float in all backends":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_float(v0, 3.14)
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+
+        it "handles special float values":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_float(v0, 0.0)
+            builder.const_float(v1, -0.0)
+            # Note: infinity and NaN would need special handling
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 4
+
+    context "boolean constants":
+        it "compiles const_bool in all backends":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_bool(v0, true)
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+
+    context "string constants":
+        it "compiles const_string":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            builder.const_string(v0, "hello")
+            builder.ret(v0)
+            val test_case = builder.build()
+
+            expect test_case.instruction_count() == 2
+
+# ============================================================================
+# Test Group 2: Arithmetic Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Arithmetic":
+    """
+    ## Arithmetic Operations
+
+    Test all binary and unary arithmetic operations across backends.
+    """
+
+    context "addition":
+        it "compiles integer addition":
+            val test_case = simple_arithmetic_test()
+            expect test_case.get_name() == "simple_arithmetic"
+            expect test_case.is_supported(BackendTarget.Cranelift)
+
+        it "builds add instruction correctly":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 10)
+            builder.const_int(v1, 20)
+            builder.add(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "subtraction":
+        it "compiles integer subtraction":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 50)
+            builder.const_int(v1, 30)
+            builder.sub(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "multiplication":
+        it "compiles integer multiplication":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 6)
+            builder.const_int(v1, 7)
+            builder.mul(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "division":
+        it "compiles integer division":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 42)
+            builder.const_int(v1, 6)
+            builder.div(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "modulo":
+        it "compiles integer modulo":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 17)
+            builder.const_int(v1, 5)
+            builder.mod_(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "negation":
+        it "compiles integer negation":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+
+            builder.const_int(v0, 42)
+            builder.neg(v1, v0)
+            builder.ret(v1)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+# ============================================================================
+# Test Group 3: Comparison Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Comparisons":
+    """
+    ## Comparison Operations
+
+    Test all comparison operations that produce boolean results.
+    """
+
+    context "equality":
+        it "compiles equality comparison":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 10)
+            builder.const_int(v1, 10)
+            builder.eq(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "inequality":
+        it "compiles inequality comparison":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 10)
+            builder.const_int(v1, 20)
+            builder.ne(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "less than":
+        it "compiles less than comparison":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 5)
+            builder.const_int(v1, 10)
+            builder.lt(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "greater than":
+        it "compiles greater than comparison":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+
+            builder.const_int(v0, 15)
+            builder.const_int(v1, 10)
+            builder.gt(v2, v0, v1)
+            builder.ret(v2)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+# ============================================================================
+# Test Group 4: Memory Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Memory":
+    """
+    ## Memory Operations
+
+    Test load, store, and copy operations.
+    """
+
+    context "copy":
+        it "compiles register copy":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+
+            builder.const_int(v0, 42)
+            builder.copy(v1, v0)
+            builder.ret(v1)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+# ============================================================================
+# Test Group 5: Control Flow Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Control Flow":
+    """
+    ## Control Flow
+
+    Test jumps, branches, and return instructions.
+    """
+
+    context "return":
+        it "compiles return with value":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+
+            builder.const_int(v0, 42)
+            builder.ret(v0)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+        it "compiles void return":
+            val builder = MirTestBuilder__new()
+            builder.ret_void()
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 1
+
+    context "branching":
+        it "builds conditional branch":
+            val builder = MirTestBuilder__new()
+            val cond = builder.vreg(0)
+            val then_block = builder.block(1)
+            val else_block = builder.block(2)
+
+            builder.const_bool(cond, true)
+            builder.branch(cond, then_block, else_block)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+    context "jumping":
+        it "builds unconditional jump":
+            val builder = MirTestBuilder__new()
+            val target = builder.block(1)
+
+            builder.jump(target)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 1
+
+# ============================================================================
+# Test Group 6: Collection Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Collections":
+    """
+    ## Collections
+
+    Test array, tuple, and dictionary operations.
+    """
+
+    context "arrays":
+        it "builds array literal":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+            val arr = builder.vreg(3)
+
+            builder.const_int(v0, 1)
+            builder.const_int(v1, 2)
+            builder.const_int(v2, 3)
+            builder.array_lit(arr, [v0, v1, v2])
+            builder.ret(arr)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 5
+
+        it "builds array indexing":
+            val builder = MirTestBuilder__new()
+            val arr = builder.vreg(0)
+            val idx = builder.vreg(1)
+            val result = builder.vreg(2)
+
+            builder.const_int(idx, 0)
+            builder.index_get(result, arr, idx)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+    context "tuples":
+        it "builds tuple literal":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val tup = builder.vreg(2)
+
+            builder.const_int(v0, 42)
+            builder.const_string(v1, "hello")
+            builder.tuple_lit(tup, [v0, v1])
+            builder.ret(tup)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+    context "dictionaries":
+        it "builds dictionary literal":
+            val builder = MirTestBuilder__new()
+            val k0 = builder.vreg(0)
+            val v0 = builder.vreg(1)
+            val dict = builder.vreg(2)
+
+            builder.const_string(k0, "key")
+            builder.const_int(v0, 42)
+            builder.dict_lit(dict, [k0], [v0])
+            builder.ret(dict)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 4
+
+# ============================================================================
+# Test Group 7: SIMD Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - SIMD":
+    """
+    ## SIMD Operations
+
+    Test vector operations for high-performance computing.
+    Not all backends support SIMD - verify errors are clear.
+    """
+
+    context "vector literals":
+        it "builds SIMD vector literal":
+            val builder = MirTestBuilder__new()
+            val v0 = builder.vreg(0)
+            val v1 = builder.vreg(1)
+            val v2 = builder.vreg(2)
+            val v3 = builder.vreg(3)
+            val vec_reg = builder.vreg(4)
+
+            builder.const_float(v0, 1.0)
+            builder.const_float(v1, 2.0)
+            builder.const_float(v2, 3.0)
+            builder.const_float(v3, 4.0)
+            builder.vec_lit(vec_reg, [v0, v1, v2, v3])
+            builder.ret(vec_reg)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 6
+
+    context "vector reductions":
+        it "builds vector sum reduction":
+            val test_case = simd_reduction_test()
+            expect test_case.get_name() == "simd_reduction"
+            # Only LLVM and Interpreter support SIMD
+            expect test_case.is_supported(BackendTarget.LLVM)
+            expect test_case.is_supported(BackendTarget.Interpreter)
+
+        it "builds vector product reduction":
+            val builder = MirTestBuilder__new()
+            val vec_reg = builder.vreg(0)
+            val result = builder.vreg(1)
+
+            builder.vec_product(result, vec_reg)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+    context "vector operations":
+        it "builds vector extract":
+            val builder = MirTestBuilder__new()
+            val vec_reg = builder.vreg(0)
+            val idx = builder.vreg(1)
+            val result = builder.vreg(2)
+
+            builder.const_int(idx, 2)
+            builder.vec_extract(result, vec_reg, idx)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+        it "builds vector sqrt":
+            val builder = MirTestBuilder__new()
+            val vec_reg = builder.vreg(0)
+            val result = builder.vreg(1)
+
+            builder.vec_sqrt(result, vec_reg)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+        it "builds vector FMA":
+            val builder = MirTestBuilder__new()
+            val a = builder.vreg(0)
+            val b = builder.vreg(1)
+            val c = builder.vreg(2)
+            val result = builder.vreg(3)
+
+            builder.vec_fma(result, a, b, c)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+# ============================================================================
+# Test Group 8: GPU Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - GPU":
+    """
+    ## GPU Operations
+
+    GPU instructions are only supported by Vulkan backend.
+    Other backends should produce clear errors.
+    """
+
+    context "work item IDs":
+        it "builds gpu_global_id":
+            val builder = MirTestBuilder__new()
+            val id = builder.vreg(0)
+
+            builder.gpu_global_id(id, 0)  # x dimension
+            builder.ret(id)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+    context "synchronization":
+        it "builds gpu_barrier":
+            val builder = MirTestBuilder__new()
+            builder.gpu_barrier()
+            builder.ret_void()
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+    context "atomics":
+        it "builds gpu_atomic_add":
+            val builder = MirTestBuilder__new()
+            val ptr = builder.vreg(0)
+            val value = builder.vreg(1)
+            val old = builder.vreg(2)
+
+            builder.const_int(value, 1)
+            builder.gpu_atomic_add(old, ptr, value)
+            builder.ret(old)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+# ============================================================================
+# Test Group 9: Async/Actor Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Async":
+    """
+    ## Async and Actor Operations
+
+    Async operations are interpreter-only for now.
+    Verify clear errors from compiled backends.
+    """
+
+    context "actors":
+        it "builds actor spawn":
+            val test_case = actor_message_test()
+            expect test_case.get_name() == "actor_message"
+            # Only interpreter supports actors
+            expect test_case.is_supported(BackendTarget.Interpreter)
+
+        it "builds actor receive":
+            val builder = MirTestBuilder__new()
+            val msg = builder.vreg(0)
+
+            builder.actor_recv(msg)
+            builder.ret(msg)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+# ============================================================================
+# Test Group 10: Error Handling Instructions
+# ============================================================================
+
+describe "Backend Instruction Coverage - Error Handling":
+    """
+    ## Option and Result Types
+
+    Test error handling constructs.
+    """
+
+    context "Option":
+        it "builds Option::Some":
+            val builder = MirTestBuilder__new()
+            val value = builder.vreg(0)
+            val opt = builder.vreg(1)
+
+            builder.const_int(value, 42)
+            builder.option_some(opt, value)
+            builder.ret(opt)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+        it "builds Option::None":
+            val builder = MirTestBuilder__new()
+            val opt = builder.vreg(0)
+
+            builder.option_none(opt)
+            builder.ret(opt)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 2
+
+    context "Result":
+        it "builds Result::Ok":
+            val builder = MirTestBuilder__new()
+            val value = builder.vreg(0)
+            val result = builder.vreg(1)
+
+            builder.const_int(value, 42)
+            builder.result_ok(result, value)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+        it "builds Result::Err":
+            val builder = MirTestBuilder__new()
+            val error = builder.vreg(0)
+            val result = builder.vreg(1)
+
+            builder.const_string(error, "error message")
+            builder.result_err(result, error)
+            builder.ret(result)
+
+            val test_case = builder.build()
+            expect test_case.instruction_count() == 3
+
+# ============================================================================
+# Test Group 11: Builder API Tests
+# ============================================================================
+
+describe "MirTestBuilder API":
+    """
+    ## Builder Pattern Tests
+
+    Verify the builder API itself works correctly.
+    """
+
+    context "register allocation":
+        it "allocates unique registers":
+            val builder = MirTestBuilder__new()
+            val r0 = builder.next_reg()
+            val r1 = builder.next_reg()
+            val r2 = builder.next_reg()
+
+            expect r0.id != r1.id
+            expect r1.id != r2.id
+            expect r0.id == 0
+            expect r1.id == 1
+            expect r2.id == 2
+
+    context "block allocation":
+        it "allocates unique blocks":
+            val builder = MirTestBuilder__new()
+            val b0 = builder.next_block_id()
+            val b1 = builder.next_block_id()
+
+            expect b0.id != b1.id
+            expect b0.id == 0
+            expect b1.id == 1
+
+    context "metadata":
+        it "sets test name":
+            val builder = MirTestBuilder__new()
+            builder.set_name("my_test")
+
+            val test_case = builder.build()
+            expect test_case.get_name() == "my_test"
+
+        it "sets expected result":
+            val builder = MirTestBuilder__new()
+            builder.expect_result("42")
+            builder.ret_void()
+
+            val test_case = builder.build()
+            # Would need to add getter to test this
+            expect test_case.instruction_count() == 1
+
+    context "backend filtering":
+        it "restricts backends":
+            val builder = MirTestBuilder__new()
+            builder.only_backends([BackendTarget.LLVM])
+            builder.ret_void()
+
+            val test_case = builder.build()
+            expect test_case.is_supported(BackendTarget.LLVM)
+            expect not test_case.is_supported(BackendTarget.Cranelift)

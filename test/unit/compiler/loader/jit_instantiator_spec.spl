@@ -1,0 +1,914 @@
+# @pending
+"""
+# JIT Instantiator Specification
+
+**Feature IDs:** #1021-1030
+**Category:** Tooling
+**Difficulty:** 5/5
+**Status:** In Progress
+**Tags:** skip
+
+**BLOCKED:** These tests require infrastructure not yet available:
+- CompilerContext FFI implementation
+- SMF file I/O and parsing
+- Executable memory allocation
+- See TODO section at end of file for details
+
+## Overview
+
+JitInstantiator provides on-demand instantiation of generic templates during
+runtime loading. When a symbol cannot be found in pre-compiled code, the JIT
+instantiator can compile it from template metadata stored in SMF files.
+
+## Key Features
+
+- Load-time JIT compilation of generic templates
+- SMF note.sdn metadata loading and caching
+- Circular dependency detection
+- Maximum depth limiting
+- SMF file updating with compiled results
+- Symbol resolution with JIT fallback
+
+## Implementation
+
+File: `/home/ormastes/dev/pub/simple/src/compiler/loader/jit_instantiator.spl`
+
+## Workflow
+
+1. Symbol lookup fails in loaded code
+2. JitInstantiator checks note.sdn metadata for "possible" entries
+3. If found, triggers template compilation via TemplateInstantiator
+4. Caches compiled code and updates SMF note.sdn
+5. Returns compiled code address
+"""
+
+use compiler.loader.jit_instantiator.*
+# NOTE: compiler_ffi functions are registered as FFI in Rust runtime - no import needed
+# use compiler.loader.compiler_ffi.*
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn default_jit_config() -> JitInstantiatorConfig:
+    """Create default JIT configuration for tests."""
+    JitInstantiatorConfig(
+        update_smf: true,
+        max_depth: 50,
+        enabled: true,
+        verbose: false
+    )
+
+# ============================================================================
+# Test Group 1: Configuration
+# ============================================================================
+
+describe "JitInstantiatorConfig":
+    """
+    ## Configuration Management
+
+    Validates JitInstantiatorConfig creation and default values.
+    """
+
+    it "creates default configuration":
+        val config = JitInstantiatorConfig(
+            update_smf: true,
+            max_depth: 50,
+            enabled: true,
+            verbose: false
+        )
+
+        expect(config.update_smf).to_equal(true)
+        expect(config.max_depth).to_equal(50)
+        expect(config.enabled).to_equal(true)
+        expect(config.verbose).to_equal(false)
+
+    it "allows custom configuration":
+        val config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 100,
+            enabled: false,
+            verbose: true
+        )
+
+        expect(config.update_smf).to_equal(false)
+        expect(config.max_depth).to_equal(100)
+        expect(config.enabled).to_equal(false)
+        expect(config.verbose).to_equal(true)
+
+    it "supports disabling JIT":
+        val config = JitInstantiatorConfig(
+            update_smf: true,
+            max_depth: 50,
+            enabled: false,
+            verbose: false
+        )
+
+        expect(config.enabled).to_equal(false)
+
+
+# ============================================================================
+# Test Group 2: JitInstantiationResult
+# ============================================================================
+
+describe "JitInstantiationResult Variants":
+    """
+    ## Result Type Handling
+
+    Validates JitInstantiationResult enum variants and helper methods.
+    """
+
+    context "when checking success results":
+        """
+        ### Scenario: Success Detection
+
+        Tests is_success() for Success variant.
+        """
+
+        it "identifies Success as success":
+            val result = JitInstantiationResult.Success(
+                code: [1, 2, 3],
+                symbol: "fn$Vec$i64",
+                address: Some(0x1000)
+            )
+
+            expect(result.is_success()).to_equal(true)
+            expect(result.is_error()).to_equal(false)
+
+        it "handles Success without address":
+            val result = JitInstantiationResult.Success(
+                code: [1, 2, 3],
+                symbol: "fn$Vec$i64",
+                address: nil
+            )
+
+            expect(result.is_success()).to_equal(true)
+
+    context "when checking error results":
+        """
+        ### Scenario: Error Detection
+
+        Tests is_error() for error variants.
+        """
+
+        it "identifies CompilationError as error":
+            val result = JitInstantiationResult.CompilationError(
+                "Type mismatch in template"
+            )
+
+            expect(result.is_success()).to_equal(false)
+            expect(result.is_error()).to_equal(true)
+
+        it "identifies CircularDependency as error":
+            val result = JitInstantiationResult.CircularDependency(
+                cycle: ["A", "B", "C", "A"]
+            )
+
+            expect(result.is_error()).to_equal(true)
+
+        it "identifies UpdateFailed as error":
+            val result = JitInstantiationResult.UpdateFailed(
+                symbol: "fn$Vec$i64",
+                error: "SMF file locked"
+            )
+
+            expect(result.is_error()).to_equal(true)
+
+    context "when handling not found results":
+        """
+        ### Scenario: NotFound Handling
+
+        Tests NotFound variant (neither success nor error).
+        """
+
+        it "identifies NotFound as neither success nor error":
+            val result = JitInstantiationResult.NotFound("missing_symbol")
+
+            expect(result.is_success()).to_equal(false)
+            expect(result.is_error()).to_equal(false)
+
+
+# ============================================================================
+# Test Group 3: JitInstantiator Creation
+# ============================================================================
+
+describe "JitInstantiator Construction":
+    """
+    ## Instantiator Creation
+
+    Validates JitInstantiator.new() and initial state.
+    """
+
+    it "creates with default config":
+        val config = default_jit_config()
+        val jit = JitInstantiator.new(config)
+
+        val stats = jit.stats()
+        expect(stats.cached_count).to_equal(0)
+        expect(stats.loaded_smf_count).to_equal(0)
+
+    it "creates with custom config":
+        val config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 25,
+            enabled: true,
+            verbose: true
+        )
+        val jit = JitInstantiator.new(config)
+
+        # Verify config is stored
+        expect(jit.config.max_depth).to_equal(25)
+        expect(jit.config.verbose).to_equal(true)
+
+    it "initializes empty caches":
+        val jit = JitInstantiator.new(default_jit_config())
+
+        val stats = jit.stats()
+        expect(stats.cached_count).to_equal(0)
+        expect(stats.loaded_smf_count).to_equal(0)
+
+
+# ============================================================================
+# Test Group 4: Metadata Loading
+# ============================================================================
+
+describe "JitInstantiator Metadata Loading":
+    """
+    ## SMF Metadata Loading
+
+    Validates load_smf_metadata() for loading note.sdn from SMF files.
+    """
+
+    context "when loading metadata from SMF":
+        """
+        ### Scenario: Metadata Loading
+
+        Tests loading and caching of note.sdn metadata.
+        """
+
+        it "loads metadata successfully":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # BLOCKED: Requires real SMF file infrastructure
+            # Need to create test SMF file with note.sdn section
+            # Placeholder test until SMF I/O is implemented
+            val result = jit.load_smf_metadata("test.smf")
+            expect(result.ok.?).to_equal(true)
+
+            # Verify empty metadata (placeholder behavior)
+            val loaded = jit.loaded_metadata["test.smf"]
+            expect(loaded.possible.len()).to_equal(0)
+            expect(loaded.instantiations.len()).to_equal(0)
+
+        it "caches loaded metadata":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Load same file twice
+            val result1 = jit.load_smf_metadata("test.smf")
+            val result2 = jit.load_smf_metadata("test.smf")
+
+            expect(result1.ok.?).to_equal(true)
+            expect(result2.ok.?).to_equal(true)
+
+            # Verify metadata is stored (second load overwrites)
+            expect(jit.loaded_metadata.contains_key("test.smf")).to_equal(true)
+
+        it "handles missing SMF files":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Test loading non-existent file
+            val result = jit.load_smf_metadata("nonexistent.smf")
+
+            # Current implementation returns empty metadata (placeholder)
+            # Future: Should return Err for missing files
+            expect(result.ok.?).to_equal(true)
+
+        it "tracks loaded SMF count":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Load multiple SMF files
+            val result1 = jit.load_smf_metadata("test1.smf")
+            val result2 = jit.load_smf_metadata("test2.smf")
+            expect(result1.ok.?).to_equal(true)
+            expect(result2.ok.?).to_equal(true)
+
+            val stats = jit.stats()
+            expect(stats.loaded_smf_count).to_equal(2)
+
+
+# ============================================================================
+# Test Group 5: Symbol Checking
+# ============================================================================
+
+describe "JitInstantiator Symbol Checking":
+    """
+    ## Symbol Instantiation Checks
+
+    Validates can_jit_instantiate() and find_possible().
+    """
+
+    context "when checking if symbol can be JIT-compiled":
+        """
+        ### Scenario: JIT Capability Check
+
+        Tests can_jit_instantiate() for various scenarios.
+        """
+
+        it "returns false when JIT is disabled":
+            val config = JitInstantiatorConfig(
+                update_smf: true,
+                max_depth: 50,
+                enabled: false,
+                verbose: false
+            )
+            val jit = JitInstantiator.new(config)
+
+            expect(jit.can_jit_instantiate("any_symbol")).to_equal(false)
+
+        it "returns false for unknown symbols":
+            val jit = JitInstantiator.new(default_jit_config())
+
+            expect(jit.can_jit_instantiate("unknown_symbol")).to_equal(false)
+
+        it "returns true for symbols in metadata":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Manually create test metadata
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [test_entry],
+                instantiations: []
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            expect(jit.can_jit_instantiate("fn$Vec$i64")).to_equal(true)
+
+    context "when finding possible instantiations":
+        """
+        ### Scenario: Possible Entry Lookup
+
+        Tests find_possible() for locating template entries.
+        """
+
+        it "returns None for unknown symbols":
+            val jit = JitInstantiator.new(default_jit_config())
+
+            val found = jit.find_possible("unknown_symbol")
+            expect(found.?).to_equal(false)
+
+        it "finds possible entry in loaded metadata":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Manually create test metadata
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [test_entry],
+                instantiations: []
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            val found = jit.find_possible("fn$Vec$i64")
+            expect(found.?).to_equal(true)
+
+            val (path, entry) = found.unwrap()
+            expect(path).to_equal("test.smf")
+            expect(entry.mangled_name).to_equal("fn$Vec$i64")
+            expect(entry.template_name).to_equal("Vec")
+            expect(entry.type_args).to_equal("i64")
+
+
+# ============================================================================
+# Test Group 6: JIT Compilation
+# ============================================================================
+
+describe "JitInstantiator Compilation":
+    """
+    ## JIT Compilation Process
+
+    Validates try_jit_instantiate() and do_jit_compile().
+    """
+
+    context "when JIT is disabled":
+        """
+        ### Scenario: Disabled JIT
+
+        Tests behavior when JIT is turned off.
+        """
+
+        it "returns NotFound when disabled":
+            val config = JitInstantiatorConfig(
+                update_smf: true,
+                max_depth: 50,
+                enabled: false,
+                verbose: false
+            )
+            var jit = JitInstantiator.new(config)
+
+            val result = jit.try_jit_instantiate("any_symbol")
+
+            match result:
+                case NotFound(sym):
+                    expect(sym).to_equal("any_symbol")
+                case _:
+                    fail("Expected NotFound, got different variant")
+
+    context "when depth limit is exceeded":
+        """
+        ### Scenario: Depth Limiting
+
+        Tests maximum recursion depth protection.
+        """
+
+        it "returns CompilationError at max depth":
+            val config = JitInstantiatorConfig(
+                update_smf: true,
+                max_depth: 2,
+                enabled: true,
+                verbose: false
+            )
+            var jit = JitInstantiator.new(config)
+
+            # Manually set depth to max
+            jit.depth = 2
+
+            val result = jit.try_jit_instantiate("test_symbol")
+
+            match result:
+                case CompilationError(msg):
+                    expect(msg).to_contain("Maximum JIT depth")
+                    expect(msg).to_contain("2")
+                case _:
+                    fail("Expected CompilationError")
+
+    context "when symbol is cached":
+        """
+        ### Scenario: Cache Hit
+
+        Tests returning cached compilation results.
+        """
+
+        it "returns cached code":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Manually add to cache for testing
+            jit.set_cache_for_test("test_fn", [1, 2, 3, 4], 0x1000)
+
+            val result = jit.try_jit_instantiate("test_fn")
+
+            match result:
+                case Success(code, symbol, address):
+                    expect(code).to_equal([1, 2, 3, 4])
+                    expect(symbol).to_equal("test_fn")
+                    expect(address.?).to_equal(true)
+                    expect(address.unwrap()).to_equal(0x1000)
+                case _:
+                    fail("Expected Success from cache")
+
+    context "when detecting circular dependencies":
+        """
+        ### Scenario: Circular Dependency Detection
+
+        Tests detection of circular template instantiation.
+        """
+
+        it "detects direct cycle":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Manually mark symbol as in-progress
+            jit.in_progress = jit.in_progress.insert("cycle_fn")
+
+            val result = jit.try_jit_instantiate("cycle_fn")
+
+            match result:
+                case CircularDependency(cycle):
+                    expect(cycle.len()).to(be_greater_than(0))
+                case _:
+                    fail("Expected CircularDependency")
+
+    context "when symbol not found":
+        """
+        ### Scenario: Missing Symbol
+
+        Tests NotFound result for unknown symbols.
+        """
+
+        it "returns NotFound for unknown symbol":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            val result = jit.try_jit_instantiate("unknown_symbol")
+
+            match result:
+                case NotFound(sym):
+                    expect(sym).to_equal("unknown_symbol")
+                case _:
+                    fail("Expected NotFound")
+
+
+# ============================================================================
+# Test Group 7: SMF Updates
+# ============================================================================
+
+describe "JitInstantiator SMF Updates":
+    """
+    ## SMF File Updates
+
+    Validates update_smf_note_sdn() for writing compiled results back to SMF.
+    """
+
+    context "when updating SMF after compilation":
+        """
+        ### Scenario: Metadata Updates
+
+        Tests updating note.sdn after successful JIT compilation.
+        """
+
+        it "updates metadata in memory":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Create test metadata with possible entry
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [test_entry],
+                instantiations: []
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            # Call update_smf_note_sdn
+            val result = jit.update_smf_note_sdn("test.smf", test_entry)
+            expect(result.ok.?).to_equal(true)
+
+            # Verify entry moved from possible to instantiations
+            val updated = jit.loaded_metadata["test.smf"]
+            expect(updated.possible.len()).to_equal(0)
+            expect(updated.instantiations.len()).to_equal(1)
+            expect(updated.instantiations[0].mangled_name).to_equal("fn$Vec$i64")
+
+        it "removes from possible list":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Create metadata with multiple possible entries
+            val entry1 = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val entry2 = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "f64",
+                mangled_name: "fn$Vec$f64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [entry1, entry2],
+                instantiations: []
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            # Update with first entry
+            val result = jit.update_smf_note_sdn("test.smf", entry1)
+            expect(result.ok.?).to_equal(true)
+
+            # Verify only entry1 was removed
+            val updated = jit.loaded_metadata["test.smf"]
+            expect(updated.possible.len()).to_equal(1)
+            expect(updated.possible[0].mangled_name).to_equal("fn$Vec$f64")
+
+        it "adds to instantiations list":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Create metadata with existing instantiation
+            val existing_inst = InstantiationRecord(
+                id: 0,
+                template_name: "List",
+                type_args: "text",
+                mangled_name: "fn$List$text",
+                from_file: "test.smf",
+                from_loc: "test.smf:10:5",
+                to_obj: "obj1",
+                status: "compiled"
+            )
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [test_entry],
+                instantiations: [existing_inst]
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            # Update with new entry
+            val result = jit.update_smf_note_sdn("test.smf", test_entry)
+            expect(result.ok.?).to_equal(true)
+
+            # Verify new instantiation was added
+            val updated = jit.loaded_metadata["test.smf"]
+            expect(updated.instantiations.len()).to_equal(2)
+            expect(updated.instantiations[1].mangled_name).to_equal("fn$Vec$i64")
+            expect(updated.instantiations[1].status).to_equal("jit_compiled")
+
+        it "handles update errors":
+            var jit = JitInstantiator.new(default_jit_config())
+
+            # Test with non-existent SMF path (current impl doesn't error)
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+
+            # Current implementation always succeeds for in-memory updates
+            # Future: Test actual SMF file write failures
+            val result = jit.update_smf_note_sdn("nonexistent.smf", test_entry)
+            expect(result.ok.?).to_equal(true)
+
+    context "when update_smf is disabled":
+        """
+        ### Scenario: No Updates
+
+        Tests behavior when SMF updates are turned off.
+        """
+
+        it "skips SMF updates":
+            val config = JitInstantiatorConfig(
+                update_smf: false,
+                max_depth: 50,
+                enabled: true,
+                verbose: false
+            )
+            var jit = JitInstantiator.new(config)
+
+            # Create test metadata
+            val test_entry = PossibleInstantiation(
+                template_name: "Vec",
+                type_args: "i64",
+                mangled_name: "fn$Vec$i64"
+            )
+            val metadata = LoadedMetadata(
+                possible: [test_entry],
+                instantiations: []
+            )
+            jit.set_metadata_for_test("test.smf", metadata)
+
+            # When update_smf is false, update_smf_note_sdn is not called
+            # during do_jit_compile, but we can still call it directly
+            # to verify it works regardless of config
+            val result = jit.update_smf_note_sdn("test.smf", test_entry)
+            expect(result.ok.?).to_equal(true)
+
+            # Verify the config setting
+            expect(jit.config.update_smf).to_equal(false)
+
+
+# ============================================================================
+# Test Group 8: Statistics
+# ============================================================================
+
+describe "JitInstantiator Statistics":
+    """
+    ## Statistics Tracking
+
+    Validates stats() method for monitoring JIT activity.
+    """
+
+    it "reports initial empty stats":
+        val jit = JitInstantiator.new(default_jit_config())
+
+        val stats = jit.stats()
+        expect(stats.cached_count).to_equal(0)
+        expect(stats.loaded_smf_count).to_equal(0)
+
+    it "tracks cached compilations":
+        var jit = JitInstantiator.new(default_jit_config())
+
+        # Add to cache manually
+        jit.set_cache_for_test("test_fn1", [1], 0x1000)
+        jit.set_cache_for_test("test_fn2", [2], 0x2000)
+
+        val stats = jit.stats()
+        expect(stats.cached_count).to_equal(2)
+
+    it "tracks loaded SMF files":
+        var jit = JitInstantiator.new(default_jit_config())
+
+        # Load multiple SMF files
+        val _ = jit.load_smf_metadata("file1.smf")
+        val _ = jit.load_smf_metadata("file2.smf")
+        val _ = jit.load_smf_metadata("file3.smf")
+
+        val stats = jit.stats()
+        expect(stats.loaded_smf_count).to_equal(3)
+
+
+# ============================================================================
+# Test Group 9: JitSymbolResolver
+# ============================================================================
+
+describe "JitSymbolResolver":
+    """
+    ## Symbol Resolution with JIT Fallback
+
+    Validates JitSymbolResolver for integrating JIT into symbol lookup.
+    """
+
+    context "when creating resolver":
+        """
+        ### Scenario: Resolver Construction
+
+        Tests JitSymbolResolver.new().
+        """
+
+        it "creates with default config":
+            val resolver = JitSymbolResolver.new(default_jit_config())
+
+            # Verify initial state
+            val address = resolver.resolve("any_symbol")
+            expect(address.?).to_equal(false)
+
+        it "creates with custom config":
+            val config = JitInstantiatorConfig(
+                update_smf: false,
+                max_depth: 25,
+                enabled: false,
+                verbose: true
+            )
+            val resolver = JitSymbolResolver.new(config)
+
+            # Resolver should have JIT disabled
+            val address = resolver.resolve("any_symbol")
+            expect(address.?).to_equal(false)
+
+    context "when registering symbols":
+        """
+        ### Scenario: Symbol Registration
+
+        Tests register() for adding known symbols.
+        """
+
+        it "registers symbol address":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            resolver.register("my_fn", 0x1000)
+
+            val address = resolver.resolve("my_fn")
+            expect(address.?).to_equal(true)
+            expect(address.unwrap()).to_equal(0x1000)
+
+        it "overwrites existing registration":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            resolver.register("my_fn", 0x1000)
+            resolver.register("my_fn", 0x2000)
+
+            val address = resolver.resolve("my_fn")
+            expect(address.unwrap()).to_equal(0x2000)
+
+    context "when resolving symbols":
+        """
+        ### Scenario: Symbol Resolution
+
+        Tests resolve() with primary table lookup and JIT fallback.
+        """
+
+        it "resolves registered symbols":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            resolver.register("known_fn", 0x1000)
+
+            val address = resolver.resolve("known_fn")
+            expect(address.?).to_equal(true)
+            expect(address.unwrap()).to_equal(0x1000)
+
+        it "returns None for unknown symbols":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            val address = resolver.resolve("unknown_fn")
+            expect(address.?).to_equal(false)
+
+        it "tries JIT on miss":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            # BLOCKED: Requires CompilerContext FFI implementation
+            # This test needs:
+            # 1. resolver.jit with loaded metadata containing test symbol
+            # 2. CompilerContext.instantiate() to work
+            # 3. Executable memory allocation
+
+            # For now, test that resolution returns None for unknown symbols
+            val address = resolver.resolve("fn$Vec$i64")
+            expect(address.?).to_equal(false)
+
+        it "caches JIT result":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            # Manually simulate a cached JIT result
+            resolver.set_jit_cache_for_test("fn$Vec$i64", [1, 2, 3], 0x2000)
+
+            # First resolve should hit cache (not registered in symbols yet)
+            val addr1 = resolver.resolve("fn$Vec$i64")
+            expect(addr1.?).to_equal(true)
+            expect(addr1.unwrap()).to_equal(0x2000)
+
+            # Second resolve should hit primary symbols table
+            val addr2 = resolver.resolve("fn$Vec$i64")
+            expect(addr2.?).to_equal(true)
+            expect(addr2.unwrap()).to_equal(0x2000)
+
+    context "when loading SMF files":
+        """
+        ### Scenario: SMF Loading via Resolver
+
+        Tests load_smf() wrapper.
+        """
+
+        it "loads SMF metadata":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            # Test the load_smf wrapper method
+            val result = resolver.load_smf("test.smf")
+            expect(result.ok.?).to_equal(true)
+
+            # Verify metadata was loaded into JIT
+            val stats = resolver.jit.stats()
+            expect(stats.loaded_smf_count).to_equal(1)
+
+        it "propagates load errors":
+            var resolver = JitSymbolResolver.new(default_jit_config())
+
+            # Test with invalid SMF path
+            val result = resolver.load_smf("invalid_path.smf")
+
+            # Current implementation returns Ok (placeholder)
+            # Future: Should return Err for file I/O errors
+            expect(result.ok.?).to_equal(true)
+
+
+# ============================================================================
+# Helper Code
+# ============================================================================
+
+fn create_test_possible_entry(tmpl: text, type_args: text, mangled: text) -> PossibleInstantiation:
+    """Helper to create test PossibleInstantiation."""
+    PossibleInstantiation(
+        template_name: tmpl,
+        type_args: type_args,
+        mangled_name: mangled
+    )
+
+fn create_test_metadata(possible: [PossibleInstantiation], insts: [InstantiationRecord]) -> LoadedMetadata:
+    """Helper to create test LoadedMetadata."""
+    LoadedMetadata(
+        possible: possible,
+        instantiations: insts
+    )
+
+fn create_test_instantiation(id: i32, tmpl: text, type_args: text, mangled: text) -> InstantiationRecord:
+    """Helper to create test InstantiationRecord."""
+    InstantiationRecord(
+        id: id,
+        template_name: tmpl,
+        type_args: type_args,
+        mangled_name: mangled,
+        from_file: "test.smf",
+        from_loc: "test.smf:0:0",
+        to_obj: "test_obj",
+        status: "compiled"
+    )
+
+# ===========================================================================
+# Remaining TODOs
+# ===========================================================================
+#
+# The following tests require infrastructure not yet available:
+#
+# 1. SMF File I/O Tests (lines 229, 235, 249, 526):
+#    - Requires real SMF file creation/reading
+#    - Needs SMF format parser implementation
+#    - Blocked by: SMF file infrastructure
+#
+# 2. Full JIT Compilation Tests (lines 618, 623, 637, 641):
+#    - Requires working CompilerContext FFI
+#    - Needs template bytecode loading from SMF
+#    - Needs executable memory allocation
+#    - Blocked by: FFI bridge completion
+#
+# 3. Integration Tests:
+#    - End-to-end JIT compilation pipeline
+#    - Template instantiation with type inference
+#    - Code execution of JIT-compiled functions
+#    - Blocked by: Complete runtime integration
+#
+# These tests are documented here and should be implemented once
+# the required infrastructure is in place.

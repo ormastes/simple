@@ -1,0 +1,178 @@
+# Benchmarking framework tests
+
+use app.duplicate_check.config.{DuplicationConfig}
+use app.duplicate_check.benchmark.{BenchmarkResult, BenchmarkStats, run_benchmark, run_benchmark_iterations, compute_stats, format_benchmark_result, format_benchmark_stats, save_benchmark_results, load_benchmark_results, compare_benchmarks, quick_benchmark}
+use app.duplicate_check.detector.{collect_files}
+use app.io.mod.{shell}
+use test.app.duplicate_check.test_helpers.{create_test_file_in, cleanup_test_dir, minimal_test_config}
+
+val TEST_DIR = "/tmp/test_benchmark"
+
+fn create_test_files():
+    create_test_file_in(TEST_DIR, "/tmp/test_benchmark/test1.spl", "fn test1(): 42")
+    create_test_file_in(TEST_DIR, "/tmp/test_benchmark/test2.spl", "fn test2(): 42")
+    create_test_file_in(TEST_DIR, "/tmp/test_benchmark/test3.spl", "fn test3(): 99")
+
+fn cleanup_test_files():
+    cleanup_test_dir(TEST_DIR)
+
+describe "Benchmark: Single run":
+    it "runs benchmark on test files":
+        create_test_files()
+
+        val config = minimal_test_config()
+
+        val files = collect_files("/tmp/test_benchmark", config)
+        val result = run_benchmark("test_benchmark", files, config)
+
+        expect(result.name).to_equal("test_benchmark")
+        expect(result.files_count).to_equal(3)
+        expect(result.duration_ms).to_be_greater_than(0)
+
+        cleanup_test_files()
+
+describe "Benchmark: Statistics":
+    it "computes stats from multiple results":
+        val results = [
+            BenchmarkResult(
+                name: "run1",
+                files_count: 10,
+                blocks_found: 50,
+                groups_found: 5,
+                duration_ms: 100,
+                timestamp: 1000,
+                config_hash: "abc"
+            ),
+            BenchmarkResult(
+                name: "run2",
+                files_count: 10,
+                blocks_found: 50,
+                groups_found: 5,
+                duration_ms: 120,
+                timestamp: 2000,
+                config_hash: "abc"
+            ),
+            BenchmarkResult(
+                name: "run3",
+                files_count: 10,
+                blocks_found: 50,
+                groups_found: 5,
+                duration_ms: 110,
+                timestamp: 3000,
+                config_hash: "abc"
+            )
+        ]
+
+        val stats = compute_stats(results)
+
+        expect(stats.runs.len()).to_equal(3)
+        expect(stats.average_ms).to_equal(110)
+        expect(stats.min_ms).to_equal(100)
+        expect(stats.max_ms).to_equal(120)
+
+    it "handles empty results":
+        val results = []
+        val stats = compute_stats(results)
+
+        expect(stats.runs.len()).to_equal(0)
+        expect(stats.average_ms).to_equal(0)
+
+describe "Benchmark: Formatting":
+    it "formats benchmark result":
+        val result = BenchmarkResult(
+            name: "test",
+            files_count: 10,
+            blocks_found: 50,
+            groups_found: 5,
+            duration_ms: 100,
+            timestamp: 1000,
+            config_hash: "abc"
+        )
+
+        val formatted = format_benchmark_result(result)
+
+        expect(formatted).to_contain("test")
+        expect(formatted).to_contain("10 files")
+        expect(formatted).to_contain("50 blocks")
+        expect(formatted).to_contain("100ms")
+
+    it "formats benchmark statistics":
+        val stats = BenchmarkStats(
+            runs: [],
+            average_ms: 110,
+            min_ms: 100,
+            max_ms: 120,
+            stddev_ms: 10,
+            throughput_files_per_sec: 90
+        )
+
+        val formatted = format_benchmark_stats(stats)
+
+        expect(formatted).to_contain("Average: 110ms")
+        expect(formatted).to_contain("Min:     100ms")
+        expect(formatted).to_contain("Max:     120ms")
+
+describe "Benchmark: Persistence":
+    it "saves and loads benchmark results":
+        val path = "/tmp/test_benchmark_results.txt"
+        cleanup_test_files()
+
+        val results = [
+            BenchmarkResult(
+                name: "run1",
+                files_count: 10,
+                blocks_found: 50,
+                groups_found: 5,
+                duration_ms: 100,
+                timestamp: 1000,
+                config_hash: "abc"
+            ),
+            BenchmarkResult(
+                name: "run2",
+                files_count: 10,
+                blocks_found: 50,
+                groups_found: 5,
+                duration_ms: 120,
+                timestamp: 2000,
+                config_hash: "abc"
+            )
+        ]
+
+        save_benchmark_results(results, path)
+        val loaded = load_benchmark_results(path)
+
+        expect(loaded.len()).to_equal(2)
+        expect(loaded[0].name).to_equal("run1")
+        expect(loaded[0].duration_ms).to_equal(100)
+        expect(loaded[1].name).to_equal("run2")
+        expect(loaded[1].duration_ms).to_equal(120)
+
+        shell("rm -f {path}")
+
+describe "Benchmark: Comparison":
+    it "compares two benchmark results":
+        val baseline = BenchmarkResult(
+            name: "baseline",
+            files_count: 10,
+            blocks_found: 50,
+            groups_found: 5,
+            duration_ms: 200,
+            timestamp: 1000,
+            config_hash: "abc"
+        )
+
+        val optimized = BenchmarkResult(
+            name: "optimized",
+            files_count: 10,
+            blocks_found: 50,
+            groups_found: 5,
+            duration_ms: 100,
+            timestamp: 2000,
+            config_hash: "abc"
+        )
+
+        val comparison = compare_benchmarks(baseline, optimized)
+
+        expect(comparison).to_contain("200ms")
+        expect(comparison).to_contain("100ms")
+        expect(comparison).to_contain("faster")
