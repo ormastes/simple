@@ -13,7 +13,7 @@ Original plan assumed we could add:
 - `rt_string_to_ptr(s) -> i64`
 - etc.
 
-**Reality:** These are not in `bin/bootstrap/simple` runtime. Can't add without recompiling Rust.
+**Reality:** These are not in `bin/release/simple` runtime. Can't add without recompiling Rust.
 
 ## Current Status
 

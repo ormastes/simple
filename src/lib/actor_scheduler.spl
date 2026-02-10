@@ -1,0 +1,447 @@
+# Actor Scheduler
+#
+# Reductions-based fair scheduling for actors.
+# Uses priority run queues with round-robin within each level.
+
+use mailbox.{
+    Mailbox, Mailbox__new, MailboxConfig__default,
+    SEND_SUCCESS
+}
+
+# --- SchedulerConfig ---
+
+class SchedulerConfig:
+    reductions_per_timeslice: i64
+    scheduler_count: i64
+    work_stealing_enabled: bool
+    priority_scheduling: bool
+    max_run_queue_length: i64
+
+fn SchedulerConfig__default() -> SchedulerConfig:
+    SchedulerConfig(
+        reductions_per_timeslice: 2000,
+        scheduler_count: 4,
+        work_stealing_enabled: true,
+        priority_scheduling: true,
+        max_run_queue_length: 10000
+    )
+
+fn SchedulerConfig__single_threaded() -> SchedulerConfig:
+    SchedulerConfig(
+        reductions_per_timeslice: 2000,
+        scheduler_count: 1,
+        work_stealing_enabled: false,
+        priority_scheduling: true,
+        max_run_queue_length: 10000
+    )
+
+fn SchedulerConfig__low_latency() -> SchedulerConfig:
+    SchedulerConfig(
+        reductions_per_timeslice: 500,
+        scheduler_count: 4,
+        work_stealing_enabled: true,
+        priority_scheduling: true,
+        max_run_queue_length: 10000
+    )
+
+fn SchedulerConfig__high_throughput() -> SchedulerConfig:
+    SchedulerConfig(
+        reductions_per_timeslice: 8000,
+        scheduler_count: 4,
+        work_stealing_enabled: true,
+        priority_scheduling: false,
+        max_run_queue_length: 50000
+    )
+
+# --- ActorPriority (as integers) ---
+# Max=0, High=1, Normal=2, Low=3
+
+fn ActorPriority__from_i64(v: i64) -> i64:
+    if v == 0: return 0
+    if v == 1: return 1
+    if v == 2: return 2
+    3
+
+# --- ActorState (as strings) ---
+
+fn ActorState__is_alive(state: text) -> bool:
+    if state == "runnable": return true
+    if state == "running": return true
+    if state == "waiting": return true
+    if state == "suspended": return true
+    false
+
+fn ActorState__can_run(state: text) -> bool:
+    state == "runnable"
+
+fn ActorState__fmt(state: text) -> text:
+    state
+
+# --- RunQueue ---
+
+class RunQueue:
+    # 4 priority queues: max(0), high(1), normal(2), low(3)
+    max_q: [i64]
+    high_q: [i64]
+    normal_q: [i64]
+    low_q: [i64]
+
+    fn is_empty() -> bool:
+        val total = self.max_q.len() + self.high_q.len() + self.normal_q.len() + self.low_q.len()
+        total == 0
+
+    fn len() -> i64:
+        self.max_q.len() + self.high_q.len() + self.normal_q.len() + self.low_q.len()
+
+    fn len_by_priority(priority: i64) -> i64:
+        if priority == 0: return self.max_q.len()
+        if priority == 1: return self.high_q.len()
+        if priority == 2: return self.normal_q.len()
+        self.low_q.len()
+
+    me enqueue(actor_id: i64, priority: i64):
+        if priority == 0:
+            self.max_q.push(actor_id)
+        else:
+            if priority == 1:
+                self.high_q.push(actor_id)
+            else:
+                if priority == 2:
+                    self.normal_q.push(actor_id)
+                else:
+                    self.low_q.push(actor_id)
+
+    me dequeue():
+        if self.max_q.len() > 0:
+            val aid = self.max_q[0]
+            self.max_q.remove(0)
+            return aid
+        if self.high_q.len() > 0:
+            val aid = self.high_q[0]
+            self.high_q.remove(0)
+            return aid
+        if self.normal_q.len() > 0:
+            val aid = self.normal_q[0]
+            self.normal_q.remove(0)
+            return aid
+        if self.low_q.len() > 0:
+            val aid = self.low_q[0]
+            self.low_q.remove(0)
+            return aid
+        nil
+
+    me remove(actor_id: i64):
+        self.max_q = self.remove_from(self.max_q, actor_id)
+        self.high_q = self.remove_from(self.high_q, actor_id)
+        self.normal_q = self.remove_from(self.normal_q, actor_id)
+        self.low_q = self.remove_from(self.low_q, actor_id)
+
+    fn remove_from(q, actor_id: i64):
+        var new_q = []
+        for aid in q:
+            if aid != actor_id:
+                new_q.push(aid)
+        new_q
+
+fn RunQueue__new() -> RunQueue:
+    RunQueue(max_q: [], high_q: [], normal_q: [], low_q: [])
+
+# --- ActorContext ---
+
+class ActorContext:
+    id: i64
+    name_val: text
+    has_name: bool
+    priority: i64
+    state: text
+    reductions_left: i64
+    total_reductions: i64
+    timeslice_count: i64
+    links: [i64]
+    monitors: [i64]
+    monitored_by: [i64]
+    mailbox: Mailbox
+
+    me consume_reductions(amount: i64) -> bool:
+        self.reductions_left = self.reductions_left - amount
+        self.total_reductions = self.total_reductions + amount
+        self.reductions_left < 0
+
+    me reset_reductions(amount: i64):
+        self.reductions_left = amount
+        self.timeslice_count = self.timeslice_count + 1
+
+    me set_running():
+        self.state = "running"
+
+    me set_waiting():
+        self.state = "waiting"
+
+    me set_suspended():
+        self.state = "suspended"
+
+    me set_runnable():
+        self.state = "runnable"
+
+    me set_dead():
+        self.state = "dead"
+
+    me link(other_id: i64):
+        self.links.push(other_id)
+
+    me unlink(other_id: i64):
+        var new_links = []
+        for lid in self.links:
+            if lid != other_id:
+                new_links.push(lid)
+        self.links = new_links
+
+    me monitor(target_id: i64):
+        self.monitors.push(target_id)
+
+    me demonitor(target_id: i64):
+        var new_monitors = []
+        for mid in self.monitors:
+            if mid != target_id:
+                new_monitors.push(mid)
+        self.monitors = new_monitors
+
+    me add_monitored_by(monitor_id: i64):
+        self.monitored_by.push(monitor_id)
+
+    me remove_monitored_by(monitor_id: i64):
+        var new_mb = []
+        for mid in self.monitored_by:
+            if mid != monitor_id:
+                new_mb.push(mid)
+        self.monitored_by = new_mb
+
+    fn fmt() -> text:
+        var name_str = "unnamed"
+        if self.has_name:
+            name_str = self.name_val
+        "Actor(id={self.id}, name={name_str}, state={self.state})"
+
+fn ActorContext__with_defaults(id: i64, name, reductions: i64) -> ActorContext:
+    var name_str = ""
+    var has_n = false
+    if name.?:
+        name_str = name
+        has_n = true
+    ActorContext(
+        id: id,
+        name_val: name_str,
+        has_name: has_n,
+        priority: 2,
+        state: "runnable",
+        reductions_left: reductions,
+        total_reductions: 0,
+        timeslice_count: 0,
+        links: [],
+        monitors: [],
+        monitored_by: [],
+        mailbox: Mailbox__new(MailboxConfig__default())
+    )
+
+# --- SchedulerStats ---
+
+class SchedulerStats:
+    total_actors_created: i64
+    total_actors_terminated: i64
+    current_actor_count: i64
+    peak_actor_count: i64
+    total_context_switches: i64
+    total_reductions_executed: i64
+    total_timeslices: i64
+
+    fn utilization() -> f64:
+        0.0
+
+    fn fmt() -> text:
+        "SchedulerStats(actors={self.current_actor_count}, switches={self.total_context_switches})"
+
+fn SchedulerStats__new() -> SchedulerStats:
+    SchedulerStats(
+        total_actors_created: 0,
+        total_actors_terminated: 0,
+        current_actor_count: 0,
+        peak_actor_count: 0,
+        total_context_switches: 0,
+        total_reductions_executed: 0,
+        total_timeslices: 0
+    )
+
+# --- ActorScheduler ---
+
+class ActorScheduler:
+    config: SchedulerConfig
+    actors: [ActorContext]
+    run_queue: RunQueue
+    next_id: i64
+    stats: SchedulerStats
+    started: bool
+
+    me spawn_actor(name) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice)
+        self.actors.push(ctx)
+        self.run_queue.enqueue(id, 2)
+        self.stats.total_actors_created = self.stats.total_actors_created + 1
+        self.stats.current_actor_count = self.stats.current_actor_count + 1
+        if self.stats.current_actor_count > self.stats.peak_actor_count:
+            self.stats.peak_actor_count = self.stats.current_actor_count
+        id
+
+    me spawn_with_priority(name, priority: i64) -> i64:
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        var ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice)
+        ctx.priority = priority
+        self.actors.push(ctx)
+        self.run_queue.enqueue(id, priority)
+        self.stats.total_actors_created = self.stats.total_actors_created + 1
+        self.stats.current_actor_count = self.stats.current_actor_count + 1
+        if self.stats.current_actor_count > self.stats.peak_actor_count:
+            self.stats.peak_actor_count = self.stats.current_actor_count
+        id
+
+    fn get_actor(id: i64):
+        for act in self.actors:
+            if act.id == id:
+                return act
+        nil
+
+    me terminate(id: i64):
+        for act in self.actors:
+            if act.id == id:
+                act.set_dead()
+                self.run_queue.remove(id)
+                self.stats.total_actors_terminated = self.stats.total_actors_terminated + 1
+                self.stats.current_actor_count = self.stats.current_actor_count - 1
+                return ()
+        ()
+
+    me run_one_timeslice() -> bool:
+        val aid = self.run_queue.dequeue()
+        if not aid.?:
+            return false
+        val act = self.get_actor(aid)
+        if not act.?:
+            return false
+        act.set_running()
+        # Simulate running one timeslice worth of reductions
+        act.consume_reductions(self.config.reductions_per_timeslice)
+        act.reset_reductions(self.config.reductions_per_timeslice)
+        act.set_runnable()
+        self.run_queue.enqueue(aid, act.priority)
+        self.stats.total_context_switches = self.stats.total_context_switches + 1
+        self.stats.total_reductions_executed = self.stats.total_reductions_executed + self.config.reductions_per_timeslice
+        self.stats.total_timeslices = self.stats.total_timeslices + 1
+        true
+
+    me run_n_timeslices(n: i64):
+        for _ in 0..n:
+            self.run_one_timeslice()
+
+    me start():
+        self.started = true
+
+    fn has_runnable() -> bool:
+        not self.run_queue.is_empty()
+
+    fn actor_count() -> i64:
+        self.stats.current_actor_count
+
+    me suspend_actor(id: i64):
+        for act in self.actors:
+            if act.id == id:
+                act.set_suspended()
+                self.run_queue.remove(id)
+                return ()
+        ()
+
+    me resume_actor(id: i64):
+        for act in self.actors:
+            if act.id == id:
+                act.set_runnable()
+                self.run_queue.enqueue(id, act.priority)
+                return ()
+        ()
+
+    me send_message(id: i64, data_ref: i64, size: i64, sender) -> bool:
+        for act in self.actors:
+            if act.id == id:
+                val result = act.mailbox.send_normal(data_ref, size, sender)
+                return result == SEND_SUCCESS
+        false
+
+    me send_high_priority(id: i64, data_ref: i64, size: i64, sender) -> bool:
+        for act in self.actors:
+            if act.id == id:
+                val result = act.mailbox.send_high(data_ref, size, sender)
+                return result == SEND_SUCCESS
+        false
+
+    me link_actors(id1: i64, id2: i64):
+        for act in self.actors:
+            if act.id == id1:
+                act.link(id2)
+            if act.id == id2:
+                act.link(id1)
+
+    me unlink_actors(id1: i64, id2: i64):
+        for act in self.actors:
+            if act.id == id1:
+                act.unlink(id2)
+            if act.id == id2:
+                act.unlink(id1)
+
+    me monitor_actor(monitor_id: i64, target_id: i64):
+        for act in self.actors:
+            if act.id == monitor_id:
+                act.monitor(target_id)
+            if act.id == target_id:
+                act.add_monitored_by(monitor_id)
+
+    me demonitor_actor(monitor_id: i64, target_id: i64):
+        for act in self.actors:
+            if act.id == monitor_id:
+                act.demonitor(target_id)
+            if act.id == target_id:
+                act.remove_monitored_by(monitor_id)
+
+    fn get_stats() -> SchedulerStats:
+        SchedulerStats(
+            total_actors_created: self.stats.total_actors_created,
+            total_actors_terminated: self.stats.total_actors_terminated,
+            current_actor_count: self.stats.current_actor_count,
+            peak_actor_count: self.stats.peak_actor_count,
+            total_context_switches: self.stats.total_context_switches,
+            total_reductions_executed: self.stats.total_reductions_executed,
+            total_timeslices: self.stats.total_timeslices
+        )
+
+    fn fmt() -> text:
+        "ActorScheduler(actors={self.stats.current_actor_count}, switches={self.stats.total_context_switches})"
+
+fn ActorScheduler__new(config: SchedulerConfig) -> ActorScheduler:
+    ActorScheduler(
+        config: config,
+        actors: [],
+        run_queue: RunQueue__new(),
+        next_id: 0,
+        stats: SchedulerStats__new(),
+        started: false
+    )
+
+fn ActorScheduler__default() -> ActorScheduler:
+    ActorScheduler__new(SchedulerConfig__default())
+
+export SchedulerConfig, SchedulerConfig__default, SchedulerConfig__single_threaded, SchedulerConfig__low_latency, SchedulerConfig__high_throughput
+export RunQueue, RunQueue__new
+export ActorContext, ActorContext__with_defaults
+export ActorPriority__from_i64
+export ActorState__is_alive, ActorState__can_run, ActorState__fmt
+export SchedulerStats, SchedulerStats__new
+export ActorScheduler, ActorScheduler__new, ActorScheduler__default

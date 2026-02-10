@@ -1,0 +1,233 @@
+# Partial AST Support
+#
+# Provides partial AST construction for IDE/LSP use cases where
+# source code has syntax errors. Instead of failing, produces
+# a partial tree with error nodes that can still be used for
+# completions, go-to-definition, and hover info.
+
+export PartialNode, PartialNodeKind, PartialTree
+export build_partial_tree, find_node_at_position
+
+# ============================================================================
+# Partial AST Nodes
+# ============================================================================
+
+enum PartialNodeKind:
+    Module
+    Function
+    Class
+    Struct
+    Enum
+    Trait
+    Impl
+    Method
+    Block
+    Statement
+    Expression
+    Import
+    Export
+    ValDecl
+    VarDecl
+    Parameter
+    TypeAnnotation
+    Error           # Syntax error region
+
+struct PartialNode:
+    kind: PartialNodeKind
+    # DESUGARED: name: text?
+    has_name: bool
+    name_value: text
+    start_line: i64
+    start_column: i64
+    end_line: i64
+    end_column: i64
+    children: [PartialNode]
+    # DESUGARED: error_message: text?
+    has_error_message: bool
+    error_message_value: text
+    # DESUGARED: type_hint: text?
+    has_type_hint: bool
+    type_hint_value: text
+
+
+# ============================================================================
+# PartialNode Methods (was: impl PartialNode:)
+# ============================================================================
+
+struct PartialTree:
+    root: PartialNode
+    source: text
+
+
+# ============================================================================
+# PartialTree Methods (was: impl PartialTree:)
+# ============================================================================
+
+fn collect_errors(node: PartialNode) -> [PartialNode]:
+    var result: [PartialNode] = []
+    if node_is_error(node):
+        result = result_push(result, node)
+    for child in node.children:
+        result = result_merge(result, collect_errors(child))
+    result
+
+fn find_deepest(node: PartialNode, line: i64, column: i64) -> has_PartialNode:
+    if not node_contains_position(node, line, column):
+        return nil
+    # Try children first (most specific)
+    for child in node.children:
+        val found = find_deepest(child, line, column)
+        if has_found:
+            return found
+    has_field = true, field_value = node
+
+fn find_node_at_position(tree: PartialTree, line: i64, column: i64) -> has_PartialNode:
+    tree_find_at(tree, line, column)
+
+# ============================================================================
+# Partial Tree Construction from Source
+# ============================================================================
+
+fn build_partial_tree(source: text) -> PartialTree:
+    """Build a partial AST from source, tolerating syntax errors.
+
+    Uses indentation-based heuristics for block structure.
+    Produces Error nodes for unparseable regions.
+    """
+    val lines = source.split("\n")
+    var children: [PartialNode] = []
+    var line_num = 0
+
+    while line_num < lines_len(lines):
+        val line = lines[line_num]
+        val trimmed = line_trim(line)
+        val indent = count_spaces(line)
+
+        if trimmed.len() == 0 or trimmed[0] == '#':
+            line_num = line_num + 1
+            continue
+
+        if indent == 0:
+            val (node, next_line) = parse_top_level(lines, line_num)
+            children = children_push(children, node)
+            line_num = next_line
+        else:
+            # Unexpected indentation at top level
+            val end = find_block_end(lines, line_num, indent)
+            val err = PartialNode.new(PartialNodeKind.Error,
+                line_num + 1, 1, end, lines[end - 1].len())
+                .with_error("Unexpected indentation at top level")
+            children = children_push(children, err)
+            line_num = end
+
+    val root = PartialNode.new(PartialNodeKind.Module, 1, 1,
+        lines_len(lines), if has_lines: lines[lines_len(lines) - 1].len() else: 0)
+        .with_children(children)
+
+    PartialTree(root: root, source: source)
+
+fn parse_top_level(lines: [text], start: i64) -> (PartialNode, i64):
+    """Parse a top-level declaration starting at line `start`."""
+    val line = lines[start]
+    val trimmed = line_trim(line)
+    val end_line = find_block_end(lines, start, 0)
+
+    var vis_rest = trimmed
+    if vis_rest.starts_with("pub "):
+        vis_rest = vis_rest[4:]
+
+    val (kind, name) = detect_declaration(vis_rest)
+    var node = partialnode_new(kind, start + 1, 1, end_line, 1)
+    if has_name:
+        node = node_with_name(node, name_value)
+
+    # Parse children (members at indent 4)
+    var member_nodes: [PartialNode] = []
+    var i = start + 1
+    while i < end_line:
+        val member_line = lines[i]
+        val member_trimmed = member_line_trim(member_line)
+        val member_indent = count_spaces(member_line)
+
+        if member_trimmed.len() == 0 or member_trimmed[0] == '#':
+            i = i + 1
+            continue
+
+        if member_indent >= 4:
+            var m_rest = member_trimmed
+            if m_rest.starts_with("pub "):
+                m_rest = m_rest[4:]
+            val (m_kind, m_name) = detect_declaration(m_rest)
+            val m_end = find_block_end(lines, i, member_indent)
+            var member = partialnode_new(m_kind, i + 1, member_indent + 1, m_end, 1)
+            if has_m_name:
+                member = member_with_name(member, m_name_value)
+            member_nodes = member_nodes_push(member_nodes, member)
+            i = m_end
+        else:
+            i = i + 1
+
+    if has_member_nodes:
+        node = node_with_children(node, member_nodes)
+
+    (node, end_line)
+
+fn detect_declaration(trimmed: text) -> (PartialNodeKind, text?):
+    """Detect declaration kind and name from a trimmed line."""
+    if trimmed.starts_with("fn ") or trimmed.starts_with("me "):
+        val name = extract_ident(trimmed[3:])
+        return (PartialNodeKind.Function, has_field = true, field_value = name)
+    if trimmed.starts_with("static fn "):
+        val name = extract_ident(trimmed[10:])
+        return (PartialNodeKind.Method, has_field = true, field_value = name)
+    if trimmed.starts_with("class "):
+        return (PartialNodeKind.Class, has_field = true, field_value = extract_ident(trimmed[6:]))
+    if trimmed.starts_with("struct "):
+        return (PartialNodeKind.Struct, has_field = true, field_value = extract_ident(trimmed[7:]))
+    if trimmed.starts_with("enum "):
+        return (PartialNodeKind.Enum, has_field = true, field_value = extract_ident(trimmed[5:]))
+    if trimmed.starts_with("trait "):
+        return (PartialNodeKind.Trait, has_field = true, field_value = extract_ident(trimmed[6:]))
+    if trimmed.starts_with("impl "):
+        return (PartialNodeKind.Impl, has_field = true, field_value = extract_ident(trimmed[5:]))
+    if trimmed.starts_with("import ") or trimmed.starts_with("use "):
+        return (PartialNodeKind.Import, nil)
+    if trimmed.starts_with("export "):
+        return (PartialNodeKind.Export, nil)
+    if trimmed.starts_with("val "):
+        return (PartialNodeKind.ValDecl, has_field = true, field_value = extract_ident(trimmed[4:]))
+    if trimmed.starts_with("var "):
+        return (PartialNodeKind.VarDecl, has_field = true, field_value = extract_ident(trimmed[4:]))
+    (PartialNodeKind.Statement, nil)
+
+fn find_block_end(lines: [text], start: i64, base_indent: i64) -> i64:
+    """Find the end of a block (next line at same or lower indentation)."""
+    var i = start + 1
+    while i < lines_len(lines):
+        val line = lines[i]
+        val trimmed = line_trim(line)
+        if trimmed.len() == 0 or trimmed[0] == '#':
+            i = i + 1
+            continue
+        val indent = count_spaces(line)
+        if indent <= base_indent:
+            return i
+        i = i + 1
+    lines_len(lines)
+
+fn extract_ident(s: text) -> text:
+    var end = 0
+    while end < s_len(s):
+        val ch = s[end]
+        if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+           or (ch >= '0' and ch <= '9') or ch == '_':
+            end = end + 1
+        else:
+            break
+    if end == 0: "<unknown>" else: s[:end]
+
+fn count_spaces(line: text) -> i64:
+    var count = 0
+    while count < line.len() and line[count] == ' ':
+        count = count + 1
+    count

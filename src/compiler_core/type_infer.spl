@@ -1,0 +1,117 @@
+# Hindley-Milner Type Inference
+#
+# Full Algorithm W type inference with level-based generalization.
+# Enables zero-annotation code like ML/OCaml:
+#
+#   fn identity(x):     # Infers: forall a. a -> a
+#       x
+#
+#   fn compose(f, g, x): # Infers: forall a b c. (b -> c) -> (a -> b) -> a -> c
+#       f(g(x))
+#
+# Key features:
+# - Level-based type variables for efficient generalization
+# - Let-polymorphism at all let-bindings
+# - Unification with occurs check
+# - Type scheme instantiation
+#
+# References:
+# - Damas-Milner Algorithm W
+# - verification/type_inference_compile/src/Generics.lean
+#
+# Type definitions are in type_infer_types.spl
+#
+# ============================================================================
+# FACADE PATTERN - Module Organization
+# ============================================================================
+#
+# This file serves as a facade for the type_infer module, which has been
+# refactored into 5 focused modules for better maintainability:
+#
+# Module Structure (2,175 lines → 5 modules):
+#
+#   type_infer/core.spl (~230 lines)
+#   - Core unification and substitution algorithms
+#   - Occurs check (prevents infinite types)
+#   - Fundamental operations of Algorithm W
+#
+#   type_infer/generalization.spl (~200 lines)
+#   - Level-based generalization and instantiation
+#   - Fresh type variable generation
+#   - Free variable collection
+#   - Let-polymorphism implementation
+#
+#   type_infer/traits.spl (~240 lines)
+#   - Trait collection from HIR modules
+#   - Trait/impl conversion (HirTrait → TraitDef, HirImpl → ImplBlock)
+#   - Obligation generation and solving
+#   - Trait-aware type checking
+#
+#   type_infer/context.spl (~120 lines)
+#   - Context initialization and construction
+#   - Builtin function registration
+#   - Environment operations (lookup, bind)
+#   - Error recording
+#
+#   type_infer/inference.spl (~1,400 lines)
+#   - Main type inference loop
+#   - Bidirectional type checking (synthesize/check)
+#   - Expression, statement, pattern inference
+#   - Binary/unary operators, pipelines
+#   - Deep learning operators (@, .*, ~>)
+#   - Dimension constraint solving
+#   - Effect inference
+#
+# All implementation is in the submodules. This facade:
+# - Declares the HmInferContext struct
+# - Imports all submodules
+# - Re-exports public types and functions
+
+use compiler.hir.*
+use compiler.lexer.*
+use compiler.dim_constraints.*
+use compiler.traits.*
+use type_infer_types.*
+
+struct HmInferContext:
+    """Hindley-Milner inference context with level-based generalization.
+
+    Levels enable efficient generalization control:
+    - Each scope (let-binding, lambda) increments the level
+    - Type variables are created at the current level
+    - Only variables at level > environment level are generalizable
+
+    Includes dimension constraint solver for tensor/layer type checking.
+    Dimension checking happens in two phases:
+    - Compile-time: Static dimension mismatches caught during type inference
+    - Runtime: Dynamic dimension checks generated for before training/inference
+    """
+    # Type environment: maps names to polymorphic type schemes
+    env: Dict<text, TypeScheme>
+    # Current generalization level (incremented on enter_level)
+    level: i64
+    # Counter for generating fresh type variable IDs
+    next_var: i64
+    # Substitution map from type variable IDs to types
+    subst: Substitution
+    # Accumulated errors
+    errors: [TypeInferError]
+    # Dimension constraint solver for tensor/layer operations
+    dim_solver: DimSolver
+    # Runtime dimension check generator
+    runtime_checks: DimCheckGenerator
+    # Dimension check mode (controls runtime check generation)
+    dim_check_mode: DimCheckMode
+    # Trait solver for trait resolution
+    trait_solver: TraitSolver
+    # Function metadata: maps symbol ID to trait bounds
+    # Stores trait bounds for each function to generate obligations during calls
+    function_bounds: Dict<i64, [HirTraitBound]>
+
+# Import all implementation modules
+# NOTE: Using 'use' instead of 'mod' for bootstrap parser compatibility.
+use compiler.type_infer.context.*
+use compiler.type_infer.core.*
+use compiler.type_infer.generalization.*
+use compiler.type_infer.traits.*
+use compiler.type_infer.inference.*

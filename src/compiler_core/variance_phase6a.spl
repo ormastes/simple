@@ -1,0 +1,393 @@
+"""
+Variance Inference - Phase 6A: Variance Representation
+
+Implements variance types, composition rules, and environment.
+
+Status: Phase 6A In Progress
+"""
+
+type Symbol = text
+
+# ============================================================================
+# Variance
+# ============================================================================
+
+enum Variance:
+    """
+    Variance of a type parameter
+
+    Examples:
+        Covariant (+T):     F<A> <: F<B> if A <: B (producer, read-only)
+        Contravariant (-T): F<A> <: F<B> if B <: A (consumer, input)
+        Inv (T):            F<A> <: F<B> only if A = B (both, mutable)
+        Bivariant (±T):     F<A> <: F<B> always (unused parameter)
+    """
+    Covariant        # +T (producer, read-only)
+    Contravariant    # -T (consumer, input)
+    Inv              # T (both, mutable) - renamed from Invariant (keyword conflict)
+    Bivariant        # ±T (unused)
+
+
+# ============================================================================
+# Variance Methods (was: impl Variance:)
+# ============================================================================
+
+# ============================================================================
+# Variance Operations
+# ============================================================================
+
+class VarianceOps:
+    """Helper class for variance operations"""
+
+    static fn flip(v: Variance) -> Variance:
+        """
+        Flip variance (for contravariant position)
+
+        Examples:
+            flip(Covariant) = Contravariant
+            flip(Contravariant) = Covariant
+            flip(Invariant) = Invariant
+            flip(Bivariant) = Bivariant
+        """
+        match v:
+            case Covariant: Variance.Contravariant
+            case Contravariant: Variance.Covariant
+            case Inv: Variance.Inv
+            case Bivariant: Variance.Bivariant
+
+    static fn compose(outer: Variance, inner: Variance) -> Variance:
+        """
+        Compose two variance contexts
+
+        Rules:
+            Covariant + v = v
+            Contravariant + v = flip(v)
+            Invariant + v = Invariant
+            Bivariant + v = Bivariant
+
+        Examples:
+            compose(Covariant, Covariant) = Covariant
+            compose(Contravariant, Covariant) = Contravariant
+            compose(Contravariant, Contravariant) = Covariant (double flip)
+            compose(Invariant, Covariant) = Invariant
+        """
+        match outer:
+            case Covariant:
+                # Covariant context preserves variance
+                inner
+
+            case Contravariant:
+                # Contravariant context flips variance
+                varianceops_flip(inner)
+
+            case Inv:
+                # Invariant context forces invariance
+                Variance.Inv
+
+            case Bivariant:
+                # Bivariant context forces bivariance
+                Variance.Bivariant
+
+    static fn combine(v1: Variance, v2: Variance) -> Variance:
+        """
+        Combine two variance constraints (intersection)
+
+        Rules:
+            Bivariant + v = v (unused constraint)
+            v + Bivariant = v (unused constraint)
+            Covariant + Covariant = Covariant (both agree)
+            Contravariant + Contravariant = Contravariant (both agree)
+            Otherwise = Invariant (conflict)
+
+        Examples:
+            combine(Covariant, Bivariant) = Covariant
+            combine(Covariant, Covariant) = Covariant
+            combine(Covariant, Contravariant) = Invariant (conflict)
+            combine(Invariant, Covariant) = Invariant (already most restrictive)
+        """
+        match (v1, v2):
+            # Bivariant is identity (unused parameter)
+            case (Bivariant, v): v
+            case (v, Bivariant): v
+
+            # Same variance → keep it
+            case (Covariant, Covariant): Variance.Covariant
+            case (Contravariant, Contravariant): Variance.Contravariant
+            case (Invariant, Invariant): Variance.Inv
+
+            # Conflict → invariant (most restrictive)
+            case _: Variance.Inv
+
+# ============================================================================
+# Type Parameter Definition
+# ============================================================================
+
+class TypeParamDef:
+    """
+    Type parameter definition with variance
+
+    Examples:
+        +T (covariant, explicit)
+        T (invariant by default, inferred)
+        -U (contravariant, explicit)
+    """
+    name: Symbol
+    variance: Variance  # Explicit or inferred
+
+
+# ============================================================================
+# TypeParamDef Methods (was: impl TypeParamDef:)
+# ============================================================================
+
+fn typeparamdef_covariant(name: Symbol) -> TypeParamDef:
+        TypeParamDef(name: name, variance: Variance.Covariant)
+
+
+fn typeparamdef_contravariant(name: Symbol) -> TypeParamDef:
+        TypeParamDef(name: name, variance: Variance.Contravariant)
+
+
+fn typeparamdef_inv(name: Symbol) -> TypeParamDef:
+        TypeParamDef(name: name, variance: Variance.Inv)
+
+
+fn typeparamdef_bivariant(name: Symbol) -> TypeParamDef:
+        TypeParamDef(name: name, variance: Variance.Bivariant)
+
+
+# ============================================================================
+# Variance Environment
+# ============================================================================
+
+class VarianceEnv:
+    """
+    Environment tracking variance for type parameters
+
+    Maps: type name → parameter name → variance
+
+    Example:
+        Box → T → Covariant
+        Cell → T → Invariant
+        Fn → T → Contravariant
+        Fn → U → Covariant
+    """
+    type_variances: text  # Dict<Symbol, Dict<Symbol, Variance>>
+
+
+# ============================================================================
+# VarianceEnv Methods (was: impl VarianceEnv:)
+# ============================================================================
+
+fn varianceenv_empty() -> VarianceEnv:
+        VarianceEnv(type_variances: {})
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+fn test_variance_basic():
+    """Test basic variance creation"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    assert cov.is_covariant(), "Is covariant"
+    assert contra.is_contravariant(), "Is contravariant"
+    assert inv.is_inv(), "Is invariant"
+    assert bi.is_bivariant(), "Is bivariant"
+
+    assert cov.to_string() == "+", "Covariant symbol"
+    assert contra.to_string() == "-", "Contravariant symbol"
+    assert inv.to_string() == "=", "Invariant symbol"
+    assert bi.to_string() == "±", "Bivariant symbol"
+
+    print "✅ Basic variance"
+
+fn test_variance_flip():
+    """Test variance flipping"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    # Flip covariant → contravariant
+    val flipped_cov = varianceops_flip(cov)
+    assert flipped_cov.is_contravariant(), "Flip covariant"
+
+    # Flip contravariant → covariant
+    val flipped_contra = varianceops_flip(contra)
+    assert flipped_contra.is_covariant(), "Flip contravariant"
+
+    # Flip invariant → invariant
+    val flipped_inv = varianceops_flip(inv)
+    assert flipped_inv.is_inv(), "Flip invariant"
+
+    # Flip bivariant → bivariant
+    val flipped_bi = varianceops_flip(bi)
+    assert flipped_bi.is_bivariant(), "Flip bivariant"
+
+    print "✅ Variance flip"
+
+fn test_variance_compose():
+    """Test variance composition"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+
+    # Covariant + v = v
+    val result1 = varianceops_compose(cov, cov)
+    assert result1.is_covariant(), "Cov + Cov = Cov"
+
+    val result2 = varianceops_compose(cov, contra)
+    assert result2.is_contravariant(), "Cov + Contra = Contra"
+
+    # Contravariant + v = flip(v)
+    val result3 = varianceops_compose(contra, cov)
+    assert result3.is_contravariant(), "Contra + Cov = Contra"
+
+    val result4 = varianceops_compose(contra, contra)
+    assert result4.is_covariant(), "Contra + Contra = Cov (double flip)"
+
+    # Invariant + v = Invariant
+    val result5 = varianceops_compose(inv, cov)
+    assert result5.is_inv(), "Inv + Cov = Inv"
+
+    print "✅ Variance compose"
+
+fn test_variance_combine():
+    """Test variance combination"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    # Bivariant is identity
+    val result1 = varianceops_combine(bi, cov)
+    assert result1.is_covariant(), "Bi + Cov = Cov"
+
+    val result2 = varianceops_combine(cov, bi)
+    assert result2.is_covariant(), "Cov + Bi = Cov"
+
+    # Same variance → keep it
+    val result3 = varianceops_combine(cov, cov)
+    assert result3.is_covariant(), "Cov + Cov = Cov"
+
+    val result4 = varianceops_combine(contra, contra)
+    assert result4.is_contravariant(), "Contra + Contra = Contra"
+
+    # Conflict → invariant
+    val result5 = varianceops_combine(cov, contra)
+    assert result5.is_inv(), "Cov + Contra = Inv (conflict)"
+
+    val result6 = varianceops_combine(inv, cov)
+    assert result6.is_inv(), "Inv + Cov = Inv (already invariant)"
+
+    print "✅ Variance combine"
+
+fn test_type_param_def():
+    """Test type parameter definition"""
+    val t_cov = TypeParamDef.covariant("T")
+    val u_contra = TypeParamDef.contravariant("U")
+    val v_inv = TypeParamDef.inv("V")
+
+    assert t_cov.variance.is_covariant(), "T is covariant"
+    assert u_contra.variance.is_contravariant(), "U is contravariant"
+    assert v_inv.variance.is_inv(), "V is invariant"
+
+    assert t_cov.to_string() == "+T", "T string"
+    assert u_contra.to_string() == "-U", "U string"
+    assert v_inv.to_string() == "=V", "V string"
+
+    print "✅ Type parameter definition"
+
+fn test_variance_env():
+    """Test variance environment"""
+    val env = varianceenv_empty()
+
+    assert env.type_count() == 0, "Initially empty"
+
+    # Set Box<T> = Covariant
+    env.set_type_variance("Box", "T", Variance.Covariant)
+
+    assert env.has_type("Box"), "Has Box"
+    assert env.type_count() == 1, "One type"
+
+    val t_var = env.get_type_variance("Box", "T")
+    assert t_var.is_covariant(), "Box<T> is covariant"
+
+    # Set Cell<T> = Invariant
+    env.set_type_variance("Cell", "T", Variance.Inv)
+
+    assert env.has_type("Cell"), "Has Cell"
+    assert env.type_count() == 2, "Two types"
+
+    val cell_t_var = env.get_type_variance("Cell", "T")
+    assert cell_t_var.is_inv(), "Cell<T> is invariant"
+
+    # Get unknown type → Bivariant
+    val unknown = env.get_type_variance("Unknown", "X")
+    assert unknown.is_bivariant(), "Unknown type is bivariant"
+
+    print "✅ Variance environment"
+
+fn test_variance_env_multiple():
+    """Test variance environment with multiple parameters"""
+    val env = varianceenv_empty()
+
+    # Set Fn<T, U> = (Contravariant, Covariant)
+    env.set_type_variance("Fn", "T", Variance.Contravariant)
+    env.set_type_variance("Fn", "U", Variance.Covariant)
+
+    val t_var = env.get_type_variance("Fn", "T")
+    val u_var = env.get_type_variance("Fn", "U")
+
+    assert t_var.is_contravariant(), "Fn<T> is contravariant"
+    assert u_var.is_covariant(), "Fn<U> is covariant"
+
+    print "✅ Variance environment multiple params"
+
+fn test_variance_env_bulk():
+    """Test setting all variances at once"""
+    val env = varianceenv_empty()
+
+    # Set Result<T, E> = (Covariant, Covariant)
+    val variances = [Variance.Covariant, Variance.Covariant]
+    val param_names = ["T", "E"]
+
+    env.set_type_variances("Result", variances, param_names)
+
+    val t_var = env.get_type_variance("Result", "T")
+    val e_var = env.get_type_variance("Result", "E")
+
+    assert t_var.is_covariant(), "Result<T> is covariant"
+    assert e_var.is_covariant(), "Result<E> is covariant"
+
+    print "✅ Variance environment bulk set"
+
+fn main():
+    print ""
+    print "Variance Inference Phase 6A Tests"
+    print "=================================="
+
+    test_variance_basic()
+    test_variance_flip()
+    test_variance_compose()
+    test_variance_combine()
+    test_type_param_def()
+    test_variance_env()
+    test_variance_env_multiple()
+    test_variance_env_bulk()
+
+    print ""
+    print "🎉 Phase 6A Complete!"
+    print ""
+    print "Implemented:"
+    print "  ✅ Variance enum (Covariant/Contravariant/Invariant/Bivariant)"
+    print "  ✅ VarianceOps - flip, compose, combine"
+    print "  ✅ TypeParamDef - type parameters with variance"
+    print "  ✅ VarianceEnv - environment tracking"
+    print ""
+    print "Progress: 2/8 hours (25% of Phase 6)"
+    print "Next: Phase 6B - Variance Inference Algorithm (3h)"

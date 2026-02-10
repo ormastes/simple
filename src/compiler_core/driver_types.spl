@@ -1,0 +1,344 @@
+# Driver Types - Compiler Driver Type Definitions
+#
+# This module contains compiler driver type definitions:
+# - CompileMode: Compilation mode (interpret, JIT, AOT, check)
+# - OutputFormat: Output format options
+# - CompileOptions: Compilation configuration
+# - CompileResult: Compilation result types
+# - SourceFile: Source file representation
+# - Helper factory functions
+#
+# The compiler driver implementation is in driver.spl
+
+use compiler.hir.*
+use compiler.mir.*
+use compiler.lexer.*
+use compiler.parser.*
+use compiler.treesitter.*
+use blocks.*
+use config.*
+
+# FFI declarations used by SourceFile.load and CompileContext
+extern fn rt_file_read_text(path: text) -> text
+
+fn create_config() -> Config:
+    Config(values: {})
+
+# Helper function to create a BlockResolver (avoids static method calls)
+fn create_block_resolver() -> BlockResolver:
+    BlockResolver(
+        registry: block_registry(),
+        diagnostics: [],
+        has_file_path: false,  # DESUGARED: file_path: nil
+        has_module_name: false,  # DESUGARED: module_name: nil
+    )
+
+# Helper function to create a SymbolTable (avoids static method calls)
+fn create_symbol_table() -> SymbolTable:
+    var table = SymbolTable(
+        symbols: {},
+        scopes: {},
+        current_scope: ScopeId(id: 0),
+        next_symbol_id: 0,
+        next_scope_id: 1
+    )
+    # Create root scope (direct mutation avoids copy-modify-reassign bug)
+    table.scopes[0] = Scope(
+        id: ScopeId(id: 0),
+        parent: nil,
+        kind: ScopeKind.Module,
+        symbols: {}
+    )
+    table
+
+# Helper function to create HirLowering (avoids static method calls)
+fn create_hir_lowering() -> HirLowering:
+    HirLowering(
+        symbols: create_symbol_table(),
+        errors: [],
+        has_current_function: false,  # DESUGARED: current_function: nil
+        loop_depth: 0
+    )
+
+# ------------------------------------------------------------------------------
+# Compilation Mode
+# ------------------------------------------------------------------------------
+
+enum CompileMode:
+    Interpret       # Tree-walking interpreter
+    Jit             # JIT compile and run
+    Aot             # Ahead-of-time compile to executable
+    Check           # Type check only, no execution
+    Sdn             # SDN data parsing mode (no code execution)
+
+
+# ============================================================================
+# CompileMode Methods (was: impl CompileMode:)
+# ============================================================================
+
+# Manually desugared static method for bootstrap runtime compatibility
+fn CompileMode__from_text(s: text) -> has_CompileMode:
+    match s:
+        case "interpret" | "i": has_field = true, field_value = CompileMode.Interpret
+        case "jit" | "j": has_field = true, field_value = CompileMode.Jit
+        case "aot" | "a" | "compile" | "c": has_field = true, field_value = CompileMode.Aot
+        case "check" | "k": has_field = true, field_value = CompileMode.Check
+        case "sdn" | "s" | "data": has_field = true, field_value = CompileMode.Sdn
+        case _: nil
+
+# ------------------------------------------------------------------------------
+# Output Format (for AOT compilation)
+# ------------------------------------------------------------------------------
+
+enum OutputFormat:
+    Native          # Emit native executable (default)
+    Smf             # Emit .smf module file
+    Both            # Emit both native executable and .smf
+    SelfContained   # Emit self-contained binary (runtime + SMF in one file)
+
+
+# ============================================================================
+# OutputFormat Methods (was: impl OutputFormat:)
+# ============================================================================
+
+fn outputformat_from_text(s: text) -> OutputFormat:
+        match s:
+            case "smf": OutputFormat.Smf
+            case "both": OutputFormat.Both
+            case "self-contained" | "sc": OutputFormat.SelfContained
+            case _: OutputFormat.Native
+
+
+# Manually desugared static method for bootstrap runtime compatibility
+fn OutputFormat__from_text(s: text) -> OutputFormat:
+    match s:
+        case "smf": OutputFormat.Smf
+        case "both": OutputFormat.Both
+        case "self-contained" | "sc": OutputFormat.SelfContained
+        case _: OutputFormat.Native
+
+# ------------------------------------------------------------------------------
+# Compilation Options
+# ------------------------------------------------------------------------------
+
+struct CompileOptions:
+    mode: CompileMode
+    input_files: [text]
+    # DESUGARED: output_file: text?
+    has_output_file: bool
+    output_file_value: text
+    output_format: OutputFormat
+    optimize: bool
+    # DESUGARED: opt_level: i64?
+    has_opt_level: bool
+    opt_level_value: i64
+    release: bool           # Release build (enables optimization)
+    debug_info: bool
+    verbose: bool
+    log_level: i64
+    profile: text           # dev, test, prod
+    no_borrow_check: bool   # Skip borrow checking
+    backend: text           # "auto", "cranelift", "llvm" - backend selection
+    interpreter_mode: text  # "classic" or "optimized" - interpreter mode selection
+    gc_off: bool            # Disable garbage collection
+
+    static fn default() -> CompileOptions:
+        CompileOptions(
+            mode: CompileMode.Interpret,
+            input_files: [],
+            has_output_file: false,  # DESUGARED: output_file: nil
+            output_format: OutputFormat.Native,
+            optimize: false,
+            has_opt_level: false,  # DESUGARED: opt_level: nil
+            release: false,
+            debug_info: true,
+            verbose: false,
+            log_level: 4,       # Info
+            profile: "dev",
+            no_borrow_check: false,
+            backend: "auto",
+            interpreter_mode: "classic",
+            gc_off: false
+        )
+
+# Manually desugared static method for bootstrap runtime compatibility
+fn CompileOptions__default() -> CompileOptions:
+    CompileOptions(
+        mode: CompileMode.Interpret,
+        input_files: [],
+        has_output_file: false,  # DESUGARED: output_file: nil
+        output_format: OutputFormat.Native,
+        optimize: false,
+        has_opt_level: false,  # DESUGARED: opt_level: nil
+        release: false,
+        debug_info: true,
+        verbose: false,
+        log_level: 4,       # Info
+        profile: "dev",
+        no_borrow_check: false,
+        backend: "auto",
+        interpreter_mode: "classic",
+        gc_off: false
+    )
+
+# ------------------------------------------------------------------------------
+# Compilation Result
+# ------------------------------------------------------------------------------
+
+enum CompileResult:
+    Success(value: Any?)
+    TypeError(errors: [text])
+    ParseError(errors: [text])
+    BlockError(errors: [text])     # Block resolution errors
+    ResolveError(errors: [text])
+    BorrowError(errors: [text])    # Borrow checking errors
+    CodegenError(message: text)
+    RuntimeError(message: text)
+
+    fn is_success(self) -> bool:
+        match self:
+            case compileresult_Success(_): true
+            case _: false
+
+    fn get_value(self) -> has_Any:
+        match self:
+            case compileresult_Success(v): v
+            case has__: false,  # DESUGARED: _: nil
+
+    fn get_errors(self) -> [text]:
+        match self:
+            case compileresult_Success(_): []
+            case compileresult_TypeError(e): e
+            case compileresult_ParseError(e): e
+            case compileresult_BlockError(e): e
+            case compileresult_ResolveError(e): e
+            case compileresult_BorrowError(e): e
+            case compileresult_CodegenError(m): [m]
+            case compileresult_RuntimeError(m): [m]
+            case _: []
+
+# ------------------------------------------------------------------------------
+# Source File
+# ------------------------------------------------------------------------------
+
+struct SourceFile:
+    path: text
+    content: text
+    module_name: text
+
+    static fn load(path: text) -> Result<SourceFile, text>:
+        val content_opt = rt_file_read_text(path)
+        # rt_file_read_text returns Option<text>
+        if content_opt_is_none(content_opt):
+            return Err("Failed to read file: {path}")
+        val content = content_opt_value
+
+        # Extract module name from path
+        val name = path.split("/").last() ?? "main"
+        val name_no_spl = name.replace(".spl", "")
+        val module_name = name_no_spl.replace(".sdn", "")
+
+        Ok(SourceFile(
+            path: path,
+            content: content,
+            module_name: module_name
+        ))
+
+# ------------------------------------------------------------------------------
+# Compilation Context
+# ------------------------------------------------------------------------------
+
+class CompileContext:
+    options: CompileOptions
+    config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
+    di: DiContainer
+    aop: AopWeaver
+    logger: Logger
+    sources: [SourceFile]
+    modules: Dict<text, Module>
+    hir_modules: Dict<text, HirModule>
+    mir_modules: Dict<text, MirModule>
+    errors: [text]
+    warnings: [text]
+    visibility_warnings: [text]  # Visibility warnings (W0401)
+
+    static fn create(options: CompileOptions) -> CompileContext:
+        # Load config
+        val config = {}  # Simple dict for now
+
+        # Setup DI container
+        val di = DiContainer(bindings: {}, singletons: {}, profile: options.profile)
+
+        # Register backend based on mode (eagerly, no closures)
+        match options.mode:
+            case CompileMode.Interpret:
+                val interp_config = if options.interpreter_mode == "optimized":
+                    interpreterconfig_optimized()
+                else:
+                    interpreterconfig_classic()
+                val interp_config_final = if options.gc_off:
+                    interp_config_with_gc(interp_config, false)
+                else:
+                    interp_config
+                di.bind_instance("Backend", InterpreterBackendImpl.with_config(interp_config_final))
+            case CompileMode.Jit:
+                di.bind_instance("Backend", CompilerBackendImpl.jit())
+            case CompileMode.Aot:
+                val output = options.output_file ?? "a.out"
+                di.bind_instance("Backend", CompilerBackendImpl.aot(output))
+            case CompileMode.Sdn:
+                di.bind_instance("Backend", SdnBackendImpl())
+            case CompileMode.Check:
+                # Check mode uses a no-op backend
+                di.bind_instance("Backend", CheckBackendImpl())
+
+        # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
+        val logger = if options.verbose:
+            Logger(level: 10)  # verbose flag forces debug level
+        else:
+            logger_from_env()
+
+        # Setup AOP
+        var aop = AopWeaver(aspects: [], logger: logger)
+        if options.verbose:
+            aop_add_aspect(aop, LogAspect(level: 6, logger: aop.logger))
+
+        CompileContext(
+            options: options,
+            config: config,
+            di: di,
+            aop: aop,
+            logger: logger,
+            sources: [],
+            modules: {},
+            hir_modules: {},
+            mir_modules: {},
+            errors: [],
+            warnings: [],
+            visibility_warnings: []
+        )
+
+    me add_error(message: text):
+        self.errors_push(errors, message)
+
+    me add_warning(message: text):
+        self.warnings_push(warnings, message)
+
+    me add_visibility_warning(message: text):
+        self.visibility_warnings_push(visibility_warnings, message)
+
+    fn has_errors() -> bool:
+        self.errors_len(errors) > 0
+
+# ------------------------------------------------------------------------------
+# Check Backend (Type Check Only)
+# ------------------------------------------------------------------------------
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export create_config, create_block_resolver, create_symbol_table, create_hir_lowering
+export CompileMode, CompileMode__from_text, OutputFormat, OutputFormat__from_text
+export CompileOptions, CompileOptions__default, CompileResult, SourceFile, CompileContext

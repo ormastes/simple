@@ -132,6 +132,9 @@ fn print_help():
     print "  SIMPLE_EXECUTION_MODE env var  jit|interpret|interpret-optimized|cranelift|llvm"
     print ""
     print "Fault Detection:"
+    print "  --no-jit                       Disable JIT compilation (pure tree-walk)"
+    print "  --jit-threshold=N              JIT compile after N calls (default: 10)"
+    print "  --backend=NAME                 JIT backend: auto, cranelift, llvm"
     print "  --stack-overflow-detection     Enable recursion depth check"
     print "  --no-stack-overflow-detection  Disable recursion depth check"
     print "  --max-recursion-depth=N        Set max call depth (default: 1000)"
@@ -209,6 +212,8 @@ struct GlobalFlags:
     force_interpret: bool  # --interpret flag to force interpreter mode
     interpreter_mode: text  # "classic" or "optimized" - interpreter mode selection
     run_config: text        # "interpreter" or "compiler" (public-facing flag)
+    no_jit: bool            # --no-jit flag to disable JIT compilation
+    jit_threshold: i64      # --jit-threshold=N for JIT compilation threshold
 
 fn parse_global_flags(args: [str]) -> GlobalFlags:
     var gc_log = false
@@ -223,6 +228,8 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
     var force_interpret = false
     var interpreter_mode = "classic"
     var run_config = ""
+    var no_jit = false
+    var jit_threshold = 10
 
     var i = 0
     while i < args.len():
@@ -238,6 +245,14 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
         elif arg == "--interpret-optimized":
             force_interpret = true
             interpreter_mode = "optimized"
+        elif arg == "--no-jit":
+            no_jit = true
+        elif arg.starts_with("--jit-threshold="):
+            val val_str = arg[16:]
+            jit_threshold = val_str.to_int()
+        elif arg == "--jit-threshold" and i + 1 < args.len():
+            i = i + 1
+            jit_threshold = args[i].to_int()
         elif arg.starts_with("--interpreter-mode="):
             interpreter_mode = arg[19:]
         elif arg == "--interpreter-mode" and i + 1 < args.len():
@@ -309,7 +324,8 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
         max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
         execution_limit: execution_limit, stack_overflow_detection: stack_overflow_detection,
         backend: backend, force_interpret: force_interpret,
-        interpreter_mode: interpreter_mode, run_config: run_config)
+        interpreter_mode: interpreter_mode, run_config: run_config,
+        no_jit: no_jit, jit_threshold: jit_threshold)
 
 fn apply_fault_detection(flags: GlobalFlags):
     if flags.max_recursion_depth > 0:
@@ -328,10 +344,10 @@ fn filter_internal_flags(args: [str]) -> [str]:
     for arg in args:
         if skip_next:
             skip_next = false
-        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit" or arg == "--interpreter-mode" or arg == "--run-config":
+        elif arg == "--max-recursion-depth" or arg == "--timeout" or arg == "--execution-limit" or arg == "--interpreter-mode" or arg == "--run-config" or arg == "--jit-threshold":
             skip_next = true
-        elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret" and arg != "--interpret-optimized":
-            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config"):
+        elif not arg.starts_with("--gc") and arg != "--notui" and arg != "--lang" and arg != "--stack-overflow-detection" and arg != "--no-stack-overflow-detection" and arg != "--interpret" and arg != "--interpret-optimized" and arg != "--no-jit":
+            if not arg.starts_with("--lang=") and not arg.starts_with("--max-recursion-depth=") and not arg.starts_with("--timeout=") and not arg.starts_with("--execution-limit=") and not arg.starts_with("--interpreter-mode") and not arg.starts_with("--run-config") and not arg.starts_with("--jit-threshold="):
                 # Keep --backend flags (used by both JIT and compile commands)
                 result.push(arg)
     result
@@ -470,7 +486,7 @@ fn check_self_contained() -> bool:
         return false
 
     # For now, delegate to the runtime's SMF loader by running:
-    #   bin/bootstrap/simple --run-embedded-smf <exe_path>
+    #   bin/release/simple --run-embedded-smf <exe_path>
     # When SMF loader is available in Simple, load and execute directly.
     eprint("[WARNING] SMF loader not yet available in Simple; cannot load embedded SMF directly")
     print "[self-contained] Detected embedded SMF in {exe_path}"

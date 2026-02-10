@@ -1,0 +1,170 @@
+# Dead Code Elimination (DCE)
+#
+# Removes instructions and basic blocks that don't affect program output.
+#
+# What it removes:
+# 1. Unused local variables (dead stores)
+# 2. Instructions whose results are never used
+# 3. Unreachable basic blocks
+# 4. Pure operations with unused results
+#
+# Algorithm:
+# 1. Mark phase: Mark all "live" values (used in output)
+# 2. Sweep phase: Remove unmarked instructions and blocks
+#
+# Preserves:
+# - Function calls (may have side effects)
+# - Memory stores (may be visible)
+# - Return instructions
+# - Branch terminators
+
+use compiler.mir_data.*
+use compiler.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Liveness Analysis
+# ============================================================================
+
+class LivenessAnalysis:
+    """
+    Tracks which local variables are live (used later).
+
+    A variable is live if:
+    - It's used in a future instruction
+    - It's returned from the function
+    - It's passed to a function call
+    - It's stored to memory
+    """
+    live_locals: Dict<i64, bool>  # Set of live LocalId indices
+    live_blocks: Dict<i64, bool>  # Set of reachable BlockId indices
+
+
+# ============================================================================
+# LivenessAnalysis Methods (was: impl LivenessAnalysis:)
+# ============================================================================
+
+fn livenessanalysis_new() -> LivenessAnalysis:
+        LivenessAnalysis(
+            live_locals: {},
+            live_blocks: {}
+        )
+
+
+# ============================================================================
+# Dead Code Elimination Pass
+# ============================================================================
+
+class DeadCodeElimination:
+    """
+    DCE optimization pass.
+
+    Removes dead code in two phases:
+    1. Mark: Identify live instructions via backwards dataflow
+    2. Sweep: Remove unmarked instructions
+    """
+    removed_instructions: i64
+    removed_blocks: i64
+    iterations: i64
+
+
+# ============================================================================
+# DeadCodeElimination Methods (was: impl DeadCodeElimination:)
+# ============================================================================
+
+fn deadcodeelimination_new() -> DeadCodeElimination:
+        DeadCodeElimination(
+            removed_instructions: 0,
+            removed_blocks: 0,
+            iterations: 0
+        )
+
+
+fn deadcodeelimination_run_on_function(self: DeadCodeElimination, func: MirFunction) -> MirFunction:
+        """
+        Run DCE on a function.
+
+        Algorithm:
+        1. Find reachable blocks (from entry)
+        2. For each reachable block:
+           a. Mark live instructions (backwards from terminator)
+           b. Remove dead instructions
+        3. Remove unreachable blocks
+        """
+        self.iterations = self.iterations + 1
+
+        # Phase 1: Find reachable blocks
+        val reachable = self.find_reachable_blocks(func)
+
+        # Phase 2: Remove dead instructions in reachable blocks
+        var optimized_blocks: [MirBlock] = []
+        for block in func.blocks:
+            if self.is_block_in_set(block.id, reachable):
+                val optimized_block = self.remove_dead_instructions(block)
+                optimized_blocks_push(optimized_blocks, optimized_block)
+            else:
+                # Unreachable block - don't include
+                self.removed_blocks = self.removed_blocks + 1
+
+        # Return optimized function
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+
+fn deadcodeelimination_remove_dead_instructions(self: DeadCodeElimination, block: MirBlock) -> MirBlock:
+        """
+        Remove dead instructions from a block.
+
+        An instruction is dead if:
+        - It assigns to a local that's never used
+        - It's a pure operation (no side effects)
+        - Its result isn't consumed
+        """
+        var live_instructions: [MirInst] = []
+
+        # Liveness analysis strategy (Phase 1B.6 - TODO #131 ✅)
+        # 1. Mark all instructions with side effects as live
+        # 2. Mark instructions whose results are used as live
+        # 3. Remove unmarked (dead) instructions
+
+        var live_set = []
+
+        # First pass: mark side-effect instructions
+        for i in 0..(block.instructions_len(instructions)):
+            if self.instruction_has_side_effects(block.instructions[i]):
+                live_set_push(live_set, i)
+
+        # Second pass: mark instructions whose results are used
+        for i in 0..(block.instructions_len(instructions)):
+            if self.is_instruction_result_used(block.instructions[i], block):
+                if not live_set_contains(live_set, i):
+                    live_set_push(live_set, i)
+
+        # Third pass: build live instruction list
+        for i in 0..(block.instructions_len(instructions)):
+            if live_set_contains(live_set, i):
+                live_instructions_push(live_instructions, block.instructions[i])
+            else:
+                # Dead instruction - count removal
+                self.removed_instructions = self.removed_instructions + 1
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: live_instructions,
+            terminator: block.terminator
+        )
+
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_dce_pass() -> DeadCodeElimination:
+    """Create a new DCE pass instance."""
+    deadcodeelimination_new()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export DeadCodeElimination, create_dce_pass

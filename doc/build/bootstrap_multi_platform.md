@@ -15,13 +15,13 @@ The bootstrap system provides pre-built runtime binaries for multiple platforms,
 ### Binary Naming Convention
 
 ```
-bin/bootstrap/<os>-<arch>/simple[.exe]
+bin/release/<os>-<arch>/simple[.exe]
 ```
 
 Examples:
-- `bin/bootstrap/linux-x86_64/simple`
-- `bin/bootstrap/macos-arm64/simple`
-- `bin/bootstrap/windows-x86_64/simple.exe`
+- `bin/release/linux-x86_64/simple`
+- `bin/release/macos-arm64/simple`
+- `bin/release/windows-x86_64/simple.exe`
 
 ### Platform Auto-Detection
 
@@ -59,7 +59,7 @@ script/build-bootstrap-multi-platform.sh
 
 Output:
 ```
-bin/bootstrap/
+bin/release/
 ├── linux-x86_64/simple (32 MB)
 ├── linux-arm64/simple (32 MB)
 ├── macos-arm64/simple (32 MB)
@@ -101,10 +101,10 @@ cargo build --release --target aarch64-unknown-linux-gnu
 cross build --release --target aarch64-unknown-linux-gnu
 
 # Copy to bootstrap directory
-mkdir -p bin/bootstrap/linux-arm64
+mkdir -p bin/release/linux-arm64
 cp target/aarch64-unknown-linux-gnu/release/simple_runtime \
-   bin/bootstrap/linux-arm64/simple
-chmod +x bin/bootstrap/linux-arm64/simple
+   bin/release/linux-arm64/simple
+chmod +x bin/release/linux-arm64/simple
 ```
 
 ## Integration with Simple Build System
@@ -128,10 +128,10 @@ bin/simple build package        # Create release package
 bin/simple build --release
 
 # 2. Copy to bootstrap directory
-cp target/release/simple_runtime bin/bootstrap/linux-x86_64/simple
+cp target/release/simple_runtime bin/release/linux-x86_64/simple
 
 # 3. Test new bootstrap
-bin/bootstrap/linux-x86_64/simple --version
+bin/release/linux-x86_64/simple --version
 
 # 4. Rebuild entire system with new bootstrap
 bin/simple build bootstrap-rebuild
@@ -166,7 +166,7 @@ simple-multi-platform-20260206.tar.gz (71 MB)
 └── simple-multi-platform/
     ├── bin/
     │   ├── simple (wrapper script)
-    │   └── bootstrap/
+    │   └── release/
     │       ├── linux-x86_64/simple
     │       ├── linux-arm64/simple
     │       ├── macos-x86_64/simple
@@ -267,7 +267,7 @@ bin/simple --version
 **Binary not executable:**
 ```bash
 # Fix permissions
-chmod +x bin/bootstrap/*/simple*
+chmod +x bin/release/*/simple*
 ```
 
 ### GitHub Actions Failures

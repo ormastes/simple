@@ -40,11 +40,11 @@ echo "==========================================================================
 echo ""
 
 # Test: Bootstrap binary exists and works
-if [ -x "bin/bootstrap/linux-x86_64/simple" ]; then
+if [ -x "bin/release/linux-x86_64/simple" ]; then
     test_pass "Bootstrap binary exists and is executable"
 
     # Get size
-    SIZE=$(ls -lh bin/bootstrap/linux-x86_64/simple | awk '{print $5}')
+    SIZE=$(ls -lh bin/release/linux-x86_64/simple | awk '{print $5}')
     echo "  Size: $SIZE"
 
     # Test execution
@@ -53,7 +53,7 @@ fn main():
     print "exec_ok"
 EOF
 
-    OUTPUT=$(bin/bootstrap/linux-x86_64/simple /tmp/exec_test.spl 2>&1)
+    OUTPUT=$(bin/release/linux-x86_64/simple /tmp/exec_test.spl 2>&1)
     if echo "$OUTPUT" | grep -q "exec_ok"; then
         test_pass "Bootstrap binary executes Simple code"
     else
@@ -84,7 +84,7 @@ echo "==========================================================================
 echo ""
 
 # Run the feature tests
-FEATURE_OUTPUT=$(bin/bootstrap/linux-x86_64/simple test/test_bootstrap.spl 2>&1)
+FEATURE_OUTPUT=$(bin/release/linux-x86_64/simple test/test_bootstrap.spl 2>&1)
 
 if echo "$FEATURE_OUTPUT" | grep -q "Test 1: Basic execution works"; then
     test_pass "Basic execution"
@@ -148,9 +148,9 @@ for entry in "${PLATFORMS[@]}"; do
     platform="${entry%%:*}"
     status="${entry##*:}"
 
-    if [ -d "bin/bootstrap/$platform" ]; then
-        if [ -f "bin/bootstrap/$platform/simple" ] || [ -f "bin/bootstrap/$platform/simple.exe" ]; then
-            SIZE=$(du -h bin/bootstrap/$platform/simple* 2>/dev/null | awk '{print $1}')
+    if [ -d "bin/release/$platform" ]; then
+        if [ -f "bin/release/$platform/simple" ] || [ -f "bin/release/$platform/simple.exe" ]; then
+            SIZE=$(du -h bin/release/$platform/simple* 2>/dev/null | awk '{print $1}')
             test_pass "$platform [$status] - Binary present ($SIZE)"
         else
             test_warn "$platform [$status] - Directory ready, no binary yet"
@@ -197,7 +197,7 @@ echo "==========================================================================
 echo ""
 
 DOCS=(
-    "bin/bootstrap/README.md:Bootstrap guide"
+    "bin/release/README.md:Bootstrap guide"
     "doc/build/bootstrap_multi_platform.md:Technical documentation"
     "PLATFORMS.md:Platform support overview"
     "doc/report/multi_platform_bootstrap_complete_2026-02-06.md:Implementation report"
@@ -221,9 +221,9 @@ echo "6. PERFORMANCE & SIZE"
 echo "============================================================================"
 echo ""
 
-if [ -f "bin/bootstrap/linux-x86_64/simple" ]; then
+if [ -f "bin/release/linux-x86_64/simple" ]; then
     # Binary size
-    SIZE_BYTES=$(stat -f%z "bin/bootstrap/linux-x86_64/simple" 2>/dev/null || stat -c%s "bin/bootstrap/linux-x86_64/simple")
+    SIZE_BYTES=$(stat -f%z "bin/release/linux-x86_64/simple" 2>/dev/null || stat -c%s "bin/release/linux-x86_64/simple")
     SIZE_MB=$((SIZE_BYTES / 1024 / 1024))
 
     if [ $SIZE_MB -lt 40 ]; then
@@ -234,7 +234,7 @@ if [ -f "bin/bootstrap/linux-x86_64/simple" ]; then
 
     # Startup time test
     START=$(date +%s%N)
-    bin/bootstrap/linux-x86_64/simple --version > /dev/null 2>&1
+    bin/release/linux-x86_64/simple --version > /dev/null 2>&1
     END=$(date +%s%N)
     STARTUP_MS=$(( (END - START) / 1000000 ))
 
@@ -252,13 +252,13 @@ echo "==========================================================================
 echo ""
 
 # Test: Can the bootstrap build itself?
-if [ -f "bin/bootstrap/linux-x86_64/simple" ]; then
+if [ -f "bin/release/linux-x86_64/simple" ]; then
     cat > /tmp/build_test.spl << 'EOF'
 fn main():
     print "Build system test"
 EOF
 
-    if bin/bootstrap/linux-x86_64/simple /tmp/build_test.spl > /dev/null 2>&1; then
+    if bin/release/linux-x86_64/simple /tmp/build_test.spl > /dev/null 2>&1; then
         test_pass "Bootstrap can execute build scripts"
     else
         test_fail "Bootstrap cannot execute build scripts"
@@ -271,7 +271,7 @@ fn main():
     print "Module test"
 EOF
 
-if bin/bootstrap/linux-x86_64/simple /tmp/module_test.spl > /dev/null 2>&1; then
+if bin/release/linux-x86_64/simple /tmp/module_test.spl > /dev/null 2>&1; then
     test_pass "Module system functional"
 else
     test_fail "Module system issues"

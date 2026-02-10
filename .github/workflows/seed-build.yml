@@ -1,0 +1,221 @@
+name: Seed Compiler Cross-Compile
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'seed/**'
+      - '.github/workflows/seed-build.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'seed/**'
+      - '.github/workflows/seed-build.yml'
+  workflow_dispatch:
+
+jobs:
+  seed-crosscompile:
+    name: Cross-compile seed
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install cross-compile toolchains
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq clang lld \
+          gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 xz-utils
+
+    - name: Download macOS SDK
+      run: |
+        curl -L -o /tmp/MacOSX14.5.sdk.tar.xz \
+          https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz
+        mkdir -p /tmp/macos-sdk
+        tar xf /tmp/MacOSX14.5.sdk.tar.xz -C /tmp/macos-sdk
+
+    - name: Download FreeBSD sysroot
+      run: |
+        curl -L -o /tmp/freebsd-base.txz \
+          https://archive.freebsd.org/old-releases/amd64/14.1-RELEASE/base.txz
+        mkdir -p /tmp/freebsd-sysroot
+        tar xf /tmp/freebsd-base.txz -C /tmp/freebsd-sysroot ./usr/include ./usr/lib ./lib
+
+    # ---- Linux x86_64 (native) ----
+    - name: Build seed — Linux x86_64
+      run: |
+        cmake -B build/linux-x86_64 seed \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++
+        cmake --build build/linux-x86_64
+        file build/linux-x86_64/seed
+        file build/linux-x86_64/seed_cpp
+
+    # ---- Windows x86_64 (MinGW cross) ----
+    - name: Build seed — Windows x86_64
+      run: |
+        cmake -B build/windows-x86_64 seed \
+          -DCMAKE_SYSTEM_NAME=Windows \
+          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
+        cmake --build build/windows-x86_64
+        file build/windows-x86_64/seed.exe
+        file build/windows-x86_64/seed_cpp.exe
+
+    # ---- macOS x86_64 (clang cross, full link) ----
+    - name: Build seed — macOS x86_64
+      run: |
+        mkdir -p build/macos-x86_64
+        clang -std=c11 --target=x86_64-apple-darwin \
+          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk -fuse-ld=lld \
+          -Wall -Wextra -Wno-unused-parameter \
+          -o build/macos-x86_64/seed seed/seed.c
+        clang -std=c11 --target=x86_64-apple-darwin \
+          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk \
+          -Wall -Wextra -Wno-unused-parameter \
+          -c seed/runtime.c -o build/macos-x86_64/runtime.o
+        clang++ -std=c++20 --target=x86_64-apple-darwin \
+          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk -fuse-ld=lld \
+          -Wall -Wextra -Wno-unused-parameter \
+          -o build/macos-x86_64/seed_cpp seed/seed.cpp
+        file build/macos-x86_64/seed build/macos-x86_64/seed_cpp
+
+    # ---- FreeBSD x86_64 (clang cross, full link) ----
+    - name: Build seed — FreeBSD x86_64
+      run: |
+        mkdir -p build/freebsd-x86_64
+        clang -std=c11 --target=x86_64-unknown-freebsd14 \
+          --sysroot=/tmp/freebsd-sysroot \
+          -Wall -Wextra -Wno-unused-parameter \
+          -o build/freebsd-x86_64/seed seed/seed.c
+        clang -std=c11 --target=x86_64-unknown-freebsd14 \
+          --sysroot=/tmp/freebsd-sysroot \
+          -Wall -Wextra -Wno-unused-parameter \
+          -c seed/runtime.c -o build/freebsd-x86_64/runtime.o
+        clang++ -std=c++20 --target=x86_64-unknown-freebsd14 \
+          --sysroot=/tmp/freebsd-sysroot \
+          -Wall -Wextra -Wno-unused-parameter \
+          -o build/freebsd-x86_64/seed_cpp seed/seed.cpp
+        file build/freebsd-x86_64/seed build/freebsd-x86_64/seed_cpp
+
+    # ---- Roundtrip test (Linux native) ----
+    - name: Roundtrip test — Linux seed
+      run: |
+        cat > /tmp/test_seed.spl <<'EOF'
+        fn main():
+            val x = 42
+            print "hello {x}"
+        EOF
+        ./build/linux-x86_64/seed /tmp/test_seed.spl > /tmp/test_seed.c
+        clang -std=c11 -o /tmp/test_seed /tmp/test_seed.c seed/runtime.c -Iseed
+        OUTPUT=$(/tmp/test_seed)
+        echo "Output: $OUTPUT"
+        echo "$OUTPUT" | grep -q "hello 42" && echo "Roundtrip PASSED" || (echo "FAILED"; exit 1)
+
+    # ---- Upload all artifacts ----
+    - name: Upload seed binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: seed-all-platforms
+        path: |
+          build/linux-x86_64/seed
+          build/linux-x86_64/seed_cpp
+          build/linux-x86_64/libspl_runtime.a
+          build/windows-x86_64/seed.exe
+          build/windows-x86_64/seed_cpp.exe
+          build/windows-x86_64/libspl_runtime.a
+          build/macos-x86_64/seed
+          build/macos-x86_64/seed_cpp
+          build/macos-x86_64/runtime.o
+          build/freebsd-x86_64/seed
+          build/freebsd-x86_64/seed_cpp
+          build/freebsd-x86_64/runtime.o
+        retention-days: 30
+
+  # ---- Native macOS build (full link) ----
+  seed-macos:
+    name: macOS native
+    runs-on: macos-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build seed — macOS
+      run: |
+        cmake -B build seed
+        cmake --build build
+        file build/seed
+        file build/seed_cpp
+
+    - name: Roundtrip test
+      run: |
+        cat > /tmp/test_seed.spl <<'EOF'
+        fn main():
+            val x = 42
+            print "hello {x}"
+        EOF
+        ./build/seed /tmp/test_seed.spl > /tmp/test_seed.c
+        cc -std=c11 -o /tmp/test_seed /tmp/test_seed.c seed/runtime.c -Iseed
+        OUTPUT=$(/tmp/test_seed)
+        echo "Output: $OUTPUT"
+        echo "$OUTPUT" | grep -q "hello 42" && echo "Roundtrip PASSED" || (echo "FAILED"; exit 1)
+
+    - name: Upload macOS seed
+      uses: actions/upload-artifact@v4
+      with:
+        name: seed-macos
+        path: |
+          build/seed
+          build/seed_cpp
+          build/libspl_runtime.a
+        retention-days: 30
+
+  # ---- Native FreeBSD build (full link) ----
+  seed-freebsd:
+    name: FreeBSD native
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build seed on FreeBSD VM
+      uses: vmactions/freebsd-vm@v1
+      with:
+        release: "14.1"
+        usesh: true
+        run: |
+          pkg install -y cmake
+          cmake -B build seed
+          cmake --build build
+          file build/seed
+          file build/seed_cpp
+
+          # Roundtrip test
+          cat > /tmp/test_seed.spl <<'SPLEOF'
+          fn main():
+              val x = 42
+              print "hello {x}"
+          SPLEOF
+          ./build/seed /tmp/test_seed.spl > /tmp/test_seed.c
+          cc -std=c11 -o /tmp/test_seed /tmp/test_seed.c seed/runtime.c -Iseed
+          OUTPUT=$(/tmp/test_seed)
+          echo "Output: $OUTPUT"
+          echo "$OUTPUT" | grep -q "hello 42" && echo "Roundtrip PASSED" || (echo "FAILED"; exit 1)
+      continue-on-error: true
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [seed-crosscompile, seed-macos, seed-freebsd]
+    if: always()
+    steps:
+    - name: Generate summary
+      run: |
+        echo "# Seed Compiler Build Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Linux + Windows cross-compile | ${{ needs.seed-crosscompile.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS native | ${{ needs.seed-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| FreeBSD native | ${{ needs.seed-freebsd.result }} |" >> $GITHUB_STEP_SUMMARY

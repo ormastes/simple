@@ -1,0 +1,153 @@
+# Macro Registry for Parser Integration
+#
+# Compile-time macro registration and symbol tracking.
+# Enables the parser to register introduced symbols when
+# encountering macro invocations (LL(1) integration).
+#
+# Port of rust/parser/src/macro_registry.rs (559 lines)
+
+export IntroducedSymbol, InjectionPoint, InjectionAnchor, InjectionCodeKind
+export ConstValue, ConstEvalContext, MacroRegistry
+
+# ============================================================================
+# Introduced Symbols
+# ============================================================================
+
+enum IntroducedSymbol:
+    """A symbol introduced by a macro (function, field, type, or variable)."""
+    Function(name: text, params: [(text, text)], return_type: text?, source_macro: text)
+    Field(name: text, type_name: text, source_macro: text)
+    TypeAlias(name: text, source_macro: text)
+    Variable(name: text, type_name: text, is_const: bool, source_macro: text)
+
+fn symbol_name(sym: IntroducedSymbol) -> text:
+    match sym:
+        case Function(name, _, _, _): name
+        case Field(name, _, _): name
+        case TypeAlias(name, _): name
+        case Variable(name, _, _, _): name
+
+fn symbol_source_macro(sym: IntroducedSymbol) -> text:
+    match sym:
+        case Function(_, _, _, source): source
+        case Field(_, _, source): source
+        case TypeAlias(_, source): source
+        case Variable(_, _, _, source): source
+
+# ============================================================================
+# Injection Points
+# ============================================================================
+
+enum InjectionAnchor:
+    Head
+    Tail
+    Here
+
+enum InjectionCodeKind:
+    Stmt
+    Block
+
+struct InjectionPoint:
+    source_macro: text
+    label: text
+    anchor: InjectionAnchor
+    code_kind: InjectionCodeKind
+
+# ============================================================================
+# Const Evaluation
+# ============================================================================
+
+enum ConstValue:
+    Int(i64)
+    Str(text)
+    Bool(bool)
+
+
+# ============================================================================
+# ConstValue Methods (was: impl ConstValue:)
+# ============================================================================
+
+class ConstEvalContext:
+    """Const bindings from macro arguments and loop indices."""
+    bindings: {text: ConstValue}
+
+
+# ============================================================================
+# ConstEvalContext Methods (was: impl ConstEvalContext:)
+# ============================================================================
+
+fn constevalcontext_empty() -> ConstEvalContext:
+        ConstEvalContext(bindings: {})
+
+
+# ============================================================================
+# Macro Registry
+# ============================================================================
+
+struct MacroDef:
+    """A macro definition (simplified representation)."""
+    name: text
+    params: [text]
+    contract_intros: [MacroIntroDecl]
+    contract_injects: [MacroInjectDecl]
+
+struct MacroIntroDecl:
+    """An intro declaration from a macro contract."""
+    kind: text          # "fn", "field", "type", "var", "const"
+    name_pattern: text  # may contain interpolation like "{name}_handler"
+    # DESUGARED: type_pattern: text?
+    has_type_pattern: bool
+    type_pattern_value: text
+
+struct MacroInjectDecl:
+    """An inject declaration from a macro contract."""
+    label: text
+    anchor: InjectionAnchor
+    code_kind: InjectionCodeKind
+
+class MacroRegistry:
+    """Registry for macro definitions and introduced symbols.
+
+    Used by the parser for LL(1) macro integration:
+    - When a macro is defined, it's registered here
+    - When invoked, its contract is processed to register symbols
+    - Introduced symbols are available for name resolution and IDE completion
+    """
+    macros: {text: MacroDef}
+    introduced_symbols: {text: [IntroducedSymbol]}  # scope -> symbols
+    pending_injections: [InjectionPoint]
+    ll1_mode: bool
+
+
+# ============================================================================
+# MacroRegistry Methods (was: impl MacroRegistry:)
+# ============================================================================
+
+fn macroregistry_default() -> MacroRegistry:
+        MacroRegistry(macros: {}, introduced_symbols: {},
+                      pending_injections: [], ll1_mode: false)
+
+
+fn macroregistry_with_ll1_mode() -> MacroRegistry:
+        MacroRegistry(macros: {}, introduced_symbols: {},
+                      pending_injections: [], ll1_mode: true)
+
+
+fn expand_name_pattern(pattern: text, ctx: ConstEvalContext) -> text:
+    """Expand interpolation in name patterns like '{name}_handler'."""
+    var result = pattern
+    var start = result.find("{")
+    while has_start:
+        val idx = start_value
+        val end = result[idx:].find("}")
+        if has_end:
+            val key = result[idx + 1:idx + end_value]
+            val value = ctx_get(ctx, key)
+            if has_value:
+                result = result[:idx] + value_value_to_text(value_value) + result[idx + end_value + 1:]
+            else:
+                break
+            start = result.find("{")
+        else:
+            break
+    result

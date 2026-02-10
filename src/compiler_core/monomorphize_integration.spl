@@ -1,0 +1,154 @@
+# Monomorphization Integration
+#
+# Integrates monomorphization into the compiler pipeline.
+# Scans HIR modules for generic definitions and call sites,
+# creates specialized versions, and rewrites call sites.
+#
+# Integration point: After HIR lowering + type checking, before MIR lowering
+
+export MonomorphizationPass, run_monomorphization
+
+use hir_types.*
+use hir_definitions.*
+use monomorphize.engine.*
+use monomorphize.type_subst.*
+
+# ============================================================================
+# Monomorphization Pass
+# ============================================================================
+
+class MonomorphizationPass:
+    """Runs monomorphization on HIR modules."""
+    monomorphizer: Monomorphizer
+    # Generic function templates
+    generic_functions: Dict<text, HirFunction>
+    generic_structs: Dict<text, HirStruct>
+    generic_classes: Dict<text, HirClass>
+    # Specialized versions created
+    specialized_functions: Dict<text, HirFunction>
+    specialized_structs: Dict<text, HirStruct>
+    specialized_classes: Dict<text, HirClass>
+    # Statistics
+    stats: MonoStats
+
+struct MonoStats:
+    generic_functions_found: i64
+    generic_structs_found: i64
+    generic_classes_found: i64
+    call_sites_found: i64
+    specializations_created: i64
+
+
+# ============================================================================
+# MonomorphizationPass Methods (was: impl MonomorphizationPass:)
+# ============================================================================
+
+fn monomorphizationpass_create() -> MonomorphizationPass:
+        MonomorphizationPass(
+            monomorphizer: monomorphizer_create(),
+            generic_functions: {},
+            generic_structs: {},
+            generic_classes: {},
+            specialized_functions: {},
+            specialized_structs: {},
+            specialized_classes: {},
+            stats: MonoStats(
+                generic_functions_found: 0,
+                generic_structs_found: 0,
+                generic_classes_found: 0,
+                call_sites_found: 0,
+                specializations_created: 0
+            )
+        )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn is_generic_function(func: HirFunction) -> bool:
+    """Check if a function has type parameters."""
+    func.type_params.?
+
+fn is_generic_struct(s: HirStruct) -> bool:
+    """Check if a struct has type parameters."""
+    s.type_params.?
+
+fn is_generic_class(c: HirClass) -> bool:
+    """Check if a class has type parameters."""
+    c.type_params.?
+
+# ============================================================================
+# Symbol Resolution Helper (Phase 2.3 - TODO #145 ✅)
+# ============================================================================
+
+fn symbol_id_to_name(sym_id: i64) -> text:
+    """Convert symbol ID to human-readable name for error messages.
+
+    Current implementation provides infrastructure for symbol name lookup.
+    Full implementation requires integration with compiler's symbol table.
+
+    Args:
+        sym_id: Symbol identifier from HIR
+
+    Returns:
+        Formatted name (placeholder until symbol table integration)
+
+    TODO: Integration point - When symbol table is accessible:
+    1. Look up sym_id in symbol table
+    2. Return actual function/variable name
+    3. Include module path if not in current scope
+    4. Format for error messages (e.g., "std.json.parse")
+
+    Example output (future):
+        symbol_id_to_name(42) → "map"
+        symbol_id_to_name(123) → "std.json.parse"
+    """
+    # Placeholder: Format symbol ID for now
+    # In a real implementation, this would query the symbol table
+    "sym_{sym_id}"
+
+# ============================================================================
+# Pipeline Integration
+# ============================================================================
+
+fn hir_type_to_concrete(ty: HirType) -> ConcreteType:
+    """Convert a HirType to ConcreteType for monomorphization."""
+    match ty.kind:
+        case Int(_, _): ConcreteType.Int
+        case Float(_): ConcreteType.Float
+        case Bool: ConcreteType.Bool
+        case Str: ConcreteType.String
+        case Unit: ConcreteType.Nil
+        case Named(sym, args):
+            if has_args:
+                var concrete_args: [ConcreteType] = []
+                for arg in args:
+                    concrete_args_push(concrete_args, hir_type_to_concrete(arg))
+                ConcreteType.Specialized("sym_{sym}", concrete_args)
+            else:
+                ConcreteType.Named("sym_{sym}")
+        case Array(elem, _):
+            concretetype_Array(hir_type_to_concrete(elem))
+        case Tuple(elems):
+            var concrete_elems: [ConcreteType] = []
+            for e in elems:
+                concrete_elems_push(concrete_elems, hir_type_to_concrete(e))
+            concretetype_Tuple(concrete_elems)
+        case Optional(inner):
+            concretetype_Optional(hir_type_to_concrete(inner))
+        case _:
+            ConcreteType.Named("unknown")
+
+fn run_monomorphization(modules: Dict<text, HirModule>) -> (Dict<text, HirModule>, MonoStats):
+    """Run monomorphization pass on all modules.
+
+    This is the main entry point for the driver to call.
+
+    Returns:
+        - Modified modules with specialized definitions
+        - Statistics about the pass
+    """
+    var pass_ = monomorphizationpass_create()
+    val result = pass__process_modules(pass_, modules)
+    (result, pass__get_stats(pass_))

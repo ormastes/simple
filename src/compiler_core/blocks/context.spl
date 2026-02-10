@@ -1,0 +1,245 @@
+# Block Context and Error Types
+#
+# Context passed to block handlers during parsing.
+
+use blocks.modes.{Span, PreLexInfo}
+
+# ============================================================================
+# Block Context
+# ============================================================================
+
+struct BlockContext:
+    """Context provided to block handlers during parsing.
+
+    Contains information about the block's location in source,
+    the surrounding scope, and access to compiler services.
+    """
+
+    # Source information
+    payload: text           # Raw payload text
+    payload_span: Span      # Span of payload in source
+    block_span: Span        # Span of entire block (including keyword and braces)
+
+    # Source file info
+    # DESUGARED: file_path: text?
+    has_file_path: bool
+    file_path_value: text
+    # DESUGARED: module_name: text?
+    has_module_name: bool
+    module_name_value: text
+
+    # Pre-lex info from main lexer
+    # DESUGARED: pre_lex_info: PreLexInfo?
+    has_pre_lex_info: bool
+    pre_lex_info_value: PreLexInfo
+
+    # Compilation context
+    is_top_level: bool      # Block at module level vs inside function
+    # DESUGARED: parent_block: text?
+    has_parent_block: bool
+    parent_block_value: text
+
+
+# ============================================================================
+# BlockContext Methods (was: impl BlockContext:)
+# ============================================================================
+
+fn blockcontext_new(payload: text, payload_span: Span, block_span: Span) -> BlockContext:
+        BlockContext(
+            payload: payload,
+            payload_span: payload_span,
+            block_span: block_span,
+            has_file_path: false,  # DESUGARED: file_path: nil
+            has_module_name: false,  # DESUGARED: module_name: nil
+            has_pre_lex_info: false,  # DESUGARED: pre_lex_info: nil
+            is_top_level: false,
+            has_parent_block: false,  # DESUGARED: parent_block: nil
+        )
+
+
+fn blockcontext_test(payload: text) -> BlockContext:
+        """Create a test context with minimal info."""
+        BlockContext(
+            payload: payload,
+            payload_span: span_empty(),
+            block_span: span_empty(),
+            has_file_path: false,  # DESUGARED: file_path: nil
+            has_module_name: false,  # DESUGARED: module_name: nil
+            has_pre_lex_info: false,  # DESUGARED: pre_lex_info: nil
+            is_top_level: false,
+            has_parent_block: false,  # DESUGARED: parent_block: nil
+        )
+
+
+fn blockcontext_with_pre_lex(self: BlockContext, info: PreLexInfo) -> BlockContext:
+        self.pre_lex_info = has_field = true, field_value = info
+        self
+
+
+fn blockcontext_with_file(self: BlockContext, path: text) -> BlockContext:
+        self.file_path = has_field = true, field_value = path
+        self
+
+
+fn blockcontext_with_module(self: BlockContext, name: text) -> BlockContext:
+        self.module_name = has_field = true, field_value = name
+        self
+
+
+fn blockcontext_at_top_level(self: BlockContext) -> BlockContext:
+        self.is_top_level = true
+        self
+
+
+fn blockcontext_inside_block(self: BlockContext, kind: text) -> BlockContext:
+        self.parent_block = has_field = true, field_value = kind
+        self
+
+
+# ============================================================================
+# Block Errors
+# ============================================================================
+
+"""Kind of block error."""
+enum BlockErrorKind:
+    ParseError          # Syntax error in payload
+    ValidationError     # Semantic error (e.g., invalid SQL)
+    TypeError           # Type mismatch in payload
+    RuntimeError        # Error during compile-time evaluation
+    UnsupportedFeature  # Feature not supported by block
+
+struct BlockError:
+    """Error from block parsing or validation.
+
+    Contains enough information for accurate diagnostics.
+    """
+
+    kind: BlockErrorKind
+    message: text
+    # DESUGARED: span: Span?
+    has_span: bool
+    span_value: Span
+    notes: [text]           # Additional context
+    suggestions: [text]     # Possible fixes
+
+
+# ============================================================================
+# BlockError Methods (was: impl BlockError:)
+# ============================================================================
+
+fn blockerror_parse(message: text) -> BlockError:
+        BlockError(
+            kind: BlockErrorKind.ParseError,
+            message: message,
+            has_span: false,  # DESUGARED: span: nil
+            notes: [],
+            suggestions: []
+        )
+
+
+fn blockerror_parse_at(message: text, span: Span) -> BlockError:
+        BlockError(
+            kind: BlockErrorKind.ParseError,
+            message: message,
+            # DESUGARED: span: Some(span)
+            has_span: true,
+            span_value: span,
+            notes: [],
+            suggestions: []
+        )
+
+
+fn blockerror_validation(message: text) -> BlockError:
+        BlockError(
+            kind: BlockErrorKind.ValidationError,
+            message: message,
+            has_span: false,  # DESUGARED: span: nil
+            notes: [],
+            suggestions: []
+        )
+
+
+fn blockerror_type_error(message: text) -> BlockError:
+        BlockError(
+            kind: BlockErrorKind.TypeError,
+            message: message,
+            has_span: false,  # DESUGARED: span: nil
+            notes: [],
+            suggestions: []
+        )
+
+
+fn blockerror_unsupported(feature: text) -> BlockError:
+        BlockError(
+            kind: BlockErrorKind.UnsupportedFeature,
+            message: "Unsupported feature: {feature}",
+            has_span: false,  # DESUGARED: span: nil
+            notes: [],
+            suggestions: []
+        )
+
+
+fn blockerror_with_span(self: BlockError, s: Span) -> BlockError:
+        self.span = has_field = true, field_value = s
+        self
+
+
+fn blockerror_with_note(self: BlockError, note: text) -> BlockError:
+        self.notes = self.notes_push(notes, note)
+        self
+
+
+fn blockerror_with_suggestion(self: BlockError, suggestion: text) -> BlockError:
+        self.suggestions = self.suggestions_push(suggestions, suggestion)
+        self
+
+
+# ============================================================================
+# Diagnostic Types (for integration)
+# ============================================================================
+
+enum DiagnosticLevel:
+    Error
+    Warning
+    Info
+    Hint
+
+struct Diagnostic:
+    """Compiler diagnostic message."""
+    level: DiagnosticLevel
+    message: text
+    span: Span
+    notes: [text]
+    suggestions: [text]
+
+
+# ============================================================================
+# Diagnostic Methods (was: impl Diagnostic:)
+# ============================================================================
+
+fn diagnostic_error(message: text, span: Span) -> Diagnostic:
+        Diagnostic(
+            level: DiagnosticLevel.Error,
+            message: message,
+            span: span,
+            notes: [],
+            suggestions: []
+        )
+
+
+fn diagnostic_warning(message: text, span: Span) -> Diagnostic:
+        Diagnostic(
+            level: DiagnosticLevel.Warning,
+            message: message,
+            span: span,
+            notes: [],
+            suggestions: []
+        )
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BlockContext, BlockError, BlockErrorKind
+export Diagnostic, DiagnosticLevel

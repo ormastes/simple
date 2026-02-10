@@ -1,0 +1,163 @@
+# Module Loader Library Support - SmfGetter integration
+#
+# This module extends ModuleLoader with support for loading SMF modules
+# from library archives (.lsm) in addition to single files (.smf).
+#
+# Usage:
+#   var loader = ModuleLoader.with_lib_support()
+#   loader.add_library("/usr/lib/simple/libstd.lsm")
+#   loader.load_module("std/io/mod")
+
+use compiler.linker.smf_getter.{SmfGetter, SmfSourceType}
+use compiler.linker.smf_reader_memory.{SmfReaderMemory}
+use ..loader.compiler_ffi.*
+use ..linker.obj_taker.*
+use ..linker.smf_reader.*
+use .jit_instantiator.*
+
+# Import base module loader types
+# Note: Can't use wildcard import, so we redefine what we need
+
+# ============================================================================
+# Enhanced Module Loader with Library Support
+# ============================================================================
+
+"""Configuration for library-aware module loader."""
+struct ModuleLoaderLibConfig:
+    enable_jit: bool
+    enable_cache: bool
+    max_cache_size: i32
+    verbose: bool
+    hot_reload: bool
+    # Library-specific settings
+    enable_libraries: bool
+    library_search_paths: [text]
+    auto_scan_libraries: bool
+
+
+# ============================================================================
+# ModuleLoaderLibConfig Methods (was: impl ModuleLoaderLibConfig:)
+# ============================================================================
+
+fn moduleloaderlibconfig_default() -> ModuleLoaderLibConfig:
+        ModuleLoaderLibConfig(
+            enable_jit: true,
+            enable_cache: true,
+            max_cache_size: 100,
+            verbose: false,
+            hot_reload: false,
+            enable_libraries: true,
+            library_search_paths: [
+                "/usr/lib/simple",
+                "/usr/local/lib/simple"
+            ],
+            auto_scan_libraries: false
+        )
+
+
+fn moduleloaderlibconfig_with_libraries(search_paths: [text]) -> ModuleLoaderLibConfig:
+        """Create config with custom library search paths."""
+        var config = ModuleLoaderLibConfig__default()
+        config.library_search_paths = search_paths
+        config.enable_libraries = true
+        config
+
+
+"""Enhanced module loader with library support."""
+struct ModuleLoaderWithLibs:
+    # SMF getter for unified module loading
+    smf_getter: SmfGetter
+    # Shared compiler context (FFI handle)
+    compiler_ctx: CompilerContext
+    # ObjTaker for extraction and instantiation
+    obj_taker: ObjTaker
+    # JIT instantiator
+    jit: JitInstantiator
+    # Loaded modules cache: path -> (reader, symbols)
+    modules: Dict<text, (SmfReaderMemory, Dict<text, SmfSymbol>)>
+    # Configuration
+    config: ModuleLoaderLibConfig
+
+
+# ============================================================================
+# ModuleLoaderWithLibs Methods (was: impl ModuleLoaderWithLibs:)
+# ============================================================================
+
+fn moduleloaderwithlibs_new(config: ModuleLoaderLibConfig) -> ModuleLoaderWithLibs:
+        # Create SMF getter
+        var getter = SmfGetter__new()
+        getter_set_verbose(getter, config.verbose)
+
+        # Add search paths
+        for path in config.library_search_paths:
+            getter_add_search_path(getter, path)
+
+        # Scan for libraries if enabled
+        if config.auto_scan_libraries:
+            var _ = getter_scan_search_paths(getter)
+
+        # Create compiler context
+        val compiler_ctx = CompilerContext__create()
+
+        # Create obj taker
+        val obj_taker_config = ObjTakerConfig(
+            enable_caching: config.enable_cache,
+            max_cache_size: config.max_cache_size,
+            verbose: config.verbose,
+            allow_deferred: true
+        )
+
+        # Create JIT instantiator
+        val jit_config = JitInstantiatorConfig(
+            update_smf: false,
+            max_depth: 50,
+            enabled: config.enable_jit,
+            verbose: config.verbose
+        )
+
+        ModuleLoaderWithLibs(
+            smf_getter: getter,
+            compiler_ctx: compiler_ctx,
+            obj_taker: ObjTaker__with_compiler_context(compiler_ctx, obj_taker_config),
+            jit: JitInstantiator__new(jit_config),
+            modules: {},
+            config: config
+        )
+
+
+fn moduleloaderwithlibs_with_defaults() -> ModuleLoaderWithLibs:
+        ModuleLoaderWithLibs__new(ModuleLoaderLibConfig__default())
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Create a loader with standard system libraries.
+
+Returns:
+    ModuleLoaderWithLibs configured with system libraries
+"""
+fn create_loader_with_stdlib() -> ModuleLoaderWithLibs:
+    var config = ModuleLoaderLibConfig__default()
+    config.library_search_paths = [
+        "/usr/lib/simple",
+        "/usr/local/lib/simple",
+        "/opt/simple/lib"
+    ]
+
+    var loader = ModuleLoaderWithLibs__new(config)
+
+    # Try to add standard library (ignore if not found)
+    var _ = loader.add_library("/usr/lib/simple/libstd.lsm")
+    var _ = loader.add_library("/usr/local/lib/simple/libstd.lsm")
+
+    loader
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ModuleLoaderWithLibs
+export ModuleLoaderLibConfig
+export create_loader_with_stdlib

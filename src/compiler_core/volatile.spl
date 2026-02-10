@@ -1,0 +1,233 @@
+# Volatile Memory Access
+#
+# Ensures memory reads/writes are not optimized away by the compiler.
+# Essential for:
+# - Memory-mapped I/O (MMIO) registers
+# - Hardware status registers
+# - Shared memory with DMA
+# - Interrupt handlers
+#
+# Volatile Levels:
+# 1. Field: @volatile val x: u32
+# 2. Struct: @volatile struct Regs { ... }
+# 3. File: module-level __volatile__ = true
+# 4. Project: simple.sdn volatile = true
+
+from hir_types import {HirType, SymbolId}
+from hir_definitions import {HirExpr, HirExprKind}
+from lexer import {Span}
+
+export VolatileAccess, VolatileContext, VolatileKind
+export is_volatile_access, mark_volatile, generate_volatile_read, generate_volatile_write
+
+# Kind of volatile access
+enum VolatileKind:
+    Read            # Volatile read - always fetch from memory
+    Write           # Volatile write - always commit to memory
+    ReadWrite       # Both read and write are volatile
+    None_            # Normal (non-volatile) access
+
+
+# ============================================================================
+# VolatileKind Methods (was: impl VolatileKind:)
+# ============================================================================
+
+# Volatile access descriptor
+struct VolatileAccess:
+    address: i64            # Memory address
+    size: i64               # Access size in bytes
+    kind: VolatileKind      # Type of volatile access
+    type_: HirType          # Type being accessed
+    span: Span
+
+
+# ============================================================================
+# VolatileAccess Methods (was: impl VolatileAccess:)
+# ============================================================================
+
+fn volatileaccess_read(addr: i64, size: i64, type_: HirType, span: Span) -> VolatileAccess:
+        VolatileAccess(
+            address: addr,
+            size: size,
+            kind: VolatileKind.Read,
+            type_: type_,
+            span: span
+        )
+
+
+fn volatileaccess_write(addr: i64, size: i64, type_: HirType, span: Span) -> VolatileAccess:
+        VolatileAccess(
+            address: addr,
+            size: size,
+            kind: VolatileKind.Write,
+            type_: type_,
+            span: span
+        )
+
+
+# Volatile context tracks what's volatile in current scope
+class VolatileContext:
+    # Volatile variables by name
+    volatile_vars: Dict<text, bool>
+    # Volatile types by name
+    volatile_types: Dict<text, bool>
+    # File-level volatile flag
+    file_volatile: bool
+    # Project-level volatile flag
+    project_volatile: bool
+
+
+# ============================================================================
+# VolatileContext Methods (was: impl VolatileContext:)
+# ============================================================================
+
+fn volatilecontext_new() -> VolatileContext:
+        VolatileContext(
+            volatile_vars: {},
+            volatile_types: {},
+            file_volatile: false,
+            project_volatile: false
+        )
+
+
+# Check if an expression involves volatile access
+fn is_volatile_access(expr: HirExpr, ctx: VolatileContext) -> bool:
+    match expr.kind:
+        case hirexprkind_Var(sym):
+            # Check if variable is marked volatile
+            # Would need symbol table lookup here
+            false  # Placeholder
+        case hirexprkind_Field(base, field, _):
+            # Check if base type has volatile field
+            is_volatile_access(base, ctx)
+        case hirexprkind_Index(base, _):
+            # Array access inherits volatility from base
+            is_volatile_access(base, ctx)
+        case _:
+            false
+
+# Mark an expression as requiring volatile access
+fn mark_volatile(expr: HirExpr) -> HirExpr:
+    # In practice, this would modify the expression's metadata
+    # to indicate volatile access is required
+    expr
+
+# Generate volatile read operation
+# Returns assembly/IR for a volatile read
+fn generate_volatile_read(access: VolatileAccess) -> text:
+    val size_suffix = match access.size:
+        case 1: "b"  # byte
+        case 2: "w"  # word
+        case 4: "l"  # long/dword
+        case 8: "q"  # quad
+        case _: ""
+
+    # For x86, volatile reads use regular mov but compiler
+    # must not optimize them away
+    match access.size:
+        case 1:
+            "mov{size_suffix} ({access.address:#x}), %al"
+        case 2:
+            "mov{size_suffix} ({access.address:#x}), %ax"
+        case 4:
+            "mov{size_suffix} ({access.address:#x}), %eax"
+        case 8:
+            "mov{size_suffix} ({access.address:#x}), %rax"
+        case _:
+            "# volatile read of size {access.size} not supported"
+
+# Generate volatile write operation
+fn generate_volatile_write(access: VolatileAccess, value_reg: text) -> text:
+    val size_suffix = match access.size:
+        case 1: "b"
+        case 2: "w"
+        case 4: "l"
+        case 8: "q"
+        case _: ""
+
+    "mov{size_suffix} {value_reg}, ({access.address:#x})"
+
+# Volatile memory intrinsics
+# These are the primitive operations for volatile access
+
+# Read a byte from a volatile address
+fn volatile_read_u8(addr: i64) -> u8:
+    # This would generate actual volatile read instruction
+    # Implementation depends on codegen backend
+    asm """
+        mov eax, [{addr}]
+    """
+    0  # Placeholder return
+
+# Read a word from a volatile address
+fn volatile_read_u16(addr: i64) -> u16:
+    asm """
+        mov ax, [{addr}]
+    """
+    0
+
+# Read a dword from a volatile address
+fn volatile_read_u32(addr: i64) -> u32:
+    asm """
+        mov eax, [{addr}]
+    """
+    0
+
+# Read a qword from a volatile address
+fn volatile_read_u64(addr: i64) -> u64:
+    asm """
+        mov rax, [{addr}]
+    """
+    0
+
+# Write a byte to a volatile address
+fn volatile_write_u8(addr: i64, value: u8):
+    asm """
+        mov byte ptr [{addr}], {value}
+    """
+
+# Write a word to a volatile address
+fn volatile_write_u16(addr: i64, value: u16):
+    asm """
+        mov word ptr [{addr}], {value}
+    """
+
+# Write a dword to a volatile address
+fn volatile_write_u32(addr: i64, value: u32):
+    asm """
+        mov dword ptr [{addr}], {value}
+    """
+
+# Write a qword to a volatile address
+fn volatile_write_u64(addr: i64, value: u64):
+    asm """
+        mov qword ptr [{addr}], {value}
+    """
+
+# Memory barrier operations
+# These ensure memory operations complete in order
+
+# Full memory barrier (both loads and stores)
+fn memory_barrier():
+    asm """
+        mfence
+    """
+
+# Load barrier (ensures all prior loads complete)
+fn load_barrier():
+    asm """
+        lfence
+    """
+
+# Store barrier (ensures all prior stores complete)
+fn store_barrier():
+    asm """
+        sfence
+    """
+
+# Compiler barrier (prevents compiler reordering, no CPU fence)
+fn compiler_barrier():
+    asm """
+        # compiler barrier - no CPU instructions needed
+        # just prevents optimization across this point
+    """

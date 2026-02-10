@@ -1,0 +1,245 @@
+# Constant Folding
+#
+# Evaluates constant expressions at compile time.
+#
+# Examples:
+#   2 + 3 → 5
+#   x * 1 → x
+#   x + 0 → x
+#   if true → unconditional jump
+#
+# Benefits:
+# - Reduces runtime computation
+# - Enables further optimizations (DCE, branch elimination)
+# - Smaller code size
+#
+# Algorithm:
+# 1. Scan instructions for constant operands
+# 2. If operation can be evaluated at compile time, replace with constant
+# 3. Propagate constants through the CFG
+# 4. Simplify branches with constant conditions
+
+use compiler.mir_data.*
+use compiler.mir.*
+use compiler.mir_opt.mod.{MirPass}
+
+# ============================================================================
+# Constant Evaluation
+# ============================================================================
+
+class ConstantEvaluator:
+    """
+    Evaluates constant expressions.
+
+    Handles:
+    - Arithmetic operations on constant integers/floats
+    - Logical operations on constant booleans
+    - Comparisons
+    - Bitwise operations
+    """
+    folded_count: i64
+
+
+# ============================================================================
+# ConstantEvaluator Methods (was: impl ConstantEvaluator:)
+# ============================================================================
+
+fn constantevaluator_new() -> ConstantEvaluator:
+        ConstantEvaluator(folded_count: 0)
+
+
+# ============================================================================
+# Algebraic Simplification
+# ============================================================================
+
+class AlgebraicSimplifier:
+    """
+    Applies algebraic identities for simplification.
+
+    Identities:
+    - x + 0 = x
+    - x * 1 = x
+    - x * 0 = 0
+    - x - 0 = x
+    - x / 1 = x
+    - x & -1 = x
+    - x | 0 = x
+    - x ^ 0 = x
+    """
+    simplified_count: i64
+
+
+# ============================================================================
+# AlgebraicSimplifier Methods (was: impl AlgebraicSimplifier:)
+# ============================================================================
+
+fn algebraicsimplifier_new() -> AlgebraicSimplifier:
+        AlgebraicSimplifier(simplified_count: 0)
+
+
+# ============================================================================
+# Constant Folding Pass
+# ============================================================================
+
+class ConstantFolding:
+    """
+    Constant folding optimization pass.
+
+    Combines:
+    - Constant evaluation (compute at compile time)
+    - Algebraic simplification (apply identities)
+    - Branch folding (eliminate dead branches)
+    """
+    evaluator: ConstantEvaluator
+    simplifier: AlgebraicSimplifier
+    folded_instructions: i64
+    folded_branches: i64
+
+
+# ============================================================================
+# ConstantFolding Methods (was: impl ConstantFolding:)
+# ============================================================================
+
+fn constantfolding_new() -> ConstantFolding:
+        ConstantFolding(
+            evaluator: constantevaluator_new(),
+            simplifier: algebraicsimplifier_new(),
+            folded_instructions: 0,
+            folded_branches: 0
+        )
+
+
+fn constantfolding_run_on_function(self: ConstantFolding, func: MirFunction) -> MirFunction:
+        """
+        Run constant folding on a function.
+
+        Process:
+        1. Fold constant instructions in each block
+        2. Fold branch conditions
+        3. Repeat until no changes (fixed point)
+        """
+        var optimized_blocks: [MirBlock] = []
+
+        for block in func.blocks:
+            val optimized_block = self.fold_block(block)
+            optimized_blocks_push(optimized_blocks, optimized_block)
+
+        copy_mir_function_with_blocks(func, optimized_blocks)
+
+
+fn constantfolding_fold_block(self: ConstantFolding, block: MirBlock) -> MirBlock:
+        """Fold constants in a basic block."""
+        var folded_instructions: [MirInst] = []
+
+        for inst in block.instructions:
+            val folded = self.try_fold_instruction(inst)
+            folded_instructions_push(folded_instructions, folded)
+
+        # Fold terminator
+        val folded_terminator = self.try_fold_terminator(block.terminator)
+
+        MirBlock(
+            id: block.id,
+            label: block.label,
+            instructions: folded_instructions,
+            terminator: folded_terminator
+        )
+
+
+fn constantfolding_try_fold_instruction(self: ConstantFolding, inst: MirInst) -> MirInst:
+        """Try to fold a single instruction."""
+        match inst.kind:
+            case BinOp(dest, op, left, right):
+                # Try constant evaluation
+                match left.kind:
+                    case Const(lval, _):
+                        match right.kind:
+                            case Const(rval, rty):
+                                val folded = self.evaluator_try_fold_binop(evaluator, op, lval, rval)
+                                if has_folded:
+                                    self.folded_instructions = self.folded_instructions + 1
+                                    return MirInst(
+                                        kind: mirinstkind_Const(dest, folded_value, rty),
+                                        span: inst.span
+                                    )
+                            case _:
+                                pass
+                    case _:
+                        pass
+
+                # Try algebraic simplification
+                val simplified = self.simplifier_try_simplify_binop(simplifier, op, left, right)
+                if has_simplified:
+                    match simplified_value.kind:
+                        case Copy(src):
+                            return MirInst(
+                                kind: mirinstkind_Copy(dest, src),
+                                span: inst.span
+                            )
+                        case Const(const_val, ty):
+                            return MirInst(
+                                kind: mirinstkind_Const(dest, const_val, ty),
+                                span: inst.span
+                            )
+                        case _:
+                            pass
+
+                # No folding - return original
+                inst
+
+            case UnaryOp(dest, op, operand):
+                match operand.kind:
+                    case Const(const_val, ty):
+                        val folded = self.evaluator_try_fold_unaryop(evaluator, op, const_val)
+                        if has_folded:
+                            self.folded_instructions = self.folded_instructions + 1
+                            return MirInst(
+                                kind: mirinstkind_Const(dest, folded_value, ty),
+                                span: inst.span
+                            )
+                # No folding
+                inst
+
+            case _:
+                # Can't fold this instruction type
+                inst
+
+
+fn constantfolding_try_fold_terminator(self: ConstantFolding, term: MirTerminator) -> MirTerminator:
+        """Try to fold branch conditions."""
+        match term:
+            case If(cond, then_, else_):
+                match cond.kind:
+                    case Const(Bool(true), _):
+                        # Always true - eliminate false branch
+                        self.folded_branches = self.folded_branches + 1
+                        mirterminator_Goto(then_)
+
+                    case Const(Bool(false), _):
+                        # Always false - eliminate true branch
+                        self.folded_branches = self.folded_branches + 1
+                        mirterminator_Goto(else_)
+
+                    case _:
+                        # Dynamic condition - can't fold
+                        term
+
+            case _:
+                # Other terminators can't be folded
+                term
+
+
+# ============================================================================
+# Factory Function
+# ============================================================================
+
+fn create_const_fold_pass() -> ConstantFolding:
+    """Create a new constant folding pass instance."""
+    constantfolding_new()
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ConstantFolding, create_const_fold_pass
+export ConstantEvaluator, AlgebraicSimplifier

@@ -1,0 +1,226 @@
+# Library SMF Format - Container for multiple SMF modules
+#
+# This module defines the Library SMF (.lsm) format, which bundles multiple
+# SMF modules into a single archive file with a location index.
+#
+# Format Layout:
+# ┌────────────────────────────────┐
+# │  Lib SMF Header (128 bytes)    │  Magic, version, module count
+# ├────────────────────────────────┤
+# │  Module Index Table            │  Array of ModuleIndexEntry
+# │  (128 bytes × module_count)    │  Each entry: name, offset, size, hash
+# ├────────────────────────────────┤
+# │  Module 1 SMF Data             │  Complete SMF file data
+# ├────────────────────────────────┤
+# │  Module 2 SMF Data             │  Complete SMF file data
+# ├────────────────────────────────┤
+# │  ...                           │
+# ├────────────────────────────────┤
+# │  Module N SMF Data             │  Complete SMF file data
+# └────────────────────────────────┘
+#
+# Benefits:
+# - Single file deployment for libraries
+# - Fast random access via index
+# - Reduced file system overhead
+# - Atomic library updates
+
+use app.io.{file_write, file_read, file_exists}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val LSMF_MAGIC: [u8] = [76, 83, 77, 70]  # "LSMF" (Library SMF)
+val LSMF_HEADER_SIZE: i64 = 128
+val LSMF_INDEX_ENTRY_SIZE: i64 = 128
+val LSMF_VERSION_MAJOR: u8 = 1
+val LSMF_VERSION_MINOR: u8 = 0
+
+# ============================================================================
+# Lib SMF Header
+# ============================================================================
+
+# Library SMF header structure (128 bytes).
+# The header is at the beginning of the file and contains:
+# - Magic number, version, module count, index metadata
+struct LibSmfHeader:
+    # Identification (8 bytes)
+    magic: [u8]              # Magic number "LSMF" (4 bytes)
+    version_major: u8        # Major version (1)
+    version_minor: u8        # Minor version (0)
+    reserved1: [u8]          # Reserved (2 bytes)
+
+    # Metadata (24 bytes)
+    module_count: u32        # Number of modules in library
+    index_offset: u64        # Offset to index table (always 128)
+    index_size: u64          # Size of index table in bytes
+    data_offset: u64         # Offset where module data begins
+
+    # Hashing (16 bytes)
+    library_hash: u64        # Hash of entire library content
+    index_hash: u64          # Hash of index table
+
+    # Reserved (80 bytes) - padding to 128 bytes
+    reserved2: [u8]
+
+
+# ============================================================================
+# LibSmfHeader Methods (was: impl LibSmfHeader:)
+# ============================================================================
+
+fn libsmfheader_new_default() -> LibSmfHeader:
+        LibSmfHeader(
+            magic: LSMF_MAGIC,
+            version_major: LSMF_VERSION_MAJOR,
+            version_minor: LSMF_VERSION_MINOR,
+            reserved1: [0, 0],
+            module_count: 0,
+            index_offset: LSMF_HEADER_SIZE as u64,
+            index_size: 0,
+            data_offset: 0,
+            library_hash: 0,
+            index_hash: 0,
+            reserved2: [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        )
+
+
+# ============================================================================
+# Module Index Entry
+# ============================================================================
+
+# Module index entry (128 bytes).
+# Each entry describes one module in the library:
+# - Module path/name, location (offset/size), verification hashes
+struct ModuleIndexEntry:
+    # Module name (64 bytes) - null-terminated UTF-8
+    name: [u8]               # Module path (e.g., "std/io/mod")
+
+    # SMF Location (16 bytes)
+    offset: u64              # Offset to module SMF data
+    size: u64                # Size of module SMF data
+
+    # Object Location (16 bytes)
+    obj_offset: u64          # Offset to object file (0 if none)
+    obj_size: u64            # Size of object file (0 if none)
+
+    # Metadata (16 bytes)
+    hash: u64                # FNV-1a hash of SMF data
+    obj_hash: u64            # FNV-1a hash of object data (0 if none)
+
+    # Reserved (16 bytes)
+    reserved: [u8]
+
+
+# ============================================================================
+# ModuleIndexEntry Methods (was: impl ModuleIndexEntry:)
+# ============================================================================
+
+fn moduleindexentry_new(name: text, offset: u64, size: u64, hash: u64) -> ModuleIndexEntry:
+        var name_bytes: [u8] = []
+        var name_limit = name_len(name)
+        if name_limit > 63:
+            name_limit = 63
+        for i in 0..name_limit:
+            name_bytes_push(name_bytes, name[i] as u8)
+        # Null-terminate and pad to 64 bytes
+        for i in name_bytes_len(name_bytes)..64:
+            name_bytes_push(name_bytes, 0)
+
+        var reserved: [u8] = []
+        for i in 0..16:
+            reserved_push(reserved, 0)
+
+        ModuleIndexEntry(
+            name: name_bytes,
+            offset: offset,
+            size: size,
+            obj_offset: 0,
+            obj_size: 0,
+            hash: hash,
+            obj_hash: 0,
+            reserved: reserved
+        )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Convert u32 to bytes (little-endian).
+fn u32_to_bytes(value: u32) -> [u8]:
+    val b0 = (value and 0xFF) as u8
+    val b1 = ((value >> 8) and 0xFF) as u8
+    val b2 = ((value >> 16) and 0xFF) as u8
+    val b3 = ((value >> 24) and 0xFF) as u8
+    [b0, b1, b2, b3]
+
+# Convert u64 to bytes (little-endian).
+fn u64_to_bytes(value: u64) -> [u8]:
+    val b0 = (value and 0xFF) as u8
+    val b1 = ((value >> 8) and 0xFF) as u8
+    val b2 = ((value >> 16) and 0xFF) as u8
+    val b3 = ((value >> 24) and 0xFF) as u8
+    val b4 = ((value >> 32) and 0xFF) as u8
+    val b5 = ((value >> 40) and 0xFF) as u8
+    val b6 = ((value >> 48) and 0xFF) as u8
+    val b7 = ((value >> 56) and 0xFF) as u8
+    [b0, b1, b2, b3, b4, b5, b6, b7]
+
+# Read u32 from bytes (little-endian).
+fn bytes_to_u32(bytes: [u8], offset: i64) -> u32:
+    val v0 = bytes[offset] as u32
+    val v1 = (bytes[offset + 1] as u32) << 8
+    val v2 = (bytes[offset + 2] as u32) << 16
+    val v3 = (bytes[offset + 3] as u32) << 24
+    v0 or v1 or v2 or v3
+
+# Read u64 from bytes (little-endian).
+fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
+    val v0 = bytes[offset] as u64
+    val v1 = (bytes[offset + 1] as u64) << 8
+    val v2 = (bytes[offset + 2] as u64) << 16
+    val v3 = (bytes[offset + 3] as u64) << 24
+    val v4 = (bytes[offset + 4] as u64) << 32
+    val v5 = (bytes[offset + 5] as u64) << 40
+    val v6 = (bytes[offset + 6] as u64) << 48
+    val v7 = (bytes[offset + 7] as u64) << 56
+    v0 or v1 or v2 or v3 or v4 or v5 or v6 or v7
+
+# Convert byte to single-character text.
+fn char_from_byte(b: u8) -> text:
+    val c = b as i64
+    "{c}"
+
+# Calculate FNV-1a hash.
+fn fnv1a_hash(data: [u8]) -> u64:
+    # FNV_OFFSET = 14695981039346656037 (too large for literal, compute from parts)
+    # 0xCBF29CE4_84222325
+    val FNV_OFFSET_HI: u64 = 0x4BF29CE4
+    val fnv_hi_shifted = (FNV_OFFSET_HI + 0x80000000) << 32
+    val FNV_OFFSET: u64 = fnv_hi_shifted + 0x84222325
+    val FNV_PRIME: u64 = 4294967296 + 435
+
+    var hash = FNV_OFFSET
+    for byte in data:
+        hash = hash xor (byte as u64)
+        hash = hash * FNV_PRIME
+
+    hash
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LibSmfHeader
+export ModuleIndexEntry
+export LSMF_MAGIC
+export LSMF_HEADER_SIZE
+export LSMF_INDEX_ENTRY_SIZE
+export fnv1a_hash

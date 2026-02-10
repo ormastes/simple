@@ -1,4 +1,5 @@
 # JIT-Enabled Interpreter Backend - Hybrid Interpreter with JIT Compilation
+# (COMPILED-ONLY — requires generics, traits, Result<>)
 #
 # This module implements a hybrid interpreter that can:
 # 1. Use JIT compilation (Cranelift/LLVM) for hot functions
@@ -6,9 +7,9 @@
 # 3. Share backend infrastructure with the compiler
 #
 # Architecture:
-# - Compile HIR → MIR → native code (via ExecutionManager)
-# - Execute via JIT for performance
-# - Fall back to tree-walking when needed
+# - Hot path: Compile HIR → MIR → native code (via ExecutionManager)
+# - Cold path: Tree-walking via InterpreterBackendImpl (delegates to core)
+# - For runtime (interpreter mode), use core.interpreter.jit instead
 
 use compiler.hir.*
 use compiler.mir.*
@@ -17,6 +18,7 @@ use backend.env.{EvalContext, Environment}
 use backend.interpreter.InterpreterBackendImpl
 use compiler.execution.mod.{LocalExecutionManager, get_jit_backend}
 use compiler.mir_lowering.MirLowering
+use compiler.mir_serialization.serialize_mir_function
 
 # ============================================================================
 # JIT Interpreter Configuration
@@ -128,7 +130,7 @@ impl JitInterpreterBackend:
                 false
             case AlwaysJit:
                 true
-            case Auto, Hybrid:
+            case Auto | Hybrid:
                 # Check call count threshold
                 val count = self.call_counts[fn_name] ?? 0
                 count >= self.config.jit_threshold

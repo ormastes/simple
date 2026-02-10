@@ -25,16 +25,16 @@ echo ""
 echo "Step 1: Verify Bootstrap Binary"
 echo "--------------------------------------"
 
-if [ ! -f "bin/bootstrap/simple" ]; then
-    echo "❌ Bootstrap binary not found at bin/bootstrap/simple"
+if [ ! -f "bin/release/simple" ]; then
+    echo "❌ Bootstrap binary not found at bin/release/simple"
     exit 1
 fi
 
-BOOTSTRAP_SIZE=$(ls -lh bin/bootstrap/simple | awk '{print $5}')
+BOOTSTRAP_SIZE=$(ls -lh bin/release/simple | awk '{print $5}')
 echo "✅ Bootstrap binary found: $BOOTSTRAP_SIZE"
 
 # Test bootstrap execution
-bin/bootstrap/simple --version
+bin/release/simple --version
 echo ""
 
 # Step 2: Test bootstrap can run Simple code
@@ -46,7 +46,7 @@ fn main():
     print "✅ Bootstrap interpreter working!"
 EOF
 
-bin/bootstrap/simple /tmp/test_bootstrap.spl
+bin/release/simple /tmp/test_bootstrap.spl
 rm /tmp/test_bootstrap.spl
 echo ""
 
@@ -141,7 +141,7 @@ echo "--------------------------------------"
 
 if command -v llc &> /dev/null; then
     echo "LLVM tools available, testing LLVM route..."
-    bin/bootstrap/simple src/app/compile/llvm_direct.spl hello_macos_test.spl hello_llvm -O2
+    bin/release/simple src/app/compile/llvm_direct.spl hello_macos_test.spl hello_llvm -O2
 
     if [ -f hello_llvm ]; then
         LLVM_SIZE=$(ls -lh hello_llvm | awk '{print $5}')
@@ -164,11 +164,11 @@ echo "Step 9: Test Self-Hosting Build (dry-run)"
 echo "--------------------------------------"
 
 echo "Self-hosting build command:"
-echo "  SIMPLE_BOOTSTRAP=bin/bootstrap/simple script/build-bootstrap.sh"
+echo "  SIMPLE_BOOTSTRAP=bin/release/simple script/build-bootstrap.sh"
 echo ""
 echo "This would:"
 echo "  1. Use existing bootstrap binary"
-echo "  2. Run: bin/bootstrap/simple src/app/build/main.spl --bootstrap"
+echo "  2. Run: bin/release/simple src/app/build/main.spl --bootstrap"
 echo "  3. Build new runtime with optimization"
 echo "  4. Package as: simple-bootstrap-{version}-darwin-{arch}.spk"
 echo ""

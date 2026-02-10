@@ -1,0 +1,507 @@
+# Trait System for Simple
+#
+# Implements Rust-style traits:
+# - Trait definitions with method signatures
+# - Impl blocks for trait implementations
+# - Trait bounds on generics (T: Trait)
+# - Trait objects for dynamic dispatch (dyn Trait)
+# - Obligation-based constraint solving
+#
+# Design: doc/design/trait_system_design.md
+
+use compiler.hir.*
+use compiler.lexer.*
+
+# ============================================================================
+# Trait Definition
+# ============================================================================
+
+struct TraitDef:
+    """Definition of a trait.
+
+    A trait declares method signatures that types can implement.
+
+    Example:
+        trait Display:
+            fn to_string() -> text
+    """
+    name: Symbol                    # Trait name
+    methods: [MethodSignature]      # Required method signatures
+    defaults: [HirFunction]         # Default implementations
+    supertraits: [Symbol]           # Supertrait bounds (Trait: Supertrait)
+    type_params: [Symbol]           # Generic parameters on trait
+    span: Span
+
+
+# ============================================================================
+# TraitDef Methods (was: impl TraitDef:)
+# ============================================================================
+
+fn traitdef_create(name: Symbol, span: Span) -> TraitDef:
+        """Create a new trait definition."""
+        TraitDef(
+            name: name,
+            methods: [],
+            defaults: [],
+            supertraits: [],
+            type_params: [],
+            span: span
+        )
+
+
+struct MethodSignature:
+    """Method signature in a trait definition."""
+    name: text                      # Method name
+    params: [HirType]               # Parameter types
+    return_type: HirType            # Return type
+    effects: [Effect]               # Effect annotations
+    span: Span
+
+
+# ============================================================================
+# MethodSignature Methods (was: impl MethodSignature:)
+# ============================================================================
+
+# ============================================================================
+# Impl Block
+# ============================================================================
+
+struct ImplBlock:
+    """Implementation of a trait for a specific type.
+
+    Example:
+        # REMOVED: impl Display for Point:
+        # (Trait implementations not supported in Core Simple)
+            # fn to_string() -> text:
+                # "Point({self.x}, {self.y})"
+    """
+    trait_name: Symbol              # Which trait is being implemented
+    for_type: HirType               # Which type is implementing the trait
+    type_params: [Symbol]           # Generic parameters (impl<T> Trait for Vec<T>)
+    where_clause: [TraitBound]      # Where T: Trait constraints
+    methods: [HirFunction]          # Method implementations
+    span: Span
+
+
+# ============================================================================
+# ImplBlock Methods (was: impl ImplBlock:)
+# ============================================================================
+
+fn implblock_create(trait_name: Symbol, for_type: HirType, span: Span) -> ImplBlock:
+        """Create a new impl block."""
+        ImplBlock(
+            trait_name: trait_name,
+            for_type: for_type,
+            type_params: [],
+            where_clause: [],
+            methods: [],
+            span: span
+        )
+
+
+# ============================================================================
+# Generic Type Matching (Phase B.3.1)
+# ============================================================================
+
+fn match_types(pattern: HirType, concrete: HirType) -> bool:
+    """Check if a type pattern matches a concrete type.
+
+    Handles generic matching where pattern may contain type parameters.
+
+    Examples:
+    - match_types(Vec<T>, Vec<i64>) → true (T can be i64)
+    - match_types(Point, Point) → true
+    - match_types(Vec<T>, Point) → false
+
+    Algorithm:
+    - If pattern is TypeParam, always matches (can be anything)
+    - If both are Named, check name matches and recursively check args
+    - Otherwise, check structural equality
+    """
+    match pattern.kind:
+        case TypeParam(_, _):
+            # Type parameter matches any concrete type
+            true
+
+        case Named(pattern_symbol, pattern_args):
+            match concrete.kind:
+                case Named(concrete_symbol, concrete_args):
+                    # Check if symbols match
+                    if pattern_symbol != concrete_symbol:
+                        return false
+
+                    # Check if argument counts match
+                    if pattern_args_len(pattern_args) != concrete_args_len(concrete_args):
+                        return false
+
+                    # Recursively check each type argument
+                    for i in 0..pattern_args_len(pattern_args):
+                        if not match_types(pattern_args[i], concrete_args[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Function(pattern_params, pattern_ret, _):
+            match concrete.kind:
+                case Function(concrete_params, concrete_ret, _):
+                    # Check parameter count
+                    if pattern_params_len(pattern_params) != concrete_params_len(concrete_params):
+                        return false
+
+                    # Check each parameter
+                    for i in 0..pattern_params_len(pattern_params):
+                        if not match_types(pattern_params[i], concrete_params[i]):
+                            return false
+
+                    # Check return type
+                    match_types(pattern_ret, concrete_ret)
+                case _:
+                    false
+
+        case Tuple(pattern_elems):
+            match concrete.kind:
+                case Tuple(concrete_elems):
+                    if pattern_elems_len(pattern_elems) != concrete_elems_len(concrete_elems):
+                        return false
+
+                    for i in 0..pattern_elems_len(pattern_elems):
+                        if not match_types(pattern_elems[i], concrete_elems[i]):
+                            return false
+
+                    true
+                case _:
+                    false
+
+        case Array(pattern_elem, pattern_size):
+            match concrete.kind:
+                case Array(concrete_elem, concrete_size):
+                    # Check sizes match (if both specified)
+                    if pattern_size.? and has_concrete_size:
+                        if pattern_size_value != concrete_size_value:
+                            return false
+
+                    # Check element types match
+                    match_types(pattern_elem, concrete_elem)
+                case _:
+                    false
+
+        case _:
+            # For other types, use structural equality
+            pattern.kind == concrete.kind
+
+# ============================================================================
+# Trait Bound
+# ============================================================================
+
+struct TraitBound:
+    """A constraint on a type parameter: T: Trait
+
+    Used in:
+    - Function signatures: fn foo<T: Display>(x: T)
+    - Where clauses: fn foo<T>(x: T) where T: Display
+    - Impl blocks: impl<T: Clone> Clone for Vec<T>
+    """
+    type_param: Symbol              # Type variable being constrained (e.g., T)
+    trait_name: Symbol              # Required trait (e.g., Display)
+    span: Span
+
+
+# ============================================================================
+# TraitBound Methods (was: impl TraitBound:)
+# ============================================================================
+
+fn traitbound_create(type_param: Symbol, trait_name: Symbol, span: Span) -> TraitBound:
+        """Create a new trait bound."""
+        TraitBound(
+            type_param: type_param,
+            trait_name: trait_name,
+            span: span
+        )
+
+
+enum TraitBoundKind:
+    """Kind of trait bound."""
+    Single(Symbol)                  # T: Trait
+    Multiple([Symbol])              # T: Trait1 + Trait2
+    Supertrait(Symbol, Symbol)      # In trait definition: trait Ord: Eq
+
+
+# ============================================================================
+# TraitBoundKind Methods (was: impl TraitBoundKind:)
+# ============================================================================
+
+# ============================================================================
+# Obligation
+# ============================================================================
+
+struct Obligation:
+    """A trait bound that must be proven during type checking.
+
+    Created when:
+    - Calling a function with trait bounds
+    - Using a method that requires a trait
+    - Satisfying a where clause
+
+    Must be satisfied by finding an impl block.
+    """
+    type_: HirType                  # The type that must implement the trait
+    trait_: Symbol                  # The trait that must be implemented
+    cause: ObligationCause          # Why this obligation was created
+    span: Span                      # Source location
+
+
+# ============================================================================
+# Obligation Methods (was: impl Obligation:)
+# ============================================================================
+
+fn obligation_create(ty: HirType, trait_: Symbol, cause: ObligationCause, span: Span) -> Obligation:
+        """Create a new obligation."""
+        Obligation(
+            type_: ty,
+            trait_: trait_,
+            cause: cause,
+            span: span
+        )
+
+
+enum ObligationCause:
+    """Why an obligation was created (for error messages)."""
+    FunctionCall(Symbol)            # From calling fn<T: Trait>
+    MethodCall(Symbol, text)        # From calling method
+    TraitBound(Symbol)              # From where clause
+    FieldAccess(Symbol, text)       # From accessing field
+    BuiltIn                         # From built-in constraint
+
+
+# ============================================================================
+# ObligationCause Methods (was: impl ObligationCause:)
+# ============================================================================
+
+# ============================================================================
+# Trait Solver
+# ============================================================================
+
+class TraitSolver:
+    """Solves trait obligations by searching impl blocks.
+
+    Algorithm (simplified Rust trait solver):
+    1. Collect obligations from function calls and method calls
+    2. For each obligation T: Trait:
+       a. Search for impl Trait for T
+       b. Check where clauses recursively
+       c. Report error if no impl found
+    3. Cache results to avoid duplicate work
+
+    Note: This is a simplified solver. Full Rust solver handles:
+    - Higher-ranked trait bounds
+    - Associated types
+    - Negative impls
+    - Specialization
+    - Coherence checking
+    """
+    # All known trait definitions
+    traits: Dict<Symbol, TraitDef>
+
+    # All known impl blocks (indexed by trait name)
+    impls: Dict<Symbol, [ImplBlock]>
+
+    # All known impl blocks (indexed by target type symbol)
+    # Enables efficient lookup: "what traits does type X implement?"
+    impls_by_type: Dict<Symbol, [ImplBlock]>
+
+    # Cache of solved obligations: (type, trait) -> success
+    cache: Dict<(HirType, Symbol), bool>
+
+    # Current obligations to solve
+    obligations: [Obligation]
+
+    # Errors encountered during solving
+    errors: [TraitError]
+
+
+# ============================================================================
+# TraitSolver Methods (was: impl TraitSolver:)
+# ============================================================================
+
+fn traitsolver_create() -> TraitSolver:
+        """Create a new trait solver."""
+        TraitSolver(
+            traits: {},
+            impls: {},
+            impls_by_type: {},
+            cache: {},
+            obligations: [],
+            errors: []
+        )
+
+
+fn impls_overlap(impl1: ImplBlock, impl2: ImplBlock) -> bool:
+    """Check if two impl blocks could overlap (Phase B.3.2).
+
+    Two impls overlap if there exists a concrete type that matches both.
+
+    Examples:
+    - impl Display for Vec<i64> and impl<T> Display for Vec<T> → overlap
+    - impl Display for Point and impl Display for Vec<T> → no overlap
+    - impl<T> Display for Vec<T> and impl<U> Clone for Vec<U> → no overlap (different traits)
+
+    Simplified overlap detection:
+    - If either impl has no generics, check if types are equal
+    - If both have generics, check if base types could unify
+    - Full overlap detection is complex (requires unification)
+    """
+    val ty1 = impl1.for_type
+    val ty2 = impl2.for_type
+
+    # Check if both types could match a common concrete type
+    # For a conservative approximation:
+    match ty1.kind:
+        case Named(symbol1, args1):
+            match ty2.kind:
+                case Named(symbol2, args2):
+                    # If different base types, no overlap
+                    if symbol1 != symbol2:
+                        return false
+
+                    # Same base type - could overlap
+                    # Examples:
+                    # - Vec<i64> and Vec<T> → overlap (T=i64)
+                    # - Vec<i64> and Vec<u32> → no overlap (concrete types differ)
+
+                    # If both are fully concrete (no type params), check equality
+                    val has_params1 = type_has_params(ty1)
+                    val has_params2 = type_has_params(ty2)
+
+                    if not has_params1 and not has_params2:
+                        # Both concrete - overlap only if equal
+                        return ty1 == ty2
+
+                    # At least one has type parameters - conservative: assume overlap
+                    # Full unification would be needed for precise check
+                    true
+                case _:
+                    # Different type kinds
+                    false
+        case _:
+            # For non-Named types, use simple equality check
+            ty1 == ty2
+
+fn type_has_params(ty: HirType) -> bool:
+    """Check if a type contains type parameters."""
+    match ty.kind:
+        case TypeParam(_, _):
+            true
+        case Named(_, args):
+            for arg in args:
+                if type_has_params(arg):
+                    return true
+            false
+        case Function(params, ret, _):
+            for param in params:
+                if type_has_params(param):
+                    return true
+            type_has_params(ret)
+        case Tuple(elems):
+            for elem in elems:
+                if type_has_params(elem):
+                    return true
+            false
+        case Array(elem, _):
+            type_has_params(elem)
+        case _:
+            false
+
+# ============================================================================
+# Trait Errors
+# ============================================================================
+
+enum TraitError:
+    """Errors from trait resolution."""
+    Unsatisfied(obligation: Obligation)
+    Ambiguous(type_: HirType, trait_: Symbol, candidates: [ImplBlock])
+    Overlapping(trait_: Symbol, type_: HirType, span: Span)
+    MissingMethod(trait_: Symbol, method: text, type_: HirType, span: Span)
+    CyclicBound(type_param: Symbol, span: Span)
+    UndefinedTrait(name: Symbol, span: Span)
+
+
+# ============================================================================
+# TraitError Methods (was: impl TraitError:)
+# ============================================================================
+
+# ============================================================================
+# Built-in Traits
+# ============================================================================
+
+fn create_builtin_traits() -> [TraitDef]:
+    """Create definitions for built-in traits.
+
+    Built-in traits:
+    - Clone: fn clone() -> Self
+    - Copy: marker trait (Clone + trivial bitwise copy)
+    - Debug: fn debug() -> text
+    - Default: fn default() -> Self
+    - Drop: fn drop()
+    - Eq: fn eq(other: Self) -> bool
+    - Ord: fn cmp(other: Self) -> Ordering (requires Eq)
+    """
+    var traits: [TraitDef] = []
+    val dummy_span = Span(start: 0, end: 0, line: 0, col: 0)
+
+    val self_type = HirType(kind: HirTypeKind.TypeParam(name: "Self", bounds: []), span: dummy_span)
+    val bool_type = HirType(kind: HirTypeKind.Bool, span: dummy_span)
+    val text_type = HirType(kind: HirTypeKind.Str, span: dummy_span)
+    val unit_type = HirType(kind: HirTypeKind.Unit, span: dummy_span)
+    val i32_type = HirType(kind: hirtypekind_Int(bits: 32, signed: true), span: dummy_span)
+
+    # Clone trait: fn clone() -> Self
+    var clone_trait = TraitDef.create(Symbol(id: 1, name: "Clone"), dummy_span)
+    clone_trait.methods = [MethodSignature(name: "clone", params: [], return_type: self_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, clone_trait)
+
+    # Copy trait (marker, no methods - just requires Clone)
+    var copy_trait = TraitDef.create(Symbol(id: 2, name: "Copy"), dummy_span)
+    copy_trait.supertraits = [Symbol(id: 1, name: "Clone")]  # Copy: Clone
+    traits = traits_push(traits, copy_trait)
+
+    # Debug trait: fn debug() -> text
+    var debug_trait = TraitDef.create(Symbol(id: 3, name: "Debug"), dummy_span)
+    debug_trait.methods = [MethodSignature(name: "debug", params: [], return_type: text_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, debug_trait)
+
+    # Default trait: fn default() -> Self (static)
+    var default_trait = TraitDef.create(Symbol(id: 4, name: "Default"), dummy_span)
+    default_trait.methods = [MethodSignature(name: "default", params: [], return_type: self_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, default_trait)
+
+    # Drop trait: fn drop()
+    var drop_trait = TraitDef.create(Symbol(id: 5, name: "Drop"), dummy_span)
+    drop_trait.methods = [MethodSignature(name: "drop", params: [], return_type: unit_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, drop_trait)
+
+    # Eq trait: fn eq(other: Self) -> bool
+    var eq_trait = TraitDef.create(Symbol(id: 6, name: "Eq"), dummy_span)
+    eq_trait.methods = [MethodSignature(name: "eq", params: [self_type], return_type: bool_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, eq_trait)
+
+    # Ord trait: fn cmp(other: Self) -> i32 (requires Eq)
+    var ord_trait = TraitDef.create(Symbol(id: 7, name: "Ord"), dummy_span)
+    ord_trait.supertraits = [Symbol(id: 6, name: "Eq")]  # Ord: Eq
+    ord_trait.methods = [MethodSignature(name: "cmp", params: [self_type], return_type: i32_type, effects: [], span: dummy_span)]
+    traits = traits_push(traits, ord_trait)
+
+    traits
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export TraitDef, MethodSignature
+export ImplBlock
+export TraitBound, TraitBoundKind
+export Obligation, ObligationCause
+export TraitSolver
+export TraitError
+export create_builtin_traits

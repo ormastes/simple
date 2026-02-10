@@ -1,0 +1,276 @@
+# MIR Optimization Framework
+#
+# Mid-level IR optimization passes for the Simple compiler.
+#
+# Architecture:
+# - Pass trait for implementing optimization passes
+# - OptimizationPipeline for sequencing passes
+# - Support for different optimization levels
+#
+# Optimization Levels:
+# - nil: No optimizations (debug builds)
+# - Size: Optimize for binary size
+# - Speed: Optimize for execution speed
+# - Aggressive: Maximum optimization (may increase compile time)
+
+use compiler.mir_data.*
+use compiler.mir.*
+use compiler.mir_opt.dce (create_dce_pass)
+use compiler.mir_opt.const_fold (create_const_fold_pass)
+
+# ============================================================================
+# Optimization Level
+# ============================================================================
+
+enum OptLevel:
+    """Optimization level for compilation."""
+    NoOpt       # No optimization (fastest compile, slowest runtime)
+    Size        # Optimize for binary size
+    Speed       # Optimize for execution speed (default for release)
+    Aggressive  # Maximum optimization (slowest compile, fastest runtime)
+
+
+# ============================================================================
+# OptLevel Methods (was: impl OptLevel:)
+# ============================================================================
+
+# ============================================================================
+# Optimization Pass Trait
+# ============================================================================
+
+trait MirPass:
+    """
+    Optimization pass over MIR.
+
+    Each pass transforms a MirFunction and returns a modified version.
+    Passes should be idempotent when possible.
+    """
+
+    fn name() -> text:
+        """Human-readable pass name."""
+
+    fn description() -> text:
+        """Brief description of what this pass does."""
+
+    me run_on_function(func: MirFunction) -> MirFunction:
+        """
+        Run optimization pass on a single function.
+
+        Args:
+            func: Function to optimize
+
+        Returns:
+            Optimized function (may be same object if no changes)
+        """
+
+    fn is_analysis_pass() -> bool:
+        """Whether this pass only analyzes (doesn't modify IR)."""
+        false
+
+    fn dependencies() -> [text]:
+        """List of pass names this pass depends on."""
+        []
+
+# ============================================================================
+# Pass Manager
+# ============================================================================
+
+class PassManager:
+    """
+    Manages optimization passes and their execution order.
+
+    Handles:
+    - Pass dependencies
+    - Pass ordering
+    - Pass statistics
+    """
+    passes: [text]  # Pass instances (placeholder - should be [Box<dyn MirPass>])
+    stats: PassStatistics
+
+
+# ============================================================================
+# PassManager Methods (was: impl PassManager:)
+# ============================================================================
+
+fn passmanager_new() -> PassManager:
+        PassManager(
+            passes: [],
+            stats: passstatistics_new()
+        )
+
+
+fn passmanager_run_on_module(self: PassManager, module: MirModule) -> MirModule:
+        """
+        Run all passes on a module.
+
+        Processes each function in the module through the pass pipeline.
+        """
+        var optimized_module = module
+
+        # Run passes on each function
+        for func_symbol in module.functions_keys(functions):
+            val func = module.functions[func_symbol]
+            var optimized_func = func
+
+            # Run each pass by name dispatch
+            for pass_name in self.passes:
+                optimized_func = run_named_pass(pass_name, optimized_func)
+                self.stats_record_pass_run(stats, pass_name)
+
+            # Update module with optimized function
+            optimized_module.functions[func_symbol] = optimized_func
+
+        optimized_module
+
+
+class PassStatistics:
+    """Statistics about pass execution."""
+    pass_run_count: Dict<text, i64>
+    total_runs: i64
+
+
+# ============================================================================
+# PassStatistics Methods (was: impl PassStatistics:)
+# ============================================================================
+
+fn passstatistics_new() -> PassStatistics:
+        PassStatistics(
+            pass_run_count: {},
+            total_runs: 0
+        )
+
+
+# ============================================================================
+# Optimization Pipeline
+# ============================================================================
+
+class OptimizationPipeline:
+    """
+    Standard optimization pipelines for different levels.
+
+    Provides pre-configured pass sequences for common optimization scenarios.
+    """
+    level: OptLevel
+    passes: [text]  # Pass names
+
+
+# ============================================================================
+# OptimizationPipeline Methods (was: impl OptimizationPipeline:)
+# ============================================================================
+
+fn optimizationpipeline_for_level(level: OptLevel) -> OptimizationPipeline:
+        """
+        Create pipeline for given optimization level.
+
+        Pass ordering matters! Passes are run in the order they appear.
+
+        General strategy:
+        1. Cleanup passes (DCE, simplify)
+        2. Analysis passes (alias analysis, escape analysis)
+        3. Transform passes (inline, unroll, vectorize)
+        4. Final cleanup (DCE again)
+        """
+        match level:
+            case NoOpt:
+                # No optimization
+                OptimizationPipeline(level: level, passes: [])
+
+            case Size:
+                # Optimize for binary size
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "dead_code_elimination",    # Remove unused code
+                        "constant_folding",         # Fold constants
+                        "inline_small_functions",   # Inline only tiny functions (threshold: 50 bytes)
+                        "dead_code_elimination"     # Cleanup after inlining
+                    ]
+                )
+
+            case Speed:
+                # Optimize for execution speed (default release)
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "dead_code_elimination",    # Initial cleanup
+                        "constant_folding",         # Fold constants
+                        "copy_propagation",         # Propagate copies
+                        "common_subexpr_elim",      # Eliminate redundant computations
+                        "inline_functions",         # Inline functions (threshold: 500 bytes)
+                        "loop_invariant_motion",    # Hoist invariants
+                        "dead_code_elimination"     # Final cleanup
+                    ]
+                )
+
+            case Aggressive:
+                # Maximum optimization
+                OptimizationPipeline(
+                    level: level,
+                    passes: [
+                        "dead_code_elimination",
+                        "constant_folding",
+                        "copy_propagation",
+                        "common_subexpr_elim",
+                        "inline_aggressive",        # Aggressive inlining (threshold: 2000 bytes)
+                        "loop_invariant_motion",
+                        "loop_unroll",              # Unroll small loops
+                        "strength_reduction",       # Replace expensive ops with cheap ones
+                        "vectorization",            # Auto-vectorize loops
+                        "dead_code_elimination",    # Cleanup
+                        "constant_folding"          # Final constant folding
+                    ]
+                )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn optimize_module(module: MirModule, level: OptLevel) -> MirModule:
+    """
+    Convenience function to optimize a module.
+
+    Example:
+        val optimized = optimize_module(mir_module, OptLevel.Speed)
+    """
+    val pipeline = optimizationpipeline_for_level(level)
+    pipeline_optimize(pipeline, module)
+
+fn optimize_function(func: MirFunction, passes: [text]) -> MirFunction:
+    """
+    Run specific passes on a function.
+
+    Example:
+        val optimized = optimize_function(func, ["dead_code_elimination", "constant_folding"])
+    """
+    var result = func
+
+    for pass_name in passes:
+        result = run_named_pass(pass_name, result)
+
+    result
+
+# ============================================================================
+# Pass Dispatch
+# ============================================================================
+
+fn run_named_pass(pass_name: text, func: MirFunction) -> MirFunction:
+    """Dispatch optimization pass by name."""
+    match pass_name:
+        case "dead_code_elimination" | "dce":
+            var dce = create_dce_pass()
+            dce_run_on_function(dce, func)
+        case "constant_folding" | "const_fold":
+            var cf = create_const_fold_pass()
+            cf_run_on_function(cf, func)
+        case _:
+            # Unknown pass - return function unchanged
+            func
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export OptLevel, OptimizationPipeline
+export MirPass, PassManager, PassStatistics
+export optimize_module, optimize_function, run_named_pass

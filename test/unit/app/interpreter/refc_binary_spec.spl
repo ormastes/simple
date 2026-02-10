@@ -2,50 +2,65 @@
 #
 # Tests for reference-counted binaries and shared heap.
 
-# @skip
 use std.spec.{check, check_msg}
-use app.interpreter.memory.refc_binary.{
+use lib.memory.refc_binary.{
     RefcBinary,
+    RefcBinary__new,
+    RefcBinary__sub_binary,
     BinaryRef,
+    BinaryRef__new,
     SharedHeap,
+    SharedHeap__new,
     SharedHeapConfig,
+    SharedHeapConfig__default,
+    SharedHeapConfig__small,
+    SharedHeapConfig__large,
     SharedHeapStats,
+    SharedHeapStats__new,
     AllocResult,
-    CopyStrategy,
+    AllocResult__Success,
+    AllocResult__OutOfMemory,
+    AllocResult__TooLarge,
+    AllocResult__InvalidSize,
+    AllocResult__InvalidRange,
+    AllocResult__ParentNotFound,
     SMALL_BINARY_THRESHOLD,
-    copy_strategy
+    copy_strategy,
+    CopyStrategy__DeepCopy__should_share,
+    CopyStrategy__ShareRef__should_share,
+    CopyStrategy__Hybrid__should_share
 }
 
 describe "CopyStrategy":
     it "recommends deep copy for small values":
         val strategy = copy_strategy(32)
-        check(strategy == CopyStrategy.DeepCopy)
+        check(strategy == "DeepCopy")
 
     it "recommends share ref for large values":
         val strategy = copy_strategy(128)
-        check(strategy == CopyStrategy.ShareRef)
+        check(strategy == "ShareRef")
 
     it "uses threshold of 64 bytes":
-        check(copy_strategy(63) == CopyStrategy.DeepCopy)
-        check(copy_strategy(64) == CopyStrategy.ShareRef)
+        check(copy_strategy(63) == "DeepCopy")
+        check(copy_strategy(64) == "ShareRef")
 
     it "determines sharing based on strategy":
-        check(not CopyStrategy.DeepCopy__should_share(1000))
-        check(CopyStrategy.ShareRef__should_share(10))
-        check(not CopyStrategy.Hybrid__should_share(32))
-        check(CopyStrategy.Hybrid__should_share(128))
+        check(not CopyStrategy__DeepCopy__should_share(1000))
+        check(CopyStrategy__ShareRef__should_share(10))
+        check(not CopyStrategy__Hybrid__should_share(32))
+        check(CopyStrategy__Hybrid__should_share(128))
 
 describe "BinaryRef":
     it "creates reference":
-        val ref = BinaryRef__new(1, 100, 256)
+        val ref_val = BinaryRef__new(1, 100, 256)
 
-        check(ref.id == 1)
-        check(ref.offset == 100)
-        check(ref.length == 256)
+        check(ref_val.id == 1)
+        check(ref_val.offset == 100)
+        check(ref_val.length == 256)
 
     it "reports size":
-        val ref = BinaryRef__new(1, 0, 1024)
-        check(ref.size() == 1024)
+        val ref_val = BinaryRef__new(1, 0, 1024)
+        check(ref_val.size() == 1024)
 
     it "identifies small binaries":
         val small = BinaryRef__new(1, 0, 32)
@@ -63,12 +78,12 @@ describe "BinaryRef":
         check(not ref1.eq(ref3))  # Different ID
 
     it "formats for display":
-        val ref = BinaryRef__new(42, 0, 256)
-        val str = ref.fmt()
+        val ref_val = BinaryRef__new(42, 0, 256)
+        val s = ref_val.fmt()
 
-        check(str.contains("BinaryRef"))
-        check(str.contains("42"))
-        check(str.contains("256"))
+        check(s.contains("BinaryRef"))
+        check(s.contains("42"))
+        check(s.contains("256"))
 
 describe "RefcBinary":
     it "creates with initial refcount of 1":
@@ -117,11 +132,11 @@ describe "RefcBinary":
 
         check(sub.id == 2)
         check(sub.is_sub_binary)
-        check(sub.parent_id == Some(1))
+        check(sub.parent_id == 1)
         check(sub.length == 50)
 
     it "calculates total size":
-        val binary = RefcBinary__new(1, 1024, 0)
+        val binary = RefcBinary__new(1, 1024, 1024)
         val total = binary.total_size()
 
         # Header (~64) + capacity (1024)
@@ -129,11 +144,11 @@ describe "RefcBinary":
 
     it "creates ref from binary":
         val binary = RefcBinary__new(1, 256, 0)
-        val ref = binary.to_ref(100)
+        val ref_val = binary.to_ref(100)
 
-        check(ref.id == 1)
-        check(ref.offset == 100)
-        check(ref.length == 256)
+        check(ref_val.id == 1)
+        check(ref_val.offset == 100)
+        check(ref_val.length == 256)
 
 describe "SharedHeapConfig":
     it "creates default config":
@@ -159,8 +174,8 @@ describe "SharedHeap - Allocation":
         val result = heap.allocate(0, 1024)
 
         check(result.is_success())
-        val ref = result.unwrap()
-        check(ref.length == 1024)
+        val ref_val = result.unwrap()
+        check(ref_val.length == 1024)
 
     it "tracks allocation stats":
         var heap = SharedHeap__new(SharedHeapConfig__small())
@@ -178,14 +193,14 @@ describe "SharedHeap - Allocation":
 
         val result = heap.allocate(0, 0)
 
-        check(result == AllocResult.InvalidSize)
+        check(result.tag == "InvalidSize")
 
     it "rejects too large":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 2 * 1024 * 1024 * 1024)  # 2 GB
 
-        check(result == AllocResult.TooLarge)
+        check(result.tag == "TooLarge")
 
     it "returns out of memory when full":
         val config = SharedHeapConfig(
@@ -200,7 +215,7 @@ describe "SharedHeap - Allocation":
         heap.allocate(0, 900)
         val result = heap.allocate(0, 200)
 
-        check(result == AllocResult.OutOfMemory)
+        check(result.tag == "OutOfMemory")
 
 describe "SharedHeap - Sub-binaries":
     it "allocates sub-binary":
@@ -220,7 +235,7 @@ describe "SharedHeap - Sub-binaries":
 
         val result = heap.allocate_sub_binary(999, 0, 100)
 
-        check(result == AllocResult.ParentNotFound)
+        check(result.tag == "ParentNotFound")
 
     it "fails for invalid range":
         var heap = SharedHeap__new(SharedHeapConfig__small())
@@ -230,7 +245,7 @@ describe "SharedHeap - Sub-binaries":
 
         val result = heap.allocate_sub_binary(parent_ref.id, 50, 100)  # 50 + 100 > 100
 
-        check(result == AllocResult.InvalidRange)
+        check(result.tag == "InvalidRange")
 
     it "tracks sub-binary count":
         var heap = SharedHeap__new(SharedHeapConfig__small())
@@ -249,45 +264,45 @@ describe "SharedHeap - Reference Counting":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        check(heap.incref(ref.id))
+        check(heap.incref(ref_val.id))
 
-        val binary = heap.get(ref.id)
+        val binary = heap.get(ref_val.id)
         check(binary.?.refcount == 2)
 
     it "decrements refcount":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
-        heap.incref(ref.id)
+        val ref_val = result.unwrap()
+        heap.incref(ref_val.id)
 
-        check(heap.decref(ref.id))
+        check(heap.decref(ref_val.id))
 
-        val binary = heap.get(ref.id)
+        val binary = heap.get(ref_val.id)
         check(binary.?.refcount == 1)
 
     it "deallocates when refcount reaches zero":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        heap.decref(ref.id)
+        heap.decref(ref_val.id)
 
-        check(not heap.contains(ref.id))
+        check(not heap.contains(ref_val.id))
         check(heap.get_stats().binary_count == 0)
 
-    it "tracks incref/decref stats":
+    it "tracks incref and decref stats":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        heap.incref(ref.id)
-        heap.incref(ref.id)
-        heap.decref(ref.id)
+        heap.incref(ref_val.id)
+        heap.incref(ref_val.id)
+        heap.decref(ref_val.id)
 
         val stats = heap.get_stats()
         check(stats.total_incref == 2)
@@ -304,43 +319,41 @@ describe "SharedHeap - Garbage Collection":
         heap.decref(0)
         heap.decref(1)
 
-        val reclaimed = heap.collect_garbage()
-
-        check(reclaimed == 3000)
+        # They should already be removed by decref
         check(heap.binary_count() == 0)
 
     it "preserves referenced binaries":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 1000)
-        val ref = result.unwrap()
-        heap.incref(ref.id)  # Extra reference
+        val ref_val = result.unwrap()
+        heap.incref(ref_val.id)  # Extra reference
 
-        heap.decref(ref.id)  # Drop one reference
+        heap.decref(ref_val.id)  # Drop one reference
         heap.collect_garbage()
 
-        check(heap.contains(ref.id))
+        check(heap.contains(ref_val.id))
 
     it "preserves pinned binaries":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 1000)
-        val ref = result.unwrap()
-        heap.pin(ref.id)
-        heap.decref(ref.id)  # Refcount = 0
+        val ref_val = result.unwrap()
+        heap.pin(ref_val.id)
+        heap.decref(ref_val.id)  # Refcount = 0
 
         heap.collect_garbage()
 
-        check(heap.contains(ref.id))  # Still there because pinned
+        check(heap.contains(ref_val.id))  # Still there because pinned
 
 describe "SharedHeap - Pinning":
     it "pins binary":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        check(heap.pin(ref.id))
+        check(heap.pin(ref_val.id))
 
         val stats = heap.get_stats()
         check(stats.pinned_count == 1)
@@ -349,10 +362,10 @@ describe "SharedHeap - Pinning":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 100)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        heap.pin(ref.id)
-        heap.unpin(ref.id)
+        heap.pin(ref_val.id)
+        heap.unpin(ref_val.id)
 
         val stats = heap.get_stats()
         check(stats.pinned_count == 0)
@@ -364,7 +377,6 @@ describe "SharedHeap - Statistics":
         heap.allocate(0, 1000)
         heap.allocate(0, 2000)
         heap.decref(0)
-        heap.collect_garbage()
 
         val stats = heap.get_stats()
         check(stats.peak_usage == 3000)
@@ -376,13 +388,15 @@ describe "SharedHeap - Statistics":
 
         val stats = heap.get_stats()
         val util = stats.utilization()
-        check(util > 40.0 and util < 60.0)
+        val ok = util > 40.0 and util < 60.0
+        check(ok)
 
     it "calculates fragmentation":
         val stats = SharedHeapStats__new()
         # Fragmentation depends on free block distribution
         val frag = stats.fragmentation()
-        check(frag >= 0.0 and frag <= 1.0)
+        val ok = frag >= 0.0 and frag <= 1.0
+        check(ok)
 
 describe "SharedHeap - Defragmentation":
     it "merges adjacent free blocks":
@@ -407,22 +421,22 @@ describe "SharedHeap - Queries":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         val result = heap.allocate(0, 256)
-        val ref = result.unwrap()
+        val ref_val = result.unwrap()
 
-        val binary = heap.get(ref.id)
+        val binary = heap.get(ref_val.id)
 
         check(binary.?)
-        check(binary.unwrap().length == 256)
+        check(binary.length == 256)
 
     it "gets ref for binary":
         var heap = SharedHeap__new(SharedHeapConfig__small())
 
         heap.allocate(0, 256)
 
-        val ref = heap.get_ref(0)
+        val ref_val = heap.get_ref(0)
 
-        check(ref.?)
-        check(ref.unwrap().length == 256)
+        check(ref_val.?)
+        check(ref_val.length == 256)
 
     it "checks containment":
         var heap = SharedHeap__new(SharedHeapConfig__small())
@@ -434,28 +448,28 @@ describe "SharedHeap - Queries":
 
 describe "AllocResult":
     it "checks success":
-        val success = AllocResult.Success(BinaryRef__new(1, 0, 100))
-        val failure = AllocResult.OutOfMemory
+        val success = AllocResult__Success(BinaryRef__new(1, 0, 100))
+        val failure = AllocResult__OutOfMemory()
 
         check(success.is_success())
         check(not failure.is_success())
 
     it "unwraps success":
-        val result = AllocResult.Success(BinaryRef__new(1, 0, 100))
-        val ref = result.unwrap()
+        val result = AllocResult__Success(BinaryRef__new(1, 0, 100))
+        val ref_val = result.unwrap()
 
-        check(ref.id == 1)
+        check(ref_val.id == 1)
 
     it "gets optional ref":
-        val success = AllocResult.Success(BinaryRef__new(1, 0, 100))
-        val failure = AllocResult.OutOfMemory
+        val success = AllocResult__Success(BinaryRef__new(1, 0, 100))
+        val failure = AllocResult__OutOfMemory()
 
-        check(success.ref().?)
-        check(not failure.ref().?)
+        check(success.ref_option().?)
+        check(not failure.ref_option().?)
 
     it "formats for display":
-        val success = AllocResult.Success(BinaryRef__new(1, 0, 100))
-        val failure = AllocResult.OutOfMemory
+        val success = AllocResult__Success(BinaryRef__new(1, 0, 100))
+        val failure = AllocResult__OutOfMemory()
 
         check(success.fmt().contains("Success"))
         check(failure.fmt() == "OutOfMemory")

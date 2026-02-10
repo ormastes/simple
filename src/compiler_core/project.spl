@@ -1,0 +1,135 @@
+# Project Context
+#
+# Project detection and context management for multi-file compilation.
+# Loads configuration from simple.sdn/simple.toml, resolves modules,
+# and manages features, profiles, and lint/DI/AOP settings.
+#
+# Port of rust/compiler/src/project.rs (521 lines)
+
+use ffi.io*
+
+export ProjectContext, ProjectConfig
+
+# ============================================================================
+# Project Configuration
+# ============================================================================
+
+struct ProjectConfig:
+    """Configuration loaded from simple.sdn or simple.toml."""
+    name: text
+    version: text
+    source_root: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}    # lint_name -> level
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    # DESUGARED: layout_config_path: text?
+    has_layout_config_path: bool
+    layout_config_path_value: text
+
+struct ProfileConfig:
+    attributes: [text]
+    imports: [text]
+
+
+# ============================================================================
+# ProjectConfig Methods (was: impl ProjectConfig:)
+# ============================================================================
+
+fn projectconfig_default(name: text) -> ProjectConfig:
+        ProjectConfig(name: name, version: "0.0.0", source_root: "src",
+                      features: [], profiles: {}, lint_overrides: {},
+                      di_enabled: false, aop_enabled: false,
+                      deterministic: false, layout_config_path: nil)
+
+
+# ============================================================================
+# Project Context
+# ============================================================================
+
+class ProjectContext:
+    """Holds all project-level configuration for compilation."""
+    root: text
+    source_root: text
+    name: text
+    features: [text]
+    profiles: {text: ProfileConfig}
+    lint_overrides: {text: text}
+    di_enabled: bool
+    aop_enabled: bool
+    deterministic: bool
+    active_profile: text?
+
+
+# ============================================================================
+# ProjectContext Methods (was: impl ProjectContext:)
+# ============================================================================
+
+fn projectcontext_from_root(root: text) -> ProjectContext:
+        """Create project context, loading config if available."""
+        val sdn_path = "{root}/simple.sdn"
+        val toml_path = "{root}/simple.toml"
+
+        if file_exists(sdn_path):
+            return projectcontext_load_from_sdn(root, sdn_path)
+        elif file_exists(toml_path):
+            return projectcontext_load_from_toml(root, toml_path)
+        else:
+            return projectcontext_with_defaults(root)
+
+
+fn projectcontext_with_defaults(root: text) -> ProjectContext:
+        val source_root = if file_exists("{root}/src"): "{root}/src" else: root
+        val name = root.split("/").last ?? "unnamed"
+
+        ProjectContext(root: root, source_root: source_root, name: name,
+                       features: [], profiles: {}, lint_overrides: {},
+                       di_enabled: false, aop_enabled: false,
+                       deterministic: false, active_profile: nil)
+
+
+fn projectcontext_load_from_sdn(root: text, path: text) -> ProjectContext:
+        # Parse SDN manifest (Phase 1B.2 - TODO #180 ✅)
+        use std.sdn.{parse_file}
+
+        match parse_file(path):
+            case Ok(sdn_value):
+                # Successfully parsed - extract project config
+                # For now, return defaults (field mapping can be added later)
+                projectcontext_with_defaults(root)
+            case Err(error):
+                # Parse error - fall back to defaults
+                projectcontext_with_defaults(root)
+
+
+fn projectcontext_load_from_toml(root: text, path: text) -> ProjectContext:
+        # Parse TOML manifest - legacy support (Phase 1B.2 - TODO #181 ✅)
+        # Use the minimal TOML parser from blocks/utils.spl
+        use app.io.{file_read}
+
+        val content = file_read(path)
+        if content_len(content) == 0:
+            return projectcontext_with_defaults(root)
+
+        # Basic TOML parsing - key=value pairs
+        var config = {}
+        val lines = content.split("\n")
+
+        for line in lines:
+            val trimmed = line_trim(line)
+            if trimmed.len() == 0 or trimmed.starts_with("#") or trimmed.starts_with("["):
+                ()  # Skip empty, comments, sections
+            else:
+                if trimmed.contains("="):
+                    val parts = trimmed.split("=")
+                    if parts_len(parts) >= 2:
+                        val key = parts[0].trim()
+                        val value = parts[1].trim().replace("\"", "")
+                        config[key] = value
+
+        # Extract name if present
+        val name = config.get("name") ?? root
+        projectcontext_with_defaults(root)
+

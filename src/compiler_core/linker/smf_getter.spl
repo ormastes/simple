@@ -1,0 +1,141 @@
+# SMF Getter - Unified interface for loading SMF modules
+#
+# This module provides a unified interface for loading SMF modules from:
+# 1. Single SMF files (.smf)
+# 2. Library SMF archives (.lsm)
+#
+# The SmfGetter automatically detects the file type and provides a consistent
+# API for accessing SMF data regardless of the source.
+#
+# Usage:
+#   val getter = SmfGetter.new()
+#   getter.add_search_path("/usr/lib/simple")
+#   val smf_data = getter.get("std/io/mod")?
+
+use app.io.{file_read, file_exists, path_join}
+use compiler.linker.lib_smf.{LibSmfHeader, ModuleIndexEntry, LSMF_HEADER_SIZE, fnv1a_hash}
+use compiler.linker.lib_smf_reader.{LibSmfReader}
+use compiler.linker.smf_reader.{SmfReaderImpl}
+
+# ============================================================================
+# SMF Source Type
+# ============================================================================
+
+"""Type of SMF source."""
+enum SmfSourceType:
+    SingleFile       # Individual .smf file
+    LibraryFile      # Library .lsmf archive
+
+# ============================================================================
+# SMF Location
+# ============================================================================
+
+"""Location information for an SMF module."""
+struct SmfLocation:
+    module_name: text           # Module path (e.g., "std/io/mod")
+    source_type: SmfSourceType  # Single file or library
+    file_path: text             # Path to .smf or .lsmf file
+    offset: i64                 # Offset in file (0 for single files)
+    size: i64                   # Size of SMF data
+
+
+# ============================================================================
+# SmfLocation Methods (was: impl SmfLocation:)
+# ============================================================================
+
+fn smflocation_single_file(module_name: text, file_path: text, size: i64) -> SmfLocation:
+        SmfLocation(
+            module_name: module_name,
+            source_type: SmfSourceType.SingleFile,
+            file_path: file_path,
+            offset: 0,
+            size: size
+        )
+
+
+fn smflocation_library_module(module_name: text, lib_path: text, offset: i64, size: i64) -> SmfLocation:
+        SmfLocation(
+            module_name: module_name,
+            source_type: SmfSourceType.LibraryFile,
+            file_path: lib_path,
+            offset: offset,
+            size: size
+        )
+
+
+# ============================================================================
+# SMF Getter
+# ============================================================================
+
+"""Unified SMF loader supporting single files and libraries.
+
+The SmfGetter maintains:
+- Search paths for locating modules
+- Cache of library readers (avoiding repeated file reads)
+- Index of module locations (file path + offset)
+
+Example:
+    val getter = smfgetter_new()
+    getter.add_search_path("/usr/lib/simple")
+    getter.add_library("/usr/lib/simple/libstd.lsm")
+
+    val smf_data = getter.get("std/io/mod")?
+    val reader = getter.get_reader("std/io/mod")?
+"""
+struct SmfGetter:
+    search_paths: [text]                        # Directories to search
+    library_readers: Dict<text, LibSmfReader>   # Cached library readers
+    module_index: Dict<text, SmfLocation>       # Module name -> location
+    verbose: bool
+
+
+# ============================================================================
+# SmfGetter Methods (was: impl SmfGetter:)
+# ============================================================================
+
+fn smfgetter_new() -> SmfGetter:
+        SmfGetter(
+            search_paths: [],
+            library_readers: {},
+            module_index: {},
+            verbose: false
+        )
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+"""Convert text to bytes."""
+fn text_to_bytes(text: text) -> [u8]:
+    var bytes: [u8] = []
+    var i = 0
+    while i < text_len(text):
+        bytes_push(bytes, text[i] as u8)
+        i = i + 1
+    bytes
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+"""Create a getter with standard search paths.
+
+Returns:
+    SmfGetter with /usr/lib/simple and /usr/local/lib/simple
+"""
+fn create_standard_getter() -> SmfGetter:
+    var getter = smfgetter_new()
+    getter.add_search_path("/usr/lib/simple")
+    getter.add_search_path("/usr/local/lib/simple")
+    getter.add_search_path("/opt/simple/lib")
+    getter
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export SmfGetter
+export SmfLocation
+export SmfSourceType
+export create_standard_getter

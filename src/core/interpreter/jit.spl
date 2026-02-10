@@ -1,0 +1,145 @@
+# Core Interpreter — JIT Engine
+#
+# Seed-compilable JIT compilation support for the core interpreter.
+# Tracks function call counts and delegates to execution manager
+# when hot functions exceed the compilation threshold.
+#
+# Uses parallel arrays (no generics, no Dict<>) for seed compatibility.
+#
+# Architecture:
+#   1. Tree-walk all functions initially (cold path)
+#   2. Count calls per function
+#   3. When threshold reached, JIT compile via ExecutionManager SFFI
+#   4. Subsequent calls use native code (hot path)
+#   5. Fall back to tree-walk if JIT fails
+
+# ===== SFFI declarations for JIT backend =====
+extern fn rt_exec_manager_create(backend: text) -> i64
+extern fn rt_exec_manager_compile(handle: i64, mir_data: text) -> text
+extern fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64
+extern fn rt_exec_manager_has_function(handle: i64, name: text) -> bool
+extern fn rt_exec_manager_cleanup(handle: i64)
+
+# ===== JIT State (module-level parallel arrays) =====
+var jit_call_names: [text] = []      # function name
+var jit_call_values: [i64] = []      # call count per function
+var jit_compiled_names: [text] = []  # names of JIT-compiled functions
+var jit_threshold: i64 = 10
+var jit_handle: i64 = 0
+var jit_verbose: i64 = 0
+var jit_enabled: i64 = 0
+
+# ===== JIT Initialization =====
+
+fn jit_init(threshold: i64, verbose: i64):
+    jit_threshold = threshold
+    jit_verbose = verbose
+    jit_call_names = []
+    jit_call_values = []
+    jit_compiled_names = []
+    jit_handle = 0
+    if threshold < 999999:
+        jit_enabled = 1
+    else:
+        jit_enabled = 0
+
+fn jit_init_with_backend(threshold: i64, verbose: i64, backend: text):
+    jit_init(threshold, verbose)
+    if jit_enabled == 1:
+        jit_handle = rt_exec_manager_create(backend)
+        if jit_verbose == 1:
+            print "[jit] Initialized execution manager (handle={jit_handle})"
+
+fn jit_cleanup():
+    if jit_handle != 0:
+        rt_exec_manager_cleanup(jit_handle)
+        jit_handle = 0
+    jit_call_names = []
+    jit_call_values = []
+    jit_compiled_names = []
+    jit_enabled = 0
+
+# ===== Call Tracking =====
+
+fn jit_record_call(fn_name: text):
+    if jit_enabled == 0: return
+    # Find existing entry
+    var i: i64 = 0
+    for name in jit_call_names:
+        if name == fn_name:
+            jit_call_values[i] = jit_call_values[i] + 1
+            return
+        i = i + 1
+    # New entry
+    jit_call_names.push(fn_name)
+    jit_call_values.push(1)
+
+fn jit_get_call_count(fn_name: text) -> i64:
+    var i: i64 = 0
+    for name in jit_call_names:
+        if name == fn_name:
+            return jit_call_values[i]
+        i = i + 1
+    0
+
+# ===== Compilation Status =====
+
+fn jit_should_compile(fn_name: text) -> bool:
+    if jit_enabled == 0: return false
+    val count = jit_get_call_count(fn_name)
+    count >= jit_threshold
+
+fn jit_is_compiled(fn_name: text) -> bool:
+    for name in jit_compiled_names:
+        if name == fn_name: return true
+    false
+
+fn jit_mark_compiled(fn_name: text):
+    if jit_is_compiled(fn_name) == false:
+        jit_compiled_names.push(fn_name)
+        if jit_verbose == 1:
+            print "[jit] Marked as compiled: {fn_name}"
+
+# ===== JIT Compilation =====
+
+fn jit_try_compile(fn_name: text, mir_data: text) -> bool:
+    if jit_handle == 0: return false
+    if jit_is_compiled(fn_name): return true
+    if jit_verbose == 1:
+        print "[jit] Compiling: {fn_name} ({mir_data.len()} bytes MIR)"
+    val result = rt_exec_manager_compile(jit_handle, mir_data)
+    if result == "":
+        jit_mark_compiled(fn_name)
+        return true
+    if jit_verbose == 1:
+        print "[jit] Compilation failed for {fn_name}: {result}"
+    false
+
+# ===== JIT Execution =====
+
+fn jit_try_execute(fn_name: text, args: [i64]) -> i64:
+    # Returns the result or -1 if not JIT-compiled
+    if jit_handle == 0: return -1
+    if jit_is_compiled(fn_name) == false: return -1
+    val has_fn = rt_exec_manager_has_function(jit_handle, fn_name)
+    if has_fn == false: return -1
+    if jit_verbose == 1:
+        print "[jit] Executing natively: {fn_name}"
+    rt_exec_manager_execute(jit_handle, fn_name, args)
+
+# ===== Status Accessors =====
+
+fn jit_is_enabled() -> bool:
+    jit_enabled == 1
+
+fn jit_compiled_count() -> i64:
+    jit_compiled_names.len()
+
+fn jit_total_tracked() -> i64:
+    jit_call_names.len()
+
+export jit_init, jit_init_with_backend, jit_cleanup
+export jit_record_call, jit_get_call_count
+export jit_should_compile, jit_is_compiled, jit_mark_compiled
+export jit_try_compile, jit_try_execute
+export jit_is_enabled, jit_compiled_count, jit_total_tracked

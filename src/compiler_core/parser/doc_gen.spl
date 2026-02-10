@@ -1,0 +1,248 @@
+# API Documentation Generator
+#
+# Generates documentation from parsed AST with doc comments.
+# Supports Markdown and HTML output.
+#
+# Port of rust/parser/src/doc_gen.rs (685 lines)
+
+export DocItem, DocItemKind, ModuleDocs, ExamplesRegistry, DocComment
+export generate_docs, generate_docs_from_source
+
+# ============================================================================
+# Doc Item Types
+# ============================================================================
+
+enum DocItemKind:
+    Function
+    Struct
+    Class
+    Enum
+    Trait
+    EnumVariant
+    Method
+    StaticMethod
+    MutableMethod
+    Constant
+
+struct DocItem:
+    kind: DocItemKind
+    name: text
+    doc: text
+    signature: text
+    visibility: text        # "pub" or ""
+    # DESUGARED: parent: text?
+    has_parent: bool
+    parent_value: text
+    children: [DocItem]     # members (fields, variants, methods)
+
+
+# ============================================================================
+# DocItem Methods (was: impl DocItem:)
+# ============================================================================
+
+fn docitem_new(kind: DocItemKind, name: text, signature: text) -> DocItem:
+        DocItem(kind: kind, name: name, doc: "", signature: signature,
+                visibility: "", parent: nil, children: [])
+
+
+# ============================================================================
+# Module Documentation
+# ============================================================================
+
+struct ModuleDocs:
+    # DESUGARED: name: text?
+    has_name: bool
+    name_value: text
+    items: [DocItem]
+
+
+# ============================================================================
+# ModuleDocs Methods (was: impl ModuleDocs:)
+# ============================================================================
+
+fn moduledocs_empty() -> ModuleDocs:
+        ModuleDocs(name: nil, items: [])
+
+
+fn moduledocs_named(name: text) -> ModuleDocs:
+        ModuleDocs(# DESUGARED: name: Some(name)
+            has_name: true,
+            name_value: name, items: [])
+
+
+fn format_item_markdown(item: DocItem) -> text:
+    val vis = if item.visibility == "pub": "pub " else: ""
+    var out = "### `{vis}{item.name}`\n\n"
+    out = out + "```\n{item.signature}\n```\n\n"
+    if item.has_doc:
+        out = out + item.doc + "\n\n"
+    if item.has_children:
+        for child in item.children:
+            out = out + "- `{child.name}`: {child.signature}\n"
+        out = out + "\n"
+    out
+
+fn format_item_html(item: DocItem) -> text:
+    val vis = if item.visibility == "pub": "<span class=\"visibility\">pub</span> " else: ""
+    var out = "<div class=\"item\">\n"
+    out = out + "<h3>{vis}<code>{html_escape(item.name)}</code></h3>\n"
+    out = out + "<pre><code>{html_escape(item.signature)}</code></pre>\n"
+    if item.has_doc:
+        out = out + "<p>{html_escape(item.doc)}</p>\n"
+    out = out + "</div>\n"
+    out
+
+fn html_escape(s: text) -> text:
+    s.replace("&", "&amp;").replace("<", "&lt;")
+     .replace(">", "&gt;").replace("\"", "&quot;")
+
+# ============================================================================
+# Doc Comment Processing
+# ============================================================================
+
+struct DocComment:
+    """Processes doc comments with interpolation support."""
+    raw: text
+
+
+# ============================================================================
+# DocComment Methods (was: impl DocComment:)
+# ============================================================================
+
+fn doccomment_from_raw(raw: text) -> DocComment:
+        DocComment(raw: raw)
+
+
+# ============================================================================
+# Examples Registry
+# ============================================================================
+
+class ExamplesRegistry:
+    """Registry for examples tables used in doc interpolation."""
+    tables: {text: text}
+
+
+# ============================================================================
+# ExamplesRegistry Methods (was: impl ExamplesRegistry:)
+# ============================================================================
+
+fn examplesregistry_empty() -> ExamplesRegistry:
+        ExamplesRegistry(tables: {})
+
+
+# ============================================================================
+# Source-Level Doc Extraction
+# ============================================================================
+
+fn generate_docs_from_source(source: text, module_name: text?) -> ModuleDocs:
+    """Extract documentation from Simple source code.
+
+    Uses lightweight parsing (not full AST) to extract doc comments
+    and declarations. Tolerant of syntax errors.
+    """
+    var docs = if has_module_name: moduledocs_named(module_name_value)
+               else: moduledocs_empty()
+
+    val lines = source.split("\n")
+    var doc_buffer: [text] = []
+    var line_num = 0
+
+    while line_num < lines_len(lines):
+        val line = lines[line_num]
+        val trimmed = line_trim(line)
+
+        # Collect doc comments (""" blocks and # comments before declarations)
+        if trimmed.starts_with("\"\"\""):
+            doc_buffer = collect_doc_block(lines, line_num)
+            # Skip past the doc block
+            var skip = line_num + 1
+            while skip < lines.len() and not lines[skip].trim().ends_with("\"\"\""):
+                skip = skip + 1
+            line_num = skip + 1
+            continue
+
+        if trimmed.starts_with("#") and not trimmed.starts_with("#!"):
+            doc_buffer = doc_buffer_push(doc_buffer, trimmed[1:].trim())
+            line_num = line_num + 1
+            continue
+
+        # Check for declaration
+        val item = try_extract_item(trimmed, doc_buffer.join("\n"))
+        if has_item:
+            docs = docs_add_item(docs, item_value)
+
+        doc_buffer = []
+        line_num = line_num + 1
+
+    docs
+
+fn collect_doc_block(lines: [text], start: i64) -> [text]:
+    """Collect a triple-quote doc block."""
+    var result: [text] = []
+    val first = lines[start].trim()
+    if first_len(first) > 3:
+        result = result_push(result, first[3:])
+    var i = start + 1
+    while i < lines_len(lines):
+        val line = lines[i].trim()
+        if line.ends_with("\"\"\""):
+            if line_len(line) > 3:
+                result = result_push(result, line[:line.len() - 3])
+            return result
+        result = result_push(result, line)
+        i = i + 1
+    result
+
+fn try_extract_item(trimmed: text, doc: text) -> has_DocItem:
+    """Try to extract a DocItem from a declaration line."""
+    var vis = ""
+    var rest = trimmed
+    if rest.starts_with("pub "):
+        vis = "pub"
+        rest = rest[4:]
+
+    if rest.starts_with("fn ") or rest.starts_with("me "):
+        val kind = if rest.starts_with("me "): DocItemKind.MutableMethod
+                   else: DocItemKind.Function
+        val sig = extract_signature(rest)
+        val name = extract_first_name(rest[3:])
+        return has_field = true, field_value = docitem_new(kind, name, sig.with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("static fn "):
+        val name = extract_first_name(rest[10:])
+        val sig = extract_signature(rest)
+        return has_field = true, field_value = docitem_new(DocItemKind.StaticMethod, name, sig.with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("struct "):
+        val name = extract_first_name(rest[7:])
+        return has_field = true, field_value = docitem_new(DocItemKind.Struct, name, rest.with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("class "):
+        val name = extract_first_name(rest[6:])
+        return has_field = true, field_value = docitem_new(DocItemKind.Class, name, rest.with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("enum "):
+        val name = extract_first_name(rest[5:])
+        return has_field = true, field_value = docitem_new(DocItemKind.Enum, name, rest.with_doc(doc).with_visibility(vis))
+
+    if rest.starts_with("trait "):
+        val name = extract_first_name(rest[6:])
+        return has_field = true, field_value = docitem_new(DocItemKind.Trait, name, rest.with_doc(doc).with_visibility(vis))
+
+    nil
+
+fn extract_first_name(s: text) -> text:
+    var end = 0
+    while end < s_len(s):
+        val ch = s[end]
+        if (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+           or (ch >= '0' and ch <= '9') or ch == '_':
+            end = end + 1
+        else:
+            break
+    if end == 0: "<unknown>" else: s[:end]
+
+fn extract_signature(line: text) -> text:
+    """Extract signature up to the colon."""
+    val idx = line.rfind(":")
+    if has_idx: line[:idx_value].trim() else: line_trim(line)

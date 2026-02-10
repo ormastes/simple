@@ -60,7 +60,7 @@ CURRENT_PLATFORM="${OS}-${ARCH}"
 echo -e "${GREEN}Current platform: $CURRENT_PLATFORM${NC}"
 
 # Create bootstrap directories
-mkdir -p "$PROJECT_ROOT/bin/bootstrap"
+mkdir -p "$PROJECT_ROOT/bin/release"
 
 # Build for each platform
 for platform in "${!PLATFORMS[@]}"; do
@@ -96,7 +96,7 @@ for platform in "${!PLATFORMS[@]}"; do
     fi
 
     # Copy binary to bootstrap directory
-    mkdir -p "$PROJECT_ROOT/bin/bootstrap/$platform"
+    mkdir -p "$PROJECT_ROOT/bin/release/$platform"
 
     if [[ "$platform" == windows-* ]]; then
         ext=".exe"
@@ -105,7 +105,7 @@ for platform in "${!PLATFORMS[@]}"; do
     fi
 
     source_bin="$PROJECT_ROOT/target/$target/release/simple$ext"
-    dest_bin="$PROJECT_ROOT/bin/bootstrap/$platform/simple$ext"
+    dest_bin="$PROJECT_ROOT/bin/release/$platform/simple$ext"
 
     if [ -f "$source_bin" ]; then
         cp "$source_bin" "$dest_bin"
@@ -129,7 +129,7 @@ for platform in "${!PLATFORMS[@]}"; do
         ext=""
     fi
 
-    binary="$PROJECT_ROOT/bin/bootstrap/$platform/simple$ext"
+    binary="$PROJECT_ROOT/bin/release/$platform/simple$ext"
     if [ -f "$binary" ]; then
         size=$(ls -lh "$binary" | awk '{print $5}')
         echo -e "${GREEN}✓ $platform: $size${NC}"
@@ -140,4 +140,4 @@ done
 
 echo ""
 echo -e "${GREEN}Bootstrap build complete!${NC}"
-echo "Binaries located in: bin/bootstrap/"
+echo "Binaries located in: bin/release/"

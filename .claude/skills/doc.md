@@ -481,7 +481,7 @@ users |id, name, role|
 ### Formatting
 - **Headings** - Use semantic hierarchy (# → ## → ###)
 - **Lists** - Bullet points for items, numbered for steps
-- **Code blocks** - Always specify language (```simple, ```rust, ```bash)
+- **Code blocks** - Always specify language (```simple, ```bash, ```sdn)
 - **Tables** - For comparisons and reference data
 - **Diagrams** - ASCII art for simple diagrams
 
@@ -520,7 +520,7 @@ Run doc generator to create API docs from SSpec.
 
 ```bash
 # Generate documentation from specs
-./rust/target/debug/simple src/std/test/features/generate_docs.spl
+bin/simple src/std/test/features/generate_docs.spl
 ```
 
 ## Common Pitfalls
@@ -554,21 +554,9 @@ Include setup, usage, and cleanup in examples.
 ### Doc Generation
 ```bash
 # Generate docs from SSpec tests
-./rust/target/debug/simple src/std/test/features/generate_docs.spl
+bin/simple src/std/test/features/generate_docs.spl
 
 # Outputs to: doc/spec/generated/
-```
-
-### Link Checking
-```bash
-# Verify all internal links work
-./scripts/check_doc_links.sh
-```
-
-### Style Linting
-```bash
-# Check markdown formatting
-make lint-docs
 ```
 
 ## Examples from Codebase

@@ -6,66 +6,36 @@
 ```bash
 # Set log level
 SIMPLE_LOG=debug bin/simple file.spl
-RUST_LOG=debug bin/simple file.spl
 
 # Specific module
-SIMPLE_LOG=simple_compiler::interpreter=trace bin/simple file.spl
-
-# Multiple modules
-SIMPLE_LOG=simple_compiler=debug,simple_runtime=trace bin/simple file.spl
+SIMPLE_LOG=interpreter=trace bin/simple file.spl
 ```
 
 ### GC Logging
 ```bash
 # Enable GC debug output
 bin/simple --gc-log file.spl
-
-# See allocation/collection events
-SIMPLE_LOG=simple_runtime::memory::gc=debug bin/simple file.spl
 ```
 
 ## Interpreter Debugging
 
 ### Interpreter Modules
 ```
-src/compiler/src/
-├── interpreter.rs          # Main entry point
-├── interpreter_call.rs     # Function calls
-├── interpreter_control.rs  # Control flow (if, match, loops)
-├── interpreter_context.rs  # Execution context
-├── interpreter_extern.rs   # External function bindings
-├── interpreter_ffi.rs      # FFI bridge
-├── interpreter_helpers.rs  # Utilities
-├── interpreter_macro.rs    # Macro expansion
-└── interpreter_method.rs   # Method dispatch
+src/app/interpreter/
+├── core.spl      # Main entry point
+├── call.spl      # Function calls
+├── module.spl    # Module loading
+└── expr.spl      # Expression evaluation
 ```
 
 ### Add Debug Tracing
-```rust
-use tracing::{debug, trace, instrument};
-
-#[instrument(skip(self))]
-fn interpret_expr(&mut self, expr: &Expr) -> Result<Value> {
-    trace!(?expr, "interpreting expression");
-    // ...
-    debug!(result = ?value, "expression result");
-    Ok(value)
-}
-```
-
-### Value Inspection
-```rust
-// In interpreter code
-use crate::value::Value;
-
-// Debug print runtime values
-eprintln!("Value: {:?}", value);
-eprintln!("Type: {:?}", value.type_of());
-
-// For RuntimeValue (tagged pointer)
-use simple_runtime::value::RuntimeValue;
-eprintln!("Tag: {:?}", rv.tag());
-eprintln!("Is heap: {}", rv.is_heap_object());
+```simple
+# Add print-based debugging in Simple code
+fn interpret_expr(expr):
+    print "DEBUG: interpreting expression: {expr}"
+    val result = evaluate(expr)
+    print "DEBUG: result = {result}"
+    result
 ```
 
 ## Codegen Debugging
@@ -87,12 +57,11 @@ bin/simple --emit-ast --emit-hir --emit-mir file.spl
 
 ### Compilability Analysis
 Check why code falls back to interpreter:
-```rust
-// src/compiler/src/compilability.rs
-// 20+ fallback reasons tracked
-
-// In logs, look for:
-// "Falling back to interpreter: <reason>"
+```bash
+# In logs, look for:
+# "Falling back to interpreter: <reason>"
+# 20+ fallback reasons tracked
+SIMPLE_LOG=debug bin/simple --compile file.spl
 ```
 
 ### Cranelift Debug
@@ -117,28 +86,9 @@ Tags:
 - 0b11: Symbol
 ```
 
-### Heap Object Inspection
-```rust
-use simple_runtime::value::{HeapHeader, HeapObjectType};
-
-// Check heap object type
-if let Some(header) = rv.as_heap_header() {
-    eprintln!("Object type: {:?}", header.object_type);
-    eprintln!("Size: {}", header.size);
-}
-```
-
 ## Test Debugging
 
-### Run Single Test with Output
-```bash
-simple build rust test -p simple-driver test_name -- --nocapture
-
-# With logging
-RUST_LOG=debug simple build rust test -p simple-driver test_name -- --nocapture
-```
-
-### Debug Simple Test
+### Run Single Test
 ```bash
 # Run with verbose output
 bin/simple --verbose src/std/test/unit/core/test_spec.spl
@@ -157,7 +107,7 @@ SIMPLE_STACK_OVERFLOW_DETECTION=1 bin/simple file.spl
 # Set custom recursion depth limit (default: 1000)
 SIMPLE_MAX_RECURSION_DEPTH=500 bin/simple file.spl
 ```
-- Implemented in `interpreter_state.rs` (AtomicUsize + RAII guard)
+- Implemented with AtomicUsize + RAII guard
 - ~2 atomic ops per function call (Relaxed ordering)
 - Error: `StackOverflow { depth, limit, function_name }`
 
@@ -169,14 +119,14 @@ SIMPLE_TIMEOUT_SECONDS=30 bin/simple file.spl
 # Short timeout for testing infinite loops
 SIMPLE_TIMEOUT_SECONDS=1 bin/simple loop_test.spl
 ```
-- Watchdog thread checks every 100ms via `watchdog.rs`
+- Watchdog thread checks every 100ms
 - Zero overhead on fast path (single AtomicBool load, Relaxed)
 - Checked at loop back-edges alongside `check_interrupt!()` and `check_execution_limit!()`
 
-### Crash Detection (catch_unwind)
-- `run_file_with_args` and `run_code` in `cli/basic.rs` wrap execution in `catch_unwind`
-- Panics produce: `fatal: interpreter crashed: <message>` (exit code 101)
-- Panic hook in `cli/init.rs` logs backtrace to stderr and tracing
+### Crash Detection
+- Runtime wraps execution to catch crashes
+- Crashes produce: `fatal: interpreter crashed: <message>` (exit code 101)
+- Backtrace logged to stderr
 
 ### Memory Leak Detection
 ```bash
@@ -184,7 +134,7 @@ SIMPLE_TIMEOUT_SECONDS=1 bin/simple loop_test.spl
 SIMPLE_LEAK_DETECTION=1 bin/simple file.spl
 ```
 - Tracks post-GC heap size over 10 cycles
-- Warns via `tracing::warn!` if heap grows >10% over window
+- Warns if heap grows >10% over window
 - Zero overhead when disabled; runs only in GC collection path
 
 ### Execution Limit (existing)
@@ -192,15 +142,6 @@ SIMPLE_LEAK_DETECTION=1 bin/simple file.spl
 # Set instruction count limit (default: 10M, 0 = disabled)
 SIMPLE_EXECUTION_LIMIT=1000000 bin/simple file.spl
 SIMPLE_EXECUTION_LIMIT_ENABLED=false bin/simple file.spl
-```
-
-### Sanitizer Support
-```bash
-# Address Sanitizer (requires nightly)
-RUSTFLAGS="-Zsanitizer=address" simple build rust test -p simple-driver
-
-# Valgrind
-valgrind --leak-check=full bin/simple file.spl
 ```
 
 ### Env Var Summary
@@ -216,39 +157,27 @@ valgrind --leak-check=full bin/simple file.spl
 ## Common Issues
 
 ### "Falling back to interpreter"
-- Check `compilability.rs` for reason
 - Usually: unsupported MIR instruction, complex pattern, dynamic dispatch
+- Check logs with `SIMPLE_LOG=debug` for specific fallback reason
 
 ### Memory Issues
 - Enable GC logging: `--gc-log`
-- Check for leaks with `SIMPLE_LOG=simple_runtime::memory=debug`
 - Enable leak detection: `SIMPLE_LEAK_DETECTION=1`
 
 ### Type Errors
 - Export HIR: `--emit-hir` to see inferred types
-- Check unification in `src/type/src/lib.rs`
 
 ### Pattern Match Failures
-- MIR patterns in `src/compiler/src/mir/types.rs`
-- PatternTest/PatternBind instructions
+- PatternTest/PatternBind MIR instructions
+- Check exhaustiveness with `--emit-mir`
 
 ## Useful Debug Patterns
 
-### Conditional Breakpoint (in tests)
-```rust
-#[test]
-fn debug_specific_case() {
-    if std::env::var("DEBUG_TEST").is_ok() {
-        // Extra debug output
-        eprintln!("Debug info...");
-    }
-}
-```
-
-### Panic Location
-```bash
-RUST_BACKTRACE=1 simple build rust test -p simple-driver test_name
-RUST_BACKTRACE=full simple build rust test -p simple-driver test_name
+### Conditional Debug Output (in tests)
+```simple
+# Add conditional debug output
+if env_get("DEBUG_TEST") != "":
+    print "Debug info..."
 ```
 
 ## MCP-Based Debugging (NEW)
@@ -272,17 +201,17 @@ bin/simple src/app/mcp/main.spl json src/compiler/driver.spl
 ### Bootstrap Debugging
 ```bash
 # Run bootstrap with debug capture
-./scripts/capture_bootstrap_debug.sh
+script/capture_bootstrap_debug.sh
 
 # Run specific stage
-./scripts/bootstrap.sh --stage=1
-./scripts/bootstrap.sh --stage=2
+script/bootstrap.sh --stage=1
+script/bootstrap.sh --stage=2
 
 # Verify determinism
-./scripts/bootstrap.sh --verify
+script/bootstrap.sh --verify
 
 # Extended multi-generation test
-bin/simple scripts/bootstrap_extended.spl --generations=5
+bin/simple script/bootstrap_extended.spl --generations=5
 ```
 
 ### Debug Instrumentation Points
@@ -318,19 +247,19 @@ bin/simple scripts/bootstrap_extended.spl --generations=5
 **Issue: Bootstrap timeout (>60s)**
 - Large debug output slowing compilation
 - Use `SIMPLE_LOG=warn` to reduce verbosity
-- Profile with: `time ./scripts/bootstrap.sh --stage=1`
+- Profile with: `time script/bootstrap.sh --stage=1`
 
 ### Automated Bug Detection
 
 **Test Dictionary Semantics:**
 ```bash
-bin/simple scripts/test_dict_semantics.spl
+bin/simple script/test_dict_semantics.spl
 # Should show: "ALL TESTS PASSED"
 ```
 
 **MCP Debug Script:**
 ```bash
-bin/simple scripts/mcp_debug_bootstrap.spl
+bin/simple script/mcp_debug_bootstrap.spl
 # Auto-detects common bug patterns
 ```
 
@@ -351,13 +280,13 @@ cat doc/bug/bug_db.sdn
 
 1. **Capture Debug Output:**
    ```bash
-   ./scripts/capture_bootstrap_debug.sh
-   # Saves to: target/bootstrap_debug_TIMESTAMP.log
+   script/capture_bootstrap_debug.sh
+   # Saves to: build/bootstrap_debug_TIMESTAMP.log
    ```
 
 2. **Extract Key Messages:**
    ```bash
-   grep -E "\[phase3\]|\[aot\]" target/bootstrap_debug_*.log
+   grep -E "\[phase3\]|\[aot\]" build/bootstrap_debug_*.log
    ```
 
 3. **Identify Loss Point:**
@@ -374,16 +303,14 @@ cat doc/bug/bug_db.sdn
 5. **Apply Fix & Test:**
    ```bash
    # After fixing
-   simple build
-   ./scripts/bootstrap.sh --verify
+   bin/simple build
+   script/bootstrap.sh --verify
    ```
 
 ## See Also
 
-- `src/runtime/src/memory/gc.rs` - GC implementation
-- `src/compiler/src/value.rs` - Value enum, Env
-- `src/runtime/src/value/` - RuntimeValue (9 modules)
 - `doc/codegen_technical.md` - Codegen details
 - `doc/bug/bug_db.sdn` - Bug tracking database
-- `scripts/mcp_debug_bootstrap.spl` - MCP debugger
-- `scripts/bootstrap_extended.spl` - Multi-gen bootstrap tester
+- `src/app/mcp/` - MCP server and debugging tools
+- `src/app/interpreter/` - Interpreter modules
+- `src/compiler/` - Compiler source (Pure Simple)

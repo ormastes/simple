@@ -4,24 +4,43 @@ SSpec is Simple's BDD testing framework that generates documentation from tests.
 
 ## Quick Start
 
-```simple
-import std.spec
+`describe`, `it`, and `expect` are **built-in** to the runtime -- no import needed.
 
+```simple
 describe "Calculator":
     context "addition":
         it "adds two numbers":
-            expect 2 + 2 == 4
+            expect(2 + 2).to_equal(4)
 ```
 
-Run: `simple test` or `simple build rust test -p simple-driver simple_stdlib`
+Run: `bin/simple test` or `bin/simple test path/to/spec.spl`
 
-## Complete Workflow: Test → Documentation
+## Built-in Matchers Reference
+
+The runtime provides these matchers on `expect(value)`:
+
+| Matcher | Usage | Description |
+|---------|-------|-------------|
+| `.to_equal(expected)` | `expect(x).to_equal(42)` | Equality check |
+| `.to_be(expected)` | `expect(x).to_be(42)` | Identity/equality check |
+| `.to_be_nil` | `expect(x).to_be_nil` | Nil check |
+| `.to_contain(item)` | `expect(list).to_contain(3)` | Collection/string contains |
+| `.to_start_with(prefix)` | `expect(s).to_start_with("he")` | String prefix |
+| `.to_end_with(suffix)` | `expect(s).to_end_with("lo")` | String suffix |
+| `.to_be_greater_than(n)` | `expect(10).to_be_greater_than(5)` | Numeric comparison |
+| `.to_be_less_than(n)` | `expect(5).to_be_less_than(10)` | Numeric comparison |
+
+**Important:** Use `.to_equal()` style, NOT `.to(eq())` style. The runtime does not support the `to(matcher())` pattern.
+
+**Boolean checks:** Use `.to_equal(true)` and `.to_equal(false)` -- there are no `.to_be_true()` or `.to_be_false()` matchers.
+
+## Complete Workflow: Test -> Documentation
 
 ### 1. Create Spec File from Template
 
 ```bash
 # Copy template to your feature directory
-cp .claude/templates/sspec_template.spl simple/test/system/features/my_feature/my_feature_spec.spl
+cp .claude/templates/sspec_template.spl test/my_feature_spec.spl
 ```
 
 ### 2. Write Module-Level Documentation
@@ -61,7 +80,7 @@ Basic usage examples.
 ### 3. Write Tests with Documentation
 
 ```simple
-import std.spec
+# No import needed -- describe/it/expect are built-in
 
 describe "MyFeature":
     """
@@ -78,53 +97,39 @@ describe "MyFeature":
         """
 
         it "does expected behavior":
-            expect actual to eq expected
+            expect(actual).to_equal(expected)
 ```
 
 ### 4. Run Tests
 
 ```bash
 # Run your spec
-simple build rust test -p simple-driver simple_stdlib_system_my_feature
+bin/simple test test/my_feature_spec.spl
 
-# Or run directly
-./rust/target/debug/simple simple/test/system/features/my_feature/my_feature_spec.spl
+# Run all tests
+bin/simple test
+
+# Run with filtering
+bin/simple test --tag=integration
+bin/simple test --match "Stack when empty"
+bin/simple test --fail-fast
 ```
 
 ### 5. Generate Documentation
 
-**TWO options:**
-
-#### Option A: Full Generation (Recommended)
-
-Uses the newer `sspec_docgen` system with metadata extraction and validation:
-
 ```bash
-# Generate docs for all feature specs
-cargo run --bin gen-sspec-docs -- simple/test/system/features/**/*_spec.spl
+# Generate docs for feature specs
+bin/simple doc-gen
 
-# Output: docs/spec/*.md + docs/spec/README.md (index)
+# Output: doc/spec/generated/
 ```
-
-#### Option B: Simple Generation
-
-Uses the older system for quick single-file docs:
-
-```bash
-# Generate single spec
-simple spec-gen --input simple/test/system/features/ --output doc/spec/generated/
-```
-
-**Use Option A** for feature specs - it extracts metadata, validates completeness, and generates an organized index.
 
 ### 6. Review Generated Docs
 
 ```bash
-# Open the index
-cat docs/spec/README.md
-
-# View your feature doc
-cat docs/spec/my_feature_spec.md
+# View generated docs
+cat doc/spec/generated/README.md
+cat doc/spec/generated/my_feature_spec.md
 ```
 
 The generator:
@@ -138,10 +143,14 @@ The generator:
 
 ### Location
 ```
+test/
+  lib/           # Library tests
+  compiler/      # Compiler tests
+  app/           # Application tests
 src/std/test/
-  unit/           # Fast, isolated (branch/condition coverage)
-  integration/    # Public function touch (100%)
-  system/         # Public type touch (100%)
+  unit/          # Fast, isolated (branch/condition coverage)
+  integration/   # Public function touch (100%)
+  system/        # Public type touch (100%)
 ```
 
 ### Naming
@@ -160,11 +169,11 @@ describe "Feature":
 
     context "when empty":
         it "returns zero":
-            expect [].len() == 0
+            expect([].len()).to_equal(0)
 
     context "when populated":
         it "has items":
-            expect [1, 2, 3].len() == 3
+            expect([1, 2, 3].len()).to_equal(3)
 ```
 
 ### Hooks
@@ -173,8 +182,6 @@ describe "Feature":
 |------|-------|-------|
 | `before_each:` | per test | outer -> inner |
 | `after_each:` | per test | inner -> outer |
-| `before_all:` | per group | once |
-| `after_all:` | per group | once |
 
 ```simple
 context "with setup":
@@ -183,7 +190,7 @@ context "with setup":
     after_each:
         cleanup()
     it "test":
-        expect true
+        expect(true).to_equal(true)
 ```
 
 ### Fixtures
@@ -212,72 +219,17 @@ context_def :as_admin:
 describe "Dashboard":
     context :as_admin:
         it "shows admin panel":
-            expect user.admin?
+            expect(user.admin).to_equal(true)
 ```
 
-## Matchers Reference
+## Test Types
 
-### Equality
-```simple
-expect value to eq expected
-expect value to be expected
-expect value to be_nil
-```
-
-### Comparison
-```simple
-expect 10 to gt 5       # greater than
-expect 5 to lt 10       # less than
-expect 10 to gte 10     # >=
-expect 5 to lte 10      # <=
-```
-
-### Collections
-```simple
-expect [1, 2, 3] to include 2
-expect [1, 2, 3] to have_length 3
-expect [] to be_empty
-```
-
-### Strings
-```simple
-expect "hello world" to include_string "world"
-expect "hello" to start_with "hel"
-expect "hello" to end_with "lo"
-expect "" to be_blank
-```
-
-### Errors
-```simple
-expect_raises ValueError:
-    raise ValueError("bad")
-
-expect_raises:
-    risky_operation()
-```
-
-### Negation
-```simple
-expect value not_to eq other
-expect [1] not_to be_empty
-```
-
-## Gherkin-Style (System Tests)
-
-```simple
-examples addition:
-    a    b    result
-    1    2    3
-    10   20   30
-
-feature Calculator:
-    scenario outline Adding:
-        given fresh calculator:
-        when add <a>:
-        when add <b>:
-        then value is <result>:
-        examples addition:
-```
+| Type | Keyword | Behavior |
+|------|---------|----------|
+| Regular | `it "..."` | Runs by default |
+| Slow | `slow_it "..."` | Auto-ignored, run with `--only-slow` |
+| Skipped | `skip_it "..."` | Skipped in interpreter, runs in compiled mode |
+| Pending | `pending "reason"` | Marked as pending |
 
 ## Documentation Generation
 
@@ -291,31 +243,31 @@ SSpec uses triple-quoted strings (`"""`) as **full markdown docstrings** that ge
 """
 # Feature Name Specification
 
-**Feature IDs:** #100-110              ← REQUIRED: Your feature ID range
-**Category:** Language                 ← REQUIRED: Choose one category
-**Difficulty:** 3/5                    ← OPTIONAL: 1-5 rating
-**Status:** Implemented                ← REQUIRED: Current status
+**Feature IDs:** #100-110              <- REQUIRED: Your feature ID range
+**Category:** Language                 <- REQUIRED: Choose one category
+**Difficulty:** 3/5                    <- OPTIONAL: 1-5 rating
+**Status:** Implemented                <- REQUIRED: Current status
 
-## Overview                            ← REQUIRED: What & Why
+## Overview                            <- REQUIRED: What & Why
 
 High-level description of the feature and its purpose.
 
-## Key Concepts                        ← RECOMMENDED
+## Key Concepts                        <- RECOMMENDED
 
 | Concept | Description |
 |---------|-------------|
 | Term1   | Definition  |
 
-## Related Specifications               ← OPTIONAL
+## Related Specifications               <- OPTIONAL
 
 - [Types](types.md) - Related spec
 - [Functions](functions.md) - Related spec
 
-## Examples                             ← RECOMMENDED
+## Examples                             <- RECOMMENDED
 
 ```simple
 # Working code example
-val result = use_feature()
+result = use_feature()
 ```
 """
 ```
@@ -366,8 +318,7 @@ Standard markdown link syntax works inside docstrings:
 - [See Overview](#overview)
 
 ### External Links
-- [Rust Documentation](https://doc.rust-lang.org)
-- [GitHub Issue](https://github.com/org/repo/issues/123)
+- [Simple Language](https://github.com/org/simple)
 
 ### Anchor Links
 Use `{#anchor-name}` for custom anchors:
@@ -376,48 +327,6 @@ Use `{#anchor-name}` for custom anchors:
 
 Then link: [Go to section](#custom-anchor)
 """
-```
-
-### Doc Structure in Specs
-
-```simple
-"""
-# Feature Name
-
-**Status:** Stable
-**Feature IDs:** #10-19
-
-## Overview
-High-level description.
-
-## Related Specifications
-- [Types](types.md) - Type system
-- [Memory](memory.md) - Ownership rules
-"""
-
-## Test: Basic Usage
-
-"""
-### Scenario: Simple case
-Validates basic behavior.
-
-See [Types spec](types.md) for type details.
-"""
-test "basic test":
-    assert true
-```
-
-### Generate Docs
-
-```bash
-# Using gen-sspec-docs binary
-cargo run --bin gen-sspec-docs -- tests/specs/*_spec.spl
-
-# Output to specific directory
-cargo run --bin gen-sspec-docs -- tests/specs/*.spl --output doc/spec/generated/
-
-# Using spec_gen.py script
-python scripts/spec_gen.py --input tests/specs/syntax_spec.spl
 ```
 
 ### Generated Output Location
@@ -441,139 +350,41 @@ The generator creates an index with:
 ## Running Tests
 
 ```bash
-# All stdlib tests
-simple build rust test -p simple-driver simple_stdlib
+# All tests
+bin/simple test
 
-# By layer
-simple build rust test -p simple-driver simple_stdlib_unit
-simple build rust test -p simple-driver simple_stdlib_system
+# Specific file
+bin/simple test test/my_feature_spec.spl
 
-# Specific test
-simple build rust test -p simple-driver simple_stdlib_unit_core_string_spec
+# List tests without running
+bin/simple test --list
 
-# Direct interpreter
-./rust/target/debug/simple src/std/test/unit/core/arithmetic_spec.spl
+# Filter by tag
+bin/simple test --tag=integration
 
-# With options
-simple test --tag slow
-simple test --fail-fast
-simple test --match "Stack when empty"
+# Run only slow tests
+bin/simple test --only-slow
+
+# Match by name
+bin/simple test --match "Stack when empty"
+
+# Fail fast
+bin/simple test --fail-fast
+
+# Run tracking
+bin/simple test --list-runs
+bin/simple test --cleanup-runs
+bin/simple test --prune-runs=50
 ```
 
 ## Coverage Measurement
 
-### Quick Commands
-
 ```bash
-make coverage              # HTML report -> target/coverage/html/
-make coverage-summary      # Console summary
-make coverage-all          # All report types
+# Generate coverage
+bin/simple build coverage
+
+# Coverage data location: .coverage/coverage.sdn
 ```
-
-### By Test Level
-
-```bash
-# Unit: branch/condition (100% target)
-make coverage-unit
-
-# Integration: public function touch (100% target)
-make coverage-integration
-
-# System: class/struct method touch (100% target)
-make coverage-system
-
-# Merged: unit + environment
-make coverage-merged
-```
-
-### Full Test Mode
-
-```bash
-# Run tests + generate all reports
-make test-full
-
-# Quick (no extended reports)
-make test-full-quick
-
-# With threshold check
-make test-full-check
-SIMPLE_COV_THRESHOLD=80 make test-full-check
-```
-
-### Coverage Thresholds
-
-```bash
-make coverage-check        # Verify all thresholds (100%)
-make coverage-check-unit   # Unit only
-make coverage-check-system # System only
-```
-
-### Reports Location
-
-```
-target/coverage/
-  html/index.html          # Visual HTML report
-  coverage.json            # Machine-readable
-  unit/                    # Unit coverage
-  integration/             # Integration coverage
-  system/                  # System coverage
-  extended/                # Extended analysis
-```
-
-## Code Duplication Detection
-
-### Quick Check
-
-```bash
-make duplication           # Full report -> target/duplication/
-```
-
-### Configuration
-
-Uses `.jscpd.json`:
-- Threshold: 2%
-- Min lines: 5
-- Min tokens: 50
-
-### Manual Run
-
-```bash
-# Rust source
-jscpd src/ --reporters html,console --output target/duplication \
-    --min-lines 5 --min-tokens 50 --format rust
-
-# Simple source
-jscpd simple/ --reporters html,console --output target/duplication \
-    --min-lines 5 --min-tokens 50 --format simple
-```
-
-### Fallback (No jscpd)
-
-```bash
-make duplication-simple    # Basic pattern detection
-```
-
-## Pre-Commit Check
-
-```bash
-make check                 # fmt + lint + test
-make check-full            # + coverage + duplication
-```
-
-## Install Tools
-
-```bash
-make install-tools         # cargo-llvm-cov, cargo-audit, cargo-outdated
-npm install -g jscpd       # Duplication detection
-```
-
-## Critical Rules
-
-- NEVER add `#[ignore]` without user approval
-- NEVER skip failing tests as a "fix"
-- ALWAYS fix root cause or ask user
-- One assertion concept per test
-- Clear test names: `it "adds two positive numbers":` not `it "works":`
 
 ## Lean Verification Integration
 
@@ -597,9 +408,17 @@ See [architecture skill](/architecture) for verification workflow.
 
 Generate Lean from verified code:
 ```bash
-simple gen-lean compare           # Check alignment
-simple gen-lean write --force     # Regenerate Lean files
+bin/simple gen-lean compare           # Check alignment
+bin/simple gen-lean write --force     # Regenerate Lean files
 ```
+
+## Critical Rules
+
+- NEVER add `#[ignore]` without user approval
+- NEVER skip failing tests as a "fix"
+- ALWAYS fix root cause or ask user
+- One assertion concept per test
+- Clear test names: `it "adds two positive numbers":` not `it "works":`
 
 ## Quick Reference
 
@@ -607,7 +426,7 @@ simple gen-lean write --force     # Regenerate Lean files
 
 1. **Copy template:**
    ```bash
-   cp .claude/templates/sspec_template.spl simple/test/system/features/my_feature/my_feature_spec.spl
+   cp .claude/templates/sspec_template.spl test/my_feature_spec.spl
    ```
 
 2. **Fill in required metadata:**
@@ -618,32 +437,40 @@ simple gen-lean write --force     # Regenerate Lean files
 
 3. **Write tests with docstrings**
 
-4. **Generate docs:**
+4. **Run tests:**
    ```bash
-   cargo run --bin gen-sspec-docs -- simple/test/system/features/**/*_spec.spl
+   bin/simple test test/my_feature_spec.spl
+   ```
+
+5. **Generate docs:**
+   ```bash
+   bin/simple doc-gen
    ```
 
 ### Common Mistakes to Avoid
 
-❌ **Don't:** Skip module-level docstring → Generator will warn "No documentation"
-✅ **Do:** Always start with `"""# Feature Name Specification..."""`
+- **Don't:** Skip module-level docstring -- Generator will warn "No documentation"
+- **Do:** Always start with `"""# Feature Name Specification..."""`
 
-❌ **Don't:** Use single-line `#` comments for docs → Not extracted
-✅ **Do:** Use triple-quoted `"""..."""` docstrings
+- **Don't:** Use single-line `#` comments for docs -- Not extracted
+- **Do:** Use triple-quoted `"""..."""` docstrings
 
-❌ **Don't:** Forget to import std.spec → Tests won't run
-✅ **Do:** `import std.spec` in every spec file
+- **Don't:** Use `.to(eq(...))` matcher style -- Not supported
+- **Do:** Use `.to_equal(...)` directly on the expect result
 
-❌ **Don't:** Mix test code with helpers → Hard to read
-✅ **Do:** Put helpers at the end under `# Helper Code` comment
+- **Don't:** Use `.to_be_true()` or `.to_be_false()` -- Not in built-in matchers
+- **Do:** Use `.to_equal(true)` and `.to_equal(false)`
 
-❌ **Don't:** Write specs without running tests → May have syntax errors
-✅ **Do:** Test → Document → Generate workflow
+- **Don't:** Mix test code with helpers -- Hard to read
+- **Do:** Put helpers at the end under `# Helper Code` comment
+
+- **Don't:** Write specs without running tests -- May have syntax errors
+- **Do:** Test -> Document -> Generate workflow
 
 ## See Also
 
 - **[Complete Example](../../doc/guide/sspec_complete_example.md)** - Full workflow walkthrough
-- **[Template](.claude/templates/sspec_template.spl)** - Spec file template
+- **[Template](../../.claude/templates/sspec_template.spl)** - Spec file template
 - `doc/spec/sspec_format.md` - Format details
 - `doc/guide/sspec_writing.md` - Writing guide
 - `doc/spec/sspec_manual.md` - User manual

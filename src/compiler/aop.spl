@@ -1,9 +1,21 @@
-# Aspect-Oriented Programming Support
+# Aspect-Oriented Programming - Full Simple Extensions
 #
-# AOP weaving for cross-cutting concerns: logging, tracing, contracts, error handling.
-# Aspects are registered with pointcut patterns and woven at MIR level.
+# Runtime advice with lambdas, Any type, class-based aspects.
+# Core AOP (types, pointcuts, config, weaving, diagnostics) is in core.aop.
 #
 # Port of rust/compiler/src/weaving/ (1,382 lines) into shared module.
+
+use core.aop.{PointcutKind, Pointcut, AdviceKind, AdviceForm}
+use core.aop.{DiagnosticLevel, JoinPointKind}
+use core.aop.{InstructionInfo, AdviceCallInfo, AdviceMatchResult}
+use core.aop.{JoinPointContext, JoinPoint, MatchedAdvice}
+use core.aop.{MirBlockInfo, WeavingRule, WeavingConfig}
+use core.aop.{WeavingDiagnostic, WeavingResult}
+use core.aop.{glob_match, matches_predicate, predicate_specificity}
+use core.aop.{weavingconfig_all_rules}
+use core.aop.{detect_join_points, match_advice_for_join_point, weave_function}
+
+use core.aop_debug_log.{debug_log_enter, debug_log_exit, debug_log_is_enabled}
 
 use compiler.config (Logger)
 
@@ -15,253 +27,20 @@ export WeavingDiagnostic, DiagnosticLevel
 export AopWeaver
 
 # ============================================================================
-# Pointcut Matching
+# Advice (Full Simple - uses function type with Any)
 # ============================================================================
-
-enum PointcutKind:
-    """Types of pointcut patterns."""
-    NamePattern     # Match by function name glob (e.g., "parse_*")
-    Annotation      # Match by annotation (e.g., "@log")
-    Module          # Match by module name
-    All             # Match everything
-
-struct Pointcut:
-    """A pointcut selects which join points an aspect applies to."""
-    kind: PointcutKind
-    pattern: text       # Glob pattern or annotation name
-
-impl Pointcut:
-    static fn name(pattern: text) -> Pointcut:
-        Pointcut(kind: PointcutKind.NamePattern, pattern: pattern)
-
-    static fn annotation(name: text) -> Pointcut:
-        Pointcut(kind: PointcutKind.Annotation, pattern: name)
-
-    static fn module(name: text) -> Pointcut:
-        Pointcut(kind: PointcutKind.Module, pattern: name)
-
-    static fn all() -> Pointcut:
-        Pointcut(kind: PointcutKind.All, pattern: "*")
-
-    fn matches_name(fn_name: text) -> bool:
-        """Check if a function name matches this pointcut."""
-        match self.kind:
-            case All: true
-            case NamePattern:
-                glob_match(self.pattern, fn_name)
-            case Module: false
-            case Annotation: false
-
-    fn matches_context(ctx: JoinPointContext) -> bool:
-        """Check if a join point context matches this pointcut."""
-        match self.kind:
-            case All: true
-            case NamePattern: glob_match(self.pattern, ctx.function_name)
-            case Module: glob_match(self.pattern, ctx.module_path)
-            case Annotation:
-                ctx.attributes.filter(\a: a == self.pattern).?
-
-fn glob_match(pattern: text, name: text) -> bool:
-    """Simple glob matching with * wildcard."""
-    if pattern == "*":
-        return true
-    if pattern.ends_with("*"):
-        val prefix = pattern[:pattern.len() - 1]
-        return name.starts_with(prefix)
-    if pattern.starts_with("*"):
-        val suffix = pattern[1:]
-        return name.ends_with(suffix)
-    if pattern.contains("*"):
-        val parts = pattern.split("*")
-        if parts.len() == 2:
-            return name.starts_with(parts[0]) and name.ends_with(parts[1])
-    pattern == name
-
-# ============================================================================
-# Advice Types
-# ============================================================================
-
-enum AdviceKind:
-    Before
-    After
-    Around
-
-enum AdviceForm:
-    """Advice form for MIR-level weaving."""
-    Before          # Execute before join point
-    AfterSuccess    # Execute after successful completion
-    AfterError      # Execute after error
-    Around          # Wrap join point (control execution via proceed)
-
-impl AdviceForm:
-    static fn from_text(s: text) -> AdviceForm?:
-        match s.lower():
-            case "before": Some(AdviceForm.Before)
-            case "after_success" | "after-success": Some(AdviceForm.AfterSuccess)
-            case "after_error" | "after-error": Some(AdviceForm.AfterError)
-            case "around": Some(AdviceForm.Around)
-            case _: nil
 
 struct Advice:
-    """An advice is code that runs at a join point."""
     kind: AdviceKind
     pointcut: Pointcut
     handler: fn(text, [Any]) -> Any
     order: i64
 
 # ============================================================================
-# Join Points (MIR-level)
-# ============================================================================
-
-enum JoinPointKind:
-    """Types of join points detected in MIR."""
-    Execution(function_name: text, signature: text)
-    Decision(location: text)
-    Condition(location: text)
-    Error(location: text, error_type: text)
-
-struct JoinPointContext:
-    """Context information for join point matching."""
-    function_name: text
-    module_path: text
-    signature: text
-    attributes: [text]
-    effects: [text]
-
-struct JoinPoint:
-    """A detected join point in the MIR."""
-    kind: JoinPointKind
-    block_id: i64
-    instruction_index: i64
-    context: JoinPointContext
-
-# ============================================================================
-# Matched Advice
-# ============================================================================
-
-struct MatchedAdvice:
-    advice_function: text
-    form: AdviceForm
-    priority: i64
-    specificity: i64
-
-# ============================================================================
-# Weaving Configuration
-# ============================================================================
-
-struct WeavingRule:
-    predicate_text: text
-    advice_function: text
-    form: AdviceForm
-    priority: i64
-
-struct WeavingConfig:
-    enabled: bool
-    before_advices: [WeavingRule]
-    after_success_advices: [WeavingRule]
-    after_error_advices: [WeavingRule]
-    around_advices: [WeavingRule]
-
-impl WeavingConfig:
-    static fn disabled() -> WeavingConfig:
-        WeavingConfig(enabled: false, before_advices: [],
-                      after_success_advices: [], after_error_advices: [],
-                      around_advices: [])
-
-    static fn from_rules(rules: [WeavingRule]) -> WeavingConfig:
-        var before: [WeavingRule] = []
-        var after_success: [WeavingRule] = []
-        var after_error: [WeavingRule] = []
-        var around: [WeavingRule] = []
-        for rule in rules:
-            match rule.form:
-                case Before: before = before.push(rule)
-                case AfterSuccess: after_success = after_success.push(rule)
-                case AfterError: after_error = after_error.push(rule)
-                case Around: around = around.push(rule)
-        WeavingConfig(enabled: rules.?, before_advices: before,
-                      after_success_advices: after_success,
-                      after_error_advices: after_error, around_advices: around)
-
-    fn all_rules() -> [WeavingRule]:
-        self.before_advices.merge(self.after_success_advices)
-            .merge(self.after_error_advices).merge(self.around_advices)
-
-# ============================================================================
-# Weaving Diagnostics
-# ============================================================================
-
-enum DiagnosticLevel:
-    Error
-    Warning
-    Info
-
-struct WeavingDiagnostic:
-    level: DiagnosticLevel
-    message: text
-    predicate: text?
-    location: text?
-
-impl WeavingDiagnostic:
-    static fn error(message: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(level: DiagnosticLevel.Error, message: message,
-                          predicate: nil, location: nil)
-
-    static fn warning(message: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(level: DiagnosticLevel.Warning, message: message,
-                          predicate: nil, location: nil)
-
-    static fn info(message: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(level: DiagnosticLevel.Info, message: message,
-                          predicate: nil, location: nil)
-
-    fn with_predicate(pred: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(level: self.level, message: self.message,
-                          predicate: Some(pred), location: self.location)
-
-    fn with_location(loc: text) -> WeavingDiagnostic:
-        WeavingDiagnostic(level: self.level, message: self.message,
-                          predicate: self.predicate, location: Some(loc))
-
-    fn is_error() -> bool:
-        match self.level: case Error: true; case _: false
-
-    fn is_warning() -> bool:
-        match self.level: case Warning: true; case _: false
-
-# ============================================================================
-# Weaving Result
-# ============================================================================
-
-struct WeavingResult:
-    join_points_woven: i64
-    advices_inserted: i64
-    advice_calls: [(JoinPointKind, text)]
-    diagnostics: [WeavingDiagnostic]
-
-impl WeavingResult:
-    static fn empty() -> WeavingResult:
-        WeavingResult(join_points_woven: 0, advices_inserted: 0,
-                      advice_calls: [], diagnostics: [])
-
-    fn has_errors() -> bool:
-        self.diagnostics.filter(\d: d.is_error()).?
-
-    fn has_warnings() -> bool:
-        self.diagnostics.filter(\d: d.is_warning()).?
-
-    fn errors() -> [WeavingDiagnostic]:
-        self.diagnostics.filter(\d: d.is_error())
-
-    fn warnings() -> [WeavingDiagnostic]:
-        self.diagnostics.filter(\d: d.is_warning())
-
-# ============================================================================
-# Aspects (Runtime)
+# Aspects (Runtime - Full Simple classes)
 # ============================================================================
 
 class LogAspect:
-    """Logging cross-cutting concern."""
     level: i64
     logger: Logger
 
@@ -278,7 +57,6 @@ class LogAspect:
         result
 
 class TracingAspect:
-    """Performance tracing cross-cutting concern."""
     logger: Logger
 
     fn before(name: text, args: [Any]):
@@ -288,7 +66,6 @@ class TracingAspect:
         self.logger.log(20, "TRACE", "exit {name}")
 
 class ContractAspect:
-    """Design-by-contract checking (pre/post/invariant)."""
     preconditions: Dict<text, fn([Any]) -> bool>
     postconditions: Dict<text, fn(Any) -> bool>
 
@@ -303,16 +80,10 @@ class ContractAspect:
         true
 
 # ============================================================================
-# AOP Weaver (MIR-level + Runtime)
+# AOP Weaver (Full Simple - runtime advice + MIR delegation to core)
 # ============================================================================
 
 class AopWeaver:
-    """AOP weaver that applies aspects at registered pointcuts.
-
-    Supports two modes:
-    1. Runtime: Collects advice for interpreter-level application
-    2. MIR-level: Detects join points and inserts advice calls into MIR blocks
-    """
     advices: [Advice]
     config: WeavingConfig
     logger: Logger
@@ -342,6 +113,16 @@ class AopWeaver:
         self.add_before(pointcut, \name, args: aspect.before(name, args), 50)
         self.add_after(pointcut, \name, args: aspect.after(name, args[0]), 50)
 
+    me add_debug_log_aspect(pointcut: Pointcut):
+        self.add_before(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_enter(name, "", "", 0, "")
+        , 200)
+        self.add_after(pointcut, \name, args:
+            if debug_log_is_enabled():
+                debug_log_exit(name, "", 0, 0)
+        , 200)
+
     fn advices_for(fn_name: text) -> [Advice]:
         var matching: [Advice] = []
         for advice in self.advices:
@@ -349,192 +130,16 @@ class AopWeaver:
                 matching = matching.push(advice)
         matching.sort_by(\a, b: a.order - b.order)
 
-    # --- MIR-level weaving ---
+    # --- MIR-level weaving (delegates to core free functions) ---
 
-    me set_config(config: WeavingConfig):
-        self.config = config
+    me set_config(new_config: WeavingConfig):
+        self.config = new_config
 
-    fn detect_join_points(func_name: text, module_path: text,
+    fn weave_mir_function(func_name: text, module_path: text,
                           attributes: [text], effects: [text],
-                          blocks: [MirBlockInfo]) -> [JoinPoint]:
-        """Detect join points in a MIR function."""
-        if not self.config.enabled:
-            return []
-
-        val context = JoinPointContext(
-            function_name: func_name, module_path: module_path,
-            signature: "* {func_name}(...)",
-            attributes: attributes, effects: effects)
-
-        var join_points: [JoinPoint] = []
-
-        # Function execution join point (at entry)
-        join_points = join_points.push(JoinPoint(
-            kind: JoinPointKind.Execution(function_name: func_name,
-                                          signature: context.signature),
-            block_id: 0, instruction_index: 0, context: context))
-
-        # Scan blocks for decision/condition/error join points
-        for block in blocks:
-            for (idx, inst_kind) in block.instruction_kinds:
-                if inst_kind == "comparison":
-                    val loc = "{func_name}:block{block.id}:inst{idx}"
-                    join_points = join_points.push(JoinPoint(
-                        kind: JoinPointKind.Condition(location: loc),
-                        block_id: block.id, instruction_index: idx,
-                        context: context))
-                elif inst_kind == "branch" or inst_kind == "pattern_test":
-                    val loc = "{func_name}:block{block.id}:inst{idx}"
-                    join_points = join_points.push(JoinPoint(
-                        kind: JoinPointKind.Decision(location: loc),
-                        block_id: block.id, instruction_index: idx,
-                        context: context))
-                elif inst_kind == "error" or inst_kind == "try_unwrap":
-                    val loc = "{func_name}:block{block.id}:inst{idx}"
-                    join_points = join_points.push(JoinPoint(
-                        kind: JoinPointKind.Error(location: loc,
-                                                  error_type: "Result"),
-                        block_id: block.id, instruction_index: idx,
-                        context: context))
-
-        join_points
-
-    fn match_advice_for_join_point(join_point: JoinPoint) -> ([MatchedAdvice], [WeavingDiagnostic]):
-        """Match advice rules to a join point."""
-        if not self.config.enabled:
-            return ([], [])
-
-        var matched: [MatchedAdvice] = []
-        var diagnostics: [WeavingDiagnostic] = []
-
-        for rule in self.config.all_rules():
-            # Simple predicate matching: check if function name matches
-            if matches_predicate(rule.predicate_text, join_point.context):
-                matched = matched.push(MatchedAdvice(
-                    advice_function: rule.advice_function,
-                    form: rule.form, priority: rule.priority,
-                    specificity: predicate_specificity(rule.predicate_text)))
-
-        # Warn about ambiguous ordering
-        if matched.len() > 1:
-            val priorities = matched.map(\a: a.priority)
-            var i = 0
-            while i < priorities.len() - 1:
-                if priorities[i] == priorities[i + 1]:
-                    diagnostics = diagnostics.push(
-                        WeavingDiagnostic.warning(
-                            "Ambiguous advice ordering at priority {priorities[i]}"
-                        ).with_location(join_point.context.function_name))
-                    break
-                i = i + 1
-
-        # Sort by priority (higher first), then specificity
-        matched = matched.sort_by(\a, b:
-            if b.priority != a.priority: b.priority - a.priority
-            else: b.specificity - a.specificity)
-
-        (matched, diagnostics)
-
-    fn weave_function(func_name: text, module_path: text,
-                      attributes: [text], effects: [text],
-                      blocks: [MirBlockInfo]) -> WeavingResult:
-        """Weave advice into a MIR function. Returns weaving result with diagnostics."""
-        if not self.config.enabled:
-            return WeavingResult.empty()
-
-        val join_points = self.detect_join_points(
-            func_name, module_path, attributes, effects, blocks)
-
-        var result = WeavingResult.empty()
-        var used_rules: [text] = []
-
-        for jp in join_points:
-            val (advices, diags) = self.match_advice_for_join_point(jp)
-            result = WeavingResult(
-                join_points_woven: result.join_points_woven + if advices.?: 1 else: 0,
-                advices_inserted: result.advices_inserted + advices.len(),
-                advice_calls: result.advice_calls.merge(
-                    advices.map(\a: (jp.kind, a.advice_function))),
-                diagnostics: result.diagnostics.merge(diags))
-
-            for a in advices:
-                if not used_rules.contains(a.advice_function):
-                    used_rules = used_rules.push(a.advice_function)
-
-        # Warn about unused advice rules
-        for rule in self.config.all_rules():
-            if not used_rules.contains(rule.advice_function):
-                result = WeavingResult(
-                    join_points_woven: result.join_points_woven,
-                    advices_inserted: result.advices_inserted,
-                    advice_calls: result.advice_calls,
-                    diagnostics: result.diagnostics.push(
-                        WeavingDiagnostic.warning(
-                            "Advice '{rule.advice_function}' was never applied"
-                        ).with_predicate(rule.predicate_text)
-                         .with_location(func_name)))
-
-        # Summary diagnostic
-        if result.join_points_woven > 0:
-            result = WeavingResult(
-                join_points_woven: result.join_points_woven,
-                advices_inserted: result.advices_inserted,
-                advice_calls: result.advice_calls,
-                diagnostics: result.diagnostics.push(
-                    WeavingDiagnostic.info(
-                        "Woven {result.advices_inserted} advice calls at {result.join_points_woven} join points"
-                    ).with_location(func_name)))
-
-        result
+                          blocks: [MirBlockInfo]) -> WeavingResult:
+        weave_function(self.config, func_name, module_path, attributes, effects, blocks)
 
     fn weave(mir: Any) -> Any:
-        """Legacy runtime weave — returns MIR unchanged if config not set."""
+        # Legacy runtime weave - returns MIR unchanged if config not set
         mir
-
-# ============================================================================
-# MIR Block Info (lightweight representation for weaving)
-# ============================================================================
-
-struct MirBlockInfo:
-    """Lightweight block info for join point detection."""
-    id: i64
-    instruction_kinds: [(i64, text)]    # (index, kind_tag)
-
-# ============================================================================
-# Predicate Matching Helpers
-# ============================================================================
-
-fn matches_predicate(predicate_text: text, ctx: JoinPointContext) -> bool:
-    """Simple predicate matching against join point context.
-
-    Supports patterns like:
-    - "*" — matches all
-    - "parse_*" — name prefix
-    - "@log" — annotation match
-    - "module:compiler.*" — module match
-    """
-    val pred = predicate_text.trim()
-    if pred == "*":
-        return true
-    if pred.starts_with("@"):
-        return ctx.attributes.contains(pred[1:])
-    if pred.starts_with("module:"):
-        return glob_match(pred[7:], ctx.module_path)
-    if pred.starts_with("effect:"):
-        return ctx.effects.contains(pred[7:])
-    # Default: match by function name
-    glob_match(pred, ctx.function_name)
-
-fn predicate_specificity(predicate_text: text) -> i64:
-    """Calculate specificity of a predicate (higher = more specific)."""
-    val pred = predicate_text.trim()
-    if pred == "*":
-        return 0
-    if pred.contains("*"):
-        return 1
-    if pred.starts_with("@"):
-        return 2
-    if pred.starts_with("module:"):
-        return 3
-    # Exact name match is most specific
-    4

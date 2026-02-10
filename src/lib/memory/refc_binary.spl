@@ -1,0 +1,451 @@
+# Reference-Counted Binaries and Shared Heap
+#
+# Provides RefcBinary, BinaryRef, SharedHeap for memory management.
+
+val SMALL_BINARY_THRESHOLD = 64
+
+# --- CopyStrategy ---
+
+fn copy_strategy(size: i64) -> text:
+    if size < SMALL_BINARY_THRESHOLD:
+        return "DeepCopy"
+    "ShareRef"
+
+fn CopyStrategy__DeepCopy__should_share(size: i64) -> bool:
+    false
+
+fn CopyStrategy__ShareRef__should_share(size: i64) -> bool:
+    true
+
+fn CopyStrategy__Hybrid__should_share(size: i64) -> bool:
+    size >= SMALL_BINARY_THRESHOLD
+
+# --- BinaryRef ---
+
+class BinaryRef:
+    id: i64
+    offset: i64
+    length: i64
+
+    fn size() -> i64:
+        self.length
+
+    fn is_small() -> bool:
+        self.length < SMALL_BINARY_THRESHOLD
+
+    fn eq(other: BinaryRef) -> bool:
+        self.id == other.id
+
+    fn fmt() -> text:
+        "BinaryRef(id={self.id}, offset={self.offset}, length={self.length})"
+
+fn BinaryRef__new(id: i64, offset: i64, length: i64) -> BinaryRef:
+    BinaryRef(id: id, offset: offset, length: length)
+
+# --- RefcBinary ---
+
+class RefcBinary:
+    id: i64
+    refcount: i64
+    length: i64
+    capacity: i64
+    is_sub_binary: bool
+    parent_id: i64
+    has_parent: bool
+    is_pinned: bool
+
+    me incref() -> i64:
+        self.refcount = self.refcount + 1
+        self.refcount
+
+    me decref() -> i64:
+        self.refcount = self.refcount - 1
+        self.refcount
+
+    fn can_collect() -> bool:
+        val zero_refs = self.refcount <= 0
+        val not_pinned = not self.is_pinned
+        zero_refs and not_pinned
+
+    me pin():
+        self.is_pinned = true
+
+    me unpin():
+        self.is_pinned = false
+
+    fn total_size() -> i64:
+        64 + self.capacity
+
+    fn to_ref(offset: i64) -> BinaryRef:
+        BinaryRef(id: self.id, offset: offset, length: self.length)
+
+fn RefcBinary__new(id: i64, length: i64, capacity: i64) -> RefcBinary:
+    RefcBinary(
+        id: id,
+        refcount: 1,
+        length: length,
+        capacity: capacity,
+        is_sub_binary: false,
+        parent_id: 0,
+        has_parent: false,
+        is_pinned: false
+    )
+
+fn RefcBinary__sub_binary(id: i64, parent: i64, offset: i64, length: i64, capacity: i64) -> RefcBinary:
+    RefcBinary(
+        id: id,
+        refcount: 1,
+        length: length,
+        capacity: capacity,
+        is_sub_binary: true,
+        parent_id: parent,
+        has_parent: true,
+        is_pinned: false
+    )
+
+# --- SharedHeapConfig ---
+
+class SharedHeapConfig:
+    initial_size: i64
+    max_size: i64
+    grow_factor: f64
+    gc_threshold: f64
+    defrag_threshold: f64
+
+fn SharedHeapConfig__default() -> SharedHeapConfig:
+    SharedHeapConfig(
+        initial_size: 64 * 1024 * 1024,
+        max_size: 512 * 1024 * 1024,
+        grow_factor: 1.5,
+        gc_threshold: 0.8,
+        defrag_threshold: 0.3
+    )
+
+fn SharedHeapConfig__small() -> SharedHeapConfig:
+    SharedHeapConfig(
+        initial_size: 1024 * 1024,
+        max_size: 16 * 1024 * 1024,
+        grow_factor: 1.5,
+        gc_threshold: 0.8,
+        defrag_threshold: 0.3
+    )
+
+fn SharedHeapConfig__large() -> SharedHeapConfig:
+    SharedHeapConfig(
+        initial_size: 256 * 1024 * 1024,
+        max_size: 2 * 1024 * 1024 * 1024,
+        grow_factor: 1.5,
+        gc_threshold: 0.8,
+        defrag_threshold: 0.3
+    )
+
+# --- SharedHeapStats ---
+
+class SharedHeapStats:
+    binary_count: i64
+    sub_binary_count: i64
+    used_size: i64
+    total_allocations: i64
+    total_incref: i64
+    total_decref: i64
+    peak_usage: i64
+    pinned_count: i64
+    defrag_count: i64
+    initial_size: i64
+
+    fn utilization() -> f64:
+        if self.initial_size == 0:
+            return 0.0
+        self.used_size * 100.0 / self.initial_size
+
+    fn fragmentation() -> f64:
+        0.0
+
+fn SharedHeapStats__new() -> SharedHeapStats:
+    SharedHeapStats(
+        binary_count: 0,
+        sub_binary_count: 0,
+        used_size: 0,
+        total_allocations: 0,
+        total_incref: 0,
+        total_decref: 0,
+        peak_usage: 0,
+        pinned_count: 0,
+        defrag_count: 0,
+        initial_size: 0
+    )
+
+# --- AllocResult ---
+
+class AllocResult:
+    tag: text
+    ref_val: BinaryRef
+
+    fn is_success() -> bool:
+        self.tag == "Success"
+
+    fn unwrap() -> BinaryRef:
+        self.ref_val
+
+    fn ref_option():
+        if self.tag == "Success":
+            return self.ref_val
+        nil
+
+    fn fmt() -> text:
+        if self.tag == "Success":
+            return "Success({self.ref_val.fmt()})"
+        self.tag
+
+fn AllocResult__Success(ref_val: BinaryRef) -> AllocResult:
+    AllocResult(tag: "Success", ref_val: ref_val)
+
+fn AllocResult__OutOfMemory() -> AllocResult:
+    AllocResult(tag: "OutOfMemory", ref_val: BinaryRef(id: -1, offset: 0, length: 0))
+
+fn AllocResult__TooLarge() -> AllocResult:
+    AllocResult(tag: "TooLarge", ref_val: BinaryRef(id: -1, offset: 0, length: 0))
+
+fn AllocResult__InvalidSize() -> AllocResult:
+    AllocResult(tag: "InvalidSize", ref_val: BinaryRef(id: -1, offset: 0, length: 0))
+
+fn AllocResult__InvalidRange() -> AllocResult:
+    AllocResult(tag: "InvalidRange", ref_val: BinaryRef(id: -1, offset: 0, length: 0))
+
+fn AllocResult__ParentNotFound() -> AllocResult:
+    AllocResult(tag: "ParentNotFound", ref_val: BinaryRef(id: -1, offset: 0, length: 0))
+
+# --- SharedHeap ---
+
+class SharedHeap:
+    config: SharedHeapConfig
+    binary_ids: [i64]
+    binary_refcounts: [i64]
+    binary_lengths: [i64]
+    binary_capacities: [i64]
+    binary_is_sub: [bool]
+    binary_parent_ids: [i64]
+    binary_is_pinned: [bool]
+    next_id: i64
+    stat_used_size: i64
+    stat_total_allocs: i64
+    stat_total_incref: i64
+    stat_total_decref: i64
+    stat_peak_usage: i64
+    stat_sub_count: i64
+    stat_pinned_count: i64
+    stat_defrag_count: i64
+
+    me allocate(process_id: i64, size: i64) -> AllocResult:
+        if size <= 0:
+            return AllocResult__InvalidSize()
+        if size > 1024 * 1024 * 1024:
+            return AllocResult__TooLarge()
+        val total = self.stat_used_size + size
+        if total > self.config.max_size:
+            return AllocResult__OutOfMemory()
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.binary_ids.push(id)
+        self.binary_refcounts.push(1)
+        self.binary_lengths.push(size)
+        self.binary_capacities.push(size)
+        self.binary_is_sub.push(false)
+        self.binary_parent_ids.push(-1)
+        self.binary_is_pinned.push(false)
+        self.stat_used_size = self.stat_used_size + size
+        self.stat_total_allocs = self.stat_total_allocs + 1
+        if self.stat_used_size > self.stat_peak_usage:
+            self.stat_peak_usage = self.stat_used_size
+        val ref_val = BinaryRef(id: id, offset: 0, length: size)
+        AllocResult__Success(ref_val)
+
+    me allocate_sub_binary(parent_id: i64, offset: i64, length: i64) -> AllocResult:
+        # Find parent
+        var parent_idx = -1
+        var pi = 0
+        for bid in self.binary_ids:
+            if bid == parent_id:
+                parent_idx = pi
+            pi = pi + 1
+        if parent_idx == -1:
+            return AllocResult__ParentNotFound()
+        val parent_len = self.binary_lengths[parent_idx]
+        val range_end = offset + length
+        if range_end > parent_len:
+            return AllocResult__InvalidRange()
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        self.binary_ids.push(id)
+        self.binary_refcounts.push(1)
+        self.binary_lengths.push(length)
+        self.binary_capacities.push(0)
+        self.binary_is_sub.push(true)
+        self.binary_parent_ids.push(parent_id)
+        self.binary_is_pinned.push(false)
+        self.stat_sub_count = self.stat_sub_count + 1
+        self.stat_total_allocs = self.stat_total_allocs + 1
+        val ref_val = BinaryRef(id: id, offset: offset, length: length)
+        AllocResult__Success(ref_val)
+
+    me incref(id: i64) -> bool:
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                self.binary_refcounts[idx] = self.binary_refcounts[idx] + 1
+                self.stat_total_incref = self.stat_total_incref + 1
+                return true
+            idx = idx + 1
+        false
+
+    me decref(id: i64) -> bool:
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                self.binary_refcounts[idx] = self.binary_refcounts[idx] - 1
+                self.stat_total_decref = self.stat_total_decref + 1
+                if self.binary_refcounts[idx] <= 0:
+                    val not_pinned = not self.binary_is_pinned[idx]
+                    if not_pinned:
+                        self.remove_at(idx)
+                return true
+            idx = idx + 1
+        false
+
+    me remove_at(idx: i64):
+        val size = self.binary_lengths[idx]
+        val is_sub = self.binary_is_sub[idx]
+        self.binary_ids.remove(idx)
+        self.binary_refcounts.remove(idx)
+        self.binary_lengths.remove(idx)
+        self.binary_capacities.remove(idx)
+        self.binary_is_sub.remove(idx)
+        self.binary_parent_ids.remove(idx)
+        self.binary_is_pinned.remove(idx)
+        if not is_sub:
+            self.stat_used_size = self.stat_used_size - size
+        else:
+            self.stat_sub_count = self.stat_sub_count - 1
+
+    fn get(id: i64):
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                return RefcBinary(
+                    id: bid,
+                    refcount: self.binary_refcounts[idx],
+                    length: self.binary_lengths[idx],
+                    capacity: self.binary_capacities[idx],
+                    is_sub_binary: self.binary_is_sub[idx],
+                    parent_id: self.binary_parent_ids[idx],
+                    has_parent: self.binary_is_sub[idx],
+                    is_pinned: self.binary_is_pinned[idx]
+                )
+            idx = idx + 1
+        nil
+
+    fn get_ref(id: i64):
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                return BinaryRef(id: bid, offset: 0, length: self.binary_lengths[idx])
+            idx = idx + 1
+        nil
+
+    fn contains(id: i64) -> bool:
+        for bid in self.binary_ids:
+            if bid == id:
+                return true
+        false
+
+    me pin(id: i64) -> bool:
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                self.binary_is_pinned[idx] = true
+                self.stat_pinned_count = self.stat_pinned_count + 1
+                return true
+            idx = idx + 1
+        false
+
+    me unpin(id: i64) -> bool:
+        var idx = 0
+        for bid in self.binary_ids:
+            if bid == id:
+                self.binary_is_pinned[idx] = false
+                self.stat_pinned_count = self.stat_pinned_count - 1
+                return true
+            idx = idx + 1
+        false
+
+    me collect_garbage() -> i64:
+        var reclaimed = 0
+        var idx = 0
+        var to_remove = []
+        for bid in self.binary_ids:
+            val rc = self.binary_refcounts[idx]
+            val pinned = self.binary_is_pinned[idx]
+            val collectible = rc <= 0 and not pinned
+            if collectible:
+                to_remove.push(idx)
+                val is_sub = self.binary_is_sub[idx]
+                if not is_sub:
+                    reclaimed = reclaimed + self.binary_lengths[idx]
+            idx = idx + 1
+        # Remove in reverse order to keep indices valid
+        var ri = to_remove.len() - 1
+        for _ in to_remove:
+            self.remove_at(to_remove[ri])
+            ri = ri - 1
+        reclaimed
+
+    me defragment():
+        self.stat_defrag_count = self.stat_defrag_count + 1
+
+    fn binary_count() -> i64:
+        self.binary_ids.len()
+
+    fn get_stats() -> SharedHeapStats:
+        SharedHeapStats(
+            binary_count: self.binary_ids.len(),
+            sub_binary_count: self.stat_sub_count,
+            used_size: self.stat_used_size,
+            total_allocations: self.stat_total_allocs,
+            total_incref: self.stat_total_incref,
+            total_decref: self.stat_total_decref,
+            peak_usage: self.stat_peak_usage,
+            pinned_count: self.stat_pinned_count,
+            defrag_count: self.stat_defrag_count,
+            initial_size: self.config.initial_size
+        )
+
+fn SharedHeap__new(config: SharedHeapConfig) -> SharedHeap:
+    SharedHeap(
+        config: config,
+        binary_ids: [],
+        binary_refcounts: [],
+        binary_lengths: [],
+        binary_capacities: [],
+        binary_is_sub: [],
+        binary_parent_ids: [],
+        binary_is_pinned: [],
+        next_id: 0,
+        stat_used_size: 0,
+        stat_total_allocs: 0,
+        stat_total_incref: 0,
+        stat_total_decref: 0,
+        stat_peak_usage: 0,
+        stat_sub_count: 0,
+        stat_pinned_count: 0,
+        stat_defrag_count: 0
+    )
+
+export SMALL_BINARY_THRESHOLD, copy_strategy
+export CopyStrategy__DeepCopy__should_share, CopyStrategy__ShareRef__should_share, CopyStrategy__Hybrid__should_share
+export BinaryRef, BinaryRef__new
+export RefcBinary, RefcBinary__new, RefcBinary__sub_binary
+export SharedHeapConfig, SharedHeapConfig__default, SharedHeapConfig__small, SharedHeapConfig__large
+export SharedHeapStats, SharedHeapStats__new
+export AllocResult, AllocResult__Success, AllocResult__OutOfMemory, AllocResult__TooLarge
+export AllocResult__InvalidSize, AllocResult__InvalidRange, AllocResult__ParentNotFound
+export SharedHeap, SharedHeap__new

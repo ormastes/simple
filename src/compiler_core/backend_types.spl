@@ -1,0 +1,278 @@
+# Backend Types - Backend Trait and Value Definitions
+#
+# This module contains backend type definitions:
+# - BackendKind, BackendResult, BackendError: Backend interface types
+# - CompiledUnit, CompiledSymbol: Compilation output types
+# - SdnValue: SDN (data-only) value representation
+# - Value: Runtime value representation
+# - Environment: Execution environment for values
+#
+# Backend implementations are in backend.spl
+
+use compiler.hir.*
+use compiler.mir.*
+use compiler.lexer.Span
+
+enum BackendKind:
+    Interpreter
+    Compiler
+    Sdn
+    CraneliftJit
+    LlvmJit
+    AutoJit
+    Custom(name: text)
+
+# ============================================================================
+# Backend Results and Errors
+# ============================================================================
+
+"""Result of backend processing."""
+enum BackendResult:
+    Value(value: Value)
+    CompiledUnit(unit: CompiledUnit)
+    SdnData(data: SdnValue)
+    Unit
+
+struct BackendError:
+    """Error during backend processing."""
+    message: text
+    # DESUGARED: span: Span?
+    has_span: bool
+    span_value: Span
+    kind: BackendErrorKind
+
+"""Backend error kind."""
+enum BackendErrorKind:
+    NotAllowed          # Operation not allowed (SDN mode)
+    TypeError           # Type mismatch
+    RuntimeError        # Runtime error
+    CompileError        # Compilation error
+    NotImplemented      # Feature not implemented
+    Internal            # Internal error
+
+
+# ============================================================================
+# BackendError Methods (was: impl BackendError:)
+# ============================================================================
+
+fn backenderror_not_allowed(message: text, span: Span?) -> BackendError:
+        BackendError(message: message, span: span, kind: BackendErrorKind.NotAllowed)
+
+
+fn backenderror_type_error(message: text, span: Span?) -> BackendError:
+        BackendError(message: message, span: span, kind: BackendErrorKind.TypeError)
+
+
+fn backenderror_runtime_error(message: text, span: Span?) -> BackendError:
+        BackendError(message: message, span: span, kind: BackendErrorKind.RuntimeError)
+
+
+fn backenderror_compile_error(message: text, span: Span?) -> BackendError:
+        BackendError(message: message, span: span, kind: BackendErrorKind.CompileError)
+
+
+fn backenderror_not_implemented(message: text) -> BackendError:
+        BackendError(message: message, span: nil, kind: BackendErrorKind.NotImplemented)
+
+
+fn backenderror_internal(message: text) -> BackendError:
+        BackendError(message: message, span: nil, kind: BackendErrorKind.Internal)
+
+
+# ============================================================================
+# Compiled Unit (for Compiler Backend)
+# ============================================================================
+
+struct CompiledUnit:
+    """Result of compilation."""
+    name: text
+    code: [u8]
+    symbols: Dict<text, CompiledSymbol>
+    # DESUGARED: entry_point: text?
+    has_entry_point: bool
+    entry_point_value: text
+    relocations: [Relocation]
+
+struct CompiledSymbol:
+    """Symbol in compiled unit."""
+    name: text
+    address: i64
+    size: i64
+    kind: CompiledSymbolKind
+
+enum CompiledSymbolKind:
+    Function
+    Data
+    External
+
+struct Relocation:
+    """Relocation entry."""
+    offset: i64
+    symbol: text
+    kind: RelocKind
+
+enum RelocKind:
+    Absolute
+    Relative
+    PltRelative
+
+# ============================================================================
+# SDN Value (for SDN Backend)
+# ============================================================================
+
+struct SdnValue:
+    """Data-only value from SDN parsing."""
+    kind: SdnValueKind
+
+"""SDN value kind."""
+enum SdnValueKind:
+    Nil
+    Bool(value: bool)
+    Int(value: i64)
+    Float(value: f64)
+    String(value: text)
+    Array(elements: [SdnValue])
+    Dict(entries: Dict<text, SdnValue>)
+    Table(headers: [text], rows: [[SdnValue]])
+
+
+# ============================================================================
+# SdnValue Methods (was: impl SdnValue:)
+# ============================================================================
+
+fn sdnvalue_make_nil() -> SdnValue:
+        SdnValue(kind: SdnValueKind.Nil)
+
+
+fn sdnvalue_bool(value: bool) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Bool(value))
+
+
+fn sdnvalue_int(value: i64) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Int(value))
+
+
+fn sdnvalue_float(value: f64) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Float(value))
+
+
+fn sdnvalue_string(value: text) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_String(value))
+
+
+fn sdnvalue_array(elements: [SdnValue]) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Array(elements))
+
+
+fn sdnvalue_dict(entries: Dict<text, SdnValue>) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Dict(entries))
+
+
+fn sdnvalue_table(headers: [text], rows: [[SdnValue]]) -> SdnValue:
+        SdnValue(kind: sdnvaluekind_Table(headers, rows))
+
+
+# ============================================================================
+# Runtime Value (for Interpreter Backend)
+# ============================================================================
+
+"""Runtime value for interpreter."""
+enum Value:
+    Nil
+    Unit
+    Bool(value: bool)
+    Int(value: i64)
+    Float(value: f64)
+    Char(value: char)
+    String(value: text)
+    Array(elements: [Value])
+    Tuple(elements: [Value])
+    Dict(entries: Dict<text, Value>)
+    Struct(type_: text, fields: Dict<text, Value>)
+    Enum(type_: text, variant: text, payload: EnumPayloadValue?)
+    Function(fn_: FunctionValue)
+    Closure(closure: ClosureValue)
+    Object(obj: ObjectValue)
+    Ref(target: Value, mutable: bool)
+    Option(value: Value?)
+    Result(ok: Value?, err: Value?)
+    TraitType(trait_name: text)
+    # NEW: FFI-backed RuntimeValue pointer
+    RuntimeValue(ptr: i64)  # Opaque pointer to Rust RuntimeValue
+
+enum EnumPayloadValue:
+    Tuple(values: [Value])
+    Struct(fields: Dict<text, Value>)
+
+struct FunctionValue:
+    """Function value."""
+    symbol: SymbolId
+    name: text
+
+struct ClosureValue:
+    """Closure value with captured environment."""
+    params: [HirParam]
+    body: HirExpr
+    captures: Dict<SymbolId, Value>
+
+struct ObjectValue:
+    """Object instance."""
+    class_: SymbolId
+    fields: Dict<text, Value>
+
+
+# ============================================================================
+# Value Methods (was: impl Value:)
+# ============================================================================
+
+fn value_make_nil() -> Value:
+        Value.Nil
+
+
+fn value_bool(value: bool) -> Value:
+        value_Bool(value)
+
+
+fn value_int(value: i64) -> Value:
+        value_Int(value)
+
+
+fn value_float(value: f64) -> Value:
+        value_Float(value)
+
+
+fn value_string(value: text) -> Value:
+        value_String(value)
+
+
+fn value_some(value: Value) -> Value:
+        value_Option(has_field = true, field_value = value)
+
+
+fn value_none() -> Value:
+        value_Option(nil)
+
+
+fn value_ok(value: Value) -> Value:
+        value_Result(has_field = true, field_value = value, nil)
+
+
+fn value_err(value: Value) -> Value:
+        value_Result(nil, has_field = true, field_value = value)
+
+
+# ============================================================================
+# Evaluation Context
+# ============================================================================
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export BackendKind, BackendResult, BackendError, BackendErrorKind
+export CompiledUnit, CompiledSymbol, CompiledSymbolKind
+export Relocation, RelocKind
+export SdnValue, SdnValueKind
+export Value, EnumPayloadValue, FunctionValue, ClosureValue, ObjectValue
+export EvalContext, Environment

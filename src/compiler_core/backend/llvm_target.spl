@@ -1,0 +1,224 @@
+# LLVM Target - Triple and Configuration
+#
+# Target triple specification and CPU configuration for LLVM compilation.
+# Split from llvm_backend.spl for modularity.
+
+use compiler.backend.backend_api.*
+
+# ============================================================================
+# LLVM Target Triple
+# ============================================================================
+
+struct LlvmTargetTriple:
+    """LLVM target triple specification."""
+    arch: text
+    vendor: text
+    os: text
+    # DESUGARED: env: text?
+    has_env: bool
+    env_value: text
+
+
+# ============================================================================
+# LlvmTargetTriple Methods (was: impl LlvmTargetTriple:)
+# ============================================================================
+
+fn llvmtargettriple_from_target(target: CodegenTarget) -> LlvmTargetTriple:
+        """Create target triple from codegen target (hosted mode with OS)."""
+        LlvmTargetTriple__from_target_with_mode(target, bare_metal: false)
+
+
+fn llvmtargettriple_from_target_baremetal(target: CodegenTarget) -> LlvmTargetTriple:
+        """Create target triple for bare-metal (no OS)."""
+        LlvmTargetTriple__from_target_with_mode(target, bare_metal: true)
+
+
+fn llvmtargettriple_from_target_with_mode(target: CodegenTarget, bare_metal: bool) -> LlvmTargetTriple:
+        """Create target triple with OS or bare-metal mode."""
+        val os = if bare_metal: "none" else: "linux"
+        val env = if bare_metal: nil # DESUGARED: else: Some("gnu")
+            has_else: true,
+            else_value: "gnu"
+
+        match target:
+            case X86_64:
+                LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: os, env: env)
+            case AArch64:
+                LlvmTargetTriple(arch: "aarch64", vendor: "unknown", os: os, env: env)
+            case Riscv64:
+                LlvmTargetTriple(arch: "riscv64", vendor: "unknown", os: os, env: env)
+            case X86:
+                LlvmTargetTriple(arch: "i686", vendor: "unknown", os: os, env: env)
+            case Arm:
+                val arm_env = if # DESUGARED: bare_metal: Some("eabi" else: has_field = true)
+            has_bare_metal: true,
+            bare_metal_value: "eabi" else: has_field = true, field_value = "gnueabihf"
+                LlvmTargetTriple(arch: "armv7", vendor: "unknown", os: os, env: arm_env)
+            case Riscv32:
+                LlvmTargetTriple(arch: "riscv32", vendor: "unknown", os: os, env: env)
+            case Wasm32:
+                LlvmTargetTriple(arch: "wasm32", vendor: "unknown", os: "wasi", env: nil)
+            case Wasm64:
+                LlvmTargetTriple(arch: "wasm64", vendor: "unknown", os: "wasi", env: nil)
+            case Host:
+                # Would detect host at runtime - assume hosted for now
+                LlvmTargetTriple(arch: "x86_64", vendor: "unknown", os: os, env: env)
+
+
+# ============================================================================
+# LLVM Target Configuration (CPU + Features)
+# ============================================================================
+
+struct LlvmTargetConfig:
+    """
+    Complete LLVM target configuration including CPU model and features.
+
+    The CPU model determines which instruction sets are available. For x86_64,
+    we default to x86-64-v3 (Haswell, 2015+) which includes AVX2, FMA, BMI2
+    for significantly better performance on modern CPUs.
+    """
+    triple: LlvmTargetTriple
+    cpu: text              # Target CPU (e.g., "x86-64-v3", "haswell", "generic")
+    features: [text]       # Additional features (e.g., ["+avx2", "+fma"])
+
+
+# ============================================================================
+# LlvmTargetConfig Methods (was: impl LlvmTargetConfig:)
+# ============================================================================
+
+fn llvmtargetconfig_for_target(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
+        """Create config for hosted target (with OS)."""
+        LlvmTargetConfig__for_target_with_mode(target, cpu_override, bare_metal: false)
+
+
+fn llvmtargetconfig_for_target_baremetal(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
+        """Create config for bare-metal target (no OS)."""
+        LlvmTargetConfig__for_target_with_mode(target, cpu_override, bare_metal: true)
+
+
+fn llvmtargetconfig_for_target_with_mode(target: CodegenTarget, cpu_override: text?, bare_metal: bool) -> LlvmTargetConfig:
+        """
+        Create target configuration with optimal CPU selection.
+
+        Defaults:
+        - x86_64: x86-64-v3 (Haswell 2015+) → AVX2, FMA, BMI2 for 2-3x SIMD speedup
+        - AArch64: cortex-a53 (common baseline) → NEON support
+        - RISC-V 64: generic-rv64 with IMAFDC extensions
+        - i686: i686 with SSE2 (conservative 32-bit baseline)
+
+        Override with cpu_override parameter for compatibility builds.
+
+        Bare-metal mode uses -none OS (no stdlib, custom startup).
+        """
+        val triple = LlvmTargetTriple__from_target_with_mode(target, bare_metal)
+
+        # Check for user override first
+        if has_cpu_override:
+            return LlvmTargetConfig(
+                triple: triple,
+                cpu: cpu_override_value,
+                features: []  # Auto-detected from CPU
+            )
+
+        # Auto-select optimal CPU for target
+        match target:
+            case X86_64:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "x86-64-v3",
+                    features: []
+                )
+
+            case AArch64:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "cortex-a53",
+                    features: ["+neon", "+fp-armv8"]
+                )
+
+            case Riscv64:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "generic-rv64",
+                    features: ["+m", "+a", "+f", "+d", "+c"]
+                )
+
+            case X86:  # i686 32-bit
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "i686",
+                    features: ["+sse2"]
+                )
+
+            case Arm:  # ARMv7 32-bit
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "cortex-a7",
+                    features: ["+neon", "+vfp4"]
+                )
+
+            case Riscv32:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "generic-rv32",
+                    features: ["+m", "+a", "+f", "+d", "+c"]
+                )
+
+            case Wasm32 | Wasm64:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "generic",
+                    features: []
+                )
+
+            case Host:
+                LlvmTargetConfig(
+                    triple: triple,
+                    cpu: "x86-64-v3",
+                    features: []
+                )
+
+
+fn llvmtargetconfig_compatibility_build(target: CodegenTarget) -> LlvmTargetConfig:
+        """
+        Create compatibility build configuration for older hardware.
+
+        Use this for maximum compatibility at the cost of performance:
+        - x86_64: x86-64 baseline (2003+, no AVX)
+        - Others: Conservative baselines
+        """
+        match target:
+            case X86_64:
+                LlvmTargetConfig__for_target(target, has_field = true, field_value = "x86-64")
+            case AArch64:
+                LlvmTargetConfig__for_target(target, has_field = true, field_value = "generic")
+            case _:
+                LlvmTargetConfig__for_target(target, nil)
+
+
+# Desugared static methods
+fn LlvmTargetTriple__from_target(target: CodegenTarget) -> LlvmTargetTriple:
+    LlvmTargetTriple__from_target(target)
+
+fn LlvmTargetTriple__from_target_baremetal(target: CodegenTarget) -> LlvmTargetTriple:
+    LlvmTargetTriple__from_target_baremetal(target)
+
+fn LlvmTargetTriple__from_target_with_mode(target: CodegenTarget, bare_metal: bool) -> LlvmTargetTriple:
+    LlvmTargetTriple__from_target_with_mode(target, bare_metal)
+
+fn LlvmTargetConfig__for_target(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
+    LlvmTargetConfig__for_target(target, cpu_override)
+
+fn LlvmTargetConfig__for_target_baremetal(target: CodegenTarget, cpu_override: text?) -> LlvmTargetConfig:
+    LlvmTargetConfig__for_target_baremetal(target, cpu_override)
+
+fn LlvmTargetConfig__for_target_with_mode(target: CodegenTarget, cpu_override: text?, bare_metal: bool) -> LlvmTargetConfig:
+    LlvmTargetConfig__for_target_with_mode(target, cpu_override, bare_metal)
+
+fn LlvmTargetConfig__compatibility_build(target: CodegenTarget) -> LlvmTargetConfig:
+    LlvmTargetConfig__compatibility_build(target)
+
+export LlvmTargetTriple, LlvmTargetConfig
+export LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode
+export LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode
+export LlvmTargetConfig__compatibility_build

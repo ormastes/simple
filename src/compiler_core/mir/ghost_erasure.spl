@@ -1,0 +1,152 @@
+# Ghost Variable Erasure
+#
+# Ghost variable erasure pass for MIR.
+#
+# Ghost variables exist only for verification purposes and must be erased
+# before code generation. This module provides the erasure pass.
+#
+# Ghost erasure rules:
+# - Ghost parameters are removed from function signatures
+# - Ghost locals are removed from the locals list
+# - Instructions that only use/define ghost variables are removed
+# - Uses of ghost variables in non-ghost code result in errors
+#
+# Port of rust/compiler/src/mir/ghost_erasure.rs (234 lines)
+
+export GhostErasureStats, GhostErasureError
+export erase_ghost_from_module, erase_ghost_from_function
+export has_ghost_variables, ghost_variable_count
+
+use mir.function (MirFunction, MirLocal, MirModule)
+use mir.instructions (MirInst, VReg)
+
+# ============================================================================
+# Statistics and Errors
+# ============================================================================
+
+struct GhostErasureStats:
+    """Statistics from ghost erasure."""
+    ghost_params_erased: usize    # Number of ghost parameters erased
+    ghost_locals_erased: usize    # Number of ghost locals erased
+    instructions_erased: usize    # Number of instructions erased
+    functions_processed: usize    # Number of functions processed
+
+
+# ============================================================================
+# GhostErasureStats Methods (was: impl GhostErasureStats:)
+# ============================================================================
+
+fn ghosterasurestats_new() -> GhostErasureStats:
+        GhostErasureStats(
+            ghost_params_erased: 0,
+            ghost_locals_erased: 0,
+            instructions_erased: 0,
+            functions_processed: 0
+        )
+
+
+struct GhostErasureError:
+    """Error during ghost erasure."""
+    function_name: text
+    message: text
+
+
+# ============================================================================
+# GhostErasureError Methods (was: impl GhostErasureError:)
+# ============================================================================
+
+# ============================================================================
+# Module-Level Erasure
+# ============================================================================
+
+fn erase_ghost_from_module(module: MirModule) -> (GhostErasureStats, [GhostErasureError]):
+    """Erase ghost variables from a MIR module.
+
+    This is a post-MIR-lowering pass that removes all ghost variables
+    and related instructions before code generation.
+
+    CRITICAL: Two-pass accumulation - stats and errors collected separately.
+    """
+    var stats = ghosterasurestats_new()
+    var errors: [GhostErasureError] = []
+
+    for func in module.functions:
+        val (func_stats, func_errors) = erase_ghost_from_function(func)
+
+        # Accumulate stats
+        stats.ghost_params_erased = stats.ghost_params_erased + func_stats.ghost_params_erased
+        stats.ghost_locals_erased = stats.ghost_locals_erased + func_stats.ghost_locals_erased
+        stats.instructions_erased = stats.instructions_erased + func_stats.instructions_erased
+        stats.functions_processed = stats.functions_processed + 1
+
+        # Accumulate errors
+        errors = errors_concat(errors, func_errors)
+
+    (stats, errors)
+
+# ============================================================================
+# Function-Level Erasure
+# ============================================================================
+
+fn erase_ghost_from_function(func: MirFunction) -> (GhostErasureStats, [GhostErasureError]):
+    """Erase ghost variables from a single MIR function.
+
+    CRITICAL: Three-phase algorithm:
+    1. Collect ghost VRegs
+    2. Remove ghost parameters and locals
+    3. Remove instructions that define ghost variables
+    """
+    var stats = ghosterasurestats_new()
+    val errors: [GhostErasureError] = []
+
+    # Phase 1: Collect ghost VRegs
+    var ghost_vregs: {VReg} = {}
+
+    # Parameters start at VReg(0)
+    for (i, param) in func.params_enumerate(params):
+        if param.is_ghost:
+            ghost_vregs = ghost_vregs_insert(ghost_vregs, VReg(i as u32))
+
+    # Locals start after parameters
+    val param_count = func.params_len(params)
+    for (i, local) in func.locals_enumerate(locals):
+        if local.is_ghost:
+            ghost_vregs = ghost_vregs_insert(ghost_vregs, VReg((param_count + i) as u32))
+
+    # Phase 2: Count and remove ghost parameters and locals
+    val ghost_params_count = func.params_filter(params, \p: p.is_ghost).len()
+    val ghost_locals_count = func.locals_filter(locals, \l: l.is_ghost).len()
+
+    func.params = func.params_filter(params, \p: not p.is_ghost)
+    func.locals = func.locals_filter(locals, \l: not l.is_ghost)
+
+    stats.ghost_params_erased = ghost_params_count
+    stats.ghost_locals_erased = ghost_locals_count
+
+    # Phase 3: Remove instructions that define ghost variables
+    for block in func.blocks:
+        val original_len = block.instructions_len(instructions)
+
+        block.instructions = block.instructions.filter(\inst:
+            # Keep instruction if it doesn't define a ghost variable
+            if val has_field = true, field_value = dest = inst_dest(inst):
+                not ghost_vregs_contains(ghost_vregs, dest)
+            else:
+                true
+        )
+
+        stats.instructions_erased = stats.instructions_erased + (original_len - block.instructions_len(instructions))
+
+    (stats, errors)
+
+# ============================================================================
+# Query Functions
+# ============================================================================
+
+fn has_ghost_variables(func: MirFunction) -> bool:
+    """Check if a function has any ghost variables."""
+    func.params_any(params, \p: p.is_ghost) or func.locals_any(locals, \l: l.is_ghost)
+
+fn ghost_variable_count(func: MirFunction) -> usize:
+    """Get the count of ghost variables in a function."""
+    func.params_filter(params, \p: p.is_ghost).len() + func.locals_filter(locals, \l: l.is_ghost).len()

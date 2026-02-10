@@ -1,0 +1,163 @@
+# Core Simple Lexer - Desugared from Full Simple
+#
+# This is a Core-compatible version of src/compiler/lexer.spl
+# All impl blocks, Option types, and pattern matching have been desugared.
+#
+# Transformations applied:
+# 1. impl Lexer: removed → methods converted to module functions
+# 2. Option<T> removed → replaced with has_field + field_value pattern  
+# 3. Pattern matching → converted to if-else chains
+# 4. Method calls obj.method() → function calls module_method(obj)
+
+use lexer_types.*
+
+# ============================================================================
+# Lexer Structure (Option types desugared)
+# ============================================================================
+
+struct Lexer:
+    """Tokenizer for Simple source code."""
+    source: text
+    pos: i64
+    line: i64
+    col: i64
+    indent_stack: [i64]
+    pending_dedents: i64
+    at_line_start: bool
+    paren_depth: i64
+    in_math_block: bool
+    math_brace_depth: i64
+    prev_token_kind: TokenKind
+    
+    # DESUGARED: pending_token: Token?
+    has_pending_token: bool
+    pending_token_value: Token
+    
+    generic_depth: i64
+    
+    # DESUGARED: block_registry: BlockRegistry?
+    has_block_registry: bool
+    block_registry_value: BlockRegistry
+    
+    # DESUGARED: current_block_kind: text?
+    has_current_block_kind: bool
+    current_block_kind_value: text
+    
+    current_lexer_mode: LexerMode
+    in_raw_block: bool
+    raw_block_start: i64
+    block_brace_depth: i64
+    
+    # DESUGARED: unified_registry: UnifiedRegistry?
+    has_unified_registry: bool
+    unified_registry_value: UnifiedRegistry
+
+# ============================================================================
+# Constructors (was: static methods)
+# ============================================================================
+
+fn lexer_new(source: text) -> Lexer:
+    """Create new lexer. Was: impl Lexer: static fn new()"""
+    Lexer(
+        source: source,
+        pos: 0,
+        line: 1,
+        col: 1,
+        indent_stack: [0],
+        pending_dedents: 0,
+        at_line_start: true,
+        paren_depth: 0,
+        in_math_block: false,
+        math_brace_depth: 0,
+        prev_token_kind: TokenKind.Eof,
+        has_pending_token: false,
+        pending_token_value: token_eof(),
+        generic_depth: 0,
+        has_block_registry: false,
+        block_registry_value: block_registry_default(),
+        has_current_block_kind: false,
+        current_block_kind_value: "",
+        current_lexer_mode: LexerMode.Normal,
+        in_raw_block: false,
+        raw_block_start: 0,
+        block_brace_depth: 0,
+        has_unified_registry: false,
+        unified_registry_value: unified_registry_default()
+    )
+
+# ============================================================================
+# Instance Methods (was: me methods)
+# ============================================================================
+
+fn lexer_maybe_insert_implicit_mul(self: Lexer, token: Token) -> Token:
+    """Check for implicit multiplication. Was: me maybe_insert_implicit_mul()
+    
+    DESUGARED: Pattern matching → if-else chain
+    """
+    if not self.in_math_block:
+        self.prev_token_kind = token.kind
+        return token
+    
+    # DESUGARED pattern match
+    var needs_implicit_mul: bool = false
+    
+    val prev_int: bool = self.prev_token_kind == TokenKind.IntLit
+    val prev_float: bool = self.prev_token_kind == TokenKind.FloatLit
+    val prev_num: bool = prev_int or prev_float
+    val curr_ident: bool = token.kind == TokenKind.Ident
+    val curr_lparen: bool = token.kind == TokenKind.LParen
+    val prev_rparen: bool = self.prev_token_kind == TokenKind.RParen
+    
+    if prev_num and curr_ident:
+        needs_implicit_mul = true
+    if prev_num and curr_lparen:
+        needs_implicit_mul = true
+    if prev_rparen and curr_ident:
+        needs_implicit_mul = true
+    if prev_rparen and curr_lparen:
+        needs_implicit_mul = true
+    
+    if needs_implicit_mul:
+        self.has_pending_token = true
+        self.pending_token_value = token
+        val mul: Token = token_new(TokenKind.ImplicitMul, token.span, "")
+        self.prev_token_kind = TokenKind.ImplicitMul
+        return mul
+    else:
+        self.prev_token_kind = token.kind
+        return token
+
+fn lexer_next_token(self: Lexer) -> Token:
+    """Get next token. Was: me next_token()"""
+    if self.has_pending_token:
+        val token: Token = self.pending_token_value
+        self.has_pending_token = false
+        self.prev_token_kind = token.kind
+        return token
+    
+    val token: Token = lexer_scan_token(self)
+    return lexer_maybe_insert_implicit_mul(self, token)
+
+fn lexer_scan_token(self: Lexer) -> Token:
+    """Internal token scanner. Was: me scan_token()"""
+    # Placeholder implementation
+    return token_eof()
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn token_eof() -> Token:
+    Token(kind: TokenKind.Eof, span: span_default(), text: "")
+
+fn token_new(kind: TokenKind, span: Span, text: text) -> Token:
+    Token(kind: kind, span: span, text: text)
+
+fn span_default() -> Span:
+    Span(start: 0, end: 0, line: 0, col: 0)
+
+fn block_registry_default() -> BlockRegistry:
+    BlockRegistry(blocks: [])
+
+fn unified_registry_default() -> UnifiedRegistry:
+    UnifiedRegistry(entries: [])

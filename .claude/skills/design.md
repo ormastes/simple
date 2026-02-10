@@ -18,25 +18,23 @@
 
 ### Adding New Types
 
-1. Add variant to `Type` enum in `src/type/src/lib.rs`
+1. Add variant to the type system in `src/core/types.spl`
 2. Create separate module for complex types
-3. Update `Type::apply_subst()` for new variants
+3. Update type substitution for new variants
 4. Update `contains_var()` if type can contain variables
 5. Export public API through module declarations
 
 Example:
-```rust
-// src/type/src/lib.rs
-pub enum Type {
-    // ... existing variants
-    NewType(String),  // Add new variant
-}
+```simple
+# src/core/types.spl
+enum Type:
+    # ... existing variants
+    NewType(name: text)   # Add new variant
 
-// src/type/src/new_type.rs
-pub struct NewType {
-    pub name: String,
-    pub fields: Vec<Field>,
-}
+# src/core/new_type.spl
+class NewType:
+    name: text
+    fields: [Field]
 ```
 
 ### Memory Model

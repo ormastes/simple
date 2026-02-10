@@ -1,0 +1,319 @@
+# Core Simple — Lexer Intensive Tests
+use core.lexer.{lex_init, lex_next, lex_token_text}
+use core.tokens.*
+
+fn collect_kinds(source: text) -> [i64]:
+    var kinds: [i64] = []
+    lex_init(source)
+    for i in 0..100000:
+        val k = lex_next()
+        kinds.push(k)
+        if k == TOK_EOF:
+            break
+    kinds
+
+fn collect_texts(source: text) -> [text]:
+    var texts: [text] = []
+    lex_init(source)
+    for i in 0..100000:
+        val k = lex_next()
+        texts.push(lex_token_text())
+        if k == TOK_EOF:
+            break
+    texts
+
+fn count_kind(kinds: [i64], target: i64) -> i64:
+    var count = 0
+    for k in kinds:
+        if k == target:
+            count = count + 1
+    count
+
+fn find_kind(kinds: [i64], target: i64) -> bool:
+    for k in kinds:
+        if k == target:
+            return true
+    false
+
+
+describe "core.lexer (intensive)":
+    it "handles string escapes and unknown escapes":
+        val src = "\"" + "a" + "\\n" + "\\t" + "\\r" + "\\\\" + "\\\"" + "\\'" + "\\0" + "\\q" + "\""
+        val kinds = collect_kinds(src)
+        expect(kinds[0]).to_equal(TOK_STRING_LIT)
+        val texts = collect_texts(src)
+        val text = texts[0]
+        expect(text.contains("\n")).to_equal(true)
+        expect(text.contains("\t")).to_equal(true)
+        expect(text.contains("\r")).to_equal(true)
+        expect(text.contains("\\")).to_equal(true)
+        expect(text.contains("\"" )).to_equal(true)
+        expect(text.contains("'")).to_equal(true)
+        # Unknown escape preserved as \q
+        expect(text.contains("\\q")).to_equal(true)
+
+    it "reports unterminated strings":
+        val kinds = collect_kinds("\"unterminated\n")
+        expect(find_kind(kinds, TOK_ERROR)).to_equal(true)
+        val texts = collect_texts("\"unterminated\n")
+        expect(texts[0].contains("unterminated")).to_equal(true)
+
+    it "emits attribute token for #[":
+        val kinds = collect_kinds("#[test]\n")
+        expect(find_kind(kinds, TOK_HASH_LBRACKET)).to_equal(true)
+
+    it "emits dedent at EOF when needed":
+        val kinds = collect_kinds("fn main():\n    val x = 1")
+        expect(find_kind(kinds, TOK_INDENT)).to_equal(true)
+        expect(find_kind(kinds, TOK_DEDENT)).to_equal(true)
+
+    it "suppresses newline inside parentheses":
+        val kinds = collect_kinds("val x = (1 +\n 2)\n")
+        val newlines = count_kind(kinds, TOK_NEWLINE)
+        expect(newlines).to_equal(1)
+
+    it "reports unexpected characters":
+        val kinds = collect_kinds("$\n")
+        expect(find_kind(kinds, TOK_ERROR)).to_equal(true)
+
+    # === Additional branch coverage tests ===
+
+    it "handles empty source":
+        val kinds = collect_kinds("")
+        expect(kinds.len()).to_equal(1)
+        expect(kinds[0]).to_equal(TOK_EOF)
+
+    it "handles single quote strings":
+        val kinds = collect_kinds("'hello'\n")
+        expect(kinds[0]).to_equal(TOK_STRING_LIT)
+        val texts = collect_texts("'hello'\n")
+        expect(texts[0]).to_equal("hello")
+
+    it "handles exponent with plus sign":
+        val kinds = collect_kinds("1e+10\n")
+        expect(kinds[0]).to_equal(TOK_FLOAT_LIT)
+        val texts = collect_texts("1e+10\n")
+        expect(texts[0]).to_equal("1e+10")
+
+    it "handles exponent with minus sign":
+        val kinds = collect_kinds("1e-5\n")
+        expect(kinds[0]).to_equal(TOK_FLOAT_LIT)
+        val texts = collect_texts("1e-5\n")
+        expect(texts[0]).to_equal("1e-5")
+
+    it "handles uppercase exponent":
+        val kinds = collect_kinds("1E10\n")
+        expect(kinds[0]).to_equal(TOK_FLOAT_LIT)
+
+    it "handles number with underscore separators":
+        val kinds = collect_kinds("1_000_000\n")
+        expect(kinds[0]).to_equal(TOK_INT_LIT)
+        val texts = collect_texts("1_000_000\n")
+        expect(texts[0]).to_equal("1_000_000")
+
+    it "handles float decimal with underscores":
+        val kinds = collect_kinds("1_234.567_8\n")
+        expect(kinds[0]).to_equal(TOK_FLOAT_LIT)
+
+    it "handles zero as regular number":
+        val kinds = collect_kinds("0\n")
+        expect(kinds[0]).to_equal(TOK_INT_LIT)
+        val texts = collect_texts("0\n")
+        expect(texts[0]).to_equal("0")
+
+    it "handles tab indentation":
+        val kinds = collect_kinds("fn f():\n\tval x = 1\n")
+        expect(find_kind(kinds, TOK_INDENT)).to_equal(true)
+
+    it "handles multiple dedent levels":
+        val src = "fn f():\n    if true:\n        val x = 1\nval y = 2\n"
+        val kinds = collect_kinds(src)
+        val dedents = count_kind(kinds, TOK_DEDENT)
+        expect(dedents >= 2).to_equal(true)
+
+    it "handles spread operator ...":
+        val kinds = collect_kinds("...\n")
+        expect(find_kind(kinds, TOK_DOTDOTDOT)).to_equal(true)
+
+    it "handles inclusive range ..=":
+        val kinds = collect_kinds("0..=10\n")
+        expect(find_kind(kinds, TOK_DOTDOT_EQ)).to_equal(true)
+
+    it "handles single dot":
+        val kinds = collect_kinds("a.b\n")
+        expect(find_kind(kinds, TOK_DOT)).to_equal(true)
+
+    it "handles arrow operator":
+        val kinds = collect_kinds("fn f() -> i64\n")
+        expect(find_kind(kinds, TOK_ARROW)).to_equal(true)
+
+    it "handles fat arrow operator":
+        val kinds = collect_kinds("x => y\n")
+        expect(find_kind(kinds, TOK_FAT_ARROW)).to_equal(true)
+
+    it "handles plus assign":
+        val kinds = collect_kinds("x += 1\n")
+        expect(find_kind(kinds, TOK_PLUS_ASSIGN)).to_equal(true)
+
+    it "handles minus assign":
+        val kinds = collect_kinds("x -= 1\n")
+        expect(find_kind(kinds, TOK_MINUS_ASSIGN)).to_equal(true)
+
+    it "handles star assign":
+        val kinds = collect_kinds("x *= 2\n")
+        expect(find_kind(kinds, TOK_STAR_ASSIGN)).to_equal(true)
+
+    it "handles slash assign":
+        val kinds = collect_kinds("x /= 2\n")
+        expect(find_kind(kinds, TOK_SLASH_ASSIGN)).to_equal(true)
+
+    it "handles single plus":
+        val kinds = collect_kinds("1 + 2\n")
+        expect(find_kind(kinds, TOK_PLUS)).to_equal(true)
+
+    it "handles single minus":
+        val kinds = collect_kinds("1 - 2\n")
+        expect(find_kind(kinds, TOK_MINUS)).to_equal(true)
+
+    it "handles single star":
+        val kinds = collect_kinds("1 * 2\n")
+        expect(find_kind(kinds, TOK_STAR)).to_equal(true)
+
+    it "handles single slash":
+        val kinds = collect_kinds("1 / 2\n")
+        expect(find_kind(kinds, TOK_SLASH)).to_equal(true)
+
+    it "handles percent operator":
+        val kinds = collect_kinds("7 % 3\n")
+        expect(find_kind(kinds, TOK_PERCENT)).to_equal(true)
+
+    it "handles equals operator":
+        val kinds = collect_kinds("a == b\n")
+        expect(find_kind(kinds, TOK_EQ)).to_equal(true)
+
+    it "handles not equals operator":
+        val kinds = collect_kinds("a != b\n")
+        expect(find_kind(kinds, TOK_NEQ)).to_equal(true)
+
+    it "handles single bang (not)":
+        val kinds = collect_kinds("!x\n")
+        expect(find_kind(kinds, TOK_NOT)).to_equal(true)
+
+    it "handles less than":
+        val kinds = collect_kinds("a < b\n")
+        expect(find_kind(kinds, TOK_LT)).to_equal(true)
+
+    it "handles greater than":
+        val kinds = collect_kinds("a > b\n")
+        expect(find_kind(kinds, TOK_GT)).to_equal(true)
+
+    it "handles less or equal":
+        val kinds = collect_kinds("a <= b\n")
+        expect(find_kind(kinds, TOK_LEQ)).to_equal(true)
+
+    it "handles greater or equal":
+        val kinds = collect_kinds("a >= b\n")
+        expect(find_kind(kinds, TOK_GEQ)).to_equal(true)
+
+    it "handles single assign":
+        val kinds = collect_kinds("x = 1\n")
+        expect(find_kind(kinds, TOK_ASSIGN)).to_equal(true)
+
+    it "handles single question mark":
+        val kinds = collect_kinds("opt?\n")
+        expect(find_kind(kinds, TOK_QUESTION)).to_equal(true)
+
+    it "handles single pipe":
+        val kinds = collect_kinds("a | b\n")
+        expect(find_kind(kinds, TOK_PIPE)).to_equal(true)
+
+    it "handles at symbol":
+        val kinds = collect_kinds("@decorator\n")
+        expect(find_kind(kinds, TOK_AT)).to_equal(true)
+
+    it "handles semicolon":
+        val kinds = collect_kinds("x; y\n")
+        expect(find_kind(kinds, TOK_SEMICOLON)).to_equal(true)
+
+    it "handles colon":
+        val kinds = collect_kinds("x: i64\n")
+        expect(find_kind(kinds, TOK_COLON)).to_equal(true)
+
+    it "handles comma":
+        val kinds = collect_kinds("a, b, c\n")
+        expect(find_kind(kinds, TOK_COMMA)).to_equal(true)
+
+    it "handles parentheses":
+        val kinds = collect_kinds("(1 + 2)\n")
+        expect(find_kind(kinds, TOK_LPAREN)).to_equal(true)
+        expect(find_kind(kinds, TOK_RPAREN)).to_equal(true)
+
+    it "handles brackets":
+        val kinds = collect_kinds("[1, 2]\n")
+        expect(find_kind(kinds, TOK_LBRACKET)).to_equal(true)
+        expect(find_kind(kinds, TOK_RBRACKET)).to_equal(true)
+
+    it "handles braces":
+        val kinds = collect_kinds("{key: val}\n")
+        expect(find_kind(kinds, TOK_LBRACE)).to_equal(true)
+        expect(find_kind(kinds, TOK_RBRACE)).to_equal(true)
+
+    it "handles nested brackets with depth tracking":
+        val kinds = collect_kinds("[[1], [2]]\n")
+        val lbrackets = count_kind(kinds, TOK_LBRACKET)
+        val rbrackets = count_kind(kinds, TOK_RBRACKET)
+        expect(lbrackets).to_equal(3)
+        expect(rbrackets).to_equal(3)
+
+    it "handles newline suppression in brackets":
+        val kinds = collect_kinds("[\n1,\n2\n]\n")
+        val newlines = count_kind(kinds, TOK_NEWLINE)
+        expect(newlines).to_equal(1)  # Only final newline
+
+    it "handles newline suppression in braces":
+        val kinds = collect_kinds("{\nkey:\nval\n}\n")
+        val newlines = count_kind(kinds, TOK_NEWLINE)
+        expect(newlines).to_equal(1)  # Only final newline
+
+    it "handles underscore as token":
+        val kinds = collect_kinds("_ = 1\n")
+        expect(find_kind(kinds, TOK_UNDERSCORE)).to_equal(true)
+
+    it "handles keywords true/false/nil":
+        val kinds = collect_kinds("true false nil\n")
+        expect(find_kind(kinds, TOK_BOOL_LIT)).to_equal(true)
+        expect(find_kind(kinds, TOK_NIL_LIT)).to_equal(true)
+
+    it "handles range operator":
+        val kinds = collect_kinds("0..10\n")
+        expect(find_kind(kinds, TOK_DOTDOT)).to_equal(true)
+
+    it "handles binary literal with underscores":
+        val kinds = collect_kinds("0b1010_1100\n")
+        expect(kinds[0]).to_equal(TOK_INT_LIT)
+
+    it "handles hex literal with underscores":
+        val kinds = collect_kinds("0xDEAD_BEEF\n")
+        expect(kinds[0]).to_equal(TOK_INT_LIT)
+
+    it "handles octal literal with underscores":
+        val kinds = collect_kinds("0o755\n")
+        expect(kinds[0]).to_equal(TOK_INT_LIT)
+
+    it "handles blank line between indented blocks":
+        val src = "fn f():\n    val x = 1\n\n    val y = 2\n"
+        val kinds = collect_kinds(src)
+        expect(find_kind(kinds, TOK_IDENT)).to_equal(true)
+
+    it "handles comment-only line in indented block":
+        val src = "fn f():\n    # comment\n    val x = 1\n"
+        val kinds = collect_kinds(src)
+        expect(find_kind(kinds, TOK_KW_VAL)).to_equal(true)
+
+    it "handles .? operator":
+        val kinds = collect_kinds("a.?\n")
+        expect(find_kind(kinds, TOK_QUESTION_DOT)).to_equal(true)
+
+    it "handles string at EOF without newline":
+        val kinds = collect_kinds("\"hello\"")
+        expect(kinds[0]).to_equal(TOK_STRING_LIT)

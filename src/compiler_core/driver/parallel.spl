@@ -1,0 +1,239 @@
+# Parallel Build Orchestration
+#
+# Dependency-aware parallel compilation using work queues.
+# Respects module dependency order while maximizing parallelism.
+
+export ParallelBuildConfig, BuildUnit, BuildGraph, BuildResult
+export ParallelBuilder, BuildStats
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct ParallelBuildConfig:
+    num_threads: i64            # 0 = use all available CPUs
+    parallel_threshold: i64     # Min modules to enable parallelism
+    deterministic: bool         # Sort inputs for reproducible builds
+    verbose: bool
+
+
+# ============================================================================
+# ParallelBuildConfig Methods (was: impl ParallelBuildConfig:)
+# ============================================================================
+
+fn parallelbuildconfig_default() -> ParallelBuildConfig:
+        ParallelBuildConfig(num_threads: 0, parallel_threshold: 4,
+                            deterministic: true, verbose: false)
+
+
+fn parallelbuildconfig_single_threaded() -> ParallelBuildConfig:
+        ParallelBuildConfig(num_threads: 1, parallel_threshold: 999,
+                            deterministic: true, verbose: false)
+
+
+# ============================================================================
+# Build Units and Dependency Graph
+# ============================================================================
+
+struct BuildUnit:
+    """A unit of compilation (usually one source file)."""
+    id: i64
+    path: text
+    dependencies: [i64]     # IDs of units this depends on
+    dependents: [i64]       # IDs of units that depend on this
+    status: BuildUnitStatus
+    # DESUGARED: output: text?
+    has_output: bool
+    output_value: text
+
+enum BuildUnitStatus:
+    Pending
+    Ready           # All deps satisfied
+    InProgress
+    Completed
+    Failed(text)
+
+class BuildGraph:
+    """Dependency graph for build units."""
+    units: {i64: BuildUnit}
+    next_id: i64
+
+
+# ============================================================================
+# BuildGraph Methods (was: impl BuildGraph:)
+# ============================================================================
+
+fn buildgraph_empty() -> BuildGraph:
+        BuildGraph(units: {}, next_id: 0)
+
+
+fn buildgraph_add_unit(self: BuildGraph, path: text, dependencies: [i64]) -> i64:
+        """Add a build unit, return its ID."""
+        val id = self.next_id
+        self.next_id = self.next_id + 1
+        val unit = BuildUnit(id: id, path: path, dependencies: dependencies,
+                             dependents: [], status: BuildUnitStatus.Pending,
+                             output: nil)
+        self.units[id] = unit
+
+        # Update dependents
+        for dep_id in dependencies:
+            if self.units_contains_key(units, dep_id):
+                var dep = self.units[dep_id]
+                self.units[dep_id] = BuildUnit(
+                    id: dep.id, path: dep.path,
+                    dependencies: dep.dependencies,
+                    dependents: dep.dependents_push(dependents, id),
+                    status: dep.status, output: dep.output)
+
+        id
+
+
+# ============================================================================
+# Build Statistics
+# ============================================================================
+
+struct BuildStats:
+    total_units: i64
+    completed: i64
+    failed: i64
+    skipped: i64
+    parallel_batches: i64
+
+
+# ============================================================================
+# BuildStats Methods (was: impl BuildStats:)
+# ============================================================================
+
+fn buildstats_empty() -> BuildStats:
+        BuildStats(total_units: 0, completed: 0, failed: 0,
+                   skipped: 0, parallel_batches: 0)
+
+
+# ============================================================================
+# Build Result
+# ============================================================================
+
+struct BuildResult:
+    success: bool
+    stats: BuildStats
+    errors: [(text, text)]      # (file, error_message)
+    outputs: [text]             # Generated artifact paths
+
+# ============================================================================
+# Parallel Builder
+# ============================================================================
+
+class ParallelBuilder:
+    """Orchestrates parallel compilation respecting dependencies."""
+    config: ParallelBuildConfig
+    graph: BuildGraph
+    stats: BuildStats
+
+
+# ============================================================================
+# ParallelBuilder Methods (was: impl ParallelBuilder:)
+# ============================================================================
+
+fn parallelbuilder_create(config: ParallelBuildConfig) -> ParallelBuilder:
+        ParallelBuilder(config: config, graph: buildgraph_empty(),
+                        stats: buildstats_empty())
+
+
+fn parallelbuilder_add_unit(self: ParallelBuilder, path: text, dependencies: [i64]) -> i64:
+        self.graph_add_unit(graph, path, dependencies)
+
+
+fn parallelbuilder_build(self: ParallelBuilder, compile_fn: fn(text) -> Result<text, text>) -> BuildResult:
+        """Execute the build using the provided compile function.
+
+        In deterministic mode, processes units in topological order.
+        Otherwise, processes ready units in parallel batches.
+        """
+        val total = self.graph.units_len(units)
+        self.stats = BuildStats(total_units: total, completed: 0, failed: 0,
+                                skipped: 0, parallel_batches: 0)
+        var errors: [(text, text)] = []
+        var outputs: [text] = []
+
+        if self.config.deterministic or total < self.config.parallel_threshold:
+            # Sequential build in topological order
+            val order = self.graph_topological_order(graph)
+            for id in order:
+                if not self.graph.units_contains_key(units, id):
+                    continue
+                val unit = self.graph.units[id]
+
+                # Skip if any dependency failed
+                var dep_failed = false
+                for dep_id in unit.dependencies:
+                    if self.graph.units_contains_key(units, dep_id):
+                        match self.graph.units[dep_id].status:
+                            case Failed(_): dep_failed = true
+                            case _: ()
+                if dep_failed:
+                    self.graph.mark_failed(id, "Dependency failed")
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                    continue
+
+                self.graph_mark_in_progress(graph, id)
+                val result = compile_fn(unit.path)
+                match result:
+                    case Ok(output):
+                        self.graph_mark_completed(graph, id, has_field = true, field_value = output)
+                        outputs = outputs_push(outputs, output)
+                        self.stats = BuildStats(total_units: self.stats.total_units,
+                            completed: self.stats.completed + 1,
+                            failed: self.stats.failed,
+                            skipped: self.stats.skipped,
+                            parallel_batches: self.stats.parallel_batches)
+                    case Err(msg):
+                        self.graph_mark_failed(graph, id, msg)
+                        errors = errors_push(errors, (unit.path, msg))
+                        self.stats = BuildStats(total_units: self.stats.total_units,
+                            completed: self.stats.completed,
+                            failed: self.stats.failed + 1,
+                            skipped: self.stats.skipped,
+                            parallel_batches: self.stats.parallel_batches)
+        else:
+            # Parallel build: process ready units in batches
+            # Uses rayon FFI for actual parallelism
+            while not self.graph_is_complete(graph):
+                val ready = self.graph_ready_units(graph)
+                if ready_len(ready) == 0:
+                    break   # Deadlock or all done
+
+                self.stats = BuildStats(total_units: self.stats.total_units,
+                    completed: self.stats.completed, failed: self.stats.failed,
+                    skipped: self.stats.skipped,
+                    parallel_batches: self.stats.parallel_batches + 1)
+
+                # Process batch (sequential for now; parallel via rayon FFI in future)
+                for unit in ready:
+                    self.graph_mark_in_progress(graph, unit.id)
+                    val result = compile_fn(unit.path)
+                    match result:
+                        case Ok(output):
+                            self.graph_mark_completed(graph, unit.id, has_field = true, field_value = output)
+                            outputs = outputs_push(outputs, output)
+                            self.stats = BuildStats(total_units: self.stats.total_units,
+                                completed: self.stats.completed + 1,
+                                failed: self.stats.failed,
+                                skipped: self.stats.skipped,
+                                parallel_batches: self.stats.parallel_batches)
+                        case Err(msg):
+                            self.graph_mark_failed(graph, unit.id, msg)
+                            errors = errors_push(errors, (unit.path, msg))
+                            self.stats = BuildStats(total_units: self.stats.total_units,
+                                completed: self.stats.completed,
+                                failed: self.stats.failed + 1,
+                                skipped: self.stats.skipped,
+                                parallel_batches: self.stats.parallel_batches)
+
+        BuildResult(success: not self.graph_has_failures(graph),
+                    stats: self.stats, errors: errors, outputs: outputs)
+

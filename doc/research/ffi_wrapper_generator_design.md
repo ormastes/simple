@@ -1,7 +1,7 @@
 # FFI Wrapper Generator Design
 
-**Status**: Research / Phase 1
-**Date**: 2026-02-02
+**Status**: Implemented (Phases 1-3 complete, Phase 4 in progress)
+**Date**: 2026-02-02 (updated 2026-02-10)
 
 ## Problem
 
@@ -278,29 +278,57 @@ With `-C linker-plugin-lto` enabled:
 - Generated wrappers can be completely eliminated
 - Achieves true zero-overhead FFI for Cranelift-compiled code
 
-## Implementation Files
+## Implementation Files (Actual)
 
-### Simple App (`src/app/ffi_gen/`)
+### Simple App (`src/app/ffi_gen/`) — 18 core files, 3,699 lines
 
-| File | Purpose | Lines (est.) |
-|------|---------|-------------|
-| `main.spl` | CLI entry point, orchestration | ~300 |
-| `parser.spl` | Parse `@Lib(...)` annotations + extern decls | ~400 |
-| `rust_codegen.spl` | Generate Rust wrapper source code | ~500 |
-| `c_codegen.spl` | Generate C wrapper source code (future) | ~300 |
-| `cargo_gen.spl` | Generate Cargo.toml with dependency | ~150 |
-| `type_mapping.spl` | Simple ↔ Rust/C type mapping rules | ~200 |
-| `builder.spl` | Invoke cargo/cc build on generated crate | ~150 |
+| File | Purpose | Lines |
+|------|---------|-------|
+| `main.spl` | CLI entry point, orchestration, env setup | 1,034 |
+| `parser.spl` | Parse `@Lib(...)` annotations + extern decls | 310 |
+| `rust_codegen.spl` | Generate Rust extern "C" wrappers | 269 |
+| `cargo_gen.spl` | Generate Cargo.toml with dependencies | 60 |
+| `type_mapping.spl` | Simple ↔ Rust/C type mapping rules | 115 |
+| `builder.spl` | Invoke cargo build on generated crate | 31 |
+| `types.spl` | Extended type specs (ImportSpec, FieldSpec, EnumVariantSpec, FnSpec, etc.) | 429 |
+| `intern_codegen.spl` | Generate `interpreter_extern` Rust module from spec | 302 |
+| `module_gen.spl` | Generate complete Rust module source from ModuleSpec | 172 |
+| `workspace_gen.spl` | Generate multi-crate Cargo workspace (16 FFI crates) | 181 |
+| `lib_gen.spl` | Generate `simple_ffi_lib` top-level crate | 78 |
+| `fn_gen.spl` | Generate Rust function bodies | 137 |
+| `struct_gen.spl` | Generate Rust struct definitions | 121 |
+| `enum_gen.spl` | Generate Rust enum definitions | 113 |
+| `impl_gen.spl` | Generate Rust impl blocks | 113 |
+| `bootstrap_gen.spl` | Generate bootstrap/startup code | 57 |
+| `package.spl` | Package management for FFI crates | 67 |
+| `test_gen.spl` | Generate Rust test code | 110 |
+
+### FFI Spec Files (`src/app/ffi_gen/specs/`) — 50+ files, 8,374 lines
+
+Declarative specifications for all FFI bindings, organized by domain:
+
+| Category | Files | Description |
+|----------|-------|-------------|
+| Runtime core | `runtime_value.spl`, `runtime_value_full.spl` | Value type conversions |
+| GC/Memory | `gc.spl`, `gc_full.spl`, `exec_memory.spl`, `memory_syscalls.spl`, `mmap.spl`, `mmap_syscalls.spl` | Memory management |
+| I/O | `file_io.spl`, `file_io_full.spl`, `io_print.spl`, `io_full.spl`, `dir_io.spl` | File/directory I/O |
+| System | `system.spl`, `system_full.spl`, `system_mod.spl`, `env.spl`, `fault.spl` | System calls |
+| Process | `process.spl`, `process_full.spl`, `process_mod.spl` | Process management |
+| Time | `time.spl`, `time_full.spl`, `time_mod.spl` | Time functions |
+| Collections | `collections.spl`, `im_rs.spl` | Collection types |
+| Codegen | `cranelift_core.spl`, `cranelift_ops.spl`, `cranelift_codegen.spl`, `cranelift_advanced.spl`, `codegen_mod.spl` | Cranelift codegen |
+| CLI | `cli.spl`, `cli_mod.spl`, `cargo.spl` | CLI tools |
+| Network | `net_mod.spl` | Networking |
+| Serialization | `json.spl`, `serde_mod.spl` | JSON/serde |
+| Other | `crypto_mod.spl`, `archive_mod.spl`, `concurrent_mod.spl`, `data_mod.spl`, `glob.spl`, `treesitter.spl`, `compiler_query.spl` | Misc |
 
 ### Build System Integration
 
 | File | Change |
 |------|--------|
-| `src/app/cli/main.spl` | Add `ffi-gen` command dispatch |
-| `src/app/build/cli_entry.spl` | Add `ffi-gen` build subcommand |
-| `src/app/build/orchestrator.spl` | Integrate FFI generation before Cargo build |
-| `src/app/build/cargo.spl` | Add `build_ffi_crates()` function |
-| `src/app/build/config.spl` | Add `FfiBuildConfig` struct |
+| `src/app/cli/main.spl` | `ffi-gen` command dispatch |
+| `build/rust/` | Persistent Rust build environment |
+| `simple.sdn` | `ffi.rust` config section |
 
 ## Usage Example
 
@@ -341,6 +369,23 @@ Each migration:
 - Verify generated wrappers match manual implementations
 - Run existing tests to confirm no regression
 - Remove manual Rust code
+
+## Implementation Status
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 | Research document | DONE |
+| Phase 2 | Simple app (`src/app/ffi_gen/`) | DONE — 18 core files, 3,699 lines |
+| Phase 2.5 | `build/rust/` persistent environment + `simple.sdn` config | DONE |
+| Phase 3 | Type mapping (`type_mapping.spl`) | DONE |
+| Phase 3.5 | Full code generation (module_gen, workspace_gen, lib_gen, etc.) | DONE |
+| Phase 3.6 | FFI spec files (50+ specs, 8,374 lines) | DONE |
+| Phase 3.7 | Verification test suite | DONE |
+| Phase 4 | Migrate existing wrappers (math, file_io, system, collections) | NOT STARTED |
+| Phase 5 | Cross-Language LTO | NOT STARTED |
+| Phase 6 | Bootstrap build integration | NOT STARTED |
+
+**Total implementation: ~12,073 lines across 68 files.**
 
 ## Open Questions
 
