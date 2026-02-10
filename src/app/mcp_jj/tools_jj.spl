@@ -1,26 +1,1099 @@
-# tools_jj.spl - Hub for all 48 native jj tools
+# tools_jj.spl - All 48 native jj tools (consolidated for fast startup)
 #
-# Sub-modules:
-#   tools_jj_changes.spl  - 14 change operation tools
-#   tools_jj_viewing.spl  - 7 viewing & querying tools
-#   tools_jj_files.spl    - 3 file operation tools
-#   tools_jj_bookmarks.spl - 6 bookmark management tools
-#   tools_jj_git.spl      - 5 git interop tools
-#   tools_jj_misc.spl     - 13 misc tools (tags, ops, workspaces, sparse, conflicts, config)
+# Categories:
+#   Change operations (14): new, describe, commit, squash, split, duplicate, edit,
+#                           diffedit, absorb, abandon, restore, rebase, revert, parallelize
+#   Viewing & querying (7): status, log, diff, show, revset, interdiff, evolog
+#   File operations (3): file_annotate, file_list, file_show
+#   Bookmark management (6): bookmark_create, bookmark_delete, bookmark_list,
+#                            bookmark_move, bookmark_set, bookmark_rename
+#   Git interop (5): git_fetch, git_push, git_clone, git_remote, git_export
+#   Tags (1): tag_list
+#   Operation history (3): op_log, op_undo, op_restore
+#   Workspace (3): workspace_add, workspace_list, workspace_forget
+#   Sparse (2): sparse_list, sparse_set
+#   Conflicts (2): conflict_list, resolve
+#   Config (2): config_get, config_set
 
-use app.mcp_jj.helpers.{make_error_response}
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, make_tool_result, make_error_response, make_tool_schema_multi, extract_nested_string, extract_arguments_dict}
+use jj_runner.{JjResult, jj_run, jj_run_with_args, shell_quote}
 
-use app.mcp_jj.tools_jj_changes.{schema_jj_new, schema_jj_describe, schema_jj_commit, schema_jj_squash, schema_jj_split, schema_jj_duplicate, schema_jj_edit, schema_jj_diffedit, schema_jj_absorb, schema_jj_abandon, schema_jj_restore, schema_jj_rebase, schema_jj_revert, schema_jj_parallelize, handle_jj_new, handle_jj_describe, handle_jj_commit, handle_jj_squash, handle_jj_split, handle_jj_duplicate, handle_jj_edit, handle_jj_diffedit, handle_jj_absorb, handle_jj_abandon, handle_jj_restore, handle_jj_rebase, handle_jj_revert, handle_jj_parallelize}
+# --- jj-specific tool schema helpers (inlined from helpers.spl) ---
 
-use app.mcp_jj.tools_jj_viewing.{schema_jj_status, schema_jj_log, schema_jj_diff, schema_jj_show, schema_jj_revset, schema_jj_interdiff, schema_jj_evolog, handle_jj_status, handle_jj_log, handle_jj_diff, handle_jj_show, handle_jj_revset, handle_jj_interdiff, handle_jj_evolog}
+fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
+    val prop = jo2(jp("type", js("string")), jp("description", js(desc)))
+    val props = jo1(jp(prop_name, prop))
+    var req_arr = "[]"
+    if required:
+        req_arr = "[" + js(prop_name) + "]"
+    val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", req_arr))
+    var annot = LB()
+    var ro = "false"
+    if read_only:
+        ro = "true"
+    annot = annot + jp("readOnlyHint", ro) + ","
+    var dest = "false"
+    if destructive:
+        dest = "true"
+    annot = annot + jp("destructiveHint", dest) + ","
+    var idemp = "false"
+    if idempotent:
+        idemp = "true"
+    annot = annot + jp("idempotentHint", idemp) + ","
+    annot = annot + jp("openWorldHint", "false") + RB()
+    var result = LB()
+    result = result + jp("name", js(name)) + ","
+    result = result + jp("description", js(escape_json(desc))) + ","
+    result = result + jp("inputSchema", schema) + ","
+    result = result + jp("annotations", annot) + RB()
+    result
 
-use app.mcp_jj.tools_jj_files.{schema_jj_file_annotate, schema_jj_file_list, schema_jj_file_show, handle_jj_file_annotate, handle_jj_file_list, handle_jj_file_show}
+fn make_no_param_tool(name: String, desc: String, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
+    val schema = jo2(jp("type", js("object")), jp("properties", LB() + RB()))
+    var annot = LB()
+    var ro = "false"
+    if read_only:
+        ro = "true"
+    annot = annot + jp("readOnlyHint", ro) + ","
+    var dest = "false"
+    if destructive:
+        dest = "true"
+    annot = annot + jp("destructiveHint", dest) + ","
+    var idemp = "false"
+    if idempotent:
+        idemp = "true"
+    annot = annot + jp("idempotentHint", idemp) + ","
+    annot = annot + jp("openWorldHint", "false") + RB()
+    var result = LB()
+    result = result + jp("name", js(name)) + ","
+    result = result + jp("description", js(escape_json(desc))) + ","
+    result = result + jp("inputSchema", schema) + ","
+    result = result + jp("annotations", annot) + RB()
+    result
 
-use app.mcp_jj.tools_jj_bookmarks.{schema_jj_bookmark_create, schema_jj_bookmark_delete, schema_jj_bookmark_list, schema_jj_bookmark_move, schema_jj_bookmark_set, schema_jj_bookmark_rename, handle_jj_bookmark_create, handle_jj_bookmark_delete, handle_jj_bookmark_list, handle_jj_bookmark_move, handle_jj_bookmark_set, handle_jj_bookmark_rename}
+fn make_prop(name: String, desc: String) -> String:
+    jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))
 
-use app.mcp_jj.tools_jj_git.{schema_jj_git_fetch, schema_jj_git_push, schema_jj_git_clone, schema_jj_git_remote, schema_jj_git_export, handle_jj_git_fetch, handle_jj_git_push, handle_jj_git_clone, handle_jj_git_remote, handle_jj_git_export}
+fn make_prop_bool(name: String, desc: String) -> String:
+    jp(name, jo2(jp("type", js("boolean")), jp("description", js(escape_json(desc)))))
 
-use app.mcp_jj.tools_jj_misc.{schema_jj_tag_list, schema_jj_op_log, schema_jj_op_undo, schema_jj_op_restore, schema_jj_workspace_add, schema_jj_workspace_list, schema_jj_workspace_forget, schema_jj_sparse_list, schema_jj_sparse_set, schema_jj_conflict_list, schema_jj_resolve, schema_jj_config_get, schema_jj_config_set, handle_jj_tag_list, handle_jj_op_log, handle_jj_op_undo, handle_jj_op_restore, handle_jj_workspace_add, handle_jj_workspace_list, handle_jj_workspace_forget, handle_jj_sparse_list, handle_jj_sparse_set, handle_jj_conflict_list, handle_jj_resolve, handle_jj_config_get, handle_jj_config_set}
+fn make_prop_int(name: String, desc: String) -> String:
+    jp(name, jo2(jp("type", js("integer")), jp("description", js(escape_json(desc)))))
+
+# =============================================================================
+# CHANGE OPERATIONS (14 tools)
+# =============================================================================
+
+# --- 1. jj_new ---
+
+fn schema_jj_new() -> String:
+    var props = LB()
+    props = props + make_prop("revisions", "Parent revision(s) for the new change")
+    props = props + "," + make_prop("message", "Description for the new change")
+    props = props + "," + make_prop_bool("insert_before", "Insert before the given revision")
+    props = props + "," + make_prop_bool("insert_after", "Insert after the given revision")
+    props = props + RB()
+    make_tool_schema_multi("jj_new", "Create a new empty change", props, "[]", false, false, false)
+
+fn handle_jj_new(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    val message = extract_nested_string(body, "arguments", "message")
+    val insert_before = extract_nested_string(body, "arguments", "insert_before")
+    val insert_after = extract_nested_string(body, "arguments", "insert_after")
+    var cmd = "new"
+    if insert_before == "true":
+        cmd = cmd + " --insert-before"
+    if insert_after == "true":
+        cmd = cmd + " --insert-after"
+    if message != "":
+        cmd = cmd + " -m " + "'" + message + "'"
+    if revisions != "":
+        cmd = cmd + " " + revisions
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 2. jj_describe ---
+
+fn schema_jj_describe() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to describe (default: @)")
+    props = props + "," + make_prop("message", "New description text")
+    props = props + "," + make_prop_bool("stdin", "Read description from stdin")
+    props = props + RB()
+    make_tool_schema_multi("jj_describe", "Update the description of a change", props, "[]", false, false, true)
+
+fn handle_jj_describe(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val message = extract_nested_string(body, "arguments", "message")
+    val stdin = extract_nested_string(body, "arguments", "stdin")
+    var cmd = "describe"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if message != "":
+        cmd = cmd + " -m " + "'" + message + "'"
+    if stdin == "true":
+        cmd = cmd + " --stdin"
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 3. jj_commit ---
+
+fn schema_jj_commit() -> String:
+    make_tool_schema("jj_commit", "Commit current changes and start a new change", "message", "Commit message", false, false, false, false)
+
+fn handle_jj_commit(id: String, body: String, repo_path: String) -> String:
+    val message = extract_nested_string(body, "arguments", "message")
+    var cmd = "commit"
+    if message != "":
+        cmd = cmd + " -m " + "'" + message + "'"
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 4. jj_squash ---
+
+fn schema_jj_squash() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to squash (default: @)")
+    props = props + "," + make_prop("into", "Target revision to squash into")
+    props = props + "," + make_prop("message", "Description for the combined change")
+    props = props + RB()
+    make_tool_schema_multi("jj_squash", "Squash changes into parent or specified revision", props, "[]", false, false, false)
+
+fn handle_jj_squash(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val into_rev = extract_nested_string(body, "arguments", "into")
+    val message = extract_nested_string(body, "arguments", "message")
+    var cmd = "squash"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if into_rev != "":
+        cmd = cmd + " --into " + into_rev
+    if message != "":
+        cmd = cmd + " -m " + "'" + message + "'"
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 5. jj_split ---
+
+fn schema_jj_split() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to split (default: @)")
+    props = props + "," + make_prop("paths", "File paths to include in the first change")
+    props = props + RB()
+    make_tool_schema_multi("jj_split", "Split a change into two changes", props, "[]", false, false, false)
+
+fn handle_jj_split(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val paths = extract_nested_string(body, "arguments", "paths")
+    var cmd = "split"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 6. jj_duplicate ---
+
+fn schema_jj_duplicate() -> String:
+    make_tool_schema("jj_duplicate", "Duplicate one or more changes", "revisions", "Revisions to duplicate", false, false, false, false)
+
+fn handle_jj_duplicate(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    var cmd = "duplicate"
+    if revisions != "":
+        cmd = cmd + " " + revisions
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 7. jj_edit ---
+
+fn schema_jj_edit() -> String:
+    make_tool_schema("jj_edit", "Edit a change directly in the working copy", "revision", "Revision to edit", false, false, false, true)
+
+fn handle_jj_edit(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "edit"
+    if revision != "":
+        cmd = cmd + " " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 8. jj_diffedit ---
+
+fn schema_jj_diffedit() -> String:
+    make_tool_schema("jj_diffedit", "Edit the diff of a change using an external editor", "revision", "Revision to edit (default: @)", false, false, false, false)
+
+fn handle_jj_diffedit(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "diffedit"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 9. jj_absorb ---
+
+fn schema_jj_absorb() -> String:
+    make_no_param_tool("jj_absorb", "Move changes from the working copy into relevant earlier commits", false, false, false)
+
+fn handle_jj_absorb(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("absorb", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 10. jj_abandon ---
+
+fn schema_jj_abandon() -> String:
+    make_tool_schema("jj_abandon", "Abandon one or more changes", "revisions", "Revisions to abandon", false, false, true, false)
+
+fn handle_jj_abandon(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    var cmd = "abandon"
+    if revisions != "":
+        cmd = cmd + " " + revisions
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 11. jj_restore ---
+
+fn schema_jj_restore() -> String:
+    var props = LB()
+    props = props + make_prop("from", "Revision to restore from")
+    props = props + "," + make_prop("to", "Revision to restore to (default: @)")
+    props = props + "," + make_prop("paths", "Specific file paths to restore")
+    props = props + RB()
+    make_tool_schema_multi("jj_restore", "Restore files from another change", props, "[]", false, false, false)
+
+fn handle_jj_restore(id: String, body: String, repo_path: String) -> String:
+    val from = extract_nested_string(body, "arguments", "from")
+    val to = extract_nested_string(body, "arguments", "to")
+    val paths = extract_nested_string(body, "arguments", "paths")
+    var cmd = "restore"
+    if from != "":
+        cmd = cmd + " --from " + from
+    if to != "":
+        cmd = cmd + " --to " + to
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 12. jj_rebase ---
+
+fn schema_jj_rebase() -> String:
+    var props = LB()
+    props = props + make_prop("revisions", "Revisions to rebase")
+    props = props + "," + make_prop("destination", "Destination revision(s)")
+    props = props + "," + make_prop("source", "Rebase this revision and its descendants")
+    props = props + "," + make_prop("branch", "Rebase the whole branch relative to destination")
+    props = props + RB()
+    make_tool_schema_multi("jj_rebase", "Rebase changes onto another revision", props, "[]", false, false, false)
+
+fn handle_jj_rebase(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    val destination = extract_nested_string(body, "arguments", "destination")
+    val source = extract_nested_string(body, "arguments", "source")
+    val branch = extract_nested_string(body, "arguments", "branch")
+    var cmd = "rebase"
+    if revisions != "":
+        cmd = cmd + " -r " + revisions
+    if source != "":
+        cmd = cmd + " -s " + source
+    if branch != "":
+        cmd = cmd + " -b " + branch
+    if destination != "":
+        cmd = cmd + " -d " + destination
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 13. jj_revert ---
+
+fn schema_jj_revert() -> String:
+    make_tool_schema("jj_revert", "Create a change that reverses the effect of another change", "revisions", "Revisions to revert", false, false, false, false)
+
+fn handle_jj_revert(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    var cmd = "revert"
+    if revisions != "":
+        cmd = cmd + " -r " + revisions
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 14. jj_parallelize ---
+
+fn schema_jj_parallelize() -> String:
+    make_tool_schema("jj_parallelize", "Make a set of revisions parallel instead of sequential", "revisions", "Revisions to parallelize", false, false, false, false)
+
+fn handle_jj_parallelize(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    var cmd = "parallelize"
+    if revisions != "":
+        cmd = cmd + " " + revisions
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# VIEWING & QUERYING (7 tools)
+# =============================================================================
+
+# --- 15. jj_status ---
+
+fn schema_jj_status() -> String:
+    make_no_param_tool("jj_status", "Show working copy status and tracked file changes", true, false, true)
+
+fn handle_jj_status(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("status", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 16. jj_log ---
+
+fn schema_jj_log() -> String:
+    var props = LB()
+    props = props + make_prop("revisions", "Revset expression to filter commits")
+    props = props + "," + make_prop("limit", "Max number of commits to show")
+    props = props + "," + make_prop("template", "Output template")
+    props = props + RB()
+    make_tool_schema_multi("jj_log", "Show commit history log", props, "[]", true, false, true)
+
+fn handle_jj_log(id: String, body: String, repo_path: String) -> String:
+    val revisions = extract_nested_string(body, "arguments", "revisions")
+    val limit = extract_nested_string(body, "arguments", "limit")
+    val tmpl = extract_nested_string(body, "arguments", "template")
+    var cmd = "log"
+    if revisions != "":
+        cmd = cmd + " -r " + revisions
+    if limit != "":
+        cmd = cmd + " -n " + limit
+    if tmpl != "":
+        cmd = cmd + " -T " + tmpl
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 17. jj_diff ---
+
+fn schema_jj_diff() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to show diff for (default: @)")
+    props = props + "," + make_prop("from", "Show diff from this revision")
+    props = props + "," + make_prop("to", "Show diff to this revision")
+    props = props + "," + make_prop("paths", "Restrict diff to specific paths")
+    props = props + RB()
+    make_tool_schema_multi("jj_diff", "Show changes in a revision or between revisions", props, "[]", true, false, true)
+
+fn handle_jj_diff(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val from = extract_nested_string(body, "arguments", "from")
+    val to = extract_nested_string(body, "arguments", "to")
+    val paths = extract_nested_string(body, "arguments", "paths")
+    var cmd = "diff"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if from != "":
+        cmd = cmd + " --from " + from
+    if to != "":
+        cmd = cmd + " --to " + to
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 18. jj_show ---
+
+fn schema_jj_show() -> String:
+    make_tool_schema("jj_show", "Show commit details and diff", "revision", "Revision to show (default: @)", false, true, false, true)
+
+fn handle_jj_show(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "show"
+    if revision != "":
+        cmd = cmd + " " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 19. jj_revset ---
+
+fn schema_jj_revset() -> String:
+    make_tool_schema("jj_revset", "Evaluate a revset expression and list matching revisions", "expression", "Revset expression to evaluate", true, true, false, true)
+
+fn handle_jj_revset(id: String, body: String, repo_path: String) -> String:
+    val expression = extract_nested_string(body, "arguments", "expression")
+    if expression == "":
+        return make_error_response(id, -32602, "Missing required parameter: expression")
+    var cmd = "log -r " + expression
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 20. jj_interdiff ---
+
+fn schema_jj_interdiff() -> String:
+    var props = LB()
+    props = props + make_prop("from", "First revision to compare")
+    props = props + "," + make_prop("to", "Second revision to compare")
+    props = props + RB()
+    make_tool_schema_multi("jj_interdiff", "Compare the diffs of two changes", props, "[]", true, false, true)
+
+fn handle_jj_interdiff(id: String, body: String, repo_path: String) -> String:
+    val from = extract_nested_string(body, "arguments", "from")
+    val to = extract_nested_string(body, "arguments", "to")
+    var cmd = "interdiff"
+    if from != "":
+        cmd = cmd + " --from " + from
+    if to != "":
+        cmd = cmd + " --to " + to
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 21. jj_evolog ---
+
+fn schema_jj_evolog() -> String:
+    make_tool_schema("jj_evolog", "Show how a change has evolved over time", "revision", "Revision to show evolution for (default: @)", false, true, false, true)
+
+fn handle_jj_evolog(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    var cmd = "evolog"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# FILE OPERATIONS (3 tools)
+# =============================================================================
+
+# --- 22. jj_file_annotate ---
+
+fn schema_jj_file_annotate() -> String:
+    var props = LB()
+    props = props + make_prop("path", "File path to annotate")
+    props = props + "," + make_prop("revision", "Revision to annotate at (default: @)")
+    props = props + RB()
+    make_tool_schema_multi("jj_file_annotate", "Annotate each line of a file with the change that last modified it", props, "[" + js("path") + "]", true, false, true)
+
+fn handle_jj_file_annotate(id: String, body: String, repo_path: String) -> String:
+    val path = extract_nested_string(body, "arguments", "path")
+    val revision = extract_nested_string(body, "arguments", "revision")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+    var cmd = "file annotate"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    cmd = cmd + " " + path
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 23. jj_file_list ---
+
+fn schema_jj_file_list() -> String:
+    var props = LB()
+    props = props + make_prop("revision", "Revision to list files at (default: @)")
+    props = props + "," + make_prop("paths", "Restrict to specific paths")
+    props = props + RB()
+    make_tool_schema_multi("jj_file_list", "List tracked files in the repository", props, "[]", true, false, true)
+
+fn handle_jj_file_list(id: String, body: String, repo_path: String) -> String:
+    val revision = extract_nested_string(body, "arguments", "revision")
+    val paths = extract_nested_string(body, "arguments", "paths")
+    var cmd = "file list"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    if paths != "":
+        cmd = cmd + " " + paths
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 24. jj_file_show ---
+
+fn schema_jj_file_show() -> String:
+    var props = LB()
+    props = props + make_prop("path", "File path to show")
+    props = props + "," + make_prop("revision", "Revision to show file at (default: @)")
+    props = props + RB()
+    make_tool_schema_multi("jj_file_show", "Show the contents of a file at a given revision", props, "[" + js("path") + "]", true, false, true)
+
+fn handle_jj_file_show(id: String, body: String, repo_path: String) -> String:
+    val path = extract_nested_string(body, "arguments", "path")
+    val revision = extract_nested_string(body, "arguments", "revision")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+    var cmd = "file show"
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    cmd = cmd + " " + path
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# BOOKMARK MANAGEMENT (6 tools)
+# =============================================================================
+
+# --- 25. jj_bookmark_create ---
+
+fn schema_jj_bookmark_create() -> String:
+    var props = LB()
+    props = props + make_prop("name", "Name of the bookmark to create")
+    props = props + "," + make_prop("revision", "Revision to point the bookmark at (default: @)")
+    props = props + RB()
+    make_tool_schema_multi("jj_bookmark_create", "Create a new bookmark at a revision", props, "[" + js("name") + "]", false, false, false)
+
+fn handle_jj_bookmark_create(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    val revision = extract_nested_string(body, "arguments", "revision")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "bookmark create " + name
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 26. jj_bookmark_delete ---
+
+fn schema_jj_bookmark_delete() -> String:
+    make_tool_schema("jj_bookmark_delete", "Delete a bookmark", "name", "Name of the bookmark to delete", true, false, true, false)
+
+fn handle_jj_bookmark_delete(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "bookmark delete " + name
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 27. jj_bookmark_list ---
+
+fn schema_jj_bookmark_list() -> String:
+    var props = LB()
+    props = props + make_prop_bool("all_remotes", "Show bookmarks from all remotes")
+    props = props + RB()
+    make_tool_schema_multi("jj_bookmark_list", "List all bookmarks", props, "[]", true, false, true)
+
+fn handle_jj_bookmark_list(id: String, body: String, repo_path: String) -> String:
+    val all_remotes = extract_nested_string(body, "arguments", "all_remotes")
+    var cmd = "bookmark list"
+    if all_remotes == "true":
+        cmd = cmd + " --all-remotes"
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 28. jj_bookmark_move ---
+
+fn schema_jj_bookmark_move() -> String:
+    var props = LB()
+    props = props + make_prop("name", "Name of the bookmark to move")
+    props = props + "," + make_prop("to", "Destination revision (default: @)")
+    props = props + RB()
+    make_tool_schema_multi("jj_bookmark_move", "Move a bookmark to a different revision", props, "[" + js("name") + "]", false, false, false)
+
+fn handle_jj_bookmark_move(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    val to = extract_nested_string(body, "arguments", "to")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "bookmark move " + name
+    if to != "":
+        cmd = cmd + " --to " + to
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 29. jj_bookmark_set ---
+
+fn schema_jj_bookmark_set() -> String:
+    var props = LB()
+    props = props + make_prop("name", "Name of the bookmark to set")
+    props = props + "," + make_prop("revision", "Revision to point the bookmark at (default: @)")
+    props = props + RB()
+    make_tool_schema_multi("jj_bookmark_set", "Set a bookmark to a specific revision, creating if needed", props, "[" + js("name") + "]", false, false, true)
+
+fn handle_jj_bookmark_set(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    val revision = extract_nested_string(body, "arguments", "revision")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "bookmark set " + name
+    if revision != "":
+        cmd = cmd + " -r " + revision
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 30. jj_bookmark_rename ---
+
+fn schema_jj_bookmark_rename() -> String:
+    var props = LB()
+    props = props + make_prop("old_name", "Current name of the bookmark")
+    props = props + "," + make_prop("new_name", "New name for the bookmark")
+    props = props + RB()
+    make_tool_schema_multi("jj_bookmark_rename", "Rename a bookmark", props, "[" + js("old_name") + "," + js("new_name") + "]", false, false, false)
+
+fn handle_jj_bookmark_rename(id: String, body: String, repo_path: String) -> String:
+    val old_name = extract_nested_string(body, "arguments", "old_name")
+    val new_name = extract_nested_string(body, "arguments", "new_name")
+    if old_name == "":
+        return make_error_response(id, -32602, "Missing required parameter: old_name")
+    if new_name == "":
+        return make_error_response(id, -32602, "Missing required parameter: new_name")
+    var cmd = "bookmark rename " + old_name + " " + new_name
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# GIT INTEROP (5 tools)
+# =============================================================================
+
+# --- 31. jj_git_fetch ---
+
+fn schema_jj_git_fetch() -> String:
+    make_tool_schema("jj_git_fetch", "Fetch from a git remote", "remote", "Remote to fetch from (default: origin)", false, false, false, true)
+
+fn handle_jj_git_fetch(id: String, body: String, repo_path: String) -> String:
+    val remote = extract_nested_string(body, "arguments", "remote")
+    var cmd = "git fetch"
+    if remote != "":
+        cmd = cmd + " --remote " + remote
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 32. jj_git_push ---
+
+fn schema_jj_git_push() -> String:
+    var props = LB()
+    props = props + make_prop("remote", "Remote to push to (default: origin)")
+    props = props + "," + make_prop("bookmark", "Bookmark to push")
+    props = props + "," + make_prop_bool("all", "Push all bookmarks")
+    props = props + "," + make_prop("change", "Push this change's bookmark")
+    props = props + RB()
+    make_tool_schema_multi("jj_git_push", "Push to a git remote", props, "[]", false, false, false)
+
+fn handle_jj_git_push(id: String, body: String, repo_path: String) -> String:
+    val remote = extract_nested_string(body, "arguments", "remote")
+    val bookmark = extract_nested_string(body, "arguments", "bookmark")
+    val all = extract_nested_string(body, "arguments", "all")
+    val change = extract_nested_string(body, "arguments", "change")
+    var cmd = "git push"
+    if remote != "":
+        cmd = cmd + " --remote " + remote
+    if bookmark != "":
+        cmd = cmd + " --bookmark " + bookmark
+    if all == "true":
+        cmd = cmd + " --all"
+    if change != "":
+        cmd = cmd + " --change " + change
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 33. jj_git_clone ---
+
+fn schema_jj_git_clone() -> String:
+    var props = LB()
+    props = props + make_prop("url", "URL of the git repository to clone")
+    props = props + "," + make_prop("destination", "Directory to clone into")
+    props = props + "," + make_prop_bool("colocate", "Create a colocated jj+git repository")
+    props = props + RB()
+    make_tool_schema_multi("jj_git_clone", "Clone a git repository into a new jj repository", props, "[" + js("url") + "]", false, false, false)
+
+fn handle_jj_git_clone(id: String, body: String, repo_path: String) -> String:
+    val url = extract_nested_string(body, "arguments", "url")
+    val destination = extract_nested_string(body, "arguments", "destination")
+    val colocate = extract_nested_string(body, "arguments", "colocate")
+    if url == "":
+        return make_error_response(id, -32602, "Missing required parameter: url")
+    var cmd = "git clone"
+    if colocate == "true":
+        cmd = cmd + " --colocate"
+    cmd = cmd + " " + url
+    if destination != "":
+        cmd = cmd + " " + destination
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 34. jj_git_remote ---
+
+fn schema_jj_git_remote() -> String:
+    var props = LB()
+    props = props + make_prop("action", "Action to perform: add, list, remove, or rename")
+    props = props + "," + make_prop("name", "Remote name")
+    props = props + "," + make_prop("url", "Remote URL (for add)")
+    props = props + "," + make_prop("new_name", "New remote name (for rename)")
+    props = props + RB()
+    make_tool_schema_multi("jj_git_remote", "Manage git remotes", props, "[" + js("action") + "]", false, false, false)
+
+fn handle_jj_git_remote(id: String, body: String, repo_path: String) -> String:
+    val action = extract_nested_string(body, "arguments", "action")
+    val name = extract_nested_string(body, "arguments", "name")
+    val url = extract_nested_string(body, "arguments", "url")
+    val new_name = extract_nested_string(body, "arguments", "new_name")
+    if action == "":
+        return make_error_response(id, -32602, "Missing required parameter: action")
+    var cmd = "git remote"
+    if action == "add":
+        if name == "" or url == "":
+            return make_error_response(id, -32602, "Remote add requires name and url")
+        cmd = cmd + " add " + name + " " + url
+    elif action == "list":
+        cmd = cmd + " list"
+    elif action == "remove":
+        if name == "":
+            return make_error_response(id, -32602, "Remote remove requires name")
+        cmd = cmd + " remove " + name
+    elif action == "rename":
+        if name == "" or new_name == "":
+            return make_error_response(id, -32602, "Remote rename requires name and new_name")
+        cmd = cmd + " rename " + name + " " + new_name
+    else:
+        return make_error_response(id, -32602, "Invalid action. Use: add, list, remove, rename")
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 35. jj_git_export ---
+
+fn schema_jj_git_export() -> String:
+    make_no_param_tool("jj_git_export", "Export jj changes to the underlying git repository refs", false, false, true)
+
+fn handle_jj_git_export(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("git export", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# TAGS (1 tool)
+# =============================================================================
+
+# --- 36. jj_tag_list ---
+
+fn schema_jj_tag_list() -> String:
+    make_no_param_tool("jj_tag_list", "List all tags in the repository", true, false, true)
+
+fn handle_jj_tag_list(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("tag list", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# OPERATION HISTORY (3 tools)
+# =============================================================================
+
+# --- 37. jj_op_log ---
+
+fn schema_jj_op_log() -> String:
+    make_tool_schema("jj_op_log", "Show the history of jj operations", "limit", "Max number of operations to show", false, true, false, true)
+
+fn handle_jj_op_log(id: String, body: String, repo_path: String) -> String:
+    val limit = extract_nested_string(body, "arguments", "limit")
+    var cmd = "op log"
+    if limit != "":
+        cmd = cmd + " -n " + limit
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 38. jj_op_undo ---
+
+fn schema_jj_op_undo() -> String:
+    make_no_param_tool("jj_op_undo", "Undo the most recent jj operation", false, true, false)
+
+fn handle_jj_op_undo(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("op undo", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 39. jj_op_restore ---
+
+fn schema_jj_op_restore() -> String:
+    make_tool_schema("jj_op_restore", "Restore the repository to the state at a specific operation", "operation", "Operation ID to restore to", true, false, true, false)
+
+fn handle_jj_op_restore(id: String, body: String, repo_path: String) -> String:
+    val operation = extract_nested_string(body, "arguments", "operation")
+    if operation == "":
+        return make_error_response(id, -32602, "Missing required parameter: operation")
+    var cmd = "op restore " + operation
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# WORKSPACE (3 tools)
+# =============================================================================
+
+# --- 40. jj_workspace_add ---
+
+fn schema_jj_workspace_add() -> String:
+    var props = LB()
+    props = props + make_prop("path", "Path for the new workspace")
+    props = props + "," + make_prop("name", "Name for the workspace")
+    props = props + RB()
+    make_tool_schema_multi("jj_workspace_add", "Add a new workspace at a specified path", props, "[" + js("path") + "]", false, false, false)
+
+fn handle_jj_workspace_add(id: String, body: String, repo_path: String) -> String:
+    val path = extract_nested_string(body, "arguments", "path")
+    val name = extract_nested_string(body, "arguments", "name")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+    var cmd = "workspace add"
+    if name != "":
+        cmd = cmd + " --name " + name
+    cmd = cmd + " " + path
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 41. jj_workspace_list ---
+
+fn schema_jj_workspace_list() -> String:
+    make_no_param_tool("jj_workspace_list", "List all workspaces in the repository", true, false, true)
+
+fn handle_jj_workspace_list(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("workspace list", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 42. jj_workspace_forget ---
+
+fn schema_jj_workspace_forget() -> String:
+    make_tool_schema("jj_workspace_forget", "Forget a workspace and stop tracking it", "name", "Name of the workspace to forget", true, false, true, false)
+
+fn handle_jj_workspace_forget(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "workspace forget " + name
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# SPARSE (2 tools)
+# =============================================================================
+
+# --- 43. jj_sparse_list ---
+
+fn schema_jj_sparse_list() -> String:
+    make_no_param_tool("jj_sparse_list", "List the current sparse patterns for the working copy", true, false, true)
+
+fn handle_jj_sparse_list(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("sparse list", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 44. jj_sparse_set ---
+
+fn schema_jj_sparse_set() -> String:
+    var props = LB()
+    props = props + make_prop("add", "Paths to add to the sparse set")
+    props = props + "," + make_prop("remove", "Paths to remove from the sparse set")
+    props = props + "," + make_prop_bool("clear", "Clear all sparse patterns first")
+    props = props + RB()
+    make_tool_schema_multi("jj_sparse_set", "Set which paths are included in the sparse working copy", props, "[]", false, false, false)
+
+fn handle_jj_sparse_set(id: String, body: String, repo_path: String) -> String:
+    val add = extract_nested_string(body, "arguments", "add")
+    val remove = extract_nested_string(body, "arguments", "remove")
+    val clear = extract_nested_string(body, "arguments", "clear")
+    var cmd = "sparse set"
+    if clear == "true":
+        cmd = cmd + " --clear"
+    if add != "":
+        cmd = cmd + " --add " + add
+    if remove != "":
+        cmd = cmd + " --remove " + remove
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# CONFLICTS (2 tools)
+# =============================================================================
+
+# --- 45. jj_conflict_list ---
+
+fn schema_jj_conflict_list() -> String:
+    make_no_param_tool("jj_conflict_list", "List files with unresolved conflicts in the working copy", true, false, true)
+
+fn handle_jj_conflict_list(id: String, body: String, repo_path: String) -> String:
+    val result = jj_run("resolve --list", repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 46. jj_resolve ---
+
+fn schema_jj_resolve() -> String:
+    make_tool_schema("jj_resolve", "Start conflict resolution for a file", "path", "File path to resolve", false, false, false, false)
+
+fn handle_jj_resolve(id: String, body: String, repo_path: String) -> String:
+    val path = extract_nested_string(body, "arguments", "path")
+    var cmd = "resolve"
+    if path != "":
+        cmd = cmd + " " + path
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# =============================================================================
+# CONFIG (2 tools)
+# =============================================================================
+
+# --- 47. jj_config_get ---
+
+fn schema_jj_config_get() -> String:
+    make_tool_schema("jj_config_get", "Get a jj configuration value", "name", "Configuration key name", true, true, false, true)
+
+fn handle_jj_config_get(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    var cmd = "config get " + name
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout)
+    else:
+        make_error_response(id, -32603, result.stderr)
+
+# --- 48. jj_config_set ---
+
+fn schema_jj_config_set() -> String:
+    var props = LB()
+    props = props + make_prop("name", "Configuration key name")
+    props = props + "," + make_prop("value", "Value to set")
+    props = props + RB()
+    make_tool_schema_multi("jj_config_set", "Set a jj configuration value", props, "[" + js("name") + "," + js("value") + "]", false, false, true)
+
+fn handle_jj_config_set(id: String, body: String, repo_path: String) -> String:
+    val name = extract_nested_string(body, "arguments", "name")
+    val value = extract_nested_string(body, "arguments", "value")
+    if name == "":
+        return make_error_response(id, -32602, "Missing required parameter: name")
+    if value == "":
+        return make_error_response(id, -32602, "Missing required parameter: value")
+    var cmd = "config set --user " + name + " " + value
+    val result = jj_run(cmd, repo_path)
+    if result.success:
+        make_tool_result(id, result.stdout + result.stderr)
+    else:
+        make_error_response(id, -32603, result.stderr)
 
 # =============================================================================
 # COLLECTOR FUNCTIONS
@@ -201,7 +1274,7 @@ fn handle_jj_tool(id: String, tool_name: String, body: String, repo_path: String
         return ""
 
 # =============================================================================
-# EXPORTS - Re-export everything for backward compatibility
+# EXPORTS
 # =============================================================================
 
 # Schema functions (48)
