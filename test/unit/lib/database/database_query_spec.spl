@@ -1,0 +1,225 @@
+# Database Query Builder Tests
+#
+# Tests fluent query API for database queries
+
+use std.spec.{check, check_msg}
+use lib.database.core.{SdnDatabase, SdnTable, SdnRow}
+use lib.database.query.{QueryBuilder, CompareOp}
+
+describe "QueryBuilder":
+    it "filters rows by equality":
+        # Create test table
+        var table = SdnTable(name: "users", columns: ["id", "name", "age"], rows: [], index: {})
+
+        # Add test data
+        for i in 0..5:
+            var row = SdnRow(fields: {})
+            row.set("id", "{i}")
+            row.set("name", "user_{i}")
+            row.set("age", "{20 + i}")
+            table.add_row(row)
+
+        # Query with filter
+        var query = QueryBuilder__for_table(table)
+        val results = query.filter_by("name", CompareOp.Eq, "user_2").execute()
+
+        check(results.len() == 1)
+        check(results[0].get("name")? == "user_2")
+
+    it "filters rows by comparison operators":
+        var table = SdnTable(name: "items", columns: ["id", "price"], rows: [], index: {})
+
+        # Add items with different prices
+        for i in 0..10:
+            var row = SdnRow(fields: {})
+            row.set("id", "item_{i}")
+            row.set("price", "{i * 10}")
+            table.add_row(row)
+
+        # Query: price > 50
+        var query_gt = QueryBuilder__for_table(table)
+        val results_gt = query_gt.filter_by("price", CompareOp.Gt, "50").execute()
+
+        # Should get items 6-9 (prices 60, 70, 80, 90)
+        check(results_gt.len() == 4)
+
+        # Query: price < 30
+        var query_lt = QueryBuilder__for_table(table)
+        val results_lt = query_lt.filter_by("price", CompareOp.Lt, "30").execute()
+
+        # Should get items 0-2 (prices 0, 10, 20)
+        check(results_lt.len() == 3)
+
+    it "filters rows by contains operator":
+        var table = SdnTable(name: "files", columns: ["path", "extension"], rows: [], index: {})
+
+        # Add files
+        val files = [
+            ("src/main.spl", "spl"),
+            ("test/test.spl", "spl"),
+            ("README.md", "md"),
+            ("src/lib.rs", "rs"),
+        ]
+
+        for file in files:
+            var row = SdnRow(fields: {})
+            row.set("path", file.0)
+            row.set("extension", file.1)
+            table.add_row(row)
+
+        # Query: path contains "src"
+        var query = QueryBuilder__for_table(table)
+        val results = query.filter_by("path", CompareOp.Contains, "src").execute()
+
+        check(results.len() == 2)
+        check(results[0].get("path")?.contains("src"))
+
+    it "filters with in operator":
+        var table = SdnTable(name: "bugs", columns: ["id", "status"], rows: [], index: {})
+
+        # Add bugs with different statuses
+        val statuses = ["Open", "Fixed", "Open", "Closed", "Open", "Fixed"]
+        for i in 0..6:
+            var row = SdnRow(fields: {})
+            row.set("id", "bug_{i}")
+            row.set("status", statuses[i])
+            table.add_row(row)
+
+        # Query: status in ["Open", "Closed"]
+        var query = QueryBuilder__for_table(table)
+        val results = query.filter_in("status", ["Open", "Closed"]).execute()
+
+        # Should get 4 bugs (3 Open + 1 Closed)
+        check(results.len() == 4)
+
+    it "chains multiple filters":
+        var table = SdnTable(name: "products", columns: ["name", "category", "price"], rows: [], index: {})
+
+        # Add products
+        val products = [
+            ("Laptop", "Electronics", "1000"),
+            ("Mouse", "Electronics", "20"),
+            ("Desk", "Furniture", "300"),
+            ("Chair", "Furniture", "150"),
+            ("Monitor", "Electronics", "400"),
+        ]
+
+        for product in products:
+            var row = SdnRow(fields: {})
+            row.set("name", product.0)
+            row.set("category", product.1)
+            row.set("price", product.2)
+            table.add_row(row)
+
+        # Query: Electronics AND price > 100
+        var query = QueryBuilder__for_table(table)
+        val results = query
+            .filter_by("category", CompareOp.Eq, "Electronics")
+            .filter_by("price", CompareOp.Gt, "100")
+            .execute()
+
+        # Should get Laptop and Monitor
+        check(results.len() == 2)
+
+    it "filters only valid rows":
+        var table = SdnTable(name: "data", columns: ["id", "value", "valid"], rows: [], index: {})
+
+        # Add rows (some invalid)
+        for i in 0..5:
+            var row = SdnRow(fields: {})
+            row.set("id", "{i}")
+            row.set("value", "data_{i}")
+            val valid_str = if i % 2 == 0: "true" else: "false"
+            row.set("valid", valid_str)
+            table.add_row(row)
+
+        # Query with only_valid()
+        var query = QueryBuilder__for_table(table)
+        val results = query.only_valid().execute()
+
+        # Should get only valid rows (0, 2, 4)
+        check(results.len() == 3)
+
+    it "orders results ascending":
+        var table = SdnTable(name: "scores", columns: ["name", "score"], rows: [], index: {})
+
+        # Add unsorted scores
+        val scores = [("Alice", "85"), ("Bob", "92"), ("Charlie", "78"), ("Diana", "95")]
+        for score in scores:
+            var row = SdnRow(fields: {})
+            row.set("name", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        # Query ordered by score ascending
+        var query = QueryBuilder__for_table(table)
+        val results = query.order_by("score", false).execute()
+
+        # Should be: Charlie (78), Alice (85), Bob (92), Diana (95)
+        check(results[0].get("name")? == "Charlie")
+        check(results[3].get("name")? == "Diana")
+
+    it "orders results descending":
+        var table = SdnTable(name: "scores", columns: ["name", "score"], rows: [], index: {})
+
+        # Add scores
+        val scores = [("Alice", "85"), ("Bob", "92"), ("Charlie", "78"), ("Diana", "95")]
+        for score in scores:
+            var row = SdnRow(fields: {})
+            row.set("name", score.0)
+            row.set("score", score.1)
+            table.add_row(row)
+
+        # Query ordered by score descending
+        var query = QueryBuilder__for_table(table)
+        val results = query.order_by("score", true).execute()
+
+        # Should be: Diana (95), Bob (92), Alice (85), Charlie (78)
+        check(results[0].get("name")? == "Diana")
+        check(results[3].get("name")? == "Charlie")
+
+    it "limits number of results":
+        var table = SdnTable(name: "logs", columns: ["id", "message"], rows: [], index: {})
+
+        # Add many rows
+        for i in 0..20:
+            var row = SdnRow(fields: {})
+            row.set("id", "{i}")
+            row.set("message", "log_{i}")
+            table.add_row(row)
+
+        # Query with take(5)
+        var query = QueryBuilder__for_table(table)
+        val results = query.take(5).execute()
+
+        check(results.len() == 5)
+
+    it "combines filter, order, and limit":
+        var table = SdnTable(name: "tasks", columns: ["id", "priority", "status"], rows: [], index: {})
+
+        # Add tasks
+        for i in 0..10:
+            var row = SdnRow(fields: {})
+            row.set("id", "task_{i}")
+            row.set("priority", "{i % 3}")  # Priority 0, 1, 2
+            row.set("status", (if i % 2 == 0: "open" else: "closed"))
+            table.add_row(row)
+
+        # Query: open tasks, ordered by priority desc, top 3
+        var query = QueryBuilder__for_table(table)
+        val results = query
+            .filter_by("status", CompareOp.Eq, "open")
+            .order_by("priority", true)
+            .take(3)
+            .execute()
+
+        check(results.len() == 3)
+        check(results[0].get("status")? == "open")
+
+    it "returns empty for empty table":
+        val table = SdnTable(name: "empty", columns: ["id"], rows: [], index: {})
+
+        var query = QueryBuilder__for_table(table)
+        val results = query.execute()
+
+        check(results.len() == 0)

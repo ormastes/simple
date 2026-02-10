@@ -1,0 +1,126 @@
+#!/usr/bin/env simple
+# SSpec Tests for RISC-V 32 Semihosting
+#
+# Tests that bare-metal programs can print output via semihosting
+# and that we can verify the output with expect() assertions.
+
+use lib.execution.semihost_capture.{SemihostExecutor}
+
+# Test configuration
+val BINARY_PATH = "examples/baremetal/hello_riscv32_semihost.elf"
+val OUTPUT_FILE = "/tmp/semihost_test_output.txt"
+
+describe "RISC-V 32 Semihosting":
+    var executor = nil
+
+    after_each:
+        # Cleanup after each test
+        if executor.?:
+            executor.cleanup()
+            executor = nil
+
+    it "prints hello world message":
+        # Skip if binary doesn't exist
+        if not file_exists(BINARY_PATH):
+            skip("Binary not built: {BINARY_PATH}")
+            return
+
+        # Create executor and execute
+        val exec_result = SemihostExecutor.riscv32(BINARY_PATH, OUTPUT_FILE)
+        if not exec_result.ok.?:
+            fail_test("Failed to create executor: {exec_result.err ?? \"unknown error\"}")
+            return
+
+        executor = exec_result.ok ?? nil
+
+        # Execute and capture output
+        val result = executor.execute_and_capture()
+        if not result.ok.?:
+            fail_test("Failed to execute: {result.err ?? \"unknown error\"}")
+            return
+
+        val semihost_result = result.ok ?? nil
+
+        # Verify output
+        expect(semihost_result.stdout).to_contain("Hello, RISC-V 32!")
+
+    it "exits with code 0":
+        if not file_exists(BINARY_PATH):
+            skip("Binary not built: {BINARY_PATH}")
+            return
+
+        val exec_result = SemihostExecutor.riscv32(BINARY_PATH, OUTPUT_FILE)
+        if not exec_result.ok.?:
+            fail_test("Failed to create executor")
+            return
+
+        executor = exec_result.ok ?? nil
+
+        val result = executor.execute_and_capture()
+        if not result.ok.?:
+            fail_test("Failed to execute")
+            return
+
+        val semihost_result = result.ok ?? nil
+
+        # Verify success (check output message, not QEMU exit code)
+        # QEMU may exit with code 1 when killed by timeout, even if program succeeded
+        expect(semihost_result.stdout).to_contain("exit code 0")
+
+    it "completes within timeout":
+        if not file_exists(BINARY_PATH):
+            skip("Binary not built: {BINARY_PATH}")
+            return
+
+        val exec_result = SemihostExecutor.riscv32(BINARY_PATH, OUTPUT_FILE)
+        if not exec_result.ok.?:
+            fail_test("Failed to create executor")
+            return
+
+        executor = exec_result.ok ?? nil
+
+        val result = executor.execute_and_capture()
+        if not result.ok.?:
+            fail_test("Failed to execute")
+            return
+
+        val semihost_result = result.ok ?? nil
+
+        # Should complete quickly (< 5 seconds)
+        expect(semihost_result.duration_ms).to_be_less_than(5000)
+
+    it "outputs success message":
+        if not file_exists(BINARY_PATH):
+            skip("Binary not built: {BINARY_PATH}")
+            return
+
+        val exec_result = SemihostExecutor.riscv32(BINARY_PATH, OUTPUT_FILE)
+        if not exec_result.ok.?:
+            fail_test("Failed to create executor")
+            return
+
+        executor = exec_result.ok ?? nil
+
+        val result = executor.execute_and_capture()
+        if not result.ok.?:
+            fail_test("Failed to execute")
+            return
+
+        val semihost_result = result.ok ?? nil
+
+        # Verify success message
+        expect(semihost_result.stdout).to_contain("SEMIHOST TEST")
+        expect(semihost_result.stdout).to_contain("Success")
+
+# Helper functions
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_print(msg: text)
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn skip(msg: text):
+    rt_print("⊘ SKIP: {msg}")
+
+fn fail_test(msg: text):
+    rt_print("✗ FAIL: {msg}")

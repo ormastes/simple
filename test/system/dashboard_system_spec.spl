@@ -1,0 +1,86 @@
+# Dashboard System Tests - SSpec
+# Verifies dashboard CLI end-to-end behavior using the bootstrap runtime.
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+struct ProcResult:
+    stdout: text
+    stderr: text
+    exit_code: i64
+
+fn run_simple(args: [text]) -> ProcResult:
+    val (stdout, stderr, code) = rt_process_run("bin/bootstrap/simple", args)
+    ProcResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn shell_output(command: text) -> text:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn file_delete(path: text) -> bool:
+    rt_file_delete(path)
+
+describe "Dashboard System Tests":
+    it "collect generates dashboard tables and cache":
+        val result = run_simple(["src/app/dashboard/main.spl", "collect", "--mode=full"])
+        expect result.exit_code == 0
+        expect result.stdout.contains("Collection complete.")
+
+        expect file_exists("doc/dashboard/tables/todos.sdn")
+        expect file_exists("doc/dashboard/tables/test_status.sdn")
+        expect file_exists("doc/dashboard/dashboard_db.cache.sdn")
+
+        val todos = file_read("doc/dashboard/tables/todos.sdn")
+        expect todos.contains("todos |")
+
+    it "status prints summary":
+        val result = run_simple(["src/app/dashboard/main.spl", "status"])
+        expect result.exit_code == 0
+        expect result.stdout.contains("Project Status Overview")
+        expect result.stdout.contains("Todos:")
+
+    it "sspec summary prints suite/test counts":
+        val result = run_simple(["src/app/dashboard/main.spl", "sspec"])
+        expect result.exit_code == 0
+        expect result.stdout.contains("SSpec Test Summary")
+        expect result.stdout.contains("Suites:")
+        expect result.stdout.contains("Tests:")
+
+    it "export json includes summary and tables":
+        val result = run_simple(["src/app/dashboard/main.spl", "export", "--format=json"])
+        expect result.exit_code == 0
+        expect result.stdout.contains("\"summary\"")
+        expect result.stdout.contains("\"tables\"")
+        expect result.stdout.contains("\"todos\"")
+
+    it "snapshot creates history file for today":
+        val date = shell_output("date +%Y-%m-%d")
+        val month = shell_output("date +%Y-%m")
+        expect date.len() > 0
+        expect month.len() > 0
+
+        val snapshot_path = "doc/dashboard/history/{month}/{date}.sdn"
+        # Remove existing snapshot to ensure creation is exercised
+        if file_exists(snapshot_path):
+            file_delete(snapshot_path)
+
+        val result = run_simple(["src/app/dashboard/main.spl", "snapshot"])
+        expect result.exit_code == 0
+        expect file_exists(snapshot_path)
+
+        val snapshot = file_read(snapshot_path)
+        expect snapshot.contains("todos |")
+        expect snapshot.contains("features |")

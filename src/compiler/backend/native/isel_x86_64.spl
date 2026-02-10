@@ -423,6 +423,8 @@ fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             isel_aggregate(ctx, dest, operands)
         case Cast(dest, operand, target):
             isel_cast(ctx, dest, operand, target)
+        case GetElementPtr(dest, base, indices):
+            isel_get_element_ptr(ctx, dest, base, indices)
         case Nop:
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
         case _:
@@ -645,6 +647,43 @@ fn isel_aggregate(ctx: ISelContext, dest: LocalId, operands: [MirOperand]) -> IS
         insts = insts + op_low.insts
         val offset = i * 8
         insts = insts + [new_mach_inst(X86_OP_MOV_MEM_REG, [op_mem(base_reg, offset), op_low.result])]
+
+    ISelInstResult(insts: insts, ctx: current_ctx)
+
+fn isel_get_element_ptr(ctx: ISelContext, dest: LocalId, base: MirOperand, indices: [MirOperand]) -> ISelInstResult:
+    """Compute element address: dest = base + indices[0] * 8."""
+    var insts: [MachInst] = []
+    var current_ctx = ctx
+
+    # Lower base operand
+    val base_low = lower_operand(current_ctx, base)
+    current_ctx = base_low.ctx
+    insts = insts + base_low.insts
+
+    val dest_op = local_vreg_op(dest.id)
+
+    if indices.len() > 0:
+        # Lower index operand
+        val idx_low = lower_operand(current_ctx, indices[0])
+        current_ctx = idx_low.ctx
+        insts = insts + idx_low.insts
+
+        # Allocate temp vreg for scaled index
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val tmp_vreg = isel_get_vreg(current_ctx)
+        val tmp_op = op_reg(virtual_reg(tmp_vreg))
+
+        # tmp = 8 (element size)
+        insts = insts + [new_mach_inst(X86_OP_MOV_REG_IMM, [tmp_op, op_imm(8)])]
+        # tmp = tmp * index = 8 * index
+        insts = insts + [new_mach_inst(X86_OP_IMUL, [tmp_op, idx_low.result])]
+        # dest = base
+        insts = insts + [new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, base_low.result])]
+        # dest = dest + tmp = base + index * 8
+        insts = insts + [new_mach_inst(X86_OP_ADD, [dest_op, tmp_op])]
+    else:
+        # No indices - just copy base
+        insts = insts + [new_mach_inst(X86_OP_MOV_REG_REG, [dest_op, base_low.result])]
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 

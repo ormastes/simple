@@ -1,0 +1,362 @@
+# Concurrent Data Structures Specification
+#
+# Tests for src/std/concurrent.spl - MpscQueue, MpmcQueue, ConcurrentMap,
+# AtomicFlag, Once, Barrier. All built on working SFFI primitives.
+
+
+# --- SFFI declarations (self-contained test) ---
+
+# Channel operations
+extern fn rt_channel_new() -> i64
+extern fn rt_channel_send(channel_id: i64, value: Any)
+extern fn rt_channel_try_recv(channel_id: i64) -> Any
+extern fn rt_channel_close(channel_id: i64)
+
+# Atomic integer operations
+extern fn rt_atomic_int_new(initial: i64) -> i64
+extern fn rt_atomic_int_load(handle: i64) -> i64
+extern fn rt_atomic_int_store(handle: i64, value: i64)
+extern fn rt_atomic_int_fetch_add(handle: i64, value: i64) -> i64
+extern fn rt_atomic_int_fetch_sub(handle: i64, value: i64) -> i64
+extern fn rt_atomic_int_compare_exchange(handle: i64, current: i64, new_value: i64) -> bool
+extern fn rt_atomic_int_free(handle: i64)
+
+# Atomic boolean operations
+extern fn rt_atomic_bool_new(initial: bool) -> i64
+extern fn rt_atomic_bool_load(handle: i64) -> bool
+extern fn rt_atomic_bool_store(handle: i64, value: bool)
+extern fn rt_atomic_bool_swap(handle: i64, value: bool) -> bool
+extern fn rt_atomic_bool_free(handle: i64)
+
+# HashMap operations
+extern fn __rt_hashmap_new() -> i64
+extern fn __rt_hashmap_insert(handle: i64, key: text, value: Any) -> bool
+extern fn __rt_hashmap_get(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_contains_key(handle: i64, key: text) -> bool
+extern fn __rt_hashmap_remove(handle: i64, key: text) -> Any
+extern fn __rt_hashmap_len(handle: i64) -> i64
+
+# Thread operations
+extern fn rt_thread_yield()
+
+# ============================================================================
+# Class definitions (replicated for self-contained test)
+# ============================================================================
+
+class MpscQueue:
+    _channel_id: i64
+    _size_handle: i64
+
+    fn push(value: Any):
+        rt_channel_send(self._channel_id, value)
+        rt_atomic_int_fetch_add(self._size_handle, 1)
+
+    fn pop() -> Any:
+        val result = rt_channel_try_recv(self._channel_id)
+        if result != nil:
+            rt_atomic_int_fetch_sub(self._size_handle, 1)
+        result
+
+    fn is_empty() -> bool:
+        rt_atomic_int_load(self._size_handle) <= 0
+
+    fn len() -> i64:
+        val size = rt_atomic_int_load(self._size_handle)
+        if size < 0:
+            return 0
+        size
+
+    fn close():
+        rt_channel_close(self._channel_id)
+        rt_atomic_int_free(self._size_handle)
+
+class MpmcQueue:
+    _channel_id: i64
+    _capacity: i64
+    _size_handle: i64
+
+    fn push(value: Any) -> bool:
+        val current = rt_atomic_int_load(self._size_handle)
+        if current >= self._capacity:
+            return false
+        rt_channel_send(self._channel_id, value)
+        rt_atomic_int_fetch_add(self._size_handle, 1)
+        true
+
+    fn pop() -> Any:
+        val result = rt_channel_try_recv(self._channel_id)
+        if result != nil:
+            rt_atomic_int_fetch_sub(self._size_handle, 1)
+        result
+
+    fn len() -> i64:
+        val size = rt_atomic_int_load(self._size_handle)
+        if size < 0:
+            return 0
+        size
+
+    fn is_empty() -> bool:
+        rt_atomic_int_load(self._size_handle) <= 0
+
+    fn is_full() -> bool:
+        rt_atomic_int_load(self._size_handle) >= self._capacity
+
+    fn close():
+        rt_channel_close(self._channel_id)
+        rt_atomic_int_free(self._size_handle)
+
+class ConcurrentMap:
+    _handle: i64
+
+    fn insert(key: text, value: Any) -> bool:
+        __rt_hashmap_insert(self._handle, key, value)
+
+    fn get(key: text) -> Any:
+        __rt_hashmap_get(self._handle, key)
+
+    fn remove(key: text) -> Any:
+        __rt_hashmap_remove(self._handle, key)
+
+    fn contains_key(key: text) -> bool:
+        __rt_hashmap_contains_key(self._handle, key)
+
+    fn len() -> i64:
+        __rt_hashmap_len(self._handle)
+
+    fn is_empty() -> bool:
+        __rt_hashmap_len(self._handle) == 0
+
+class AtomicFlag:
+    _handle: i64
+
+    fn set():
+        rt_atomic_bool_store(self._handle, true)
+
+    fn clear():
+        rt_atomic_bool_store(self._handle, false)
+
+    fn is_set() -> bool:
+        rt_atomic_bool_load(self._handle)
+
+    fn test_and_set() -> bool:
+        rt_atomic_bool_swap(self._handle, true)
+
+    fn free():
+        rt_atomic_bool_free(self._handle)
+
+class Once:
+    _state: i64
+
+    fn call_once(f: fn()):
+        if rt_atomic_int_load(self._state) == 2:
+            return
+        val ok = rt_atomic_int_compare_exchange(self._state, 0, 1)
+        if ok:
+            f()
+            rt_atomic_int_store(self._state, 2)
+        else:
+            while rt_atomic_int_load(self._state) != 2:
+                rt_thread_yield()
+
+    fn is_completed() -> bool:
+        rt_atomic_int_load(self._state) == 2
+
+    fn free():
+        rt_atomic_int_free(self._state)
+
+# ============================================================================
+# MpscQueue Tests
+# ============================================================================
+
+describe "MpscQueue":
+    it "starts empty":
+        val q = MpscQueue(_channel_id: rt_channel_new(), _size_handle: rt_atomic_int_new(0))
+        expect(q.is_empty()).to_equal(true)
+        expect(q.len()).to_equal(0)
+        q.close()
+
+    it "push and pop single value":
+        val q = MpscQueue(_channel_id: rt_channel_new(), _size_handle: rt_atomic_int_new(0))
+        q.push(42)
+        expect(q.is_empty()).to_equal(false)
+        expect(q.len()).to_equal(1)
+        val result = q.pop()
+        expect(result).to_equal(42)
+        expect(q.is_empty()).to_equal(true)
+        q.close()
+
+    it "maintains FIFO order":
+        val q = MpscQueue(_channel_id: rt_channel_new(), _size_handle: rt_atomic_int_new(0))
+        q.push("first")
+        q.push("second")
+        q.push("third")
+        expect(q.len()).to_equal(3)
+        expect(q.pop()).to_equal("first")
+        expect(q.pop()).to_equal("second")
+        expect(q.pop()).to_equal("third")
+        expect(q.is_empty()).to_equal(true)
+        q.close()
+
+    it "pop returns nil when empty":
+        val q = MpscQueue(_channel_id: rt_channel_new(), _size_handle: rt_atomic_int_new(0))
+        val result = q.pop()
+        expect(result).to_be_nil()
+        q.close()
+
+    it "handles mixed push and pop":
+        val q = MpscQueue(_channel_id: rt_channel_new(), _size_handle: rt_atomic_int_new(0))
+        q.push(1)
+        q.push(2)
+        expect(q.pop()).to_equal(1)
+        q.push(3)
+        expect(q.pop()).to_equal(2)
+        expect(q.pop()).to_equal(3)
+        expect(q.pop()).to_be_nil()
+        q.close()
+
+# ============================================================================
+# MpmcQueue Tests
+# ============================================================================
+
+describe "MpmcQueue":
+    it "starts empty":
+        val q = MpmcQueue(_channel_id: rt_channel_new(), _capacity: 10, _size_handle: rt_atomic_int_new(0))
+        expect(q.is_empty()).to_equal(true)
+        expect(q.is_full()).to_equal(false)
+        expect(q.len()).to_equal(0)
+        q.close()
+
+    it "push and pop":
+        val q = MpmcQueue(_channel_id: rt_channel_new(), _capacity: 10, _size_handle: rt_atomic_int_new(0))
+        val pushed = q.push(42)
+        expect(pushed).to_equal(true)
+        expect(q.len()).to_equal(1)
+        val result = q.pop()
+        expect(result).to_equal(42)
+        expect(q.is_empty()).to_equal(true)
+        q.close()
+
+    it "rejects push when full":
+        val q = MpmcQueue(_channel_id: rt_channel_new(), _capacity: 2, _size_handle: rt_atomic_int_new(0))
+        expect(q.push("a")).to_equal(true)
+        expect(q.push("b")).to_equal(true)
+        expect(q.is_full()).to_equal(true)
+        expect(q.push("c")).to_equal(false)
+        q.close()
+
+    it "pop returns nil when empty":
+        val q = MpmcQueue(_channel_id: rt_channel_new(), _capacity: 10, _size_handle: rt_atomic_int_new(0))
+        val result = q.pop()
+        expect(result).to_be_nil()
+        q.close()
+
+    it "maintains FIFO order":
+        val q = MpmcQueue(_channel_id: rt_channel_new(), _capacity: 10, _size_handle: rt_atomic_int_new(0))
+        q.push(1)
+        q.push(2)
+        q.push(3)
+        expect(q.pop()).to_equal(1)
+        expect(q.pop()).to_equal(2)
+        expect(q.pop()).to_equal(3)
+        q.close()
+
+# ============================================================================
+# ConcurrentMap Tests
+# ============================================================================
+
+describe "ConcurrentMap":
+    it "starts empty":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        expect(m.is_empty()).to_equal(true)
+        expect(m.len()).to_equal(0)
+
+    it "inserts and retrieves":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        m.insert("key1", 42)
+        expect(m.get("key1")).to_equal(42)
+
+    it "contains_key":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        m.insert("x", 1)
+        expect(m.contains_key("x")).to_equal(true)
+        expect(m.contains_key("y")).to_equal(false)
+
+    it "removes key":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        m.insert("a", 10)
+        m.remove("a")
+        expect(m.len()).to_equal(0)
+
+    it "tracks length":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        m.insert("a", 1)
+        m.insert("b", 2)
+        m.insert("c", 3)
+        expect(m.len()).to_equal(3)
+
+    it "overwrites existing key":
+        val m = ConcurrentMap(_handle: __rt_hashmap_new())
+        m.insert("key", "old")
+        m.insert("key", "new")
+        expect(m.get("key")).to_equal("new")
+
+# ============================================================================
+# AtomicFlag Tests
+# ============================================================================
+
+describe "AtomicFlag":
+    it "starts unset":
+        val f = AtomicFlag(_handle: rt_atomic_bool_new(false))
+        expect(f.is_set()).to_equal(false)
+        f.free()
+
+    it "set and clear":
+        val f = AtomicFlag(_handle: rt_atomic_bool_new(false))
+        f.set()
+        expect(f.is_set()).to_equal(true)
+        f.clear()
+        expect(f.is_set()).to_equal(false)
+        f.free()
+
+    it "test_and_set returns old value":
+        val f = AtomicFlag(_handle: rt_atomic_bool_new(false))
+        val was_set = f.test_and_set()
+        expect(was_set).to_equal(false)
+        expect(f.is_set()).to_equal(true)
+        val was_set2 = f.test_and_set()
+        expect(was_set2).to_equal(true)
+        f.free()
+
+    it "starts set when created with true":
+        val f = AtomicFlag(_handle: rt_atomic_bool_new(true))
+        expect(f.is_set()).to_equal(true)
+        f.free()
+
+# ============================================================================
+# Once Tests
+# ============================================================================
+
+describe "Once":
+    it "starts not completed":
+        val o = Once(_state: rt_atomic_int_new(0))
+        expect(o.is_completed()).to_equal(false)
+        o.free()
+
+    it "call_once runs function and marks completed":
+        val counter_handle = rt_atomic_int_new(0)
+        val o = Once(_state: rt_atomic_int_new(0))
+        o.call_once(\: rt_atomic_int_fetch_add(counter_handle, 1))
+        expect(o.is_completed()).to_equal(true)
+        expect(rt_atomic_int_load(counter_handle)).to_equal(1)
+        rt_atomic_int_free(counter_handle)
+        o.free()
+
+    it "call_once runs only once":
+        val counter_handle = rt_atomic_int_new(0)
+        val o = Once(_state: rt_atomic_int_new(0))
+        o.call_once(\: rt_atomic_int_fetch_add(counter_handle, 1))
+        o.call_once(\: rt_atomic_int_fetch_add(counter_handle, 1))
+        o.call_once(\: rt_atomic_int_fetch_add(counter_handle, 1))
+        expect(rt_atomic_int_load(counter_handle)).to_equal(1)
+        rt_atomic_int_free(counter_handle)
+        o.free()

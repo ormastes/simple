@@ -606,6 +606,15 @@ bin/simple script.spl               # Run a Simple file
 bin/simple mcp server               # Start MCP server
 ```
 
+### Duplicate Detection
+
+```bash
+bin/simple src/app/duplicate_check/main.spl src/ --min-lines 5 --verbose       # Hash-based detection
+bin/simple src/app/duplicate_check/main.spl src/ --min-lines 5 --cosine        # Cosine similarity (fuzzy)
+bin/simple src/app/duplicate_check/main.spl src/ --format sdn                  # SDN database output
+bin/simple src/app/duplicate_check/main.spl --help                             # All options
+```
+
 ### Development (Pure Simple - No Rust)
 
 > **As of 2026-02-06:** All Rust source removed. System is 100% pure Simple.

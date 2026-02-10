@@ -1,0 +1,397 @@
+"""
+# Compiler Reports Specification
+
+**Feature IDs:** #RPT-005
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for compiler-specific reports from the unified reporting system.
+Verifies EasyFixReport, CompilerDiagnostic, and related types.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| EasyFixReport | Report with machine-applicable fix |
+| Replacement | Text replacement for a fix |
+| CompilerDiagnostic | Factory for compiler diagnostics |
+| LegacyAdapter | Backward compatibility adapter |
+"""
+
+use std.report.*
+use std.report.compiler.*
+
+# ============================================================================
+# Test Group 1: EasyFixReport
+# ============================================================================
+
+describe "EasyFixReport":
+    """
+    ## EasyFixReport
+
+    Tests for EasyFix reports with machine-applicable fixes.
+    """
+
+    context "creation":
+        """
+        ### EasyFix Creation
+
+        EasyFix reports can be created with different confidence levels.
+        """
+
+        it "creates safe fix":
+            val fix = EasyFixReport.safe("L:unused_var", "remove unused variable")
+            expect(fix.rule_id).to_equal("L:unused_var")
+            expect(fix.confidence).to_equal(FixConfidence.MachineApplicable)
+
+        it "creates likely fix":
+            val fix = EasyFixReport.likely("L:naming", "rename to snake_case")
+            expect(fix.confidence).to_equal(FixConfidence.MaybeIncorrect)
+
+        it "creates placeholder fix":
+            val fix = EasyFixReport.placeholder("L:missing_type", "add type annotation")
+            expect(fix.confidence).to_equal(FixConfidence.HasPlaceholders)
+
+        it "creates fix with custom confidence":
+            val fix = EasyFixReport.with_confidence(
+                "L:custom",
+                "custom fix",
+                FixConfidence.MaybeIncorrect
+            )
+            expect(fix.confidence).to_equal(FixConfidence.MaybeIncorrect)
+
+    context "builder pattern":
+        """
+        ### Builder Pattern
+
+        EasyFix reports support builder pattern for adding details.
+        """
+
+        it "adds location":
+            val fix = EasyFixReport.safe("L:test", "description")
+                .at("test.spl", 10, 5)
+            expect(fix.location.?).to_equal(true)
+            expect(fix.location.unwrap().file).to_equal("test.spl")
+
+        it "adds replacement":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val replacement = Replacement.at("test.spl", 100, 110, 10, 5, "new_text")
+            val fix = EasyFixReport.safe("L:test", "description")
+                .with_replacement(replacement)
+            expect(fix.replacements.len()).to_equal(1)
+
+        it "adds multiple replacements":
+            val r1 = Replacement.at("test.spl", 100, 110, 10, 5, "text1")
+            val r2 = Replacement.at("test.spl", 200, 210, 20, 3, "text2")
+            val fix = EasyFixReport.safe("L:test", "description")
+                .with_replacement(r1)
+                .with_replacement(r2)
+            expect(fix.replacements.len()).to_equal(2)
+
+        it "adds note":
+            val fix = EasyFixReport.safe("L:test", "description")
+                .with_note("additional info")
+            expect(fix.notes.len()).to_equal(1)
+
+        it "adds help":
+            val fix = EasyFixReport.safe("L:test", "description")
+                .with_help("try this instead")
+            expect(fix.help.len()).to_equal(1)
+
+    context "conversion to report":
+        """
+        ### Conversion to Report
+
+        EasyFix reports can be converted to standard reports.
+        """
+
+        it "converts to report":
+            val fix = EasyFixReport.safe("L:test", "test description")
+                .at("test.spl", 10, 5)
+            val report = fix.to_report()
+            expect(report.code.?).to_equal(true)
+            expect(report.code.unwrap()).to_equal("L:test")
+            expect(report.message).to_equal("test description")
+
+        it "converts with warning level":
+            val fix = EasyFixReport.safe("L:test", "description")
+            val report = fix.to_report()
+            expect(report.level).to_equal(ReportLevel.Warning)
+
+    context "applicability":
+        """
+        ### Fix Applicability
+
+        EasyFix reports indicate if they can be auto-applied.
+        """
+
+        it "safe fix is auto-applicable":
+            val fix = EasyFixReport.safe("L:test", "description")
+            expect(fix.is_auto_applicable()).to_equal(true)
+
+        it "likely fix is not auto-applicable":
+            val fix = EasyFixReport.likely("L:test", "description")
+            expect(fix.is_auto_applicable()).to_equal(false)
+
+        it "placeholder fix is not auto-applicable":
+            val fix = EasyFixReport.placeholder("L:test", "description")
+            expect(fix.is_auto_applicable()).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Replacement
+# ============================================================================
+
+describe "Replacement":
+    """
+    ## Replacement
+
+    Tests for text replacement specifications.
+    """
+
+    context "creation":
+        """
+        ### Replacement Creation
+
+        Replacements specify text changes.
+        """
+
+        it "creates replacement at position":
+            val replacement = Replacement.at("test.spl", 100, 110, 10, 5, "new_text")
+            expect(replacement.file).to_equal("test.spl")
+            expect(replacement.start_byte).to_equal(100)
+            expect(replacement.end_byte).to_equal(110)
+            expect(replacement.new_text).to_equal("new_text")
+
+        it "creates replacement from span":
+            val span = Span.from_range(100, 110)
+            val replacement = Replacement.from_span("test.spl", span, 10, 5, "new_text")
+            expect(replacement.start_byte).to_equal(100)
+            expect(replacement.end_byte).to_equal(110)
+
+        it "creates deletion":
+            val replacement = Replacement.delete("test.spl", 100, 110, 10, 5)
+            expect(replacement.new_text).to_equal("")
+
+        it "creates insertion":
+            val replacement = Replacement.insert("test.spl", 100, 10, 5, "inserted")
+            expect(replacement.start_byte).to_equal(100)
+            expect(replacement.end_byte).to_equal(100)
+            expect(replacement.new_text).to_equal("inserted")
+
+    context "properties":
+        """
+        ### Replacement Properties
+
+        Replacements have computed properties.
+        """
+
+        it "calculates length":
+            val replacement = Replacement.at("test.spl", 100, 110, 10, 5, "new")
+            expect(replacement.original_length()).to_equal(10)
+
+        it "is_deletion for empty new_text":
+            val replacement = Replacement.delete("test.spl", 100, 110, 10, 5)
+            expect(replacement.is_deletion()).to_equal(true)
+
+        it "is_insertion for zero-length span":
+            val replacement = Replacement.insert("test.spl", 100, 10, 5, "text")
+            expect(replacement.is_insertion()).to_equal(true)
+
+# ============================================================================
+# Test Group 3: CompilerDiagnostic Factories
+# ============================================================================
+
+describe "ParseError":
+    """
+    ## ParseError
+
+    Tests for parse error factory methods.
+    """
+
+    context "creation":
+        """
+        ### Parse Error Creation
+
+        Parse errors for various syntax issues.
+        """
+
+        it "creates unexpected token error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = ParseError.unexpected_token("}", "expression", loc)
+            expect(error.is_error()).to_equal(true)
+            expect(error.message).to_contain("}")
+            expect(error.message).to_contain("expression")
+
+        it "creates missing token error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = ParseError.missing_token(":", loc)
+            expect(error.message).to_contain(":")
+
+        it "creates invalid syntax error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = ParseError.invalid_syntax("invalid number format", loc)
+            expect(error.kind).to_equal(ReportKind.ParseError)
+
+describe "TypeError":
+    """
+    ## TypeError
+
+    Tests for type error factory methods.
+    """
+
+    context "creation":
+        """
+        ### Type Error Creation
+
+        Type errors for various type issues.
+        """
+
+        it "creates type mismatch error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = TypeError.mismatch("i64", "text", loc)
+            expect(error.is_error()).to_equal(true)
+            expect(error.message).to_contain("i64")
+            expect(error.message).to_contain("text")
+
+        it "creates undefined type error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = TypeError.undefined("MyType", loc)
+            expect(error.message).to_contain("MyType")
+
+        it "creates incompatible types error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = TypeError.incompatible("i64", "f64", "+", loc)
+            expect(error.message).to_contain("+")
+
+describe "NameError":
+    """
+    ## NameError
+
+    Tests for name resolution error factory methods.
+    """
+
+    context "creation":
+        """
+        ### Name Error Creation
+
+        Name errors for resolution issues.
+        """
+
+        it "creates undefined name error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = NameError.undefined("myVar", loc)
+            expect(error.is_error()).to_equal(true)
+            expect(error.message).to_contain("myVar")
+
+        it "creates already defined error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = NameError.already_defined("x", loc)
+            expect(error.message).to_contain("x")
+            expect(error.message).to_contain("already")
+
+        it "creates not in scope error":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val error = NameError.not_in_scope("privateVar", loc)
+            expect(error.message).to_contain("scope")
+
+describe "LintWarning":
+    """
+    ## LintWarning
+
+    Tests for lint warning factory methods.
+    """
+
+    context "creation":
+        """
+        ### Lint Warning Creation
+
+        Lint warnings for code style issues.
+        """
+
+        it "creates unused variable warning":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val warning = LintWarning.unused_variable("x", loc)
+            expect(warning.is_warning()).to_equal(true)
+            expect(warning.message).to_contain("x")
+            expect(warning.message).to_contain("unused")
+
+        it "creates unused import warning":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val warning = LintWarning.unused_import("std.io", loc)
+            expect(warning.message).to_contain("std.io")
+
+        it "creates deprecated warning":
+            val loc = SourceLocation.at("test.spl", 10, 5)
+            val warning = LintWarning.deprecated("oldFunc", "newFunc", loc)
+            expect(warning.message).to_contain("oldFunc")
+            expect(warning.message).to_contain("newFunc")
+
+# ============================================================================
+# Test Group 4: FixApplicator
+# ============================================================================
+
+describe "FixApplicator":
+    """
+    ## FixApplicator
+
+    Tests for applying fixes to source code.
+    """
+
+    context "applying single fix":
+        """
+        ### Single Fix Application
+
+        Single replacements can be applied to source.
+        """
+
+        it "applies replacement":
+            val source = "val old_name = 1"
+            val replacement = Replacement.at("test.spl", 4, 12, 1, 5, "new_name")
+            val applicator = FixApplicator.for_source(source)
+            val result = applicator.apply_replacement(replacement)
+            expect(result.?).to_equal(true)
+            expect(result.unwrap()).to_equal("val new_name = 1")
+
+        it "applies deletion":
+            val source = "val unused = 1"
+            val replacement = Replacement.delete("test.spl", 0, 14, 1, 1)
+            val applicator = FixApplicator.for_source(source)
+            val result = applicator.apply_replacement(replacement)
+            expect(result.?).to_equal(true)
+            expect(result.unwrap()).to_equal("")
+
+        it "applies insertion":
+            val source = "val x = 1"
+            val replacement = Replacement.insert("test.spl", 6, 1, 7, ": i64 ")
+            val applicator = FixApplicator.for_source(source)
+            val result = applicator.apply_replacement(replacement)
+            expect(result.?).to_equal(true)
+            expect(result.unwrap()).to_equal("val x : i64 = 1")
+
+    context "applying multiple fixes":
+        """
+        ### Multiple Fix Application
+
+        Multiple non-overlapping replacements can be applied.
+        """
+
+        it "applies multiple non-overlapping replacements":
+            val source = "val a = 1\nval b = 2"
+            val r1 = Replacement.at("test.spl", 4, 5, 1, 5, "x")
+            val r2 = Replacement.at("test.spl", 14, 15, 2, 5, "y")
+            val applicator = FixApplicator.for_source(source)
+            val result = applicator.apply_all([r1, r2])
+            expect(result.success).to_equal(true)
+            expect(result.new_source).to_equal("val x = 1\nval y = 2")
+
+        it "rejects overlapping replacements":
+            val source = "val name = 1"
+            val r1 = Replacement.at("test.spl", 4, 8, 1, 5, "x")
+            val r2 = Replacement.at("test.spl", 6, 10, 1, 7, "y")
+            val applicator = FixApplicator.for_source(source)
+            val result = applicator.apply_all([r1, r2])
+            expect(result.success).to_equal(false)
+
