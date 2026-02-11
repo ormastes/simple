@@ -1,0 +1,308 @@
+"""
+# Compiler Uncovered Branches Test
+
+**Purpose:** Cover uncovered branches in seed compiler (seed.cpp)
+**Target:** 87.42% → 95%+ branch coverage
+**Reference:** doc/test/uncovered_branches_analysis.md
+"""
+
+use std.spec
+
+# ============================================================================
+# 1. Type System Edge Cases
+# ============================================================================
+
+describe "Type System - Optional Types":
+    """
+    Covers option_base_stype function (Lines 208, 211-213)
+    Tests long type names and non-optional type handling
+    """
+
+    context "long optional type names":
+        it "handles very long struct name as optional":
+            struct VeryLongStructNameThatExceedsTypicalBufferSizeForTesting:
+                value: i64
+                data: text
+                flag: bool
+
+            fn test_long_optional() -> VeryLongStructNameThatExceedsTypicalBufferSizeForTesting?:
+                nil
+
+            val result = test_long_optional()
+            expect(result == nil).to_equal(true)
+
+        it "works with nested long optional types":
+            struct AnotherVeryLongStructNameForTestingNestedOptionalTypes:
+                inner: i64
+
+            fn returns_long_optional() -> AnotherVeryLongStructNameForTestingNestedOptionalTypes?:
+                Some(AnotherVeryLongStructNameForTestingNestedOptionalTypes(inner: 42))
+
+            val result = returns_long_optional()
+            if val x = result:
+                expect(x.inner).to_equal(42)
+
+    context "function returning optional":
+        it "handles function calls returning optional in if condition":
+            fn maybe_get() -> i64?:
+                Some(42)
+
+            fn maybe_nil() -> i64?:
+                nil
+
+            if val x = maybe_get():
+                expect(x).to_equal(42)
+
+            var called = false
+            if val y = maybe_nil():
+                # Should not execute
+                expect(false).to_equal(true)
+            else:
+                called = true
+
+            expect(called).to_equal(true)
+
+# ============================================================================
+# 2. Constant Expression Detection
+# ============================================================================
+
+describe "Constant Expressions - Negative Numbers":
+    """
+    Covers is_constant_expr function (Line 521)
+    Tests negative numeric literals
+    """
+
+    context "negative integer constants":
+        it "parses negative integer literals":
+            val neg_const = -42
+            expect(neg_const).to_equal(-42)
+
+        it "parses negative in arrays":
+            val arr = [-1, -2, -3, -4, -5]
+            expect(arr.len()).to_equal(5)
+            expect(arr[0]).to_equal(-1)
+            expect(arr[4]).to_equal(-5)
+
+    context "negative float constants":
+        it "parses negative float literals":
+            val neg_float = -3.14
+            expect(neg_float < 0.0).to_equal(true)
+
+        it "parses negative floats in arrays":
+            val floats = [-1.5, -2.5, -3.5]
+            expect(floats.len()).to_equal(3)
+
+# ============================================================================
+# 3. Array and Collection Edge Cases
+# ============================================================================
+
+describe "Array Types - Nested and Struct Arrays":
+    """
+    Covers array_elem_stype and emit_array_literal_pushes
+    (Lines 411, 416, 1901, 1911)
+    """
+
+    context "nested arrays":
+        it "handles 2D arrays":
+            val arr2d = [[1, 2, 3], [4, 5, 6]]
+            expect(arr2d.len()).to_equal(2)
+            expect(arr2d[0].len()).to_equal(3)
+            expect(arr2d[1][2]).to_equal(6)
+
+        it "handles 3D arrays":
+            val arr3d = [[[1]], [[2, 3]], [[4, 5, 6]]]
+            expect(arr3d.len()).to_equal(3)
+            expect(arr3d[2][0][2]).to_equal(6)
+
+        it "handles jagged arrays":
+            val jagged = [[1], [2, 3], [4, 5, 6], [7, 8]]
+            expect(jagged.len()).to_equal(4)
+            expect(jagged[2].len()).to_equal(3)
+
+    context "arrays of optional types":
+        it "creates array with mixed Some and nil":
+            val opt_arr = [Some(1), nil, Some(3), nil, Some(5)]
+            expect(opt_arr.len()).to_equal(5)
+
+            var count = 0
+            for item in opt_arr:
+                if val x = item:
+                    count = count + 1
+
+            expect(count).to_equal(3)
+
+    context "struct arrays":
+        it "creates array of structs":
+            struct Point:
+                x: i64
+                y: i64
+
+            val points = [
+                Point(x: 0, y: 0),
+                Point(x: 10, y: 20),
+                Point(x: 30, y: 40)
+            ]
+
+            expect(points.len()).to_equal(3)
+            expect(points[1].x).to_equal(10)
+            expect(points[2].y).to_equal(40)
+
+        it "handles nested struct arrays":
+            struct Data:
+                val: i64
+
+            val nested_structs = [
+                [Data(val: 1), Data(val: 2)],
+                [Data(val: 3), Data(val: 4)]
+            ]
+
+            expect(nested_structs.len()).to_equal(2)
+            expect(nested_structs[1][1].val).to_equal(4)
+
+# ============================================================================
+# 4. String Operations and Interpolation
+# ============================================================================
+
+describe "String Operations - Complex Cases":
+    """
+    Covers translate_expr string handling (Lines 678, 720, 757-759, 765)
+    Tests nested braces and concatenation chains
+    """
+
+    context "multiple string interpolations":
+        it "handles multiple interpolations in one string":
+            val x = 5
+            val y = 10
+            val result = x * y
+            val message = "x={x}, y={y}, result={result}"
+            expect(message).to_contain("x=5")
+            expect(message).to_contain("y=10")
+            expect(message).to_contain("result=50")
+
+    context "string concatenation chains":
+        it "concatenates multiple strings":
+            val long_str = "a" + "b" + "c" + "d" + "e" + "f"
+            expect(long_str).to_equal("abcdef")
+
+        it "mixes interpolation and concatenation":
+            val x = 42
+            val combined = "value: " + "{x}" + " done"
+            expect(combined).to_contain("42")
+
+# ============================================================================
+# 5. Variable Declaration Edge Cases
+# ============================================================================
+
+describe "Variable Declarations - Type Inference":
+    """
+    Covers parse_var_decl (Lines 1639, 1697, 1873, 1881-1883)
+    Tests whitespace handling and type annotations
+    """
+
+    context "whitespace handling":
+        it "handles extra whitespace in declarations":
+            var    s    =    "hello"
+            expect(s).to_equal("hello")
+
+        it "handles text type inference":
+            val text_var = "test"
+            expect(text_var).to_equal("test")
+
+    context "complex type annotations":
+        it "declares matrix with nested array types":
+            val matrix: [[i64]] = [[1, 2], [3, 4]]
+            expect(matrix[0][0]).to_equal(1)
+            expect(matrix[1][1]).to_equal(4)
+
+        it "declares array of arrays with explicit type":
+            val grid: [[bool]] = [[true, false], [false, true]]
+            expect(grid[0][0]).to_equal(true)
+            expect(grid[1][1]).to_equal(true)
+
+# ============================================================================
+# 6. Control Flow - Match and Lambda
+# ============================================================================
+
+describe "Control Flow - Complex Expressions":
+    """
+    Covers translate_block (Lines 1972, 1981, 2029)
+    Tests match expressions and lambda functions
+    """
+
+    context "match expressions with multiple arms":
+        it "matches optional values":
+            fn check_value(opt: i64?) -> text:
+                match opt:
+                    Some(x): "got {x}"
+                    nil: "nothing"
+
+            expect(check_value(Some(42))).to_equal("got 42")
+            expect(check_value(nil)).to_equal("nothing")
+
+    context "lambda expressions":
+        it "handles nested lambdas":
+            val add = \x: \y: x + y
+            val add5 = add(5)
+            expect(add5(10)).to_equal(15)
+
+        it "uses lambda in filter-like operations":
+            val numbers = [1, 2, 3, 4, 5]
+            val doubled = numbers.map(\x: x * 2)
+            expect(doubled.len()).to_equal(5)
+            expect(doubled[0]).to_equal(2)
+            expect(doubled[4]).to_equal(10)
+
+        it "immediately invokes lambda":
+            val result = (\x: x * 2)(21)
+            expect(result).to_equal(42)
+
+# ============================================================================
+# 7. Method Calls with Complex Arguments
+# ============================================================================
+
+describe "Method Calls - Complex Arguments":
+    """
+    Covers method argument parsing (Lines 1093, 1097-1098, 1116)
+    Tests nested expressions in method calls
+    """
+
+    context "string slice with expressions":
+        it "uses expressions for slice bounds":
+            val s = "hello world"
+            val start = 1 + 1
+            val end = s.len() - 1
+            val sub = s[start..end]
+            expect(sub.len()).to_be_greater_than(0)
+
+    context "method chaining":
+        it "chains replace operations":
+            val s = "hello"
+            var step1 = s.replace("h", "H")
+            var step2 = step1.replace("e", "E")
+            expect(step2).to_start_with("H")
+
+# ============================================================================
+# 8. Explicit Text Type Usage
+# ============================================================================
+
+describe "Text Type - Explicit Annotations":
+    """
+    Covers text expression detection (Line 2606)
+    Tests explicit text type declarations
+    """
+
+    context "text type declarations":
+        it "declares text variable explicitly":
+            val s: text = "hello"
+            expect(s).to_equal("hello")
+
+        it "concatenates text types":
+            val greeting: text = "hello"
+            val name: text = "world"
+            val message = greeting + " " + name
+            expect(message).to_equal("hello world")
+
+        it "uses text methods":
+            val s: text = "  hello  "
+            val trimmed = s.trim()
+            expect(trimmed).to_equal("hello")
