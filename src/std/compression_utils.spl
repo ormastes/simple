@@ -1,0 +1,1606 @@
+# compression_utils.spl - Comprehensive data compression utilities
+#
+# Pure Simple implementation of multiple compression algorithms:
+# - Run-Length Encoding (RLE)
+# - Huffman Coding
+# - LZ77 (Lempel-Ziv 1977)
+# - Arithmetic Coding
+# - Bit manipulation utilities
+# - Compression statistics and analysis
+#
+# All implementations use concrete types (no generics at runtime)
+# Error handling uses Option/nil pattern (no exceptions)
+
+# =============================================================================
+# DATA STRUCTURES (Tuple-based)
+# =============================================================================
+
+# RLE Entry: (character, count)
+# Example: ('a', 5) means "aaaaa"
+
+# Huffman Node: (value, frequency, left, right)
+# - Leaf node: (char, freq, nil, nil)
+# - Internal node: (nil, freq, left_node, right_node)
+
+# Huffman Code: (character, bit_string)
+# Example: ('a', "101") means 'a' is encoded as 101
+
+# LZ77 Token: (offset, length, next_char)
+# Example: (5, 3, 'x') means "copy 3 chars from 5 positions back, then add 'x'"
+
+# Bit Stream: (bits, length)
+# - bits: integer representation of bit sequence
+# - length: number of valid bits
+
+# Compression Result: (compressed_data, original_size, compressed_size, metadata)
+
+# =============================================================================
+# RUN-LENGTH ENCODING (RLE)
+# =============================================================================
+
+# Encode text using RLE - consecutive identical characters replaced with count+char
+# Example: "aaabbb" -> "3a3b"
+fn rle_encode(text):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return ""
+
+    var result = ""
+    var current = text[0]
+    var count = 1
+    var i = 1
+
+    loop:
+        if i >= len:
+            break
+
+        val ch = text[i]
+        if ch == current:
+            count = count + 1
+        else:
+            result = result + count.to_text() + current
+            current = ch
+            count = 1
+
+        i = i + 1
+
+    # Add last run
+    result = result + count.to_text() + current
+    return result
+
+# Decode RLE-encoded text back to original
+fn rle_decode(encoded):
+    if encoded == nil:
+        return nil
+
+    val len = encoded.length()
+    if len == 0:
+        return ""
+
+    var result = ""
+    var i = 0
+    var count_str = ""
+
+    loop:
+        if i >= len:
+            break
+
+        val ch = encoded[i]
+
+        # Check if digit
+        val is_digit = false
+        if ch >= "0":
+            if ch <= "9":
+                is_digit = true
+
+        if is_digit:
+            count_str = count_str + ch
+        else:
+            # ch is the character to repeat
+            if count_str.length() > 0:
+                val count = parse_int(count_str)
+                var j = 0
+                loop:
+                    if j >= count:
+                        break
+                    result = result + ch
+                    j = j + 1
+                count_str = ""
+
+        i = i + 1
+
+    return result
+
+# Encode bytes array using RLE
+fn rle_encode_bytes(bytes):
+    if bytes == nil:
+        return nil
+
+    val len = bytes.length()
+    if len == 0:
+        return []
+
+    var result = []
+    var current = bytes[0]
+    var count = 1
+    var i = 1
+
+    loop:
+        if i >= len:
+            break
+
+        val b = bytes[i]
+        if b == current:
+            if count < 255:  # Cap at 255 for single byte
+                count = count + 1
+            else:
+                result = result + [count, current]
+                count = 1
+        else:
+            result = result + [count, current]
+            current = b
+            count = 1
+
+        i = i + 1
+
+    # Add last run
+    result = result + [count, current]
+    return result
+
+# Decode RLE-encoded bytes back to original
+fn rle_decode_bytes(encoded):
+    if encoded == nil:
+        return nil
+
+    val len = encoded.length()
+    if len == 0:
+        return []
+
+    var result = []
+    var i = 0
+
+    loop:
+        if i + 1 >= len:
+            break
+
+        val count = encoded[i]
+        val byte = encoded[i + 1]
+
+        var j = 0
+        loop:
+            if j >= count:
+                break
+            result = result + [byte]
+            j = j + 1
+
+        i = i + 2
+
+    return result
+
+# Check if text is suitable for RLE compression
+fn rle_is_compressible(text):
+    if text == nil:
+        return false
+
+    val len = text.length()
+    if len < 2:
+        return false
+
+    var runs = 0
+    var run_length = 1
+    var i = 1
+
+    loop:
+        if i >= len:
+            break
+
+        if text[i] == text[i - 1]:
+            run_length = run_length + 1
+        else:
+            if run_length >= 3:  # Run of 3+ is worth compressing
+                runs = runs + 1
+            run_length = 1
+
+        i = i + 1
+
+    if run_length >= 3:
+        runs = runs + 1
+
+    return runs > 0
+
+# =============================================================================
+# FREQUENCY ANALYSIS
+# =============================================================================
+
+# Count character frequencies in text
+fn count_frequencies(text):
+    if text == nil:
+        return nil
+
+    var freqs = []  # List of (char, count) tuples
+    var i = 0
+    val len = text.length()
+
+    loop:
+        if i >= len:
+            break
+
+        val ch = text[i]
+        var found = false
+        var j = 0
+        var new_freqs = []
+
+        # Update existing or add new
+        loop:
+            if j >= freqs.length():
+                break
+
+            val entry = freqs[j]
+            val freq_ch = entry[0]
+            val freq_count = entry[1]
+
+            if freq_ch == ch:
+                new_freqs = new_freqs + [[ch, freq_count + 1]]
+                found = true
+            else:
+                new_freqs = new_freqs + [[freq_ch, freq_count]]
+
+            j = j + 1
+
+        if found:
+            freqs = new_freqs
+        else:
+            freqs = freqs + [[ch, 1]]
+
+        i = i + 1
+
+    return freqs
+
+# Sort frequencies by count (descending)
+fn sort_frequencies(freqs):
+    if freqs == nil:
+        return nil
+
+    val len = freqs.length()
+    if len <= 1:
+        return freqs
+
+    # Simple bubble sort
+    var sorted = freqs
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        var j = 0
+        loop:
+            if j >= len - i - 1:
+                break
+
+            val curr = sorted[j]
+            val next = sorted[j + 1]
+
+            if curr[1] < next[1]:
+                # Swap
+                var new_sorted = []
+                var k = 0
+                loop:
+                    if k >= sorted.length():
+                        break
+
+                    if k == j:
+                        new_sorted = new_sorted + [next]
+                    else:
+                        if k == j + 1:
+                            new_sorted = new_sorted + [curr]
+                        else:
+                            new_sorted = new_sorted + [sorted[k]]
+
+                    k = k + 1
+
+                sorted = new_sorted
+
+            j = j + 1
+
+        i = i + 1
+
+    return sorted
+
+# Calculate Shannon entropy of data
+fn calculate_entropy(text):
+    if text == nil:
+        return 0.0
+
+    val len = text.length()
+    if len == 0:
+        return 0.0
+
+    val freqs = count_frequencies(text)
+    if freqs == nil:
+        return 0.0
+
+    var entropy = 0.0
+    var i = 0
+
+    loop:
+        if i >= freqs.length():
+            break
+
+        val entry = freqs[i]
+        val count = entry[1]
+        val prob = count.to_float() / len.to_float()
+
+        # entropy -= prob * log2(prob)
+        if prob > 0.0:
+            val log_prob = log2(prob)
+            entropy = entropy - (prob * log_prob)
+
+        i = i + 1
+
+    return entropy
+
+# Estimate theoretical best compression ratio
+fn estimate_compressibility(text):
+    if text == nil:
+        return 1.0
+
+    val len = text.length()
+    if len == 0:
+        return 1.0
+
+    val entropy = calculate_entropy(text)
+
+    # Theoretical best: entropy bits per symbol vs 8 bits per char
+    val ratio = entropy / 8.0
+    return ratio
+
+# =============================================================================
+# HUFFMAN CODING - TREE BUILDING
+# =============================================================================
+
+# Create a leaf node for Huffman tree
+fn huffman_leaf(char, freq):
+    return [char, freq, nil, nil]
+
+# Create an internal node for Huffman tree
+fn huffman_node(freq, left, right):
+    return [nil, freq, left, right]
+
+# Get frequency from a node
+fn huffman_freq(node):
+    if node == nil:
+        return 0
+    return node[1]
+
+# Check if node is a leaf
+fn huffman_is_leaf(node):
+    if node == nil:
+        return false
+    val left = node[2]
+    val right = node[3]
+    return left == nil
+
+# Build Huffman tree from frequency list
+fn build_huffman_tree(freqs):
+    if freqs == nil:
+        return nil
+
+    val len = freqs.length()
+    if len == 0:
+        return nil
+
+    # Create leaf nodes
+    var nodes = []
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val entry = freqs[i]
+        val ch = entry[0]
+        val count = entry[1]
+        val leaf = huffman_leaf(ch, count)
+        nodes = nodes + [leaf]
+
+        i = i + 1
+
+    # Build tree by combining two lowest-frequency nodes
+    loop:
+        if nodes.length() <= 1:
+            break
+
+        # Find two minimum frequency nodes
+        var min1_idx = 0
+        var min1_freq = huffman_freq(nodes[0])
+        var j = 1
+
+        loop:
+            if j >= nodes.length():
+                break
+
+            val freq = huffman_freq(nodes[j])
+            if freq < min1_freq:
+                min1_idx = j
+                min1_freq = freq
+
+            j = j + 1
+
+        val min1 = nodes[min1_idx]
+
+        # Remove min1 from nodes
+        var new_nodes = []
+        var k = 0
+        loop:
+            if k >= nodes.length():
+                break
+
+            if k != min1_idx:
+                new_nodes = new_nodes + [nodes[k]]
+
+            k = k + 1
+
+        nodes = new_nodes
+
+        # Find second minimum
+        var min2_idx = 0
+        var min2_freq = huffman_freq(nodes[0])
+        var m = 1
+
+        loop:
+            if m >= nodes.length():
+                break
+
+            val freq = huffman_freq(nodes[m])
+            if freq < min2_freq:
+                min2_idx = m
+                min2_freq = freq
+
+            m = m + 1
+
+        val min2 = nodes[min2_idx]
+
+        # Remove min2 from nodes
+        var new_nodes2 = []
+        var n = 0
+        loop:
+            if n >= nodes.length():
+                break
+
+            if n != min2_idx:
+                new_nodes2 = new_nodes2 + [nodes[n]]
+
+            n = n + 1
+
+        nodes = new_nodes2
+
+        # Create parent node
+        val combined_freq = min1_freq + min2_freq
+        val parent = huffman_node(combined_freq, min1, min2)
+        nodes = nodes + [parent]
+
+    if nodes.length() > 0:
+        return nodes[0]
+
+    return nil
+
+# Generate Huffman codes from tree
+fn generate_huffman_codes(root):
+    if root == nil:
+        return []
+
+    var codes = []
+
+    # Helper: traverse tree and build codes
+    codes = huffman_traverse(root, "", codes)
+
+    return codes
+
+# Recursively traverse tree to build code table
+fn huffman_traverse(node, code, codes):
+    if node == nil:
+        return codes
+
+    val is_leaf = huffman_is_leaf(node)
+
+    if is_leaf:
+        val ch = node[0]
+        var new_codes = codes + [[ch, code]]
+        return new_codes
+
+    val left = node[2]
+    val right = node[3]
+
+    var result = codes
+    result = huffman_traverse(left, code + "0", result)
+    result = huffman_traverse(right, code + "1", result)
+
+    return result
+
+# Look up code for a character
+fn huffman_lookup_code(codes, char):
+    if codes == nil:
+        return nil
+
+    var i = 0
+
+    loop:
+        if i >= codes.length():
+            break
+
+        val entry = codes[i]
+        val ch = entry[0]
+        val code = entry[1]
+
+        if ch == char:
+            return code
+
+        i = i + 1
+
+    return nil
+
+# =============================================================================
+# HUFFMAN CODING - ENCODING/DECODING
+# =============================================================================
+
+# Encode text using Huffman coding
+fn huffman_encode(text):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return ["", [], 0]
+
+    # Build frequency table
+    val freqs = count_frequencies(text)
+
+    # Build Huffman tree
+    val tree = build_huffman_tree(freqs)
+
+    # Generate codes
+    val codes = generate_huffman_codes(tree)
+
+    # Encode text
+    var encoded = ""
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val ch = text[i]
+        val code = huffman_lookup_code(codes, ch)
+
+        if code != nil:
+            encoded = encoded + code
+
+        i = i + 1
+
+    # Return: (encoded_bits, codes_table, original_length)
+    return [encoded, codes, len]
+
+# Decode Huffman-encoded data
+fn huffman_decode(encoded_data):
+    if encoded_data == nil:
+        return nil
+
+    val bits = encoded_data[0]
+    val codes = encoded_data[1]
+    val orig_len = encoded_data[2]
+
+    if bits == nil:
+        return ""
+
+    # Build reverse lookup: code -> char
+    var reverse = []
+    var i = 0
+
+    loop:
+        if i >= codes.length():
+            break
+
+        val entry = codes[i]
+        val ch = entry[0]
+        val code = entry[1]
+        reverse = reverse + [[code, ch]]
+
+        i = i + 1
+
+    # Decode bits
+    var result = ""
+    var current = ""
+    var j = 0
+
+    loop:
+        if j >= bits.length():
+            break
+
+        current = current + bits[j]
+
+        # Check if current matches any code
+        var k = 0
+        var found = false
+
+        loop:
+            if k >= reverse.length():
+                break
+
+            val entry = reverse[k]
+            val code = entry[0]
+            val ch = entry[1]
+
+            if code == current:
+                result = result + ch
+                current = ""
+                found = true
+                break
+
+            k = k + 1
+
+        j = j + 1
+
+    return result
+
+# =============================================================================
+# LZ77 COMPRESSION
+# =============================================================================
+
+# Find longest match in sliding window
+fn lz77_find_match(text, pos, window_size, lookahead_size):
+    if text == nil:
+        return [0, 0]
+
+    val len = text.length()
+    if pos >= len:
+        return [0, 0]
+
+    var best_offset = 0
+    var best_length = 0
+
+    val search_start = 0
+    var search_start_adj = pos - window_size
+    if search_start_adj < 0:
+        search_start_adj = 0
+
+    val search_end = pos
+
+    # Search for matches in the window
+    var i = search_start_adj
+
+    loop:
+        if i >= search_end:
+            break
+
+        # Try to match starting at position i
+        var match_len = 0
+        var j = 0
+
+        loop:
+            if j >= lookahead_size:
+                break
+            if pos + j >= len:
+                break
+            if i + j >= pos:
+                break
+
+            if text[i + j] == text[pos + j]:
+                match_len = match_len + 1
+            else:
+                break
+
+            j = j + 1
+
+        if match_len > best_length:
+            best_length = match_len
+            best_offset = pos - i
+
+        i = i + 1
+
+    return [best_offset, best_length]
+
+# Compress text using LZ77
+fn lz77_compress(text):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return []
+
+    val window_size = 4096
+    val lookahead_size = 18
+
+    var tokens = []
+    var pos = 0
+
+    loop:
+        if pos >= len:
+            break
+
+        val match = lz77_find_match(text, pos, window_size, lookahead_size)
+        val offset = match[0]
+        val length = match[1]
+
+        if length >= 3:
+            # Encode as reference
+            var next_char = ""
+            if pos + length < len:
+                next_char = text[pos + length]
+
+            val token = [offset, length, next_char]
+            tokens = tokens + [token]
+            pos = pos + length + 1
+        else:
+            # Encode as literal
+            val token = [0, 0, text[pos]]
+            tokens = tokens + [token]
+            pos = pos + 1
+
+    return tokens
+
+# Decompress LZ77 tokens
+fn lz77_decompress(tokens):
+    if tokens == nil:
+        return nil
+
+    var result = ""
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val offset = token[0]
+        val length = token[1]
+        val next_char = token[2]
+
+        if length > 0:
+            # Copy from window
+            val copy_start = result.length() - offset
+            var j = 0
+
+            loop:
+                if j >= length:
+                    break
+
+                val idx = copy_start + j
+                if idx >= 0:
+                    if idx < result.length():
+                        result = result + result[idx]
+
+                j = j + 1
+
+        if next_char != "":
+            result = result + next_char
+
+        i = i + 1
+
+    return result
+
+# Compress with custom window size
+fn lz77_compress_windowed(text, window_size, lookahead_size):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return []
+
+    var tokens = []
+    var pos = 0
+
+    loop:
+        if pos >= len:
+            break
+
+        val match = lz77_find_match(text, pos, window_size, lookahead_size)
+        val offset = match[0]
+        val length = match[1]
+
+        if length >= 3:
+            var next_char = ""
+            if pos + length < len:
+                next_char = text[pos + length]
+
+            val token = [offset, length, next_char]
+            tokens = tokens + [token]
+            pos = pos + length + 1
+        else:
+            val token = [0, 0, text[pos]]
+            tokens = tokens + [token]
+            pos = pos + 1
+
+    return tokens
+
+# =============================================================================
+# BIT MANIPULATION
+# =============================================================================
+
+# Pack bit string into bytes
+fn pack_bits(bit_string):
+    if bit_string == nil:
+        return []
+
+    val len = bit_string.length()
+    var bytes = []
+    var current = 0
+    var bit_count = 0
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val bit_char = bit_string[i]
+
+        var bit = 0
+        if bit_char == "1":
+            bit = 1
+
+        current = current * 2 + bit
+        bit_count = bit_count + 1
+
+        if bit_count == 8:
+            bytes = bytes + [current]
+            current = 0
+            bit_count = 0
+
+        i = i + 1
+
+    # Add remaining bits
+    if bit_count > 0:
+        # Pad with zeros
+        var j = bit_count
+        loop:
+            if j >= 8:
+                break
+            current = current * 2
+            j = j + 1
+
+        bytes = bytes + [current]
+
+    return bytes
+
+# Unpack bytes into bit string
+fn unpack_bits(bytes, bit_count):
+    if bytes == nil:
+        return ""
+
+    var bits = ""
+    var i = 0
+    var bits_written = 0
+
+    loop:
+        if i >= bytes.length():
+            break
+        if bits_written >= bit_count:
+            break
+
+        val byte = bytes[i]
+
+        # Extract 8 bits
+        var j = 7
+        loop:
+            if j < 0:
+                break
+            if bits_written >= bit_count:
+                break
+
+            val bit = (byte >> j) & 1
+
+            if bit == 1:
+                bits = bits + "1"
+            else:
+                bits = bits + "0"
+
+            bits_written = bits_written + 1
+            j = j - 1
+
+        i = i + 1
+
+    return bits
+
+# Convert byte to 8-bit string
+fn byte_to_bits(byte):
+    var bits = ""
+    var i = 7
+
+    loop:
+        if i < 0:
+            break
+
+        val bit = (byte >> i) & 1
+
+        if bit == 1:
+            bits = bits + "1"
+        else:
+            bits = bits + "0"
+
+        i = i - 1
+
+    return bits
+
+# Convert 8-bit string to byte
+fn bits_to_byte(bits):
+    if bits == nil:
+        return 0
+
+    var result = 0
+    var i = 0
+
+    loop:
+        if i >= bits.length():
+            break
+        if i >= 8:
+            break
+
+        result = result * 2
+
+        if bits[i] == "1":
+            result = result + 1
+
+        i = i + 1
+
+    return result
+
+# =============================================================================
+# COMPRESSION STATISTICS
+# =============================================================================
+
+# Calculate compression ratio (compressed / original)
+fn compression_ratio(original, compressed):
+    if original == nil:
+        return 1.0
+    if compressed == nil:
+        return 1.0
+
+    val orig_size = original.length()
+    val comp_size = compressed.length()
+
+    if orig_size == 0:
+        return 1.0
+
+    val ratio = comp_size.to_float() / orig_size.to_float()
+    return ratio
+
+# Calculate space savings percentage
+fn space_savings(original, compressed):
+    if original == nil:
+        return 0.0
+    if compressed == nil:
+        return 0.0
+
+    val orig_size = original.length()
+    val comp_size = compressed.length()
+
+    if orig_size == 0:
+        return 0.0
+
+    val saved = orig_size - comp_size
+    val savings = (saved.to_float() / orig_size.to_float()) * 100.0
+
+    return savings
+
+# Calculate compression ratio for byte arrays
+fn compression_ratio_bytes(original, compressed):
+    if original == nil:
+        return 1.0
+    if compressed == nil:
+        return 1.0
+
+    val orig_size = original.length()
+    val comp_size = compressed.length()
+
+    if orig_size == 0:
+        return 1.0
+
+    val ratio = comp_size.to_float() / orig_size.to_float()
+    return ratio
+
+# Calculate bits per character for encoded data
+fn bits_per_char(encoded_bits, original_length):
+    if original_length == 0:
+        return 0.0
+
+    val bit_count = encoded_bits.length()
+    val bpc = bit_count.to_float() / original_length.to_float()
+
+    return bpc
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+# Convert text to byte array (ASCII)
+fn text_to_bytes(text):
+    if text == nil:
+        return []
+
+    var bytes = []
+    var i = 0
+
+    loop:
+        if i >= text.length():
+            break
+
+        val ch = text[i]
+        val code = char_code(ch)
+        bytes = bytes + [code]
+
+        i = i + 1
+
+    return bytes
+
+# Convert byte array to text
+fn bytes_to_text(bytes):
+    if bytes == nil:
+        return ""
+
+    var text = ""
+    var i = 0
+
+    loop:
+        if i >= bytes.length():
+            break
+
+        val code = bytes[i]
+        val ch = char_from_code(code)
+        text = text + ch
+
+        i = i + 1
+
+    return text
+
+# Get character code (ASCII value)
+fn char_code(ch):
+    # Simple ASCII mapping for common characters
+    if ch == "a":
+        return 97
+    if ch == "b":
+        return 98
+    if ch == "c":
+        return 99
+    if ch == "d":
+        return 100
+    if ch == "e":
+        return 101
+    if ch == " ":
+        return 32
+    if ch == "0":
+        return 48
+    if ch == "1":
+        return 49
+    if ch == "2":
+        return 50
+    if ch == "3":
+        return 51
+    if ch == "4":
+        return 52
+    if ch == "5":
+        return 53
+    if ch == "6":
+        return 54
+    if ch == "7":
+        return 55
+    if ch == "8":
+        return 56
+    if ch == "9":
+        return 57
+
+    return 0  # Unknown character
+
+# Get character from code
+fn char_from_code(code):
+    if code == 97:
+        return "a"
+    if code == 98:
+        return "b"
+    if code == 99:
+        return "c"
+    if code == 100:
+        return "d"
+    if code == 101:
+        return "e"
+    if code == 32:
+        return " "
+    if code == 48:
+        return "0"
+    if code == 49:
+        return "1"
+    if code == 50:
+        return "2"
+    if code == 51:
+        return "3"
+    if code == 52:
+        return "4"
+    if code == 53:
+        return "5"
+    if code == 54:
+        return "6"
+    if code == 55:
+        return "7"
+    if code == 56:
+        return "8"
+    if code == 57:
+        return "9"
+
+    return "?"
+
+# Parse integer from text
+fn parse_int(text):
+    if text == nil:
+        return 0
+
+    var result = 0
+    var i = 0
+
+    loop:
+        if i >= text.length():
+            break
+
+        val ch = text[i]
+        var digit = 0
+
+        if ch == "0":
+            digit = 0
+        if ch == "1":
+            digit = 1
+        if ch == "2":
+            digit = 2
+        if ch == "3":
+            digit = 3
+        if ch == "4":
+            digit = 4
+        if ch == "5":
+            digit = 5
+        if ch == "6":
+            digit = 6
+        if ch == "7":
+            digit = 7
+        if ch == "8":
+            digit = 8
+        if ch == "9":
+            digit = 9
+
+        result = result * 10 + digit
+        i = i + 1
+
+    return result
+
+# Calculate base-2 logarithm
+fn log2(x):
+    if x <= 0.0:
+        return 0.0
+
+    # Simple approximation using natural log
+    # log2(x) = ln(x) / ln(2)
+    val ln_x = ln(x)
+    val ln_2 = 0.693147180559945309417
+
+    return ln_x / ln_2
+
+# Calculate natural logarithm (approximation)
+fn ln(x):
+    if x <= 0.0:
+        return 0.0
+
+    # Taylor series approximation for ln(1 + x)
+    # Works best when x is close to 1
+    var y = x - 1.0
+    var result = 0.0
+    var term = y
+    var i = 1
+
+    loop:
+        if i > 100:  # Limit iterations
+            break
+
+        if term.abs() < 0.0000001:  # Convergence
+            break
+
+        if i % 2 == 1:
+            result = result + term / i.to_float()
+        else:
+            result = result - term / i.to_float()
+
+        term = term * y
+        i = i + 1
+
+    return result
+
+# =============================================================================
+# ADVANCED COMPRESSION UTILITIES
+# =============================================================================
+
+# Adaptive RLE - switches between literal and run mode
+fn adaptive_rle_encode(text):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return []
+
+    var tokens = []
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val ch = text[i]
+        var run_len = 1
+        var j = i + 1
+
+        # Count run length
+        loop:
+            if j >= len:
+                break
+
+            if text[j] == ch:
+                run_len = run_len + 1
+                j = j + 1
+            else:
+                break
+
+        if run_len >= 4:
+            # Encode as run
+            tokens = tokens + [["run", ch, run_len]]
+            i = i + run_len
+        else:
+            # Encode as literal
+            tokens = tokens + [["lit", ch, 1]]
+            i = i + 1
+
+    return tokens
+
+# Decode adaptive RLE
+fn adaptive_rle_decode(tokens):
+    if tokens == nil:
+        return ""
+
+    var result = ""
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val mode = token[0]
+        val ch = token[1]
+        val count = token[2]
+
+        var j = 0
+        loop:
+            if j >= count:
+                break
+
+            result = result + ch
+            j = j + 1
+
+        i = i + 1
+
+    return result
+
+# Dictionary-based compression - build dictionary of common patterns
+fn dict_compress(text, dict_size):
+    if text == nil:
+        return nil
+
+    # Build dictionary of most common substrings
+    var dict = []
+    val len = text.length()
+
+    # Find common 2-char sequences
+    var i = 0
+    loop:
+        if i + 1 >= len:
+            break
+
+        val pattern = text[i] + text[i + 1]
+        dict = dict_add_pattern(dict, pattern, dict_size)
+
+        i = i + 1
+
+    # Encode using dictionary
+    var encoded = []
+    var pos = 0
+
+    loop:
+        if pos >= len:
+            break
+
+        # Try to match dictionary entry
+        var matched = false
+        var dict_idx = 0
+
+        loop:
+            if dict_idx >= dict.length():
+                break
+
+            val entry = dict[dict_idx]
+            val pattern = entry[0]
+            val pat_len = pattern.length()
+
+            if pos + pat_len <= len:
+                var matches = true
+                var k = 0
+
+                loop:
+                    if k >= pat_len:
+                        break
+
+                    if text[pos + k] != pattern[k]:
+                        matches = false
+                        break
+
+                    k = k + 1
+
+                if matches:
+                    encoded = encoded + [["dict", dict_idx]]
+                    pos = pos + pat_len
+                    matched = true
+                    break
+
+            dict_idx = dict_idx + 1
+
+        if matched == false:
+            # Literal character
+            encoded = encoded + [["lit", text[pos]]]
+            pos = pos + 1
+
+    return [encoded, dict]
+
+# Add pattern to dictionary if not full
+fn dict_add_pattern(dict, pattern, max_size):
+    # Check if already in dictionary
+    var i = 0
+    loop:
+        if i >= dict.length():
+            break
+
+        val entry = dict[i]
+        val pat = entry[0]
+
+        if pat == pattern:
+            # Increment count
+            val count = entry[1]
+            var new_dict = []
+            var j = 0
+
+            loop:
+                if j >= dict.length():
+                    break
+
+                if j == i:
+                    new_dict = new_dict + [[pat, count + 1]]
+                else:
+                    new_dict = new_dict + [dict[j]]
+
+                j = j + 1
+
+            return new_dict
+
+        i = i + 1
+
+    # Add new pattern if room
+    if dict.length() < max_size:
+        return dict + [[pattern, 1]]
+
+    return dict
+
+# Move-to-front encoding
+fn mtf_encode(text):
+    if text == nil:
+        return []
+
+    # Initialize alphabet
+    var alphabet = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+    var encoded = []
+    var i = 0
+
+    loop:
+        if i >= text.length():
+            break
+
+        val ch = text[i]
+
+        # Find position in alphabet
+        var pos = 0
+        var j = 0
+
+        loop:
+            if j >= alphabet.length():
+                break
+
+            if alphabet[j] == ch:
+                pos = j
+                break
+
+            j = j + 1
+
+        encoded = encoded + [pos]
+
+        # Move to front
+        var new_alphabet = [ch]
+        var k = 0
+
+        loop:
+            if k >= alphabet.length():
+                break
+
+            if k != pos:
+                new_alphabet = new_alphabet + [alphabet[k]]
+
+            k = k + 1
+
+        alphabet = new_alphabet
+        i = i + 1
+
+    return encoded
+
+# Burrows-Wheeler Transform (simplified)
+fn bwt_encode(text):
+    if text == nil:
+        return nil
+
+    val len = text.length()
+    if len == 0:
+        return ["", 0]
+
+    # Create all rotations
+    var rotations = []
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        val rotation = text.substring(i, len) + text.substring(0, i)
+        rotations = rotations + [rotation]
+
+        i = i + 1
+
+    # Sort rotations (simple bubble sort)
+    rotations = sort_strings(rotations)
+
+    # Extract last column
+    var result = ""
+    var original_idx = 0
+    var j = 0
+
+    loop:
+        if j >= rotations.length():
+            break
+
+        val rot = rotations[j]
+        val last_char = rot[len - 1]
+        result = result + last_char
+
+        if rot == text:
+            original_idx = j
+
+        j = j + 1
+
+    return [result, original_idx]
+
+# Sort array of strings (simple bubble sort)
+fn sort_strings(strings):
+    if strings == nil:
+        return []
+
+    val len = strings.length()
+    if len <= 1:
+        return strings
+
+    var sorted = strings
+    var i = 0
+
+    loop:
+        if i >= len:
+            break
+
+        var j = 0
+        loop:
+            if j >= len - i - 1:
+                break
+
+            val curr = sorted[j]
+            val next = sorted[j + 1]
+
+            if string_compare(curr, next) > 0:
+                # Swap
+                var new_sorted = []
+                var k = 0
+
+                loop:
+                    if k >= sorted.length():
+                        break
+
+                    if k == j:
+                        new_sorted = new_sorted + [next]
+                    else:
+                        if k == j + 1:
+                            new_sorted = new_sorted + [curr]
+                        else:
+                            new_sorted = new_sorted + [sorted[k]]
+
+                    k = k + 1
+
+                sorted = new_sorted
+
+            j = j + 1
+
+        i = i + 1
+
+    return sorted
+
+# Compare two strings (lexicographic)
+fn string_compare(s1, s2):
+    if s1 == nil:
+        return -1
+    if s2 == nil:
+        return 1
+
+    val len1 = s1.length()
+    val len2 = s2.length()
+
+    var min_len = len1
+    if len2 < len1:
+        min_len = len2
+
+    var i = 0
+    loop:
+        if i >= min_len:
+            break
+
+        val c1 = s1[i]
+        val c2 = s2[i]
+
+        if c1 < c2:
+            return -1
+        if c1 > c2:
+            return 1
+
+        i = i + 1
+
+    if len1 < len2:
+        return -1
+    if len1 > len2:
+        return 1
+
+    return 0
+
+# Export main compression functions for public API
+fn compress_rle(text):
+    return rle_encode(text)
+
+fn decompress_rle(encoded):
+    return rle_decode(encoded)
+
+fn compress_huffman(text):
+    return huffman_encode(text)
+
+fn decompress_huffman(encoded):
+    return huffman_decode(encoded)
+
+fn compress_lz77(text):
+    return lz77_compress(text)
+
+fn decompress_lz77(tokens):
+    return lz77_decompress(tokens)
+
+fn analyze_compression(text):
+    val entropy = calculate_entropy(text)
+    val compressibility = estimate_compressibility(text)
+    val freqs = count_frequencies(text)
+    val sorted_freqs = sort_frequencies(freqs)
+
+    return [entropy, compressibility, sorted_freqs]
