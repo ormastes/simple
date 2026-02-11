@@ -1,0 +1,900 @@
+# CSV Processing Utilities
+#
+# Comprehensive CSV parsing and generation utilities.
+# Pure Simple implementation - no external dependencies, no generics at runtime.
+#
+# Provides parsing, generation, validation, and transformation of CSV data.
+# Handles edge cases like quoted fields, escaped quotes, newlines in quotes.
+#
+# Functions:
+# - Core parsing: parse_csv, parse_csv_line, parse_csv_with_options
+# - Core generation: to_csv, to_csv_line, array_to_csv
+# - Field handling: parse_csv_field, escape_csv_field, trim_field
+# - Row operations: skip_header, filter_rows, transform_rows
+# - Column operations: extract_column, extract_columns
+# - Validation: validate_csv, is_valid_csv_line
+# - Statistics: count_rows, count_columns, csv_info
+# - Advanced: transpose_csv, merge_csv_files, csv_to_dict
+
+# ============================================================================
+# CSV Options
+# ============================================================================
+
+class CsvOptions:
+    delimiter: text
+    quote_char: text
+    escape_char: text
+    trim_fields: bool
+    skip_empty_rows: bool
+
+fn default_csv_options() -> CsvOptions:
+    """Create default CSV options (comma delimiter, double quote).
+
+    Example:
+        val opts = default_csv_options()
+        val data = parse_csv_with_options(text, opts)
+    """
+    CsvOptions(
+        delimiter: ",",
+        quote_char: "\"",
+        escape_char: "\"",
+        trim_fields: false,
+        skip_empty_rows: false
+    )
+
+fn csv_options_tsv() -> CsvOptions:
+    """Create TSV (tab-separated values) options.
+
+    Example:
+        val opts = csv_options_tsv()
+        val data = parse_csv_with_options(text, opts)
+    """
+    CsvOptions(
+        delimiter: "\t",
+        quote_char: "\"",
+        escape_char: "\"",
+        trim_fields: false,
+        skip_empty_rows: false
+    )
+
+fn csv_options_custom(delimiter: text, quote_char: text, escape_char: text) -> CsvOptions:
+    """Create custom CSV options.
+
+    Example:
+        val opts = csv_options_custom(";", "'", "\\")
+        val data = parse_csv_with_options(text, opts)
+    """
+    CsvOptions(
+        delimiter: delimiter,
+        quote_char: quote_char,
+        escape_char: escape_char,
+        trim_fields: false,
+        skip_empty_rows: false
+    )
+
+# ============================================================================
+# Core Parsing Functions
+# ============================================================================
+
+fn parse_csv(text: text) -> [[text]]:
+    """Parse CSV text into array of rows (arrays of fields).
+    Uses default options: comma delimiter, double quote.
+
+    Example:
+        val csv = "name,age\nAlice,30\nBob,25"
+        val rows = parse_csv(csv)
+        # [[name, age], [Alice, 30], [Bob, 25]]
+    """
+    val opts = default_csv_options()
+    parse_csv_with_options(text, opts)
+
+fn parse_csv_with_options(text: text, opts: CsvOptions) -> [[text]]:
+    """Parse CSV text with custom options.
+
+    Example:
+        val opts = csv_options_custom(";", "'", "\\")
+        val rows = parse_csv_with_options(text, opts)
+    """
+    var rows: [[text]] = []
+    val lines = text.split("\n")
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+
+        # Skip empty rows if option set
+        if opts.skip_empty_rows and is_empty_line(line):
+            i = i + 1
+            continue
+
+        # Check if line contains unclosed quotes
+        var unclosed = has_unclosed_quotes(line, opts.quote_char, opts.escape_char)
+
+        # If unclosed quotes, merge with next lines until quote is closed
+        var full_line = line
+        var j = i + 1
+        while unclosed and j < lines.len():
+            full_line = full_line + "\n" + lines[j]
+            unclosed = has_unclosed_quotes(full_line, opts.quote_char, opts.escape_char)
+            j = j + 1
+
+        # Parse the complete line
+        val row = parse_csv_line_with_options(full_line, opts)
+        rows = rows.push(row)
+
+        # Move to next unprocessed line
+        i = j
+
+    rows
+
+fn parse_csv_line(line: text) -> [text]:
+    """Parse a single CSV line into fields.
+    Uses default options: comma delimiter, double quote.
+
+    Example:
+        val fields = parse_csv_line("Alice,30,Boston")
+        # [Alice, 30, Boston]
+    """
+    val opts = default_csv_options()
+    parse_csv_line_with_options(line, opts)
+
+fn parse_csv_line_with_options(line: text, opts: CsvOptions) -> [text]:
+    """Parse a single CSV line with custom options.
+    Handles quoted fields, escaped quotes, and delimiters within quotes.
+
+    Example:
+        val opts = default_csv_options()
+        val fields = parse_csv_line_with_options("\"Smith, John\",30", opts)
+        # [Smith, John, 30]
+    """
+    var fields: [text] = []
+    var current_field = ""
+    var in_quotes = false
+    var i = 0
+
+    while i < line.len():
+        val ch = line[i:i+1]
+
+        # Check for quote character
+        if ch == opts.quote_char:
+            # Check if next character is also quote (escaped quote)
+            val next_i = i + 1
+            if next_i < line.len() and line[next_i:next_i+1] == opts.escape_char:
+                current_field = current_field + opts.quote_char
+                i = i + 2
+                continue
+            else:
+                # Toggle quote state
+                in_quotes = not in_quotes
+                i = i + 1
+                continue
+
+        # Check for delimiter (only if not in quotes)
+        if ch == opts.delimiter and not in_quotes:
+            # End of field
+            var field = current_field
+            if opts.trim_fields:
+                field = trim_field(field)
+            fields = fields.push(field)
+            current_field = ""
+            i = i + 1
+            continue
+
+        # Regular character
+        current_field = current_field + ch
+        i = i + 1
+
+    # Add final field
+    var final_field = current_field
+    if opts.trim_fields:
+        final_field = trim_field(final_field)
+    fields.push(final_field)
+
+fn parse_csv_field(field: text, quote_char: text, escape_char: text) -> text:
+    """Parse a single CSV field, handling quotes and escapes.
+
+    Example:
+        val field = parse_csv_field("\"hello\"", "\"", "\"")
+        # hello
+    """
+    var result = field
+
+    # Remove surrounding quotes if present
+    if result.len() >= 2:
+        val starts = result[0:1] == quote_char
+        val ends = result[result.len()-1:result.len()] == quote_char
+        if starts and ends:
+            result = result[1:result.len()-1]
+
+    # Unescape escaped quotes
+    result = unescape_field(result, quote_char, escape_char)
+
+    result
+
+# ============================================================================
+# Core Generation Functions
+# ============================================================================
+
+fn to_csv(rows: [[text]]) -> text:
+    """Convert array of rows to CSV text.
+    Uses default options: comma delimiter, double quote.
+
+    Example:
+        val rows = [["name", "age"], ["Alice", "30"]]
+        val csv = to_csv(rows)
+        # name,age\nAlice,30
+    """
+    val opts = default_csv_options()
+    array_to_csv_with_options(rows, opts)
+
+fn to_csv_line(fields: [text]) -> text:
+    """Convert array of fields to CSV line.
+    Uses default options: comma delimiter, double quote.
+
+    Example:
+        val line = to_csv_line(["Alice", "30", "Boston"])
+        # Alice,30,Boston
+    """
+    val opts = default_csv_options()
+    to_csv_line_with_options(fields, opts)
+
+fn to_csv_line_with_options(fields: [text], opts: CsvOptions) -> text:
+    """Convert array of fields to CSV line with custom options.
+
+    Example:
+        val opts = csv_options_custom(";", "'", "\\")
+        val line = to_csv_line_with_options(["Alice", "30"], opts)
+        # Alice;30
+    """
+    var parts: [text] = []
+
+    for field in fields:
+        val escaped = escape_csv_field(field, opts)
+        parts = parts.push(escaped)
+
+    parts.join(opts.delimiter)
+
+fn array_to_csv(rows: [[text]]) -> text:
+    """Convert array of rows to CSV text (alias for to_csv).
+
+    Example:
+        val csv = array_to_csv([["name", "age"], ["Alice", "30"]])
+    """
+    to_csv(rows)
+
+fn array_to_csv_with_options(rows: [[text]], opts: CsvOptions) -> text:
+    """Convert array of rows to CSV text with custom options.
+
+    Example:
+        val opts = csv_options_tsv()
+        val csv = array_to_csv_with_options(rows, opts)
+    """
+    var lines: [text] = []
+
+    for row in rows:
+        val line = to_csv_line_with_options(row, opts)
+        lines = lines.push(line)
+
+    lines.join("\n")
+
+# ============================================================================
+# Field Handling
+# ============================================================================
+
+fn escape_csv_field(field: text, opts: CsvOptions) -> text:
+    """Escape a CSV field if it contains special characters.
+    Adds quotes if field contains delimiter, quote char, or newline.
+
+    Example:
+        val opts = default_csv_options()
+        val escaped = escape_csv_field("Smith, John", opts)
+        # "Smith, John"
+    """
+    # Check if field needs quoting
+    var needs_quotes = false
+
+    if contains_char(field, opts.delimiter):
+        needs_quotes = true
+    if contains_char(field, opts.quote_char):
+        needs_quotes = true
+    if contains_char(field, "\n"):
+        needs_quotes = true
+    if contains_char(field, "\r"):
+        needs_quotes = true
+
+    if not needs_quotes:
+        return field
+
+    # Escape internal quotes
+    val escaped = escape_quotes_in_field(field, opts.quote_char, opts.escape_char)
+
+    # Wrap in quotes
+    opts.quote_char + escaped + opts.quote_char
+
+fn escape_quotes_in_field(field: text, quote_char: text, escape_char: text) -> text:
+    """Escape quote characters in field by doubling them.
+
+    Example:
+        val escaped = escape_quotes_in_field("He said \"Hi\"", "\"", "\"")
+        # He said ""Hi""
+    """
+    var result = ""
+    var i = 0
+
+    while i < field.len():
+        val ch = field[i:i+1]
+        if ch == quote_char:
+            result = result + escape_char + quote_char
+        else:
+            result = result + ch
+        i = i + 1
+
+    result
+
+fn unescape_field(field: text, quote_char: text, escape_char: text) -> text:
+    """Unescape doubled quote characters in field.
+
+    Example:
+        val unescaped = unescape_field("He said \"\"Hi\"\"", "\"", "\"")
+        # He said "Hi"
+    """
+    var result = ""
+    var i = 0
+
+    while i < field.len():
+        val ch = field[i:i+1]
+
+        # Check for escaped quote
+        if ch == escape_char and i + 1 < field.len():
+            val next_ch = field[i+1:i+2]
+            if next_ch == quote_char:
+                result = result + quote_char
+                i = i + 2
+                continue
+
+        result = result + ch
+        i = i + 1
+
+    result
+
+fn trim_field(field: text) -> text:
+    """Trim whitespace from field.
+
+    Example:
+        val trimmed = trim_field("  Alice  ")
+        # Alice
+    """
+    var result = field
+
+    # Trim start
+    while result.len() > 0 and is_whitespace_char(result[0:1]):
+        result = result[1:]
+
+    # Trim end
+    while result.len() > 0 and is_whitespace_char(result[result.len()-1:result.len()]):
+        result = result[0:result.len()-1]
+
+    result
+
+# ============================================================================
+# Row Operations
+# ============================================================================
+
+fn skip_header(rows: [[text]]) -> [[text]]:
+    """Skip the first row (header row).
+
+    Example:
+        val data = skip_header(rows)
+    """
+    if rows.len() <= 1:
+        return []
+
+    var result: [[text]] = []
+    var i = 1
+    while i < rows.len():
+        result = result.push(rows[i])
+        i = i + 1
+    result
+
+fn filter_rows(rows: [[text]], predicate) -> [[text]]:
+    """Filter rows based on predicate function.
+    Predicate receives row and returns bool.
+
+    Example:
+        val filtered = filter_rows(rows, \\row: row[0] != "")
+    """
+    var result: [[text]] = []
+
+    for row in rows:
+        if predicate(row):
+            result = result.push(row)
+
+    result
+
+fn transform_rows(rows: [[text]], transformer) -> [[text]]:
+    """Transform rows using transformer function.
+    Transformer receives row and returns transformed row.
+
+    Example:
+        val transformed = transform_rows(rows, \\row: [row[0].to_uppercase()])
+    """
+    var result: [[text]] = []
+
+    for row in rows:
+        val transformed = transformer(row)
+        result = result.push(transformed)
+
+    result
+
+fn filter_rows_by_column(rows: [[text]], col_index: i64, predicate) -> [[text]]:
+    """Filter rows by value in specific column.
+
+    Example:
+        val adults = filter_rows_by_column(rows, 1, \\age: age.to_int() >= 18)
+    """
+    var result: [[text]] = []
+
+    for row in rows:
+        if col_index >= 0 and col_index < row.len():
+            val cell = row[col_index]
+            if predicate(cell):
+                result = result.push(row)
+
+    result
+
+fn sort_rows_by_column(rows: [[text]], col_index: i64) -> [[text]]:
+    """Sort rows by value in specific column (alphabetically).
+
+    Example:
+        val sorted = sort_rows_by_column(rows, 0)
+    """
+    # Simple insertion sort
+    var sorted: [[text]] = []
+
+    for row in rows:
+        var inserted = false
+        var i = 0
+
+        while i < sorted.len() and not inserted:
+            val current_row = sorted[i]
+
+            # Compare column values
+            var row_val = ""
+            var current_val = ""
+
+            if col_index >= 0 and col_index < row.len():
+                row_val = row[col_index]
+            if col_index >= 0 and col_index < current_row.len():
+                current_val = current_row[col_index]
+
+            if row_val < current_val:
+                # Insert before current
+                var before = take_rows(sorted, i)
+                var after = drop_rows(sorted, i)
+                var combined = before
+                combined = combined.push(row)
+                for r in after:
+                    combined = combined.push(r)
+                sorted = combined
+                inserted = true
+
+            i = i + 1
+
+        if not inserted:
+            sorted = sorted.push(row)
+
+    sorted
+
+# ============================================================================
+# Column Operations
+# ============================================================================
+
+fn extract_column(rows: [[text]], col_index: i64) -> [text]:
+    """Extract single column as array of values.
+
+    Example:
+        val names = extract_column(rows, 0)
+    """
+    var column: [text] = []
+
+    for row in rows:
+        if col_index >= 0 and col_index < row.len():
+            column = column.push(row[col_index])
+        else:
+            column = column.push("")
+
+    column
+
+fn extract_columns(rows: [[text]], col_indices: [i64]) -> [[text]]:
+    """Extract multiple columns by indices.
+
+    Example:
+        val subset = extract_columns(rows, [0, 2])
+    """
+    var result: [[text]] = []
+
+    for row in rows:
+        var new_row: [text] = []
+        for col_index in col_indices:
+            if col_index >= 0 and col_index < row.len():
+                new_row = new_row.push(row[col_index])
+            else:
+                new_row = new_row.push("")
+        result = result.push(new_row)
+
+    result
+
+fn transpose_csv(rows: [[text]]) -> [[text]]:
+    """Transpose CSV (swap rows and columns).
+
+    Example:
+        val transposed = transpose_csv(rows)
+    """
+    if rows.len() == 0:
+        return []
+
+    # Find maximum row width
+    var max_cols = 0
+    for row in rows:
+        if row.len() > max_cols:
+            max_cols = row.len()
+
+    # Create transposed result
+    var result: [[text]] = []
+    var col = 0
+
+    while col < max_cols:
+        var new_row: [text] = []
+        for row in rows:
+            if col < row.len():
+                new_row = new_row.push(row[col])
+            else:
+                new_row = new_row.push("")
+        result = result.push(new_row)
+        col = col + 1
+
+    result
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+fn validate_csv(rows: [[text]]) -> bool:
+    """Validate CSV data (all rows have same number of columns).
+
+    Example:
+        val is_valid = validate_csv(rows)
+    """
+    if rows.len() == 0:
+        return true
+
+    val expected_cols = rows[0].len()
+
+    for row in rows:
+        if row.len() != expected_cols:
+            return false
+
+    true
+
+fn is_valid_csv_line(line: text, delimiter: text) -> bool:
+    """Check if line is valid CSV (no unclosed quotes).
+
+    Example:
+        val is_valid = is_valid_csv_line("Alice,30", ",")
+    """
+    val quote_char = "\""
+    val escape_char = "\""
+    not has_unclosed_quotes(line, quote_char, escape_char)
+
+fn count_columns(row: [text]) -> i64:
+    """Count number of columns in row.
+
+    Example:
+        val cols = count_columns(row)
+    """
+    row.len()
+
+fn count_rows(rows: [[text]]) -> i64:
+    """Count number of rows.
+
+    Example:
+        val row_count = count_rows(rows)
+    """
+    rows.len()
+
+# ============================================================================
+# Statistics and Info
+# ============================================================================
+
+fn csv_info(rows: [[text]]) -> text:
+    """Get info about CSV data (rows, columns, validity).
+
+    Example:
+        print csv_info(rows)
+    """
+    val row_count = count_rows(rows)
+    val is_valid = validate_csv(rows)
+
+    var col_count = 0
+    if row_count > 0:
+        col_count = rows[0].len()
+
+    var info = "CSV Info:\n"
+    info = info + "  Rows: {row_count}\n"
+    info = info + "  Columns: {col_count}\n"
+    info = info + "  Valid: {is_valid}"
+
+    info
+
+fn get_header(rows: [[text]]) -> [text]:
+    """Get header row (first row).
+
+    Example:
+        val header = get_header(rows)
+    """
+    if rows.len() == 0:
+        return []
+
+    rows[0]
+
+fn get_column_stats(rows: [[text]], col_index: i64) -> text:
+    """Get statistics for a column (count, unique values).
+
+    Example:
+        print get_column_stats(rows, 0)
+    """
+    val column = extract_column(rows, col_index)
+    val total = column.len()
+
+    var unique_values: [text] = []
+    var seen = {}
+
+    for value in column:
+        val key = value
+        if not seen.contains_key(key):
+            seen[key] = true
+            unique_values = unique_values.push(value)
+
+    val unique_count = unique_values.len()
+
+    var stats = "Column {col_index} Stats:\n"
+    stats = stats + "  Total values: {total}\n"
+    stats = stats + "  Unique values: {unique_count}"
+
+    stats
+
+# ============================================================================
+# Advanced Operations
+# ============================================================================
+
+fn csv_to_dict(rows: [[text]]) -> [{}]:
+    """Convert CSV to array of dictionaries using first row as keys.
+
+    Example:
+        val dicts = csv_to_dict(rows)
+        # [{name: Alice, age: 30}, {name: Bob, age: 25}]
+    """
+    if rows.len() == 0:
+        return []
+
+    val header = rows[0]
+    var result = []
+
+    var i = 1
+    while i < rows.len():
+        val row = rows[i]
+        var dict = {}
+
+        var j = 0
+        while j < header.len() and j < row.len():
+            val key = header[j]
+            val value = row[j]
+            dict[key] = value
+            j = j + 1
+
+        result = result.push(dict)
+        i = i + 1
+
+    result
+
+fn dict_to_csv(dicts: [{}], keys: [text]) -> [[text]]:
+    """Convert array of dictionaries to CSV rows.
+
+    Example:
+        val rows = dict_to_csv(dicts, ["name", "age"])
+    """
+    var result: [[text]] = []
+
+    # Add header
+    result = result.push(keys)
+
+    # Add data rows
+    for dict in dicts:
+        var row: [text] = []
+        for key in keys:
+            if dict.contains_key(key):
+                val value = dict[key]
+                row = row.push("{value}")
+            else:
+                row = row.push("")
+        result = result.push(row)
+
+    result
+
+fn merge_csv_rows(rows1: [[text]], rows2: [[text]]) -> [[text]]:
+    """Merge two CSV datasets row-wise (concatenate rows).
+
+    Example:
+        val merged = merge_csv_rows(csv1, csv2)
+    """
+    var result: [[text]] = []
+
+    for row in rows1:
+        result = result.push(row)
+
+    for row in rows2:
+        result = result.push(row)
+
+    result
+
+fn merge_csv_columns(rows1: [[text]], rows2: [[text]]) -> [[text]]:
+    """Merge two CSV datasets column-wise (join columns).
+
+    Example:
+        val merged = merge_csv_columns(csv1, csv2)
+    """
+    var result: [[text]] = []
+
+    val max_rows = if rows1.len() > rows2.len(): rows1.len() else: rows2.len()
+
+    var i = 0
+    while i < max_rows:
+        var row: [text] = []
+
+        # Add columns from first dataset
+        if i < rows1.len():
+            for cell in rows1[i]:
+                row = row.push(cell)
+
+        # Add columns from second dataset
+        if i < rows2.len():
+            for cell in rows2[i]:
+                row = row.push(cell)
+
+        result = result.push(row)
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn has_unclosed_quotes(line: text, quote_char: text, escape_char: text) -> bool:
+    """Check if line has unclosed quotes.
+
+    Example:
+        val unclosed = has_unclosed_quotes("\"hello", "\"", "\"")
+        # true
+    """
+    var in_quotes = false
+    var i = 0
+
+    while i < line.len():
+        val ch = line[i:i+1]
+
+        # Check for escaped quote
+        if ch == escape_char and i + 1 < line.len():
+            val next_ch = line[i+1:i+2]
+            if next_ch == quote_char:
+                i = i + 2
+                continue
+
+        # Check for quote
+        if ch == quote_char:
+            in_quotes = not in_quotes
+
+        i = i + 1
+
+    in_quotes
+
+fn is_empty_line(line: text) -> bool:
+    """Check if line is empty or contains only whitespace.
+
+    Example:
+        val empty = is_empty_line("   ")
+        # true
+    """
+    var trimmed = trim_field(line)
+    trimmed.len() == 0
+
+fn contains_char(s: text, c: text) -> bool:
+    """Check if string contains character.
+
+    Example:
+        val has_comma = contains_char("hello, world", ",")
+        # true
+    """
+    var i = 0
+    while i < s.len():
+        if s[i:i+1] == c:
+            return true
+        i = i + 1
+    false
+
+fn is_whitespace_char(ch: text) -> bool:
+    """Check if character is whitespace.
+
+    Example:
+        val is_ws = is_whitespace_char(" ")
+        # true
+    """
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+fn take_rows(rows: [[text]], n: i64) -> [[text]]:
+    """Take first n rows.
+
+    Example:
+        val first_5 = take_rows(rows, 5)
+    """
+    var result: [[text]] = []
+    var i = 0
+
+    while i < n and i < rows.len():
+        result = result.push(rows[i])
+        i = i + 1
+
+    result
+
+fn drop_rows(rows: [[text]], n: i64) -> [[text]]:
+    """Drop first n rows.
+
+    Example:
+        val rest = drop_rows(rows, 5)
+    """
+    var result: [[text]] = []
+    var i = n
+
+    while i < rows.len():
+        result = result.push(rows[i])
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CsvOptions
+export default_csv_options, csv_options_tsv, csv_options_custom
+
+# Core parsing
+export parse_csv, parse_csv_line, parse_csv_with_options, parse_csv_line_with_options
+export parse_csv_field
+
+# Core generation
+export to_csv, to_csv_line, array_to_csv
+export to_csv_line_with_options, array_to_csv_with_options
+
+# Field handling
+export escape_csv_field, escape_quotes_in_field, unescape_field, trim_field
+
+# Row operations
+export skip_header, filter_rows, transform_rows
+export filter_rows_by_column, sort_rows_by_column
+
+# Column operations
+export extract_column, extract_columns, transpose_csv
+
+# Validation
+export validate_csv, is_valid_csv_line, count_columns, count_rows
+
+# Statistics
+export csv_info, get_header, get_column_stats
+
+# Advanced
+export csv_to_dict, dict_to_csv
+export merge_csv_rows, merge_csv_columns
+
+# Helpers
+export has_unclosed_quotes, is_empty_line
