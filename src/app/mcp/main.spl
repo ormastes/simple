@@ -20,6 +20,7 @@ use app.mcp.completions
 use app.mcp.session.{McpState}
 use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_tool_result_with_structured, make_tool_schema_with_output, make_server_request, make_sampling_request, make_elicitation_request, send_notification_message, send_log, send_progress, send_resource_updated, make_image_content}
 use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string}
+use app.mcp.error_handler.{InputValidator, input_validator}
 use app.mcp.debug_tools.{SessionManager, SessionBreakpoint, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate, parse_var_entry, parse_stack_frame, step_mode_to_int}
 use app.mcp.debug_log_tools.{handle_debug_log_enable, handle_debug_log_disable, handle_debug_log_clear, handle_debug_log_query, handle_debug_log_tree, handle_debug_log_status, schema_debug_log_enable, schema_debug_log_disable, schema_debug_log_clear, schema_debug_log_query, schema_debug_log_tree, schema_debug_log_status, handle_debuglog_resource}
 use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status, schema_simple_read, schema_simple_check, schema_simple_symbols, schema_simple_status}
@@ -566,6 +567,15 @@ fn read_stdin_message() -> String:
     if content_length == 0:
         return ""
 
+    # Validate content length: must be positive and within 1MB limit
+    if content_length < 0:
+        eprint("ERROR: Negative Content-Length: " + content_length.to_string())
+        return ""
+    val max_content_length = 1048576
+    if content_length > max_content_length:
+        eprint("ERROR: Content-Length exceeds maximum (" + content_length.to_string() + " > " + max_content_length.to_string() + ")")
+        return ""
+
     # Skip blank line after headers
     input()
 
@@ -584,9 +594,18 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
     if debug_mode:
         debug_log("Request: " + body)
 
+    # Validate body is non-empty
+    if body.trim() == "":
+        return make_error_response("null", -32700, "Parse error: empty body")
+
     # Simple JSON parsing for method extraction
     val method = extract_json_string_v2(body, "method")
     val id = extract_json_value(body, "id")
+
+    # Validate method is present for requests (id present means it's a request)
+    val is_request = id != "" and id != "null"
+    if method == "" and is_request:
+        return make_error_response(id, -32600, "Invalid request: missing method")
 
     if method == "initialize":
         val client_protocol = extract_nested_string(body, "params", "protocolVersion")
@@ -594,6 +613,15 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
     elif method == "initialized" or method == "notifications/initialized":
         return ""  # Notification, no response
     elif method == "shutdown":
+        # Cancel pending tasks
+        val active_tasks = task_mgr.list_tasks()
+        for task in active_tasks:
+            val state_str = task_state_to_string(task.state)
+            val is_active = state_str == "running" or state_str == "pending"
+            if is_active:
+                task_mgr.cancel_task(task.id)
+        if debug_mode:
+            debug_log("Shutdown: cancelled pending tasks")
         return make_result_response(id, "null")
     elif method == "exit":
         exit(0)
@@ -904,6 +932,15 @@ fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> 
 fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager, mcp_state: McpState) -> String:
     if debug_mode:
         debug_log("Tool call: " + tool_name)
+
+    # Validate tool name
+    if tool_name == "":
+        return make_error_response(id, -32602, "Missing required parameter: tool name")
+
+    val validator = input_validator()
+    val name_err = validator.validate_tool_name(tool_name)
+    if name_err.?:
+        return make_error_response(id, -32602, "Invalid tool name: " + name_err.unwrap().message)
 
     # Emit log notification before tool execution
     send_log("info", "Tool call: " + tool_name, "simple-mcp", mcp_state.log_level)
@@ -1447,6 +1484,15 @@ fn handle_resources_list_paginated(id: String, resource_mgr: resources.ResourceM
 fn handle_resources_read(id: String, uri: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
     if debug_mode:
         debug_log("Reading resource: " + uri)
+
+    # Validate URI
+    if uri == "":
+        return make_error_response(id, -32602, "Missing required parameter: uri")
+
+    val validator = input_validator()
+    val uri_err = validator.validate_uri(uri)
+    if uri_err.?:
+        return make_error_response(id, -32602, "Invalid URI: " + uri_err.unwrap().message)
 
     val read_result = resource_mgr.read_resource(uri)
 
