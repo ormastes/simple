@@ -1,0 +1,445 @@
+# Functional Programming Utilities
+#
+# Helper functions for functional programming patterns in Simple.
+# Pure Simple implementation - no external dependencies.
+#
+# Note: Some patterns are limited by runtime constraints:
+# - Closures can read but not modify outer variables
+# - Generic functions not available at runtime
+#
+# Functions:
+# - identity: Identity function
+# - constant: Constant function generator
+# - flip: Flip function argument order
+# - apply: Apply function to value
+# - pipe_two/pipe_three: Function composition (limited)
+# - times: Execute function n times
+# - until_predicate: Execute until condition met
+# - memoize_simple: Simple memoization (for i64 -> i64)
+
+# ============================================================================
+# Basic Functional Primitives
+# ============================================================================
+
+fn identity(x):
+    """Identity function - returns its argument unchanged.
+
+    Useful as default function or placeholder.
+
+    Example:
+        identity(42)  # 42
+    """
+    x
+
+fn constant(value):
+    """Create a function that always returns the same value.
+
+    Note: Returns a function that takes one argument.
+
+    Example:
+        val always_42 = constant(42)
+        always_42(1)  # 42
+        always_42(2)  # 42
+    """
+    \x: value
+
+fn apply(f, x):
+    """Apply function f to value x.
+
+    Explicit function application.
+
+    Example:
+        apply(\x: x * 2, 5)  # 10
+    """
+    f(x)
+
+# ============================================================================
+# Function Composition (Limited)
+# ============================================================================
+
+fn pipe_two(x, f, g):
+    """Pipe value through two functions: g(f(x)).
+
+    Example:
+        pipe_two(5, \x: x * 2, \x: x + 1)  # 11
+    """
+    g(f(x))
+
+fn pipe_three(x, f, g, h):
+    """Pipe value through three functions: h(g(f(x))).
+
+    Example:
+        pipe_three(5, \x: x * 2, \x: x + 1, \x: x * 10)  # 110
+    """
+    h(g(f(x)))
+
+fn compose_two(f, g):
+    """Compose two functions: returns \x: g(f(x)).
+
+    Example:
+        val double_then_inc = compose_two(\x: x * 2, \x: x + 1)
+        double_then_inc(5)  # 11
+    """
+    \x: g(f(x))
+
+# ============================================================================
+# Iteration Helpers
+# ============================================================================
+
+fn times(n: i64, f: fn(i64)):
+    """Execute function n times with index as argument.
+
+    Example:
+        times(3, \i: print("Iteration {i}"))
+    """
+    var i = 0
+    while i < n:
+        f(i)
+        i = i + 1
+
+fn repeat_value(n: i64, value) -> []:
+    """Create array with value repeated n times.
+
+    Example:
+        repeat_value(3, 42)  # [42, 42, 42]
+    """
+    var result = []
+    var i = 0
+    while i < n:
+        result.push(value)
+        i = i + 1
+    result
+
+fn iterate(f, initial, n: i64):
+    """Apply function repeatedly, collecting results.
+
+    Returns array: [initial, f(initial), f(f(initial)), ...]
+
+    Example:
+        iterate(\x: x * 2, 1, 4)  # [1, 2, 4, 8]
+    """
+    var result = [initial]
+    var current = initial
+    var i = 1
+    while i < n:
+        current = f(current)
+        result.push(current)
+        i = i + 1
+    result
+
+fn until_predicate(f, predicate, initial, max_iterations: i64):
+    """Apply function repeatedly until predicate is true.
+
+    Returns array of intermediate values.
+    Stops at max_iterations to prevent infinite loops.
+
+    Example:
+        until_predicate(\x: x + 1, \x: x > 5, 0, 100)
+        # [0, 1, 2, 3, 4, 5, 6]
+    """
+    var result = [initial]
+    var current = initial
+    var i = 0
+
+    while not predicate(current) and i < max_iterations:
+        current = f(current)
+        result.push(current)
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Array Higher-Order Functions
+# ============================================================================
+
+fn map_with_index(arr, f):
+    """Map with index: f receives (element, index).
+
+    Example:
+        map_with_index([10,20,30], \x, i: x + i)
+        # [10, 21, 32]
+    """
+    var result = []
+    var i = 0
+    while i < arr.len():
+        result.push(f(arr[i], i))
+        i = i + 1
+    result
+
+fn filter_with_index(arr, predicate):
+    """Filter with index: predicate receives (element, index).
+
+    Example:
+        filter_with_index([10,20,30,40], \x, i: i % 2 == 0)
+        # [10, 30]
+    """
+    var result = []
+    var i = 0
+    while i < arr.len():
+        if predicate(arr[i], i):
+            result.push(arr[i])
+        i = i + 1
+    result
+
+fn fold_left(arr, initial, f):
+    """Left fold (reduce): f(accumulator, element).
+
+    Example:
+        fold_left([1,2,3,4], 0, \acc, x: acc + x)  # 10
+    """
+    var acc = initial
+    for item in arr:
+        acc = f(acc, item)
+    acc
+
+fn fold_right(arr, initial, f):
+    """Right fold: f(element, accumulator).
+
+    Processes array from right to left.
+
+    Example:
+        fold_right([1,2,3], 0, \x, acc: x - acc)
+        # 1 - (2 - (3 - 0)) = 2
+    """
+    var acc = initial
+    var i = arr.len() - 1
+    while i >= 0:
+        acc = f(arr[i], acc)
+        i = i - 1
+    acc
+
+fn scan_left(arr, initial, f):
+    """Scan (cumulative fold): returns all intermediate results.
+
+    Example:
+        scan_left([1,2,3], 0, \acc, x: acc + x)
+        # [0, 1, 3, 6]
+    """
+    var result = [initial]
+    var acc = initial
+    for item in arr:
+        acc = f(acc, item)
+        result.push(acc)
+    result
+
+# ============================================================================
+# Predicates and Combinators
+# ============================================================================
+
+fn all_predicate(arr, predicate):
+    """Check if predicate is true for all elements.
+
+    Example:
+        all_predicate([2,4,6], \x: x % 2 == 0)  # true
+    """
+    for item in arr:
+        if not predicate(item):
+            return false
+    true
+
+fn any_predicate(arr, predicate):
+    """Check if predicate is true for any element.
+
+    Example:
+        any_predicate([1,3,5,6], \x: x % 2 == 0)  # true
+    """
+    for item in arr:
+        if predicate(item):
+            return true
+    false
+
+fn none_predicate(arr, predicate):
+    """Check if predicate is false for all elements.
+
+    Example:
+        none_predicate([1,3,5], \x: x % 2 == 0)  # true
+    """
+    for item in arr:
+        if predicate(item):
+            return false
+    true
+
+fn count_where(arr, predicate):
+    """Count elements matching predicate.
+
+    Example:
+        count_where([1,2,3,4,5], \x: x % 2 == 0)  # 2
+    """
+    var count = 0
+    for item in arr:
+        if predicate(item):
+            count = count + 1
+    count
+
+# ============================================================================
+# Array Pairing and Unpairing
+# ============================================================================
+
+fn zip_with(arr1, arr2, f):
+    """Zip two arrays with a combining function.
+
+    Example:
+        zip_with([1,2,3], [4,5,6], \a, b: a + b)
+        # [5, 7, 9]
+    """
+    var result = []
+    var len = arr1.len()
+    if arr2.len() < len:
+        len = arr2.len()
+
+    var i = 0
+    while i < len:
+        result.push(f(arr1[i], arr2[i]))
+        i = i + 1
+
+    result
+
+fn unzip_pairs(arr):
+    """Unzip array of pairs into two arrays.
+
+    Example:
+        unzip_pairs([(1,2), (3,4), (5,6)])
+        # ([1,3,5], [2,4,6])
+    """
+    var first = []
+    var second = []
+
+    for (a, b) in arr:
+        first.push(a)
+        second.push(b)
+
+    (first, second)
+
+# ============================================================================
+# Simple Memoization (i64 -> i64 only)
+# ============================================================================
+
+fn memoize_simple(f: fn(i64) -> i64, max_cache: i64):
+    """Simple memoization for i64 -> i64 functions.
+
+    Returns a new function that caches results.
+    Cache is a simple array of (input, output) pairs.
+    Limited to max_cache entries.
+
+    Note: This is a simplified version due to runtime limitations.
+
+    Example:
+        val fib = \n: if n <= 1: n else: fib(n-1) + fib(n-2)
+        val memo_fib = memoize_simple(fib, 100)
+        # (In practice, this won't work perfectly due to closure issues)
+    """
+    var cache = []
+
+    fn memoized(x: i64) -> i64:
+        # Check cache
+        for (input, output) in cache:
+            if input == x:
+                return output
+
+        # Compute and cache
+        val result = f(x)
+
+        if cache.len() < max_cache:
+            cache.push((x, result))
+
+        result
+
+    memoized
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn take_while(arr, predicate):
+    """Take elements while predicate is true.
+
+    Example:
+        take_while([1,2,3,4,2,1], \x: x < 4)  # [1,2,3]
+    """
+    var result = []
+    for item in arr:
+        if not predicate(item):
+            break
+        result.push(item)
+    result
+
+fn drop_while(arr, predicate):
+    """Drop elements while predicate is true.
+
+    Example:
+        drop_while([1,2,3,4,5], \x: x < 3)  # [3,4,5]
+    """
+    var i = 0
+    while i < arr.len():
+        if not predicate(arr[i]):
+            break
+        i = i + 1
+
+    var result = []
+    while i < arr.len():
+        result.push(arr[i])
+        i = i + 1
+
+    result
+
+fn find_first(arr, predicate):
+    """Find first element matching predicate.
+
+    Returns Some(element) or nil.
+
+    Example:
+        find_first([1,2,3,4], \x: x > 2)  # Some(3)
+    """
+    for item in arr:
+        if predicate(item):
+            return Some(item)
+    nil
+
+fn find_last(arr, predicate):
+    """Find last element matching predicate.
+
+    Returns Some(element) or nil.
+
+    Example:
+        find_last([1,2,3,4,3,2], \x: x > 2)  # Some(3)
+    """
+    var result = nil
+    for item in arr:
+        if predicate(item):
+            result = Some(item)
+    result
+
+# ============================================================================
+# Array Generation
+# ============================================================================
+
+fn generate(n: i64, f: fn(i64)):
+    """Generate array by applying function to indices.
+
+    Example:
+        generate(5, \i: i * i)  # [0, 1, 4, 9, 16]
+    """
+    var result = []
+    var i = 0
+    while i < n:
+        result.push(f(i))
+        i = i + 1
+    result
+
+fn range_step(start: i64, end: i64, step: i64) -> [i64]:
+    """Generate range with custom step.
+
+    Example:
+        range_step(0, 10, 2)  # [0, 2, 4, 6, 8]
+    """
+    var result = []
+    var i = start
+    if step > 0:
+        while i < end:
+            result.push(i)
+            i = i + step
+    elif step < 0:
+        while i > end:
+            result.push(i)
+            i = i + step
+    result
