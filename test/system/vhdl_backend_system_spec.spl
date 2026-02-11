@@ -1,0 +1,522 @@
+# VHDL Backend System Test - Full Pipeline Integration
+#
+# End-to-end tests covering the complete VHDL backend pipeline:
+# type mapping -> constraint checking -> builder emission -> output validation.
+
+"""
+# VHDL Backend System Specification
+
+**Feature IDs:** #SYSTEM, #vhdl-backend
+**Category:** Testing
+**Difficulty:** 5/5
+**Status:** In Progress
+
+## Overview
+
+End-to-end system tests covering the complete VHDL backend workflow.
+Tests the full pipeline from type mapper through builder to output validation,
+plus constraint checker integration.
+
+## Related Files
+- `src/compiler/backend/vhdl_backend.spl` - Backend orchestrator
+- `src/compiler/backend/vhdl_type_mapper.spl` - Type mapping
+- `src/compiler/backend/vhdl/vhdl_builder.spl` - Code generation
+- `src/compiler/vhdl_constraints.spl` - Constraint checking
+- `src/app/io/vhdl_ffi.spl` - Toolchain FFI
+"""
+
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+use compiler.backend.vhdl.vhdl_builder.VhdlBuilder
+use compiler.vhdl_constraints.*
+use compiler.mir_data.{PrimitiveType, VhdlPortDirection, VhdlClockDomain, VhdlClockEdge}
+use compiler.lexer.Span
+use std.spec.{check, check_msg}
+
+# ============================================================================
+# Test Utilities
+# ============================================================================
+
+fn test_span() -> Span:
+    Span(start: 0, end: 10, line: 1, col: 1)
+
+# ============================================================================
+# Pipeline Integration: Type Mapper -> Builder
+# ============================================================================
+
+describe "VHDL Pipeline: Type Mapper -> Builder":
+    """
+    ## Type Mapping to Code Generation
+
+    Tests the flow from type mapping to VHDL output.
+    """
+
+    slow_it "generates entity with mapped types":
+        val mapper = VhdlTypeMapper__create()
+        var builder = VhdlBuilder__create("alu")
+
+        builder.emit_library_header()
+        builder.emit_entity_begin("alu")
+        builder.emit_port_begin()
+
+        # Map types and emit ports
+        val i32_type = mapper.map_primitive(PrimitiveType.I32)
+        val bool_type = mapper.map_primitive(PrimitiveType.Bool)
+        val in_dir = mapper.map_port_direction(VhdlPortDirection.In)
+        val out_dir = mapper.map_port_direction(VhdlPortDirection.Out)
+
+        builder.emit_port("a", in_dir, i32_type, false)
+        builder.emit_port("b", in_dir, i32_type, false)
+        builder.emit_port("sel", in_dir, bool_type, false)
+        builder.emit_port("result", out_dir, i32_type, true)
+        builder.emit_port_end()
+        builder.emit_entity_end("alu")
+
+        val result = builder.build()
+        check(result.contains("library ieee;"))
+        check(result.contains("entity alu is"))
+        check(result.contains("a : in signed(31 downto 0);"))
+        check(result.contains("b : in signed(31 downto 0);"))
+        check(result.contains("sel : in bit"))
+        check(result.contains("result : out signed(31 downto 0)"))
+        check(result.contains("end entity alu;"))
+
+    slow_it "generates entity with resolved types":
+        val mapper = VhdlTypeMapper__create_resolved()
+        var builder = VhdlBuilder__create("mux")
+
+        builder.emit_library_header()
+        builder.emit_entity_begin("mux")
+        builder.emit_port_begin()
+
+        val bool_type = mapper.map_primitive(PrimitiveType.Bool)
+        val u8_type = mapper.map_primitive(PrimitiveType.U8)
+
+        builder.emit_port("sel", "in", bool_type, false)
+        builder.emit_port("a", "in", u8_type, false)
+        builder.emit_port("b", "in", u8_type, false)
+        builder.emit_port("y", "out", u8_type, true)
+        builder.emit_port_end()
+        builder.emit_entity_end("mux")
+
+        val result = builder.build()
+        check(result.contains("sel : in std_logic"))
+        check(result.contains("a : in unsigned(7 downto 0)"))
+
+# ============================================================================
+# Pipeline Integration: Constraint Checker -> Builder
+# ============================================================================
+
+describe "VHDL Pipeline: Constraints -> Code Generation":
+    """
+    ## Constraint Verification Before Emission
+
+    Tests that constraints are checked before code generation proceeds.
+    """
+
+    slow_it "passes constraint check then generates output":
+        # Step 1: Constraint verification
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "a", signal2: "b",
+            width1: 32, width2: 32,
+            span: test_span()
+        ))
+        checker.add_constraint(VhdlConstraint.SingleDriver(
+            signal: "result",
+            drivers: ["main_proc"],
+            span: test_span()
+        ))
+        val check_result = checker.check_all()
+        check(check_result.is_ok())
+
+        # Step 2: Code generation (only if constraints pass)
+        var builder = VhdlBuilder__create("validated_mod")
+        builder.emit_library_header()
+        builder.emit_entity_begin("validated_mod")
+        builder.emit_port_begin()
+        builder.emit_port("a", "in", "signed(31 downto 0)", false)
+        builder.emit_port("b", "in", "signed(31 downto 0)", false)
+        builder.emit_port("result", "out", "signed(31 downto 0)", true)
+        builder.emit_port_end()
+        builder.emit_entity_end("validated_mod")
+        builder.emit_architecture_begin("validated_mod", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("result", "a + b")
+        builder.emit_architecture_end("rtl")
+
+        val vhdl = builder.build()
+        check(vhdl.contains("entity validated_mod is"))
+        check(vhdl.contains("result <= a + b;"))
+
+    slow_it "blocks code generation on constraint failure":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "narrow_sig", signal2: "wide_sig",
+            width1: 8, width2: 32,
+            span: test_span()
+        ))
+        val check_result = checker.check_all()
+        check(check_result.is_err())
+
+        val errors = check_result.unwrap_err()
+        expect(errors[0].code).to_equal("E0700")
+        # Code generation should NOT proceed
+
+# ============================================================================
+# Full Entity Generation Workflows
+# ============================================================================
+
+describe "VHDL Full Entity Workflows":
+    """
+    ## Complete Entity/Architecture Generation
+
+    End-to-end workflows producing valid VHDL entities.
+    """
+
+    slow_it "generates combinational adder":
+        val mapper = VhdlTypeMapper__create()
+        var builder = VhdlBuilder__create("adder")
+
+        builder.emit_library_header()
+        builder.emit_entity_begin("adder")
+        builder.emit_port_begin()
+        builder.emit_port("a", "in", mapper.map_signed(32), false)
+        builder.emit_port("b", "in", mapper.map_signed(32), false)
+        builder.emit_port("sum", "out", mapper.map_signed(32), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("adder")
+
+        builder.emit_architecture_begin("adder", "rtl")
+        builder.emit_architecture_body_begin()
+        builder.emit_signal_assign("sum", "a + b")
+        builder.emit_architecture_end("rtl")
+
+        val vhdl = builder.build()
+        check(vhdl.contains("library ieee;"))
+        check(vhdl.contains("use ieee.numeric_std.all;"))
+        check(vhdl.contains("entity adder is"))
+        check(vhdl.contains("signed(31 downto 0)"))
+        check(vhdl.contains("sum <= a + b;"))
+        check(vhdl.contains("end architecture rtl;"))
+
+    slow_it "generates clocked register":
+        val mapper = VhdlTypeMapper__create()
+        var builder = VhdlBuilder__create("reg")
+
+        builder.emit_library_header()
+        builder.emit_entity_begin("reg8")
+        builder.emit_port_begin()
+        builder.emit_port("clk", "in", mapper.bit_type(), false)
+        builder.emit_port("rst", "in", mapper.bit_type(), false)
+        builder.emit_port("d", "in", mapper.map_unsigned(8), false)
+        builder.emit_port("q", "out", mapper.map_unsigned(8), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("reg8")
+
+        builder.emit_architecture_begin("reg8", "rtl")
+        builder.emit_signal_decl("q_reg", mapper.map_unsigned(8), Some("(others => '0')"))
+        builder.emit_architecture_body_begin()
+
+        builder.emit_clocked_process_begin(Some("reg_proc"), "clk", Some("rst"))
+        builder.emit_process_body_begin()
+        builder.emit_if_begin("rst = '1'")
+        builder.emit_signal_assign("q_reg", "(others => '0')")
+        builder.emit_elsif("rising_edge(clk)")
+        builder.emit_signal_assign("q_reg", "d")
+        builder.emit_if_end()
+        builder.emit_process_end(Some("reg_proc"))
+
+        builder.emit_signal_assign("q", "q_reg")
+        builder.emit_architecture_end("rtl")
+
+        val vhdl = builder.build()
+        check(vhdl.contains("entity reg8 is"))
+        check(vhdl.contains("clk : in bit"))
+        check(vhdl.contains("d : in unsigned(7 downto 0)"))
+        check(vhdl.contains("signal q_reg : unsigned(7 downto 0) := (others => '0');"))
+        check(vhdl.contains("reg_proc: process(clk, rst)"))
+        check(vhdl.contains("if rst = '1' then"))
+        check(vhdl.contains("elsif rising_edge(clk) then"))
+        check(vhdl.contains("q <= q_reg;"))
+
+    slow_it "generates FSM with enum states":
+        val mapper = VhdlTypeMapper__create()
+        var builder = VhdlBuilder__create("fsm")
+
+        builder.emit_library_header()
+
+        # Package with state enum
+        builder.emit_package_begin("fsm")
+        val state_enum = mapper.map_enum_type(["Idle", "Running", "Done"])
+        builder.emit_type_decl("state_t", state_enum)
+        builder.emit_package_end("fsm")
+
+        # Entity
+        builder.emit_entity_begin("fsm")
+        builder.emit_port_begin()
+        builder.emit_port("clk", "in", mapper.bit_type(), false)
+        builder.emit_port("rst", "in", mapper.bit_type(), false)
+        builder.emit_port("start", "in", mapper.bit_type(), false)
+        builder.emit_port("done", "out", mapper.bit_type(), true)
+        builder.emit_port_end()
+        builder.emit_entity_end("fsm")
+
+        val vhdl = builder.build()
+        check(vhdl.contains("package fsm_pkg is"))
+        check(vhdl.contains("type state_t is (Idle, Running, Done);"))
+        check(vhdl.contains("end package fsm_pkg;"))
+        check(vhdl.contains("entity fsm is"))
+
+    slow_it "generates entity with record type":
+        val mapper = VhdlTypeMapper__create()
+        var builder = VhdlBuilder__create("point_module")
+
+        builder.emit_library_header()
+
+        # Package with record
+        builder.emit_package_begin("point_module")
+        val fields = [("x", mapper.map_signed(32)), ("y", mapper.map_signed(32))]
+        val record_def = mapper.map_record(fields)
+        builder.emit_type_decl("point_t", record_def)
+        builder.emit_package_end("point_module")
+
+        val vhdl = builder.build()
+        check(vhdl.contains("type point_t is record"))
+        check(vhdl.contains("x : signed(31 downto 0);"))
+        check(vhdl.contains("y : signed(31 downto 0);"))
+        check(vhdl.contains("end record;"))
+
+# ============================================================================
+# Constraint Coverage
+# ============================================================================
+
+describe "VHDL Constraint Full Coverage":
+    """
+    ## All Constraint Types
+
+    Tests all 8 constraint verification categories from the plan.
+    """
+
+    slow_it "checks width mismatch (E0700)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "a", signal2: "b",
+            width1: 8, width2: 16,
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0700")
+
+    slow_it "checks width overflow (E0701)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.WidthSafe(
+            operands: [32, 32],
+            operator: "*",
+            result_width: 32,
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0701")
+
+    slow_it "checks CDC violation (E0710)":
+        var checker = VhdlConstraintChecker__create()
+        checker.register_signal_domain("sig_a", "clk_fast")
+        checker.register_signal_domain("sig_b", "clk_slow")
+        checker.add_constraint(VhdlConstraint.SameClockDomain(
+            signal1: "sig_a", signal2: "sig_b",
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0710")
+
+    slow_it "checks incomplete sensitivity (E0720)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.SensitivityComplete(
+            process_label: "comb",
+            used_signals: ["a", "b", "c"],
+            sensitivity: ["a", "b"],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0720")
+
+    slow_it "checks combinational loop (E0721)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.NoCombLoop(
+            signals: ["x"],
+            dependencies: [("x", "x")],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0721")
+
+    slow_it "checks latch inference (E0722)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.NoLatchInference(
+            process_label: "incomplete_proc",
+            assigned_signals: ["q"],
+            branch_coverage: [("q", false)],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0722")
+
+    slow_it "checks unbounded loop (E0730)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.LoopBounded(
+            bound_expr: "0",
+            max_iterations: 0,
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0730")
+
+    slow_it "checks multiple drivers (E0740)":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.SingleDriver(
+            signal: "shared_bus",
+            drivers: ["proc_a", "proc_b"],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        check(result.is_err())
+        expect(result.unwrap_err()[0].code).to_equal("E0740")
+
+# ============================================================================
+# Synthesizability Verification
+# ============================================================================
+
+describe "VHDL Synthesizability Verification":
+    """
+    ## Synthesizability Checks
+
+    Verify type mapper correctly identifies synthesizable/non-synthesizable types.
+    """
+
+    slow_it "accepts all synthesizable integer types":
+        val mapper = VhdlTypeMapper__create()
+        val synth_types = [
+            PrimitiveType.I8, PrimitiveType.I16, PrimitiveType.I32, PrimitiveType.I64,
+            PrimitiveType.U8, PrimitiveType.U16, PrimitiveType.U32, PrimitiveType.U64,
+            PrimitiveType.Bool
+        ]
+        for ty in synth_types:
+            check(mapper.is_synthesizable(ty))
+            val mapped = mapper.map_primitive(ty)
+            check(not mapped.contains("ERROR"))
+
+    slow_it "rejects all unsynthesizable float types":
+        val mapper = VhdlTypeMapper__create()
+        val float_types = [PrimitiveType.F16, PrimitiveType.F32, PrimitiveType.F64]
+        for ty in float_types:
+            check(not mapper.is_synthesizable(ty))
+            val mapped = mapper.map_primitive(ty)
+            check(mapped.contains("ERROR"))
+
+# ============================================================================
+# Width Consistency
+# ============================================================================
+
+describe "VHDL Width Consistency":
+    """
+    ## Width/Type Consistency
+
+    Verify width_of_type matches map_primitive output.
+    """
+
+    slow_it "width matches mapped type for all integer types":
+        val mapper = VhdlTypeMapper__create()
+        # I64 -> 64 -> signed(63 downto 0)
+        expect(mapper.width_of_type(PrimitiveType.I64)).to_equal(64)
+        check(mapper.map_primitive(PrimitiveType.I64).contains("63 downto 0"))
+
+        # I32 -> 32 -> signed(31 downto 0)
+        expect(mapper.width_of_type(PrimitiveType.I32)).to_equal(32)
+        check(mapper.map_primitive(PrimitiveType.I32).contains("31 downto 0"))
+
+        # U16 -> 16 -> unsigned(15 downto 0)
+        expect(mapper.width_of_type(PrimitiveType.U16)).to_equal(16)
+        check(mapper.map_primitive(PrimitiveType.U16).contains("15 downto 0"))
+
+        # U8 -> 8 -> unsigned(7 downto 0)
+        expect(mapper.width_of_type(PrimitiveType.U8)).to_equal(8)
+        check(mapper.map_primitive(PrimitiveType.U8).contains("7 downto 0"))
+
+        # Bool -> 1
+        expect(mapper.width_of_type(PrimitiveType.Bool)).to_equal(1)
+
+# ============================================================================
+# Error Message Quality
+# ============================================================================
+
+describe "VHDL Error Message Quality":
+    """
+    ## Error Messages
+
+    Ensure errors are actionable and contain relevant context.
+    """
+
+    slow_it "width error mentions both signals and widths":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.WidthEqual(
+            signal1: "data_in", signal2: "data_out",
+            width1: 16, width2: 32,
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        val errors = result.unwrap_err()
+        val msg = errors[0].message
+        check(msg.contains("data_in"))
+        check(msg.contains("data_out"))
+        check(msg.contains("16"))
+        check(msg.contains("32"))
+
+    slow_it "CDC error mentions both domains":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.ClockDomainCrossing(
+            source: "tx_data", dest: "rx_data",
+            source_domain: "clk_tx", dest_domain: "clk_rx",
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        val errors = result.unwrap_err()
+        val msg = errors[0].message
+        check(msg.contains("clk_tx"))
+        check(msg.contains("clk_rx"))
+        check(msg.contains("tx_data"))
+
+    slow_it "sensitivity error lists missing signals":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.SensitivityComplete(
+            process_label: "decode_proc",
+            used_signals: ["opcode", "operand_a", "operand_b"],
+            sensitivity: ["opcode"],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        val errors = result.unwrap_err()
+        val msg = errors[0].message
+        check(msg.contains("decode_proc"))
+        check(msg.contains("operand_a"))
+        check(msg.contains("operand_b"))
+
+    slow_it "multiple driver error lists all drivers":
+        var checker = VhdlConstraintChecker__create()
+        checker.add_constraint(VhdlConstraint.SingleDriver(
+            signal: "data_bus",
+            drivers: ["master_proc", "slave_proc"],
+            span: test_span()
+        ))
+        val result = checker.check_all()
+        val errors = result.unwrap_err()
+        val msg = errors[0].message
+        check(msg.contains("data_bus"))
+        check(msg.contains("master_proc"))
+        check(msg.contains("slave_proc"))

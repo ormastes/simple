@@ -117,7 +117,7 @@ fn find_close_paren(expr: text, open_pos: i64) -> i64:
     return -1
 
 # --- Type Registry Functions ---
-# Registry format: ";text:name;arr:name;fn_text:funcname;"
+# Registry format: ";text:name;arr:name;fn_text:funcname;struct:Name;struct_var:name=Class;method:Class.method;me_method:Class.method;static_fn:Class.method;dict:name;option:name;"
 
 fn is_string_array_var(name: text, types: text) -> bool:
     val marker = ";arr:" + name + ";"
@@ -131,6 +131,119 @@ fn is_fn_returning_text(name: text, types: text) -> bool:
     val marker = ";fn_text:" + name + ";"
     types.contains(marker)
 
+# Check if a variable is a known struct type, return class name or ""
+fn is_struct_type_var(name: text, types: text) -> text:
+    val marker = ";struct_var:" + name + "="
+    val pos = types.index_of(marker) ?? -1
+    if pos < 0:
+        return ""
+    val after = types.substring(pos + marker.len())
+    val end_pos = after.index_of(";") ?? -1
+    if end_pos < 0:
+        return ""
+    after.substring(0, end_pos)
+
+# Check if a struct type is known
+fn is_known_struct(name: text, types: text) -> bool:
+    val marker = ";struct:" + name + ";"
+    types.contains(marker)
+
+# Check if a method exists for a class (fn or me)
+fn is_known_method(class_name: text, method_name: text, types: text) -> bool:
+    val marker1 = ";method:" + class_name + "." + method_name + ";"
+    val marker2 = ";me_method:" + class_name + "." + method_name + ";"
+    val found1 = types.contains(marker1)
+    val found2 = types.contains(marker2)
+    found1 or found2
+
+# Check if a method is a mutable (me) method
+fn is_me_method(class_name: text, method_name: text, types: text) -> bool:
+    val marker = ";me_method:" + class_name + "." + method_name + ";"
+    types.contains(marker)
+
+# Check if a static function exists for a class
+fn is_static_fn(class_name: text, method_name: text, types: text) -> bool:
+    val marker = ";static_fn:" + class_name + "." + method_name + ";"
+    types.contains(marker)
+
+# Check if variable is a dict
+fn is_dict_var(name: text, types: text) -> bool:
+    val marker = ";dict:" + name + ";"
+    types.contains(marker)
+
+# Check if variable is an option
+fn is_option_var(name: text, types: text) -> bool:
+    val marker = ";option:" + name + ";"
+    types.contains(marker)
+
+# Parse a method signature inside an impl block
+# Returns [method_name, c_signature, forward_decl]
+fn parse_method_signature(trimmed: text, class_name: text, is_me: bool) -> [text]:
+    # trimmed is like "fn method_name(params) -> ret:" or "me method_name(params) -> ret:"
+    var without_prefix = ""
+    if is_me:
+        without_prefix = trimmed.substring(3)
+    else:
+        without_prefix = trimmed.substring(3)
+    # Remove trailing colon
+    val colon_pos = without_prefix.len() - 1
+    val sig = without_prefix.substring(0, colon_pos).trim()
+
+    val paren_idx = sig.index_of("(") ?? -1
+    if paren_idx < 0:
+        val mangled = class_name + "__" + sig
+        return [sig, "long long {mangled}(void)", "long long {mangled}(void);"]
+
+    val method_name = sig.substring(0, paren_idx).trim()
+    val mangled = class_name + "__" + method_name
+
+    # Return type
+    val arrow_idx = sig.index_of("->") ?? -1
+    var ret_type = "long long"
+    if arrow_idx >= 0:
+        val ret_str = sig.substring(arrow_idx + 2).trim()
+        ret_type = simple_type_to_c(ret_str)
+
+    # Parameters
+    val close_paren_idx = sig.index_of(")") ?? -1
+    var params_str = ""
+    if close_paren_idx > paren_idx + 1:
+        params_str = sig.substring(paren_idx + 1, close_paren_idx).trim()
+
+    # Build self parameter + user params
+    var self_param = "const {class_name}* self"
+    if is_me:
+        self_param = "{class_name}* self"
+
+    var c_params = self_param
+    if params_str.len() > 0:
+        val user_params = translate_params(params_str)
+        c_params = self_param + ", " + user_params
+
+    val c_sig = "{ret_type} {mangled}({c_params})"
+    [method_name, c_sig, "{c_sig};"]
+
+# Parse generic type annotation like Dict<text, i64> -> ["Dict", "text", "i64"]
+# or Option<T> -> ["Option", "T"]
+# Returns base type name for simple types
+fn parse_generic_type(type_str: text) -> [text]:
+    val lt_pos = type_str.index_of("<") ?? -1
+    if lt_pos < 0:
+        return [type_str]
+    val base = type_str.substring(0, lt_pos).trim()
+    val gt_pos = type_str.index_of(">") ?? -1
+    if gt_pos < 0:
+        return [base]
+    val inner = type_str.substring(lt_pos + 1, gt_pos).trim()
+    val parts = inner.split(",")
+    var result: [text] = [base]
+    for part in parts:
+        result.push(part.trim())
+    result
+
 export get_indent_level, get_c_indent, simple_type_to_c, translate_params
 export parse_fn_signature, find_close_paren
 export is_string_array_var, is_text_var, is_fn_returning_text
+export is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn
+export is_dict_var, is_option_var
+export parse_method_signature, parse_generic_type

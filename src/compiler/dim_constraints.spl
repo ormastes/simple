@@ -332,6 +332,122 @@ impl DimSolver:
 
                 Ok()
 
+            case WidthMatch(s1, s2, operation, span):
+                val expr1 = self.apply_substitution(s1)
+                val expr2 = self.apply_substitution(s2)
+                val result = self.unify(expr1, expr2)
+                if not result.is_ok():
+                    val w1 = expr1.format()
+                    val w2 = expr2.format()
+                    Err(DimError(
+                        message: "VHDL width mismatch in {operation}: {w1} vs {w2}",
+                        kind: DimErrorKind.WidthMismatch,
+                        span: span,
+                        notes: [
+                            DimNote(message: "left signal width: {w1}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "right signal width: {w2}", span: nil, kind: DimNoteKind.Expected)
+                        ],
+                        help: Some("use resize() to match signal widths"),
+                        error_code: "E0700"
+                    ))
+                else:
+                    Ok(())
+
+            case WidthSafe(operands, operator, result_width, span):
+                # Check that arithmetic result fits in result width
+                val res_expr = self.apply_substitution(result_width)
+                val res_val = self.try_eval(res_expr)
+                if res_val.?:
+                    var max_operand_width = 0
+                    for op in operands:
+                        val op_expr = self.apply_substitution(op)
+                        val op_val = self.try_eval(op_expr)
+                        if op_val.? and op_val.unwrap() > max_operand_width:
+                            max_operand_width = op_val.unwrap()
+                    # For add/sub, result needs max(a,b)+1 bits; for mul, a+b bits
+                    var needed = max_operand_width
+                    if operator == "+" or operator == "-":
+                        needed = max_operand_width + 1
+                    elif operator == "*":
+                        var total = 0
+                        for op in operands:
+                            val op_expr = self.apply_substitution(op)
+                            val op_val = self.try_eval(op_expr)
+                            if op_val.?:
+                                total = total + op_val.unwrap()
+                        needed = total
+                    if needed > res_val.unwrap():
+                        Err(DimError(
+                            message: "VHDL width overflow: {operator} needs {needed} bits, result has {res_val.unwrap()}",
+                            kind: DimErrorKind.WidthOverflow,
+                            span: span,
+                            notes: [
+                                DimNote(message: "operator {operator} requires {needed}-bit result", span: nil, kind: DimNoteKind.Expected),
+                                DimNote(message: "result signal is {res_val.unwrap()} bits wide", span: nil, kind: DimNoteKind.Found)
+                            ],
+                            help: Some("widen the result signal or use explicit truncation"),
+                            error_code: "E0701"
+                        ))
+                    else:
+                        Ok(())
+                else:
+                    Ok(())  # Can't check at compile time
+
+            case BoundedLoop(bound, max_allowed, span):
+                val expr = self.apply_substitution(bound)
+                val value = self.try_eval(expr)
+                if value.?:
+                    val v = value.unwrap()
+                    if v > max_allowed:
+                        Err(DimError(
+                            message: "VHDL loop bound {v} exceeds maximum allowed {max_allowed}",
+                            kind: DimErrorKind.UnboundedLoop,
+                            span: span,
+                            notes: [
+                                DimNote(message: "loop iterates {v} times", span: nil, kind: DimNoteKind.Found),
+                                DimNote(message: "maximum allowed iterations: {max_allowed}", span: nil, kind: DimNoteKind.Expected)
+                            ],
+                            help: Some("reduce loop count or convert to FSM"),
+                            error_code: "E0730"
+                        ))
+                    else:
+                        Ok(())
+                else:
+                    # Dynamic bound - cannot verify at compile time
+                    Err(DimError(
+                        message: "VHDL loop bound must be statically determinable",
+                        kind: DimErrorKind.UnboundedLoop,
+                        span: span,
+                        notes: [
+                            DimNote(message: "loop bound: {expr.format()}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "VHDL synthesis requires static loop bounds", span: nil, kind: DimNoteKind.Info)
+                        ],
+                        help: Some("use a compile-time constant for the loop bound"),
+                        error_code: "E0730"
+                    ))
+
+            case ValidRange(hi, lo, span):
+                val hi_expr = self.apply_substitution(hi)
+                val lo_expr = self.apply_substitution(lo)
+                val hi_val = self.try_eval(hi_expr)
+                val lo_val = self.try_eval(lo_expr)
+                if hi_val.? and lo_val.? and hi_val.unwrap() < lo_val.unwrap():
+                    val h = hi_val.unwrap()
+                    val l = lo_val.unwrap()
+                    Err(DimError(
+                        message: "VHDL invalid range: {h} downto {l} (hi < lo)",
+                        kind: DimErrorKind.InvalidRange,
+                        span: span,
+                        notes: [
+                            DimNote(message: "high bound: {h}", span: nil, kind: DimNoteKind.Found),
+                            DimNote(message: "low bound: {l}", span: nil, kind: DimNoteKind.Found)
+                        ],
+                        help: Some("swap bounds or use 'to' for ascending ranges"),
+                        error_code: "E0740"
+                    ))
+                else:
+                    Ok(())
+
 # ============================================================================
 # Dimension Expression Formatting
 # ============================================================================
@@ -592,6 +708,40 @@ impl DimSolver:
                     DimCheckTiming.CompileTime
                 else:
                     DimCheckTiming.Runtime
+
+            case WidthMatch(s1, s2, _, _):
+                val static1 = self.is_static(s1)
+                val static2 = self.is_static(s2)
+                if static1 and static2:
+                    DimCheckTiming.CompileTime
+                elif not static1 and not static2:
+                    DimCheckTiming.Runtime
+                else:
+                    DimCheckTiming.Both
+
+            case WidthSafe(operands, _, result_width, _):
+                var all_static = self.is_static(result_width)
+                if all_static:
+                    for op in operands:
+                        if not self.is_static(op):
+                            all_static = false
+                            break
+                if all_static:
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Both
+
+            case BoundedLoop(bound, _, _):
+                if self.is_static(bound):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.CompileTime  # Always compile-time for VHDL (must be static)
+
+            case ValidRange(hi, lo, _):
+                if self.is_static(hi) and self.is_static(lo):
+                    DimCheckTiming.CompileTime
+                else:
+                    DimCheckTiming.Both
 
             case _:
                 DimCheckTiming.Runtime

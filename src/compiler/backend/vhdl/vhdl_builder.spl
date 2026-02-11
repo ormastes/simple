@@ -1,0 +1,358 @@
+# VHDL Builder - VHDL Code Generation Engine
+#
+# Generates VHDL-2008 source text from MIR instructions.
+# Produces package files (_pkg.vhd) and entity/architecture files (.vhd).
+
+use compiler.mir_data.*
+use compiler.backend.vhdl_type_mapper.VhdlTypeMapper
+
+# ============================================================================
+# VHDL Builder
+# ============================================================================
+
+class VhdlBuilder:
+    """
+    Generates VHDL-2008 source code.
+
+    Produces:
+    - Package declarations (records, enums, subtypes, constants)
+    - Entity declarations (ports, generics)
+    - Architecture bodies (signals, processes, instances)
+
+    Usage:
+        val builder = VhdlBuilder__create("my_module")
+        builder.emit_library_header()
+        builder.emit_entity("adder", ports)
+        builder.emit_architecture_begin("adder", "rtl")
+        ...
+        builder.emit_architecture_end()
+        val vhdl = builder.build()
+    """
+
+    module_name: text
+    type_mapper: VhdlTypeMapper
+    output: [text]
+    indent_level: i64
+    next_label: i64
+
+    static fn create(name: text) -> VhdlBuilder:
+        """Create VHDL builder for a module."""
+        VhdlBuilder(
+            module_name: name,
+            type_mapper: VhdlTypeMapper__create(),
+            output: [],
+            indent_level: 0,
+            next_label: 0
+        )
+
+    # === Library / Use Clauses ===
+
+    me emit_library_header():
+        """Emit standard library and use clauses."""
+        self.emit_line("library ieee;")
+        self.emit_line("use ieee.std_logic_1164.all;")
+        self.emit_line("use ieee.numeric_std.all;")
+        self.emit_raw("")
+
+    me emit_use_package(lib: text, pkg: text):
+        """Emit a use clause."""
+        self.emit_line("use {lib}.{pkg}.all;")
+
+    # === Package Declaration ===
+
+    me emit_package_begin(name: text):
+        """Emit package declaration begin."""
+        self.emit_line("package {name}_pkg is")
+        self.indent_level = self.indent_level + 1
+
+    me emit_package_end(name: text):
+        """Emit package declaration end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("end package {name}_pkg;")
+        self.emit_raw("")
+
+    me emit_type_decl(name: text, definition: text):
+        """Emit a type declaration."""
+        self.emit_line("type {name} is {definition};")
+
+    me emit_subtype_decl(name: text, base: text, constraint: text):
+        """Emit a subtype declaration."""
+        self.emit_line("subtype {name} is {base}{constraint};")
+
+    me emit_constant_decl(name: text, type_name: text, value: text):
+        """Emit a constant declaration."""
+        self.emit_line("constant {name} : {type_name} := {value};")
+
+    # === Entity Declaration ===
+
+    me emit_entity_begin(name: text):
+        """Emit entity declaration begin."""
+        self.emit_line("entity {name} is")
+        self.indent_level = self.indent_level + 1
+
+    me emit_generic_begin():
+        """Emit generics clause begin."""
+        self.emit_line("generic (")
+        self.indent_level = self.indent_level + 1
+
+    me emit_generic_param(name: text, type_name: text, default_val: text?, is_last: bool):
+        """Emit a single generic parameter."""
+        var line = "{name} : {type_name}"
+        if default_val.?:
+            line = "{line} := {default_val.unwrap()}"
+        if not is_last:
+            line = "{line};"
+        self.emit_line(line)
+
+    me emit_generic_end():
+        """Emit generics clause end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line(");")
+
+    me emit_port_begin():
+        """Emit port clause begin."""
+        self.emit_line("port (")
+        self.indent_level = self.indent_level + 1
+
+    me emit_port(name: text, direction: text, type_name: text, is_last: bool):
+        """Emit a single port declaration."""
+        var line = "{name} : {direction} {type_name}"
+        if not is_last:
+            line = "{line};"
+        self.emit_line(line)
+
+    me emit_port_end():
+        """Emit port clause end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line(");")
+
+    me emit_entity_end(name: text):
+        """Emit entity declaration end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("end entity {name};")
+        self.emit_raw("")
+
+    # === Architecture ===
+
+    me emit_architecture_begin(entity_name: text, arch_name: text):
+        """Emit architecture body begin."""
+        self.emit_line("architecture {arch_name} of {entity_name} is")
+        self.indent_level = self.indent_level + 1
+
+    me emit_signal_decl(name: text, type_name: text, default_val: text?):
+        """Emit signal declaration in architecture declarative region."""
+        if default_val.?:
+            self.emit_line("signal {name} : {type_name} := {default_val.unwrap()};")
+        else:
+            self.emit_line("signal {name} : {type_name};")
+
+    me emit_architecture_body_begin():
+        """Emit 'begin' of architecture body."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("begin")
+        self.indent_level = self.indent_level + 1
+
+    me emit_architecture_end(arch_name: text):
+        """Emit architecture body end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("end architecture {arch_name};")
+        self.emit_raw("")
+
+    # === Processes ===
+
+    me emit_process_begin(label: text?, sensitivity: [text]):
+        """Emit process begin with sensitivity list."""
+        val sens = sensitivity.join(", ")
+        if label.?:
+            self.emit_line("{label.unwrap()}: process({sens})")
+        else:
+            self.emit_line("process({sens})")
+        self.indent_level = self.indent_level + 1
+
+    me emit_clocked_process_begin(label: text?, clock: text, reset: text?):
+        """Emit clocked process begin."""
+        if reset.?:
+            val sens = "{clock}, {reset.unwrap()}"
+            if label.?:
+                self.emit_line("{label.unwrap()}: process({sens})")
+            else:
+                self.emit_line("process({sens})")
+        else:
+            if label.?:
+                self.emit_line("{label.unwrap()}: process({clock})")
+            else:
+                self.emit_line("process({clock})")
+        self.indent_level = self.indent_level + 1
+
+    me emit_process_var(name: text, type_name: text, default_val: text?):
+        """Emit variable declaration inside a process."""
+        if default_val.?:
+            self.emit_line("variable {name} : {type_name} := {default_val.unwrap()};")
+        else:
+            self.emit_line("variable {name} : {type_name};")
+
+    me emit_process_body_begin():
+        """Emit 'begin' of process body."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("begin")
+        self.indent_level = self.indent_level + 1
+
+    me emit_process_end(label: text?):
+        """Emit process end."""
+        self.indent_level = self.indent_level - 1
+        if label.?:
+            self.emit_line("end process {label.unwrap()};")
+        else:
+            self.emit_line("end process;")
+
+    # === Statements ===
+
+    me emit_signal_assign(target: text, value: text):
+        """Emit signal assignment (<=)."""
+        self.emit_line("{target} <= {value};")
+
+    me emit_signal_assign_delay(target: text, value: text, delay_ns: i64):
+        """Emit signal assignment with delay."""
+        self.emit_line("{target} <= {value} after {delay_ns} ns;")
+
+    me emit_var_assign(target: text, value: text):
+        """Emit variable assignment (:=)."""
+        self.emit_line("{target} := {value};")
+
+    me emit_if_begin(condition: text):
+        """Emit if statement begin."""
+        self.emit_line("if {condition} then")
+        self.indent_level = self.indent_level + 1
+
+    me emit_elsif(condition: text):
+        """Emit elsif clause."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("elsif {condition} then")
+        self.indent_level = self.indent_level + 1
+
+    me emit_else():
+        """Emit else clause."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("else")
+        self.indent_level = self.indent_level + 1
+
+    me emit_if_end():
+        """Emit end if."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("end if;")
+
+    me emit_rising_edge_check(clock: text):
+        """Emit rising_edge check."""
+        self.emit_if_begin("rising_edge({clock})")
+
+    me emit_falling_edge_check(clock: text):
+        """Emit falling_edge check."""
+        self.emit_if_begin("falling_edge({clock})")
+
+    me emit_for_loop_begin(var_name: text, lo: i64, hi: i64):
+        """Emit for loop (synthesizable, statically bounded)."""
+        self.emit_line("for {var_name} in {lo} to {hi} loop")
+        self.indent_level = self.indent_level + 1
+
+    me emit_for_loop_end():
+        """Emit end loop."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line("end loop;")
+
+    # === Component Instantiation ===
+
+    me emit_instance_begin(label: text, entity: text):
+        """Emit component instantiation begin."""
+        self.emit_line("{label}: entity work.{entity}")
+        self.indent_level = self.indent_level + 1
+
+    me emit_port_map_begin():
+        """Emit port map begin."""
+        self.emit_line("port map (")
+        self.indent_level = self.indent_level + 1
+
+    me emit_port_map_entry(formal: text, actual: text, is_last: bool):
+        """Emit a port map connection."""
+        if not is_last:
+            self.emit_line("{formal} => {actual},")
+        else:
+            self.emit_line("{formal} => {actual}")
+
+    me emit_port_map_end():
+        """Emit port map end."""
+        self.indent_level = self.indent_level - 1
+        self.emit_line(");")
+        self.indent_level = self.indent_level - 1
+
+    # === Assertions (for verification) ===
+
+    me emit_assert(condition: text, message: text, severity: text):
+        """Emit an assertion statement."""
+        self.emit_line("assert {condition}")
+        self.indent_level = self.indent_level + 1
+        self.emit_line("report \"{message}\"")
+        self.emit_line("severity {severity};")
+        self.indent_level = self.indent_level - 1
+
+    me emit_synthesis_translate_off():
+        """Emit synthesis translate_off pragma."""
+        self.emit_line("-- synthesis translate_off")
+
+    me emit_synthesis_translate_on():
+        """Emit synthesis translate_on pragma."""
+        self.emit_line("-- synthesis translate_on")
+
+    # === Resize / Slice / Concat ===
+
+    me emit_resize(dest: text, src: text, new_width: i64, signed: bool):
+        """Emit resize operation."""
+        if signed:
+            self.emit_signal_assign(dest, "resize({src}, {new_width})")
+        else:
+            self.emit_signal_assign(dest, "resize({src}, {new_width})")
+
+    me emit_slice(dest: text, src: text, hi: i64, lo: i64):
+        """Emit signal slice."""
+        self.emit_signal_assign(dest, "{src}({hi} downto {lo})")
+
+    me emit_concat(dest: text, parts: [text]):
+        """Emit signal concatenation."""
+        self.emit_signal_assign(dest, parts.join(" & "))
+
+    # === Comments ===
+
+    me emit_comment(comment: text):
+        """Emit a comment."""
+        self.emit_line("-- {comment}")
+
+    # === Output Helpers ===
+
+    me emit_line(line: text):
+        """Emit a line of VHDL code with proper indentation."""
+        val indent = "    ".repeat(self.indent_level)
+        self.output = self.output.push("{indent}{line}")
+
+    me emit_raw(line: text):
+        """Emit a raw line (no indentation)."""
+        self.output = self.output.push(line)
+
+    me alloc_label() -> text:
+        """Allocate a new label."""
+        val label_num = self.next_label
+        self.next_label = self.next_label + 1
+        "label_{label_num}"
+
+    fn build() -> text:
+        """Build final VHDL code."""
+        self.output.join("\n")
+
+    fn get_output() -> [text]:
+        """Get output lines."""
+        self.output
+
+# ============================================================================
+# Export
+# ============================================================================
+
+export VhdlBuilder
+

@@ -1,0 +1,110 @@
+# VHDL Toolchain SFFI Bindings
+#
+# Two-tier SFFI pattern for VHDL synthesis/simulation tools.
+# Wraps GHDL and Yosys command-line invocations.
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+extern fn rt_process_run(command: text, args: [text]) -> i64
+extern fn rt_process_run_capture(command: text, args: [text]) -> (i64, text, text)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+struct VhdlToolResult:
+    success: bool
+    exit_code: i64
+    stdout: text
+    stderr: text
+
+fn vhdl_tool_result(code: i64, stdout: text, stderr: text) -> VhdlToolResult:
+    VhdlToolResult(
+        success: code == 0,
+        exit_code: code,
+        stdout: stdout,
+        stderr: stderr
+    )
+
+# === GHDL Analysis & Elaboration ===
+
+fn ghdl_available() -> bool:
+    """Check if GHDL is installed."""
+    val result = rt_process_run_capture("ghdl", ["--version"])
+    result.0 == 0
+
+fn ghdl_analyze(vhdl_file: text) -> VhdlToolResult:
+    """Analyze a VHDL file with GHDL (syntax + semantic check)."""
+    val result = rt_process_run_capture("ghdl", ["-a", "--std=08", vhdl_file])
+    vhdl_tool_result(result.0, result.1, result.2)
+
+fn ghdl_elaborate(entity_name: text) -> VhdlToolResult:
+    """Elaborate a VHDL entity with GHDL."""
+    val result = rt_process_run_capture("ghdl", ["-e", "--std=08", entity_name])
+    vhdl_tool_result(result.0, result.1, result.2)
+
+fn ghdl_run(entity_name: text, stop_time: text?) -> VhdlToolResult:
+    """Run a VHDL simulation with GHDL."""
+    var args = ["-r", "--std=08", entity_name]
+    if stop_time.?:
+        args = args.push("--stop-time={stop_time.unwrap()}")
+    val result = rt_process_run_capture("ghdl", args)
+    vhdl_tool_result(result.0, result.1, result.2)
+
+fn ghdl_synth(entity_name: text) -> VhdlToolResult:
+    """Synthesize a VHDL entity with GHDL (produces netlists)."""
+    val result = rt_process_run_capture("ghdl", ["--synth", "--std=08", entity_name])
+    vhdl_tool_result(result.0, result.1, result.2)
+
+fn ghdl_analyze_and_elaborate(vhdl_file: text, entity_name: text) -> VhdlToolResult:
+    """Analyze and elaborate in one step."""
+    val analyze = ghdl_analyze(vhdl_file)
+    if not analyze.success:
+        return analyze
+    ghdl_elaborate(entity_name)
+
+# === Yosys Synthesis ===
+
+fn yosys_available() -> bool:
+    """Check if Yosys is installed."""
+    val result = rt_process_run_capture("yosys", ["--version"])
+    result.0 == 0
+
+fn yosys_synth_ghdl(vhdl_file: text, entity_name: text, output_json: text) -> VhdlToolResult:
+    """Synthesize VHDL using Yosys with GHDL plugin."""
+    val script = "ghdl --std=08 -a {vhdl_file}; ghdl --std=08 {entity_name}; synth -top {entity_name}; write_json {output_json}"
+    val result = rt_process_run_capture("yosys", ["-m", "ghdl", "-p", script])
+    vhdl_tool_result(result.0, result.1, result.2)
+
+# === File Operations ===
+
+fn vhdl_write_file(path: text, content: text) -> bool:
+    """Write VHDL source to a file."""
+    rt_file_write_text(path, content)
+
+fn vhdl_read_file(path: text) -> text?:
+    """Read a VHDL source file."""
+    if rt_file_exists(path):
+        Some(rt_file_read_text(path))
+    else:
+        nil
+
+fn vhdl_file_exists(path: text) -> bool:
+    """Check if a VHDL file exists."""
+    rt_file_exists(path)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export VhdlToolResult
+export ghdl_available, ghdl_analyze, ghdl_elaborate, ghdl_run, ghdl_synth
+export ghdl_analyze_and_elaborate
+export yosys_available, yosys_synth_ghdl
+export vhdl_write_file, vhdl_read_file, vhdl_file_exists
+
