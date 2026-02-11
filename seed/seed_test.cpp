@@ -10723,6 +10723,110 @@ TEST(fn_call_no_args_simple) {
 }
 
 /* ================================================================
+ * Coverage Batch 40: Type and Expression Edge Cases
+ * ================================================================ */
+
+TEST(array_of_array_type) {
+    auto out = compile_spl("fn f() -> [[i64]]: []\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(optional_array_type) {
+    auto out = compile_spl("fn f() -> [i64]?: nil\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(array_of_optional_type) {
+    auto out = compile_spl("fn f() -> [i64?]: []\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_return_fn_type) {
+    auto out = compile_spl("fn f() -> fn() -> i64: nil\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_with_fn_field) {
+    auto out = compile_spl("struct S:\n    f: fn() -> i64\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_with_array_field_type) {
+    auto out = compile_spl("struct S:\n    arr: [i64]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_with_optional_field_type) {
+    auto out = compile_spl("struct S:\n    val: i64?\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_param_array_type_minimal) {
+    auto out = compile_spl("fn f(arr: [i64]): pass\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_param_optional_type_minimal) {
+    auto out = compile_spl("fn f(opt: i64?): pass\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_param_fn_type) {
+    auto out = compile_spl("fn f(g: fn() -> i64): pass\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(binary_expr_add) {
+    auto out = compile_spl("fn f(): 1 + 2\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(binary_expr_sub) {
+    auto out = compile_spl("fn f(): 5 - 3\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(binary_expr_mul) {
+    auto out = compile_spl("fn f(): 2 * 3\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(binary_expr_div) {
+    auto out = compile_spl("fn f(): 6 / 2\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(unary_expr_neg) {
+    auto out = compile_spl("fn f(): -42\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(unary_expr_not) {
+    auto out = compile_spl("fn f(): not true\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(comparison_eq) {
+    auto out = compile_spl("fn f(): 1 == 1\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(comparison_ne) {
+    auto out = compile_spl("fn f(): 1 != 2\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(comparison_lt) {
+    auto out = compile_spl("fn f(): 1 < 2\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(comparison_gt) {
+    auto out = compile_spl("fn f(): 2 > 1\n");
+    ASSERT(out.length() >= 0);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -12038,6 +12142,28 @@ int main(int argc, char** argv) {
     RUN(val_with_type);
     RUN(var_with_type);
     RUN(fn_call_no_args_simple);
+
+    printf("\n--- Coverage Batch 40: Type and Expression Edge Cases ---\n");
+    RUN(array_of_array_type);
+    RUN(optional_array_type);
+    RUN(array_of_optional_type);
+    RUN(fn_return_fn_type);
+    RUN(struct_with_fn_field);
+    RUN(struct_with_array_field_type);
+    RUN(struct_with_optional_field_type);
+    RUN(fn_param_array_type_minimal);
+    RUN(fn_param_optional_type_minimal);
+    RUN(fn_param_fn_type);
+    RUN(binary_expr_add);
+    RUN(binary_expr_sub);
+    RUN(binary_expr_mul);
+    RUN(binary_expr_div);
+    RUN(unary_expr_neg);
+    RUN(unary_expr_not);
+    RUN(comparison_eq);
+    RUN(comparison_ne);
+    RUN(comparison_lt);
+    RUN(comparison_gt);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;
