@@ -175,6 +175,87 @@ static SimpleStringArray simple_split(const char* s, const char* delim) {
     return arr;
 }
 
+// --- Dynamic Integer Array ---
+
+typedef struct {
+    long long* items;
+    long long len;
+    long long cap;
+} SimpleIntArray;
+
+static SimpleIntArray simple_new_int_array(void) {
+    SimpleIntArray arr;
+    arr.items = (long long*)malloc(16 * sizeof(long long));
+    arr.len = 0;
+    arr.cap = 16;
+    return arr;
+}
+
+static void simple_int_push(SimpleIntArray* arr, long long val) {
+    if (arr->len >= arr->cap) {
+        arr->cap *= 2;
+        arr->items = (long long*)realloc(arr->items, arr->cap * sizeof(long long));
+    }
+    arr->items[arr->len] = val;
+    arr->len++;
+}
+
+static long long simple_int_pop(SimpleIntArray* arr) {
+    if (arr->len == 0) return 0;
+    arr->len--;
+    return arr->items[arr->len];
+}
+
+// --- Array of String Arrays (for [[text]]) ---
+
+typedef struct {
+    SimpleStringArray* items;
+    long long len;
+    long long cap;
+} SimpleStringArrayArray;
+
+static SimpleStringArrayArray simple_new_string_array_array(void) {
+    SimpleStringArrayArray arr;
+    arr.items = (SimpleStringArray*)malloc(16 * sizeof(SimpleStringArray));
+    arr.len = 0;
+    arr.cap = 16;
+    return arr;
+}
+
+static void simple_string_array_push(SimpleStringArrayArray* arr, SimpleStringArray val) {
+    if (arr->len >= arr->cap) {
+        arr->cap *= 2;
+        arr->items = (SimpleStringArray*)realloc(arr->items, arr->cap * sizeof(SimpleStringArray));
+    }
+    arr->items[arr->len] = val;
+    arr->len++;
+}
+
+// --- Array of Int Arrays (for [[i64]]) ---
+
+typedef struct {
+    SimpleIntArray* items;
+    long long len;
+    long long cap;
+} SimpleIntArrayArray;
+
+static SimpleIntArrayArray simple_new_int_array_array(void) {
+    SimpleIntArrayArray arr;
+    arr.items = (SimpleIntArray*)malloc(16 * sizeof(SimpleIntArray));
+    arr.len = 0;
+    arr.cap = 16;
+    return arr;
+}
+
+static void simple_int_array_push(SimpleIntArrayArray* arr, SimpleIntArray val) {
+    if (arr->len >= arr->cap) {
+        arr->cap *= 2;
+        arr->items = (SimpleIntArray*)realloc(arr->items, arr->cap * sizeof(SimpleIntArray));
+    }
+    arr->items[arr->len] = val;
+    arr->len++;
+}
+
 // --- String Helpers ---
 
 static char* simple_str_concat(const char* a, const char* b) {

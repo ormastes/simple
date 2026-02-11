@@ -15,18 +15,34 @@
 #   val specialized = mono.instantiate_function("List::push", [Float])
 #
 # Port of: rust/compiler/src/monomorphize/deferred.rs (670 lines)
+#
+# RUNTIME COMPATIBILITY: Uses nil-check error pattern instead of Result<T,E>
 
 export InstantiationMode
 export GenericTemplate
 export CompiledCode
 export DeferredMonomorphizer
 export DeferredMonoStats
+export deferred_last_error
+export deferred_clear_error
 
 use .types (ConcreteType, SpecializationKey, TypeBindings)
 use .engine (Monomorphizer)
 use .metadata (MonomorphizationMetadata)
 use ..ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use error (CompileError)
+
+# ============================================================================
+# Error Handling (Runtime-Safe Pattern)
+# ============================================================================
+
+var deferred_last_error: text = ""
+
+fn deferred_clear_error():
+    deferred_last_error = ""
+
+fn deferred_set_error(msg: text):
+    deferred_last_error = msg
 
 # ============================================================================
 # Instantiation Mode
@@ -83,29 +99,37 @@ impl GenericTemplate:
             GenericTemplate.Function(_): true
             _: false
 
-    fn as_function() -> Result<FunctionDef, CompileError>:
-        """Get as function, or error if not a function."""
+    fn as_function() -> FunctionDef?:
+        """Get as function, or nil with error set."""
         match self:
-            GenericTemplate.Function(f): Ok(f)
-            _: Err(CompileError.Codegen("{self.name()} is not a function template"))
+            GenericTemplate.Function(f): f
+            _:
+                deferred_set_error("{self.name()} is not a function template")
+                nil
 
-    fn as_struct() -> Result<StructDef, CompileError>:
-        """Get as struct, or error if not a struct."""
+    fn as_struct() -> StructDef?:
+        """Get as struct, or nil with error set."""
         match self:
-            GenericTemplate.Struct(s): Ok(s)
-            _: Err(CompileError.Codegen("{self.name()} is not a struct template"))
+            GenericTemplate.Struct(s): s
+            _:
+                deferred_set_error("{self.name()} is not a struct template")
+                nil
 
-    fn as_class() -> Result<ClassDef, CompileError>:
-        """Get as class, or error if not a class."""
+    fn as_class() -> ClassDef?:
+        """Get as class, or nil with error set."""
         match self:
-            GenericTemplate.Class(c): Ok(c)
-            _: Err(CompileError.Codegen("{self.name()} is not a class template"))
+            GenericTemplate.Class(c): c
+            _:
+                deferred_set_error("{self.name()} is not a class template")
+                nil
 
-    fn as_enum() -> Result<EnumDef, CompileError>:
-        """Get as enum, or error if not an enum."""
+    fn as_enum() -> EnumDef?:
+        """Get as enum, or nil with error set."""
         match self:
-            GenericTemplate.Enum(e): Ok(e)
-            _: Err(CompileError.Codegen("{self.name()} is not an enum template"))
+            GenericTemplate.Enum(e): e
+            _:
+                deferred_set_error("{self.name()} is not an enum template")
+                nil
 
 # ============================================================================
 # Compiled Code
@@ -163,7 +187,7 @@ impl DeferredMonomorphizer:
     # Template Loading
     # ========================================================================
 
-    me load_templates_from_smf(smf_path: text) -> Result<(), CompileError>:
+    me load_templates_from_smf(smf_path: text) -> bool:
         """Load templates from an SMF file.
 
         Extracts TemplateCode and TemplateMeta sections and populates
@@ -176,6 +200,7 @@ impl DeferredMonomorphizer:
         4. Deserialize templates from section data
 
         ROBUSTNESS: Validates SMF format before loading.
+        Returns true on success, false on error (check deferred_last_error).
         """
         # File I/O FFI not yet available for binary reads
         # When binary file reads are available, the flow is:
@@ -186,9 +211,10 @@ impl DeferredMonomorphizer:
         # Iterate section entries to find TemplateCode (type=12)
         # Call self.deserialize_templates(template_section_data)
         eprint("Warning: file I/O FFI not yet available for binary reads; SMF template loading deferred for {smf_path}")
-        Ok(())
+        deferred_clear_error()
+        true
 
-    me deserialize_templates(data: [u8]) -> Result<(), CompileError>:
+    me deserialize_templates(data: [u8]) -> bool:
         """Deserialize templates from binary data.
 
         Binary format:
@@ -204,14 +230,16 @@ impl DeferredMonomorphizer:
         ROBUSTNESS:
         - Validates magic bytes
         - Checks data length before reading
-        - Returns error on invalid format
+        - Returns false on error (check deferred_last_error)
         """
         if data.len() < 10:
-            return Err(CompileError.Codegen("Template data too short"))
+            deferred_set_error("Template data too short")
+            return false
 
         # Verify magic
         if data[0] != b'G' or data[1] != b'T' or data[2] != b'P' or data[3] != b'L':
-            return Err(CompileError.Codegen("Invalid template magic"))
+            deferred_set_error("Invalid template magic")
+            return false
 
         # Read version
         val version = (data[4] as i64) + ((data[5] as i64) << 8)
@@ -232,47 +260,61 @@ impl DeferredMonomorphizer:
             offset = offset + 1
 
             # Deserialize full template based on kind
-            val result = self.deserialize_full_template(kind, data, offset)?
+            val result = self.deserialize_full_template(kind, data, offset)
+            if result == nil:
+                return false
             val template = result.0
             offset = result.1
 
             val name = template.name()
             self.template_cache[name] = template
 
-        Ok(())
+        deferred_clear_error()
+        true
 
-    fn deserialize_full_template(kind: u8, data: [u8], start_offset: i64) -> Result<(GenericTemplate, i64), CompileError>:
+    fn deserialize_full_template(kind: u8, data: [u8], start_offset: i64) -> (GenericTemplate, i64)?:
         """Deserialize a full template from binary data.
 
         Reads the complete AST node including all fields, body, params, bindings.
-        Returns the template and the new offset after reading.
+        Returns the template and the new offset after reading, or nil with error set.
 
         ROBUSTNESS: Validates data bounds before each read.
         """
         match kind:
             0:  # Function
-                val result = deserialize_function_def(data, start_offset)?
-                Ok((GenericTemplate.Function(result.0), result.1))
+                val result = deserialize_function_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Function(result.0), result.1)
             1:  # Struct
-                val result = deserialize_struct_def(data, start_offset)?
-                Ok((GenericTemplate.Struct(result.0), result.1))
+                val result = deserialize_struct_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Struct(result.0), result.1)
             2:  # Class
-                val result = deserialize_class_def(data, start_offset)?
-                Ok((GenericTemplate.Class(result.0), result.1))
+                val result = deserialize_class_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Class(result.0), result.1)
             3:  # Enum
-                val result = deserialize_enum_def(data, start_offset)?
-                Ok((GenericTemplate.Enum(result.0), result.1))
+                val result = deserialize_enum_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Enum(result.0), result.1)
             4:  # Trait
-                val result = deserialize_trait_def(data, start_offset)?
-                Ok((GenericTemplate.Trait(result.0), result.1))
+                val result = deserialize_trait_def(data, start_offset)
+                if result == nil:
+                    return nil
+                (GenericTemplate.Trait(result.0), result.1)
             _:
-                Err(CompileError.Codegen("Unknown template kind: {kind}"))
+                deferred_set_error("Unknown template kind: {kind}")
+                nil
 
     # ========================================================================
     # Instantiation
     # ========================================================================
 
-    me instantiate_function(name: text, type_args: [ConcreteType]) -> Result<FunctionDef, CompileError>:
+    me instantiate_function(name: text, type_args: [ConcreteType]) -> FunctionDef?:
         """Instantiate a function template with concrete type arguments.
 
         Args:
@@ -280,47 +322,55 @@ impl DeferredMonomorphizer:
             type_args: Concrete types (e.g., [Int, String])
 
         Returns:
-            Specialized function definition
+            Specialized function definition, or nil with error set
 
         ROBUSTNESS:
         - Checks cache first (avoid re-compilation)
         - Validates type arg count matches template params
-        - Returns error if template not found
+        - Returns nil if template not found
         """
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
-        if val Some(CompiledCode.Function(func)) = self.specialization_cache.get(key):
-            return Ok(func)
+        val cached = self.specialization_cache.get(key)
+        if cached != nil:
+            match cached:
+                CompiledCode.Function(func): return func
+                _: pass
 
         # Get template
-        if val Some(template) = self.template_cache.get(name):
-            val func_template = template.as_function()?
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
 
-            # Validate type arg count
-            if type_args.len() != func_template.generic_params.len():
-                return Err(CompileError.Codegen(
-                    "Type argument count mismatch: expected {func_template.generic_params.len()}, got {type_args.len()}"
-                ))
+        val func_template = template.as_function()
+        if func_template == nil:
+            return nil
 
-            # Build type bindings
-            var bindings: TypeBindings = {}
-            for i in 0..type_args.len():
-                bindings[func_template.generic_params[i]] = type_args[i]
+        # Validate type arg count
+        if type_args.len() != func_template.generic_params.len():
+            deferred_set_error(
+                "Type argument count mismatch: expected {func_template.generic_params.len()}, got {type_args.len()}"
+            )
+            return nil
 
-            # Instantiate using monomorphization engine
-            # Monomorphizer.specialize_function not yet available
-            eprint("Warning: Monomorphizer.specialize_function not yet available; returning unspecialized template for {name}")
-            val specialized = func_template.clone()
+        # Build type bindings
+        var bindings: TypeBindings = {}
+        for i in 0..type_args.len():
+            bindings[func_template.generic_params[i]] = type_args[i]
 
-            # Cache result
-            self.specialization_cache[key] = CompiledCode.Function(specialized.clone())
+        # Instantiate using monomorphization engine
+        # Monomorphizer.specialize_function not yet available
+        eprint("Warning: Monomorphizer.specialize_function not yet available; returning unspecialized template for {name}")
+        val specialized = func_template.clone()
 
-            Ok(specialized)
-        else:
-            Err(CompileError.Codegen("Template not found: {name}"))
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Function(specialized.clone())
 
-    me instantiate_struct(name: text, type_args: [ConcreteType]) -> Result<StructDef, CompileError>:
+        specialized
+
+    me instantiate_struct(name: text, type_args: [ConcreteType]) -> StructDef?:
         """Instantiate a struct template with concrete type arguments."""
         val key = SpecializationKey.new(name, type_args)
 
@@ -347,7 +397,7 @@ impl DeferredMonomorphizer:
         else:
             Err(CompileError.Codegen("Template not found: {name}"))
 
-    me instantiate_class(name: text, type_args: [ConcreteType]) -> Result<ClassDef, CompileError>:
+    me instantiate_class(name: text, type_args: [ConcreteType]) -> ClassDef?:
         """Instantiate a class template with concrete type arguments."""
         val key = SpecializationKey.new(name, type_args)
 
@@ -374,7 +424,7 @@ impl DeferredMonomorphizer:
         else:
             Err(CompileError.Codegen("Template not found: {name}"))
 
-    me instantiate_enum(name: text, type_args: [ConcreteType]) -> Result<EnumDef, CompileError>:
+    me instantiate_enum(name: text, type_args: [ConcreteType]) -> EnumDef?:
         """Instantiate an enum template with concrete type arguments."""
         val key = SpecializationKey.new(name, type_args)
 
