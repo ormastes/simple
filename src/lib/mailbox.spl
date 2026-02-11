@@ -2,31 +2,28 @@
 #
 # Provides actor mailbox with priority support.
 
-# --- MessagePriority ---
+# --- MessagePriority enum ---
 
-fn MessagePriority__High__to_i64() -> i64:
-    0
+enum MessagePriority:
+    High
+    Normal
+    Low
 
-fn MessagePriority__Normal__to_i64() -> i64:
-    1
-
-fn MessagePriority__Low__to_i64() -> i64:
+fn MessagePriority__to_i64(p: MessagePriority) -> i64:
+    if p == MessagePriority.High: return 0
+    if p == MessagePriority.Normal: return 1
     2
 
-fn MessagePriority__High__cmp(other_priority: i64) -> i64:
-    0 - other_priority
+# --- SendResult enum ---
 
-fn MessagePriority__Normal__cmp(other_priority: i64) -> i64:
-    1 - other_priority
+enum SendResult:
+    Success
+    QueueFull
+    MailboxClosed
 
-fn MessagePriority__Low__cmp(other_priority: i64) -> i64:
-    2 - other_priority
-
-# --- SendResult ---
-
-val SEND_SUCCESS = "Success"
-val SEND_QUEUE_FULL = "QueueFull"
-val SEND_MAILBOX_CLOSED = "MailboxClosed"
+val SEND_SUCCESS = SendResult.Success
+val SEND_QUEUE_FULL = SendResult.QueueFull
+val SEND_MAILBOX_CLOSED = SendResult.MailboxClosed
 
 # --- MailboxConfig ---
 
@@ -54,7 +51,7 @@ class MessageRef:
     id: i64
     sender_id: i64
     has_sender: bool
-    priority: i64
+    priority: MessagePriority
     size_bytes: i64
     timestamp_ms: i64
 
@@ -64,7 +61,7 @@ class MessageRef:
     fn is_stale(threshold_ms: i64) -> bool:
         self.age_ms() > threshold_ms
 
-fn MessageRef__new(msg_id: i64, sender, priority: i64, size_bytes: i64, timestamp: i64) -> MessageRef:
+fn MessageRef__new(msg_id: i64, sender, priority: MessagePriority, size_bytes: i64, timestamp: i64) -> MessageRef:
     var sid = 0
     var has_s = false
     if sender.?:
@@ -109,18 +106,19 @@ class Mailbox:
     is_closed: bool
     stats: MailboxStats
 
-    me send_normal(data_ref: i64, size_bytes: i64, sender) -> text:
-        self.send_with_priority(data_ref, size_bytes, sender, 1)
+    me send_normal(data_ref: i64, size_bytes: i64, sender) -> SendResult:
+        self.send_with_priority(data_ref, size_bytes, sender, MessagePriority.Normal)
 
-    me send_high(data_ref: i64, size_bytes: i64, sender) -> text:
-        self.send_with_priority(data_ref, size_bytes, sender, 0)
+    me send_high(data_ref: i64, size_bytes: i64, sender) -> SendResult:
+        self.send_with_priority(data_ref, size_bytes, sender, MessagePriority.High)
 
-    me send_with_priority(data_ref: i64, size_bytes: i64, sender, priority: i64) -> text:
+    me send_with_priority(data_ref: i64, size_bytes: i64, sender, priority: MessagePriority) -> SendResult:
         if self.is_closed:
             return SEND_MAILBOX_CLOSED
         val total = self.total_size()
+        val is_high = priority == MessagePriority.High
         if self.config.capacity > 0:
-            if priority > 0:
+            if not is_high:
                 # Normal: respect capacity minus reserve
                 val effective_cap = self.config.capacity - self.config.high_priority_reserve
                 if total >= effective_cap:
@@ -135,7 +133,7 @@ class Mailbox:
                     return SEND_QUEUE_FULL
         val msg = MessageRef__new(self.next_id, sender, priority, size_bytes, 0)
         self.next_id = self.next_id + 1
-        if priority == 0:
+        if is_high:
             self.high_messages.push(msg)
             self.stats.high_priority_count = self.stats.high_priority_count + 1
         else:
@@ -247,10 +245,9 @@ fn Mailbox__default() -> Mailbox:
 fn Mailbox__unbounded() -> Mailbox:
     Mailbox__new(MailboxConfig__unbounded())
 
+export MessagePriority, MessagePriority__to_i64
+export SendResult, SEND_SUCCESS, SEND_QUEUE_FULL, SEND_MAILBOX_CLOSED
 export MailboxConfig, MailboxConfig__default, MailboxConfig__bounded, MailboxConfig__unbounded, MailboxConfig__with_priority
 export MessageRef, MessageRef__new
 export MailboxStats, MailboxStats__new
 export Mailbox, Mailbox__new, Mailbox__default, Mailbox__unbounded
-export MessagePriority__High__to_i64, MessagePriority__Normal__to_i64, MessagePriority__Low__to_i64
-export MessagePriority__High__cmp, MessagePriority__Normal__cmp, MessagePriority__Low__cmp
-export SEND_SUCCESS, SEND_QUEUE_FULL, SEND_MAILBOX_CLOSED

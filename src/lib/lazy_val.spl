@@ -2,36 +2,44 @@
 #
 # Provides Lazy values with deferred evaluation and Memo for caching.
 
+# --- LazyStatus enum ---
+
+enum LazyStatus:
+    Pending
+    Evaluating
+    Ready
+    Failed
+
 # --- LazyState ---
 
 class LazyState:
-    tag: text
+    tag: LazyStatus
     value: i64
     error_msg: text
 
 fn LazyState__Pending() -> LazyState:
-    LazyState(tag: "pending", value: 0, error_msg: "")
+    LazyState(tag: LazyStatus.Pending, value: 0, error_msg: "")
 
 fn LazyState__Evaluating() -> LazyState:
-    LazyState(tag: "evaluating", value: 0, error_msg: "")
+    LazyState(tag: LazyStatus.Evaluating, value: 0, error_msg: "")
 
 fn LazyState__Ready(v) -> LazyState:
-    LazyState(tag: "ready", value: v, error_msg: "")
+    LazyState(tag: LazyStatus.Ready, value: v, error_msg: "")
 
 fn LazyState__Failed(msg: text) -> LazyState:
-    LazyState(tag: "failed", value: 0, error_msg: msg)
+    LazyState(tag: LazyStatus.Failed, value: 0, error_msg: msg)
 
 fn lazy_state_is_pending(s: LazyState) -> bool:
-    s.tag == "pending"
+    s.tag == LazyStatus.Pending
 
 fn lazy_state_is_ready(s: LazyState) -> bool:
-    s.tag == "ready"
+    s.tag == LazyStatus.Ready
 
 fn lazy_state_is_evaluating(s: LazyState) -> bool:
-    s.tag == "evaluating"
+    s.tag == LazyStatus.Evaluating
 
 fn lazy_state_is_failed(s: LazyState) -> bool:
-    s.tag == "failed"
+    s.tag == LazyStatus.Failed
 
 # --- LazyError ---
 
@@ -84,39 +92,39 @@ fn get_lazy_stats() -> LazyStats:
 # --- Lazy ---
 
 class Lazy:
-    state_tag: text
+    state_tag: LazyStatus
     cached_value: i64
     thunk: fn()
     error_msg: text
 
     fn is_evaluated() -> bool:
-        self.state_tag == "ready"
+        self.state_tag == LazyStatus.Ready
 
     fn is_pending() -> bool:
-        self.state_tag == "pending"
+        self.state_tag == LazyStatus.Pending
 
     fn is_failed() -> bool:
-        self.state_tag == "failed"
+        self.state_tag == LazyStatus.Failed
 
     fn get():
-        if self.state_tag == "ready":
+        if self.state_tag == LazyStatus.Ready:
             return self.cached_value
         nil
 
     me force():
-        if self.state_tag == "ready":
+        if self.state_tag == LazyStatus.Ready:
             lazy_cache_hits = lazy_cache_hits + 1
             return self.cached_value
-        if self.state_tag == "failed":
+        if self.state_tag == LazyStatus.Failed:
             return nil
-        if self.state_tag == "evaluating":
-            self.state_tag = "failed"
+        if self.state_tag == LazyStatus.Evaluating:
+            self.state_tag = LazyStatus.Failed
             self.error_msg = "Cycle detected"
             return nil
         # Pending — evaluate
-        self.state_tag = "evaluating"
+        self.state_tag = LazyStatus.Evaluating
         val result = self.thunk()
-        self.state_tag = "ready"
+        self.state_tag = LazyStatus.Ready
         self.cached_value = result
         lazy_total_forced = lazy_total_forced + 1
         lazy_cache_misses = lazy_cache_misses + 1
@@ -124,10 +132,10 @@ class Lazy:
 
     me force_or_default(default_val):
         val result = self.force()
-        if self.state_tag == "failed":
+        if self.state_tag == LazyStatus.Failed:
             return default_val
         if result == nil:
-            if self.state_tag == "ready":
+            if self.state_tag == LazyStatus.Ready:
                 return result
             return default_val
         result
