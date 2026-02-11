@@ -12185,7 +12185,7 @@ TEST(fn_params_with_trailing_comma) {
     ASSERT(out.length() >= 0);
 }
 
-TEST(empty_array_with_type) {
+TEST(empty_array_with_type_b54) {
     auto out = compile_spl("fn f() -> [i64]: []\n");
     ASSERT(out.length() >= 0);
 }
@@ -13216,7 +13216,7 @@ int main(int argc, char** argv) {
     RUN(mutual_recursion);
     RUN(nested_fn_definition);
     RUN(self_referential_struct);
-    RUN(empty_array_with_type);
+    RUN(empty_array_with_type_b54);
     RUN(array_of_struct);
     RUN(struct_with_array_field);
 
@@ -13804,7 +13804,7 @@ int main(int argc, char** argv) {
     RUN(array_literal_with_trailing_comma);
     RUN(struct_fields_with_trailing_semicolon);
     RUN(fn_params_with_trailing_comma);
-    RUN(empty_array_with_type);
+    RUN(empty_array_with_type_b54);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;
