@@ -10,25 +10,40 @@ use memory.refc_binary.{
 
 val SMALL_BINARY_THRESHOLD = 64
 
-fn copy_strategy_for(size: i64) -> text:
+# --- TransferStrategy enum ---
+
+enum TransferStrategy:
+    DeepCopy
+    ShareRef
+    Hybrid
+
+fn copy_strategy_for(size: i64) -> TransferStrategy:
     if size < SMALL_BINARY_THRESHOLD:
-        return "DeepCopy"
-    "ShareRef"
+        return TransferStrategy.DeepCopy
+    TransferStrategy.ShareRef
 
-# --- ValueType constants ---
+# --- ValueKind enum ---
 
-val VALUE_TYPE_NIL = "Nil"
-val VALUE_TYPE_INT = "Int"
-val VALUE_TYPE_FLOAT = "Float"
-val VALUE_TYPE_BOOL = "Bool"
-val VALUE_TYPE_BINARY = "Binary"
-val VALUE_TYPE_TEXT = "Text"
+enum ValueKind:
+    Nil
+    Int
+    Float
+    Bool
+    Binary
+    Text
 
-fn estimate_size(type_tag: text, raw_size: i64) -> i64:
-    if type_tag == VALUE_TYPE_NIL: return 1
-    if type_tag == VALUE_TYPE_INT: return 8
-    if type_tag == VALUE_TYPE_FLOAT: return 8
-    if type_tag == VALUE_TYPE_BOOL: return 1
+val VALUE_TYPE_NIL = ValueKind.Nil
+val VALUE_TYPE_INT = ValueKind.Int
+val VALUE_TYPE_FLOAT = ValueKind.Float
+val VALUE_TYPE_BOOL = ValueKind.Bool
+val VALUE_TYPE_BINARY = ValueKind.Binary
+val VALUE_TYPE_TEXT = ValueKind.Text
+
+fn estimate_size(type_tag: ValueKind, raw_size: i64) -> i64:
+    if type_tag == ValueKind.Nil: return 1
+    if type_tag == ValueKind.Int: return 8
+    if type_tag == ValueKind.Float: return 8
+    if type_tag == ValueKind.Bool: return 1
     raw_size
 
 # --- ValueWrapper ---
@@ -215,7 +230,7 @@ fn MailboxMessage__new(msg_id: i64, sender, wrapper: ValueWrapper) -> MailboxMes
 # --- MessageTransfer ---
 
 class MessageTransfer:
-    strategy: text
+    strategy: TransferStrategy
     heap: SharedHeap
     has_heap: bool
     stats: TransferStats
@@ -262,7 +277,7 @@ class MessageTransfer:
         val fake_ref = ValueWrapper__shared_ref_from(0, 0, s.len())
         TransferResult__success(fake_ref)
 
-    me wrap_for_send(process_id: i64, size: i64, type_tag: text) -> TransferResult:
+    me wrap_for_send(process_id: i64, size: i64, type_tag: ValueKind) -> TransferResult:
         val should_share = self.should_share(size)
         if should_share:
             self.stats.total_transfers = self.stats.total_transfers + 1
@@ -283,8 +298,8 @@ class MessageTransfer:
         TransferResult__success(ValueWrapper__int(0))
 
     fn should_share(size: i64) -> bool:
-        if self.strategy == "deep_copy": return false
-        if self.strategy == "share_ref": return true
+        if self.strategy == TransferStrategy.DeepCopy: return false
+        if self.strategy == TransferStrategy.ShareRef: return true
         size >= SMALL_BINARY_THRESHOLD
 
     me share_wrapper(wrapper: ValueWrapper):
@@ -314,7 +329,7 @@ class MessageTransfer:
 
 fn MessageTransfer__new() -> MessageTransfer:
     MessageTransfer(
-        strategy: "hybrid",
+        strategy: TransferStrategy.Hybrid,
         heap: SharedHeap__new(SharedHeapConfig__default()),
         has_heap: true,
         stats: TransferStats__new()
@@ -322,7 +337,7 @@ fn MessageTransfer__new() -> MessageTransfer:
 
 fn MessageTransfer__always_copy() -> MessageTransfer:
     MessageTransfer(
-        strategy: "deep_copy",
+        strategy: TransferStrategy.DeepCopy,
         heap: SharedHeap__new(SharedHeapConfig__default()),
         has_heap: false,
         stats: TransferStats__new()
@@ -330,7 +345,7 @@ fn MessageTransfer__always_copy() -> MessageTransfer:
 
 fn MessageTransfer__always_share() -> MessageTransfer:
     MessageTransfer(
-        strategy: "share_ref",
+        strategy: TransferStrategy.ShareRef,
         heap: SharedHeap__new(SharedHeapConfig__default()),
         has_heap: true,
         stats: TransferStats__new()
@@ -338,7 +353,7 @@ fn MessageTransfer__always_share() -> MessageTransfer:
 
 fn MessageTransfer__with_heap(heap: SharedHeap) -> MessageTransfer:
     MessageTransfer(
-        strategy: "hybrid",
+        strategy: TransferStrategy.Hybrid,
         heap: heap,
         has_heap: true,
         stats: TransferStats__new()
@@ -346,13 +361,14 @@ fn MessageTransfer__with_heap(heap: SharedHeap) -> MessageTransfer:
 
 # --- Convenience functions ---
 
-fn send_value(process_id: i64, size: i64, type_tag: text) -> TransferResult:
+fn send_value(process_id: i64, size: i64, type_tag: ValueKind) -> TransferResult:
     var transfer = MessageTransfer__new()
     transfer.wrap_for_send(process_id, size, type_tag)
 
 fn receive_value(wrapper: ValueWrapper):
     wrapper
 
+export TransferStrategy, ValueKind
 export ValueWrapper, ValueWrapper__nil, ValueWrapper__int, ValueWrapper__float, ValueWrapper__bool
 export ValueWrapper__small_text, ValueWrapper__small_array, ValueWrapper__shared_ref_from, ValueWrapper__composite
 export CopyStrategy__DeepCopy__should_share, CopyStrategy__ShareRef__should_share, CopyStrategy__Hybrid__should_share

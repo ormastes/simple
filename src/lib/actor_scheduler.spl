@@ -8,6 +8,41 @@ use mailbox.{
     SEND_SUCCESS
 }
 
+# --- ActorPriority enum ---
+enum ActorPriority:
+    Max
+    High
+    Normal
+    Low
+
+fn ActorPriority__to_i64(p: ActorPriority) -> i64:
+    if p == ActorPriority.Max: return 0
+    if p == ActorPriority.High: return 1
+    if p == ActorPriority.Normal: return 2
+    3
+
+# --- ActorState enum ---
+enum ActorState:
+    Runnable
+    Running
+    Waiting
+    Suspended
+    Dead
+
+fn ActorState__is_alive(state: ActorState) -> bool:
+    if state == ActorState.Dead: return false
+    true
+
+fn ActorState__can_run(state: ActorState) -> bool:
+    state == ActorState.Runnable
+
+fn ActorState__fmt(state: ActorState) -> text:
+    if state == ActorState.Runnable: return "runnable"
+    if state == ActorState.Running: return "running"
+    if state == ActorState.Waiting: return "waiting"
+    if state == ActorState.Suspended: return "suspended"
+    "dead"
+
 # --- SchedulerConfig ---
 
 class SchedulerConfig:
@@ -53,30 +88,6 @@ fn SchedulerConfig__high_throughput() -> SchedulerConfig:
         max_run_queue_length: 50000
     )
 
-# --- ActorPriority (as integers) ---
-# Max=0, High=1, Normal=2, Low=3
-
-fn ActorPriority__from_i64(v: i64) -> i64:
-    if v == 0: return 0
-    if v == 1: return 1
-    if v == 2: return 2
-    3
-
-# --- ActorState (as strings) ---
-
-fn ActorState__is_alive(state: text) -> bool:
-    if state == "runnable": return true
-    if state == "running": return true
-    if state == "waiting": return true
-    if state == "suspended": return true
-    false
-
-fn ActorState__can_run(state: text) -> bool:
-    state == "runnable"
-
-fn ActorState__fmt(state: text) -> text:
-    state
-
 # --- RunQueue ---
 
 class RunQueue:
@@ -93,23 +104,21 @@ class RunQueue:
     fn len() -> i64:
         self.max_q.len() + self.high_q.len() + self.normal_q.len() + self.low_q.len()
 
-    fn len_by_priority(priority: i64) -> i64:
-        if priority == 0: return self.max_q.len()
-        if priority == 1: return self.high_q.len()
-        if priority == 2: return self.normal_q.len()
+    fn len_by_priority(priority: ActorPriority) -> i64:
+        if priority == ActorPriority.Max: return self.max_q.len()
+        if priority == ActorPriority.High: return self.high_q.len()
+        if priority == ActorPriority.Normal: return self.normal_q.len()
         self.low_q.len()
 
-    me enqueue(actor_id: i64, priority: i64):
-        if priority == 0:
+    me enqueue(actor_id: i64, priority: ActorPriority):
+        if priority == ActorPriority.Max:
             self.max_q.push(actor_id)
+        elif priority == ActorPriority.High:
+            self.high_q.push(actor_id)
+        elif priority == ActorPriority.Normal:
+            self.normal_q.push(actor_id)
         else:
-            if priority == 1:
-                self.high_q.push(actor_id)
-            else:
-                if priority == 2:
-                    self.normal_q.push(actor_id)
-                else:
-                    self.low_q.push(actor_id)
+            self.low_q.push(actor_id)
 
     me dequeue():
         if self.max_q.len() > 0:
@@ -152,8 +161,8 @@ class ActorContext:
     id: i64
     name_val: text
     has_name: bool
-    priority: i64
-    state: text
+    priority: ActorPriority
+    state: ActorState
     reductions_left: i64
     total_reductions: i64
     timeslice_count: i64
@@ -172,19 +181,19 @@ class ActorContext:
         self.timeslice_count = self.timeslice_count + 1
 
     me set_running():
-        self.state = "running"
+        self.state = ActorState.Running
 
     me set_waiting():
-        self.state = "waiting"
+        self.state = ActorState.Waiting
 
     me set_suspended():
-        self.state = "suspended"
+        self.state = ActorState.Suspended
 
     me set_runnable():
-        self.state = "runnable"
+        self.state = ActorState.Runnable
 
     me set_dead():
-        self.state = "dead"
+        self.state = ActorState.Dead
 
     me link(other_id: i64):
         self.links.push(other_id)
@@ -220,7 +229,8 @@ class ActorContext:
         var name_str = "unnamed"
         if self.has_name:
             name_str = self.name_val
-        "Actor(id={self.id}, name={name_str}, state={self.state})"
+        val state_str = ActorState__fmt(self.state)
+        "Actor(id={self.id}, name={name_str}, state={state_str})"
 
 fn ActorContext__with_defaults(id: i64, name, reductions: i64) -> ActorContext:
     var name_str = ""
@@ -232,8 +242,8 @@ fn ActorContext__with_defaults(id: i64, name, reductions: i64) -> ActorContext:
         id: id,
         name_val: name_str,
         has_name: has_n,
-        priority: 2,
-        state: "runnable",
+        priority: ActorPriority.Normal,
+        state: ActorState.Runnable,
         reductions_left: reductions,
         total_reductions: 0,
         timeslice_count: 0,
@@ -286,14 +296,14 @@ class ActorScheduler:
         self.next_id = self.next_id + 1
         val ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice)
         self.actors.push(ctx)
-        self.run_queue.enqueue(id, 2)
+        self.run_queue.enqueue(id, ActorPriority.Normal)
         self.stats.total_actors_created = self.stats.total_actors_created + 1
         self.stats.current_actor_count = self.stats.current_actor_count + 1
         if self.stats.current_actor_count > self.stats.peak_actor_count:
             self.stats.peak_actor_count = self.stats.current_actor_count
         id
 
-    me spawn_with_priority(name, priority: i64) -> i64:
+    me spawn_with_priority(name, priority: ActorPriority) -> i64:
         val id = self.next_id
         self.next_id = self.next_id + 1
         var ctx = ActorContext__with_defaults(id, name, self.config.reductions_per_timeslice)
@@ -438,10 +448,10 @@ fn ActorScheduler__new(config: SchedulerConfig) -> ActorScheduler:
 fn ActorScheduler__default() -> ActorScheduler:
     ActorScheduler__new(SchedulerConfig__default())
 
+export ActorPriority, ActorPriority__to_i64
+export ActorState, ActorState__is_alive, ActorState__can_run, ActorState__fmt
 export SchedulerConfig, SchedulerConfig__default, SchedulerConfig__single_threaded, SchedulerConfig__low_latency, SchedulerConfig__high_throughput
 export RunQueue, RunQueue__new
 export ActorContext, ActorContext__with_defaults
-export ActorPriority__from_i64
-export ActorState__is_alive, ActorState__can_run, ActorState__fmt
 export SchedulerStats, SchedulerStats__new
 export ActorScheduler, ActorScheduler__new, ActorScheduler__default
