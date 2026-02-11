@@ -1,0 +1,1343 @@
+# xml_utils.spl - Comprehensive XML parsing and manipulation utilities
+#
+# A pure Simple implementation of XML parsing, DOM-style tree manipulation,
+# and serialization with XPath-like query support.
+#
+# ARCHITECTURE:
+# - Tokenizer/Lexer for XML syntax
+# - Recursive descent parser for building DOM trees
+# - Tuple-based node representation (no generics)
+# - XPath-lite query engine
+# - Namespace-aware processing
+#
+# NODE STRUCTURE:
+# - Element: ("element", tag, attrs, children, ns)
+# - Text: ("text", content)
+# - Comment: ("comment", content)
+# - CDATA: ("cdata", content)
+# - Document: ("document", root, doctype, version, encoding)
+#
+# CONSTRAINTS:
+# - No try/catch (use Option pattern with nil)
+# - No generics (concrete list types)
+# - No chained methods (intermediate variables)
+# - No closure modification (module-level state)
+
+# ============================================================================
+# CONSTANTS AND CHARACTER UTILITIES
+# ============================================================================
+
+# XML special characters
+static val XML_LT = "<"
+static val XML_GT = ">"
+static val XML_AMP = "&"
+static val XML_QUOT = "\""
+static val XML_APOS = "'"
+static val XML_SLASH = "/"
+static val XML_EQUALS = "="
+static val XML_SPACE = " "
+static val XML_TAB = "\t"
+static val XML_NEWLINE = "\n"
+static val XML_CR = "\r"
+
+# XML entity mappings
+static val ENTITY_LT = "&lt;"
+static val ENTITY_GT = "&gt;"
+static val ENTITY_AMP = "&amp;"
+static val ENTITY_QUOT = "&quot;"
+static val ENTITY_APOS = "&apos;"
+
+# Node type constants
+static val NODE_ELEMENT = "element"
+static val NODE_TEXT = "text"
+static val NODE_COMMENT = "comment"
+static val NODE_CDATA = "cdata"
+static val NODE_DOCUMENT = "document"
+
+# Check if character is whitespace
+fn is_whitespace(ch: text) -> bool:
+    ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+
+# Check if character is valid for tag name start
+fn is_name_start_char(ch: text) -> bool:
+    val code = 0  # Would use char code in real impl
+    val is_letter = (ch >= "A" and ch <= "Z") or (ch >= "a" and ch <= "z")
+    val is_special = ch == "_" or ch == ":"
+    is_letter or is_special
+
+# Check if character is valid for tag name continuation
+fn is_name_char(ch: text) -> bool:
+    val is_start = is_name_start_char(ch)
+    val is_digit = ch >= "0" and ch <= "9"
+    val is_special = ch == "-" or ch == "." or ch == "_" or ch == ":"
+    is_start or is_digit or is_special
+
+# ============================================================================
+# STRING UTILITIES
+# ============================================================================
+
+# Get character at index (Simple string indexing helper)
+fn char_at(s: text, idx: i64) -> text:
+    if idx < 0 or idx >= s.len():
+        return ""
+    s.slice(idx, idx + 1)
+
+# Skip whitespace and return new index
+fn skip_whitespace(s: text, start: i64) -> i64:
+    var idx = start
+    val len = s.len()
+    while idx < len:
+        val ch = char_at(s, idx)
+        if not is_whitespace(ch):
+            break
+        idx = idx + 1
+    idx
+
+# Find character in string from position
+fn find_char(s: text, ch: text, start: i64) -> i64:
+    var idx = start
+    val len = s.len()
+    while idx < len:
+        if char_at(s, idx) == ch:
+            return idx
+        idx = idx + 1
+    -1  # Not found
+
+# Find any of multiple characters
+fn find_any_char(s: text, chars: text, start: i64) -> i64:
+    var idx = start
+    val len = s.len()
+    val chars_len = chars.len()
+    while idx < len:
+        val ch = char_at(s, idx)
+        var found = false
+        var j = 0
+        while j < chars_len:
+            if ch == char_at(chars, j):
+                found = true
+                break
+            j = j + 1
+        if found:
+            return idx
+        idx = idx + 1
+    -1
+
+# Check if string starts with prefix at position
+fn starts_with_at(s: text, prefix: text, pos: i64) -> bool:
+    val prefix_len = prefix.len()
+    val s_len = s.len()
+    if pos + prefix_len > s_len:
+        return false
+    var i = 0
+    while i < prefix_len:
+        if char_at(s, pos + i) != char_at(prefix, i):
+            return false
+        i = i + 1
+    true
+
+# Trim whitespace from both ends
+fn trim(s: text) -> text:
+    val len = s.len()
+    if len == 0:
+        return s
+
+    var start = 0
+    while start < len and is_whitespace(char_at(s, start)):
+        start = start + 1
+
+    var end = len - 1
+    while end >= start and is_whitespace(char_at(s, end)):
+        end = end - 1
+
+    if start > end:
+        return ""
+    s.slice(start, end + 1)
+
+# ============================================================================
+# XML ESCAPING AND UNESCAPING
+# ============================================================================
+
+# Escape special XML characters in text content
+fn escape_xml(text: text) -> text:
+    var result = text
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result
+
+# Escape XML attribute value (includes quotes)
+fn escape_attribute(value: text) -> text:
+    var result = value
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("'", "&apos;")
+    result
+
+# Unescape XML entities
+fn unescape_xml(text: text) -> text:
+    var result = text
+    result = result.replace("&lt;", "<")
+    result = result.replace("&gt;", ">")
+    result = result.replace("&quot;", "\"")
+    result = result.replace("&apos;", "'")
+    result = result.replace("&amp;", "&")  # Must be last
+    result
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
+# Validate XML tag name
+fn validate_tag_name(name: text) -> bool:
+    val len = name.len()
+    if len == 0:
+        return false
+
+    val first = char_at(name, 0)
+    if not is_name_start_char(first):
+        return false
+
+    var i = 1
+    while i < len:
+        if not is_name_char(char_at(name, i)):
+            return false
+        i = i + 1
+
+    true
+
+# Validate attribute name
+fn validate_attribute(name: text) -> bool:
+    validate_tag_name(name)  # Same rules as tag names
+
+# Basic XML validation (checks well-formedness)
+fn is_valid_xml(text: text) -> bool:
+    val doc = parse_xml(text)
+    doc != nil
+
+# ============================================================================
+# NODE CREATION AND MANIPULATION
+# ============================================================================
+
+# Create element node: ("element", tag, attrs, children, ns)
+fn create_element(tag: text) -> tuple:
+    val attrs = []
+    val children = []
+    val ns = nil
+    (NODE_ELEMENT, tag, attrs, children, ns)
+
+# Create text node: ("text", content)
+fn create_text_node(content: text) -> tuple:
+    (NODE_TEXT, content)
+
+# Create comment node: ("comment", content)
+fn create_comment(content: text) -> tuple:
+    (NODE_COMMENT, content)
+
+# Create CDATA node: ("cdata", content)
+fn create_cdata(content: text) -> tuple:
+    (NODE_CDATA, content)
+
+# Create document node: ("document", root, doctype, version, encoding)
+fn create_document() -> tuple:
+    val root = nil
+    val doctype = nil
+    val version = "1.0"
+    val encoding = "UTF-8"
+    (NODE_DOCUMENT, root, doctype, version, encoding)
+
+# ============================================================================
+# NODE TYPE CHECKING
+# ============================================================================
+
+# Check if node is an element
+fn is_element(node: tuple) -> bool:
+    if node == nil:
+        return false
+    node[0] == NODE_ELEMENT
+
+# Check if node is text
+fn is_text(node: tuple) -> bool:
+    if node == nil:
+        return false
+    node[0] == NODE_TEXT
+
+# Check if node is comment
+fn is_comment(node: tuple) -> bool:
+    if node == nil:
+        return false
+    node[0] == NODE_COMMENT
+
+# Check if node is CDATA
+fn is_cdata(node: tuple) -> bool:
+    if node == nil:
+        return false
+    node[0] == NODE_CDATA
+
+# Check if node is document
+fn is_document(node: tuple) -> bool:
+    if node == nil:
+        return false
+    node[0] == NODE_DOCUMENT
+
+# ============================================================================
+# NODE ACCESSORS
+# ============================================================================
+
+# Get element tag name
+fn get_tag(elem: tuple) -> text:
+    if not is_element(elem):
+        return ""
+    elem[1]
+
+# Get element attributes list
+fn get_attributes(elem: tuple) -> list:
+    if not is_element(elem):
+        return []
+    elem[2]
+
+# Get element children list
+fn get_children(elem: tuple) -> list:
+    if not is_element(elem):
+        return []
+    elem[3]
+
+# Get element namespace
+fn get_namespace(elem: tuple) -> text:
+    if not is_element(elem):
+        return nil
+    elem[4]
+
+# Get text content
+fn get_content(node: tuple) -> text:
+    if node == nil:
+        return ""
+    val node_type = node[0]
+    if node_type == NODE_TEXT or node_type == NODE_COMMENT or node_type == NODE_CDATA:
+        return node[1]
+    ""
+
+# Get document root
+fn get_root(doc: tuple) -> tuple:
+    if not is_document(doc):
+        return nil
+    doc[1]
+
+# Get document doctype
+fn get_doctype(doc: tuple) -> text:
+    if not is_document(doc):
+        return nil
+    doc[2]
+
+# Get document version
+fn get_version(doc: tuple) -> text:
+    if not is_document(doc):
+        return "1.0"
+    doc[3]
+
+# Get document encoding
+fn get_encoding(doc: tuple) -> text:
+    if not is_document(doc):
+        return "UTF-8"
+    doc[4]
+
+# ============================================================================
+# ATTRIBUTE OPERATIONS
+# ============================================================================
+
+# Get attribute value by name (returns nil if not found)
+fn get_attribute(elem: tuple, name: text) -> text:
+    if not is_element(elem):
+        return nil
+
+    val attrs = elem[2]
+    var i = 0
+    val len = attrs.len()
+    while i < len:
+        val attr = attrs[i]
+        if attr[0] == name:
+            return attr[1]
+        i = i + 1
+    nil
+
+# Set attribute value (modifies attrs list in place)
+fn set_attribute(elem: tuple, name: text, value: text) -> tuple:
+    if not is_element(elem):
+        return elem
+
+    val attrs = elem[2]
+    var i = 0
+    val len = attrs.len()
+
+    # Update if exists
+    while i < len:
+        val attr = attrs[i]
+        if attr[0] == name:
+            attrs[i] = (name, value)
+            return elem
+        i = i + 1
+
+    # Add new attribute
+    attrs.append((name, value))
+    elem
+
+# Check if element has attribute
+fn has_attribute(elem: tuple, name: text) -> bool:
+    get_attribute(elem, name) != nil
+
+# Remove attribute
+fn remove_attribute(elem: tuple, name: text) -> tuple:
+    if not is_element(elem):
+        return elem
+
+    val attrs = elem[2]
+    val new_attrs = []
+    var i = 0
+    val len = attrs.len()
+
+    while i < len:
+        val attr = attrs[i]
+        if attr[0] != name:
+            new_attrs.append(attr)
+        i = i + 1
+
+    # Update element with new attrs
+    (elem[0], elem[1], new_attrs, elem[3], elem[4])
+
+# Get all attribute names
+fn get_attribute_names(elem: tuple) -> list:
+    if not is_element(elem):
+        return []
+
+    val attrs = elem[2]
+    val names = []
+    var i = 0
+    val len = attrs.len()
+
+    while i < len:
+        val attr = attrs[i]
+        names.append(attr[0])
+        i = i + 1
+    names
+
+# ============================================================================
+# TEXT CONTENT OPERATIONS
+# ============================================================================
+
+# Get text content of node (recursive for elements)
+fn get_text(node: tuple) -> text:
+    if node == nil:
+        return ""
+
+    val node_type = node[0]
+
+    if node_type == NODE_TEXT:
+        return node[1]
+
+    if node_type == NODE_CDATA:
+        return node[1]
+
+    if node_type == NODE_ELEMENT:
+        val children = node[3]
+        var result = ""
+        var i = 0
+        val len = children.len()
+        while i < len:
+            val child_text = get_text(children[i])
+            result = result + child_text
+            i = i + 1
+        return result
+
+    ""
+
+# Set text content (replaces all children with single text node)
+fn set_text(elem: tuple, text: text) -> tuple:
+    if not is_element(elem):
+        return elem
+
+    val text_node = create_text_node(text)
+    val new_children = [text_node]
+    (elem[0], elem[1], elem[2], new_children, elem[4])
+
+# Get inner text (direct text children only, no recursion)
+fn get_inner_text(node: tuple) -> text:
+    if not is_element(node):
+        return ""
+
+    val children = node[3]
+    var result = ""
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        val child = children[i]
+        if is_text(child):
+            result = result + child[1]
+        i = i + 1
+    result
+
+# ============================================================================
+# TREE MANIPULATION
+# ============================================================================
+
+# Append child to element
+fn append_child(parent: tuple, child: tuple) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    children.append(child)
+    parent
+
+# Prepend child to element
+fn prepend_child(parent: tuple, child: tuple) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    children.insert(0, child)
+    parent
+
+# Insert child at index
+fn insert_child(parent: tuple, child: tuple, index: i64) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    val len = children.len()
+
+    if index < 0 or index > len:
+        return parent
+
+    children.insert(index, child)
+    parent
+
+# Remove child from element
+fn remove_child(parent: tuple, child: tuple) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    val new_children = []
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        if children[i] != child:
+            new_children.append(children[i])
+        i = i + 1
+
+    (parent[0], parent[1], parent[2], new_children, parent[4])
+
+# Remove child at index
+fn remove_child_at(parent: tuple, index: i64) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    val len = children.len()
+
+    if index < 0 or index >= len:
+        return parent
+
+    children.remove(index)
+    parent
+
+# Replace child
+fn replace_child(parent: tuple, old_child: tuple, new_child: tuple) -> tuple:
+    if not is_element(parent):
+        return parent
+
+    val children = parent[3]
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        if children[i] == old_child:
+            children[i] = new_child
+            break
+        i = i + 1
+    parent
+
+# Clear all children
+fn clear_children(elem: tuple) -> tuple:
+    if not is_element(elem):
+        return elem
+
+    val empty = []
+    (elem[0], elem[1], elem[2], empty, elem[4])
+
+# Get child count
+fn child_count(elem: tuple) -> i64:
+    if not is_element(elem):
+        return 0
+    elem[3].len()
+
+# Get child at index
+fn get_child_at(elem: tuple, index: i64) -> tuple:
+    if not is_element(elem):
+        return nil
+
+    val children = elem[3]
+    val len = children.len()
+
+    if index < 0 or index >= len:
+        return nil
+    children[index]
+
+# ============================================================================
+# TREE TRAVERSAL AND SEARCH
+# ============================================================================
+
+# Find all elements with tag name (recursive)
+fn find_by_tag(node: tuple, tag: text) -> list:
+    val results = []
+
+    if node == nil:
+        return results
+
+    if is_element(node):
+        if get_tag(node) == tag:
+            results.append(node)
+
+        val children = get_children(node)
+        var i = 0
+        val len = children.len()
+        while i < len:
+            val child_results = find_by_tag(children[i], tag)
+            var j = 0
+            val cr_len = child_results.len()
+            while j < cr_len:
+                results.append(child_results[j])
+                j = j + 1
+            i = i + 1
+
+    results
+
+# Find element by id attribute
+fn find_by_id(node: tuple, id: text) -> tuple:
+    if node == nil:
+        return nil
+
+    if is_element(node):
+        val elem_id = get_attribute(node, "id")
+        if elem_id == id:
+            return node
+
+        val children = get_children(node)
+        var i = 0
+        val len = children.len()
+        while i < len:
+            val found = find_by_id(children[i], id)
+            if found != nil:
+                return found
+            i = i + 1
+
+    nil
+
+# Find elements by class attribute
+fn find_by_class(node: tuple, class_name: text) -> list:
+    val results = []
+
+    if node == nil:
+        return results
+
+    if is_element(node):
+        val classes = get_attribute(node, "class")
+        if classes != nil:
+            val has_class = classes.contains(class_name)
+            if has_class:
+                results.append(node)
+
+        val children = get_children(node)
+        var i = 0
+        val len = children.len()
+        while i < len:
+            val child_results = find_by_class(children[i], class_name)
+            var j = 0
+            val cr_len = child_results.len()
+            while j < cr_len:
+                results.append(child_results[j])
+                j = j + 1
+            i = i + 1
+
+    results
+
+# Find first child element with tag
+fn find_first_child(parent: tuple, tag: text) -> tuple:
+    if not is_element(parent):
+        return nil
+
+    val children = get_children(parent)
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        val child = children[i]
+        if is_element(child):
+            if get_tag(child) == tag:
+                return child
+        i = i + 1
+    nil
+
+# Get all element children (filter out text nodes)
+fn get_element_children(parent: tuple) -> list:
+    if not is_element(parent):
+        return []
+
+    val children = get_children(parent)
+    val elements = []
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        val child = children[i]
+        if is_element(child):
+            elements.append(child)
+        i = i + 1
+    elements
+
+# ============================================================================
+# XPATH-LITE QUERY SUPPORT
+# ============================================================================
+
+# Simple XPath-like query: "tag1/tag2/tag3"
+fn query(node: tuple, path: text) -> list:
+    if node == nil or path == "":
+        return []
+
+    val parts = path.split("/")
+    var current = [node]
+    var part_idx = 0
+    val parts_len = parts.len()
+
+    while part_idx < parts_len:
+        val part = parts[part_idx]
+        val trimmed = trim(part)
+
+        if trimmed == "":
+            part_idx = part_idx + 1
+            pass
+
+        val next_level = []
+        var i = 0
+        val curr_len = current.len()
+
+        while i < curr_len:
+            val matches = find_by_tag(current[i], trimmed)
+            var j = 0
+            val m_len = matches.len()
+            while j < m_len:
+                next_level.append(matches[j])
+                j = j + 1
+            i = i + 1
+
+        current = next_level
+        part_idx = part_idx + 1
+
+    current
+
+# Select all elements matching selector (just tag name for now)
+fn select_all(node: tuple, selector: text) -> list:
+    find_by_tag(node, selector)
+
+# Select first element matching selector
+fn select_first(node: tuple, selector: text) -> tuple:
+    val results = find_by_tag(node, selector)
+    if results.len() > 0:
+        return results[0]
+    nil
+
+# ============================================================================
+# NAMESPACE SUPPORT
+# ============================================================================
+
+# Parse namespace from qualified name (returns (prefix, local))
+fn parse_namespace(name: text) -> tuple:
+    val colon_idx = find_char(name, ":", 0)
+    if colon_idx == -1:
+        return (nil, name)
+
+    val prefix = name.slice(0, colon_idx)
+    val local = name.slice(colon_idx + 1, name.len())
+    (prefix, local)
+
+# Get namespace prefix from element
+fn get_namespace_prefix(elem: tuple) -> text:
+    if not is_element(elem):
+        return nil
+
+    val tag = get_tag(elem)
+    val ns_info = parse_namespace(tag)
+    ns_info[0]
+
+# Get local name (without namespace prefix)
+fn get_local_name(elem: tuple) -> text:
+    if not is_element(elem):
+        return ""
+
+    val tag = get_tag(elem)
+    val ns_info = parse_namespace(tag)
+    ns_info[1]
+
+# Set namespace for element
+fn set_namespace(elem: tuple, ns: text) -> tuple:
+    if not is_element(elem):
+        return elem
+
+    (elem[0], elem[1], elem[2], elem[3], ns)
+
+# ============================================================================
+# DOCUMENT OPERATIONS
+# ============================================================================
+
+# Set document root
+fn set_root(doc: tuple, root: tuple) -> tuple:
+    if not is_document(doc):
+        return doc
+
+    (doc[0], root, doc[2], doc[3], doc[4])
+
+# Set document doctype
+fn set_doctype(doc: tuple, doctype: text) -> tuple:
+    if not is_document(doc):
+        return doc
+
+    (doc[0], doc[1], doctype, doc[3], doc[4])
+
+# Set document version
+fn set_version(doc: tuple, version: text) -> tuple:
+    if not is_document(doc):
+        return doc
+
+    (doc[0], doc[1], doc[2], version, doc[4])
+
+# Set document encoding
+fn set_encoding(doc: tuple, encoding: text) -> tuple:
+    if not is_document(doc):
+        return doc
+
+    (doc[0], doc[1], doc[2], doc[3], encoding)
+
+# ============================================================================
+# CLONING AND NORMALIZATION
+# ============================================================================
+
+# Clone node (deep copy)
+fn clone_node(node: tuple) -> tuple:
+    if node == nil:
+        return nil
+
+    val node_type = node[0]
+
+    if node_type == NODE_TEXT:
+        return (NODE_TEXT, node[1])
+
+    if node_type == NODE_COMMENT:
+        return (NODE_COMMENT, node[1])
+
+    if node_type == NODE_CDATA:
+        return (NODE_CDATA, node[1])
+
+    if node_type == NODE_ELEMENT:
+        val tag = node[1]
+        val attrs = node[2]
+        val children = node[3]
+        val ns = node[4]
+
+        # Clone attributes
+        val new_attrs = []
+        var i = 0
+        val attrs_len = attrs.len()
+        while i < attrs_len:
+            val attr = attrs[i]
+            new_attrs.append((attr[0], attr[1]))
+            i = i + 1
+
+        # Clone children recursively
+        val new_children = []
+        var j = 0
+        val children_len = children.len()
+        while j < children_len:
+            val cloned = clone_node(children[j])
+            new_children.append(cloned)
+            j = j + 1
+
+        return (NODE_ELEMENT, tag, new_attrs, new_children, ns)
+
+    node
+
+# Normalize whitespace in text
+fn normalize_whitespace(text: text) -> text:
+    var result = text
+    result = result.replace("\t", " ")
+    result = result.replace("\r", " ")
+    result = result.replace("\n", " ")
+
+    # Collapse multiple spaces
+    while result.contains("  "):
+        result = result.replace("  ", " ")
+
+    result
+
+# Strip whitespace-only text nodes
+fn strip_whitespace(node: tuple) -> tuple:
+    if not is_element(node):
+        return node
+
+    val children = get_children(node)
+    val new_children = []
+    var i = 0
+    val len = children.len()
+
+    while i < len:
+        val child = children[i]
+        if is_text(child):
+            val content = get_content(child)
+            val trimmed = trim(content)
+            if trimmed != "":
+                new_children.append(child)
+        else:
+            # Recursively strip from element children
+            val stripped = strip_whitespace(child)
+            new_children.append(stripped)
+        i = i + 1
+
+    (node[0], node[1], node[2], new_children, node[4])
+
+# ============================================================================
+# XML PARSING
+# ============================================================================
+
+# Parse XML declaration: <?xml version="1.0" encoding="UTF-8"?>
+fn parse_xml_declaration(xml: text, pos: i64) -> tuple:
+    val start = pos
+    if not starts_with_at(xml, "<?xml", start):
+        return (nil, pos)
+
+    val end_pos = find_char(xml, "?", start + 5)
+    if end_pos == -1:
+        return (nil, pos)
+
+    val decl = xml.slice(start + 5, end_pos)
+
+    # Extract version and encoding (simplified)
+    var version = "1.0"
+    var encoding = "UTF-8"
+
+    if decl.contains("version"):
+        val v_start = decl.index("version")
+        val v_eq = find_char(decl, "=", v_start)
+        if v_eq != -1:
+            val v_quote = find_char(decl, "\"", v_eq)
+            if v_quote != -1:
+                val v_end = find_char(decl, "\"", v_quote + 1)
+                if v_end != -1:
+                    version = decl.slice(v_quote + 1, v_end)
+
+    if decl.contains("encoding"):
+        val e_start = decl.index("encoding")
+        val e_eq = find_char(decl, "=", e_start)
+        if e_eq != -1:
+            val e_quote = find_char(decl, "\"", e_eq)
+            if e_quote != -1:
+                val e_end = find_char(decl, "\"", e_quote + 1)
+                if e_end != -1:
+                    encoding = decl.slice(e_quote + 1, e_end)
+
+    val info = (version, encoding)
+    (info, end_pos + 2)
+
+# Parse comment: <!-- comment -->
+fn parse_comment_node(xml: text, pos: i64) -> tuple:
+    if not starts_with_at(xml, "<!--", pos):
+        return (nil, pos)
+
+    val end_pos = xml.index("-->", pos + 4)
+    if end_pos == -1:
+        return (nil, pos)
+
+    val content = xml.slice(pos + 4, end_pos)
+    val comment = create_comment(content)
+    (comment, end_pos + 3)
+
+# Parse CDATA: <![CDATA[data]]>
+fn parse_cdata_node(xml: text, pos: i64) -> tuple:
+    if not starts_with_at(xml, "<![CDATA[", pos):
+        return (nil, pos)
+
+    val end_pos = xml.index("]]>", pos + 9)
+    if end_pos == -1:
+        return (nil, pos)
+
+    val content = xml.slice(pos + 9, end_pos)
+    val cdata = create_cdata(content)
+    (cdata, end_pos + 3)
+
+# Parse attributes from tag string
+fn parse_attributes(attr_str: text) -> list:
+    val attrs = []
+    var pos = 0
+    val len = attr_str.len()
+
+    while pos < len:
+        pos = skip_whitespace(attr_str, pos)
+        if pos >= len:
+            break
+
+        # Find attribute name
+        val name_start = pos
+        while pos < len and is_name_char(char_at(attr_str, pos)):
+            pos = pos + 1
+
+        if pos == name_start:
+            break
+
+        val name = attr_str.slice(name_start, pos)
+
+        # Skip to equals
+        pos = skip_whitespace(attr_str, pos)
+        if pos >= len or char_at(attr_str, pos) != "=":
+            break
+        pos = pos + 1
+
+        # Skip to quote
+        pos = skip_whitespace(attr_str, pos)
+        if pos >= len:
+            break
+
+        val quote = char_at(attr_str, pos)
+        if quote != "\"" and quote != "'":
+            break
+        pos = pos + 1
+
+        # Find closing quote
+        val value_start = pos
+        while pos < len and char_at(attr_str, pos) != quote:
+            pos = pos + 1
+
+        val value = attr_str.slice(value_start, pos)
+        val unescaped = unescape_xml(value)
+        attrs.append((name, unescaped))
+
+        pos = pos + 1
+
+    attrs
+
+# Parse single element
+fn parse_element_node(xml: text, pos: i64) -> tuple:
+    if char_at(xml, pos) != "<":
+        return (nil, pos)
+
+    # Check for special nodes
+    if starts_with_at(xml, "<!--", pos):
+        return parse_comment_node(xml, pos)
+
+    if starts_with_at(xml, "<![CDATA[", pos):
+        return parse_cdata_node(xml, pos)
+
+    val tag_start = pos + 1
+    var tag_end = tag_start
+    val len = xml.len()
+
+    # Find end of opening tag
+    while tag_end < len:
+        val ch = char_at(xml, tag_end)
+        if ch == ">" or ch == "/" or is_whitespace(ch):
+            break
+        tag_end = tag_end + 1
+
+    val tag = xml.slice(tag_start, tag_end)
+
+    # Find end of tag declaration
+    var decl_end = tag_end
+    while decl_end < len and char_at(xml, decl_end) != ">":
+        decl_end = decl_end + 1
+
+    if decl_end >= len:
+        return (nil, pos)
+
+    # Check for self-closing tag
+    val is_self_closing = char_at(xml, decl_end - 1) == "/"
+
+    # Parse attributes
+    val attr_str = xml.slice(tag_end, decl_end)
+    val attrs = parse_attributes(attr_str)
+
+    val elem = create_element(tag)
+    var i = 0
+    val attrs_len = attrs.len()
+    while i < attrs_len:
+        val attr = attrs[i]
+        set_attribute(elem, attr[0], attr[1])
+        i = i + 1
+
+    if is_self_closing:
+        return (elem, decl_end + 1)
+
+    # Parse children
+    var content_pos = decl_end + 1
+    val children = []
+
+    while content_pos < len:
+        content_pos = skip_whitespace(xml, content_pos)
+
+        # Check for closing tag
+        val close_tag = "</" + tag + ">"
+        if starts_with_at(xml, close_tag, content_pos):
+            # Update element with children
+            var j = 0
+            val children_len = children.len()
+            while j < children_len:
+                append_child(elem, children[j])
+                j = j + 1
+            return (elem, content_pos + close_tag.len())
+
+        # Try to parse child element
+        if char_at(xml, content_pos) == "<":
+            val child_result = parse_element_node(xml, content_pos)
+            val child = child_result[0]
+            val new_pos = child_result[1]
+
+            if child != nil:
+                children.append(child)
+                content_pos = new_pos
+                pass
+        else:
+            # Parse text content
+            val text_start = content_pos
+            while content_pos < len and char_at(xml, content_pos) != "<":
+                content_pos = content_pos + 1
+
+            val text_content = xml.slice(text_start, content_pos)
+            val unescaped = unescape_xml(text_content)
+            val text_node = create_text_node(unescaped)
+            children.append(text_node)
+
+    (elem, content_pos)
+
+# Parse complete XML document
+fn parse_xml(xml: text) -> tuple:
+    var pos = 0
+    val len = xml.len()
+
+    val doc = create_document()
+
+    # Skip whitespace
+    pos = skip_whitespace(xml, pos)
+
+    # Try to parse XML declaration
+    val decl_result = parse_xml_declaration(xml, pos)
+    val decl_info = decl_result[0]
+    pos = decl_result[1]
+
+    if decl_info != nil:
+        set_version(doc, decl_info[0])
+        set_encoding(doc, decl_info[1])
+
+    # Skip whitespace
+    pos = skip_whitespace(xml, pos)
+
+    # Parse root element
+    val root_result = parse_element_node(xml, pos)
+    val root = root_result[0]
+
+    if root == nil:
+        return nil
+
+    set_root(doc, root)
+    doc
+
+# ============================================================================
+# XML SERIALIZATION
+# ============================================================================
+
+# Serialize attributes to string
+fn serialize_attributes(attrs: list) -> text:
+    var result = ""
+    var i = 0
+    val len = attrs.len()
+
+    while i < len:
+        val attr = attrs[i]
+        val name = attr[0]
+        val value = attr[1]
+        val escaped = escape_attribute(value)
+        result = result + " " + name + "=\"" + escaped + "\""
+        i = i + 1
+    result
+
+# Serialize node to XML
+fn serialize_node(node: tuple, indent: text) -> text:
+    if node == nil:
+        return ""
+
+    val node_type = node[0]
+
+    if node_type == NODE_TEXT:
+        val content = node[1]
+        return escape_xml(content)
+
+    if node_type == NODE_COMMENT:
+        val content = node[1]
+        return "<!--" + content + "-->"
+
+    if node_type == NODE_CDATA:
+        val content = node[1]
+        return "<![CDATA[" + content + "]]>"
+
+    if node_type == NODE_ELEMENT:
+        val tag = node[1]
+        val attrs = node[2]
+        val children = node[3]
+
+        var result = "<" + tag
+        val attr_str = serialize_attributes(attrs)
+        result = result + attr_str
+
+        val children_len = children.len()
+        if children_len == 0:
+            result = result + " />"
+            return result
+
+        result = result + ">"
+
+        # Serialize children
+        var i = 0
+        while i < children_len:
+            val child_xml = serialize_node(children[i], indent)
+            result = result + child_xml
+            i = i + 1
+
+        result = result + "</" + tag + ">"
+        return result
+
+    ""
+
+# Convert node to XML string
+fn to_xml(node: tuple) -> text:
+    serialize_node(node, "")
+
+# Serialize node with pretty printing
+fn serialize_node_pretty(node: tuple, indent: text, level: i64) -> text:
+    if node == nil:
+        return ""
+
+    val node_type = node[0]
+
+    if node_type == NODE_TEXT:
+        val content = node[1]
+        val trimmed = trim(content)
+        if trimmed == "":
+            return ""
+        return escape_xml(content)
+
+    if node_type == NODE_COMMENT:
+        val content = node[1]
+        return indent + "<!--" + content + "-->\n"
+
+    if node_type == NODE_CDATA:
+        val content = node[1]
+        return indent + "<![CDATA[" + content + "]]>\n"
+
+    if node_type == NODE_ELEMENT:
+        val tag = node[1]
+        val attrs = node[2]
+        val children = node[3]
+
+        var result = indent + "<" + tag
+        val attr_str = serialize_attributes(attrs)
+        result = result + attr_str
+
+        val children_len = children.len()
+        if children_len == 0:
+            result = result + " />\n"
+            return result
+
+        result = result + ">\n"
+
+        # Calculate child indent
+        val child_indent = indent + "  "
+
+        # Serialize children
+        var i = 0
+        while i < children_len:
+            val child_xml = serialize_node_pretty(children[i], child_indent, level + 1)
+            if child_xml != "":
+                result = result + child_xml
+            i = i + 1
+
+        result = result + indent + "</" + tag + ">\n"
+        return result
+
+    ""
+
+# Convert node to pretty XML string
+fn to_xml_pretty(node: tuple, indent_size: i64) -> text:
+    var indent_str = ""
+    var i = 0
+    while i < indent_size:
+        indent_str = indent_str + " "
+        i = i + 1
+
+    serialize_node_pretty(node, "", 0)
+
+# Serialize complete document
+fn serialize_document(doc: tuple) -> text:
+    if not is_document(doc):
+        return ""
+
+    val version = get_version(doc)
+    val encoding = get_encoding(doc)
+    val root = get_root(doc)
+
+    var result = "<?xml version=\"" + version + "\" encoding=\"" + encoding + "\"?>\n"
+
+    val root_xml = to_xml(root)
+    result = result + root_xml
+    result
+
+# Serialize document with pretty printing
+fn serialize_document_pretty(doc: tuple, indent_size: i64) -> text:
+    if not is_document(doc):
+        return ""
+
+    val version = get_version(doc)
+    val encoding = get_encoding(doc)
+    val root = get_root(doc)
+
+    var result = "<?xml version=\"" + version + "\" encoding=\"" + encoding + "\"?>\n"
+
+    val root_xml = to_xml_pretty(root, indent_size)
+    result = result + root_xml
+    result
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================================
+
+# Build element with text content
+fn build_element(tag: text, text: text) -> tuple:
+    val elem = create_element(tag)
+    val text_node = create_text_node(text)
+    append_child(elem, text_node)
+    elem
+
+# Build element with attributes
+fn build_element_with_attrs(tag: text, attrs: list) -> tuple:
+    val elem = create_element(tag)
+    var i = 0
+    val len = attrs.len()
+    while i < len:
+        val attr = attrs[i]
+        set_attribute(elem, attr[0], attr[1])
+        i = i + 1
+    elem
+
+# Quick parse from string and get root
+fn parse_element(xml: text) -> tuple:
+    val doc = parse_xml(xml)
+    if doc == nil:
+        return nil
+    get_root(doc)
