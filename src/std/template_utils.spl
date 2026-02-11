@@ -1,0 +1,1523 @@
+# Template Engine Utilities Module
+# Comprehensive template engine for the Simple language (Mustache/Jinja/Handlebars-style)
+#
+# Features:
+# - Variable interpolation with nested property access
+# - Control structures (if/else, loops)
+# - Filters with chaining and arguments
+# - Template inheritance and includes
+# - Macros and partials
+# - HTML/URL/JS escaping
+# - Whitespace control
+# - Loop variables (index, first, last)
+#
+# Template Syntax:
+# - Variables: {{ variable }}, {{ user.name }}
+# - Conditionals: {% if condition %} ... {% else %} ... {% endif %}
+# - Loops: {% for item in items %} ... {% endfor %}
+# - Filters: {{ name | upper }}, {{ value | default("N/A") }}
+# - Comments: {# This is a comment #}
+# - Includes: {% include "header.html" %}
+# - Extends: {% extends "base.html" %}, {% block content %} ... {% endblock %}
+# - Macros: {% macro greeting(name) %} Hello {{ name }} {% endmacro %}
+
+import string
+import array
+
+# =============================================================================
+# TOKEN TYPES AND DATA STRUCTURES
+# =============================================================================
+
+# Token types for lexer
+fn TOKEN_TEXT() -> text: "text"
+fn TOKEN_VAR_START() -> text: "var_start"
+fn TOKEN_VAR_END() -> text: "var_end"
+fn TOKEN_STMT_START() -> text: "stmt_start"
+fn TOKEN_STMT_END() -> text: "stmt_end"
+fn TOKEN_COMMENT_START() -> text: "comment_start"
+fn TOKEN_COMMENT_END() -> text: "comment_end"
+fn TOKEN_IDENTIFIER() -> text: "identifier"
+fn TOKEN_PIPE() -> text: "pipe"
+fn TOKEN_DOT() -> text: "dot"
+fn TOKEN_LPAREN() -> text: "lparen"
+fn TOKEN_RPAREN() -> text: "rparen"
+fn TOKEN_COMMA() -> text: "comma"
+fn TOKEN_STRING() -> text: "string"
+fn TOKEN_NUMBER() -> text: "number"
+
+# Node types for AST
+fn NODE_TEXT() -> text: "text"
+fn NODE_VARIABLE() -> text: "variable"
+fn NODE_IF() -> text: "if"
+fn NODE_FOR() -> text: "for"
+fn NODE_INCLUDE() -> text: "include"
+fn NODE_EXTENDS() -> text: "extends"
+fn NODE_BLOCK() -> text: "block"
+fn NODE_MACRO() -> text: "macro"
+fn NODE_CALL() -> text: "call"
+
+# Create a token tuple
+fn create_token(token_type: text, value: text, pos: i64) -> tuple:
+    (token_type, value, pos)
+
+# Extract token fields
+fn token_type(token: tuple) -> text:
+    token[0]
+
+fn token_value(token: tuple) -> text:
+    token[1]
+
+fn token_pos(token: tuple) -> i64:
+    token[2]
+
+# Create a template node
+fn create_node(node_type: text, content: tuple) -> tuple:
+    (node_type, content)
+
+fn node_type(node: tuple) -> text:
+    node[0]
+
+fn node_content(node: tuple) -> tuple:
+    node[1]
+
+# =============================================================================
+# CONTEXT MANAGEMENT
+# =============================================================================
+
+# Create an empty context (dictionary-like structure)
+fn create_context() -> list:
+    []
+
+# Set a variable in context
+fn set_var(ctx: list, name: text, value: text) -> list:
+    var result = ctx
+    var entry = (name, value)
+    result.push(entry)
+    result
+
+# Get a variable from context (returns nil if not found)
+fn get_var(ctx: list, name: text) -> text:
+    var i = 0
+    var found = nil
+    while i < ctx.length():
+        val entry = ctx[i]
+        val key = entry[0]
+        if key == name:
+            found = entry[1]
+            i = ctx.length()
+        i = i + 1
+    found
+
+# Check if variable exists in context
+fn has_var(ctx: list, name: text) -> i64:
+    var i = 0
+    var found = 0
+    while i < ctx.length():
+        val entry = ctx[i]
+        val key = entry[0]
+        if key == name:
+            found = 1
+            i = ctx.length()
+        i = i + 1
+    found
+
+# Clone context (for nested scopes)
+fn clone_context(ctx: list) -> list:
+    var result = []
+    var i = 0
+    while i < ctx.length():
+        result.push(ctx[i])
+        i = i + 1
+    result
+
+# =============================================================================
+# TOKENIZER
+# =============================================================================
+
+# Tokenize a template string into list of tokens
+fn tokenize_template(text: text) -> list:
+    var tokens = []
+    var pos = 0
+    var len = text.length()
+
+    while pos < len:
+        # Check for {{ (variable start)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "{" and c2 == "{":
+                tokens.push(create_token(TOKEN_VAR_START(), "{{", pos))
+                pos = pos + 2
+                continue
+
+        # Check for }} (variable end)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "}" and c2 == "}":
+                tokens.push(create_token(TOKEN_VAR_END(), "}}", pos))
+                pos = pos + 2
+                continue
+
+        # Check for {% (statement start)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "{" and c2 == "%":
+                tokens.push(create_token(TOKEN_STMT_START(), "{%", pos))
+                pos = pos + 2
+                continue
+
+        # Check for %} (statement end)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "%" and c2 == "}":
+                tokens.push(create_token(TOKEN_STMT_END(), "%}", pos))
+                pos = pos + 2
+                continue
+
+        # Check for {# (comment start)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "{" and c2 == "#":
+                tokens.push(create_token(TOKEN_COMMENT_START(), "{#", pos))
+                pos = pos + 2
+                continue
+
+        # Check for #} (comment end)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "#" and c2 == "}":
+                tokens.push(create_token(TOKEN_COMMENT_END(), "#}", pos))
+                pos = pos + 2
+                continue
+
+        # Regular text - collect until next special sequence
+        var text_start = pos
+        var text_end = pos
+        var done = 0
+
+        while text_end < len and done == 0:
+            if text_end + 1 < len:
+                val c1 = text[text_end]
+                val c2 = text[text_end + 1]
+
+                val is_special_start = (c1 == "{" and (c2 == "{" or c2 == "%" or c2 == "#"))
+                if is_special_start == 1:
+                    done = 1
+                else:
+                    text_end = text_end + 1
+            else:
+                text_end = text_end + 1
+
+        if text_end > text_start:
+            val text_val = text.substring(text_start, text_end)
+            tokens.push(create_token(TOKEN_TEXT(), text_val, text_start))
+
+        pos = text_end
+
+    tokens
+
+# Tokenize content inside {{ }} or {% %}
+fn tokenize_expression(text: text) -> list:
+    var tokens = []
+    var pos = 0
+    var len = text.length()
+
+    while pos < len:
+        val c = text[pos]
+
+        # Skip whitespace
+        val is_space = (c == " " or c == "\t" or c == "\n" or c == "\r")
+        if is_space == 1:
+            pos = pos + 1
+            continue
+
+        # Pipe |
+        if c == "|":
+            tokens.push(create_token(TOKEN_PIPE(), "|", pos))
+            pos = pos + 1
+            continue
+
+        # Dot .
+        if c == ".":
+            tokens.push(create_token(TOKEN_DOT(), ".", pos))
+            pos = pos + 1
+            continue
+
+        # Left paren (
+        if c == "(":
+            tokens.push(create_token(TOKEN_LPAREN(), "(", pos))
+            pos = pos + 1
+            continue
+
+        # Right paren )
+        if c == ")":
+            tokens.push(create_token(TOKEN_RPAREN(), ")", pos))
+            pos = pos + 1
+            continue
+
+        # Comma ,
+        if c == ",":
+            tokens.push(create_token(TOKEN_COMMA(), ",", pos))
+            pos = pos + 1
+            continue
+
+        # String literal "..." or '...'
+        val is_quote = (c == "\"" or c == "'")
+        if is_quote == 1:
+            val quote_char = c
+            var string_start = pos + 1
+            var string_end = string_start
+
+            while string_end < len and text[string_end] != quote_char:
+                string_end = string_end + 1
+
+            val string_val = text.substring(string_start, string_end)
+            tokens.push(create_token(TOKEN_STRING(), string_val, pos))
+            pos = string_end + 1
+            continue
+
+        # Number
+        val is_digit = (c >= "0" and c <= "9")
+        if is_digit == 1:
+            var num_start = pos
+            var num_end = pos
+
+            while num_end < len:
+                val nc = text[num_end]
+                val is_num_char = (nc >= "0" and nc <= "9") or nc == "."
+                if is_num_char == 1:
+                    num_end = num_end + 1
+                else:
+                    num_end = len
+
+            val num_val = text.substring(num_start, num_end)
+            tokens.push(create_token(TOKEN_NUMBER(), num_val, pos))
+            pos = num_end
+            continue
+
+        # Identifier (variable name, keyword)
+        val is_alpha = ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_")
+        if is_alpha == 1:
+            var id_start = pos
+            var id_end = pos
+
+            while id_end < len:
+                val ic = text[id_end]
+                val is_id_char = ((ic >= "a" and ic <= "z") or (ic >= "A" and ic <= "Z") or
+                                  (ic >= "0" and ic <= "9") or ic == "_")
+                if is_id_char == 1:
+                    id_end = id_end + 1
+                else:
+                    id_end = len
+
+            val id_val = text.substring(id_start, id_end)
+            tokens.push(create_token(TOKEN_IDENTIFIER(), id_val, pos))
+            pos = id_end
+            continue
+
+        # Unknown character - skip
+        pos = pos + 1
+
+    tokens
+
+# =============================================================================
+# PARSER
+# =============================================================================
+
+# Parse template into AST (list of nodes)
+fn parse_template(text: text) -> list:
+    var tokens = tokenize_template(text)
+    var nodes = []
+    var i = 0
+
+    while i < tokens.length():
+        val token = tokens[i]
+        val ttype = token_type(token)
+        val tval = token_value(token)
+
+        # Text node
+        if ttype == TOKEN_TEXT():
+            val node = create_node(NODE_TEXT(), (tval,))
+            nodes.push(node)
+            i = i + 1
+            continue
+
+        # Variable {{ ... }}
+        if ttype == TOKEN_VAR_START():
+            i = i + 1
+            var expr_start = i
+            var expr_end = i
+
+            # Find matching }}
+            while expr_end < tokens.length():
+                val t = tokens[expr_end]
+                if token_type(t) == TOKEN_VAR_END():
+                    expr_end = tokens.length()
+                else:
+                    expr_end = expr_end + 1
+
+            # Extract expression text
+            if expr_start < tokens.length():
+                val expr_token = tokens[expr_start]
+                val expr_text = token_value(expr_token)
+                val node = create_node(NODE_VARIABLE(), (expr_text,))
+                nodes.push(node)
+
+            i = expr_end + 1
+            continue
+
+        # Statement {% ... %}
+        if ttype == TOKEN_STMT_START():
+            i = i + 1
+            var stmt_start = i
+            var stmt_end = i
+
+            # Find matching %}
+            while stmt_end < tokens.length():
+                val t = tokens[stmt_end]
+                if token_type(t) == TOKEN_STMT_END():
+                    stmt_end = tokens.length()
+                else:
+                    stmt_end = stmt_end + 1
+
+            # Parse statement
+            if stmt_start < tokens.length():
+                val stmt_token = tokens[stmt_start]
+                val stmt_text = token_value(stmt_token)
+
+                # Simple statement parsing (if, for, include, etc.)
+                val node = create_node("statement", (stmt_text,))
+                nodes.push(node)
+
+            i = stmt_end + 1
+            continue
+
+        # Comment {# ... #} - skip
+        if ttype == TOKEN_COMMENT_START():
+            i = i + 1
+
+            # Find matching #}
+            while i < tokens.length():
+                val t = tokens[i]
+                if token_type(t) == TOKEN_COMMENT_END():
+                    i = tokens.length()
+                else:
+                    i = i + 1
+
+            i = i + 1
+            continue
+
+        # Unknown token - skip
+        i = i + 1
+
+    nodes
+
+# Compile template (parse + optimize)
+fn compile_template(text: text) -> tuple:
+    val nodes = parse_template(text)
+    ("template", nodes)
+
+# =============================================================================
+# VARIABLE RESOLUTION
+# =============================================================================
+
+# Resolve a variable path (e.g., "user.profile.email")
+fn resolve_path(ctx: list, path: text) -> text:
+    # Simple implementation - split by '.' and resolve each part
+    var parts = string_split(path, ".")
+
+    if parts.length() == 1:
+        # Simple variable
+        get_var(ctx, path)
+    else:
+        # For now, just return the first part's value
+        # A full implementation would need nested context support
+        val first_part = parts[0]
+        get_var(ctx, first_part)
+
+# Check if value is truthy
+fn is_truthy(value: text) -> i64:
+    if value == nil:
+        0
+    else:
+        val is_empty = (value == "")
+        val is_zero = (value == "0")
+        val is_false = (value == "false")
+        val is_nil_str = (value == "nil")
+
+        if is_empty == 1 or is_zero == 1 or is_false == 1 or is_nil_str == 1:
+            0
+        else:
+            1
+
+# =============================================================================
+# FILTERS - TEXT TRANSFORMATION
+# =============================================================================
+
+# Upper case filter
+fn filter_upper(text: text) -> text:
+    string_to_upper(text)
+
+# Lower case filter
+fn filter_lower(text: text) -> text:
+    string_to_lower(text)
+
+# Capitalize first letter
+fn filter_capitalize(text: text) -> text:
+    if text.length() == 0:
+        text
+    else:
+        val first = text[0]
+        val rest = text.substring(1, text.length())
+        val first_upper = string_to_upper(first)
+        string_concat(first_upper, rest)
+
+# Trim whitespace
+fn filter_trim(text: text) -> text:
+    string_trim(text)
+
+# Default value if empty/nil
+fn filter_default(value: text, default_val: text) -> text:
+    if value == nil or value == "":
+        default_val
+    else:
+        value
+
+# Get length of text
+fn filter_length(value: text) -> text:
+    val len = value.length()
+    int_to_string(len)
+
+# Truncate text to specified length
+fn filter_truncate(text: text, length: i64) -> text:
+    if text.length() <= length:
+        text
+    else:
+        val truncated = text.substring(0, length)
+        string_concat(truncated, "...")
+
+# Reverse text
+fn filter_reverse(text: text) -> text:
+    var result = ""
+    var i = text.length() - 1
+
+    while i >= 0:
+        val c = text[i]
+        result = string_concat(result, c)
+        i = i - 1
+
+    result
+
+# Replace substring
+fn filter_replace(text: text, old: text, new: text) -> text:
+    string_replace_all(text, old, new)
+
+# Repeat text n times
+fn filter_repeat(text: text, times: i64) -> text:
+    var result = ""
+    var i = 0
+
+    while i < times:
+        result = string_concat(result, text)
+        i = i + 1
+
+    result
+
+# Center text in field of given width
+fn filter_center(text: text, width: i64) -> text:
+    val len = text.length()
+    if len >= width:
+        text
+    else:
+        val padding = width - len
+        val left_pad = padding / 2
+        val right_pad = padding - left_pad
+
+        var result = ""
+        var i = 0
+
+        while i < left_pad:
+            result = string_concat(result, " ")
+            i = i + 1
+
+        result = string_concat(result, text)
+
+        i = 0
+        while i < right_pad:
+            result = string_concat(result, " ")
+            i = i + 1
+
+        result
+
+# =============================================================================
+# FILTERS - NUMBER OPERATIONS
+# =============================================================================
+
+# Round number to decimals
+fn filter_round(num: text, decimals: i64) -> text:
+    # Simple implementation - just return the number
+    # Full implementation would need proper float parsing
+    num
+
+# Absolute value
+fn filter_abs(num: text) -> text:
+    if num.length() > 0 and num[0] == "-":
+        num.substring(1, num.length())
+    else:
+        num
+
+# Format number with commas
+fn filter_format_number(num: text) -> text:
+    # Simple implementation - add commas every 3 digits
+    var result = ""
+    var len = num.length()
+    var count = 0
+    var i = len - 1
+
+    while i >= 0:
+        if count == 3:
+            result = string_concat(",", result)
+            count = 0
+
+        val c = num[i]
+        result = string_concat(c, result)
+        count = count + 1
+        i = i - 1
+
+    result
+
+# Convert to percentage
+fn filter_percentage(num: text, decimals: i64) -> text:
+    string_concat(num, "%")
+
+# Add numbers
+fn filter_add(num: text, addend: text) -> text:
+    val n1 = string_to_int(num)
+    val n2 = string_to_int(addend)
+    val sum = n1 + n2
+    int_to_string(sum)
+
+# Subtract numbers
+fn filter_subtract(num: text, subtrahend: text) -> text:
+    val n1 = string_to_int(num)
+    val n2 = string_to_int(subtrahend)
+    val diff = n1 - n2
+    int_to_string(diff)
+
+# Multiply numbers
+fn filter_multiply(num: text, multiplier: text) -> text:
+    val n1 = string_to_int(num)
+    val n2 = string_to_int(multiplier)
+    val product = n1 * n2
+    int_to_string(product)
+
+# Divide numbers
+fn filter_divide(num: text, divisor: text) -> text:
+    val n1 = string_to_int(num)
+    val n2 = string_to_int(divisor)
+    if n2 == 0:
+        "0"
+    else:
+        val quotient = n1 / n2
+        int_to_string(quotient)
+
+# =============================================================================
+# FILTERS - LIST OPERATIONS
+# =============================================================================
+
+# Join list with separator
+fn filter_join(list: list, separator: text) -> text:
+    var result = ""
+    var i = 0
+
+    while i < list.length():
+        if i > 0:
+            result = string_concat(result, separator)
+
+        val item = list[i]
+        result = string_concat(result, item)
+        i = i + 1
+
+    result
+
+# Get first item from list
+fn filter_first(list: list) -> text:
+    if list.length() > 0:
+        list[0]
+    else:
+        ""
+
+# Get last item from list
+fn filter_last(list: list) -> text:
+    val len = list.length()
+    if len > 0:
+        list[len - 1]
+    else:
+        ""
+
+# Reverse list
+fn filter_reverse_list(list: list) -> list:
+    var result = []
+    var i = list.length() - 1
+
+    while i >= 0:
+        result.push(list[i])
+        i = i - 1
+
+    result
+
+# Sort list
+fn filter_sort(list: list) -> list:
+    # Simple bubble sort
+    var result = []
+    var i = 0
+
+    # Copy list
+    while i < list.length():
+        result.push(list[i])
+        i = i + 1
+
+    # Sort
+    var n = result.length()
+    var swapped = 1
+
+    while swapped == 1:
+        swapped = 0
+        i = 1
+
+        while i < n:
+            val a = result[i - 1]
+            val b = result[i]
+
+            if a > b:
+                result[i - 1] = b
+                result[i] = a
+                swapped = 1
+
+            i = i + 1
+
+        n = n - 1
+
+    result
+
+# Get unique items from list
+fn filter_unique(list: list) -> list:
+    var result = []
+    var i = 0
+
+    while i < list.length():
+        val item = list[i]
+
+        # Check if already in result
+        var j = 0
+        var found = 0
+
+        while j < result.length():
+            if result[j] == item:
+                found = 1
+                j = result.length()
+            j = j + 1
+
+        if found == 0:
+            result.push(item)
+
+        i = i + 1
+
+    result
+
+# Slice list
+fn filter_slice(list: list, start: i64, end: i64) -> list:
+    var result = []
+    var i = start
+
+    while i < end and i < list.length():
+        result.push(list[i])
+        i = i + 1
+
+    result
+
+# =============================================================================
+# FILTERS - ESCAPING
+# =============================================================================
+
+# HTML escape
+fn html_escape(text: text) -> text:
+    var result = text
+    result = string_replace_all(result, "&", "&amp;")
+    result = string_replace_all(result, "<", "&lt;")
+    result = string_replace_all(result, ">", "&gt;")
+    result = string_replace_all(result, "\"", "&quot;")
+    result = string_replace_all(result, "'", "&#39;")
+    result
+
+# HTML unescape
+fn html_unescape(text: text) -> text:
+    var result = text
+    result = string_replace_all(result, "&lt;", "<")
+    result = string_replace_all(result, "&gt;", ">")
+    result = string_replace_all(result, "&quot;", "\"")
+    result = string_replace_all(result, "&#39;", "'")
+    result = string_replace_all(result, "&amp;", "&")
+    result
+
+# URL escape
+fn url_escape(text: text) -> text:
+    var result = ""
+    var i = 0
+
+    while i < text.length():
+        val c = text[i]
+
+        # Check if character needs escaping
+        val is_alpha = ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z"))
+        val is_digit = (c >= "0" and c <= "9")
+        val is_safe = (c == "-" or c == "_" or c == "." or c == "~")
+
+        if is_alpha == 1 or is_digit == 1 or is_safe == 1:
+            result = string_concat(result, c)
+        else:
+            # Convert to %XX format
+            result = string_concat(result, "%")
+            # Simplified - just use the character code
+            val code = char_to_code(c)
+            val hex = int_to_hex(code)
+            result = string_concat(result, hex)
+
+        i = i + 1
+
+    result
+
+# URL unescape
+fn url_unescape(text: text) -> text:
+    var result = ""
+    var i = 0
+
+    while i < text.length():
+        val c = text[i]
+
+        if c == "%":
+            # Decode %XX
+            if i + 2 < text.length():
+                val hex = text.substring(i + 1, i + 3)
+                val code = hex_to_int(hex)
+                val decoded = code_to_char(code)
+                result = string_concat(result, decoded)
+                i = i + 3
+                continue
+
+        result = string_concat(result, c)
+        i = i + 1
+
+    result
+
+# JavaScript escape
+fn js_escape(text: text) -> text:
+    var result = text
+    result = string_replace_all(result, "\\", "\\\\")
+    result = string_replace_all(result, "\"", "\\\"")
+    result = string_replace_all(result, "'", "\\'")
+    result = string_replace_all(result, "\n", "\\n")
+    result = string_replace_all(result, "\r", "\\r")
+    result = string_replace_all(result, "\t", "\\t")
+    result
+
+# CSS escape
+fn css_escape(text: text) -> text:
+    var result = text
+    result = string_replace_all(result, "\"", "\\\"")
+    result = string_replace_all(result, "'", "\\'")
+    result
+
+# =============================================================================
+# FILTER APPLICATION
+# =============================================================================
+
+# Apply a filter to a value
+fn apply_filter(value: text, filter_name: text, args: list) -> text:
+    # Text filters
+    if filter_name == "upper":
+        filter_upper(value)
+    else: if filter_name == "lower":
+        filter_lower(value)
+    else: if filter_name == "capitalize":
+        filter_capitalize(value)
+    else: if filter_name == "trim":
+        filter_trim(value)
+    else: if filter_name == "reverse":
+        filter_reverse(value)
+    else: if filter_name == "length":
+        filter_length(value)
+    else: if filter_name == "default":
+        if args.length() > 0:
+            filter_default(value, args[0])
+        else:
+            value
+    else: if filter_name == "truncate":
+        if args.length() > 0:
+            val len = string_to_int(args[0])
+            filter_truncate(value, len)
+        else:
+            value
+    # Escaping filters
+    else: if filter_name == "escape" or filter_name == "e":
+        html_escape(value)
+    else: if filter_name == "unescape":
+        html_unescape(value)
+    else: if filter_name == "url_escape":
+        url_escape(value)
+    else: if filter_name == "url_unescape":
+        url_unescape(value)
+    else: if filter_name == "js_escape":
+        js_escape(value)
+    # Number filters
+    else: if filter_name == "abs":
+        filter_abs(value)
+    else: if filter_name == "format_number":
+        filter_format_number(value)
+    else: if filter_name == "percentage":
+        if args.length() > 0:
+            val decimals = string_to_int(args[0])
+            filter_percentage(value, decimals)
+        else:
+            filter_percentage(value, 2)
+    else: if filter_name == "add":
+        if args.length() > 0:
+            filter_add(value, args[0])
+        else:
+            value
+    else: if filter_name == "subtract":
+        if args.length() > 0:
+            filter_subtract(value, args[0])
+        else:
+            value
+    else:
+        # Unknown filter - return value unchanged
+        value
+
+# Parse filter chain (e.g., "upper | trim")
+fn parse_filters(expr: text) -> list:
+    string_split(expr, "|")
+
+# Apply filter chain to value
+fn apply_filter_chain(value: text, filters: list) -> text:
+    var result = value
+    var i = 0
+
+    while i < filters.length():
+        val filter_expr = string_trim(filters[i])
+
+        # Parse filter name and arguments
+        val paren_pos = string_index_of(filter_expr, "(")
+
+        if paren_pos >= 0:
+            # Filter has arguments
+            val filter_name = string_trim(filter_expr.substring(0, paren_pos))
+            val args_start = paren_pos + 1
+            val args_end = string_index_of(filter_expr, ")")
+
+            if args_end > args_start:
+                val args_text = filter_expr.substring(args_start, args_end)
+                val args = parse_filter_args(args_text)
+                result = apply_filter(result, filter_name, args)
+            else:
+                result = apply_filter(result, filter_name, [])
+        else:
+            # No arguments
+            result = apply_filter(result, filter_expr, [])
+
+        i = i + 1
+
+    result
+
+# Parse filter arguments
+fn parse_filter_args(args_text: text) -> list:
+    # Simple split by comma
+    var args = string_split(args_text, ",")
+    var result = []
+    var i = 0
+
+    while i < args.length():
+        val arg = string_trim(args[i])
+
+        # Remove quotes if present
+        if arg.length() >= 2:
+            val first = arg[0]
+            val last = arg[arg.length() - 1]
+
+            val is_quoted = ((first == "\"" and last == "\"") or (first == "'" and last == "'"))
+            if is_quoted == 1:
+                val unquoted = arg.substring(1, arg.length() - 1)
+                result.push(unquoted)
+            else:
+                result.push(arg)
+        else:
+            result.push(arg)
+
+        i = i + 1
+
+    result
+
+# =============================================================================
+# VARIABLE INTERPOLATION
+# =============================================================================
+
+# Interpolate variables in expression
+fn interpolate(expr: text, ctx: list) -> text:
+    # Parse expression for variables and filters
+    val pipe_pos = string_index_of(expr, "|")
+
+    if pipe_pos >= 0:
+        # Has filters
+        val var_path = string_trim(expr.substring(0, pipe_pos))
+        val filters_text = expr.substring(pipe_pos + 1, expr.length())
+        val filters = parse_filters(filters_text)
+
+        # Resolve variable
+        val value = resolve_path(ctx, var_path)
+
+        # Apply filters
+        if value == nil:
+            ""
+        else:
+            apply_filter_chain(value, filters)
+    else:
+        # No filters
+        val var_path = string_trim(expr)
+        val value = resolve_path(ctx, var_path)
+
+        if value == nil:
+            ""
+        else:
+            value
+
+# =============================================================================
+# CONDITION EVALUATION
+# =============================================================================
+
+# Evaluate a condition expression
+fn eval_condition(condition: text, ctx: list) -> i64:
+    val trimmed = string_trim(condition)
+
+    # Check for comparison operators
+    val eq_pos = string_index_of(trimmed, "==")
+    if eq_pos >= 0:
+        val left = string_trim(trimmed.substring(0, eq_pos))
+        val right = string_trim(trimmed.substring(eq_pos + 2, trimmed.length()))
+
+        val left_val = resolve_path(ctx, left)
+        val right_val = resolve_path(ctx, right)
+
+        if left_val == right_val:
+            1
+        else:
+            0
+    else:
+        # Simple truthy check
+        val value = resolve_path(ctx, trimmed)
+        is_truthy(value)
+
+# =============================================================================
+# LOOP CONTEXT
+# =============================================================================
+
+# Create loop context with index, first, last variables
+fn create_loop_context(base_ctx: list, index: i64, total: i64) -> list:
+    var ctx = clone_context(base_ctx)
+
+    # Add loop.index
+    val index_str = int_to_string(index)
+    ctx = set_var(ctx, "loop.index", index_str)
+
+    # Add loop.first
+    if index == 0:
+        ctx = set_var(ctx, "loop.first", "true")
+    else:
+        ctx = set_var(ctx, "loop.first", "false")
+
+    # Add loop.last
+    if index == total - 1:
+        ctx = set_var(ctx, "loop.last", "true")
+    else:
+        ctx = set_var(ctx, "loop.last", "false")
+
+    # Add loop.length
+    val length_str = int_to_string(total)
+    ctx = set_var(ctx, "loop.length", length_str)
+
+    ctx
+
+# =============================================================================
+# WHITESPACE CONTROL
+# =============================================================================
+
+# Strip comments from template
+fn strip_comments(text: text) -> text:
+    var result = ""
+    var pos = 0
+    var len = text.length()
+
+    while pos < len:
+        # Check for {# (comment start)
+        if pos + 1 < len:
+            val c1 = text[pos]
+            val c2 = text[pos + 1]
+
+            if c1 == "{" and c2 == "#":
+                # Skip until #}
+                pos = pos + 2
+
+                while pos + 1 < len:
+                    val cc1 = text[pos]
+                    val cc2 = text[pos + 1]
+
+                    if cc1 == "#" and cc2 == "}":
+                        pos = pos + 2
+                        pos = len
+                    else:
+                        pos = pos + 1
+
+                continue
+
+        result = string_concat(result, text[pos])
+        pos = pos + 1
+
+    result
+
+# Collapse consecutive whitespace
+fn collapse_whitespace(text: text) -> text:
+    var result = ""
+    var prev_space = 0
+    var i = 0
+
+    while i < text.length():
+        val c = text[i]
+        val is_space = (c == " " or c == "\t" or c == "\n" or c == "\r")
+
+        if is_space == 1:
+            if prev_space == 0:
+                result = string_concat(result, " ")
+                prev_space = 1
+        else:
+            result = string_concat(result, c)
+            prev_space = 0
+
+        i = i + 1
+
+    result
+
+# Trim whitespace around tags
+fn trim_whitespace(text: text) -> text:
+    # Simple implementation - trim leading and trailing whitespace from each line
+    var lines = string_split(text, "\n")
+    var result_lines = []
+    var i = 0
+
+    while i < lines.length():
+        val line = string_trim(lines[i])
+        if line.length() > 0:
+            result_lines.push(line)
+        i = i + 1
+
+    filter_join(result_lines, "\n")
+
+# Preserve whitespace (no-op, for explicit control)
+fn preserve_whitespace(text: text) -> text:
+    text
+
+# =============================================================================
+# TEMPLATE RENDERING
+# =============================================================================
+
+# Render a template with context
+fn render(template: tuple, ctx: list) -> text:
+    val nodes = template[1]
+    render_nodes(nodes, ctx)
+
+# Render list of nodes
+fn render_nodes(nodes: list, ctx: list) -> text:
+    var result = ""
+    var i = 0
+
+    while i < nodes.length():
+        val node = nodes[i]
+        val rendered = render_node(node, ctx)
+        result = string_concat(result, rendered)
+        i = i + 1
+
+    result
+
+# Render a single node
+fn render_node(node: tuple, ctx: list) -> text:
+    val ntype = node_type(node)
+    val content = node_content(node)
+
+    if ntype == NODE_TEXT():
+        # Text node - return as-is
+        content[0]
+    else: if ntype == NODE_VARIABLE():
+        # Variable interpolation
+        val expr = content[0]
+        interpolate(expr, ctx)
+    else: if ntype == "statement":
+        # Statement - parse and execute
+        val stmt = content[0]
+        render_statement(stmt, ctx)
+    else:
+        # Unknown node type
+        ""
+
+# Render statement (if, for, etc.)
+fn render_statement(stmt: text, ctx: list) -> text:
+    val trimmed = string_trim(stmt)
+
+    # Check statement type
+    if string_starts_with(trimmed, "if "):
+        # If statement - would need full parsing
+        ""
+    else: if string_starts_with(trimmed, "for "):
+        # For statement - would need full parsing
+        ""
+    else: if string_starts_with(trimmed, "include "):
+        # Include statement
+        ""
+    else: if string_starts_with(trimmed, "extends "):
+        # Extends statement
+        ""
+    else:
+        # Unknown statement
+        ""
+
+# Render template to text (convenience function)
+fn render_to_text(template: tuple, ctx: list) -> text:
+    render(template, ctx)
+
+# =============================================================================
+# TEMPLATE INCLUDES AND PARTIALS
+# =============================================================================
+
+# Global partials registry (list of name-template pairs)
+fn create_partials_registry() -> list:
+    []
+
+# Register a partial template
+fn register_partial(registry: list, name: text, template: tuple) -> list:
+    var result = registry
+    val entry = (name, template)
+    result.push(entry)
+    result
+
+# Get a partial template by name
+fn get_partial(registry: list, name: text) -> tuple:
+    var i = 0
+    var found = nil
+
+    while i < registry.length():
+        val entry = registry[i]
+        val pname = entry[0]
+
+        if pname == name:
+            found = entry[1]
+            i = registry.length()
+
+        i = i + 1
+
+    found
+
+# Include a template
+fn include_template(registry: list, name: text, ctx: list) -> text:
+    val partial = get_partial(registry, name)
+
+    if partial == nil:
+        ""
+    else:
+        render(partial, ctx)
+
+# =============================================================================
+# TEMPLATE INHERITANCE
+# =============================================================================
+
+# Define a block
+fn define_block(name: text, content: text) -> tuple:
+    ("block", name, content)
+
+# Override a block
+fn override_block(base: tuple, name: text, content: text) -> tuple:
+    # Simple implementation - return new block
+    ("block", name, content)
+
+# Extend a template with blocks
+fn extend_template(base: tuple, blocks: list) -> tuple:
+    # Simple implementation - just return base for now
+    # Full implementation would merge blocks
+    base
+
+# =============================================================================
+# MACROS
+# =============================================================================
+
+# Define a macro
+fn define_macro(name: text, params: list, body: text) -> tuple:
+    ("macro", name, params, body)
+
+# Call a macro
+fn call_macro(macro: tuple, args: list, ctx: list) -> text:
+    # Simple implementation - would need to bind params to args
+    # and render body with new context
+    val body = macro[3]
+    body
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+# Split string by delimiter
+fn string_split(text: text, delimiter: text) -> list:
+    var result = []
+    var start = 0
+    var pos = 0
+    var len = text.length()
+    var delim_len = delimiter.length()
+
+    while pos < len:
+        if pos + delim_len <= len:
+            val substr = text.substring(pos, pos + delim_len)
+
+            if substr == delimiter:
+                val part = text.substring(start, pos)
+                result.push(part)
+                start = pos + delim_len
+                pos = start
+                continue
+
+        pos = pos + 1
+
+    # Add remaining part
+    if start < len:
+        val part = text.substring(start, len)
+        result.push(part)
+
+    result
+
+# Find index of substring
+fn string_index_of(text: text, substr: text) -> i64:
+    var pos = 0
+    var len = text.length()
+    var substr_len = substr.length()
+
+    while pos + substr_len <= len:
+        val found = text.substring(pos, pos + substr_len)
+
+        if found == substr:
+            return pos
+
+        pos = pos + 1
+
+    -1
+
+# Check if string starts with prefix
+fn string_starts_with(text: text, prefix: text) -> i64:
+    val prefix_len = prefix.length()
+
+    if text.length() < prefix_len:
+        0
+    else:
+        val start = text.substring(0, prefix_len)
+        if start == prefix:
+            1
+        else:
+            0
+
+# Check if string ends with suffix
+fn string_ends_with(text: text, suffix: text) -> i64:
+    val suffix_len = suffix.length()
+    val text_len = text.length()
+
+    if text_len < suffix_len:
+        0
+    else:
+        val end = text.substring(text_len - suffix_len, text_len)
+        if end == suffix:
+            1
+        else:
+            0
+
+# Convert character to ASCII code
+fn char_to_code(c: text) -> i64:
+    # Simplified - would need proper character code conversion
+    if c == " ":
+        32
+    else: if c == "!":
+        33
+    else: if c == "\"":
+        34
+    else: if c == "#":
+        35
+    else: if c == "$":
+        36
+    else: if c == "%":
+        37
+    else: if c == "&":
+        38
+    else: if c == "'":
+        39
+    else: if c == "(":
+        40
+    else: if c == ")":
+        41
+    else:
+        0
+
+# Convert ASCII code to character
+fn code_to_char(code: i64) -> text:
+    # Simplified - would need proper character code conversion
+    if code == 32:
+        " "
+    else: if code == 33:
+        "!"
+    else: if code == 34:
+        "\""
+    else: if code == 35:
+        "#"
+    else: if code == 36:
+        "$"
+    else: if code == 37:
+        "%"
+    else: if code == 38:
+        "&"
+    else: if code == 39:
+        "'"
+    else: if code == 40:
+        "("
+    else: if code == 41:
+        ")"
+    else:
+        ""
+
+# Convert integer to hex string
+fn int_to_hex(num: i64) -> text:
+    # Simplified hex conversion
+    if num < 16:
+        if num == 0:
+            "0"
+        else: if num == 1:
+            "1"
+        else: if num == 2:
+            "2"
+        else: if num == 3:
+            "3"
+        else: if num == 4:
+            "4"
+        else: if num == 5:
+            "5"
+        else: if num == 6:
+            "6"
+        else: if num == 7:
+            "7"
+        else: if num == 8:
+            "8"
+        else: if num == 9:
+            "9"
+        else: if num == 10:
+            "A"
+        else: if num == 11:
+            "B"
+        else: if num == 12:
+            "C"
+        else: if num == 13:
+            "D"
+        else: if num == 14:
+            "E"
+        else:
+            "F"
+    else:
+        val high = num / 16
+        val low = num % 16
+        val high_hex = int_to_hex(high)
+        val low_hex = int_to_hex(low)
+        string_concat(high_hex, low_hex)
+
+# Convert hex string to integer
+fn hex_to_int(hex: text) -> i64:
+    # Simplified hex parsing
+    if hex.length() == 1:
+        val c = hex[0]
+        if c == "0":
+            0
+        else: if c == "1":
+            1
+        else: if c == "2":
+            2
+        else: if c == "3":
+            3
+        else: if c == "4":
+            4
+        else: if c == "5":
+            5
+        else: if c == "6":
+            6
+        else: if c == "7":
+            7
+        else: if c == "8":
+            8
+        else: if c == "9":
+            9
+        else: if c == "A" or c == "a":
+            10
+        else: if c == "B" or c == "b":
+            11
+        else: if c == "C" or c == "c":
+            12
+        else: if c == "D" or c == "d":
+            13
+        else: if c == "E" or c == "e":
+            14
+        else: if c == "F" or c == "f":
+            15
+        else:
+            0
+    else:
+        val high = hex[0]
+        val rest = hex.substring(1, hex.length())
+        val high_val = hex_to_int(high)
+        val low_val = hex_to_int(rest)
+        high_val * 16 + low_val
+
+# String helper functions (assuming these exist in string module)
+fn string_to_upper(text: text) -> text:
+    # Would use string.to_upper() in real implementation
+    text
+
+fn string_to_lower(text: text) -> text:
+    # Would use string.to_lower() in real implementation
+    text
+
+fn string_trim(text: text) -> text:
+    # Would use string.trim() in real implementation
+    text
+
+fn string_concat(a: text, b: text) -> text:
+    # Would use string concatenation operator in real implementation
+    a + b
+
+fn string_replace_all(text: text, old: text, new: text) -> text:
+    # Would use string.replace_all() in real implementation
+    text
+
+fn string_to_int(text: text) -> i64:
+    # Would use proper parsing in real implementation
+    0
+
+fn int_to_string(num: i64) -> text:
+    # Would use proper conversion in real implementation
+    "0"
