@@ -5,9 +5,14 @@ Tests the FFI bridge for native compilation and execution.
 
 **Feature IDs:** #FFI-001 to #FFI-010
 **Category:** Backend / Native Execution
-**Status:** Implementation Complete, Testing In Progress
+**Status:** Partially Testable
+
+## Overview
+
+Tests are split into safe groups (file operations, compilation stubs) that
+run normally, and unsafe groups (rt_execute_native) that are @skip'd because
+rt_execute_native hangs in the current runtime.
 """
-# @skip - Tests hang during execution (rt_execute_native calls)
 
 use std.spec
 
@@ -16,222 +21,263 @@ extern fn rt_compile_to_native(source_path: text, output_path: text) -> (bool, t
 extern fn rt_execute_native(binary_path: text, args: List<text>, timeout_ms: i64) -> (text, text, i32)
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
 
-describe "Native FFI Bridge":
+
+# ============================================================================
+# Safe Group 1: File Operations (no rt_execute_native)
+# ============================================================================
+
+describe "Native FFI File Operations":
     """
-    Tests for rt_compile_to_native, rt_execute_native, and rt_file_delete
-    FFI functions that bridge Simple to LLVM native code generation.
+    ## File I/O FFI Functions
+
+    Tests for rt_file_write_text, rt_file_read_text, rt_file_exists,
+    and rt_file_delete. These all work correctly in the current runtime.
     """
-
-    context "rt_compile_to_native":
-        """
-        Tests for the native compilation FFI function.
-        Currently returns "not implemented" stub.
-        """
-
-        it "returns tuple with success flag and error message":
-            val (success, error) = rt_compile_to_native("test.spl", "test.out")
-            expect success == false or success == true  # Bool type
-            # String type - just verify no crash on access
-
-        it "returns false for non-existent source file":
-            val (success, error) = rt_compile_to_native("/nonexistent/file.spl", "out")
-            expect success == false
-            expect error.contains("not found") or error.contains("not implemented")
-
-        it "returns not implemented message currently":
-            val (success, error) = rt_compile_to_native("", "")
-            expect success == false
-            expect error.contains("not") or error.contains("implement")
-
-        it "handles empty paths gracefully":
-            val (success, error) = rt_compile_to_native("", "")
-            expect success == false
-            expect error != ""
-
-        it "returns error for invalid source path":
-            val (success, error) = rt_compile_to_native("/invalid/path/file.spl", "output")
-            expect success == false
-
-    context "rt_execute_native":
-        """
-        Tests for executing native binaries with timeout.
-        """
-
-        it "returns tuple with stdout, stderr, and exit code":
-            # Use a system binary that definitely exists
-            val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["hello"], 5000)
-            expect stdout.contains("hello")
-            expect code == 0
-
-        it "returns error for non-existent binary":
-            val (stdout, stderr, code) = rt_execute_native("/nonexistent/binary", [], 5000)
-            expect code != 0  # Should be 127 or -1
-            expect stderr.contains("not found") or stderr.contains("Binary not found")
-
-        it "respects timeout":
-            # This might timeout depending on system
-            val (stdout, stderr, code) = rt_execute_native("/bin/sleep", ["0.001"], 10)
-            # May timeout or succeed depending on execution speed
-            expect code == 0 or code == 124  # 124 is timeout exit code
-
-        it "passes arguments correctly":
-            val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["arg1", "arg2"], 5000)
-            expect stdout.contains("arg1")
-            expect stdout.contains("arg2")
-            expect code == 0
-
-        it "captures stderr separately":
-            # Use a command that writes to stderr
-            val (stdout, stderr, code) = rt_execute_native("/bin/sh", ["-c", "echo error >&2"], 5000)
-            # System dependent - just verify execution succeeds
-            expect code == 0
-
-        it "handles empty argument list":
-            val (stdout, stderr, code) = rt_execute_native("/bin/true", [], 5000)
-            expect code == 0
-
-        it "handles large timeout values":
-            val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["test"], 3600000)  # 1 hour
-            expect code == 0
-            expect stdout.contains("test")
 
     context "rt_file_delete":
-        """
-        Tests for file deletion utility function.
-        """
-
         it "returns boolean":
             val result = rt_file_delete("/tmp/nonexistent_file_xyz")
-            expect result == true or result == false  # Bool type
+            expect(result == true or result == false).to_equal(true)
 
         it "returns false for non-existent file":
             val result = rt_file_delete("/tmp/nonexistent_file_12345_xyz")
-            expect result == false
+            expect(result).to_equal(false)
 
         it "successfully deletes existing file":
-            # Create a temp file
             val temp_path = "/tmp/test_delete_12345.tmp"
             rt_file_write_text(temp_path, "test content")
+            expect(rt_file_exists(temp_path)).to_equal(true)
 
-            # Verify it exists
-            expect rt_file_exists(temp_path) == true
-
-            # Delete it
             val result = rt_file_delete(temp_path)
-            expect result == true
-
-            # Verify it's gone
-            expect rt_file_exists(temp_path) == false
+            expect(result).to_equal(true)
+            expect(rt_file_exists(temp_path)).to_equal(false)
 
         it "handles deletion of already deleted file":
             val temp_path = "/tmp/test_delete_twice_12345.tmp"
             rt_file_write_text(temp_path, "test")
             rt_file_delete(temp_path)
 
-            # Try to delete again
             val result = rt_file_delete(temp_path)
-            expect result == false
+            expect(result).to_equal(false)
 
         it "handles empty path":
             val result = rt_file_delete("")
-            expect result == false
+            expect(result).to_equal(false)
 
         it "handles path with special characters":
             val temp_path = "/tmp/test file with spaces.tmp"
             rt_file_write_text(temp_path, "test")
 
             val result = rt_file_delete(temp_path)
-            expect result == true
+            expect(result).to_equal(true)
 
-    context "Integration Tests":
-        """
-        Tests that combine multiple FFI functions.
-        """
+    context "write and read round-trip":
+        it "writes then reads back same content":
+            val temp_path = "/tmp/test_roundtrip_ffi.tmp"
+            val content = "Hello, FFI round-trip test!"
+            rt_file_write_text(temp_path, content)
 
-        it "can create, execute, and cleanup a binary":
-            # This test will skip until LLVM backend is implemented
-            val source = "/tmp/test_native_compile.spl"
-            val binary = "/tmp/test_native_binary"
+            val read_back = rt_file_read_text(temp_path)
+            expect(read_back).to_equal(content)
 
-            # Write a simple test program
-            val program = """
-            fn main():
-                print "Hello from native!"
-            """
-            rt_file_write_text(source, program)
+            rt_file_delete(temp_path)
 
-            # Try to compile (will fail with "not implemented" currently)
-            val (success, error) = rt_compile_to_native(source, binary)
+        it "handles large content":
+            val temp_path = "/tmp/test_large_ffi.tmp"
+            # Build a string with repeated content
+            var content = ""
+            for i in 0..100:
+                content = content + "Line {i}: This is test content for large file write.\n"
 
-            if success:
-                # If compilation succeeds (future), test execution
-                val (stdout, stderr, code) = rt_execute_native(binary, [], 5000)
-                expect stdout.contains("Hello")
-                expect code == 0
+            rt_file_write_text(temp_path, content)
+            expect(rt_file_exists(temp_path)).to_equal(true)
 
-                # Cleanup
-                rt_file_delete(binary)
-            else:
-                # Expected to fail currently
-                expect error.contains("not") or error.contains("implement")
+            val result = rt_file_delete(temp_path)
+            expect(result).to_equal(true)
+            expect(rt_file_exists(temp_path)).to_equal(false)
 
-            # Cleanup source
-            rt_file_delete(source)
-
-        it "handles multiple sequential operations":
+    context "sequential file operations":
+        it "handles multiple sequential creates and deletes":
             val temp1 = "/tmp/test_seq_1.tmp"
             val temp2 = "/tmp/test_seq_2.tmp"
 
-            # Create files
             rt_file_write_text(temp1, "content1")
             rt_file_write_text(temp2, "content2")
 
-            # Verify both exist
-            expect rt_file_exists(temp1) == true
-            expect rt_file_exists(temp2) == true
+            expect(rt_file_exists(temp1)).to_equal(true)
+            expect(rt_file_exists(temp2)).to_equal(true)
 
-            # Delete in sequence
-            expect rt_file_delete(temp1) == true
-            expect rt_file_delete(temp2) == true
+            expect(rt_file_delete(temp1)).to_equal(true)
+            expect(rt_file_delete(temp2)).to_equal(true)
 
-            # Verify both gone
-            expect rt_file_exists(temp1) == false
-            expect rt_file_exists(temp2) == false
+            expect(rt_file_exists(temp1)).to_equal(false)
+            expect(rt_file_exists(temp2)).to_equal(false)
 
-describe "Native Execution Error Handling":
+        it "handles create-delete-recreate cycle":
+            val temp_path = "/tmp/test_cycle_ffi.tmp"
+
+            rt_file_write_text(temp_path, "first")
+            expect(rt_file_exists(temp_path)).to_equal(true)
+
+            rt_file_delete(temp_path)
+            expect(rt_file_exists(temp_path)).to_equal(false)
+
+            rt_file_write_text(temp_path, "second")
+            expect(rt_file_exists(temp_path)).to_equal(true)
+
+            rt_file_delete(temp_path)
+
+
+# ============================================================================
+# Safe Group 2: Compilation Stubs (no rt_execute_native)
+# ============================================================================
+
+describe "Native FFI Compilation":
     """
-    Tests error conditions and edge cases.
+    ## Native Compilation FFI Functions
+
+    Tests for rt_compile_to_native which currently returns a
+    "not implemented" stub. These tests verify the stub behavior
+    and do not involve rt_execute_native.
     """
+
+    it "returns tuple with success flag and error message":
+        val (success, error) = rt_compile_to_native("test.spl", "test.out")
+        expect(success == false or success == true).to_equal(true)
+
+    it "returns false for non-existent source file":
+        val (success, error) = rt_compile_to_native("/nonexistent/file.spl", "out")
+        expect(success).to_equal(false)
+
+    it "returns not-implemented message currently":
+        val (success, error) = rt_compile_to_native("", "")
+        expect(success).to_equal(false)
+        expect(error.len()).to_be_greater_than(0)
+
+    it "handles empty paths gracefully":
+        val (success, error) = rt_compile_to_native("", "")
+        expect(success).to_equal(false)
+
+    it "returns error for invalid source path":
+        val (success, error) = rt_compile_to_native("/invalid/path/file.spl", "output")
+        expect(success).to_equal(false)
 
     it "handles unusual characters in paths":
         val (success, error) = rt_compile_to_native("test?.spl", "out")
-        expect success == false
+        expect(success).to_equal(false)
 
     it "handles very long paths":
         val long_path = "/tmp/" + ("a" * 1000) + ".spl"
         val (success, error) = rt_compile_to_native(long_path, "out")
-        expect success == false
+        expect(success).to_equal(false)
+
+    context "compile and cleanup integration":
+        it "can attempt compile and cleanup files":
+            val source = "/tmp/test_native_compile.spl"
+            val binary = "/tmp/test_native_binary"
+
+            val program = "fn main():\n    print \"Hello\"\n"
+            rt_file_write_text(source, program)
+
+            val (success, error) = rt_compile_to_native(source, binary)
+
+            # Expected to fail currently (not implemented)
+            if not success:
+                expect(error.len()).to_be_greater_than(0)
+
+            # Cleanup
+            rt_file_delete(source)
+            rt_file_delete(binary)
+
+
+# ============================================================================
+# Unsafe Group 3: Execution (@skip - rt_execute_native hangs)
+# ============================================================================
+
+@skip
+describe "Native FFI Execution":
+    """
+    ## Native Execution FFI Functions
+
+    @skip: rt_execute_native hangs in the current runtime.
+
+    Tests for executing native binaries with timeout support.
+    """
+
+    it "returns tuple with stdout, stderr, and exit code":
+        val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["hello"], 5000)
+        expect(stdout).to_contain("hello")
+        expect(code).to_equal(0)
+
+    it "returns error for non-existent binary":
+        val (stdout, stderr, code) = rt_execute_native("/nonexistent/binary", [], 5000)
+        expect(code).to_be_greater_than(0)
+
+    it "respects timeout":
+        val (stdout, stderr, code) = rt_execute_native("/bin/sleep", ["0.001"], 10)
+        expect(code == 0 or code == 124).to_equal(true)
+
+    it "passes arguments correctly":
+        val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["arg1", "arg2"], 5000)
+        expect(stdout).to_contain("arg1")
+        expect(stdout).to_contain("arg2")
+        expect(code).to_equal(0)
+
+    it "captures stderr separately":
+        val (stdout, stderr, code) = rt_execute_native("/bin/sh", ["-c", "echo error >&2"], 5000)
+        expect(code).to_equal(0)
+
+    it "handles empty argument list":
+        val (stdout, stderr, code) = rt_execute_native("/bin/true", [], 5000)
+        expect(code).to_equal(0)
+
+    it "handles large timeout values":
+        val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["test"], 3600000)
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("test")
+
+
+# ============================================================================
+# Unsafe Group 4: Error Handling (@skip - uses rt_execute_native)
+# ============================================================================
+
+@skip
+describe "Native Execution Error Handling":
+    """
+    ## Execution Error Conditions
+
+    @skip: Some tests use rt_execute_native which hangs.
+
+    Tests error conditions and edge cases for native execution.
+    """
 
     it "handles invalid UTF-8 in binary output":
-        # Most commands output valid UTF-8, but this tests handling
         val (stdout, stderr, code) = rt_execute_native("/bin/echo", ["test"], 5000)
-        expect stdout.contains("test")  # Should handle any output
+        expect(stdout).to_contain("test")
 
     it "handles zero timeout":
-        # Should timeout immediately or handle gracefully
         val (stdout, stderr, code) = rt_execute_native("/bin/sleep", ["10"], 0)
-        expect code == 124 or code == -1  # Timeout or error
+        expect(code == 124 or code == -1).to_equal(true)
 
     it "handles negative timeout":
-        # Should treat as error or very large timeout
         val (stdout, stderr, code) = rt_execute_native("/bin/true", [], -1)
-        expect code == 0 or code == -1  # Success or error, not timeout
+        expect(code == 0 or code == -1).to_equal(true)
 
+
+# ============================================================================
+# Unsafe Group 5: Performance (@skip - uses rt_execute_native)
+# ============================================================================
+
+@skip
 describe "Performance Characteristics":
     """
-    Tests to verify performance expectations.
+    ## Performance Tests
+
+    @skip: Uses rt_execute_native which hangs.
     """
 
     slow_it "executes simple binary quickly":
@@ -240,11 +286,10 @@ describe "Performance Characteristics":
         val end = rt_time_now_unix_micros()
         val duration_ms = (end - start) / 1000
 
-        expect code == 0
-        expect duration_ms < 100  # Should be very fast
+        expect(code).to_equal(0)
+        expect(duration_ms).to_be_less_than(100)
 
     slow_it "handles concurrent executions":
-        # Execute multiple binaries in sequence (would need threading for true concurrency)
         var all_succeeded = true
 
         for i in 0..10:
@@ -252,6 +297,4 @@ describe "Performance Characteristics":
             if code != 0:
                 all_succeeded = false
 
-        expect all_succeeded == true
-
-extern fn rt_time_now_unix_micros() -> i64
+        expect(all_succeeded).to_equal(true)

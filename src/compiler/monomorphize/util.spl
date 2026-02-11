@@ -11,10 +11,12 @@
 export type_uses_param
 export infer_concrete_type
 export ast_type_to_concrete
+export ast_type_to_concrete_with_gc
 export concrete_to_ast_type
 
 use parser.ast (Type, Expr, PointerKind, ReferenceCapability)
 use .types (ConcreteType, PointerKind as ConcretePointerKind, TypeBindings)
+use compiler.gc_config (GcMode, GcConfig)
 
 # ============================================================================
 # Type Parameter Usage Check
@@ -99,7 +101,7 @@ fn infer_concrete_type(expr: Expr, type_context: {text: ConcreteType}) -> Concre
         Expr.Float(_) | Expr.TypedFloat(_, _):
             Some(ConcreteType.Float)
 
-        Expr.Bool(_):
+        Expr.Bool(_) | Expr.TypedBool(_, _):
             Some(ConcreteType.Bool)
 
         Expr.String(_) | Expr.TypedString(_, _) | Expr.FString(_):
@@ -287,6 +289,73 @@ fn ast_type_to_concrete(ty: Type, bindings: TypeBindings) -> ConcreteType:
         _:
             # Unknown type form - treat as named type
             ConcreteType.Named("Unknown")
+
+# ============================================================================
+# GC-Aware AST Type to Concrete Type Conversion
+# ============================================================================
+
+fn ast_type_to_concrete_with_gc(ty: Type, bindings: TypeBindings, gc_config: GcConfig) -> ConcreteType:
+    """Convert an AST type to a ConcreteType with GC mode awareness.
+
+    When a Named type (class/struct) is encountered, it is wrapped in a pointer
+    based on the GC config:
+    - GC mode: ConcreteType.Pointer(Shared, Shared, Named(name))
+    - NoGC mode: ConcreteType.Pointer(Unique, Isolated, Named(name))
+
+    Primitive types (Int, Float, Bool, String, Nil) remain value types in both modes.
+    Types that already have explicit pointer annotations are not double-wrapped.
+    """
+    match ty:
+        Type.Simple(name):
+            # Check if it's a type parameter binding
+            if val Some(concrete) = bindings.get(name):
+                return concrete
+
+            # Check for primitive types - these are value types in both modes
+            match name:
+                "Int" | "i32" | "i64" | "i8" | "i16":
+                    return ConcreteType.Int
+                "Float" | "f32" | "f64":
+                    return ConcreteType.Float
+                "Bool" | "bool":
+                    return ConcreteType.Bool
+                "String" | "str" | "text":
+                    return ConcreteType.String
+                "Nil" | "nil" | "()":
+                    return ConcreteType.Nil
+                _:
+                    # Named type (struct, class, enum) - wrap in pointer per GC mode
+                    val inner = ConcreteType.Named(name)
+                    return wrap_in_gc_pointer(inner, gc_config)
+
+        Type.Pointer(kind, inner):
+            # Explicit pointer annotation - use as-is (no GC wrapping)
+            val concrete_kind = ast_pointer_kind_to_concrete(kind)
+            val capability = match concrete_kind:
+                ConcretePointerKind.Unique:
+                    ReferenceCapability.Isolated
+                ConcretePointerKind.BorrowMut | ConcretePointerKind.RawMut:
+                    ReferenceCapability.Exclusive
+                _:
+                    ReferenceCapability.Shared
+            val inner_ty = ast_type_to_concrete_with_gc(inner, bindings, gc_config)
+            return ConcreteType.Pointer(concrete_kind, capability, inner_ty)
+
+        _:
+            # For all other type forms, delegate to the standard converter
+            return ast_type_to_concrete(ty, bindings)
+
+fn wrap_in_gc_pointer(inner: ConcreteType, gc_config: GcConfig) -> ConcreteType:
+    """Wrap a concrete type in the appropriate pointer for the GC mode.
+
+    - GC mode: Pointer(Shared, Shared, inner) - GC-managed reference
+    - NoGC mode: Pointer(Unique, Isolated, inner) - ownership-based
+    """
+    match gc_config.mode:
+        GcMode.Gc:
+            ConcreteType.Pointer(ConcretePointerKind.Shared, ReferenceCapability.Shared, inner)
+        GcMode.NoGc:
+            ConcreteType.Pointer(ConcretePointerKind.Unique, ReferenceCapability.Isolated, inner)
 
 # ============================================================================
 # Concrete Type to AST Type Conversion

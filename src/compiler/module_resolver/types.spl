@@ -23,6 +23,7 @@ use parser.ast (
     ModulePath, Attribute, Visibility, CommonUseStmt,
     ExportUseStmt, AutoImportStmt, Capability
 )
+use compiler.gc_config (GcConfig)
 
 # ============================================================================
 # Compiler Backend
@@ -163,6 +164,10 @@ struct DirectoryManifest:
     # no __init__.spl exists. Only valid for directories with no .spl code files.
     is_bypass: bool
 
+    # GC configuration for this directory (from #[gc] or #[no_gc] attribute).
+    # nil means not explicitly set (inherit from parent).
+    gc_config: GcConfig?
+
 impl DirectoryManifest:
     static fn new(name: text) -> DirectoryManifest:
         """Create a new empty directory manifest."""
@@ -174,7 +179,8 @@ impl DirectoryManifest:
             exports: [],
             auto_imports: [],
             capabilities: [],
-            is_bypass: false
+            is_bypass: false,
+            gc_config: nil
         )
 
     static fn empty() -> DirectoryManifest:
@@ -208,6 +214,16 @@ impl DirectoryManifest:
             if not parent.contains(cap):
                 return false
         true
+
+    fn effective_gc_config(parent: GcConfig) -> GcConfig:
+        """Compute effective GC config by inheriting from parent when not explicit.
+
+        - If this manifest has an explicit gc_config, use it
+        - Otherwise, inherit parent's GC config
+        """
+        match self.gc_config:
+            Some(config): config.effective_gc_config(parent)
+            nil: GcConfig(mode: parent.mode, source: parent.source, explicit: false)
 
     fn effective_capabilities(parent: [Capability]) -> [Capability]:
         """Compute effective capabilities by intersecting with parent.
@@ -246,13 +262,18 @@ struct ChildModule:
     # Module-specific attributes
     attributes: [Attribute]
 
+    # GC configuration for this child module (from #[gc] or #[no_gc] on mod decl).
+    # nil means not explicitly set (inherit from directory manifest).
+    gc_config: GcConfig?
+
 impl ChildModule:
     static fn new(name: text, visibility: Visibility) -> ChildModule:
         """Create a new child module declaration."""
         ChildModule(
             name: name,
             visibility: visibility,
-            attributes: []
+            attributes: [],
+            gc_config: nil
         )
 
     fn is_public() -> bool:

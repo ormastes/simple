@@ -7,6 +7,7 @@ use memory.refc_binary.{
     BinaryRef, BinaryRef__new,
     SharedHeap, SharedHeap__new, SharedHeapConfig, SharedHeapConfig__default, SharedHeapConfig__small
 }
+use types.{RefId, Offset, Length, Count, ByteSize, MessageId, SenderId}
 
 val SMALL_BINARY_THRESHOLD = 64
 
@@ -16,6 +17,25 @@ enum TransferStrategy:
     DeepCopy
     ShareRef
     Hybrid
+
+# --- ValueTag enum ---
+
+enum ValueTag:
+    Nil
+    Int
+    Float
+    Bool
+    SmallText
+    SmallArray
+    SharedRef
+    Composite
+
+# --- TransferStatus enum ---
+
+enum TransferStatus:
+    Success
+    OutOfMemory
+    TooLarge
 
 fn copy_strategy_for(size: i64) -> TransferStrategy:
     if size < SMALL_BINARY_THRESHOLD:
@@ -49,32 +69,32 @@ fn estimate_size(type_tag: ValueKind, raw_size: i64) -> i64:
 # --- ValueWrapper ---
 
 class ValueWrapper:
-    tag: text
+    tag: ValueTag
     int_val: i64
     float_val: f64
     bool_val: bool
     text_val: text
     items: []
-    ref_id: i64
-    ref_offset: i64
-    ref_length: i64
+    ref_id: RefId
+    ref_offset: Offset
+    ref_length: Length
 
     fn is_shared() -> bool:
-        self.tag == "shared_ref"
+        self.tag == ValueTag.SharedRef
 
     fn estimated_size() -> i64:
-        if self.tag == "nil": return 1
-        if self.tag == "int": return 8
-        if self.tag == "float": return 8
-        if self.tag == "bool": return 1
-        if self.tag == "small_text": return self.text_val.len()
-        if self.tag == "small_array":
+        if self.tag == ValueTag.Nil: return 1
+        if self.tag == ValueTag.Int: return 8
+        if self.tag == ValueTag.Float: return 8
+        if self.tag == ValueTag.Bool: return 1
+        if self.tag == ValueTag.SmallText: return self.text_val.len()
+        if self.tag == ValueTag.SmallArray:
             var total = 0
             for item in self.items:
                 total = total + item.estimated_size()
             return total
-        if self.tag == "shared_ref": return self.ref_length
-        if self.tag == "composite":
+        if self.tag == ValueTag.SharedRef: return self.ref_length.value
+        if self.tag == ValueTag.Composite:
             var total = 0
             for item in self.items:
                 total = total + item.estimated_size()
@@ -82,11 +102,11 @@ class ValueWrapper:
         0
 
     fn shared_refs():
-        if self.tag == "shared_ref":
-            return [BinaryRef__new(self.ref_id, self.ref_offset, self.ref_length)]
+        if self.tag == ValueTag.SharedRef:
+            return [BinaryRef__new(self.ref_id.value, self.ref_offset.value, self.ref_length.value)]
         var is_container = false
-        if self.tag == "composite": is_container = true
-        if self.tag == "small_array": is_container = true
+        if self.tag == ValueTag.Composite: is_container = true
+        if self.tag == ValueTag.SmallArray: is_container = true
         if is_container:
             var refs = []
             for item in self.items:
@@ -97,42 +117,42 @@ class ValueWrapper:
         []
 
     fn fmt() -> text:
-        if self.tag == "nil": return "nil"
-        if self.tag == "int": return "Int({self.int_val})"
-        if self.tag == "float": return "Float({self.float_val})"
-        if self.tag == "bool": return "Bool({self.bool_val})"
-        if self.tag == "small_text": return "SmallText({self.text_val})"
-        if self.tag == "small_array": return "SmallArray({self.items.len()} items)"
-        if self.tag == "shared_ref": return "Shared(id={self.ref_id}, len={self.ref_length})"
-        if self.tag == "composite": return "Composite({self.items.len()} items)"
+        if self.tag == ValueTag.Nil: return "nil"
+        if self.tag == ValueTag.Int: return "Int({self.int_val})"
+        if self.tag == ValueTag.Float: return "Float({self.float_val})"
+        if self.tag == ValueTag.Bool: return "Bool({self.bool_val})"
+        if self.tag == ValueTag.SmallText: return "SmallText({self.text_val})"
+        if self.tag == ValueTag.SmallArray: return "SmallArray({self.items.len()} items)"
+        if self.tag == ValueTag.SharedRef: return "Shared(id={self.ref_id.value}, len={self.ref_length.value})"
+        if self.tag == ValueTag.Composite: return "Composite({self.items.len()} items)"
         "Unknown"
 
 fn vw_base() -> ValueWrapper:
-    ValueWrapper(tag: "nil", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.Nil, int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__nil() -> ValueWrapper:
     vw_base()
 
 fn ValueWrapper__int(v: i64) -> ValueWrapper:
-    ValueWrapper(tag: "int", int_val: v, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.Int, int_val: v, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__float(v: f64) -> ValueWrapper:
-    ValueWrapper(tag: "float", int_val: 0, float_val: v, bool_val: false, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.Float, int_val: 0, float_val: v, bool_val: false, text_val: "", items: [], ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__bool(v: bool) -> ValueWrapper:
-    ValueWrapper(tag: "bool", int_val: 0, float_val: 0.0, bool_val: v, text_val: "", items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.Bool, int_val: 0, float_val: 0.0, bool_val: v, text_val: "", items: [], ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__small_text(s: text) -> ValueWrapper:
-    ValueWrapper(tag: "small_text", int_val: 0, float_val: 0.0, bool_val: false, text_val: s, items: [], ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.SmallText, int_val: 0, float_val: 0.0, bool_val: false, text_val: s, items: [], ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__small_array(arr) -> ValueWrapper:
-    ValueWrapper(tag: "small_array", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: arr, ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.SmallArray, int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: arr, ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 fn ValueWrapper__shared_ref_from(ref_id: i64, ref_offset: i64, ref_length: i64) -> ValueWrapper:
-    ValueWrapper(tag: "shared_ref", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: ref_id, ref_offset: ref_offset, ref_length: ref_length)
+    ValueWrapper(tag: ValueTag.SharedRef, int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: [], ref_id: RefId(value: ref_id), ref_offset: Offset(value: ref_offset), ref_length: Length(value: ref_length))
 
 fn ValueWrapper__composite(items) -> ValueWrapper:
-    ValueWrapper(tag: "composite", int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: items, ref_id: 0, ref_offset: 0, ref_length: 0)
+    ValueWrapper(tag: ValueTag.Composite, int_val: 0, float_val: 0.0, bool_val: false, text_val: "", items: items, ref_id: RefId(value: 0), ref_offset: Offset(value: 0), ref_length: Length(value: 0))
 
 # --- CopyStrategy helpers ---
 
@@ -148,65 +168,65 @@ fn CopyStrategy__Hybrid__should_share(size: i64) -> bool:
 # --- TransferResult ---
 
 class TransferResult:
-    tag: text
+    tag: TransferStatus
     wrapper_val: ValueWrapper
 
     fn is_success() -> bool:
-        self.tag == "success"
+        self.tag == TransferStatus.Success
 
     fn unwrap() -> ValueWrapper:
         self.wrapper_val
 
     fn wrapper():
-        if self.tag == "success":
+        if self.tag == TransferStatus.Success:
             return self.wrapper_val
         nil
 
     fn fmt() -> text:
-        if self.tag == "success": return "Success({self.wrapper_val.fmt()})"
-        if self.tag == "out_of_memory": return "OutOfMemory"
-        if self.tag == "too_large": return "TooLarge"
-        self.tag
+        if self.tag == TransferStatus.Success: return "Success({self.wrapper_val.fmt()})"
+        if self.tag == TransferStatus.OutOfMemory: return "OutOfMemory"
+        if self.tag == TransferStatus.TooLarge: return "TooLarge"
+        "Unknown"
 
 fn TransferResult__success(w: ValueWrapper) -> TransferResult:
-    TransferResult(tag: "success", wrapper_val: w)
+    TransferResult(tag: TransferStatus.Success, wrapper_val: w)
 
 fn TransferResult__out_of_memory() -> TransferResult:
-    TransferResult(tag: "out_of_memory", wrapper_val: vw_base())
+    TransferResult(tag: TransferStatus.OutOfMemory, wrapper_val: vw_base())
 
 fn TransferResult__too_large() -> TransferResult:
-    TransferResult(tag: "too_large", wrapper_val: vw_base())
+    TransferResult(tag: TransferStatus.TooLarge, wrapper_val: vw_base())
 
 # --- TransferStats ---
 
 class TransferStats:
-    total_transfers: i64
-    inline_transfers: i64
-    shared_transfers: i64
-    inline_bytes: i64
-    shared_bytes: i64
-    bytes_saved: i64
+    total_transfers: Count
+    inline_transfers: Count
+    shared_transfers: Count
+    inline_bytes: ByteSize
+    shared_bytes: ByteSize
+    bytes_saved: ByteSize
 
     fn sharing_ratio() -> f64:
-        if self.total_transfers == 0: return 0.0
-        self.shared_transfers * 1.0 / self.total_transfers
+        if self.total_transfers.value == 0: return 0.0
+        self.shared_transfers.value * 1.0 / self.total_transfers.value
 
     fn efficiency() -> f64:
-        val total_bytes = self.inline_bytes + self.shared_bytes
+        val total_bytes = self.inline_bytes.value + self.shared_bytes.value
         if total_bytes == 0: return 1.0
-        self.shared_bytes * 1.0 / total_bytes
+        self.shared_bytes.value * 1.0 / total_bytes
 
     fn fmt() -> text:
-        "TransferStats(total={self.total_transfers}, shared={self.shared_transfers})"
+        "TransferStats(total={self.total_transfers.value}, shared={self.shared_transfers.value})"
 
 fn TransferStats__new() -> TransferStats:
-    TransferStats(total_transfers: 0, inline_transfers: 0, shared_transfers: 0, inline_bytes: 0, shared_bytes: 0, bytes_saved: 0)
+    TransferStats(total_transfers: Count(value: 0), inline_transfers: Count(value: 0), shared_transfers: Count(value: 0), inline_bytes: ByteSize(value: 0), shared_bytes: ByteSize(value: 0), bytes_saved: ByteSize(value: 0))
 
 # --- MailboxMessage ---
 
 class MailboxMessage:
-    id: i64
-    sender_id: i64
+    id: MessageId
+    sender_id: SenderId
     has_sender: bool
     wrapped: ValueWrapper
 
@@ -217,7 +237,7 @@ class MailboxMessage:
         self.wrapped.is_shared()
 
     fn fmt() -> text:
-        "MailboxMessage(id={self.id}, size={self.size()})"
+        "MailboxMessage(id={self.id.value}, size={self.size()})"
 
 fn MailboxMessage__new(msg_id: i64, sender, wrapper: ValueWrapper) -> MailboxMessage:
     var sid = 0
@@ -225,7 +245,7 @@ fn MailboxMessage__new(msg_id: i64, sender, wrapper: ValueWrapper) -> MailboxMes
     if sender.?:
         sid = sender
         has_s = true
-    MailboxMessage(id: msg_id, sender_id: sid, has_sender: has_s, wrapped: wrapper)
+    MailboxMessage(id: MessageId(value: msg_id), sender_id: SenderId(value: sid), has_sender: has_s, wrapped: wrapper)
 
 # --- MessageTransfer ---
 
@@ -236,43 +256,43 @@ class MessageTransfer:
     stats: TransferStats
 
     me wrap_nil() -> TransferResult:
-        self.stats.total_transfers = self.stats.total_transfers + 1
-        self.stats.inline_transfers = self.stats.inline_transfers + 1
-        self.stats.inline_bytes = self.stats.inline_bytes + 1
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 1)
         TransferResult__success(ValueWrapper__nil())
 
     me wrap_int(v: i64) -> TransferResult:
-        self.stats.total_transfers = self.stats.total_transfers + 1
-        self.stats.inline_transfers = self.stats.inline_transfers + 1
-        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 8)
         TransferResult__success(ValueWrapper__int(v))
 
     me wrap_float(v: f64) -> TransferResult:
-        self.stats.total_transfers = self.stats.total_transfers + 1
-        self.stats.inline_transfers = self.stats.inline_transfers + 1
-        self.stats.inline_bytes = self.stats.inline_bytes + 8
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 8)
         TransferResult__success(ValueWrapper__float(v))
 
     me wrap_bool(v: bool) -> TransferResult:
-        self.stats.total_transfers = self.stats.total_transfers + 1
-        self.stats.inline_transfers = self.stats.inline_transfers + 1
-        self.stats.inline_bytes = self.stats.inline_bytes + 1
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + 1)
         TransferResult__success(ValueWrapper__bool(v))
 
     me wrap_text(s: text) -> TransferResult:
-        self.stats.total_transfers = self.stats.total_transfers + 1
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
         if s.len() < SMALL_BINARY_THRESHOLD:
-            self.stats.inline_transfers = self.stats.inline_transfers + 1
-            self.stats.inline_bytes = self.stats.inline_bytes + s.len()
+            self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+            self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + s.len())
             return TransferResult__success(ValueWrapper__small_text(s))
-        self.stats.shared_transfers = self.stats.shared_transfers + 1
-        self.stats.shared_bytes = self.stats.shared_bytes + s.len()
-        self.stats.bytes_saved = self.stats.bytes_saved + s.len()
+        self.stats.shared_transfers = Count(value: self.stats.shared_transfers.value + 1)
+        self.stats.shared_bytes = ByteSize(value: self.stats.shared_bytes.value + s.len())
+        self.stats.bytes_saved = ByteSize(value: self.stats.bytes_saved.value + s.len())
         if self.has_heap:
             val result = self.heap.allocate(0, s.len())
             if result.is_success():
                 val ref_val = result.unwrap()
-                return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id, ref_val.offset, ref_val.length))
+                return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id.value, ref_val.offset.value, ref_val.length.value))
             return TransferResult__out_of_memory()
         val fake_ref = ValueWrapper__shared_ref_from(0, 0, s.len())
         TransferResult__success(fake_ref)
@@ -280,21 +300,21 @@ class MessageTransfer:
     me wrap_for_send(process_id: i64, size: i64, type_tag: ValueKind) -> TransferResult:
         val should_share = self.should_share(size)
         if should_share:
-            self.stats.total_transfers = self.stats.total_transfers + 1
-            self.stats.shared_transfers = self.stats.shared_transfers + 1
-            self.stats.shared_bytes = self.stats.shared_bytes + size
-            self.stats.bytes_saved = self.stats.bytes_saved + size
+            self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+            self.stats.shared_transfers = Count(value: self.stats.shared_transfers.value + 1)
+            self.stats.shared_bytes = ByteSize(value: self.stats.shared_bytes.value + size)
+            self.stats.bytes_saved = ByteSize(value: self.stats.bytes_saved.value + size)
             if self.has_heap:
                 val result = self.heap.allocate(process_id, size)
                 if result.is_success():
                     val ref_val = result.unwrap()
-                    return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id, ref_val.offset, ref_val.length))
+                    return TransferResult__success(ValueWrapper__shared_ref_from(ref_val.id.value, ref_val.offset.value, ref_val.length.value))
                 return TransferResult__out_of_memory()
             val fake = ValueWrapper__shared_ref_from(0, 0, size)
             return TransferResult__success(fake)
-        self.stats.total_transfers = self.stats.total_transfers + 1
-        self.stats.inline_transfers = self.stats.inline_transfers + 1
-        self.stats.inline_bytes = self.stats.inline_bytes + size
+        self.stats.total_transfers = Count(value: self.stats.total_transfers.value + 1)
+        self.stats.inline_transfers = Count(value: self.stats.inline_transfers.value + 1)
+        self.stats.inline_bytes = ByteSize(value: self.stats.inline_bytes.value + size)
         TransferResult__success(ValueWrapper__int(0))
 
     fn should_share(size: i64) -> bool:
@@ -305,12 +325,12 @@ class MessageTransfer:
     me share_wrapper(wrapper: ValueWrapper):
         if wrapper.is_shared():
             if self.has_heap:
-                self.heap.incref(wrapper.ref_id)
+                self.heap.incref(wrapper.ref_id.value)
 
     me release_wrapper(wrapper: ValueWrapper):
         if wrapper.is_shared():
             if self.has_heap:
-                self.heap.decref(wrapper.ref_id)
+                self.heap.decref(wrapper.ref_id.value)
 
     fn get_stats() -> TransferStats:
         TransferStats(
@@ -368,7 +388,7 @@ fn send_value(process_id: i64, size: i64, type_tag: ValueKind) -> TransferResult
 fn receive_value(wrapper: ValueWrapper):
     wrapper
 
-export TransferStrategy, ValueKind
+export TransferStrategy, ValueKind, ValueTag, TransferStatus
 export ValueWrapper, ValueWrapper__nil, ValueWrapper__int, ValueWrapper__float, ValueWrapper__bool
 export ValueWrapper__small_text, ValueWrapper__small_array, ValueWrapper__shared_ref_from, ValueWrapper__composite
 export CopyStrategy__DeepCopy__should_share, CopyStrategy__ShareRef__should_share, CopyStrategy__Hybrid__should_share

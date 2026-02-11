@@ -457,12 +457,31 @@ describe "ModuleLoader Loading":
             pass
 
         it "returns Error for missing file":
-            # TODO: Load non-existent file
-            pass
+            var loader = ModuleLoader__with_defaults()
+            val result = loader.load("/nonexistent/path/test_missing.smf")
 
-        it "tracks loaded modules":
-            # TODO: Verify is_loaded() after load
-            pass
+            match result:
+                case Error(msg):
+                    expect(msg.len()).to_be_greater_than(0)
+                case _:
+                    fail("Expected Error for non-existent file")
+
+        it "does not track module after failed load":
+            var loader = ModuleLoader__with_defaults()
+            val _ = loader.load("/nonexistent/path/test_track.smf")
+
+            expect(loader.is_loaded("/nonexistent/path/test_track.smf")).to_equal(false)
+            val modules = loader.loaded_modules()
+            expect(modules.len()).to_equal(0)
+
+        it "keeps stats unchanged after failed load":
+            var loader = ModuleLoader__with_defaults()
+            val stats_before = loader.stats()
+            val _ = loader.load("/nonexistent/path/test_stats.smf")
+            val stats_after = loader.stats()
+
+            expect(stats_after.module_count).to_equal(stats_before.module_count)
+            expect(stats_after.symbol_count).to_equal(stats_before.symbol_count)
 
     context "when unloading modules":
         """
@@ -533,6 +552,23 @@ describe "ModuleLoader Symbol Resolution":
                 case _:
                     fail("Expected NotFound")
 
+        it "returns NotFound with JIT disabled":
+            val config = ModuleLoaderConfig(
+                enable_jit: false,
+                enable_cache: true,
+                max_cache_size: 100,
+                verbose: false,
+                hot_reload: false
+            )
+            var loader = ModuleLoader__new(config)
+            val result = loader.resolve_symbol("unknown_jit_disabled")
+
+            match result:
+                case NotFound(name):
+                    expect(name).to_equal("unknown_jit_disabled")
+                case _:
+                    fail("Expected NotFound with JIT disabled")
+
         it "triggers JIT compilation on miss":
             # TODO: Enable JIT, resolve missing generic
             pass
@@ -547,6 +583,29 @@ describe "ModuleLoader Symbol Resolution":
 
         Tests resolve_generic() with type arguments.
         """
+
+        it "returns NotFound for unloaded generic":
+            var loader = ModuleLoader__with_defaults()
+            val type_args = [make_int_type(64, true)]
+            val result = loader.resolve_generic("Vec", type_args)
+
+            match result:
+                case NotFound(name):
+                    expect(name).to_contain("Vec")
+                case _:
+                    fail("Expected NotFound for unloaded generic")
+
+        it "uses correct mangled name format":
+            var loader = ModuleLoader__with_defaults()
+            val type_args = [make_int_type(64, true)]
+            val result = loader.resolve_generic("Vec", type_args)
+
+            match result:
+                case NotFound(name):
+                    # Mangled name should be Vec$i64
+                    expect(name).to_equal("Vec$i64")
+                case _:
+                    fail("Expected NotFound")
 
         it "resolves with type args":
             # TODO: Resolve Vec<i64>
@@ -629,9 +688,20 @@ describe "ModuleLoader Utilities":
         val modules = loader.loaded_modules()
         expect(modules.len()).to_equal(0)
 
-    it "returns all loaded modules":
-        # TODO: Load multiple modules, verify list
-        pass
+    it "returns empty list after failed loads":
+        var loader = ModuleLoader__with_defaults()
+        val _ = loader.load("/nonexistent/a.smf")
+        val _ = loader.load("/nonexistent/b.smf")
+
+        val modules = loader.loaded_modules()
+        expect(modules.len()).to_equal(0)
+
+    it "checks multiple paths with is_loaded":
+        val loader = ModuleLoader__with_defaults()
+
+        expect(loader.is_loaded("path_a.smf")).to_equal(false)
+        expect(loader.is_loaded("path_b.smf")).to_equal(false)
+        expect(loader.is_loaded("path_c.smf")).to_equal(false)
 
 
 # ============================================================================
@@ -656,11 +726,23 @@ describe "ModuleLoader Helpers":
             val mangled = mangle_name("Vec", [])
             expect(mangled).to_equal("Vec")
 
-        it "mangles with type args":
+        it "mangles with single type arg":
             val type_args = [create_int_type(64, true)]
             val mangled = mangle_name("Vec", type_args)
             expect(mangled).to_contain("Vec$")
             expect(mangled).to_contain("i64")
+
+        it "mangles with multiple type args":
+            val type_args = [create_int_type(64, true), create_float_type(64)]
+            val mangled = mangle_name("Dict", type_args)
+            expect(mangled).to_contain("Dict$")
+            expect(mangled).to_contain("i64")
+            expect(mangled).to_contain("f64")
+
+        it "mangles with named type args":
+            val type_args = [create_named_type("MyStruct")]
+            val mangled = mangle_name("Option", type_args)
+            expect(mangled).to_equal("Option$MyStruct")
 
     context "when converting types to strings":
         """

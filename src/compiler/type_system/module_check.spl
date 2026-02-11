@@ -11,6 +11,7 @@ from inference.infer import {InferenceEngine}
 from ast import {Node, Module, FunctionDef, StructDef, ClassDef, EnumDef}
 from ast import {TraitDef, ImplBlock, TypeAliasDef, ConstStmt, StaticStmt}
 from ast import {Parameter, Field, EnumVariant, GenericParam, Block}
+from ast import {UnitDef, Visibility}
 from compiler.type_system.checker import {TypeError, TypeChecker}
 from compiler.type_system.expr_infer import {infer_expr}
 from compiler.type_system.stmt_check import {check_block, bind_pattern}
@@ -72,6 +73,9 @@ fn register_definition(checker: TypeChecker, item: Node) -> Result<(), TypeError
 
         case Static(static_stmt):
             register_static(checker, static_stmt)
+
+        case UnitNode(unit_def):
+            register_unit(checker, unit_def)
 
         case _:
             # Other items (imports, exports, etc.) don't need registration
@@ -290,6 +294,46 @@ fn register_static(checker: TypeChecker, static_stmt: StaticStmt) -> Result<(), 
 
     Ok(())
 
+# ----------------------------------------------------------------------------
+# Unit Registration
+# ----------------------------------------------------------------------------
+
+fn register_unit(checker: TypeChecker, unit_def: UnitDef) -> Result<(), TypeError>:
+    """Register unit type and populate suffix registry with variants."""
+
+    # Register the unit type name
+    val unit_ty = Type.Named(unit_def.name)
+    checker.env[unit_def.name] = unit_ty
+
+    # Determine the base value type
+    val value_type = if unit_def.base.?:
+        unit_def.base.unwrap()
+    else:
+        "f64"
+
+    # Determine visibility
+    val is_public = match unit_def.visibility:
+        case Public: true
+        case _: false
+
+    # Register each variant suffix in the suffix registry
+    for variant in unit_def.variants:
+        checker.suffix_registry.register_with_visibility(
+            variant.suffix,
+            unit_def.name,
+            value_type,
+            "",
+            is_public
+        )
+
+    # Check for conflicts after registration
+    if checker.suffix_registry.has_conflicts():
+        val conflicts = checker.suffix_registry.get_conflicts()
+        val last = conflicts[conflicts.len() - 1]
+        return Err(TypeError.Other(last.fmt()))
+
+    Ok(())
+
 # ============================================================================
 # Pass 2: Definition Body Checking
 # ============================================================================
@@ -364,7 +408,8 @@ fn check_function_body(checker: TypeChecker, func: FunctionDef) -> Result<(), Ty
         unifier: checker.unifier,
         env: type_env,
         deferred: [],
-        errors: []
+        errors: [],
+        suffix_registry: checker.suffix_registry
     )
 
     val body_ty = check_block(engine, func.body, func_env, Some(ret_ty))?
@@ -386,7 +431,8 @@ fn check_const_body(checker: TypeChecker, const_stmt: ConstStmt) -> Result<(), T
         unifier: checker.unifier,
         env: TypeEnv.empty(),
         deferred: [],
-        errors: []
+        errors: [],
+        suffix_registry: checker.suffix_registry
     )
 
     # Infer initializer type
@@ -407,7 +453,8 @@ fn check_static_body(checker: TypeChecker, static_stmt: StaticStmt) -> Result<()
         unifier: checker.unifier,
         env: TypeEnv.empty(),
         deferred: [],
-        errors: []
+        errors: [],
+        suffix_registry: checker.suffix_registry
     )
 
     # Infer initializer type

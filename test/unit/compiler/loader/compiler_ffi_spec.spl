@@ -1,0 +1,380 @@
+"""
+# CompilerFFI Specification
+
+**Feature IDs:** #1046-1055
+**Category:** Tooling
+**Difficulty:** 3/5
+**Status:** Implemented
+
+## Overview
+
+Tests for the CompilerFFI module which provides type inference and template
+instantiation functionality implemented entirely in Simple. Covers context
+lifecycle, type inference, template instantiation, type checking, statistics,
+TypeInfo factory functions, and JSON processing.
+
+## Implementation
+
+File: `src/compiler/loader/compiler_ffi.spl`
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| CompilerContext | Opaque handle wrapper for compiler state |
+| CONTEXT_REGISTRY | Global registry mapping handles to impl objects |
+| TypeInfo | Type metadata (kind, name, bits, signed, etc.) |
+| Template | Template metadata (name, type_params) |
+| CompilationResult | Result of template instantiation (success/error) |
+"""
+
+use compiler.loader.compiler_ffi.*
+
+
+# ============================================================================
+# Test Group 1: Context Lifecycle
+# ============================================================================
+
+describe "CompilerFFI Context Lifecycle":
+    """
+    ## Context Management
+
+    Validates context creation, uniqueness, destruction, and error handling
+    for operations on invalid handles.
+    """
+
+    it "creates context with positive handle":
+        val handle = compiler_create_context()
+        expect(handle).to_be_greater_than(0)
+        compiler_destroy_context(handle)
+
+    it "returns unique handles on sequential calls":
+        val h1 = compiler_create_context()
+        val h2 = compiler_create_context()
+        expect(h1).to_be_less_than(h2)
+        compiler_destroy_context(h1)
+        compiler_destroy_context(h2)
+
+    it "destroys context successfully":
+        val handle = compiler_create_context()
+        compiler_destroy_context(handle)
+        # Operations on destroyed handle should return errors
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("error")
+
+    it "returns error for inference on destroyed handle":
+        val handle = compiler_create_context()
+        compiler_destroy_context(handle)
+        val result = compiler_infer_types(handle, '{"name":"test","type_params":["T"]}', '[]')
+        expect(result).to_contain("Invalid context handle")
+
+    it "returns error for instantiation on destroyed handle":
+        val handle = compiler_create_context()
+        compiler_destroy_context(handle)
+        val result = compiler_instantiate_template(handle, '{"name":"test","type_params":["T"]}', '[{"kind":"int"}]')
+        expect(result).to_contain("Invalid context handle")
+
+    it "supports create_compiler_context alias":
+        val handle = create_compiler_context()
+        expect(handle).to_be_greater_than(0)
+        compiler_destroy_context(handle)
+
+
+# ============================================================================
+# Test Group 2: Type Inference
+# ============================================================================
+
+describe "CompilerFFI Type Inference":
+    """
+    ## Type Inference via Public API
+
+    Validates compiler_infer_types() with various hint configurations,
+    caching behavior, and error handling.
+    """
+
+    it "infers types with call_site hint":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"identity","type_params":["T"]}'
+        val hints_json = '[{"source":"call_site","param_index":0,"ty":{"kind":"int","bits":64,"signed":true}}]'
+        val result = compiler_infer_types(handle, template_json, hints_json)
+        expect(result).to_contain("int")
+        expect(result).to_contain("i64")
+        compiler_destroy_context(handle)
+
+    it "defaults to i64 with no hints":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"default_fn","type_params":["T"]}'
+        val result = compiler_infer_types(handle, template_json, '[]')
+        expect(result).to_contain("i64")
+        compiler_destroy_context(handle)
+
+    it "returns error JSON for invalid handle":
+        val result = compiler_infer_types(999999, '{"name":"x","type_params":["T"]}', '[]')
+        expect(result).to_contain("Invalid context handle")
+
+    it "caches inference results":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"cached_fn","type_params":["T"]}'
+        val hints_json = '[{"source":"call_site"}]'
+        val r1 = compiler_infer_types(handle, template_json, hints_json)
+        val r2 = compiler_infer_types(handle, template_json, hints_json)
+        expect(r1).to_equal(r2)
+        # Stats should show cache hit
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("cache_hits")
+        compiler_destroy_context(handle)
+
+    it "tracks inference count in stats":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"tracked_fn","type_params":["T"]}'
+        val _ = compiler_infer_types(handle, template_json, '[]')
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("type_inferences")
+        compiler_destroy_context(handle)
+
+
+# ============================================================================
+# Test Group 3: Template Instantiation
+# ============================================================================
+
+describe "CompilerFFI Template Instantiation":
+    """
+    ## Template Instantiation via Public API
+
+    Validates compiler_instantiate_template() with int/float types,
+    caching, and error handling.
+    """
+
+    it "instantiates with int type":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"int_inst","type_params":["T"]}'
+        val types_json = '[{"kind":"int","bits":64,"signed":true}]'
+        val result = compiler_instantiate_template(handle, template_json, types_json)
+        expect(result).to_contain("true")
+        expect(result).to_contain("code")
+        compiler_destroy_context(handle)
+
+    it "instantiates with float type":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"float_inst","type_params":["T"]}'
+        val types_json = '[{"kind":"float","bits":64}]'
+        val result = compiler_instantiate_template(handle, template_json, types_json)
+        expect(result).to_contain("true")
+        compiler_destroy_context(handle)
+
+    it "produces different bytecode for int vs float":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"diff_test","type_params":["T"]}'
+        val int_result = compiler_instantiate_template(handle, template_json, '[{"kind":"int"}]')
+        val float_result = compiler_instantiate_template(handle, template_json, '[{"kind":"float"}]')
+        # Int kind byte = 0x10 (16), float kind byte = 0x20 (32)
+        expect(int_result).to_contain("16")
+        expect(float_result).to_contain("32")
+        compiler_destroy_context(handle)
+
+    it "returns error JSON for invalid handle":
+        val result = compiler_instantiate_template(999999, '{"name":"x","type_params":["T"]}', '[{"kind":"int"}]')
+        expect(result).to_contain("false")
+        expect(result).to_contain("Invalid context handle")
+
+    it "caches instantiation results":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"cached_inst","type_params":["T"]}'
+        val types_json = '[{"kind":"int"}]'
+        val r1 = compiler_instantiate_template(handle, template_json, types_json)
+        val r2 = compiler_instantiate_template(handle, template_json, types_json)
+        expect(r1).to_equal(r2)
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("cache_hits")
+        compiler_destroy_context(handle)
+
+    it "tracks instantiation count in stats":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"tracked_inst","type_params":["T"]}'
+        val _ = compiler_instantiate_template(handle, template_json, '[{"kind":"int"}]')
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("template_instantiations")
+        compiler_destroy_context(handle)
+
+
+# ============================================================================
+# Test Group 4: Type Checking
+# ============================================================================
+
+describe "CompilerFFI Type Checking":
+    """
+    ## Type Checking
+
+    Validates compiler_check_types() stub behavior.
+    Current implementation always returns true for valid handles.
+    """
+
+    it "returns true for valid handle":
+        val handle = compiler_create_context()
+        val result = compiler_check_types(handle, [1, 2, 3])
+        expect(result).to_equal(true)
+        compiler_destroy_context(handle)
+
+    it "returns false for invalid handle":
+        val result = compiler_check_types(999999, [1, 2, 3])
+        expect(result).to_equal(false)
+
+
+# ============================================================================
+# Test Group 5: Statistics
+# ============================================================================
+
+describe "CompilerFFI Statistics":
+    """
+    ## Statistics Tracking
+
+    Validates compiler_get_stats() for monitoring context activity.
+    """
+
+    it "returns zero stats for new context":
+        val handle = compiler_create_context()
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("type_inferences")
+        expect(stats).to_contain("template_instantiations")
+        expect(stats).to_contain("cache_hits")
+        expect(stats).to_contain("cache_misses")
+        compiler_destroy_context(handle)
+
+    it "increments after inference and instantiation":
+        val handle = compiler_create_context()
+        val tmpl = '{"name":"stats_test","type_params":["T"]}'
+        val _ = compiler_infer_types(handle, tmpl, '[]')
+        val _ = compiler_instantiate_template(handle, tmpl, '[{"kind":"int"}]')
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("type_inferences")
+        expect(stats).to_contain("template_instantiations")
+        compiler_destroy_context(handle)
+
+    it "tracks cache hits and misses":
+        val handle = compiler_create_context()
+        val tmpl = '{"name":"cache_track","type_params":["T"]}'
+        # First call = miss
+        val _ = compiler_infer_types(handle, tmpl, '[]')
+        # Second call = hit
+        val _ = compiler_infer_types(handle, tmpl, '[]')
+        val stats = compiler_get_stats(handle)
+        expect(stats).to_contain("cache_hits")
+        expect(stats).to_contain("cache_misses")
+        compiler_destroy_context(handle)
+
+    it "returns error for invalid handle":
+        val stats = compiler_get_stats(999999)
+        expect(stats).to_contain("error")
+
+
+# ============================================================================
+# Test Group 6: TypeInfo Factory Functions
+# ============================================================================
+
+describe "CompilerFFI TypeInfo Factories":
+    """
+    ## TypeInfo Creation
+
+    Validates factory functions for creating TypeInfo instances.
+    """
+
+    it "creates signed integer type":
+        val ty = make_int_type(64, true)
+        expect(ty.kind).to_equal("int")
+        expect(ty.name).to_equal("i64")
+        expect(ty.bits.unwrap()).to_equal(64)
+        expect(ty.signed.unwrap()).to_equal(true)
+
+    it "creates unsigned integer type":
+        val ty = make_int_type(32, false)
+        expect(ty.kind).to_equal("int")
+        expect(ty.name).to_equal("u32")
+        expect(ty.bits.unwrap()).to_equal(32)
+        expect(ty.signed.unwrap()).to_equal(false)
+
+    it "creates float type":
+        val ty = make_float_type(64)
+        expect(ty.kind).to_equal("float")
+        expect(ty.name).to_equal("f64")
+        expect(ty.bits.unwrap()).to_equal(64)
+
+    it "creates bool type":
+        val ty = make_bool_type()
+        expect(ty.kind).to_equal("bool")
+        expect(ty.name).to_equal("bool")
+
+    it "creates string type":
+        val ty = make_string_type()
+        expect(ty.kind).to_equal("string")
+        expect(ty.name).to_equal("string")
+
+    it "creates named type":
+        val ty = make_named_type("MyStruct")
+        expect(ty.kind).to_equal("named")
+        expect(ty.name).to_equal("MyStruct")
+
+    it "converts type to string representation":
+        val int_ty = make_int_type(64, true)
+        expect(type_to_string(int_ty)).to_equal("i64")
+
+        val float_ty = make_float_type(32)
+        expect(type_to_string(float_ty)).to_equal("f32")
+
+        val named_ty = make_named_type("Vec")
+        expect(type_to_string(named_ty)).to_equal("Vec")
+
+
+# ============================================================================
+# Test Group 7: JSON Round-Trip (via Public API)
+# ============================================================================
+
+describe "CompilerFFI JSON Processing":
+    """
+    ## JSON Parsing and Serialization
+
+    Tests JSON processing indirectly through the public API functions.
+    Validates that template JSON is parsed correctly and results are
+    properly serialized.
+    """
+
+    it "parses template with name and type_params":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"Vec","type_params":["T"]}'
+        val result = compiler_infer_types(handle, template_json, '[]')
+        # Should return JSON array with one inferred type
+        expect(result).to_start_with("[")
+        expect(result).to_end_with("]")
+        compiler_destroy_context(handle)
+
+    it "parses call_site hints correctly":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"hint_test","type_params":["T"]}'
+        val with_hint = '[{"source":"call_site","ty":{"kind":"int"}}]'
+        val without_hint = '[]'
+        val r1 = compiler_infer_types(handle, template_json, with_hint)
+        val r2 = compiler_infer_types(handle, template_json, without_hint)
+        # Both should produce valid JSON arrays
+        expect(r1).to_start_with("[")
+        expect(r2).to_start_with("[")
+        compiler_destroy_context(handle)
+
+    it "serializes successful compilation result":
+        val handle = compiler_create_context()
+        val tmpl = '{"name":"ser_ok","type_params":["T"]}'
+        val result = compiler_instantiate_template(handle, tmpl, '[{"kind":"int"}]')
+        expect(result).to_contain("true")
+        expect(result).to_contain("code")
+        compiler_destroy_context(handle)
+
+    it "serializes error compilation result":
+        val result = compiler_instantiate_template(999999, '{"name":"x","type_params":["T"]}', '[]')
+        expect(result).to_contain("false")
+        expect(result).to_contain("error")
+
+    it "handles empty type_params":
+        val handle = compiler_create_context()
+        val template_json = '{"name":"no_params","type_params":[]}'
+        val result = compiler_infer_types(handle, template_json, '[]')
+        # Empty type_params → empty inferred types
+        expect(result).to_equal("[]")
+        compiler_destroy_context(handle)
