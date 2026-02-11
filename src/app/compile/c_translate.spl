@@ -8,7 +8,7 @@
 #   - Statement translation dispatcher
 #   - Block closing and function building
 
-use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, simple_type_to_c, translate_params, get_c_indent, get_indent_level, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr}
+use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, simple_type_to_c, translate_params, get_c_indent, get_indent_level, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
 
 # --- Translation Functions ---
 # Functions that only READ types receive `types: text` parameter.
@@ -109,6 +109,13 @@ fn translate_condition(cond: text, types: text) -> text:
                     val c_right = translate_expr(neq_right, types)
                     return "strcmp({c_left}, {c_right}) != 0"
 
+    # Handle == comparison by translating each side individually
+    val eq2_pos = result.index_of(" == ") ?? -1
+    if eq2_pos >= 0:
+        val cmp_left = result.substring(0, eq2_pos).trim()
+        val cmp_right = result.substring(eq2_pos + 4).trim()
+        return "{translate_expr(cmp_left, types)} == {translate_expr(cmp_right, types)}"
+
     # Handle comparison operators by translating each side individually
     # This ensures .len() and other method calls are properly translated
     val gte_pos = result.index_of(" >= ") ?? -1
@@ -150,6 +157,8 @@ fn translate_method_expr(expr: text, types: text) -> text:
             if is_dict_var(obj, types):
                 return "simple_dict_contains({obj}, {translate_expr(arg, types)})"
             if is_string_array_var(obj, types):
+                return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
+            if is_struct_field_str_array(obj, types):
                 return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
             return "simple_contains({obj}, {translate_expr(arg, types)})"
 
@@ -411,6 +420,12 @@ fn translate_expr(expr: text, types: text) -> text:
         if is_str or is_text:
             return "simple_some_str({c_inner})"
         return "simple_some_int({c_inner})"
+
+    # Handle int(x) builtin -> atoll(x)
+    if expr.starts_with("int(") and expr.ends_with(")"):
+        val int_inner = expr.substring(4, expr.len() - 1).trim()
+        val c_int_inner = translate_expr(int_inner, types)
+        return "atoll({c_int_inner})"
 
     # Handle ?? (null coalescing)
     val nq_pos = expr.index_of(" ?? ") ?? -1
@@ -1080,6 +1095,26 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         val sa_ret_elem = is_fn_returning_struct_arr(c_fn_sa_name, types)
         if sa_ret_elem != "":
             return "SimpleStructArray {name} = {c_rhs};|||;struct_arr_var:{name}={sa_ret_elem};"
+
+    # Check if function returns an int array
+    if paren_pos >= 0:
+        val fn_ia_name = rhs.substring(0, paren_pos).trim()
+        if is_fn_returning_int_arr(fn_ia_name, types):
+            return "SimpleIntArray {name} = {c_rhs};|||;int_arr:{name};"
+    if c_paren_pos >= 0:
+        val c_fn_ia_name = c_rhs.substring(0, c_paren_pos).trim()
+        if is_fn_returning_int_arr(c_fn_ia_name, types):
+            return "SimpleIntArray {name} = {c_rhs};|||;int_arr:{name};"
+
+    # Check if function returns a string array
+    if paren_pos >= 0:
+        val fn_sar_name = rhs.substring(0, paren_pos).trim()
+        if is_fn_returning_str_arr(fn_sar_name, types):
+            return "SimpleStringArray {name} = {c_rhs};|||;arr:{name};"
+    if c_paren_pos >= 0:
+        val c_fn_sar_name = c_rhs.substring(0, c_paren_pos).trim()
+        if is_fn_returning_str_arr(c_fn_sar_name, types):
+            return "SimpleStringArray {name} = {c_rhs};|||;arr:{name};"
 
     # Handle Dict type hint
     val gen_parts = parse_generic_type(type_hint)

@@ -25,7 +25,7 @@
 #   - c_translate.spl: Expression/statement/control-flow translation to C
 #   - c_runtime.spl: C runtime generation, struct parsing, result splitting
 
-use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr}
+use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
 use app.compile.c_translate.{translate_condition, translate_method_expr, translate_expr, translate_interpolated_print, translate_print, translate_array_decl, translate_var_decl, translate_for_loop, translate_case, translate_statement, close_blocks, build_function}
 use app.compile.c_runtime.{generate_c_runtime, parse_struct_fields, split_result}
 
@@ -534,13 +534,19 @@ fn generate_c_code(source_text: text) -> text:
                     # Track extern fn return types for type inference
                     if eret_type == "const char*":
                         types = types + "fn_text:" + extern_name + ";"
-                    # Track struct return types
+                    # Track struct and array return types
                     if earrow >= 0:
                         val eret_raw = extern_rest.substring(earrow + 2).trim()
                         if eret_raw.len() > 0:
                             val eret_first = eret_raw[0]
                             if eret_first >= "A" and eret_first <= "Z":
                                 types = types + "fn_struct:" + extern_name + "=" + eret_raw + ";"
+                            if eret_raw.starts_with("[") and eret_raw.ends_with("]"):
+                                val ext_arr_elem = eret_raw.substring(1, eret_raw.len() - 1).trim()
+                                if ext_arr_elem == "i64" or ext_arr_elem == "int":
+                                    types = types + "fn_int_arr:" + extern_name + ";"
+                                elif ext_arr_elem == "text" or ext_arr_elem == "str":
+                                    types = types + "fn_str_arr:" + extern_name + ";"
             continue
 
         # Type alias - skip
@@ -793,10 +799,14 @@ fn generate_c_code(source_text: text) -> text:
                     val ret_is_upper = ret_first >= "A" and ret_first <= "Z"
                     if ret_is_upper:
                         types = types + "fn_struct:" + current_fn_name + "=" + ret_type + ";"
-                # Track struct array return type: [StructName]
+                # Track array return types: [i64], [text], [StructName]
                 if ret_type.starts_with("[") and ret_type.ends_with("]"):
                     val ret_sa_elem = ret_type.substring(1, ret_type.len() - 1).trim()
-                    if ret_sa_elem.len() > 0:
+                    if ret_sa_elem == "i64" or ret_sa_elem == "int":
+                        types = types + "fn_int_arr:" + current_fn_name + ";"
+                    elif ret_sa_elem == "text" or ret_sa_elem == "str":
+                        types = types + "fn_str_arr:" + current_fn_name + ";"
+                    elif ret_sa_elem.len() > 0:
                         val ret_sa_f = ret_sa_elem[0]
                         if ret_sa_f >= "A" and ret_sa_f <= "Z":
                             types = types + "fn_struct_arr:" + current_fn_name + "=" + ret_sa_elem + ";"
