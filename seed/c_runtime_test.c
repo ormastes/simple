@@ -203,6 +203,25 @@ TEST(index_of_null) {
 }
 
 /* ================================================================
+ * simple_last_index_of tests
+ * ================================================================ */
+
+TEST(last_index_of_basic) {
+    ASSERT_EQ_INT(simple_last_index_of("hello world hello", "hello"), 12);
+    ASSERT_EQ_INT(simple_last_index_of("hello world", "world"), 6);
+    ASSERT_EQ_INT(simple_last_index_of("hello", "xyz"), -1);
+}
+
+TEST(last_index_of_null) {
+    ASSERT_EQ_INT(simple_last_index_of(NULL, "x"), -1);
+    ASSERT_EQ_INT(simple_last_index_of("x", NULL), -1);
+}
+
+TEST(last_index_of_longer_needle) {
+    ASSERT_EQ_INT(simple_last_index_of("hi", "longer_string"), -1);
+}
+
+/* ================================================================
  * simple_replace tests
  * ================================================================ */
 
@@ -580,6 +599,441 @@ TEST(format_str_null) {
 }
 
 /* ================================================================
+ * simple_int_to_str tests
+ * ================================================================ */
+
+TEST(int_to_str_basic) {
+    char* s = simple_int_to_str(42);
+    ASSERT_EQ_STR(s, "42");
+    free(s);
+}
+
+TEST(int_to_str_negative) {
+    char* s = simple_int_to_str(-123);
+    ASSERT_EQ_STR(s, "-123");
+    free(s);
+}
+
+TEST(int_to_str_zero) {
+    char* s = simple_int_to_str(0);
+    ASSERT_EQ_STR(s, "0");
+    free(s);
+}
+
+/* ================================================================
+ * SimpleIntArray tests
+ * ================================================================ */
+
+TEST(int_array_new) {
+    SimpleIntArray arr = simple_new_int_array();
+    ASSERT_EQ_INT(arr.len, 0);
+    ASSERT(arr.cap >= 16);
+    free(arr.items);
+}
+
+TEST(int_array_push_pop) {
+    SimpleIntArray arr = simple_new_int_array();
+    simple_int_push(&arr, 10);
+    simple_int_push(&arr, 20);
+    simple_int_push(&arr, 30);
+    ASSERT_EQ_INT(arr.len, 3);
+    ASSERT_EQ_INT(arr.items[0], 10);
+    ASSERT_EQ_INT(arr.items[1], 20);
+    ASSERT_EQ_INT(arr.items[2], 30);
+
+    long long popped = simple_int_pop(&arr);
+    ASSERT_EQ_INT(popped, 30);
+    ASSERT_EQ_INT(arr.len, 2);
+
+    popped = simple_int_pop(&arr);
+    ASSERT_EQ_INT(popped, 20);
+    ASSERT_EQ_INT(arr.len, 1);
+
+    /* Pop from single element */
+    popped = simple_int_pop(&arr);
+    ASSERT_EQ_INT(popped, 10);
+    ASSERT_EQ_INT(arr.len, 0);
+
+    /* Pop from empty */
+    popped = simple_int_pop(&arr);
+    ASSERT_EQ_INT(popped, 0);
+
+    free(arr.items);
+}
+
+TEST(int_array_grow) {
+    SimpleIntArray arr = simple_new_int_array();
+    for (long long i = 0; i < 100; i++) {
+        simple_int_push(&arr, i * 10);
+    }
+    ASSERT_EQ_INT(arr.len, 100);
+    ASSERT_EQ_INT(arr.items[0], 0);
+    ASSERT_EQ_INT(arr.items[50], 500);
+    ASSERT_EQ_INT(arr.items[99], 990);
+    free(arr.items);
+}
+
+/* ================================================================
+ * SimpleStringArrayArray tests
+ * ================================================================ */
+
+TEST(string_array_array_new) {
+    SimpleStringArrayArray arr = simple_new_string_array_array();
+    ASSERT_EQ_INT(arr.len, 0);
+    ASSERT(arr.cap >= 16);
+    free(arr.items);
+}
+
+TEST(string_array_array_push) {
+    SimpleStringArrayArray arr = simple_new_string_array_array();
+
+    SimpleStringArray sub1 = simple_new_string_array();
+    simple_string_push(&sub1, "a");
+    simple_string_push(&sub1, "b");
+
+    SimpleStringArray sub2 = simple_new_string_array();
+    simple_string_push(&sub2, "x");
+    simple_string_push(&sub2, "y");
+
+    simple_string_array_push(&arr, sub1);
+    simple_string_array_push(&arr, sub2);
+
+    ASSERT_EQ_INT(arr.len, 2);
+    ASSERT_EQ_INT(arr.items[0].len, 2);
+    ASSERT_EQ_STR(arr.items[0].items[0], "a");
+    ASSERT_EQ_STR(arr.items[0].items[1], "b");
+    ASSERT_EQ_INT(arr.items[1].len, 2);
+    ASSERT_EQ_STR(arr.items[1].items[0], "x");
+    ASSERT_EQ_STR(arr.items[1].items[1], "y");
+
+    /* Cleanup */
+    for (int i = 0; i < arr.len; i++) {
+        for (int j = 0; j < arr.items[i].len; j++) {
+            free((void*)arr.items[i].items[j]);
+        }
+        free(arr.items[i].items);
+    }
+    free(arr.items);
+}
+
+/* ================================================================
+ * SimpleIntArrayArray tests
+ * ================================================================ */
+
+TEST(int_array_array_new) {
+    SimpleIntArrayArray arr = simple_new_int_array_array();
+    ASSERT_EQ_INT(arr.len, 0);
+    ASSERT(arr.cap >= 16);
+    free(arr.items);
+}
+
+TEST(int_array_array_push) {
+    SimpleIntArrayArray arr = simple_new_int_array_array();
+
+    SimpleIntArray sub1 = simple_new_int_array();
+    simple_int_push(&sub1, 1);
+    simple_int_push(&sub1, 2);
+    simple_int_push(&sub1, 3);
+
+    SimpleIntArray sub2 = simple_new_int_array();
+    simple_int_push(&sub2, 10);
+    simple_int_push(&sub2, 20);
+
+    simple_int_array_push(&arr, sub1);
+    simple_int_array_push(&arr, sub2);
+
+    ASSERT_EQ_INT(arr.len, 2);
+    ASSERT_EQ_INT(arr.items[0].len, 3);
+    ASSERT_EQ_INT(arr.items[0].items[0], 1);
+    ASSERT_EQ_INT(arr.items[0].items[1], 2);
+    ASSERT_EQ_INT(arr.items[0].items[2], 3);
+    ASSERT_EQ_INT(arr.items[1].len, 2);
+    ASSERT_EQ_INT(arr.items[1].items[0], 10);
+    ASSERT_EQ_INT(arr.items[1].items[1], 20);
+
+    /* Cleanup */
+    for (int i = 0; i < arr.len; i++) {
+        free(arr.items[i].items);
+    }
+    free(arr.items);
+}
+
+/* ================================================================
+ * SimpleDict tests
+ * ================================================================ */
+
+TEST(dict_new) {
+    SimpleDict* d = simple_dict_new();
+    ASSERT(d != NULL);
+    ASSERT_EQ_INT(simple_dict_len(d), 0);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_set_get_int) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "age", 42);
+    simple_dict_set_int(d, "count", 100);
+
+    ASSERT_EQ_INT(simple_dict_get_int(d, "age"), 42);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "count"), 100);
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Overwrite */
+    simple_dict_set_int(d, "age", 43);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "age"), 43);
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_set_get_str) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_str(d, "name", "Alice");
+    simple_dict_set_str(d, "city", "Boston");
+
+    ASSERT_EQ_STR(simple_dict_get(d, "name"), "Alice");
+    ASSERT_EQ_STR(simple_dict_get(d, "city"), "Boston");
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Overwrite */
+    simple_dict_set_str(d, "name", "Bob");
+    ASSERT_EQ_STR(simple_dict_get(d, "name"), "Bob");
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) {
+        free((void*)d->entries[i].key);
+        if (d->entries[i].type_tag == SIMPLE_DICT_TYPE_STR) {
+            free((void*)d->entries[i].value.str_val);
+        }
+    }
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_set_get_ptr) {
+    SimpleDict* d = simple_dict_new();
+    int x = 42;
+    int y = 100;
+    simple_dict_set_ptr(d, "ptr1", &x);
+    simple_dict_set_ptr(d, "ptr2", &y);
+
+    ASSERT(simple_dict_get_ptr(d, "ptr1") == &x);
+    ASSERT(simple_dict_get_ptr(d, "ptr2") == &y);
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_contains) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "x", 10);
+
+    ASSERT(simple_dict_contains(d, "x"));
+    ASSERT(!simple_dict_contains(d, "y"));
+
+    /* Cleanup */
+    free((void*)d->entries[0].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_keys) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "alpha", 1);
+    simple_dict_set_int(d, "beta", 2);
+    simple_dict_set_int(d, "gamma", 3);
+
+    SimpleStringArray keys = simple_dict_keys(d);
+    ASSERT_EQ_INT(keys.len, 3);
+    ASSERT_EQ_STR(keys.items[0], "alpha");
+    ASSERT_EQ_STR(keys.items[1], "beta");
+    ASSERT_EQ_STR(keys.items[2], "gamma");
+
+    /* Cleanup */
+    for (int i = 0; i < keys.len; i++) free((void*)keys.items[i]);
+    free(keys.items);
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_remove) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "a", 1);
+    simple_dict_set_int(d, "b", 2);
+    simple_dict_set_int(d, "c", 3);
+
+    ASSERT_EQ_INT(simple_dict_len(d), 3);
+    simple_dict_remove(d, "b");
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+    ASSERT(simple_dict_contains(d, "a"));
+    ASSERT(!simple_dict_contains(d, "b"));
+    ASSERT(simple_dict_contains(d, "c"));
+
+    /* Remove non-existent */
+    simple_dict_remove(d, "xyz");
+    ASSERT_EQ_INT(simple_dict_len(d), 2);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_get_int_converts_from_str) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "num", 42);
+
+    /* Get as string (converts int to string) */
+    const char* s = simple_dict_get(d, "num");
+    ASSERT_EQ_STR(s, "42");
+    free((void*)s);
+
+    /* Cleanup */
+    free((void*)d->entries[0].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_null_operations) {
+    ASSERT_EQ_INT(simple_dict_len(NULL), 0);
+    ASSERT_EQ_INT(simple_dict_get_int(NULL, "key"), 0);
+    ASSERT(simple_dict_get_ptr(NULL, "key") == NULL);
+    ASSERT(simple_dict_get(NULL, "key") == NULL);
+
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, NULL, 42);
+    simple_dict_set_str(d, NULL, "test");
+    simple_dict_set_ptr(d, NULL, NULL);
+    ASSERT_EQ_INT(simple_dict_len(d), 0);
+
+    simple_dict_remove(d, NULL);
+    simple_dict_remove(NULL, "key");
+
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_grow) {
+    SimpleDict* d = simple_dict_new();
+    for (int i = 0; i < 100; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "key_%d", i);
+        simple_dict_set_int(d, key, i * 10);
+    }
+    ASSERT_EQ_INT(simple_dict_len(d), 100);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "key_0"), 0);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "key_50"), 500);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "key_99"), 990);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+/* ================================================================
+ * SimpleOption tests
+ * ================================================================ */
+
+TEST(option_none) {
+    SimpleOption o = simple_none();
+    ASSERT(!simple_option_has(o));
+    ASSERT_EQ_INT(o.has_value, 0);
+}
+
+TEST(option_some_int) {
+    SimpleOption o = simple_some_int(42);
+    ASSERT(simple_option_has(o));
+    ASSERT_EQ_INT(simple_option_unwrap_int(o), 42);
+}
+
+TEST(option_some_str) {
+    SimpleOption o = simple_some_str("hello");
+    ASSERT(simple_option_has(o));
+    ASSERT_EQ_STR(simple_option_unwrap_str(o), "hello");
+    free((void*)o.str_val);
+}
+
+TEST(option_some_str_null) {
+    SimpleOption o = simple_some_str(NULL);
+    ASSERT(simple_option_has(o));
+    ASSERT_EQ_STR(simple_option_unwrap_str(o), "");
+    free((void*)o.str_val);
+}
+
+TEST(option_some_ptr) {
+    int x = 123;
+    SimpleOption o = simple_some_ptr(&x);
+    ASSERT(simple_option_has(o));
+    ASSERT(simple_option_unwrap_ptr(o) == &x);
+}
+
+TEST(option_unwrap_none_str) {
+    SimpleOption o = simple_none();
+    ASSERT_EQ_STR(simple_option_unwrap_str(o), "");
+}
+
+TEST(option_unwrap_none_ptr) {
+    SimpleOption o = simple_none();
+    ASSERT(simple_option_unwrap_ptr(o) == NULL);
+}
+
+TEST(option_unwrap_wrong_type) {
+    SimpleOption o = simple_some_int(42);
+    /* Unwrapping int option as string should return empty */
+    ASSERT_EQ_STR(simple_option_unwrap_str(o), "");
+    /* Unwrapping int option as ptr should return NULL */
+    ASSERT(simple_option_unwrap_ptr(o) == NULL);
+}
+
+/* ================================================================
+ * SimpleResult tests
+ * ================================================================ */
+
+TEST(result_ok_int) {
+    SimpleResult r = simple_result_ok_int(42);
+    ASSERT(r.is_ok);
+    ASSERT_EQ_INT(r.ok_int, 42);
+}
+
+TEST(result_ok_str) {
+    SimpleResult r = simple_result_ok_str("success");
+    ASSERT(r.is_ok);
+    ASSERT_EQ_STR(r.ok_str, "success");
+    free((void*)r.ok_str);
+}
+
+TEST(result_ok_str_null) {
+    SimpleResult r = simple_result_ok_str(NULL);
+    ASSERT(r.is_ok);
+    ASSERT_EQ_STR(r.ok_str, "");
+    free((void*)r.ok_str);
+}
+
+TEST(result_err_str) {
+    SimpleResult r = simple_result_err_str("error message");
+    ASSERT(!r.is_ok);
+    ASSERT_EQ_STR(r.err_str, "error message");
+    free((void*)r.err_str);
+}
+
+TEST(result_err_str_null) {
+    SimpleResult r = simple_result_err_str(NULL);
+    ASSERT(!r.is_ok);
+    ASSERT_EQ_STR(r.err_str, "");
+    free((void*)r.err_str);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -608,6 +1062,9 @@ int main(void) {
     RUN(trim_no_whitespace);
     RUN(index_of_basic);
     RUN(index_of_null);
+    RUN(last_index_of_basic);
+    RUN(last_index_of_null);
+    RUN(last_index_of_longer_needle);
     RUN(replace_basic);
     RUN(replace_multiple);
     RUN(replace_no_match);
@@ -664,6 +1121,53 @@ int main(void) {
     RUN(format_long_null);
     RUN(format_str_basic);
     RUN(format_str_null);
+
+    printf("\n--- Int to String ---\n");
+    RUN(int_to_str_basic);
+    RUN(int_to_str_negative);
+    RUN(int_to_str_zero);
+
+    printf("\n--- Int Array ---\n");
+    RUN(int_array_new);
+    RUN(int_array_push_pop);
+    RUN(int_array_grow);
+
+    printf("\n--- String Array Array ---\n");
+    RUN(string_array_array_new);
+    RUN(string_array_array_push);
+
+    printf("\n--- Int Array Array ---\n");
+    RUN(int_array_array_new);
+    RUN(int_array_array_push);
+
+    printf("\n--- Dictionary ---\n");
+    RUN(dict_new);
+    RUN(dict_set_get_int);
+    RUN(dict_set_get_str);
+    RUN(dict_set_get_ptr);
+    RUN(dict_contains);
+    RUN(dict_keys);
+    RUN(dict_remove);
+    RUN(dict_get_int_converts_from_str);
+    RUN(dict_null_operations);
+    RUN(dict_grow);
+
+    printf("\n--- Option Type ---\n");
+    RUN(option_none);
+    RUN(option_some_int);
+    RUN(option_some_str);
+    RUN(option_some_str_null);
+    RUN(option_some_ptr);
+    RUN(option_unwrap_none_str);
+    RUN(option_unwrap_none_ptr);
+    RUN(option_unwrap_wrong_type);
+
+    printf("\n--- Result Type ---\n");
+    RUN(result_ok_int);
+    RUN(result_ok_str);
+    RUN(result_ok_str_null);
+    RUN(result_err_str);
+    RUN(result_err_str_null);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;
