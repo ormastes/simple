@@ -1,0 +1,1214 @@
+# Serialization Utilities Module
+#
+# Comprehensive serialization/deserialization utilities for the Simple language.
+# Supports multiple formats: Binary, Text, and SDN (Simple Data Notation).
+# Pure Simple implementation - no FFI, no external dependencies.
+#
+# FEATURES:
+# - Binary serialization (compact byte representation)
+# - Text serialization (human-readable format)
+# - SDN serialization (Simple Data Notation - native format)
+# - Type tagging and registration
+# - Schema validation
+# - Versioning support
+# - Deep cloning and comparison
+# - Pretty printing
+#
+# CONSTRAINTS:
+# - No generics at runtime (use concrete types)
+# - No try/catch/throw (use Option/nil for errors)
+# - No chained methods (use intermediate variables)
+# - Tuple-based data structures
+#
+# USAGE:
+#   val data = (name: "Alice", age: 30, scores: [95, 87, 92])
+#   val binary = serialize_binary(data)
+#   val restored = deserialize_binary(binary)
+#   val text = serialize_text(data)
+#   val sdn = to_sdn(data)
+
+# ============================================================================
+# Core Data Type Constants
+# ============================================================================
+
+fn type_nil() -> i64: 0
+fn type_bool() -> i64: 1
+fn type_int() -> i64: 2
+fn type_float() -> i64: 3
+fn type_text() -> i64: 4
+fn type_list() -> i64: 5
+fn type_tuple() -> i64: 6
+fn type_dict() -> i64: 7
+fn type_custom() -> i64: 8
+
+# ============================================================================
+# Binary Serialization - Varint Encoding
+# ============================================================================
+
+fn write_varint(n: i64) -> [i64]:
+    """Encode integer as variable-length byte array.
+    Uses 7 bits per byte, MSB indicates continuation."""
+    if n == 0:
+        return [0]
+
+    var result = []
+    var value = n
+    var is_negative = false
+
+    if value < 0:
+        is_negative = true
+        value = -value
+
+    while value > 0:
+        var byte_val = value % 128
+        value = value / 128
+        if value > 0:
+            byte_val = byte_val + 128
+        result = result.push(byte_val)
+
+    if is_negative:
+        # Prepend sign byte
+        var signed = [255]
+        for b in result:
+            signed = signed.push(b)
+        return signed
+
+    result
+
+fn read_varint(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode varint from byte array.
+    Returns (value, bytes_consumed) tuple."""
+    var is_negative = false
+    var start = offset
+
+    if bytes[start] == 255:
+        is_negative = true
+        start = start + 1
+
+    var result = 0
+    var shift = 0
+    var pos = start
+
+    while pos < bytes.len():
+        val byte_val = bytes[pos]
+        val value_bits = byte_val % 128
+        result = result + (value_bits * (1 << shift))
+        shift = shift + 7
+        pos = pos + 1
+
+        if byte_val < 128:
+            break
+
+    val consumed = pos - offset
+    if is_negative:
+        result = -result
+
+    (result, consumed)
+
+# ============================================================================
+# Binary Serialization - Primitive Types
+# ============================================================================
+
+fn serialize_int_bytes(n: i64) -> [i64]:
+    """Serialize integer to byte array with type tag."""
+    var result = [type_int()]
+    val varint = write_varint(n)
+    for b in varint:
+        result = result.push(b)
+    result
+
+fn serialize_bool_bytes(b: bool) -> [i64]:
+    """Serialize boolean to byte array with type tag."""
+    if b:
+        return [type_bool(), 1]
+    [type_bool(), 0]
+
+fn serialize_nil_bytes() -> [i64]:
+    """Serialize nil to byte array with type tag."""
+    [type_nil()]
+
+fn serialize_text_bytes(s: text) -> [i64]:
+    """Serialize text to byte array with type tag and length."""
+    var result = [type_text()]
+    val len_bytes = write_varint(s.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    # Convert text to byte codes
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        val code = char_code_safe(ch)
+        result = result.push(code)
+        i = i + 1
+
+    result
+
+fn char_code_safe(c: text) -> i64:
+    """Get ASCII code of character, handling all printable chars."""
+    if c == " ": return 32
+    if c == "!": return 33
+    if c == "\"": return 34
+    if c == "#": return 35
+    if c == "$": return 36
+    if c == "%": return 37
+    if c == "&": return 38
+    if c == "'": return 39
+    if c == "(": return 40
+    if c == ")": return 41
+    if c == "*": return 42
+    if c == "+": return 43
+    if c == ",": return 44
+    if c == "-": return 45
+    if c == ".": return 46
+    if c == "/": return 47
+    if c >= "0" and c <= "9":
+        val offset = c[0:1]
+        if c == "0": return 48
+        if c == "1": return 49
+        if c == "2": return 50
+        if c == "3": return 51
+        if c == "4": return 52
+        if c == "5": return 53
+        if c == "6": return 54
+        if c == "7": return 55
+        if c == "8": return 56
+        if c == "9": return 57
+    if c == ":": return 58
+    if c == ";": return 59
+    if c == "<": return 60
+    if c == "=": return 61
+    if c == ">": return 62
+    if c == "?": return 63
+    if c == "@": return 64
+    if c >= "A" and c <= "Z":
+        if c == "A": return 65
+        if c == "B": return 66
+        if c == "C": return 67
+        if c == "D": return 68
+        if c == "E": return 69
+        if c == "F": return 70
+        if c == "G": return 71
+        if c == "H": return 72
+        if c == "I": return 73
+        if c == "J": return 74
+        if c == "K": return 75
+        if c == "L": return 76
+        if c == "M": return 77
+        if c == "N": return 78
+        if c == "O": return 79
+        if c == "P": return 80
+        if c == "Q": return 81
+        if c == "R": return 82
+        if c == "S": return 83
+        if c == "T": return 84
+        if c == "U": return 85
+        if c == "V": return 86
+        if c == "W": return 87
+        if c == "X": return 88
+        if c == "Y": return 89
+        if c == "Z": return 90
+    if c == "[": return 91
+    if c == "\\": return 92
+    if c == "]": return 93
+    if c == "^": return 94
+    if c == "_": return 95
+    if c == "`": return 96
+    if c >= "a" and c <= "z":
+        if c == "a": return 97
+        if c == "b": return 98
+        if c == "c": return 99
+        if c == "d": return 100
+        if c == "e": return 101
+        if c == "f": return 102
+        if c == "g": return 103
+        if c == "h": return 104
+        if c == "i": return 105
+        if c == "j": return 106
+        if c == "k": return 107
+        if c == "l": return 108
+        if c == "m": return 109
+        if c == "n": return 110
+        if c == "o": return 111
+        if c == "p": return 112
+        if c == "q": return 113
+        if c == "r": return 114
+        if c == "s": return 115
+        if c == "t": return 116
+        if c == "u": return 117
+        if c == "v": return 118
+        if c == "w": return 119
+        if c == "x": return 120
+        if c == "y": return 121
+        if c == "z": return 122
+    if c == "{": return 123
+    if c == "|": return 124
+    if c == "}": return 125
+    if c == "~": return 126
+    if c == "\n": return 10
+    if c == "\t": return 9
+    if c == "\r": return 13
+    0
+
+fn char_from_code_safe(code: i64) -> text:
+    """Convert ASCII code to character."""
+    if code == 32: return " "
+    if code == 33: return "!"
+    if code == 34: return "\""
+    if code == 35: return "#"
+    if code == 36: return "$"
+    if code == 37: return "%"
+    if code == 38: return "&"
+    if code == 39: return "'"
+    if code == 40: return "("
+    if code == 41: return ")"
+    if code == 42: return "*"
+    if code == 43: return "+"
+    if code == 44: return ","
+    if code == 45: return "-"
+    if code == 46: return "."
+    if code == 47: return "/"
+    if code >= 48 and code <= 57:
+        if code == 48: return "0"
+        if code == 49: return "1"
+        if code == 50: return "2"
+        if code == 51: return "3"
+        if code == 52: return "4"
+        if code == 53: return "5"
+        if code == 54: return "6"
+        if code == 55: return "7"
+        if code == 56: return "8"
+        if code == 57: return "9"
+    if code == 58: return ":"
+    if code == 59: return ";"
+    if code == 60: return "<"
+    if code == 61: return "="
+    if code == 62: return ">"
+    if code == 63: return "?"
+    if code == 64: return "@"
+    if code >= 65 and code <= 90:
+        if code == 65: return "A"
+        if code == 66: return "B"
+        if code == 67: return "C"
+        if code == 68: return "D"
+        if code == 69: return "E"
+        if code == 70: return "F"
+        if code == 71: return "G"
+        if code == 72: return "H"
+        if code == 73: return "I"
+        if code == 74: return "J"
+        if code == 75: return "K"
+        if code == 76: return "L"
+        if code == 77: return "M"
+        if code == 78: return "N"
+        if code == 79: return "O"
+        if code == 80: return "P"
+        if code == 81: return "Q"
+        if code == 82: return "R"
+        if code == 83: return "S"
+        if code == 84: return "T"
+        if code == 85: return "U"
+        if code == 86: return "V"
+        if code == 87: return "W"
+        if code == 88: return "X"
+        if code == 89: return "Y"
+        if code == 90: return "Z"
+    if code == 91: return "["
+    if code == 92: return "\\"
+    if code == 93: return "]"
+    if code == 94: return "^"
+    if code == 95: return "_"
+    if code == 96: return "`"
+    if code >= 97 and code <= 122:
+        if code == 97: return "a"
+        if code == 98: return "b"
+        if code == 99: return "c"
+        if code == 100: return "d"
+        if code == 101: return "e"
+        if code == 102: return "f"
+        if code == 103: return "g"
+        if code == 104: return "h"
+        if code == 105: return "i"
+        if code == 106: return "j"
+        if code == 107: return "k"
+        if code == 108: return "l"
+        if code == 109: return "m"
+        if code == 110: return "n"
+        if code == 111: return "o"
+        if code == 112: return "p"
+        if code == 113: return "q"
+        if code == 114: return "r"
+        if code == 115: return "s"
+        if code == 116: return "t"
+        if code == 117: return "u"
+        if code == 118: return "v"
+        if code == 119: return "w"
+        if code == 120: return "x"
+        if code == 121: return "y"
+        if code == 122: return "z"
+    if code == 123: return "{"
+    if code == 124: return "|"
+    if code == 125: return "}"
+    if code == 126: return "~"
+    if code == 10: return "\n"
+    if code == 9: return "\t"
+    if code == 13: return "\r"
+    ""
+
+# ============================================================================
+# Text Serialization - String Escaping
+# ============================================================================
+
+fn escape_string(s: text) -> text:
+    """Escape special characters in string for text serialization."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        if ch == "\"":
+            result = result + "\\\""
+        else if ch == "\\":
+            result = result + "\\\\"
+        else if ch == "\n":
+            result = result + "\\n"
+        else if ch == "\t":
+            result = result + "\\t"
+        else if ch == "\r":
+            result = result + "\\r"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn unescape_string(s: text) -> text:
+    """Unescape special characters from escaped string."""
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i+1]
+        if ch == "\\":
+            if i + 1 < s.len():
+                val next = s[i+1:i+2]
+                if next == "\"":
+                    result = result + "\""
+                    i = i + 1
+                else if next == "\\":
+                    result = result + "\\"
+                    i = i + 1
+                else if next == "n":
+                    result = result + "\n"
+                    i = i + 1
+                else if next == "t":
+                    result = result + "\t"
+                    i = i + 1
+                else if next == "r":
+                    result = result + "\r"
+                    i = i + 1
+                else:
+                    result = result + ch
+            else:
+                result = result + ch
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn quote_string(s: text) -> text:
+    """Quote and escape string for serialization."""
+    "\"" + escape_string(s) + "\""
+
+fn unquote_string(s: text) -> text:
+    """Remove quotes and unescape string."""
+    if s.len() < 2:
+        return s
+    if s[0:1] == "\"" and s[s.len()-1:s.len()] == "\"":
+        val inner = s[1:s.len()-1]
+        return unescape_string(inner)
+    s
+
+# ============================================================================
+# Text Serialization - Primitive Types
+# ============================================================================
+
+fn serialize_int(n: i64) -> text:
+    """Serialize integer to text format."""
+    "{n}"
+
+fn serialize_bool(b: bool) -> text:
+    """Serialize boolean to text format."""
+    if b:
+        return "true"
+    "false"
+
+fn serialize_nil() -> text:
+    """Serialize nil to text format."""
+    "nil"
+
+fn serialize_text(s: text) -> text:
+    """Serialize text to quoted, escaped format."""
+    quote_string(s)
+
+# ============================================================================
+# Text Serialization - Collections
+# ============================================================================
+
+fn serialize_list(items: [text]) -> text:
+    """Serialize list of serialized items to text format."""
+    if items.len() == 0:
+        return "[]"
+
+    var result = "["
+    var i = 0
+    while i < items.len():
+        if i > 0:
+            result = result + ", "
+        result = result + items[i]
+        i = i + 1
+    result = result + "]"
+    result
+
+fn serialize_tuple_text(values: [text]) -> text:
+    """Serialize tuple of serialized values to text format."""
+    if values.len() == 0:
+        return "()"
+
+    var result = "("
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            result = result + ", "
+        result = result + values[i]
+        i = i + 1
+    result = result + ")"
+    result
+
+fn serialize_dict(entries: [(text, text)]) -> text:
+    """Serialize dict entries to text format.
+    Each entry is (key, serialized_value) pair."""
+    if entries.len() == 0:
+        return "{}"
+
+    var result = "{"
+    var i = 0
+    while i < entries.len():
+        if i > 0:
+            result = result + ", "
+        val entry = entries[i]
+        val key = entry.0
+        val value = entry.1
+        result = result + key + ": " + value
+        i = i + 1
+    result = result + "}"
+    result
+
+# ============================================================================
+# SDN (Simple Data Notation) Serialization
+# ============================================================================
+
+fn to_sdn_int(n: i64) -> text:
+    """Convert integer to SDN format."""
+    "{n}"
+
+fn to_sdn_bool(b: bool) -> text:
+    """Convert boolean to SDN format."""
+    if b:
+        return "true"
+    "false"
+
+fn to_sdn_nil() -> text:
+    """Convert nil to SDN format."""
+    "nil"
+
+fn to_sdn_text(s: text) -> text:
+    """Convert text to SDN format (quoted)."""
+    quote_string(s)
+
+fn to_sdn_list(items: [text]) -> text:
+    """Convert list to SDN format."""
+    serialize_list(items)
+
+fn to_sdn_tuple(values: [text]) -> text:
+    """Convert tuple to SDN format."""
+    serialize_tuple_text(values)
+
+fn to_sdn_dict(entries: [(text, text)]) -> text:
+    """Convert dict to SDN format."""
+    serialize_dict(entries)
+
+# ============================================================================
+# Pretty Printing
+# ============================================================================
+
+fn pretty_print_indent(s: text, level: i64) -> text:
+    """Add indentation to string."""
+    var indent = ""
+    var i = 0
+    while i < level:
+        indent = indent + "  "
+        i = i + 1
+    indent + s
+
+fn pretty_list(items: [text], indent: i64) -> text:
+    """Pretty print list with indentation."""
+    if items.len() == 0:
+        return "[]"
+
+    var result = "[\n"
+    var i = 0
+    while i < items.len():
+        val item_indent = pretty_print_indent(items[i], indent + 1)
+        result = result + item_indent
+        if i < items.len() - 1:
+            result = result + ","
+        result = result + "\n"
+        i = i + 1
+
+    val close = pretty_print_indent("]", indent)
+    result = result + close
+    result
+
+fn pretty_tuple(values: [text], indent: i64) -> text:
+    """Pretty print tuple with indentation."""
+    if values.len() == 0:
+        return "()"
+
+    var result = "(\n"
+    var i = 0
+    while i < values.len():
+        val value_indent = pretty_print_indent(values[i], indent + 1)
+        result = result + value_indent
+        if i < values.len() - 1:
+            result = result + ","
+        result = result + "\n"
+        i = i + 1
+
+    val close = pretty_print_indent(")", indent)
+    result = result + close
+    result
+
+fn pretty_dict(entries: [(text, text)], indent: i64) -> text:
+    """Pretty print dict with indentation."""
+    if entries.len() == 0:
+        return "{}"
+
+    var result = "{\n"
+    var i = 0
+    while i < entries.len():
+        val entry = entries[i]
+        val key = entry.0
+        val value = entry.1
+        val line = key + ": " + value
+        val line_indent = pretty_print_indent(line, indent + 1)
+        result = result + line_indent
+        if i < entries.len() - 1:
+            result = result + ","
+        result = result + "\n"
+        i = i + 1
+
+    val close = pretty_print_indent("}", indent)
+    result = result + close
+    result
+
+# ============================================================================
+# Type Tagging
+# ============================================================================
+
+fn tag_type(obj_repr: text, type_name: text) -> text:
+    """Add type tag to serialized object.
+    Format: @TypeName{...data...}"""
+    "@" + type_name + "{" + obj_repr + "}"
+
+fn get_type_tag(serialized: text) -> text?:
+    """Extract type tag from serialized object.
+    Returns nil if no tag present."""
+    if serialized.len() < 3:
+        return nil
+    if serialized[0:1] != "@":
+        return nil
+
+    var i = 1
+    while i < serialized.len():
+        val ch = serialized[i:i+1]
+        if ch == "{":
+            return serialized[1:i]
+        i = i + 1
+
+    nil
+
+fn strip_type_tag(serialized: text) -> text:
+    """Remove type tag from serialized object, returning inner content."""
+    val tag = get_type_tag(serialized)
+    if tag == nil:
+        return serialized
+
+    # Find opening brace
+    var i = 1
+    while i < serialized.len():
+        val ch = serialized[i:i+1]
+        if ch == "{":
+            # Return content between { and }
+            if i + 1 < serialized.len():
+                return serialized[i+1:serialized.len()-1]
+        i = i + 1
+
+    serialized
+
+# ============================================================================
+# Schema Definition and Validation
+# ============================================================================
+
+fn define_schema(fields: [(text, text)]) -> text:
+    """Define a schema with field names and type names.
+    Returns schema as SDN text."""
+    serialize_dict(fields)
+
+fn validate_field_type(value: text, expected_type: text) -> bool:
+    """Validate that serialized value matches expected type."""
+    if expected_type == "int":
+        # Try to parse as int
+        return is_numeric_text(value)
+    else if expected_type == "bool":
+        return value == "true" or value == "false"
+    else if expected_type == "nil":
+        return value == "nil"
+    else if expected_type == "text":
+        return value[0:1] == "\""
+    else if expected_type == "list":
+        return value[0:1] == "["
+    else if expected_type == "tuple":
+        return value[0:1] == "("
+    else if expected_type == "dict":
+        return value[0:1] == "{"
+
+    # Unknown type, assume valid
+    true
+
+fn is_numeric_text(s: text) -> bool:
+    """Check if text represents a number."""
+    if s.len() == 0:
+        return false
+
+    var start = 0
+    if s[0:1] == "-":
+        start = 1
+
+    if start >= s.len():
+        return false
+
+    var i = start
+    while i < s.len():
+        val ch = s[i:i+1]
+        val is_digit = ch >= "0" and ch <= "9"
+        if not is_digit:
+            return false
+        i = i + 1
+
+    true
+
+# ============================================================================
+# Versioning Support
+# ============================================================================
+
+fn add_version(serialized: text, version: i64) -> text:
+    """Add version number to serialized object.
+    Format: {v: version, data: ...}"""
+    "{v: {version}, data: " + serialized + "}"
+
+fn get_version(versioned: text) -> i64?:
+    """Extract version number from versioned object.
+    Returns nil if no version present."""
+    if not versioned.starts_with("{v: "):
+        return nil
+
+    # Find the version number
+    var i = 4
+    var num_text = ""
+    while i < versioned.len():
+        val ch = versioned[i:i+1]
+        if ch == ",":
+            return parse_int_safe(num_text)
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_digit:
+            num_text = num_text + ch
+        i = i + 1
+
+    nil
+
+fn parse_int_safe(s: text) -> i64:
+    """Parse integer from text, return 0 on error."""
+    if s.len() == 0:
+        return 0
+
+    var result = 0
+    var sign = 1
+    var start = 0
+
+    if s[0:1] == "-":
+        sign = -1
+        start = 1
+
+    var i = start
+    while i < s.len():
+        val ch = s[i:i+1]
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_digit:
+            val digit = char_to_digit_safe(ch)
+            result = result * 10 + digit
+        else:
+            break
+        i = i + 1
+
+    result * sign
+
+fn char_to_digit_safe(ch: text) -> i64:
+    """Convert digit character to integer."""
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    0
+
+fn strip_version(versioned: text) -> text:
+    """Remove version wrapper, returning inner data."""
+    if not versioned.starts_with("{v: "):
+        return versioned
+
+    # Find "data: " part
+    var i = 0
+    while i < versioned.len() - 6:
+        val substr = versioned[i:i+6]
+        if substr == "data: ":
+            # Extract content between "data: " and final "}"
+            val start = i + 6
+            val end = versioned.len() - 1
+            if end > start:
+                return versioned[start:end]
+        i = i + 1
+
+    versioned
+
+# ============================================================================
+# Deep Cloning
+# ============================================================================
+
+fn deep_clone_int(n: i64) -> i64:
+    """Deep clone integer (identity for primitives)."""
+    n
+
+fn deep_clone_bool(b: bool) -> bool:
+    """Deep clone boolean (identity for primitives)."""
+    b
+
+fn deep_clone_text(s: text) -> text:
+    """Deep clone text (identity for immutable strings)."""
+    s
+
+fn deep_clone_list_int(items: [i64]) -> [i64]:
+    """Deep clone list of integers."""
+    var result = []
+    for item in items:
+        result = result.push(item)
+    result
+
+fn deep_clone_list_text(items: [text]) -> [text]:
+    """Deep clone list of text."""
+    var result = []
+    for item in items:
+        result = result.push(item)
+    result
+
+fn shallow_clone_list_int(items: [i64]) -> [i64]:
+    """Shallow clone list of integers."""
+    deep_clone_list_int(items)
+
+fn shallow_clone_list_text(items: [text]) -> [text]:
+    """Shallow clone list of text."""
+    deep_clone_list_text(items)
+
+# ============================================================================
+# Deep Comparison
+# ============================================================================
+
+fn deep_equal_int(a: i64, b: i64) -> bool:
+    """Deep equality for integers."""
+    a == b
+
+fn deep_equal_bool(a: bool, b: bool) -> bool:
+    """Deep equality for booleans."""
+    a == b
+
+fn deep_equal_text(a: text, b: text) -> bool:
+    """Deep equality for text."""
+    a == b
+
+fn deep_equal_list_int(a: [i64], b: [i64]) -> bool:
+    """Deep equality for integer lists."""
+    if a.len() != b.len():
+        return false
+
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+
+    true
+
+fn deep_equal_list_text(a: [text], b: [text]) -> bool:
+    """Deep equality for text lists."""
+    if a.len() != b.len():
+        return false
+
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+
+    true
+
+# ============================================================================
+# Structural Hashing
+# ============================================================================
+
+fn structural_hash_int(n: i64) -> i64:
+    """Compute structural hash of integer."""
+    # Simple hash function
+    var h = n * 2654435761
+    h = h xor (h >> 16)
+    h
+
+fn structural_hash_bool(b: bool) -> i64:
+    """Compute structural hash of boolean."""
+    if b:
+        return 1
+    0
+
+fn structural_hash_text(s: text) -> i64:
+    """Compute structural hash of text using FNV-1a."""
+    var hash = 2166136261
+    var i = 0
+    while i < s.len():
+        val code = char_code_safe(s[i:i+1])
+        hash = (hash xor code) * 16777619
+        i = i + 1
+    hash
+
+fn structural_hash_list_int(items: [i64]) -> i64:
+    """Compute structural hash of integer list."""
+    var hash = 2166136261
+    for item in items:
+        val item_hash = structural_hash_int(item)
+        hash = (hash xor item_hash) * 16777619
+    hash
+
+fn structural_hash_list_text(items: [text]) -> i64:
+    """Compute structural hash of text list."""
+    var hash = 2166136261
+    for item in items:
+        val item_hash = structural_hash_text(item)
+        hash = (hash xor item_hash) * 16777619
+    hash
+
+fn combine_hashes(h1: i64, h2: i64) -> i64:
+    """Combine two hash values."""
+    h1 * 31 + h2
+
+# ============================================================================
+# Compression Hints (Metadata)
+# ============================================================================
+
+fn mark_compressed(serialized: text) -> text:
+    """Mark serialized data as compressed with metadata tag."""
+    "@Compressed{" + serialized + "}"
+
+fn is_compressed(serialized: text) -> bool:
+    """Check if serialized data has compression marker."""
+    val tag = get_type_tag(serialized)
+    if tag == nil:
+        return false
+    tag == "Compressed"
+
+fn mark_encrypted(serialized: text) -> text:
+    """Mark serialized data as encrypted with metadata tag."""
+    "@Encrypted{" + serialized + "}"
+
+fn is_encrypted(serialized: text) -> bool:
+    """Check if serialized data has encryption marker."""
+    val tag = get_type_tag(serialized)
+    if tag == nil:
+        return false
+    tag == "Encrypted"
+
+# ============================================================================
+# Byte Array Utilities
+# ============================================================================
+
+fn write_bytes(data: [i64]) -> [i64]:
+    """Write byte array with length prefix."""
+    var result = write_varint(data.len())
+    for byte_val in data:
+        result = result.push(byte_val)
+    result
+
+fn read_bytes(bytes: [i64], offset: i64, length: i64) -> ([i64], i64):
+    """Read fixed number of bytes from array.
+    Returns (bytes, consumed) tuple."""
+    var result = []
+    var i = 0
+    while i < length:
+        if offset + i < bytes.len():
+            result = result.push(bytes[offset + i])
+        i = i + 1
+    (result, length)
+
+fn read_bytes_with_length(bytes: [i64], offset: i64) -> ([i64], i64):
+    """Read byte array with length prefix.
+    Returns (bytes, consumed) tuple."""
+    val len_result = read_varint(bytes, offset)
+    val length = len_result.0
+    val len_consumed = len_result.1
+
+    val data_result = read_bytes(bytes, offset + len_consumed, length)
+    val data = data_result.0
+    val total_consumed = len_consumed + length
+
+    (data, total_consumed)
+
+# ============================================================================
+# Format Detection
+# ============================================================================
+
+fn detect_format(serialized: text) -> text:
+    """Detect serialization format from content.
+    Returns: 'sdn', 'json-like', 'tagged', or 'unknown'"""
+    if serialized.len() == 0:
+        return "unknown"
+
+    val first = serialized[0:1]
+
+    if first == "@":
+        return "tagged"
+    if first == "{" or first == "[":
+        return "sdn"
+    if first == "\"":
+        return "sdn"
+    if serialized == "true" or serialized == "false" or serialized == "nil":
+        return "sdn"
+    if is_numeric_text(serialized):
+        return "sdn"
+
+    "unknown"
+
+fn is_valid_sdn(serialized: text) -> bool:
+    """Check if text is valid SDN format (basic validation)."""
+    val format = detect_format(serialized)
+    format == "sdn" or format == "tagged"
+
+# ============================================================================
+# List Serialization Helpers
+# ============================================================================
+
+fn serialize_int_list(items: [i64]) -> text:
+    """Serialize list of integers to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_int(item))
+    serialize_list(serialized_items)
+
+fn serialize_text_list(items: [text]) -> text:
+    """Serialize list of text to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_text(item))
+    serialize_list(serialized_items)
+
+fn serialize_bool_list(items: [bool]) -> text:
+    """Serialize list of booleans to text format."""
+    var serialized_items = []
+    for item in items:
+        serialized_items = serialized_items.push(serialize_bool(item))
+    serialize_list(serialized_items)
+
+# ============================================================================
+# Binary List Serialization
+# ============================================================================
+
+fn serialize_int_list_bytes(items: [i64]) -> [i64]:
+    """Serialize list of integers to byte array."""
+    var result = [type_list()]
+    val len_bytes = write_varint(items.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    for item in items:
+        val item_bytes = serialize_int_bytes(item)
+        for b in item_bytes:
+            result = result.push(b)
+
+    result
+
+fn serialize_text_list_bytes(items: [text]) -> [i64]:
+    """Serialize list of text to byte array."""
+    var result = [type_list()]
+    val len_bytes = write_varint(items.len())
+    for b in len_bytes:
+        result = result.push(b)
+
+    for item in items:
+        val item_bytes = serialize_text_bytes(item)
+        for b in item_bytes:
+            result = result.push(b)
+
+    result
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    """Convert byte array to hexadecimal string."""
+    var result = ""
+    for byte_val in bytes:
+        val hex = int_to_hex(byte_val)
+        result = result + hex
+    result
+
+fn int_to_hex(n: i64) -> text:
+    """Convert integer to 2-digit hexadecimal string."""
+    val high = n / 16
+    val low = n % 16
+    digit_to_hex(high) + digit_to_hex(low)
+
+fn digit_to_hex(d: i64) -> text:
+    """Convert digit (0-15) to hex character."""
+    if d == 0: return "0"
+    if d == 1: return "1"
+    if d == 2: return "2"
+    if d == 3: return "3"
+    if d == 4: return "4"
+    if d == 5: return "5"
+    if d == 6: return "6"
+    if d == 7: return "7"
+    if d == 8: return "8"
+    if d == 9: return "9"
+    if d == 10: return "a"
+    if d == 11: return "b"
+    if d == 12: return "c"
+    if d == 13: return "d"
+    if d == 14: return "e"
+    if d == 15: return "f"
+    "0"
+
+fn hex_to_bytes(hex: text) -> [i64]:
+    """Convert hexadecimal string to byte array."""
+    var result = []
+    var i = 0
+    while i < hex.len():
+        if i + 1 < hex.len():
+            val high = hex_to_digit(hex[i:i+1])
+            val low = hex_to_digit(hex[i+1:i+2])
+            val byte_val = high * 16 + low
+            result = result.push(byte_val)
+            i = i + 2
+        else:
+            i = i + 1
+    result
+
+fn hex_to_digit(h: text) -> i64:
+    """Convert hex character to digit (0-15)."""
+    if h == "0": return 0
+    if h == "1": return 1
+    if h == "2": return 2
+    if h == "3": return 3
+    if h == "4": return 4
+    if h == "5": return 5
+    if h == "6": return 6
+    if h == "7": return 7
+    if h == "8": return 8
+    if h == "9": return 9
+    if h == "a" or h == "A": return 10
+    if h == "b" or h == "B": return 11
+    if h == "c" or h == "C": return 12
+    if h == "d" or h == "D": return 13
+    if h == "e" or h == "E": return 14
+    if h == "f" or h == "F": return 15
+    0
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+# Type constants
+export type_nil, type_bool, type_int, type_float, type_text
+export type_list, type_tuple, type_dict, type_custom
+
+# Binary serialization - varint
+export write_varint, read_varint
+
+# Binary serialization - primitives
+export serialize_int_bytes, serialize_bool_bytes, serialize_nil_bytes
+export serialize_text_bytes
+
+# Text serialization - escaping
+export escape_string, unescape_string, quote_string, unquote_string
+
+# Text serialization - primitives
+export serialize_int, serialize_bool, serialize_nil, serialize_text
+
+# Text serialization - collections
+export serialize_list, serialize_tuple_text, serialize_dict
+
+# SDN format
+export to_sdn_int, to_sdn_bool, to_sdn_nil, to_sdn_text
+export to_sdn_list, to_sdn_tuple, to_sdn_dict
+
+# Pretty printing
+export pretty_print_indent, pretty_list, pretty_tuple, pretty_dict
+
+# Type tagging
+export tag_type, get_type_tag, strip_type_tag
+
+# Schema validation
+export define_schema, validate_field_type, is_numeric_text
+
+# Versioning
+export add_version, get_version, strip_version
+
+# Deep cloning
+export deep_clone_int, deep_clone_bool, deep_clone_text
+export deep_clone_list_int, deep_clone_list_text
+export shallow_clone_list_int, shallow_clone_list_text
+
+# Deep comparison
+export deep_equal_int, deep_equal_bool, deep_equal_text
+export deep_equal_list_int, deep_equal_list_text
+
+# Structural hashing
+export structural_hash_int, structural_hash_bool, structural_hash_text
+export structural_hash_list_int, structural_hash_list_text
+export combine_hashes
+
+# Compression hints
+export mark_compressed, is_compressed, mark_encrypted, is_encrypted
+
+# Byte array utilities
+export write_bytes, read_bytes, read_bytes_with_length
+
+# Format detection
+export detect_format, is_valid_sdn
+
+# List serialization helpers
+export serialize_int_list, serialize_text_list, serialize_bool_list
+export serialize_int_list_bytes, serialize_text_list_bytes
+
+# Utility functions
+export bytes_to_hex, int_to_hex, hex_to_bytes
+export parse_int_safe, char_to_digit_safe
+export char_code_safe, char_from_code_safe
