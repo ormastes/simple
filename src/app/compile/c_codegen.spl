@@ -25,7 +25,7 @@
 #   - c_translate.spl: Expression/statement/control-flow translation to C
 #   - c_runtime.spl: C runtime generation, struct parsing, result splitting
 
-use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_text_var, is_fn_returning_text}
+use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_text_var, is_fn_returning_text, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type}
 use app.compile.c_translate.{translate_condition, translate_method_expr, translate_expr, translate_interpolated_print, translate_print, translate_array_decl, translate_var_decl, translate_for_loop, translate_case, translate_statement, close_blocks, build_function}
 use app.compile.c_runtime.{generate_c_runtime, parse_struct_fields, split_result}
 
@@ -40,6 +40,7 @@ fn generate_c_code(source_text: text) -> text:
     var func_defs: [text] = []
     var struct_defs: [text] = []
     var enum_defs: [text] = []
+    var global_defs: [text] = []
     var main_body: [text] = []
     var current_fn_name = ""
     var current_fn_lines: [text] = []
@@ -49,6 +50,14 @@ fn generate_c_code(source_text: text) -> text:
     var in_struct = false
     var in_enum = false
     var skip_until_unindent = false
+    var current_impl_class = ""
+    var in_impl = false
+    var in_impl_method = false
+    var impl_method_name = ""
+    var impl_method_sig = ""
+    var impl_method_lines: [text] = []
+    var impl_method_is_me = false
+    var lambda_counter = 0
 
     for line_idx in range(0, lines_arr.len()):
         val line = lines_arr[line_idx]
@@ -66,7 +75,119 @@ fn generate_c_code(source_text: text) -> text:
                 current_fn_lines.push("    // {comment_text}")
             continue
 
-        # Skip indented lines after struct/enum/impl/class
+        # Handle impl block methods - indented lines inside impl
+        if in_impl:
+            val still_indented = line.starts_with("    ")
+            val is_tab = line.starts_with("\t")
+            if not still_indented and not is_tab:
+                # End of impl block - flush any pending method
+                if in_impl_method:
+                    val method_code = build_function(current_impl_class + "__" + impl_method_name, impl_method_sig, impl_method_lines)
+                    func_defs.push(method_code)
+                    impl_method_lines = []
+                    in_impl_method = false
+                in_impl = false
+                current_impl_class = ""
+                # Fall through to process current line normally
+            else:
+                # Inside impl block
+                val impl_indent = get_indent_level(line)
+                if impl_indent == 1:
+                    # Top-level impl member (fn, me, static fn)
+                    if in_impl_method:
+                        val method_code = build_function(current_impl_class + "__" + impl_method_name, impl_method_sig, impl_method_lines)
+                        func_defs.push(method_code)
+                        impl_method_lines = []
+                        in_impl_method = false
+
+                    if trimmed.starts_with("fn ") and trimmed.ends_with(":"):
+                        val parsed = parse_method_signature(trimmed, current_impl_class, false)
+                        impl_method_name = parsed[0]
+                        impl_method_sig = parsed[1]
+                        val fwd = parsed[2]
+                        forward_decls.push(fwd)
+                        in_impl_method = true
+                        impl_method_is_me = false
+                        types = types + "method:" + current_impl_class + "." + impl_method_name + ";"
+                        # Track return type
+                        val arrow_idx = trimmed.index_of("->") ?? -1
+                        if arrow_idx >= 0:
+                            val ret_str = trimmed.substring(arrow_idx + 2)
+                            val rcolon = ret_str.index_of(":") ?? -1
+                            var ret_type = ret_str.trim()
+                            if rcolon >= 0:
+                                ret_type = ret_str.substring(0, rcolon).trim()
+                            if ret_type == "text" or ret_type == "str":
+                                types = types + "fn_text:" + current_impl_class + "__" + impl_method_name + ";"
+                        continue
+                    elif trimmed.starts_with("me ") and trimmed.ends_with(":"):
+                        val parsed = parse_method_signature(trimmed, current_impl_class, true)
+                        impl_method_name = parsed[0]
+                        impl_method_sig = parsed[1]
+                        val fwd = parsed[2]
+                        forward_decls.push(fwd)
+                        in_impl_method = true
+                        impl_method_is_me = true
+                        types = types + "me_method:" + current_impl_class + "." + impl_method_name + ";"
+                        val arrow_idx = trimmed.index_of("->") ?? -1
+                        if arrow_idx >= 0:
+                            val ret_str = trimmed.substring(arrow_idx + 2)
+                            val rcolon = ret_str.index_of(":") ?? -1
+                            var ret_type = ret_str.trim()
+                            if rcolon >= 0:
+                                ret_type = ret_str.substring(0, rcolon).trim()
+                            if ret_type == "text" or ret_type == "str":
+                                types = types + "fn_text:" + current_impl_class + "__" + impl_method_name + ";"
+                        continue
+                    elif trimmed.starts_with("static fn ") and trimmed.ends_with(":"):
+                        # Static method - no self parameter
+                        val static_trimmed = "fn " + trimmed.substring(10)
+                        val parsed = parse_fn_signature(static_trimmed)
+                        val static_method_name = parsed[0]
+                        val mangled_name = current_impl_class + "__" + static_method_name
+                        # Re-parse with mangled name
+                        val static_sig_trimmed = static_trimmed.replace(static_method_name + "(", mangled_name + "(")
+                        val parsed2 = parse_fn_signature(static_sig_trimmed)
+                        impl_method_name = static_method_name
+                        impl_method_sig = parsed2[1]
+                        forward_decls.push(parsed2[2])
+                        in_impl_method = true
+                        impl_method_is_me = false
+                        types = types + "static_fn:" + current_impl_class + "." + static_method_name + ";"
+                        val arrow_idx = trimmed.index_of("->") ?? -1
+                        if arrow_idx >= 0:
+                            val ret_str = trimmed.substring(arrow_idx + 2)
+                            val rcolon = ret_str.index_of(":") ?? -1
+                            var ret_type = ret_str.trim()
+                            if rcolon >= 0:
+                                ret_type = ret_str.substring(0, rcolon).trim()
+                            if ret_type == "text" or ret_type == "str":
+                                types = types + "fn_text:" + mangled_name + ";"
+                        continue
+                    else:
+                        # Skip other impl-level lines (comments etc)
+                        continue
+                elif impl_indent >= 2 and in_impl_method:
+                    # Method body line - translate with self context
+                    val raw_result = translate_statement(trimmed, types)
+                    val parts = split_result(raw_result)
+                    var code = parts[0]
+                    val new_types = parts[1]
+                    if new_types != "":
+                        types = types + new_types
+                    # Replace self.field access/assignment inside method bodies
+                    if code.contains("self."):
+                        code = code.replace("self.", "self->")
+                    if code != "":
+                        var padding = ""
+                        for pi in range(0, impl_indent - 1):
+                            padding = padding + "    "
+                        impl_method_lines.push("{padding}{code}")
+                    continue
+                else:
+                    continue
+
+        # Skip indented lines after struct/enum/class (not impl - handled above)
         if skip_until_unindent:
             val still_indented = line.starts_with("    ")
             val is_tab = line.starts_with("\t")
@@ -81,28 +202,86 @@ fn generate_c_code(source_text: text) -> text:
             continue
         if trimmed.starts_with("export "):
             continue
+        if trimmed.starts_with("from "):
+            continue
+        if trimmed.starts_with("pub mod "):
+            continue
+        if trimmed.starts_with("mod "):
+            continue
+        if trimmed.starts_with("export use "):
+            continue
+        if trimmed.starts_with("common use "):
+            continue
+
+        # Extern function - generate forward declaration instead of skipping
         if trimmed.starts_with("extern fn "):
+            val extern_rest = trimmed.substring(10).trim()
+            # Parse: name(params) -> ret
+            val ep_idx = extern_rest.index_of("(") ?? -1
+            if ep_idx >= 0:
+                val extern_name = extern_rest.substring(0, ep_idx).trim()
+                val eclose = extern_rest.index_of(")") ?? -1
+                if eclose >= 0:
+                    var eparams_str = ""
+                    if eclose > ep_idx + 1:
+                        eparams_str = extern_rest.substring(ep_idx + 1, eclose).trim()
+                    val earrow = extern_rest.index_of("->") ?? -1
+                    var eret_type = "void"
+                    if earrow >= 0:
+                        eret_type = simple_type_to_c(extern_rest.substring(earrow + 2).trim())
+                    var ec_params = "void"
+                    if eparams_str.len() > 0:
+                        ec_params = translate_params(eparams_str)
+                    forward_decls.push("{eret_type} {extern_name}({ec_params});")
+            continue
+
+        # Type alias - skip
+        if trimmed.starts_with("type ") and trimmed.contains(" = "):
+            continue
+
+        # Docstrings - skip
+        if trimmed.starts_with("\"\"\""):
+            continue
+
+        # Decorator attributes - skip
+        if trimmed.starts_with("#["):
             continue
 
         # Struct definition
         if trimmed.starts_with("struct ") and trimmed.ends_with(":"):
             val struct_name = trimmed.substring(7, trimmed.len() - 1).trim()
             types = types + "struct:" + struct_name + ";"
-            # Parse fields from subsequent indented lines
             val field_result = parse_struct_fields(lines_arr, line_idx)
             val field_body = field_result[1]
             var sdef = "typedef struct {\n"
             sdef = sdef + field_body + "\n"
             sdef = sdef + "} {struct_name};"
             struct_defs.push(sdef)
+            # Track text fields
+            for fi in range(line_idx + 1, lines_arr.len()):
+                val fline = lines_arr[fi]
+                val ftrimmed = fline.trim()
+                if ftrimmed == "":
+                    continue
+                val f_indented = fline.starts_with("    ")
+                if not f_indented:
+                    break
+                val fcolon = ftrimmed.index_of(":") ?? -1
+                if fcolon >= 0:
+                    val fname = ftrimmed.substring(0, fcolon).trim()
+                    val ftype = ftrimmed.substring(fcolon + 1).trim()
+                    if ftype == "text" or ftype == "str":
+                        types = types + "field_text:" + struct_name + "." + fname + ";"
             skip_until_unindent = true
             continue
 
-        # Enum definition
+        # Enum definition - detect data variants vs simple enums
         if trimmed.starts_with("enum ") and trimmed.ends_with(":"):
             val enum_name = trimmed.substring(5, trimmed.len() - 1).trim()
-            # Collect variants from subsequent indented lines
             var variants: [text] = []
+            var has_data_variant = false
+            var data_variants: [text] = []
+            var simple_variants: [text] = []
             for vi in range(line_idx + 1, lines_arr.len()):
                 val vline = lines_arr[vi]
                 val vtrimmed = vline.trim()
@@ -111,9 +290,89 @@ fn generate_c_code(source_text: text) -> text:
                 val v_indented = vline.starts_with("    ")
                 if not v_indented:
                     break
-                variants.push("{enum_name}_{vtrimmed}")
-            val variant_list = variants.join(", ")
-            enum_defs.push("typedef enum {{ {variant_list} }} {enum_name};")
+                # Skip comments and method-like lines inside enum
+                if vtrimmed.starts_with("#"):
+                    continue
+                if vtrimmed.starts_with("fn ") or vtrimmed.starts_with("me ") or vtrimmed.starts_with("static fn "):
+                    continue
+                # Check if data variant: Name(field: type) or Name(type)
+                val vparen = vtrimmed.index_of("(") ?? -1
+                if vparen >= 0:
+                    has_data_variant = true
+                    data_variants.push(vtrimmed)
+                else:
+                    simple_variants.push(vtrimmed)
+
+            if has_data_variant:
+                # Generate tagged union
+                var tag_idx = 0
+                var union_fields = ""
+                var constructors = ""
+                var tag_defines = ""
+                for dv in data_variants:
+                    val dv_paren = dv.index_of("(") ?? -1
+                    val dv_name = dv.substring(0, dv_paren).trim()
+                    val dv_close = dv.index_of(")") ?? -1
+                    var dv_fields_str = ""
+                    if dv_close > dv_paren + 1:
+                        dv_fields_str = dv.substring(dv_paren + 1, dv_close).trim()
+                    tag_defines = tag_defines + "#define {enum_name}_TAG_{dv_name} {tag_idx}\n"
+                    # Parse fields
+                    var struct_fields = ""
+                    var ctor_params = ""
+                    var ctor_assigns = ""
+                    if dv_fields_str.len() > 0:
+                        val dv_parts = dv_fields_str.split(",")
+                        var fi = 0
+                        for dvp in dv_parts:
+                            val dvf = dvp.trim()
+                            val dvf_colon = dvf.index_of(":") ?? -1
+                            if dvf_colon >= 0:
+                                val fname = dvf.substring(0, dvf_colon).trim()
+                                val ftype = dvf.substring(dvf_colon + 1).trim()
+                                val ctype = simple_type_to_c(ftype)
+                                struct_fields = struct_fields + "            {ctype} {fname};\n"
+                                if fi > 0:
+                                    ctor_params = ctor_params + ", "
+                                ctor_params = ctor_params + "{ctype} {fname}"
+                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{fname} = {fname};\n"
+                            else:
+                                # Positional: _0, _1, etc
+                                val ctype = simple_type_to_c(dvf)
+                                val pname = "_{fi}"
+                                struct_fields = struct_fields + "            {ctype} {pname};\n"
+                                if fi > 0:
+                                    ctor_params = ctor_params + ", "
+                                ctor_params = ctor_params + "{ctype} {pname}"
+                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{pname} = {pname};\n"
+                            fi = fi + 1
+                    union_fields = union_fields + "        struct {{\n{struct_fields}        }} {dv_name};\n"
+                    constructors = constructors + "static {enum_name} {enum_name}__{dv_name}({ctor_params}) {{\n"
+                    constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{dv_name};\n"
+                    constructors = constructors + ctor_assigns
+                    constructors = constructors + "    return r;\n}}\n"
+                    tag_idx = tag_idx + 1
+                # Also add simple variants as tags
+                for sv in simple_variants:
+                    tag_defines = tag_defines + "#define {enum_name}_TAG_{sv} {tag_idx}\n"
+                    constructors = constructors + "static {enum_name} {enum_name}__{sv}(void) {{\n"
+                    constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{sv};\n"
+                    constructors = constructors + "    return r;\n}}\n"
+                    tag_idx = tag_idx + 1
+                var edef = tag_defines + "\n"
+                edef = edef + "typedef struct {{\n    int tag;\n    union {{\n"
+                edef = edef + union_fields
+                edef = edef + "    }} data;\n}} {enum_name};\n\n"
+                edef = edef + constructors
+                enum_defs.push(edef)
+                types = types + "struct:" + enum_name + ";"
+            else:
+                # Simple enum - existing behavior
+                var variant_names: [text] = []
+                for sv in simple_variants:
+                    variant_names.push("{enum_name}_{sv}")
+                val variant_list = variant_names.join(", ")
+                enum_defs.push("typedef enum {{ {variant_list} }} {enum_name};")
             skip_until_unindent = true
             continue
 
@@ -127,12 +386,32 @@ fn generate_c_code(source_text: text) -> text:
             cdef = cdef + field_body + "\n"
             cdef = cdef + "} {class_name};"
             struct_defs.push(cdef)
+            # Track text fields
+            for fi in range(line_idx + 1, lines_arr.len()):
+                val fline = lines_arr[fi]
+                val ftrimmed = fline.trim()
+                if ftrimmed == "":
+                    continue
+                val f_indented = fline.starts_with("    ")
+                if not f_indented:
+                    break
+                # Skip methods
+                if ftrimmed.starts_with("fn ") or ftrimmed.starts_with("me ") or ftrimmed.starts_with("static fn "):
+                    break
+                val fcolon = ftrimmed.index_of(":") ?? -1
+                if fcolon >= 0:
+                    val fname = ftrimmed.substring(0, fcolon).trim()
+                    val ftype = ftrimmed.substring(fcolon + 1).trim()
+                    if ftype == "text" or ftype == "str":
+                        types = types + "field_text:" + class_name + "." + fname + ";"
             skip_until_unindent = true
             continue
 
-        # Impl block - skip (methods handled separately)
+        # Impl block - parse methods
         if trimmed.starts_with("impl ") and trimmed.ends_with(":"):
-            skip_until_unindent = true
+            current_impl_class = trimmed.substring(5, trimmed.len() - 1).trim()
+            in_impl = true
+            in_impl_method = false
             continue
 
         # Function definition
@@ -156,7 +435,6 @@ fn generate_c_code(source_text: text) -> text:
             val arrow_idx = trimmed.index_of("->") ?? -1
             if arrow_idx >= 0:
                 val ret_str = trimmed.substring(arrow_idx + 2)
-                # Remove trailing colon
                 val colon_pos = ret_str.index_of(":") ?? -1
                 var ret_type = ret_str.trim()
                 if colon_pos >= 0:
@@ -182,12 +460,12 @@ fn generate_c_code(source_text: text) -> text:
                             types = types + "arr:" + fp_name + ";"
             continue
 
-        # Static fn - skip (would need struct-qualified name)
+        # Static fn at top level - skip (only valid inside impl)
         if trimmed.starts_with("static fn ") and trimmed.ends_with(":"):
             skip_until_unindent = true
             continue
 
-        # Mutable method (me keyword) - skip
+        # Mutable method at top level - skip (only valid inside impl)
         if trimmed.starts_with("me ") and trimmed.ends_with(":"):
             skip_until_unindent = true
             continue
@@ -234,14 +512,69 @@ fn generate_c_code(source_text: text) -> text:
             current_fn_lines = []
             in_func = false
 
-        val raw_result = translate_statement(trimmed, types)
-        val parts = split_result(raw_result)
-        val code = parts[0]
-        val new_types = parts[1]
-        if new_types != "":
-            types = types + new_types
-        if code != "":
-            main_body.push("    {code}")
+        # Module-level statement - check if it's a val/var declaration (-> global)
+        val is_module_val = trimmed.starts_with("val ")
+        val is_module_var = trimmed.starts_with("var ")
+        if is_module_val or is_module_var:
+            val raw_result = translate_statement(trimmed, types)
+            val parts = split_result(raw_result)
+            val code = parts[0]
+            val new_types = parts[1]
+            if new_types != "":
+                types = types + new_types
+            if code != "":
+                # Convert to global: remove const for val (use static), add static for var
+                var global_code = code
+                if global_code.starts_with("long long "):
+                    global_code = "static " + global_code
+                elif global_code.starts_with("const char* "):
+                    global_code = "static " + global_code
+                elif global_code.starts_with("int "):
+                    global_code = "static " + global_code
+                elif global_code.starts_with("SimpleStringArray "):
+                    # Arrays need special init - can't call functions in global init
+                    # Extract name and emit as uninitialized, init in main
+                    val arr_eq = global_code.index_of(" = ") ?? -1
+                    if arr_eq >= 0:
+                        val arr_decl = global_code.substring(0, arr_eq)
+                        global_defs.push("static {arr_decl};")
+                        # Add init to main_body
+                        val arr_name = arr_decl.substring(18).trim()
+                        val arr_semi = arr_name.index_of(";") ?? -1
+                        var clean_name = arr_name
+                        if arr_semi >= 0:
+                            clean_name = arr_name.substring(0, arr_semi).trim()
+                        main_body.push("    {clean_name} = simple_new_string_array();")
+                        continue
+                    global_code = "static " + global_code
+                elif global_code.starts_with("SimpleDict* "):
+                    val dict_eq = global_code.index_of(" = ") ?? -1
+                    if dict_eq >= 0:
+                        val dict_decl = global_code.substring(0, dict_eq)
+                        global_defs.push("static {dict_decl} = NULL;")
+                        val dict_name_start = dict_decl.index_of("* ") ?? -1
+                        if dict_name_start >= 0:
+                            val dict_name = dict_decl.substring(dict_name_start + 2).trim()
+                            main_body.push("    {dict_name} = simple_dict_new();")
+                        continue
+                    global_code = "static " + global_code
+                else:
+                    global_code = "static " + global_code
+                global_defs.push(global_code)
+        else:
+            val raw_result = translate_statement(trimmed, types)
+            val parts = split_result(raw_result)
+            val code = parts[0]
+            val new_types = parts[1]
+            if new_types != "":
+                types = types + new_types
+            if code != "":
+                main_body.push("    {code}")
+
+    # Flush pending impl method
+    if in_impl and in_impl_method:
+        val method_code = build_function(current_impl_class + "__" + impl_method_name, impl_method_sig, impl_method_lines)
+        func_defs.push(method_code)
 
     if in_func:
         val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
@@ -268,6 +601,13 @@ fn generate_c_code(source_text: text) -> text:
         for edef in enum_defs:
             c_code = c_code + edef + "\n\n"
 
+    # Add global variable definitions
+    if global_defs.len() > 0:
+        c_code = c_code + "\n// --- Global Variables ---\n"
+        for gdef in global_defs:
+            c_code = c_code + gdef + "\n"
+        c_code = c_code + "\n"
+
     # Add forward declarations
     if forward_decls.len() > 0:
         c_code = c_code + "\n// --- Forward Declarations ---\n"
@@ -293,3 +633,5 @@ export build_function, parse_fn_signature, translate_params, simple_type_to_c
 export get_indent_level, get_c_indent
 export generate_c_runtime, translate_method_expr, find_close_paren
 export is_string_array_var, is_text_var, is_fn_returning_text, split_result
+export is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn
+export is_dict_var, is_option_var, parse_method_signature, parse_generic_type

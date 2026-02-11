@@ -57,6 +57,45 @@ Identify standards, toolchains, and semantic gaps to add a VHDL code-generation 
 - Emit unresolved signals by default; opt-in resolved `std_logic` when multiple drivers or tri-states are present.
 - Require static loop bounds; reject unbounded `while` at elaboration. Auto-FSM conversion for bounded loops can follow the Verilog backend policy.
 
+## Constraint System Integration Research
+
+The Simple compiler's existing `DimSolver`/`DimConstraint` infrastructure (in `src/compiler/dim_constraints.spl` and `src/compiler/dim_constraints_types.spl`) can be extended for VHDL-specific verification constraints. Four new `DimConstraint` variants map directly to VHDL verification needs:
+
+| Constraint | DimConstraint Variant | Purpose |
+|-----------|----------------------|---------|
+| Width matching | `WidthMatch(signal1, signal2, operation, span)` | Ensure signal widths match for assignments |
+| Width safety | `WidthSafe(operands, operator, result_width, span)` | Prevent arithmetic overflow |
+| Bounded loops | `BoundedLoop(bound, max_allowed, span)` | Enforce static loop bounds |
+| Valid ranges | `ValidRange(hi, lo, span)` | Validate slice ranges (hi >= lo) |
+
+These reuse the existing `DimSolver.unify()` and `DimSolver.try_eval()` mechanisms, avoiding duplication.
+
+### CDC Analysis Techniques
+
+Clock Domain Crossing (CDC) detection uses graph coloring on the signal dependency graph:
+- Each clock domain is assigned a color
+- Signals inherit their domain color from the process that drives them
+- Any edge between differently-colored nodes is a potential CDC violation
+- Two-flop synchronizer patterns are recognized and whitelisted
+
+This approach parallels Cummings' SNUG papers on CDC verification (Cummings, 2001/2008) and maps cleanly to the compiler's existing graph infrastructure used in borrow checking.
+
+### Latch Inference Detection
+
+Latch detection uses branch coverage analysis on combinational processes:
+- For each signal assigned in a combinational process, track which if/case branches assign it
+- If any branch path does not assign the signal, a latch will be inferred
+- This is equivalent to checking that the assignment set is identical across all branches
+- Default assignments at process start eliminate this issue (enforced as a recommendation)
+
+### Combinational Loop Detection
+
+Combinational loop detection reuses the Tarjan SCC algorithm already used in the borrow checker's CFG analysis:
+- Build a dependency graph of combinational signals
+- Run Tarjan's algorithm to find strongly connected components
+- Any SCC with more than one node (or a self-loop) indicates a combinational loop
+- This is a hard error in synthesizable VHDL
+
 ## Validation Strategy
 - Golden-file diffs: Simple sources → VHDL emit → compare against checked-in `.vhd` outputs.
 - Round-trip synthesis sanity: run `ghdl -a -e` for analysis/elaboration and `ghdl --synth` or `yosys -m ghdl` for a small smoke-test matrix (CI optional to keep runtime modest).
