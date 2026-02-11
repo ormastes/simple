@@ -139,7 +139,7 @@ fn translate_condition(cond: text, types: text) -> text:
 # Translate a method call expression to C
 # Returns the original expression if no method call is detected
 fn translate_method_expr(expr: text, types: text) -> text:
-    # .contains( - check dict first, then string
+    # .contains( - check dict first, then string array, then string
     val contains_pos = expr.index_of(".contains(") ?? -1
     if contains_pos >= 0:
         val obj = expr.substring(0, contains_pos)
@@ -149,6 +149,8 @@ fn translate_method_expr(expr: text, types: text) -> text:
             val arg = expr.substring(arg_start, arg_end)
             if is_dict_var(obj, types):
                 return "simple_dict_contains({obj}, {translate_expr(arg, types)})"
+            if is_string_array_var(obj, types):
+                return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
             return "simple_contains({obj}, {translate_expr(arg, types)})"
 
     # .starts_with(
@@ -482,11 +484,11 @@ fn translate_expr(expr: text, types: text) -> text:
             # Check struct array variable
             val sa_elem_type = is_struct_array_var(left, types)
             if sa_elem_type != "":
-                return "({ {sa_elem_type}* _e = malloc(sizeof({sa_elem_type})); *_e = {c_arr_elem}; simple_struct_array_copy_push({c_left}, (void*)_e); })"
+                return "({{ {sa_elem_type}* _cp = malloc(sizeof({sa_elem_type})); *_cp = {c_arr_elem}; simple_struct_array_copy_push({c_left}, (void*)_cp); }})"
             # Check struct field that is a struct array
             val sf_elem_type = is_struct_field_struct_array(left, types)
             if sf_elem_type != "":
-                return "({ {sf_elem_type}* _e = malloc(sizeof({sf_elem_type})); *_e = {c_arr_elem}; simple_struct_array_copy_push({c_left}, (void*)_e); })"
+                return "({{ {sf_elem_type}* _cp = malloc(sizeof({sf_elem_type})); *_cp = {c_arr_elem}; simple_struct_array_copy_push({c_left}, (void*)_cp); }})"
             # Check int array
             if is_int_array_var(left, types):
                 return "simple_int_array_copy_push({c_left}, {c_arr_elem})"
@@ -501,8 +503,21 @@ fn translate_expr(expr: text, types: text) -> text:
         # Find and replace each .len() occurrence
         var len_pos = processed.index_of(".len()") ?? -1
         if len_pos >= 0:
-            val len_base = processed.substring(0, len_pos)
+            val len_full_base = processed.substring(0, len_pos)
             val len_rest = processed.substring(len_pos + 6)
+            # Extract just the variable/field part (after last comma, space, or paren)
+            var len_base = len_full_base
+            var len_prefix = ""
+            var lscan = len_full_base.len() - 1
+            var lfound = false
+            while lscan >= 0 and not lfound:
+                val lch = len_full_base[lscan]
+                val is_sep = lch == "," or lch == " " or lch == "("
+                if is_sep:
+                    len_prefix = len_full_base.substring(0, lscan + 1)
+                    len_base = len_full_base.substring(lscan + 1).trim()
+                    lfound = true
+                lscan = lscan - 1
             # Directly resolve .len() based on type
             var len_replacement = ""
             if is_text_var(len_base, types) or is_struct_field_text(len_base, types):
@@ -513,6 +528,10 @@ fn translate_expr(expr: text, types: text) -> text:
                 len_replacement = "{len_base}.len"
             elif is_struct_field_str_array(len_base, types) or is_struct_field_int_array(len_base, types):
                 len_replacement = "{len_base}.len"
+            elif is_struct_array_var(len_base, types) != "":
+                len_replacement = "{len_base}.len"
+            elif is_struct_field_struct_array(len_base, types) != "":
+                len_replacement = "{len_base}.len"
             else:
                 # Fallback: try translate_method_expr
                 val len_result = translate_method_expr(len_base + ".len()", types)
@@ -520,7 +539,7 @@ fn translate_expr(expr: text, types: text) -> text:
                 if len_result != len_orig and not len_result.ends_with(".len"):
                     len_replacement = len_result
             if len_replacement != "":
-                processed = len_replacement + len_rest
+                processed = len_prefix + len_replacement + len_rest
                 return translate_expr(processed, types)
 
     # Handle method calls
@@ -584,7 +603,12 @@ fn translate_expr(expr: text, types: text) -> text:
             val idx_end = expr.index_of("]") ?? -1
             if idx_end >= 0:
                 val idx_expr = expr.substring(bracket_pos + 1, idx_end)
-                return "*({sa_elem}*){base}.items[{translate_expr(idx_expr, types)}]"
+                val c_idx = translate_expr(idx_expr, types)
+                val after_bracket = expr.substring(idx_end + 1)
+                if after_bracket.starts_with("."):
+                    # Chained field access: arr[i].field -> (*(Type*)arr.items[i]).field
+                    return "(*({sa_elem}*){base}.items[{c_idx}]){after_bracket}"
+                return "*({sa_elem}*){base}.items[{c_idx}]"
 
     # Handle nested array indexing: arr[i] on [[text]] or [[i64]]
     if bracket_pos >= 0:
@@ -1122,6 +1146,16 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     val rhs_sa_type = is_struct_array_var(rhs, types)
     if rhs_sa_type != "":
         return "SimpleStructArray {name} = {c_rhs};|||;struct_arr_var:{name}={rhs_sa_type};"
+    # Check if RHS is a struct field that is a struct array
+    val rhs_sf_sa = is_struct_field_struct_array(rhs, types)
+    if rhs_sf_sa != "":
+        return "SimpleStructArray {name} = {c_rhs};|||;struct_arr_var:{name}={rhs_sf_sa};"
+    # Check if RHS is a struct field that is a string array
+    if is_struct_field_str_array(rhs, types):
+        return "SimpleStringArray {name} = {c_rhs};|||;arr:{name};"
+    # Check if RHS is a struct field that is an int array
+    if is_struct_field_int_array(rhs, types):
+        return "SimpleIntArray {name} = {c_rhs};|||;int_arr:{name};"
 
     # Default: long long
     "long long {name} = {c_rhs};"
@@ -1329,6 +1363,8 @@ fn translate_statement(trimmed: text, types: text) -> text:
         val expr = trimmed.substring(7).trim()
         if expr == "()":
             return "return;"
+        if expr == "[]":
+            return "return simple_new_struct_array();"
         # Use translate_condition for expressions with and/or/comparisons
         val has_and = expr.contains(" and ")
         val has_or = expr.contains(" or ")
@@ -1387,12 +1423,23 @@ fn translate_statement(trimmed: text, types: text) -> text:
             # Build the if-check for the pattern
             val case_check_trimmed = "case {case_pattern}:"
             val case_check = translate_case(case_check_trimmed, types)
-            # Translate the body expression
-            val case_body_c = translate_expr(case_inline_body, types)
-            # Remove the trailing { from the check and wrap inline
             var case_if = case_check
             if case_if.ends_with("{"):
                 case_if = case_if.substring(0, case_if.len() - 1).trim()
+            # Check if body is an assignment (statement) vs expression
+            val body_eq_pos = case_inline_body.index_of(" = ") ?? -1
+            val body_is_assignment = body_eq_pos >= 0 and not case_inline_body.starts_with("\"")
+            if body_is_assignment:
+                # Translate as statement (not expression)
+                val case_stmt_raw = translate_statement(case_inline_body, types)
+                # Extract code part only (strip type annotations after |||)
+                val case_sep = case_stmt_raw.index_of("|||") ?? -1
+                var case_stmt_code = case_stmt_raw
+                if case_sep >= 0:
+                    case_stmt_code = case_stmt_raw.substring(0, case_sep)
+                return "{case_if} {{ {case_stmt_code} }}"
+            # Translate the body expression
+            val case_body_c = translate_expr(case_inline_body, types)
             return "{case_if} {{ return {case_body_c}; }}"
 
     if trimmed == "break":

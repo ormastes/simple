@@ -129,6 +129,13 @@ static const char* simple_string_pop(SimpleStringArray* arr) {
     return arr->items[arr->len];
 }
 
+static int simple_str_array_contains(SimpleStringArray arr, const char* needle) {
+    for (long long i = 0; i < arr.len; i++) {
+        if (arr.items[i] && needle && strcmp(arr.items[i], needle) == 0) return 1;
+    }
+    return 0;
+}
+
 static char* simple_string_join(SimpleStringArray* arr, const char* delim) {
     if (arr->len == 0) return strdup("");
     long long delim_len = strlen(delim);
