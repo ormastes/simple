@@ -82,6 +82,7 @@ fn generate_c_code(source_text: text) -> text:
     var current_fn_name = ""
     var current_fn_lines: [text] = []
     var current_fn_sig = ""
+    var types_before_fn = ""
     var in_main = false
     var in_func = false
     var in_struct = false
@@ -204,6 +205,7 @@ fn generate_c_code(source_text: text) -> text:
                 func_defs.push(fn_code)
                 current_fn_lines = []
                 in_func = false
+                types = types_before_fn
             continue
 
         # Handle impl block methods - indented lines inside impl
@@ -701,9 +703,12 @@ fn generate_c_code(source_text: text) -> text:
                 val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
                 func_defs.push(fn_code)
                 current_fn_lines = []
+                # Restore types to before function (clear local var types)
+                types = types_before_fn
             if trimmed == "fn main():" or trimmed.starts_with("fn main()"):
                 in_main = true
                 in_func = false
+                types_before_fn = types
                 continue
             val parsed = parse_fn_signature(trimmed)
             current_fn_name = parsed[0]
@@ -712,7 +717,7 @@ fn generate_c_code(source_text: text) -> text:
             forward_decls.push(fwd)
             in_func = true
             in_main = false
-            # Track function return type
+            # Track function return type (before saving, so it persists across function boundaries)
             val arrow_idx = trimmed.index_of("->") ?? -1
             if arrow_idx >= 0:
                 val ret_str = trimmed.substring(arrow_idx + 2)
@@ -729,6 +734,8 @@ fn generate_c_code(source_text: text) -> text:
                     val ret_is_upper = ret_first >= "A" and ret_first <= "Z"
                     if ret_is_upper:
                         types = types + "fn_struct:" + current_fn_name + "=" + ret_type + ";"
+            # Save types AFTER return type tracking so it persists
+            types_before_fn = types
             # Track parameter types (text/str params, string array params)
             val fn_paren_idx = trimmed.index_of("(") ?? -1
             val fn_close_idx = trimmed.index_of(")") ?? -1
@@ -805,11 +812,13 @@ fn generate_c_code(source_text: text) -> text:
 
         if in_main:
             in_main = false
+            types = types_before_fn
         if in_func:
             val fn_code = build_function(current_fn_name, current_fn_sig, current_fn_lines)
             func_defs.push(fn_code)
             current_fn_lines = []
             in_func = false
+            types = types_before_fn
 
         # Module-level statement - check if it's a val/var declaration (-> global)
         val is_module_val = trimmed.starts_with("val ")

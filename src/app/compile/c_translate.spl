@@ -339,6 +339,10 @@ fn translate_expr(expr: text, types: text) -> text:
         return "0"
     if expr == "()":
         return "/* unit */"
+    # Handle 'not' prefix in expressions
+    if expr.starts_with("not "):
+        val not_inner = expr.substring(4).trim()
+        return "!({translate_expr(not_inner, types)})"
     if expr == "None":
         return "simple_none()"
 
@@ -561,10 +565,15 @@ fn translate_expr(expr: text, types: text) -> text:
     # Handle optional chaining: obj?.field -> temp var pattern
     val opt_chain_pos = expr.index_of("?.") ?? -1
     if opt_chain_pos >= 0:
-        val left = expr.substring(0, opt_chain_pos).trim()
-        val right = expr.substring(opt_chain_pos + 2).trim()
-        val c_left = translate_expr(left, types)
-        return "({c_left} != NULL ? {c_left}->{right} : NULL)"
+        # Skip if ?. is inside a string literal
+        val before_opt = expr.substring(0, opt_chain_pos)
+        val quote_count_opt = before_opt.split("\"").len() - 1
+        val opt_in_str = quote_count_opt % 2 == 1
+        if not opt_in_str:
+            val left = expr.substring(0, opt_chain_pos).trim()
+            val right = expr.substring(opt_chain_pos + 2).trim()
+            val c_left = translate_expr(left, types)
+            return "({c_left} != NULL ? {c_left}->{right} : NULL)"
 
     # Handle struct construction: ClassName(field: val, field2: val2)
     val ctor_paren = expr.index_of("(") ?? -1
@@ -620,6 +629,51 @@ fn translate_expr(expr: text, types: text) -> text:
             else:
                 # Simple enum variant or field access
                 return "{ename}__{erest}"
+
+    # Handle general function calls: translate each argument individually
+    # This ensures string concat and other patterns inside arguments get translated
+    if ctor_paren >= 0 and expr.ends_with(")"):
+        val fc_name = expr.substring(0, ctor_paren).trim()
+        val fc_has_dot = fc_name.contains(".")
+        val fc_is_struct = is_known_struct(fc_name, types)
+        if not fc_has_dot and not fc_is_struct and fc_name.len() > 0:
+            val fc_close = find_close_paren(expr, ctor_paren)
+            if fc_close >= 0:
+                val fc_args_str = expr.substring(ctor_paren + 1, fc_close)
+                # Split args by top-level commas (using find_close_paren for nesting)
+                var fc_args: [text] = []
+                var fc_start = 0
+                var fc_i = 0
+                var fc_pdepth = 0
+                var fc_in_quotes = false
+                val fc_parts = fc_args_str.split("\"")
+                # Rebuild: replace top-level commas with separator
+                var fc_rebuilt = ""
+                for fc_si in range(0, fc_parts.len()):
+                    if fc_si % 2 == 0:
+                        val fc_seg = fc_parts[fc_si]
+                        # Outside strings: replace commas at depth 0
+                        # Count parens to track depth
+                        val sub_segs = fc_seg.split(",")
+                        for ss_i in range(0, sub_segs.len()):
+                            val ss = sub_segs[ss_i]
+                            val ss_open = ss.split("(").len() - 1
+                            val ss_close_p = ss.split(")").len() - 1
+                            fc_pdepth = fc_pdepth + ss_open - ss_close_p
+                            if ss_i > 0:
+                                if fc_pdepth == 0:
+                                    fc_rebuilt = fc_rebuilt + "|||ASEP|||"
+                                else:
+                                    fc_rebuilt = fc_rebuilt + ","
+                            fc_rebuilt = fc_rebuilt + ss
+                    else:
+                        fc_rebuilt = fc_rebuilt + "\"" + fc_parts[fc_si] + "\""
+                fc_args = fc_rebuilt.split("|||ASEP|||")
+                var fc_translated: [text] = []
+                for fc_a in fc_args:
+                    fc_translated.push(translate_expr(fc_a.trim(), types))
+                val fc_result = fc_translated.join(", ")
+                return "{fc_name}({fc_result})"
 
     # Handle tuple construction: (a, b)
     if expr.starts_with("(") and expr.ends_with(")"):
@@ -900,6 +954,7 @@ fn translate_var_decl(stmt: text, types: text) -> text:
     if paren_pos >= 0:
         val fn_name_s = rhs.substring(0, paren_pos).trim()
         val struct_ret = is_fn_returning_struct(fn_name_s, types)
+        eprint "DBG var_decl: name={name} fn={fn_name_s} struct_ret={struct_ret}"
         if struct_ret != "":
             return "{struct_ret} {name} = {c_rhs};|||;struct_var:{name}={struct_ret};"
     # Also check mangled name
@@ -1379,6 +1434,11 @@ fn close_blocks(body_lines: [text]) -> [text]:
         val line = body_lines[idx]
         val trimmed = line.trim()
         val current_indent = get_c_indent(line)
+
+        # Don't let comments trigger block closing
+        if trimmed.starts_with("//") or trimmed.starts_with("/*"):
+            result.push(line)
+            continue
 
         if trimmed.starts_with("} else"):
             # Close any nested blocks at higher indent before the else

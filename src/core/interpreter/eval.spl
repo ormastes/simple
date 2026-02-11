@@ -128,6 +128,7 @@ fn eval_expr(eid: i64) -> i64:
     # Access
     if tag == EXPR_FIELD_ACCESS: return eval_field_access(eid)
     if tag == EXPR_INDEX: return eval_index_expr(eid)
+    if tag == EXPR_SLICE: return eval_slice_expr(eid)
 
     # Collections
     if tag == EXPR_ARRAY_LIT: return eval_array_lit(eid)
@@ -853,6 +854,87 @@ fn eval_index_expr(eid: i64) -> i64:
             return -1
 
     eval_set_error("cannot index " + val_kind_name(val_get_kind(base_val)))
+    -1
+
+# ===== Slice Expression =====
+
+fn eval_slice_expr(eid: i64) -> i64:
+    """Evaluate slice expression: base[start:end]
+
+    Handles string and array slicing with support for:
+    - [:end] - slice from start (start=0)
+    - [start:] - slice to end (end=-1 means len)
+    - [start:end] - explicit range
+    """
+    val e_node = expr_get(eid)
+    val base_eid = e_node.left
+    val start_eid = e_node.right
+    val end_eid = e_node.extra
+
+    val base_val = eval_expr(base_eid)
+    if eval_had_error: return -1
+    val start_val = eval_expr(start_eid)
+    if eval_had_error: return -1
+    val end_val = eval_expr(end_eid)
+    if eval_had_error: return -1
+
+    if val_is_text(base_val):
+        val s = val_get_text(base_val)
+        val slen = s.len()
+
+        # Get start index (default 0)
+        var start_idx = 0
+        if val_is_int(start_val):
+            start_idx = val_get_int(start_val)
+            if start_idx < 0:
+                start_idx = 0
+
+        # Get end index (default slen, -1 means slen)
+        var end_idx = slen
+        if val_is_int(end_val):
+            end_idx = val_get_int(end_val)
+            if end_idx < 0:
+                end_idx = slen
+            if end_idx > slen:
+                end_idx = slen
+
+        # Slice the string
+        if start_idx >= slen:
+            return val_make_text("")
+        if end_idx <= start_idx:
+            return val_make_text("")
+
+        return val_make_text(s[start_idx:end_idx])
+
+    if val_is_array(base_val):
+        val elements = val_get_array(base_val)
+        val alen = elements.len()
+
+        # Get start index (default 0)
+        var start_idx = 0
+        if val_is_int(start_val):
+            start_idx = val_get_int(start_val)
+            if start_idx < 0:
+                start_idx = 0
+
+        # Get end index (default alen, -1 means alen)
+        var end_idx = alen
+        if val_is_int(end_val):
+            end_idx = val_get_int(end_val)
+            if end_idx < 0:
+                end_idx = alen
+            if end_idx > alen:
+                end_idx = alen
+
+        # Slice the array
+        var result: [i64] = []
+        if start_idx < alen and end_idx > start_idx:
+            for i in start_idx..end_idx:
+                result.push(elements[i])
+
+        return val_make_array(result)
+
+    eval_set_error("cannot slice " + val_kind_name(val_get_kind(base_val)))
     -1
 
 # ===== Array Literal =====
