@@ -10,6 +10,7 @@
 # - src/app/test_runner/host/loader.spl
 
 use app.io.{shell, ProcessResult}
+use types.{PortNumber, Millis}
 
 # ===========================================================================
 # Architecture Support
@@ -79,7 +80,7 @@ class QemuConfig:
 
     # GDB configuration (for remote debugging)
     gdb_enabled: bool
-    gdb_port: i32
+    gdb_port: PortNumber
     gdb_wait: bool           # Start halted (-S flag)
 
     # Serial/stdio configuration (for test runner)
@@ -98,7 +99,7 @@ class QemuConfig:
     extra_args: [text]
 
     # Timeout
-    timeout_ms: i64
+    timeout_ms: Millis
 
 impl QemuConfig:
     # Create minimal config for remote debugging
@@ -109,7 +110,7 @@ impl QemuConfig:
             machine: arch.default_machine(),
             memory: arch.default_memory(),
             gdb_enabled: true,
-            gdb_port: port,
+            gdb_port: PortNumber(value: port),
             gdb_wait: true,          # Start halted for debugging
             serial_stdio: false,
             serial_file: "",
@@ -118,7 +119,7 @@ impl QemuConfig:
             no_graphic: true,
             no_display: false,
             extra_args: [],
-            timeout_ms: 30000
+            timeout_ms: Millis(value: 30000)
         )
 
     # Create config for bare-metal testing
@@ -129,7 +130,7 @@ impl QemuConfig:
             machine: arch.default_machine(),
             memory: arch.default_memory(),
             gdb_enabled: false,
-            gdb_port: 0,
+            gdb_port: PortNumber(value: 0),
             gdb_wait: false,
             serial_stdio: true,      # Test output via serial
             serial_file: "",
@@ -138,7 +139,7 @@ impl QemuConfig:
             no_graphic: false,
             no_display: true,        # No display needed
             extra_args: [],
-            timeout_ms: 30000
+            timeout_ms: Millis(value: 30000)
         )
 
     # Build QEMU command-line arguments
@@ -160,7 +161,7 @@ impl QemuConfig:
         # GDB configuration
         if self.gdb_enabled:
             args.push("-gdb")
-            args.push("tcp::{self.gdb_port}")
+            args.push("tcp::{self.gdb_port.value}")
             if self.gdb_wait:
                 args.push("-S")  # Start halted
 
@@ -237,7 +238,7 @@ impl QemuInstance:
         # Get QEMU PID (use command name for pattern matching)
         val qemu_cmd = config.arch.qemu_command()
         val pid_pattern = if config.gdb_enabled:
-            "{qemu_cmd}.*-gdb tcp::{config.gdb_port}"
+            "{qemu_cmd}.*-gdb tcp::{config.gdb_port.value}"
         else:
             "{qemu_cmd}.*{config.binary_path}"
 
@@ -249,7 +250,7 @@ impl QemuInstance:
 
         # Verify GDB port is listening (if enabled)
         if config.gdb_enabled:
-            val port_check = shell("timeout 3 bash -c 'while ! ss -tlnp | grep -q :{config.gdb_port}; do sleep 0.1; done' 2>/dev/null")
+            val port_check = shell("timeout 3 bash -c 'while ! ss -tlnp | grep -q :{config.gdb_port.value}; do sleep 0.1; done' 2>/dev/null")
             # Continue even if port check fails (may not work in all environments)
 
         Ok(QemuInstance(
@@ -276,13 +277,13 @@ impl QemuInstance:
         check.exit_code == 0
 
     # Wait for QEMU to exit with timeout
-    me wait_exit(timeout_ms: i64) -> Result<i32, text>:
-        val timeout_sec = timeout_ms / 1000
+    me wait_exit(timeout_ms: Millis) -> Result<i32, text>:
+        val timeout_sec = timeout_ms.value / 1000
         val wait_cmd = "timeout {timeout_sec} tail --pid={self.pid} -f /dev/null 2>/dev/null"
         val wait_result = shell(wait_cmd)
 
         if wait_result.exit_code == 124:
-            return Err("QEMU did not exit within {timeout_ms}ms")
+            return Err("QEMU did not exit within {timeout_ms.value}ms")
 
         self.running = false
 
@@ -296,7 +297,7 @@ impl QemuInstance:
         self.pid
 
     # Get GDB port (if enabled)
-    fn get_gdb_port() -> i32:
+    fn get_gdb_port() -> PortNumber:
         self.config.gdb_port
 
 # ===========================================================================

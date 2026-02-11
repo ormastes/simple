@@ -20,6 +20,7 @@
 #   file_write("doc/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use lib.database.atomic (atomic_write, atomic_read)
+use types.{StringId}
 
 # Direct extern declarations for bootstrap runtime compatibility
 # (use app.io.{...} import doesn't resolve reliably in bootstrap interpreter)
@@ -44,21 +45,21 @@ fn file_exists(path: text) -> bool:
 class StringInterner:
     str_to_id: Dict<text, i32>    # string -> id mapping
     id_to_str: Dict<i32, text>    # id -> string mapping
-    next_id: i32
+    next_id: StringId
 
     # Create empty interner
     static fn empty() -> StringInterner:
-        StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
 
     # Intern a string, return its ID
     me intern(s: text) -> i32:
         if self.str_to_id.contains_key(s):
             self.str_to_id[s]
         else:
-            val id = self.next_id
+            val id = self.next_id.value
             self.str_to_id[s] = id
             self.id_to_str[id] = s
-            self.next_id = self.next_id + 1
+            self.next_id = StringId(value: self.next_id.value + 1)
             id
 
     # Get string by ID
@@ -85,15 +86,15 @@ class StringInterner:
 
     # Load from SDN table
     static fn from_sdn(table: SdnTable) -> StringInterner:
-        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0)
+        val interner = StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0))
         for row in table.rows:
             if val Some(id_str) = row.get("id"):
                 if val Some(value) = row.get("value"):
                     val id = id_str.to_int()
                     interner.str_to_id[value] = id
                     interner.id_to_str[id] = value
-                    if id >= interner.next_id:
-                        interner.next_id = id + 1
+                    if id >= interner.next_id.value:
+                        interner.next_id = StringId(value: id + 1)
         interner
 
     # Export to SDN table
@@ -319,7 +320,7 @@ class SdnDatabase:
     static fn new(path: text) -> SdnDatabase:
         SdnDatabase(
             path: path,
-            interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0),
+            interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)),
             tables: {},
             modified: false
         )
@@ -333,7 +334,7 @@ class SdnDatabase:
         if not content.?:
             return nil
 
-        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: 0), modified: false)
+        val db = SdnDatabase(path: path, tables: {}, interner: StringInterner(str_to_id: {}, id_to_str: {}, next_id: StringId(value: 0)), modified: false)
 
         # Parse all tables from file
         # Format: multiple tables separated by blank lines

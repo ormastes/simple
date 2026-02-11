@@ -1,0 +1,48 @@
+# CMake toolchain — macOS ARM64 (AArch64 / Apple Silicon) cross-compile
+set(CMAKE_SYSTEM_NAME Darwin)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+set(CMAKE_C_COMPILER clang)
+set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_ASM_COMPILER clang)
+
+# macOS SDK: /opt/sysroots/macos/MacOSX14.5.sdk (local) or /tmp/macos-sdk/MacOSX14.5.sdk (CI)
+if(EXISTS /opt/sysroots/macos/MacOSX14.5.sdk/usr/include)
+    set(MACOS_SDK /opt/sysroots/macos/MacOSX14.5.sdk)
+elseif(EXISTS /tmp/macos-sdk/MacOSX14.5.sdk/usr/include)
+    set(MACOS_SDK /tmp/macos-sdk/MacOSX14.5.sdk)
+else()
+    message(FATAL_ERROR "macOS SDK not found. Install at /opt/sysroots/macos/MacOSX14.5.sdk or /tmp/macos-sdk/MacOSX14.5.sdk")
+endif()
+
+set(CMAKE_OSX_ARCHITECTURES arm64)
+set(CMAKE_OSX_SYSROOT "${MACOS_SDK}")
+
+set(CMAKE_C_FLAGS "--target=aarch64-apple-darwin -isysroot ${MACOS_SDK}")
+set(CMAKE_CXX_FLAGS "--target=aarch64-apple-darwin -isysroot ${MACOS_SDK}")
+set(CMAKE_ASM_FLAGS "--target=aarch64-apple-darwin -isysroot ${MACOS_SDK}")
+set(CMAKE_EXE_LINKER_FLAGS "--target=aarch64-apple-darwin -isysroot ${MACOS_SDK} -fuse-ld=lld")
+
+# macOS cross-compile tools (use LLVM equivalents on Linux)
+find_program(_LLVM_INSTALL_NAME_TOOL NAMES llvm-install-name-tool llvm-install-name-tool-20)
+find_program(_LLVM_OTOOL NAMES llvm-otool llvm-otool-20)
+find_program(_LLVM_AR NAMES llvm-ar llvm-ar-20)
+find_program(_LLVM_RANLIB NAMES llvm-ranlib llvm-ranlib-20)
+
+if(_LLVM_INSTALL_NAME_TOOL)
+    set(CMAKE_INSTALL_NAME_TOOL "${_LLVM_INSTALL_NAME_TOOL}")
+endif()
+if(_LLVM_OTOOL)
+    set(CMAKE_OTOOL "${_LLVM_OTOOL}")
+endif()
+if(_LLVM_AR)
+    set(CMAKE_AR "${_LLVM_AR}")
+endif()
+if(_LLVM_RANLIB)
+    set(CMAKE_RANLIB "${_LLVM_RANLIB}")
+endif()
+
+set(CMAKE_FIND_ROOT_PATH "${MACOS_SDK}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)

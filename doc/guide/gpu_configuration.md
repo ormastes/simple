@@ -55,15 +55,31 @@ fn main():
 
 ## Config File Locations
 
-Simple checks for config files in this order:
+Simple uses a three-level config system. Each level only overrides the keys it explicitly contains (partial merge, not full replace).
 
-1. **Local** (highest priority): `./dl.config.sdn`
-2. **User**: `~/.simple/dl.config.sdn`
-3. **Defaults**: CPU, f32, PyTorch backend
+**Priority** (lowest → highest): defaults → user → project → project_local → env → CLI args
+
+| Level | File | Shared? | When Loaded |
+|-------|------|---------|-------------|
+| **user** (lowest file priority) | `~/.simple/dl.config.sdn` | No (user home) | Once at CLI startup |
+| **project** (shared) | `./dl.config.sdn` | Yes (committed) | Every `load_local_config()` call |
+| **project_local** (highest file priority) | `./dl.config.local.sdn` | No (gitignored) | Every `load_local_config()` call |
 
 This allows you to:
-- Set project-specific GPU in `./dl.config.sdn` (not committed to git)
-- Set user-wide default in `~/.simple/dl.config.sdn`
+- Set personal GPU preferences in `~/.simple/dl.config.sdn` (applies everywhere)
+- Set project-shared defaults in `./dl.config.sdn` (committed to repo)
+- Override locally in `./dl.config.local.sdn` (not committed, gitignored)
+
+### Example: Personal CUDA device preference
+
+Create `dl.config.local.sdn` in your project directory to set your preferred GPU without affecting other developers:
+
+```sdn
+# dl.config.local.sdn — your local CUDA preference (not shared)
+device: "cuda:1"
+```
+
+This file is automatically gitignored (`*.local.sdn`).
 
 ---
 
@@ -240,15 +256,23 @@ dl:
 
 ```simple
 use std.src.dl.config_loader.{
-    load_local_config,      # Auto-load from standard locations
-    load_and_apply,         # Load specific file
+    load_local_config,      # 3-level auto-load (user → project → project_local)
+    load_user_config,       # Load user config only (~/.simple/dl.config.sdn, cached)
+    load_and_apply,         # Load specific file (full replace)
+    apply_file_to_global,   # Load specific file (partial merge)
     load_config_from_file   # Load and return config (don't apply)
 }
 
-# Auto-load (checks ./dl.config.sdn, then ~/.simple/dl.config.sdn)
+# 3-level auto-load (user → project → project_local)
 load_local_config()
 
-# Load specific file
+# Load user config only (called automatically at CLI startup)
+load_user_config()
+
+# Load specific file (partial merge - only overrides keys present)
+apply_file_to_global("my_config.sdn")
+
+# Load specific file (full replace - overwrites all fields)
 load_and_apply("my_config.sdn")
 
 # Load without applying
@@ -272,7 +296,7 @@ dl.backend(Backend.PyTorch)
 # Helper constructors
 val dev = cuda(1)           # Device.CUDA(1)
 val dev = cpu()             # Device.CPU
-val dev = gpu()             # Device.GPU
+val dev = default_gpu()     # Device.CUDA(0)
 ```
 
 ### Preset Configurations
@@ -327,8 +351,11 @@ Expected CUDA:1, got CUDA:0
 |---------|--------|-------|
 | Device API (CPU/CUDA) | ✅ Complete | Device enum with CUDA(id) |
 | Config file loading | ✅ Complete | SDN format loader |
-| Local config (`./dl.config.sdn`) | ✅ Complete | Per-project config |
-| User config (`~/.simple/dl.config.sdn`) | ✅ Complete | Per-user defaults |
+| 3-level config system | ✅ Complete | user → project → project_local |
+| User config (`~/.simple/dl.config.sdn`) | ✅ Complete | Per-user defaults, loaded once |
+| Project config (`./dl.config.sdn`) | ✅ Complete | Shared project config |
+| Project-local config (`./dl.config.local.sdn`) | ✅ Complete | Local overrides, gitignored |
+| Partial merge | ✅ Complete | Only overrides keys present in file |
 | Pure Simple backend | ✅ Working | CPU-only (no FFI) |
 | PyTorch FFI | ⚠️ Stubs only | GPU requires implementation |
 | CUDA backend | ⚠️ Planned | Direct CUDA support |

@@ -1,9 +1,23 @@
 # DL Config Loader - Load Deep Learning configuration from SDN files
 #
 # Extends the DLConfig system with file-based configuration loading.
+#
+# Three-level config system (lowest → highest priority):
+#   1. local (user):         ~/.simple/dl.config.sdn       — loaded once at CLI startup
+#   2. project (shared):     ./dl.config.sdn               — committed to repo
+#   3. project_local:        ./dl.config.local.sdn          — not committed (gitignored)
+#
+# Each file only overrides keys it explicitly contains (partial merge).
 
 use std.src.dl.config.{DLConfig, Device, DType, Backend, dl}
 use std.io_runtime.{file_read, file_exists}
+
+# Cache flag: user-level config is loaded at most once per process
+# Wrapped in struct to work around runtime module closure limitation
+struct _ConfigState:
+    user_loaded: bool
+
+var _config_state = _ConfigState(user_loaded: false)
 
 # ============================================================================
 # Config Loading
@@ -171,30 +185,133 @@ fn load_and_apply(path: text) -> bool:
             print "Failed to load config: {msg}"
             false
 
-fn load_local_config():
-    """Load config from standard locations.
+fn apply_sdn_to_global(sdn_value: SdnValue):
+    """Apply SDN config values to the global dl instance (partial merge).
 
-    Checks in order:
-    1. ./dl.config.sdn (local project config)
-    2. ~/.simple/dl.config.sdn (user config)
-    3. Falls back to defaults
+    Only overrides keys that are explicitly present in the SDN dict.
+    Keys not present in the file are left unchanged.
+
+    Args:
+        sdn_value - Parsed SDN value (should be Dict)
     """
-    # Try local config first
-    if file_exists("dl.config.sdn"):
-        if load_and_apply("dl.config.sdn"):
-            print "Loaded local DL config: dl.config.sdn"
-            return
+    use std.sdn.{SdnValue}
 
-    # Try user config
+    match sdn_value:
+        case SdnValue.Dict(d):
+            if d.contains_key("device"):
+                val device_value = d["device"]
+                match device_value:
+                    case SdnValue.String(s):
+                        dl.default_device = parse_device(s)
+                    case _: ()
+
+            if d.contains_key("dtype"):
+                val dtype_value = d["dtype"]
+                match dtype_value:
+                    case SdnValue.String(s):
+                        dl.default_dtype = parse_dtype(s)
+                    case _: ()
+
+            if d.contains_key("backend"):
+                val backend_value = d["backend"]
+                match backend_value:
+                    case SdnValue.String(s):
+                        dl.default_backend = parse_backend(s)
+                    case _: ()
+
+            if d.contains_key("autograd"):
+                val autograd_value = d["autograd"]
+                match autograd_value:
+                    case SdnValue.Bool(b):
+                        dl.autograd_enabled = b
+                    case SdnValue.String(s):
+                        dl.autograd_enabled = parse_bool(s)
+                    case _: ()
+
+            if d.contains_key("amp"):
+                val amp_value = d["amp"]
+                match amp_value:
+                    case SdnValue.Bool(b):
+                        dl.amp_enabled = b
+                    case SdnValue.String(s):
+                        dl.amp_enabled = parse_bool(s)
+                    case _: ()
+
+            if d.contains_key("seed"):
+                val seed_value = d["seed"]
+                match seed_value:
+                    case SdnValue.Int(n):
+                        dl.seed = Some(n)
+                    case SdnValue.String(s):
+                        dl.seed = Some(int(s))
+                    case _: ()
+
+        case _:
+            ()
+
+fn apply_file_to_global(path: text) -> bool:
+    """Load an SDN config file and apply it to global dl (partial merge).
+
+    If the file exists, parses it and applies only the keys present.
+    If the file does not exist, does nothing and returns false.
+
+    Args:
+        path - Path to SDN config file
+
+    Returns:
+        true if file was found and applied, false otherwise
+    """
+    if not file_exists(path):
+        return false
+
+    val content = file_read(path)
+    if content == "":
+        return false
+
+    use std.sdn.{parse}
+
+    val parse_result = parse(content)
+    if not parse_result.is_ok():
+        return false
+
+    val sdn_value = parse_result.unwrap()
+    apply_sdn_to_global(sdn_value)
+    true
+
+fn load_user_config():
+    """Load user-level config from ~/.simple/dl.config.sdn (cached).
+
+    This is called once at CLI startup. Subsequent calls are no-ops.
+    The user config provides personal defaults (e.g. preferred GPU device)
+    that can be overridden by project and project_local configs.
+    """
+    if _config_state.user_loaded:
+        return
+
     val home = env_get("HOME") ?? "/home/user"
     val user_config = "{home}/.simple/dl.config.sdn"
-    if file_exists(user_config):
-        if load_and_apply(user_config):
-            print "Loaded user DL config: {user_config}"
-            return
+    if apply_file_to_global(user_config):
+        pass
+    _config_state.user_loaded = true
 
-    # Use defaults
-    print "Using default DL config (no config file found)"
+fn load_local_config():
+    """Load config from all standard locations (3-level merge).
+
+    Priority (lowest → highest):
+    1. User config:          ~/.simple/dl.config.sdn     (cached, loaded once)
+    2. Project config:       ./dl.config.sdn             (shared, committed)
+    3. Project-local config: ./dl.config.local.sdn       (not shared, gitignored)
+
+    Each level only overrides keys it explicitly contains.
+    """
+    # Level 1: user config (cached - only reads disk once per process)
+    load_user_config()
+
+    # Level 2: project config (shared, committed to repo)
+    apply_file_to_global("dl.config.sdn")
+
+    # Level 3: project-local config (not committed, gitignored)
+    apply_file_to_global("dl.config.local.sdn")
 
 # ============================================================================
 # SDN Helper Functions
@@ -276,5 +393,6 @@ fn extract_dl_config_from_sdn(sdn_value: SdnValue) -> Result<DLConfig, text>:
 # Exports
 # ============================================================================
 
-export load_config_from_file, load_and_apply, load_local_config
+export load_config_from_file, load_and_apply, load_local_config, load_user_config
+export apply_sdn_to_global, apply_file_to_global
 export parse_device, parse_dtype, parse_backend
