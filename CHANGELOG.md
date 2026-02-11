@@ -2,6 +2,31 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.5.1-rc.1] - 2026-02-11
+
+### Added
+- Async/await parser implementation (Phases 1-7 infrastructure complete)
+- VHDL backend with verification constraints and tests
+- VHDL examples, golden files, CI integration, and user guide
+- Test enablement progress tracking documentation
+- Expression slice evaluation support in interpreter (Phase 1.1 partial)
+
+### Changed
+- MCP server enhanced for production readiness with robustness improvements
+- Generic template tests enabled (5 tests - Phase 1.3 validation)
+- Deep learning config system improved for runtime compatibility
+
+### Fixed
+- MCP server crashes: prompts/get (enum match), bugdb, uri templates
+- Runtime compatibility issues with reserved keywords
+- DL config default function replaced with standalone for runtime compatibility
+- FFI skip test and SFFI wrapper verification
+
+### Documentation
+- Runtime parser bug root cause and rebuild limitations documented
+- Duplication analysis and intentional duplications documented
+- Test enablement progress tracking added
+
 ## [0.5.1-alpha] - 2026-02-09
 
 ### Added
