@@ -256,6 +256,67 @@ static void simple_int_array_push(SimpleIntArrayArray* arr, SimpleIntArray val) 
     arr->len++;
 }
 
+// --- Dynamic Struct Array (void* based, for [StructName] types) ---
+
+typedef struct {
+    void** items;
+    long long len;
+    long long cap;
+} SimpleStructArray;
+
+static SimpleStructArray simple_new_struct_array(void) {
+    SimpleStructArray arr;
+    arr.items = NULL;
+    arr.len = 0;
+    arr.cap = 0;
+    return arr;
+}
+
+static void simple_struct_push(SimpleStructArray* arr, void* item) {
+    if (arr->len >= arr->cap) {
+        arr->cap = arr->cap == 0 ? 8 : arr->cap * 2;
+        arr->items = (void**)realloc(arr->items, arr->cap * sizeof(void*));
+    }
+    arr->items[arr->len++] = item;
+}
+
+static SimpleStructArray simple_struct_array_copy_push(SimpleStructArray src, void* item) {
+    SimpleStructArray dst;
+    dst.cap = src.len + 1;
+    if (dst.cap < 8) dst.cap = 8;
+    dst.items = (void**)malloc(dst.cap * sizeof(void*));
+    for (long long i = 0; i < src.len; i++) {
+        dst.items[i] = src.items[i];
+    }
+    dst.len = src.len;
+    dst.items[dst.len++] = item;
+    return dst;
+}
+
+static SimpleIntArray simple_int_array_copy_push(SimpleIntArray src, long long item) {
+    SimpleIntArray dst;
+    dst.cap = src.len + 1;
+    if (dst.cap < 8) dst.cap = 8;
+    dst.items = (long long*)malloc(dst.cap * sizeof(long long));
+    memcpy(dst.items, src.items, src.len * sizeof(long long));
+    dst.len = src.len;
+    dst.items[dst.len++] = item;
+    return dst;
+}
+
+static SimpleStringArray simple_string_array_copy_push(SimpleStringArray src, const char* item) {
+    SimpleStringArray dst;
+    dst.cap = src.len + 1;
+    if (dst.cap < 8) dst.cap = 8;
+    dst.items = (const char**)malloc(dst.cap * sizeof(const char*));
+    for (long long i = 0; i < src.len; i++) {
+        dst.items[i] = src.items[i];
+    }
+    dst.len = src.len;
+    dst.items[dst.len++] = strdup(item ? item : "");
+    return dst;
+}
+
 // --- String Helpers ---
 
 static char* simple_str_concat(const char* a, const char* b) {
