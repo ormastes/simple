@@ -4,70 +4,42 @@
 
 ## Summary
 
-**Completion: 0%** (0/23 features)
+**Completion: 85%** (17/20 features)
 
 | Status | Count | Priority |
 |--------|-------|----------|
-| Failed | 0 | Critical |
-| In Progress | 0 | High |
-| Planned | 23 | Medium |
+| Failed | 1 | Critical |
+| In Progress | 1 | High |
+| Planned | 1 | Medium |
 | Ignored | 0 | Low |
-| **Total Pending** | **23** | |
+| **Total Pending** | **3** | |
 
 ## Progress by Category
 
 | Category | Complete | Failed | In Progress | Planned | Total | % |
 |----------|----------|--------|-------------|---------|-------|---|
-| Codegen | 0 | 0 | 0 | 5 | 5 | 0% |
-| Language | 0 | 0 | 0 | 2 | 2 | 0% |
-| "Testing Framework" | 0 | 0 | 0 | 7 | 7 | 0% |
-| Infrastructure | 0 | 0 | 0 | 1 | 1 | 0% |
-| Types | 0 | 0 | 0 | 1 | 1 | 0% |
-| Concurrency | 0 | 0 | 0 | 3 | 3 | 0% |
-| Uncategorized | 0 | 0 | 0 | 4 | 4 | 0% |
+| Codegen | 3 | 0 | 1 | 1 | 5 | 60% |
+| Language | 2 | 0 | 0 | 0 | 2 | 100% |
+| Testing Framework | 7 | 0 | 0 | 0 | 7 | 100% |
+| Infrastructure | 1 | 0 | 0 | 0 | 1 | 100% |
+| Types | 1 | 0 | 0 | 0 | 1 | 100% |
+| Concurrency | 3 | 0 | 0 | 0 | 3 | 100% |
+| Uncategorized | 0 | 1 | 0 | 0 | 1 | 0% |
+
+## Failed Features
+
+### Uncategorized
+
+- **700** Database SDN table import/export ([spec](test/system/db_sdn_spec.spl))
+
+## In Progress Features
+
+### Codegen
+
+- **101** Native Binary Compilation ([spec](doc/research/binary_locality.md))
 
 ## Planned Features
 
 ### Codegen
 
-- **100** "Cranelift Backend"
-- **101** "Native Binary Compilation"
-- **95** "Buffer Pool"
-- **96** "Generator Codegen"
-- **97** "LLVM Backend"
-
-### Language
-
-- **15** Variables
-- **24** Closures
-
-### "Testing Framework"
-
-- **180** "Describe Blocks"
-- **181** "Context Blocks"
-- **182** "It Examples"
-- **183** "Before Each Hooks"
-- **184** "After Each Hooks"
-- **187** "Expect Matchers"
-- **192** Doctest
-
-### Infrastructure
-
-- **2** Parser
-
-### Types
-
-- **27** "Option and Result"
-
-### Concurrency
-
-- **40** Actors
-- **44** "Async Default"
-- **47** "Promise Type"
-
-### Uncategorized
-
-- **700** "Database SDN table import/export"
-- **f1** "Feature 1"
-- **f2** "Feature 2"
-- **feature_001** "My Feature"
+- **97** LLVM Backend ([spec](doc/codegen_technical.md))

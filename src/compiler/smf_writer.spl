@@ -351,9 +351,8 @@ fn serialize_templates(templates: GenericTemplates) -> [u8]:
 
     buf = buf.concat(u32_to_bytes(total_count))
 
-    # AST serialization framework (Phase 3)
-    # Currently writes name + generic param count per template as structural placeholders.
-    # Full AST body serialization will be added when the AST serializer is available.
+    # Full AST serialization (Phase 6)
+    # Writes complete AST nodes including body, params, fields, variants, methods, and bindings.
 
     # Functions
     for func in templates.functions:
@@ -396,10 +395,8 @@ fn serialize_metadata(metadata: MonomorphizationMetadata) -> [u8]:
     buf = buf.concat(u32_to_bytes(metadata.enums.len()))
     buf = buf.concat(u32_to_bytes(metadata.traits.len()))
 
-    # Metadata serialization framework (Phase 3)
-    # Currently writes category counts as a structural skeleton.
-    # Full per-entry serialization (specialization entries, bindings, mangled names)
-    # will be added when the metadata serializer is available.
+    # Metadata serialization (Phase 6)
+    # Writes category counts and per-entry data (name, specialization count).
 
     # Serialize function metadata entries
     for (name, func_meta) in metadata.functions.items():
@@ -438,60 +435,173 @@ fn serialize_note_sdn(note_sdn: NoteSdnMetadata) -> [u8]:
     val sdn_content = note_sdn.to_sdn()
     sdn_content.to_bytes()
 
-# Placeholder serialization functions (Phase 3 TODO)
+# Full AST serialization functions (Phase 6)
+
+fn serialize_text_field(buf: [u8], value: text) -> [u8]:
+    """Serialize a text field as length-prefixed bytes."""
+    var out = buf
+    val bytes = value.to_bytes()
+    out = out.concat(u32_to_bytes(bytes.len()))
+    out = out.concat(bytes)
+    out
+
+fn serialize_optional_text_field(buf: [u8], value: text?) -> [u8]:
+    """Serialize an optional text field (0x01 + data or 0x00 for nil)."""
+    var out = buf
+    if value.?:
+        out = out.push(0x01)
+        out = serialize_text_field(out, value.unwrap())
+    else:
+        out = out.push(0x00)
+    out
+
+fn serialize_text_list(buf: [u8], items: [text]) -> [u8]:
+    """Serialize a list of text items as count + length-prefixed strings."""
+    var out = buf
+    out = out.concat(u32_to_bytes(items.len()))
+    for item in items:
+        out = serialize_text_field(out, item)
+    out
+
+fn serialize_text_dict(buf: [u8], dict: {text: text}) -> [u8]:
+    """Serialize a text-to-text dictionary as count + key-value pairs."""
+    var out = buf
+    out = out.concat(u32_to_bytes(dict.len()))
+    for (key, value) in dict.items():
+        out = serialize_text_field(out, key)
+        out = serialize_text_field(out, value)
+    out
 
 fn serialize_function_placeholder(func: FunctionDef) -> [u8]:
+    """Serialize a full FunctionDef including body, params, return type, and bindings."""
     var buf: [u8] = []
 
-    val name_bytes = func.name.to_bytes()
-    buf = buf.concat(u32_to_bytes(name_bytes.len()))
-    buf = buf.concat(name_bytes)
+    # Name
+    buf = serialize_text_field(buf, func.name)
 
+    # Generic params
     buf = buf.push(func.generic_params.len().to_u8())
+    for param in func.generic_params:
+        buf = serialize_text_field(buf, param)
+
+    # Params (list of text)
+    buf = serialize_text_list(buf, func.params)
+
+    # Return type (optional text)
+    buf = serialize_optional_text_field(buf, func.return_type)
+
+    # Body (list of text - serialized AST statements)
+    buf = serialize_text_list(buf, func.body)
+
+    # Flags
+    buf = buf.push(if func.is_generic_template: 0x01 else: 0x00)
+
+    # Specialization of (optional text)
+    buf = serialize_optional_text_field(buf, func.specialization_of)
+
+    # Type bindings
+    buf = serialize_text_dict(buf, func.type_bindings)
 
     buf
 
 fn serialize_struct_placeholder(struct_def: StructDef) -> [u8]:
+    """Serialize a full StructDef including fields and bindings."""
     var buf: [u8] = []
 
-    val name_bytes = struct_def.name.to_bytes()
-    buf = buf.concat(u32_to_bytes(name_bytes.len()))
-    buf = buf.concat(name_bytes)
+    # Name
+    buf = serialize_text_field(buf, struct_def.name)
 
+    # Generic params
     buf = buf.push(struct_def.generic_params.len().to_u8())
+    for param in struct_def.generic_params:
+        buf = serialize_text_field(buf, param)
+
+    # Fields (list of text)
+    buf = serialize_text_list(buf, struct_def.fields)
+
+    # Flags
+    buf = buf.push(if struct_def.is_generic_template: 0x01 else: 0x00)
+
+    # Specialization of (optional text)
+    buf = serialize_optional_text_field(buf, struct_def.specialization_of)
+
+    # Type bindings
+    buf = serialize_text_dict(buf, struct_def.type_bindings)
 
     buf
 
 fn serialize_class_placeholder(class_def: ClassDef) -> [u8]:
+    """Serialize a full ClassDef including fields, methods, and bindings."""
     var buf: [u8] = []
 
-    val name_bytes = class_def.name.to_bytes()
-    buf = buf.concat(u32_to_bytes(name_bytes.len()))
-    buf = buf.concat(name_bytes)
+    # Name
+    buf = serialize_text_field(buf, class_def.name)
 
+    # Generic params
     buf = buf.push(class_def.generic_params.len().to_u8())
+    for param in class_def.generic_params:
+        buf = serialize_text_field(buf, param)
+
+    # Fields (list of text)
+    buf = serialize_text_list(buf, class_def.fields)
+
+    # Methods (list of text)
+    buf = serialize_text_list(buf, class_def.methods)
+
+    # Flags
+    buf = buf.push(if class_def.is_generic_template: 0x01 else: 0x00)
+
+    # Specialization of (optional text)
+    buf = serialize_optional_text_field(buf, class_def.specialization_of)
+
+    # Type bindings
+    buf = serialize_text_dict(buf, class_def.type_bindings)
 
     buf
 
 fn serialize_enum_placeholder(enum_def: EnumDef) -> [u8]:
+    """Serialize a full EnumDef including variants and bindings."""
     var buf: [u8] = []
 
-    val name_bytes = enum_def.name.to_bytes()
-    buf = buf.concat(u32_to_bytes(name_bytes.len()))
-    buf = buf.concat(name_bytes)
+    # Name
+    buf = serialize_text_field(buf, enum_def.name)
 
+    # Generic params
     buf = buf.push(enum_def.generic_params.len().to_u8())
+    for param in enum_def.generic_params:
+        buf = serialize_text_field(buf, param)
+
+    # Variants (list of text)
+    buf = serialize_text_list(buf, enum_def.variants)
+
+    # Flags
+    buf = buf.push(if enum_def.is_generic_template: 0x01 else: 0x00)
+
+    # Specialization of (optional text)
+    buf = serialize_optional_text_field(buf, enum_def.specialization_of)
+
+    # Type bindings
+    buf = serialize_text_dict(buf, enum_def.type_bindings)
 
     buf
 
 fn serialize_trait_placeholder(trait_def: TraitDef) -> [u8]:
+    """Serialize a full TraitDef including methods."""
     var buf: [u8] = []
 
-    val name_bytes = trait_def.name.to_bytes()
-    buf = buf.concat(u32_to_bytes(name_bytes.len()))
-    buf = buf.concat(name_bytes)
+    # Name
+    buf = serialize_text_field(buf, trait_def.name)
 
+    # Generic params
     buf = buf.push(trait_def.generic_params.len().to_u8())
+    for param in trait_def.generic_params:
+        buf = serialize_text_field(buf, param)
+
+    # Methods (list of text)
+    buf = serialize_text_list(buf, trait_def.methods)
+
+    # Flags
+    buf = buf.push(if trait_def.is_generic_template: 0x01 else: 0x00)
 
     buf
 

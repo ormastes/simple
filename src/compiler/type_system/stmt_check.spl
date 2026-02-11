@@ -176,23 +176,44 @@ fn bind_pattern(pattern: Pattern, ty: Type, env: Dict<text, Type>) -> Dict<text,
             new_env[name] = ty
 
         case Tuple(patterns):
-            # Extract tuple element types
-            # For now, assign fresh vars to each pattern
-            # Full implementation needs tuple type decomposition
-            for pat in patterns:
-                new_env = bind_pattern(pat, ty, new_env)
+            # Decompose tuple type into element types
+            match ty:
+                case Type.Tuple(elements):
+                    var i = 0
+                    while i < patterns.len() and i < elements.len():
+                        new_env = bind_pattern(patterns[i], elements[i], new_env)
+                        i = i + 1
+                case _:
+                    # Not a tuple type; bind each pattern with the whole type
+                    for pat in patterns:
+                        new_env = bind_pattern(pat, ty, new_env)
 
         case Array(patterns):
-            # Extract array element type
-            # For now, assign same type to all patterns
-            for pat in patterns:
-                new_env = bind_pattern(pat, ty, new_env)
+            # Extract array element type from the array type
+            match ty:
+                case Type.Array(elem, _):
+                    for pat in patterns:
+                        new_env = bind_pattern(pat, elem, new_env)
+                case _:
+                    # Not an array type; bind each pattern with the whole type
+                    for pat in patterns:
+                        new_env = bind_pattern(pat, ty, new_env)
 
         case StructPattern(name, fields):
-            # Extract field types from struct
-            # For now, assign fresh var to each field pattern
-            for (field_name, field_pat) in fields:
-                new_env = bind_pattern(field_pat, ty, new_env)
+            # Extract field types from struct type
+            match ty:
+                case Type.Struct(_, struct_fields, _):
+                    for (field_name, field_pat) in fields:
+                        # Find the matching struct field by name
+                        var field_ty = ty
+                        for sf in struct_fields:
+                            if sf.name == field_name:
+                                field_ty = sf.ty
+                        new_env = bind_pattern(field_pat, field_ty, new_env)
+                case _:
+                    # Not a struct type; bind each field pattern with the whole type
+                    for (field_name, field_pat) in fields:
+                        new_env = bind_pattern(field_pat, ty, new_env)
 
         case EnumPattern(enum_name, variant, payload):
             # Extract variant payload types
@@ -205,10 +226,10 @@ fn bind_pattern(pattern: Pattern, ty: Type, env: Dict<text, Type>) -> Dict<text,
             new_env = bind_pattern(pattern, ty, new_env)
 
         case Or(patterns):
-            # All patterns in OR must bind same variables
-            # For now, bind all patterns with same type
-            for pat in patterns:
-                new_env = bind_pattern(pat, ty, new_env)
+            # All patterns in OR must bind the same variables with the same type
+            # Bind from the first pattern; subsequent patterns must agree
+            if patterns.len() > 0:
+                new_env = bind_pattern(patterns[0], ty, new_env)
 
         case Wildcard:
             # Wildcard binds nothing

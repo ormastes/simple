@@ -239,13 +239,19 @@ fn ast_type_to_concrete(ty: Type, bindings: TypeBindings) -> ConcreteType:
             ConcreteType.Pointer(concrete_kind, capability, inner_ty)
 
         Type.Union(types):
-            # For unions, take the first type as approximation
-            # Full union support would need a ConcreteType.Union variant
-            eprint("Warning: full union type support not yet implemented; using first type as approximation")
-            if val Some(first) = types.first():
-                ast_type_to_concrete(first, bindings)
-            else:
+            # Full union type handling: convert all union members and produce
+            # a Specialized("Union", [member_types...]) concrete type.
+            # This preserves all union members through monomorphization.
+            if types.is_empty():
                 ConcreteType.Nil
+            else if types.len() == 1:
+                # Single-element union collapses to the inner type
+                ast_type_to_concrete(types[0], bindings)
+            else:
+                var concrete_members: [ConcreteType] = []
+                for member_type in types:
+                    concrete_members.push(ast_type_to_concrete(member_type, bindings))
+                ConcreteType.Specialized("Union", concrete_members)
 
         Type.Constructor(target, _):
             # Constructor types are used for factory patterns
@@ -502,7 +508,7 @@ fn concrete_pointer_kind_to_ast(kind: ConcretePointerKind) -> PointerKind:
 # Function([T], U)         | Function([T], U)              | Direct
 # Optional(T)              | Optional(T)                   | Direct
 # Pointer(kind, T)         | Pointer(kind, cap, T)         | Cap derived
-# Union([T, U])            | T (first)                     | TODO: full union
+# Union([T, U])            | Specialized("Union", [T, U])  | Full union support
 # Constructor(T, args)     | T (extract target)            | Factory pattern
 # Simd(lanes, T)           | Array(T)                      | SIMD as array
 # Capability(T, cap)       | T (unwrap)                    | Compile-time
@@ -570,7 +576,7 @@ fn concrete_pointer_kind_to_ast(kind: ConcretePointerKind) -> PointerKind:
 # - [x] No use-after-free (Simple ownership)
 #
 # Remaining work:
-# - [ ] Full union type support (ConcreteType.Union variant)
+# - [x] Full union type support (Specialized("Union", members))
 # - [ ] More complete type inference (beyond literals)
 # - [ ] Type validation (well-formedness checks)
 #

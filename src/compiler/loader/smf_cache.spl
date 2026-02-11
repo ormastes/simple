@@ -252,39 +252,108 @@ impl SmfCache:
 # ============================================================================
 
 fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
-    """Parse minimal SMF header (placeholder).
+    """Parse SMF header from trailer bytes.
 
-    TODO: Implement proper header parsing.
-    For now, creates a minimal v1.1 header.
+    SMF v1.1 trailer format (128 bytes, little-endian):
+      Offset  Size  Field
+      0       4     Magic: "SMF\0" (0x53, 0x4D, 0x46, 0x00)
+      4       1     Version major
+      5       1     Version minor
+      6       1     Platform (u8 enum)
+      7       1     Arch (u8 enum)
+      8       4     Flags (u32 bitfield)
+      12      4     Section count (u32)
+      16      8     Section table offset (u64)
+      24      4     Symbol count (u32)
+      28      8     Symbol table offset (u64)
+      36      4     Exported count (u32)
+      40      8     Entry point (u64)
+      48      4     Compression type (u32)
+      52      8     Stub size (u64)
+      60      8     SMF data offset (u64)
+      68-127  60    Reserved
+
+    ROBUSTNESS: Falls back to safe defaults if bytes are too short.
     """
     use ..linker.smf_enums (Platform, Arch, CompressionType)
-
-    # Read basic fields
-    val version_major = if bytes.len() > 4: bytes[4] else: 1
-    val version_minor = if bytes.len() > 5: bytes[5] else: 1
-    val platform = if bytes.len() > 6: bytes[6] else: 0
-    val arch = if bytes.len() > 7: bytes[7] else: 0
-
     use ..linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
 
-    # Create minimal header
+    if bytes.len() < 128:
+        # Insufficient data - return minimal defaults
+        return ParsedHeader(
+            version: (1, 1),
+            platform: Platform.Linux,
+            arch: Arch.X86_64,
+            flags: SmfFlags(
+                executable: false,
+                reloadable: false,
+                debug_info: false,
+                pic: false,
+                has_stub: false
+            ),
+            section_count: 0,
+            symbol_count: 0,
+            entry_point: 0,
+            has_templates: false,
+            has_note_sdn: false,
+            compression: CompressionType.None
+        )
+
+    # Read magic and validate
+    val has_magic = (bytes[0] == 0x53 and bytes[1] == 0x4D and bytes[2] == 0x46 and bytes[3] == 0x00)
+    if not has_magic:
+        eprint("Warning: SMF header magic mismatch; using defaults")
+
+    # Read version
+    val version_major = bytes[4]
+    val version_minor = bytes[5]
+
+    # Read platform and arch
+    val platform = Platform.from_u8(bytes[6])
+    val arch = Arch.from_u8(bytes[7])
+
+    # Read flags (u32 at offset 8)
+    val flags_raw = bytes_to_u32(bytes[8..12])
+    val flags = SmfFlags(
+        executable: (flags_raw & 0x01) != 0,
+        reloadable: (flags_raw & 0x02) != 0,
+        debug_info: (flags_raw & 0x04) != 0,
+        pic: (flags_raw & 0x08) != 0,
+        has_stub: (flags_raw & 0x10) != 0
+    )
+
+    # Read section count (u32 at offset 12)
+    val section_count = bytes_to_u32(bytes[12..16]) as i32
+
+    # Read symbol count (u32 at offset 24)
+    val symbol_count = bytes_to_u32(bytes[24..28]) as i32
+
+    # Read entry point (u64 at offset 40, using lower 32 bits)
+    val entry_point = bytes_to_u32(bytes[40..44]) as i64
+
+    # Read compression type (u32 at offset 48)
+    val compression_raw = bytes_to_u32(bytes[48..52])
+    val compression = match compression_raw:
+        0: CompressionType.None
+        1: CompressionType.Zstd
+        _: CompressionType.None
+
+    # Determine template/note.sdn presence by checking section count
+    # Templates are present if section_count > 1 (more than just code section)
+    val has_templates = section_count > 1
+    val has_note_sdn = section_count > 3
+
     ParsedHeader(
         version: (version_major, version_minor),
-        platform: Platform.from_u8(platform),
-        arch: Arch.from_u8(arch),
-        flags: SmfFlags(
-            executable: false,
-            reloadable: false,
-            debug_info: false,
-            pic: false,
-            has_stub: false
-        ),
-        section_count: 0,
-        symbol_count: 0,
-        entry_point: 0,
-        has_templates: false,
-        has_note_sdn: false,
-        compression: CompressionType.None
+        platform: platform,
+        arch: arch,
+        flags: flags,
+        section_count: section_count,
+        symbol_count: symbol_count,
+        entry_point: entry_point,
+        has_templates: has_templates,
+        has_note_sdn: has_note_sdn,
+        compression: compression
     )
 
 fn bytes_to_u32(bytes: [u8]) -> u32:

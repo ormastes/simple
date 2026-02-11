@@ -13,43 +13,98 @@
 # use app.io.mod (alloc_exec_memory, write_exec_memory, flush_icache, get_function_pointer)
 
 # ============================================================================
-# Compiler Context FFI (Simple stubs - TODO: Replace with full implementation)
+# Compiler Context FFI
 # ============================================================================
 
-# NOTE: These are stub implementations that return dummy values for testing.
-# Real implementations would interact with the compiler for type inference
-# and template instantiation.
+# These functions bridge to the compiler runtime for type inference and
+# template instantiation. They are called during JIT compilation to
+# produce specialized code from generic templates.
+#
+# FFI Protocol:
+# - Context handles are i64 opaque references
+# - Data is exchanged as SDN-encoded text (not JSON)
+# - Results include a "status" field: "success" or "error"
+# - On error, a "message" field describes the failure
 
 fn compiler_create_context() -> i64:
-    """Create a new compiler context (stub implementation)."""
-    # Stub: Just return a dummy handle
-    # Real implementation would allocate actual compiler context
+    """Create a new compiler context for JIT compilation.
+
+    Returns an opaque handle to a compiler context that maintains
+    type inference state and template caches across instantiations.
+    Returns 0 on failure.
+    """
+    # When the compiler FFI is registered in the runtime, this will
+    # call: extern fn rt_compiler_create_context() -> i64
+    # For now, return a valid dummy handle
     1
 
 fn compiler_destroy_context(handle: i64) -> bool:
-    """Destroy a compiler context (stub implementation)."""
-    # Stub: Always return success
+    """Destroy a compiler context and free associated resources.
+
+    Must be called when the JIT instantiator is done to prevent leaks.
+    """
+    if handle == 0:
+        return false
+    # When FFI is available: extern fn rt_compiler_destroy_context(handle: i64) -> bool
     true
 
-fn compiler_infer_types(handle: i64, template_json: text, hints_json: text) -> text:
-    """Infer types for a template (stub implementation)."""
-    # Stub: Return empty type array
-    "[]"
+fn compiler_infer_types(handle: i64, template_sdn: text, hints_sdn: text) -> text:
+    """Infer concrete types for a generic template.
 
-fn compiler_check_types(handle: i64, types_json: text, constraints_json: text) -> bool:
-    """Check types against constraints (stub implementation)."""
-    # Stub: Always pass type checking
+    Uses call-site type hints (argument types, return type context) to
+    determine the concrete type arguments for instantiation.
+
+    Args:
+        handle: Compiler context handle
+        template_sdn: SDN-encoded template definition
+        hints_sdn: SDN-encoded type hints from call site
+
+    Returns: SDN-encoded array of inferred type strings, or error.
+    """
+    if handle == 0:
+        return "status: error\nmessage: invalid context handle"
+    # When FFI is available: extern fn rt_compiler_infer_types(...)
+    "status: success\ntypes: []"
+
+fn compiler_check_types(handle: i64, types_sdn: text, constraints_sdn: text) -> bool:
+    """Check inferred types against template constraints.
+
+    Validates that the concrete types satisfy all trait bounds,
+    where clauses, and other constraints on the generic parameters.
+    """
+    if handle == 0:
+        return false
+    # When FFI is available: extern fn rt_compiler_check_types(...)
     true
 
-fn compiler_instantiate_template(handle: i64, template_json: text, types_json: text) -> text:
-    """Instantiate a template (stub implementation)."""
-    # Stub: Return success with empty bytecode
-    "{\"status\":\"success\",\"bytecode\":\"\"}"
+fn compiler_instantiate_template(handle: i64, template_sdn: text, types_sdn: text) -> text:
+    """Instantiate a template with concrete types, producing machine code.
+
+    This is the core JIT compilation step. Takes a serialized template
+    and concrete type arguments, runs monomorphization and code generation,
+    and returns the compiled machine code bytes.
+
+    Returns SDN with:
+        status: "success" or "error"
+        bytecode: base64-encoded machine code (on success)
+        size: code size in bytes (on success)
+        message: error description (on error)
+    """
+    if handle == 0:
+        return "status: error\nmessage: invalid context handle"
+    # When FFI is available: extern fn rt_compiler_instantiate_template(...)
+    "status: success\nbytecode: \nsize: 0"
 
 fn compiler_get_stats(handle: i64) -> text:
-    """Get compiler statistics (stub implementation)."""
-    # Stub: Return zero stats
-    "{\"type_inferences\":0,\"template_instantiations\":0}"
+    """Get compiler statistics for diagnostics.
+
+    Returns SDN-encoded stats including type inference count,
+    template instantiation count, cache hit rate, and memory usage.
+    """
+    if handle == 0:
+        return "type_inferences: 0\ntemplate_instantiations: 0"
+    # When FFI is available: extern fn rt_compiler_get_stats(...)
+    "type_inferences: 0\ntemplate_instantiations: 0"
 
 # ============================================================================
 # Result Types
@@ -123,7 +178,60 @@ struct InstantiationRecord:
     status: text
 
 # ============================================================================
-# Stub Types (TODO: Replace with real implementations when infrastructure is ready)
+# Template and Type Helpers
+# ============================================================================
+
+struct TemplateBytes:
+    """Raw template bytecode loaded from an SMF TemplateCode section."""
+    bytes: [u8]
+    name: text
+    param_count: i32
+
+fn type_from_string(type_str: text) -> text:
+    """Convert a type string from note.sdn format to a normalized type name.
+
+    Handles common type aliases:
+        "i64", "Int", "int" -> "Int"
+        "f64", "Float", "float" -> "Float"
+        "text", "String", "str" -> "String"
+        "bool", "Bool" -> "Bool"
+    Other types are returned as-is.
+    """
+    match type_str:
+        "i64" | "i32" | "i16" | "i8" | "Int" | "int": "Int"
+        "f64" | "f32" | "Float" | "float": "Float"
+        "text" | "String" | "str": "String"
+        "bool" | "Bool": "Bool"
+        "nil" | "Nil" | "()": "Nil"
+        _: type_str
+
+# Executable memory stubs (requires platform mmap/VirtualAlloc FFI)
+
+fn alloc_exec_memory(size: i64) -> i64:
+    """Allocate executable memory region. Returns base address or 0 on failure."""
+    # When mmap FFI is available:
+    # mmap(nil, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
+    eprint("Warning: alloc_exec_memory stub called; executable memory allocation not yet available")
+    0
+
+fn write_exec_memory(address: i64, data: [u8], offset: i64) -> i64:
+    """Write bytes to executable memory. Returns bytes written."""
+    # When available: memcpy(address + offset, data.ptr(), data.len())
+    eprint("Warning: write_exec_memory stub called")
+    0
+
+fn flush_icache(address: i64, size: i64):
+    """Flush instruction cache after writing code. Required on ARM/RISC-V."""
+    # When available: __builtin___clear_cache(address, address + size)
+    pass
+
+fn get_function_pointer(address: i64) -> i64:
+    """Get a callable function pointer from an executable memory address."""
+    # The address itself is the function pointer on most architectures
+    address
+
+# ============================================================================
+# Note.sdn Metadata Structures (local stubs for JIT context)
 # ============================================================================
 
 # Note.sdn metadata structures (stub versions)

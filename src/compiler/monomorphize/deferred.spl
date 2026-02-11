@@ -169,24 +169,23 @@ impl DeferredMonomorphizer:
         Extracts TemplateCode and TemplateMeta sections and populates
         the template cache.
 
-        TODO: Implement full SMF parsing when serialization is complete.
-        For now, returns Ok (placeholder).
+        Steps:
+        1. Read SMF file as binary
+        2. Parse SMF header from trailer (last 128 bytes)
+        3. Find TemplateCode section (type=12) in section table
+        4. Deserialize templates from section data
 
         ROBUSTNESS: Validates SMF format before loading.
         """
-        # Read SMF file
         # File I/O FFI not yet available for binary reads
-        eprint("Warning: file I/O FFI not yet available; SMF template loading returns empty")
-
-        # Parse SMF header and sections
-        # SMF parsing with loader not yet implemented
-        # 1. Parse SMF header
-        # 2. Find TemplateCode section
-        # 3. Find TemplateMeta section
-        # 4. Deserialize templates and metadata
-        val _templates: [GenericTemplate] = []
-
-        eprint("Warning: SMF parsing not yet implemented; returning empty template list")
+        # When binary file reads are available, the flow is:
+        # val file_data = file_read_binary(smf_path)?
+        # val header_offset = file_data.len() - 128
+        # val header_bytes = file_data[header_offset..]
+        # Parse header to find section_table_offset and section_count
+        # Iterate section entries to find TemplateCode (type=12)
+        # Call self.deserialize_templates(template_section_data)
+        eprint("Warning: file I/O FFI not yet available for binary reads; SMF template loading deferred for {smf_path}")
         Ok(())
 
     me deserialize_templates(data: [u8]) -> Result<(), CompileError>:
@@ -200,13 +199,7 @@ impl DeferredMonomorphizer:
 
         Each Template:
         - Kind: u8 (0=Func, 1=Struct, 2=Class, 3=Enum, 4=Trait)
-        - Name length: u32
-        - Name: bytes
-        - Param count: u8
-        - Generic params: [String]
-        - Body: AST (serialized)
-
-        TODO: Implement full AST serialization/deserialization.
+        - Full AST serialization (name, generic params, body/fields/variants/methods, flags, bindings)
 
         ROBUSTNESS:
         - Validates magic bytes
@@ -229,7 +222,7 @@ impl DeferredMonomorphizer:
                     ((data[8] as i64) << 16) +
                     ((data[9] as i64) << 24))
 
-        # Deserialize each template (placeholder implementation)
+        # Deserialize each template with full AST data
         var offset = 10
         for _ in 0..count:
             if offset >= data.len():
@@ -238,102 +231,40 @@ impl DeferredMonomorphizer:
             val kind = data[offset]
             offset = offset + 1
 
-            # Read name length
-            if offset + 4 > data.len():
-                break
+            # Deserialize full template based on kind
+            val result = self.deserialize_full_template(kind, data, offset)?
+            val template = result.0
+            offset = result.1
 
-            val name_len = ((data[offset] as i64) +
-                          ((data[offset + 1] as i64) << 8) +
-                          ((data[offset + 2] as i64) << 16) +
-                          ((data[offset + 3] as i64) << 24))
-            offset = offset + 4
-
-            # Read name
-            if offset + name_len > data.len():
-                break
-
-            val name_bytes = data[offset..(offset + name_len)]
-            val name = String.from_utf8(name_bytes)?
-            offset = offset + name_len
-
-            # Read generic param count
-            if offset >= data.len():
-                break
-
-            val param_count = data[offset]
-            offset = offset + 1
-
-            # Create placeholder template
-            val template = self.create_placeholder_template(kind, name, param_count)?
+            val name = template.name()
             self.template_cache[name] = template
 
         Ok(())
 
-    fn create_placeholder_template(kind: u8, name: text, param_count: u8) -> Result<GenericTemplate, CompileError>:
-        """Create a placeholder template.
+    fn deserialize_full_template(kind: u8, data: [u8], start_offset: i64) -> Result<(GenericTemplate, i64), CompileError>:
+        """Deserialize a full template from binary data.
 
-        TODO: Replace with full AST deserialization when available.
+        Reads the complete AST node including all fields, body, params, bindings.
+        Returns the template and the new offset after reading.
 
-        ROBUSTNESS: Creates minimal valid AST nodes.
+        ROBUSTNESS: Validates data bounds before each read.
         """
-        # Create generic parameter names (T0, T1, T2, ...)
-        var generic_params: [text] = []
-        for i in 0..param_count:
-            generic_params.push("T{i}")
-
         match kind:
             0:  # Function
-                # Create a minimal placeholder FunctionDef with name and empty body
-                val func_def = FunctionDef(
-                    name: name,
-                    generic_params: generic_params,
-                    params: [],
-                    return_type: nil,
-                    body: [],
-                    is_generic_template: true,
-                    specialization_of: nil,
-                    type_bindings: {}
-                )
-                Ok(GenericTemplate.Function(func_def))
+                val result = deserialize_function_def(data, start_offset)?
+                Ok((GenericTemplate.Function(result.0), result.1))
             1:  # Struct
-                val struct_def = StructDef(
-                    name: name,
-                    generic_params: generic_params,
-                    fields: [],
-                    is_generic_template: true,
-                    specialization_of: nil,
-                    type_bindings: {}
-                )
-                Ok(GenericTemplate.Struct(struct_def))
+                val result = deserialize_struct_def(data, start_offset)?
+                Ok((GenericTemplate.Struct(result.0), result.1))
             2:  # Class
-                val class_def = ClassDef(
-                    name: name,
-                    generic_params: generic_params,
-                    fields: [],
-                    methods: [],
-                    is_generic_template: true,
-                    specialization_of: nil,
-                    type_bindings: {}
-                )
-                Ok(GenericTemplate.Class(class_def))
+                val result = deserialize_class_def(data, start_offset)?
+                Ok((GenericTemplate.Class(result.0), result.1))
             3:  # Enum
-                val enum_def = EnumDef(
-                    name: name,
-                    generic_params: generic_params,
-                    variants: [],
-                    is_generic_template: true,
-                    specialization_of: nil,
-                    type_bindings: {}
-                )
-                Ok(GenericTemplate.Enum(enum_def))
+                val result = deserialize_enum_def(data, start_offset)?
+                Ok((GenericTemplate.Enum(result.0), result.1))
             4:  # Trait
-                val trait_def = TraitDef(
-                    name: name,
-                    generic_params: generic_params,
-                    methods: [],
-                    is_generic_template: true
-                )
-                Ok(GenericTemplate.Trait(trait_def))
+                val result = deserialize_trait_def(data, start_offset)?
+                Ok((GenericTemplate.Trait(result.0), result.1))
             _:
                 Err(CompileError.Codegen("Unknown template kind: {kind}"))
 
@@ -502,6 +433,302 @@ impl DeferredMonomorphizer:
         )
 
 # ============================================================================
+# Binary Deserialization Helpers
+# ============================================================================
+
+fn read_u32(data: [u8], offset: i64) -> Result<(i64, i64), CompileError>:
+    """Read a u32 from data at offset. Returns (value, new_offset)."""
+    if offset + 4 > data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading u32 at offset {offset}"))
+    val value = ((data[offset] as i64) +
+                ((data[offset + 1] as i64) << 8) +
+                ((data[offset + 2] as i64) << 16) +
+                ((data[offset + 3] as i64) << 24))
+    Ok((value, offset + 4))
+
+fn read_text_field(data: [u8], offset: i64) -> Result<(text, i64), CompileError>:
+    """Read a length-prefixed text field. Returns (text, new_offset)."""
+    val len_result = read_u32(data, offset)?
+    val text_len = len_result.0
+    val pos = len_result.1
+    if pos + text_len > data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading text at offset {pos}"))
+    val text_bytes = data[pos..(pos + text_len)]
+    val text_value = String.from_utf8(text_bytes)?
+    Ok((text_value, pos + text_len))
+
+fn read_optional_text_field(data: [u8], offset: i64) -> Result<(text?, i64), CompileError>:
+    """Read an optional text field (0x01 + data or 0x00 for nil)."""
+    if offset >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading optional at offset {offset}"))
+    val tag = data[offset]
+    if tag == 0x01:
+        val result = read_text_field(data, offset + 1)?
+        Ok((Some(result.0), result.1))
+    else:
+        Ok((nil, offset + 1))
+
+fn read_text_list(data: [u8], offset: i64) -> Result<([text], i64), CompileError>:
+    """Read a list of length-prefixed text items. Returns (list, new_offset)."""
+    val count_result = read_u32(data, offset)?
+    val count = count_result.0
+    var pos = count_result.1
+    var items: [text] = []
+    for _ in 0..count:
+        val item_result = read_text_field(data, pos)?
+        items.push(item_result.0)
+        pos = item_result.1
+    Ok((items, pos))
+
+fn read_text_dict(data: [u8], offset: i64) -> Result<({text: text}, i64), CompileError>:
+    """Read a text-to-text dictionary. Returns (dict, new_offset)."""
+    val count_result = read_u32(data, offset)?
+    val count = count_result.0
+    var pos = count_result.1
+    var dict: {text: text} = {}
+    for _ in 0..count:
+        val key_result = read_text_field(data, pos)?
+        pos = key_result.1
+        val value_result = read_text_field(data, pos)?
+        pos = value_result.1
+        dict[key_result.0] = value_result.0
+    Ok((dict, pos))
+
+fn read_generic_params(data: [u8], offset: i64) -> Result<([text], i64), CompileError>:
+    """Read generic params: u8 count + length-prefixed strings."""
+    if offset >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading param count at offset {offset}"))
+    val param_count = data[offset] as i64
+    var pos = offset + 1
+    var params: [text] = []
+    for _ in 0..param_count:
+        val param_result = read_text_field(data, pos)?
+        params.push(param_result.0)
+        pos = param_result.1
+    Ok((params, pos))
+
+fn deserialize_function_def(data: [u8], offset: i64) -> Result<(FunctionDef, i64), CompileError>:
+    """Deserialize a FunctionDef from binary data."""
+    # Name
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+
+    # Generic params
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+
+    # Params
+    val params_result = read_text_list(data, pos)?
+    val params = params_result.0
+    pos = params_result.1
+
+    # Return type
+    val ret_result = read_optional_text_field(data, pos)?
+    val return_type = ret_result.0
+    pos = ret_result.1
+
+    # Body
+    val body_result = read_text_list(data, pos)?
+    val body = body_result.0
+    pos = body_result.1
+
+    # Flags
+    if pos >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading function flags"))
+    val is_generic = data[pos] == 0x01
+    pos = pos + 1
+
+    # Specialization of
+    val spec_result = read_optional_text_field(data, pos)?
+    val specialization_of = spec_result.0
+    pos = spec_result.1
+
+    # Type bindings
+    val bindings_result = read_text_dict(data, pos)?
+    val type_bindings = bindings_result.0
+    pos = bindings_result.1
+
+    val func_def = FunctionDef(
+        name: name,
+        generic_params: generic_params,
+        params: params,
+        return_type: return_type,
+        body: body,
+        is_generic_template: is_generic,
+        specialization_of: specialization_of,
+        type_bindings: type_bindings
+    )
+    Ok((func_def, pos))
+
+fn deserialize_struct_def(data: [u8], offset: i64) -> Result<(StructDef, i64), CompileError>:
+    """Deserialize a StructDef from binary data."""
+    # Name
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+
+    # Generic params
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+
+    # Fields
+    val fields_result = read_text_list(data, pos)?
+    val fields = fields_result.0
+    pos = fields_result.1
+
+    # Flags
+    if pos >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading struct flags"))
+    val is_generic = data[pos] == 0x01
+    pos = pos + 1
+
+    # Specialization of
+    val spec_result = read_optional_text_field(data, pos)?
+    val specialization_of = spec_result.0
+    pos = spec_result.1
+
+    # Type bindings
+    val bindings_result = read_text_dict(data, pos)?
+    val type_bindings = bindings_result.0
+    pos = bindings_result.1
+
+    val struct_def = StructDef(
+        name: name,
+        generic_params: generic_params,
+        fields: fields,
+        is_generic_template: is_generic,
+        specialization_of: specialization_of,
+        type_bindings: type_bindings
+    )
+    Ok((struct_def, pos))
+
+fn deserialize_class_def(data: [u8], offset: i64) -> Result<(ClassDef, i64), CompileError>:
+    """Deserialize a ClassDef from binary data."""
+    # Name
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+
+    # Generic params
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+
+    # Fields
+    val fields_result = read_text_list(data, pos)?
+    val fields = fields_result.0
+    pos = fields_result.1
+
+    # Methods
+    val methods_result = read_text_list(data, pos)?
+    val methods = methods_result.0
+    pos = methods_result.1
+
+    # Flags
+    if pos >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading class flags"))
+    val is_generic = data[pos] == 0x01
+    pos = pos + 1
+
+    # Specialization of
+    val spec_result = read_optional_text_field(data, pos)?
+    val specialization_of = spec_result.0
+    pos = spec_result.1
+
+    # Type bindings
+    val bindings_result = read_text_dict(data, pos)?
+    val type_bindings = bindings_result.0
+    pos = bindings_result.1
+
+    val class_def = ClassDef(
+        name: name,
+        generic_params: generic_params,
+        fields: fields,
+        methods: methods,
+        is_generic_template: is_generic,
+        specialization_of: specialization_of,
+        type_bindings: type_bindings
+    )
+    Ok((class_def, pos))
+
+fn deserialize_enum_def(data: [u8], offset: i64) -> Result<(EnumDef, i64), CompileError>:
+    """Deserialize an EnumDef from binary data."""
+    # Name
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+
+    # Generic params
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+
+    # Variants
+    val variants_result = read_text_list(data, pos)?
+    val variants = variants_result.0
+    pos = variants_result.1
+
+    # Flags
+    if pos >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading enum flags"))
+    val is_generic = data[pos] == 0x01
+    pos = pos + 1
+
+    # Specialization of
+    val spec_result = read_optional_text_field(data, pos)?
+    val specialization_of = spec_result.0
+    pos = spec_result.1
+
+    # Type bindings
+    val bindings_result = read_text_dict(data, pos)?
+    val type_bindings = bindings_result.0
+    pos = bindings_result.1
+
+    val enum_def = EnumDef(
+        name: name,
+        generic_params: generic_params,
+        variants: variants,
+        is_generic_template: is_generic,
+        specialization_of: specialization_of,
+        type_bindings: type_bindings
+    )
+    Ok((enum_def, pos))
+
+fn deserialize_trait_def(data: [u8], offset: i64) -> Result<(TraitDef, i64), CompileError>:
+    """Deserialize a TraitDef from binary data."""
+    # Name
+    val name_result = read_text_field(data, offset)?
+    val name = name_result.0
+    var pos = name_result.1
+
+    # Generic params
+    val gp_result = read_generic_params(data, pos)?
+    val generic_params = gp_result.0
+    pos = gp_result.1
+
+    # Methods
+    val methods_result = read_text_list(data, pos)?
+    val methods = methods_result.0
+    pos = methods_result.1
+
+    # Flags
+    if pos >= data.len():
+        return Err(CompileError.Codegen("Unexpected end of data reading trait flags"))
+    val is_generic = data[pos] == 0x01
+    pos = pos + 1
+
+    val trait_def = TraitDef(
+        name: name,
+        generic_params: generic_params,
+        methods: methods,
+        is_generic_template: is_generic
+    )
+    Ok((trait_def, pos))
+
+# ============================================================================
 # Statistics
 # ============================================================================
 
@@ -530,16 +757,16 @@ struct DeferredMonoStats:
 # print "Cached {stats.specialization_count} specializations"
 #
 # ============================================================================
-# TODO Items (Phase 3 Completion)
+# Remaining Items
 # ============================================================================
 #
-# 1. Implement SMF parsing (load_templates_from_smf)
-# 2. Implement template serialization/deserialization
-# 3. Implement full AST specialization (use Monomorphizer.specialize_*)
-# 4. Add error recovery (partial specialization on error)
-# 5. Add incremental compilation support
-# 6. Add template invalidation on source change
-# 7. Add parallel instantiation (for LinkTime mode)
+# 1. [done] Implement template serialization/deserialization (Phase 6)
+# 2. [pending] Implement full AST specialization (use Monomorphizer.specialize_*)
+# 3. [pending] Add error recovery (partial specialization on error)
+# 4. [pending] Add incremental compilation support
+# 5. [pending] Add template invalidation on source change
+# 6. [pending] Add parallel instantiation (for LinkTime mode)
+# 7. [pending] Wire up binary file I/O for load_templates_from_smf
 #
 # ============================================================================
 # Performance Notes

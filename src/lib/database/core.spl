@@ -207,15 +207,18 @@ class SdnTable:
             if not line.? or line.starts_with("#"):
                 continue
 
-            # Parse row (format: "    val1, val2, val3")
-            val parts = line.split(",")
+            # Parse row with quote-aware CSV splitting
+            # Handles quoted values that contain commas
+            val parts = split_sdn_row(line)
             if parts.len() != columns.len():
                 continue
 
             val row = SdnRow(fields: {})
             for (j, col) in columns.enumerate():
                 val value = parts[j].trim()
-                row.set(col, value)
+                # Strip surrounding quotes if present
+                val unquoted = strip_quotes(value)
+                row.set(col, unquoted)
 
             table.add_row(row)
 
@@ -232,7 +235,9 @@ class SdnTable:
             var values = []
             for col in self.columns:
                 val value = row.get(col) ?? ""
-                values.push(value)
+                # Quote values that contain commas to preserve round-trip safety
+                val formatted = quote_if_needed(value)
+                values.push(formatted)
             result = result + values.join(", ")
             result = result + "\n"
 
@@ -418,6 +423,49 @@ class SdnDatabase:
         []
 
 # ============================================================================
+# SDN Row Parsing Helpers (quote-aware CSV splitting)
+# ============================================================================
+
+# Split an SDN row line respecting quoted strings that may contain commas.
+# For example: '1, "hello, world", true' -> ["1", '"hello, world"', "true"]
+fn split_sdn_row(line: text) -> [text]:
+    var parts = []
+    var current = ""
+    var in_quotes = false
+    var i = 0
+
+    while i < line.len():
+        val ch = line[i]
+        if ch == '"':
+            in_quotes = not in_quotes
+            current = current + ch
+        elif ch == ',' and not in_quotes:
+            parts = parts + [current]
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+
+    # Add last field
+    if current.? or parts.len() > 0:
+        parts = parts + [current]
+
+    parts
+
+# Strip surrounding double quotes from a value.
+# '"hello"' -> 'hello', 'plain' -> 'plain'
+fn strip_quotes(value: text) -> text:
+    if value.len() >= 2 and value.starts_with('"') and value.ends_with('"'):
+        return value[1..(value.len() - 1)]
+    value
+
+# Quote a value if it contains commas (for SDN export).
+fn quote_if_needed(value: text) -> text:
+    if value.contains(","):
+        return '"' + value + '"'
+    value
+
+# ============================================================================
 # Standalone wrappers for static methods (bootstrap runtime compatibility)
 # ============================================================================
 
@@ -440,3 +488,4 @@ fn load_sdn_database(path: text) -> SdnDatabase?:
 export StringInterner
 export SdnRow, SdnTable, SdnDatabase
 export parse_sdn_table, interner_from_sdn, new_sdn_database, load_sdn_database
+export split_sdn_row, strip_quotes, quote_if_needed

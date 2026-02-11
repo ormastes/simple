@@ -41,6 +41,8 @@ struct GCConfig:
     enable_logging: bool
     enable_leak_detection: bool
     leak_window_size: i64
+    collection_frequency: f64  # Collection frequency (0.0-1.0), default 0.5
+    min_heap_bytes: i64        # Minimum heap size before collection
 
 fn GCConfig__default() -> GCConfig:
     GCConfig(
@@ -49,7 +51,9 @@ fn GCConfig__default() -> GCConfig:
         fail_on_exceeded: true,
         enable_logging: false,
         enable_leak_detection: false,
-        leak_window_size: 10
+        leak_window_size: 10,
+        collection_frequency: 0.5,
+        min_heap_bytes: 0
     )
 
 fn GCConfig__unlimited() -> GCConfig:
@@ -59,7 +63,9 @@ fn GCConfig__unlimited() -> GCConfig:
         fail_on_exceeded: false,
         enable_logging: false,
         enable_leak_detection: false,
-        leak_window_size: 10
+        leak_window_size: 10,
+        collection_frequency: 0.5,
+        min_heap_bytes: 0
     )
 
 struct GCStats:
@@ -71,6 +77,7 @@ struct GCStats:
     dead_objects: i64         # Number of dead objects
     collection_count: i64     # Collections performed
     last_collection_ms: f64   # Last collection time
+    total_collection_ms: f64  # Total collection time across all cycles
     unique_roots: i64         # Unique roots
     shared_roots: i64         # Shared roots
 
@@ -117,6 +124,7 @@ fn gc_create(config: GCConfig) -> GCCore:
             dead_objects: 0,
             collection_count: 0,
             last_collection_ms: 0.0,
+            total_collection_ms: 0.0,
             unique_roots: 0,
             shared_roots: 0
         ),
@@ -230,6 +238,7 @@ fn gc_collect(gc: GCCore, reason: text) -> i64:
     val end_time = time_now_micros()
     val duration_ms = (end_time - start_time) as f64 / 1000.0
     gc.stats.last_collection_ms = duration_ms
+    gc.stats.total_collection_ms = gc.stats.total_collection_ms + duration_ms
     gc.stats.collection_count = gc.collection_count
 
     if gc.config.enable_logging:
@@ -355,15 +364,25 @@ fn gc_unregister_shared_root(gc: GCCore, ptr: i64):
 fn gc_should_collect(gc: GCCore, alloc_size: i64) -> bool:
     """Check if should trigger collection.
 
-    Simple heuristic:
-    - If heap > threshold
+    Heuristic:
+    - Skip if heap is below min_heap_bytes
+    - Scale threshold by collection_frequency (higher = more aggressive)
     - If allocation would exceed limit
     """
-    if gc.heap_bytes + alloc_size > gc.config.threshold_bytes:
+    val new_heap = gc.heap_bytes + alloc_size
+
+    # Don't collect if heap is below minimum size
+    if gc.config.min_heap_bytes > 0 and gc.heap_bytes < gc.config.min_heap_bytes:
+        return false
+
+    # Scale threshold by frequency: higher frequency = lower effective threshold
+    val freq = gc.config.collection_frequency
+    val effective_threshold = (gc.config.threshold_bytes as f64 * (1.0 - freq * 0.8)) as i64
+    if new_heap > effective_threshold:
         return true
 
     if gc.config.limit_bytes > 0:
-        if gc.heap_bytes + alloc_size > gc.config.limit_bytes * 0.9:
+        if new_heap > gc.config.limit_bytes * 0.9:
             return true
 
     false
@@ -522,11 +541,10 @@ fn gc_last_collection_time(gc: GCCore) -> f64:
     gc.stats.last_collection_ms
 
 fn gc_average_collection_time(gc: GCCore) -> f64:
-    """Get average collection time.
-    
-    TODO: Track total collection time to compute average.
-    """
-    gc.stats.last_collection_ms  # For now, return last
+    """Get average collection time in milliseconds."""
+    if gc.collection_count == 0:
+        return 0.0
+    gc.stats.total_collection_ms / gc.collection_count as f64
 
 # ============================================================================
 # Heap Inspection Functions
@@ -543,6 +561,7 @@ fn gc_dump_heap_stats(gc: GCCore) -> text:
     "  Dead objects: {stats.dead_objects}\n" +
     "  Collections: {gc.collection_count}\n" +
     "  Last collection: {stats.last_collection_ms}ms\n" +
+    "  Total collection time: {stats.total_collection_ms}ms\n" +
     "  Unique roots: {stats.unique_roots}\n" +
     "  Shared roots: {stats.shared_roots}\n"
 
@@ -568,30 +587,37 @@ fn gc_object_type(ptr: i64) -> i64:
     read_i64(ptr - 32 + 9)  # Read type_id from header
 
 # ============================================================================
-# Performance Tuning (Placeholders for Future)
+# Performance Tuning
 # ============================================================================
 
 fn gc_set_collection_frequency(gc: GCCore, frequency: f64):
     """Set collection frequency (0.0-1.0).
-    
-    TODO: Implement frequency-based collection.
+
+    Higher values trigger collection more aggressively.
+    The frequency scales the collection threshold:
+    threshold_effective = threshold_bytes * (1.0 - frequency)
     """
-    pass
+    var clamped = frequency
+    if clamped < 0.0:
+        clamped = 0.0
+    if clamped > 1.0:
+        clamped = 1.0
+    gc.config.collection_frequency = clamped
 
 fn gc_get_collection_frequency(gc: GCCore) -> f64:
     """Get collection frequency."""
-    0.5  # Default
+    gc.config.collection_frequency
 
 fn gc_set_min_heap_size(gc: GCCore, bytes: i64):
     """Set minimum heap size before collection.
-    
-    TODO: Add to GCConfig.
+
+    Collection will not trigger until heap exceeds this size.
     """
-    pass
+    gc.config.min_heap_bytes = bytes
 
 fn gc_get_min_heap_size(gc: GCCore) -> i64:
     """Get minimum heap size."""
-    0
+    gc.config.min_heap_bytes
 
 # ============================================================================
 # ALL 26 RUST FUNCTIONS NOW IMPLEMENTED IN SIMPLE!
