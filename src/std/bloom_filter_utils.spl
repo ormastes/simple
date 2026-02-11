@@ -1,0 +1,913 @@
+# Bloom Filter Probabilistic Data Structure Utilities
+#
+# Comprehensive Bloom filter implementation and related probabilistic data structures
+# for efficient set membership testing with configurable false positive rates.
+#
+# Features:
+# - Standard Bloom filters with optimal sizing
+# - Counting Bloom filters (support deletion)
+# - Scalable Bloom filters (dynamic growth)
+# - Cuckoo filters (space-efficient with deletion)
+# - Multiple hash functions (FNV, Murmur, DJB2)
+# - Bit manipulation utilities
+# - Union/intersection operations
+# - Serialization support
+#
+# Bloom Filter Properties:
+# - Space efficient probabilistic data structure
+# - No false negatives (if not in filter, definitely not in set)
+# - Possible false positives (if in filter, might be in set)
+# - Cannot delete items (use counting filter for deletion)
+# - Optimal parameters: m = -n*ln(p)/(ln(2)^2), k = (m/n)*ln(2)
+#   where n = items, p = error rate, m = bits, k = hash functions
+
+import math from "std/math"
+
+# ============================================================================
+# DATA STRUCTURES
+# ============================================================================
+
+# Standard Bloom filter
+# (size, num_hashes, bits, item_count)
+fn create_bloom_filter_struct(size: i64, num_hashes: i64, bits: List, item_count: i64) -> tuple:
+    ("bloom", size, num_hashes, bits, item_count)
+
+# Counting Bloom filter (uses 8-bit counters instead of bits)
+# (size, num_hashes, counters, item_count)
+fn create_counting_filter_struct(size: i64, num_hashes: i64, counters: List, item_count: i64) -> tuple:
+    ("counting", size, num_hashes, counters, item_count)
+
+# Scalable Bloom filter (list of filters with decreasing error rates)
+# (initial_capacity, base_error_rate, growth_factor, filters, total_items)
+fn create_scalable_filter_struct(initial_capacity: i64, base_error_rate: f64, growth_factor: i64, filters: List, total_items: i64) -> tuple:
+    ("scalable", initial_capacity, base_error_rate, growth_factor, filters, total_items)
+
+# Cuckoo filter (bucket_count, bucket_size, fingerprint_size, buckets, item_count)
+fn create_cuckoo_filter_struct(bucket_count: i64, bucket_size: i64, fingerprint_size: i64, buckets: List, item_count: i64) -> tuple:
+    ("cuckoo", bucket_count, bucket_size, fingerprint_size, buckets, item_count)
+
+# Bit array operations (using list of integers as bit storage)
+fn create_bit_array(size: i64) -> List:
+    val num_words = (size + 63) / 64
+    val words = []
+    for i in 0..num_words:
+        words.append(0)
+    words
+
+fn get_bit(array: List, index: i64) -> bool:
+    val word_index = index / 64
+    val bit_index = index % 64
+    val word = array[word_index]
+    val mask = 1 << bit_index
+    (word & mask) != 0
+
+fn set_bit(array: List, index: i64) -> nil:
+    val word_index = index / 64
+    val bit_index = index % 64
+    val word = array[word_index]
+    val mask = 1 << bit_index
+    array[word_index] = word | mask
+    nil
+
+fn clear_bit(array: List, index: i64) -> nil:
+    val word_index = index / 64
+    val bit_index = index % 64
+    val word = array[word_index]
+    val mask = 1 << bit_index
+    array[word_index] = word & ~mask
+    nil
+
+fn count_set_bits(array: List, total_bits: i64) -> i64:
+    var count = 0
+    for i in 0..total_bits:
+        if get_bit(array, i):
+            count = count + 1
+    count
+
+# ============================================================================
+# HASH FUNCTIONS
+# ============================================================================
+
+# FNV-1a hash (32-bit)
+fn fnv1a_hash(data: text) -> i64:
+    var hash = 2166136261  # FNV offset basis
+    for i in 0..data.length():
+        val byte_val = data.char_at(i).ord()
+        hash = hash ^ byte_val
+        hash = (hash * 16777619) & 0xFFFFFFFF  # FNV prime, keep 32-bit
+    hash
+
+# DJB2 hash
+fn djb2_hash(data: text) -> i64:
+    var hash = 5381
+    for i in 0..data.length():
+        val byte_val = data.char_at(i).ord()
+        hash = ((hash << 5) + hash + byte_val) & 0xFFFFFFFF
+    hash
+
+# Simple multiplicative hash
+fn multiplicative_hash(data: text, seed: i64) -> i64:
+    var hash = seed
+    for i in 0..data.length():
+        val byte_val = data.char_at(i).ord()
+        hash = (hash * 31 + byte_val) & 0xFFFFFFFF
+    hash
+
+# Murmur-inspired hash (simplified version)
+fn murmur3_hash(data: text, seed: i64) -> i64:
+    var hash = seed
+    val c1 = 0xcc9e2d51
+    val c2 = 0x1b873593
+
+    for i in 0..data.length():
+        val byte_val = data.char_at(i).ord()
+        var k = byte_val
+        k = (k * c1) & 0xFFFFFFFF
+        k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+        k = (k * c2) & 0xFFFFFFFF
+
+        hash = hash ^ k
+        hash = ((hash << 13) | (hash >> 19)) & 0xFFFFFFFF
+        hash = ((hash * 5) + 0xe6546b64) & 0xFFFFFFFF
+
+    # Finalization
+    hash = hash ^ data.length()
+    hash = hash ^ (hash >> 16)
+    hash = (hash * 0x85ebca6b) & 0xFFFFFFFF
+    hash = hash ^ (hash >> 13)
+    hash = (hash * 0xc2b2ae35) & 0xFFFFFFFF
+    hash = hash ^ (hash >> 16)
+    hash
+
+# Combine two hash values
+fn hash_combine(h1: i64, h2: i64) -> i64:
+    (h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2))) & 0xFFFFFFFF
+
+# Generate k hash values using double hashing technique
+fn multi_hash(data: text, num_hashes: i64, size: i64) -> List:
+    val h1 = fnv1a_hash(data)
+    val h2 = djb2_hash(data)
+
+    val hashes = []
+    for i in 0..num_hashes:
+        val combined = (h1 + i * h2) & 0xFFFFFFFF
+        val index = combined % size
+        hashes.append(index)
+    hashes
+
+# Hash a single item with a seed
+fn hash_item(item: text, seed: i64) -> i64:
+    murmur3_hash(item, seed)
+
+# Compute fingerprint for cuckoo filter
+fn fingerprint(item: text, bits: i64) -> i64:
+    val hash = fnv1a_hash(item)
+    val mask = (1 << bits) - 1
+    val fp = hash & mask
+    if fp == 0:
+        1  # Avoid zero fingerprint
+    else:
+        fp
+
+fn compute_fingerprint(hash_val: i64, bits: i64) -> i64:
+    val mask = (1 << bits) - 1
+    val fp = hash_val & mask
+    if fp == 0:
+        1
+    else:
+        fp
+
+# ============================================================================
+# OPTIMAL PARAMETER CALCULATION
+# ============================================================================
+
+# Calculate optimal bit array size for given capacity and error rate
+# Formula: m = -n * ln(p) / (ln(2)^2)
+fn optimal_size(capacity: i64, error_rate: f64) -> i64:
+    val ln2 = 0.693147180559945
+    val ln2_squared = ln2 * ln2
+    val cap_float = capacity.to_f64()
+    val ln_p = math.ln(error_rate)
+    val size_float = -cap_float * ln_p / ln2_squared
+    val size = size_float.to_i64()
+    if size < 64:
+        64  # Minimum size
+    else:
+        size
+
+# Calculate optimal number of hash functions
+# Formula: k = (m/n) * ln(2)
+fn optimal_num_hashes(size: i64, capacity: i64) -> i64:
+    val ln2 = 0.693147180559945
+    val ratio = size.to_f64() / capacity.to_f64()
+    val k_float = ratio * ln2
+    val k = k_float.to_i64()
+    if k < 1:
+        1  # Minimum one hash
+    else:
+        if k > 20:
+            20  # Practical maximum
+        else:
+            k
+
+# Calculate expected error rate given parameters
+# Formula: p ≈ (1 - e^(-kn/m))^k
+fn expected_error_rate(size: i64, num_hashes: i64, item_count: i64) -> f64:
+    if item_count == 0:
+        0.0
+    else:
+        val k = num_hashes.to_f64()
+        val n = item_count.to_f64()
+        val m = size.to_f64()
+        val exponent = -k * n / m
+        val exp_val = math.exp(exponent)
+        val base = 1.0 - exp_val
+        math.pow(base, k)
+
+# ============================================================================
+# STANDARD BLOOM FILTER
+# ============================================================================
+
+# Create a Bloom filter with specified capacity and error rate
+fn create_bloom_filter(capacity: i64, error_rate: f64) -> tuple:
+    val size = optimal_size(capacity, error_rate)
+    val num_hashes = optimal_num_hashes(size, capacity)
+    val bits = create_bit_array(size)
+    create_bloom_filter_struct(size, num_hashes, bits, 0)
+
+# Create a Bloom filter with specific size and hash count
+fn create_with_size(size: i64, num_hashes: i64) -> tuple:
+    val bits = create_bit_array(size)
+    create_bloom_filter_struct(size, num_hashes, bits, 0)
+
+# Add an item to the Bloom filter
+fn bf_add(filter: tuple, item: text) -> nil:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val bits = filter[3]
+
+    val indices = multi_hash(item, num_hashes, size)
+    for i in 0..indices.length():
+        val index = indices[i]
+        set_bit(bits, index)
+
+    filter[4] = filter[4] + 1
+    nil
+
+# Check if an item might be in the Bloom filter
+fn bf_contains(filter: tuple, item: text) -> bool:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val bits = filter[3]
+
+    val indices = multi_hash(item, num_hashes, size)
+    for i in 0..indices.length():
+        val index = indices[i]
+        if not get_bit(bits, index):
+            return false
+    true
+
+# Get the number of items added to the filter
+fn bf_count(filter: tuple) -> i64:
+    filter[4]
+
+# Get the fill ratio (proportion of bits set)
+fn bf_fill_ratio(filter: tuple) -> f64:
+    val size = filter[1]
+    val bits = filter[3]
+    val set_bits = count_set_bits(bits, size)
+    set_bits.to_f64() / size.to_f64()
+
+# Estimate the number of items in the filter using fill ratio
+# Formula: n ≈ -(m/k) * ln(1 - X/m)
+# where X = number of bits set
+fn estimate_items(filter: tuple) -> i64:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val bits = filter[3]
+
+    val set_bits = count_set_bits(bits, size)
+    val x = set_bits.to_f64()
+    val m = size.to_f64()
+    val k = num_hashes.to_f64()
+
+    if x >= m:
+        size  # Filter is full
+    else:
+        val ratio = 1.0 - (x / m)
+        val ln_ratio = math.ln(ratio)
+        val estimate = -(m / k) * ln_ratio
+        estimate.to_i64()
+
+# Calculate actual error rate based on current state
+fn actual_error_rate(filter: tuple) -> f64:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val item_count = filter[4]
+    expected_error_rate(size, num_hashes, item_count)
+
+# Clear all bits in the filter
+fn clear_filter(filter: tuple) -> nil:
+    val size = filter[1]
+    val bits = filter[3]
+    for i in 0..size:
+        clear_bit(bits, i)
+    filter[4] = 0
+    nil
+
+# Check if filter is empty (no items added)
+fn is_empty(filter: tuple) -> bool:
+    filter[4] == 0
+
+# Reset filter to initial state
+fn reset_filter(filter: tuple) -> nil:
+    clear_filter(filter)
+
+# ============================================================================
+# SET OPERATIONS
+# ============================================================================
+
+# Union of two Bloom filters (OR operation on bit arrays)
+# Filters must have same size and hash count
+fn bf_union(f1: tuple, f2: tuple) -> tuple:
+    val size1 = f1[1]
+    val size2 = f2[1]
+    val num_hashes1 = f1[2]
+    val num_hashes2 = f2[2]
+
+    if size1 != size2:
+        return nil  # Cannot union filters of different sizes
+    if num_hashes1 != num_hashes2:
+        return nil  # Cannot union filters with different hash counts
+
+    val bits1 = f1[3]
+    val bits2 = f2[3]
+    val result_bits = create_bit_array(size1)
+
+    # OR all bits
+    for i in 0..size1:
+        if get_bit(bits1, i) or get_bit(bits2, i):
+            set_bit(result_bits, i)
+
+    val item_count = f1[4] + f2[4]  # Approximate
+    create_bloom_filter_struct(size1, num_hashes1, result_bits, item_count)
+
+# Intersection of two Bloom filters (AND operation on bit arrays)
+fn bf_intersection(f1: tuple, f2: tuple) -> tuple:
+    val size1 = f1[1]
+    val size2 = f2[1]
+    val num_hashes1 = f1[2]
+    val num_hashes2 = f2[2]
+
+    if size1 != size2:
+        return nil
+    if num_hashes1 != num_hashes2:
+        return nil
+
+    val bits1 = f1[3]
+    val bits2 = f2[3]
+    val result_bits = create_bit_array(size1)
+
+    # AND all bits
+    for i in 0..size1:
+        if get_bit(bits1, i) and get_bit(bits2, i):
+            set_bit(result_bits, i)
+
+    val item_count = 0  # Unknown, would need to recount
+    create_bloom_filter_struct(size1, num_hashes1, result_bits, item_count)
+
+# Check if filter f1 is a subset of f2 (all bits in f1 are set in f2)
+fn bf_is_subset(f1: tuple, f2: tuple) -> bool:
+    val size1 = f1[1]
+    val size2 = f2[1]
+
+    if size1 != size2:
+        return false
+
+    val bits1 = f1[3]
+    val bits2 = f2[3]
+
+    for i in 0..size1:
+        if get_bit(bits1, i) and not get_bit(bits2, i):
+            return false
+    true
+
+# ============================================================================
+# COUNTING BLOOM FILTER
+# ============================================================================
+
+# Create a counting Bloom filter (supports deletion)
+fn create_counting_filter(size: i64) -> tuple:
+    val num_hashes = 4  # Default
+    val counters = []
+    for i in 0..size:
+        counters.append(0)
+    create_counting_filter_struct(size, num_hashes, counters, 0)
+
+# Create counting filter with capacity and error rate
+fn create_counting_filter_with_params(capacity: i64, error_rate: f64) -> tuple:
+    val size = optimal_size(capacity, error_rate)
+    val num_hashes = optimal_num_hashes(size, capacity)
+    val counters = []
+    for i in 0..size:
+        counters.append(0)
+    create_counting_filter_struct(size, num_hashes, counters, 0)
+
+# Add an item to the counting filter
+fn cf_add(filter: tuple, item: text) -> nil:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val counters = filter[3]
+
+    val indices = multi_hash(item, num_hashes, size)
+    for i in 0..indices.length():
+        val index = indices[i]
+        val current = counters[index]
+        if current < 255:  # 8-bit counter max
+            counters[index] = current + 1
+
+    filter[4] = filter[4] + 1
+    nil
+
+# Remove an item from the counting filter
+fn cf_remove(filter: tuple, item: text) -> bool:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val counters = filter[3]
+
+    # First check if item exists
+    val indices = multi_hash(item, num_hashes, size)
+    for i in 0..indices.length():
+        val index = indices[i]
+        if counters[index] == 0:
+            return false  # Item not in filter
+
+    # Decrement counters
+    for i in 0..indices.length():
+        val index = indices[i]
+        counters[index] = counters[index] - 1
+
+    filter[4] = filter[4] - 1
+    true
+
+# Check if item is in counting filter
+fn cf_contains(filter: tuple, item: text) -> bool:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val counters = filter[3]
+
+    val indices = multi_hash(item, num_hashes, size)
+    for i in 0..indices.length():
+        val index = indices[i]
+        if counters[index] == 0:
+            return false
+    true
+
+# Get counter value for an item (minimum counter)
+fn cf_get_count(filter: tuple, item: text) -> i64:
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val counters = filter[3]
+
+    val indices = multi_hash(item, num_hashes, size)
+    var min_count = 255
+    for i in 0..indices.length():
+        val index = indices[i]
+        val count = counters[index]
+        if count < min_count:
+            min_count = count
+    min_count
+
+# Clear counting filter
+fn cf_clear(filter: tuple) -> nil:
+    val size = filter[1]
+    val counters = filter[3]
+    for i in 0..size:
+        counters[i] = 0
+    filter[4] = 0
+    nil
+
+# ============================================================================
+# SCALABLE BLOOM FILTER
+# ============================================================================
+
+# Create a scalable Bloom filter that grows dynamically
+fn create_scalable_filter(initial_capacity: i64, error_rate: f64) -> tuple:
+    val growth_factor = 2
+    val filters = []
+    val total_items = 0
+    create_scalable_filter_struct(initial_capacity, error_rate, growth_factor, filters, total_items)
+
+# Add item to scalable filter (creates new filter if needed)
+fn sf_add(filter: tuple, item: text) -> nil:
+    val initial_capacity = filter[1]
+    val base_error_rate = filter[2]
+    val growth_factor = filter[3]
+    val filters = filter[4]
+    val total_items = filter[5]
+
+    # Check if item already exists
+    for i in 0..filters.length():
+        val sub_filter = filters[i]
+        if bf_contains(sub_filter, item):
+            return nil  # Already exists
+
+    # Find a filter with capacity or create new one
+    if filters.length() == 0:
+        # Create first filter
+        val new_filter = create_bloom_filter(initial_capacity, base_error_rate)
+        filters.append(new_filter)
+
+    val last_filter = filters[filters.length() - 1]
+    val last_count = bf_count(last_filter)
+    val last_capacity = initial_capacity * (growth_factor ** (filters.length() - 1))
+
+    if last_count >= last_capacity:
+        # Create new filter with larger capacity and tighter error rate
+        val new_capacity = last_capacity * growth_factor
+        val new_error_rate = base_error_rate / filters.length().to_f64()
+        val new_filter = create_bloom_filter(new_capacity, new_error_rate)
+        filters.append(new_filter)
+        bf_add(new_filter, item)
+    else:
+        bf_add(last_filter, item)
+
+    filter[5] = total_items + 1
+    nil
+
+# Check if item is in scalable filter
+fn sf_contains(filter: tuple, item: text) -> bool:
+    val filters = filter[4]
+    for i in 0..filters.length():
+        val sub_filter = filters[i]
+        if bf_contains(sub_filter, item):
+            return true
+    false
+
+# Get total items in scalable filter
+fn sf_count(filter: tuple) -> i64:
+    filter[5]
+
+# Get number of sub-filters
+fn sf_num_filters(filter: tuple) -> i64:
+    val filters = filter[4]
+    filters.length()
+
+# Get total capacity across all filters
+fn sf_total_capacity(filter: tuple) -> i64:
+    val initial_capacity = filter[1]
+    val growth_factor = filter[3]
+    val filters = filter[4]
+
+    var total = 0
+    for i in 0..filters.length():
+        val capacity = initial_capacity * (growth_factor ** i)
+        total = total + capacity
+    total
+
+# ============================================================================
+# CUCKOO FILTER
+# ============================================================================
+
+# Create a cuckoo filter
+fn create_cuckoo_filter(capacity: i64) -> tuple:
+    val bucket_size = 4  # Standard bucket size
+    val fingerprint_size = 8  # 8-bit fingerprints
+    val bucket_count = (capacity + bucket_size - 1) / bucket_size
+
+    val buckets = []
+    for i in 0..bucket_count:
+        val bucket = []
+        for j in 0..bucket_size:
+            bucket.append(0)  # Empty slot
+        buckets.append(bucket)
+
+    val item_count = 0
+    create_cuckoo_filter_struct(bucket_count, bucket_size, fingerprint_size, buckets, item_count)
+
+# Get alternate bucket index for cuckoo hashing
+fn cuckoo_alt_index(index: i64, fp: i64, bucket_count: i64) -> i64:
+    val hash_fp = hash_combine(index, fp)
+    (index ^ hash_fp) % bucket_count
+
+# Find fingerprint in bucket
+fn find_in_bucket(bucket: List, fp: i64) -> bool:
+    for i in 0..bucket.length():
+        if bucket[i] == fp:
+            return true
+    false
+
+# Check if bucket has empty slot
+fn has_empty_slot(bucket: List) -> bool:
+    for i in 0..bucket.length():
+        if bucket[i] == 0:
+            return true
+    false
+
+# Insert fingerprint into bucket
+fn insert_in_bucket(bucket: List, fp: i64) -> bool:
+    for i in 0..bucket.length():
+        if bucket[i] == 0:
+            bucket[i] = fp
+            return true
+    false
+
+# Add item to cuckoo filter
+fn cuckoo_add(filter: tuple, item: text) -> bool:
+    val bucket_count = filter[1]
+    val fingerprint_size = filter[3]
+    val buckets = filter[4]
+
+    val fp = fingerprint(item, fingerprint_size)
+    val h1 = fnv1a_hash(item) % bucket_count
+    val h2 = cuckoo_alt_index(h1, fp, bucket_count)
+
+    val bucket1 = buckets[h1]
+    val bucket2 = buckets[h2]
+
+    # Check if already exists
+    if find_in_bucket(bucket1, fp) or find_in_bucket(bucket2, fp):
+        return true  # Already exists
+
+    # Try to insert in first bucket
+    if insert_in_bucket(bucket1, fp):
+        filter[5] = filter[5] + 1
+        return true
+
+    # Try to insert in second bucket
+    if insert_in_bucket(bucket2, fp):
+        filter[5] = filter[5] + 1
+        return true
+
+    # Need to relocate items (simplified: just fail for now)
+    # Full implementation would do cuckoo relocation
+    false
+
+# Check if item is in cuckoo filter
+fn cuckoo_contains(filter: tuple, item: text) -> bool:
+    val bucket_count = filter[1]
+    val fingerprint_size = filter[3]
+    val buckets = filter[4]
+
+    val fp = fingerprint(item, fingerprint_size)
+    val h1 = fnv1a_hash(item) % bucket_count
+    val h2 = cuckoo_alt_index(h1, fp, bucket_count)
+
+    val bucket1 = buckets[h1]
+    val bucket2 = buckets[h2]
+
+    find_in_bucket(bucket1, fp) or find_in_bucket(bucket2, fp)
+
+# Delete item from cuckoo filter
+fn cuckoo_delete(filter: tuple, item: text) -> bool:
+    val bucket_count = filter[1]
+    val fingerprint_size = filter[3]
+    val buckets = filter[4]
+
+    val fp = fingerprint(item, fingerprint_size)
+    val h1 = fnv1a_hash(item) % bucket_count
+    val h2 = cuckoo_alt_index(h1, fp, bucket_count)
+
+    val bucket1 = buckets[h1]
+    val bucket2 = buckets[h2]
+
+    # Try to delete from first bucket
+    for i in 0..bucket1.length():
+        if bucket1[i] == fp:
+            bucket1[i] = 0
+            filter[5] = filter[5] - 1
+            return true
+
+    # Try to delete from second bucket
+    for i in 0..bucket2.length():
+        if bucket2[i] == fp:
+            bucket2[i] = 0
+            filter[5] = filter[5] - 1
+            return true
+
+    false
+
+# Get item count in cuckoo filter
+fn cuckoo_count(filter: tuple) -> i64:
+    filter[5]
+
+# Get load factor (fullness) of cuckoo filter
+fn cuckoo_load_factor(filter: tuple) -> f64:
+    val bucket_count = filter[1]
+    val bucket_size = filter[2]
+    val item_count = filter[5]
+    val total_slots = bucket_count * bucket_size
+    item_count.to_f64() / total_slots.to_f64()
+
+# ============================================================================
+# SERIALIZATION
+# ============================================================================
+
+# Serialize a standard Bloom filter to a string
+fn serialize_filter(filter: tuple) -> text:
+    val filter_type = filter[0]
+    if filter_type != "bloom":
+        return ""  # Only standard Bloom filter supported
+
+    val size = filter[1]
+    val num_hashes = filter[2]
+    val bits = filter[3]
+    val item_count = filter[4]
+
+    var result = "BLOOM\n"
+    result = result + "size:{size}\n"
+    result = result + "hashes:{num_hashes}\n"
+    result = result + "items:{item_count}\n"
+    result = result + "bits:"
+
+    # Serialize bit array as hex
+    for i in 0..bits.length():
+        val word = bits[i]
+        result = result + "{word},"
+
+    result
+
+# Deserialize a Bloom filter from string (simplified)
+fn deserialize_filter(data: text) -> tuple:
+    # Simplified deserialization
+    # Full implementation would parse the serialized format
+    val lines = data.split("\n")
+    if lines.length() < 4:
+        return nil
+
+    # Parse header
+    if lines[0] != "BLOOM":
+        return nil
+
+    # For now, return a default filter
+    # Full implementation would parse size, hashes, and bits
+    create_bloom_filter(1000, 0.01)
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+# Get filter type
+fn get_filter_type(filter: tuple) -> text:
+    filter[0]
+
+# Check if filter is valid
+fn is_valid_filter(filter: tuple) -> bool:
+    if filter == nil:
+        return false
+    val filter_type = filter[0]
+    filter_type == "bloom" or filter_type == "counting" or filter_type == "scalable" or filter_type == "cuckoo"
+
+# Get filter size
+fn get_filter_size(filter: tuple) -> i64:
+    val filter_type = filter[0]
+    if filter_type == "bloom" or filter_type == "counting":
+        filter[1]
+    else:
+        if filter_type == "cuckoo":
+            filter[1] * filter[2]  # bucket_count * bucket_size
+        else:
+            0
+
+# Get memory usage estimate in bytes
+fn memory_usage(filter: tuple) -> i64:
+    val filter_type = filter[0]
+    if filter_type == "bloom":
+        val size = filter[1]
+        (size + 7) / 8  # Bits to bytes
+    else:
+        if filter_type == "counting":
+            val size = filter[1]
+            size  # One byte per counter
+        else:
+            if filter_type == "cuckoo":
+                val bucket_count = filter[1]
+                val bucket_size = filter[2]
+                bucket_count * bucket_size  # One byte per fingerprint
+            else:
+                0
+
+# Compare two filters for equality (same bits set)
+fn filters_equal(f1: tuple, f2: tuple) -> bool:
+    val type1 = f1[0]
+    val type2 = f2[0]
+    if type1 != type2:
+        return false
+
+    if type1 == "bloom":
+        val size1 = f1[1]
+        val size2 = f2[1]
+        if size1 != size2:
+            return false
+
+        val bits1 = f1[3]
+        val bits2 = f2[3]
+
+        for i in 0..size1:
+            if get_bit(bits1, i) != get_bit(bits2, i):
+                return false
+        true
+    else:
+        false
+
+# Clone a filter (create a copy)
+fn clone_filter(filter: tuple) -> tuple:
+    val filter_type = filter[0]
+    if filter_type == "bloom":
+        val size = filter[1]
+        val num_hashes = filter[2]
+        val bits = filter[3]
+        val item_count = filter[4]
+
+        val new_bits = create_bit_array(size)
+        for i in 0..size:
+            if get_bit(bits, i):
+                set_bit(new_bits, i)
+
+        create_bloom_filter_struct(size, num_hashes, new_bits, item_count)
+    else:
+        nil
+
+# Merge multiple filters into one (union)
+fn merge_filters(filters: List) -> tuple:
+    if filters.length() == 0:
+        return nil
+
+    var result = clone_filter(filters[0])
+    for i in 1..filters.length():
+        val temp = bf_union(result, filters[i])
+        result = temp
+    result
+
+# Calculate Jaccard similarity between two filters
+# (size of intersection / size of union)
+fn jaccard_similarity(f1: tuple, f2: tuple) -> f64:
+    val size1 = f1[1]
+    val size2 = f2[1]
+
+    if size1 != size2:
+        return 0.0
+
+    val bits1 = f1[3]
+    val bits2 = f2[3]
+
+    var intersection = 0
+    var union_count = 0
+
+    for i in 0..size1:
+        val bit1 = get_bit(bits1, i)
+        val bit2 = get_bit(bits2, i)
+
+        if bit1 and bit2:
+            intersection = intersection + 1
+        if bit1 or bit2:
+            union_count = union_count + 1
+
+    if union_count == 0:
+        return 0.0
+
+    intersection.to_f64() / union_count.to_f64()
+
+# Print filter statistics
+fn print_filter_stats(filter: tuple) -> nil:
+    val filter_type = filter[0]
+    print "Filter Type: {filter_type}"
+
+    if filter_type == "bloom":
+        val size = filter[1]
+        val num_hashes = filter[2]
+        val item_count = filter[4]
+        val fill = bf_fill_ratio(filter)
+        val error = actual_error_rate(filter)
+
+        print "Size: {size} bits"
+        print "Hash Functions: {num_hashes}"
+        print "Items: {item_count}"
+        print "Fill Ratio: {fill * 100.0}%"
+        print "Error Rate: {error * 100.0}%"
+        print "Memory: {memory_usage(filter)} bytes"
+    else:
+        if filter_type == "counting":
+            val size = filter[1]
+            val item_count = filter[4]
+            print "Size: {size}"
+            print "Items: {item_count}"
+        else:
+            if filter_type == "scalable":
+                val total_items = filter[5]
+                val num_filters = sf_num_filters(filter)
+                val capacity = sf_total_capacity(filter)
+                print "Items: {total_items}"
+                print "Filters: {num_filters}"
+                print "Total Capacity: {capacity}"
+            else:
+                if filter_type == "cuckoo":
+                    val bucket_count = filter[1]
+                    val bucket_size = filter[2]
+                    val item_count = filter[5]
+                    val load = cuckoo_load_factor(filter)
+                    print "Buckets: {bucket_count}"
+                    print "Bucket Size: {bucket_size}"
+                    print "Items: {item_count}"
+                    print "Load Factor: {load * 100.0}%"
+    nil
