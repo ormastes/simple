@@ -8,16 +8,7 @@
  * Test:  cc -o /tmp/runtime_test bootstrap/runtime_test.c bootstrap/runtime.c -std=c11 && /tmp/runtime_test
  */
 
-#if !defined(_WIN32)
-#define _POSIX_C_SOURCE 200809L
-#define _XOPEN_SOURCE 700
-#if defined(__FreeBSD__)
-#define __BSD_VISIBLE 1
-#endif
-#if defined(__APPLE__)
-#define _DARWIN_C_SOURCE
-#endif
-#endif
+#include "platform/platform.h"
 
 #include "runtime.h"
 
@@ -28,21 +19,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <sys/stat.h>
-
-#ifndef _WIN32
-#include <ftw.h>
-#include <sys/file.h>
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
-#ifdef _WIN32
-#include <io.h>
-#include <process.h>
-#define popen  _popen
-#define pclose _pclose
-#define strdup _strdup
-#endif
 
 /* ================================================================
  * Value Constructors
@@ -364,6 +340,19 @@ int64_t spl_str_index_of(const char* s, const char* needle) {
     return (int64_t)(found - s);
 }
 
+int64_t spl_str_last_index_of(const char* s, const char* needle) {
+    if (!s || !needle) return -1;
+    int64_t needle_len = (int64_t)strlen(needle);
+    int64_t slen = (int64_t)strlen(s);
+    if (needle_len == 0 || needle_len > slen) return -1;
+    for (int64_t i = slen - needle_len; i >= 0; i--) {
+        if (strncmp(s + i, needle, (size_t)needle_len) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 char* spl_str_to_upper(const char* s) {
     if (!s) return strdup("");
     size_t len = strlen(s);
@@ -491,6 +480,66 @@ void      spl_array_set_i64(SplArray* a, int64_t idx, int64_t n) { spl_array_set
 SplArray* spl_array_new_text(void) { return spl_array_new(); }
 void      spl_array_push_text(SplArray* a, const char* s) { spl_array_push(a, spl_str(s)); }
 const char* spl_array_get_text(SplArray* a, int64_t idx) { return spl_as_str(spl_array_get(a, idx)); }
+
+/* String array utilities */
+int spl_array_contains_str(SplArray* arr, const char* needle) {
+    if (!arr || !needle) return 0;
+    for (int64_t i = 0; i < arr->len; i++) {
+        if (arr->items[i].tag == SPL_STRING && arr->items[i].as_str &&
+            strcmp(arr->items[i].as_str, needle) == 0) return 1;
+    }
+    return 0;
+}
+
+SplArray* spl_str_split(const char* s, const char* delim) {
+    SplArray* arr = spl_array_new();
+    if (!s) return arr;
+    if (!delim || strlen(delim) == 0) {
+        spl_array_push(arr, spl_str(s));
+        return arr;
+    }
+    size_t delim_len = strlen(delim);
+    const char* start = s;
+    const char* found;
+    while ((found = strstr(start, delim)) != NULL) {
+        size_t len = (size_t)(found - start);
+        char* part = (char*)malloc(len + 1);
+        memcpy(part, start, len);
+        part[len] = '\0';
+        spl_array_push(arr, spl_str_own(part));
+        start = found + delim_len;
+    }
+    spl_array_push(arr, spl_str(start));
+    return arr;
+}
+
+char* spl_str_join(SplArray* arr, const char* delim) {
+    if (!arr || arr->len == 0) return strdup("");
+    const char* safe_delim = delim ? delim : "";
+    size_t delim_len = strlen(safe_delim);
+    size_t total = 0;
+    for (int64_t i = 0; i < arr->len; i++) {
+        const char* s = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
+                        ? arr->items[i].as_str : "";
+        total += strlen(s);
+        if (i < arr->len - 1) total += delim_len;
+    }
+    char* result = (char*)malloc(total + 1);
+    char* dst = result;
+    for (int64_t i = 0; i < arr->len; i++) {
+        const char* s = (arr->items[i].tag == SPL_STRING && arr->items[i].as_str)
+                        ? arr->items[i].as_str : "";
+        size_t slen = strlen(s);
+        memcpy(dst, s, slen);
+        dst += slen;
+        if (i < arr->len - 1) {
+            memcpy(dst, safe_delim, delim_len);
+            dst += delim_len;
+        }
+    }
+    *dst = '\0';
+    return result;
+}
 
 /* ================================================================
  * Hash-Table Dictionary (open addressing, linear probing)
@@ -683,66 +732,26 @@ int spl_file_exists(const char* path) {
     return 0;
 }
 
+int spl_file_delete(const char* path) {
+    if (!path) return 0;
+    return remove(path) == 0 ? 1 : 0;
+}
+
+int64_t spl_file_size(const char* path) {
+    if (!path) return -1;
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    fseek(f, 0, SEEK_END);
+    int64_t size = (int64_t)ftell(f);
+    fclose(f);
+    return size;
+}
+
 /* ================================================================
  * Directory Operations
  * ================================================================ */
 
-#ifndef _WIN32
-static int unlink_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
-    (void)sb; (void)typeflag; (void)ftwbuf;
-    return remove(fpath);
-}
-
-bool rt_dir_remove_all(const char* path) {
-    if (!path) return false;
-    return nftw(path, unlink_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
-}
-
-/* ================================================================
- * File Locking
- * ================================================================ */
-
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    if (!path) return -1;
-
-    int fd = open(path, O_RDWR | O_CREAT, 0644);
-    if (fd < 0) return -1;
-
-    if (timeout_secs > 0) {
-        alarm(timeout_secs);
-    }
-
-    int result = flock(fd, LOCK_EX);
-    alarm(0);
-
-    if (result == 0) return fd;
-    close(fd);
-    return -1;
-}
-
-bool rt_file_unlock(int64_t handle) {
-    if (handle < 0) return false;
-    flock((int)handle, LOCK_UN);
-    close((int)handle);
-    return true;
-}
-#else
-/* Windows stubs - not implemented yet */
-bool rt_dir_remove_all(const char* path) {
-    (void)path;
-    return false;
-}
-
-int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    (void)path; (void)timeout_secs;
-    return -1;
-}
-
-bool rt_file_unlock(int64_t handle) {
-    (void)handle;
-    return false;
-}
-#endif
+/* rt_dir_remove_all, rt_file_lock, rt_file_unlock — see platform/ headers */
 
 /* ================================================================
  * Output
@@ -837,18 +846,7 @@ const char* spl_env_get(const char* key) {
     return val ? val : "";
 }
 
-void spl_env_set(const char* key, const char* value) {
-    if (!key) return;
-#ifdef _WIN32
-    _putenv_s(key, value ? value : "");
-#else
-    if (value) {
-        setenv(key, value, 1);
-    } else {
-        unsetenv(key);
-    }
-#endif
-}
+/* spl_env_set — see platform/ headers */
 
 /* ================================================================
  * Memory
@@ -892,32 +890,30 @@ const char* spl_get_arg(int64_t idx) {
 }
 
 /* ================================================================
+ * rt_ Aliases (FFI-compatible wrappers)
+ * ================================================================ */
+
+const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
+int         rt_file_exists(const char* path)    { return spl_file_exists(path); }
+int         rt_file_write(const char* path, const char* content) { return spl_file_write(path, content); }
+int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
+int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }
+
+const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
+
+SplArray* rt_cli_get_args(void) {
+    SplArray* arr = spl_array_new();
+    for (int i = 0; i < g_argc; i++) {
+        spl_array_push(arr, spl_str(g_argv && g_argv[i] ? g_argv[i] : ""));
+    }
+    return arr;
+}
+
+/* ================================================================
  * Dynamic Loading (WFFI)
  * ================================================================ */
 
-#ifdef _WIN32
-#include <windows.h>
-void* spl_dlopen(const char* path) {
-    return (void*)LoadLibraryA(path);
-}
-void* spl_dlsym(void* handle, const char* name) {
-    return (void*)GetProcAddress((HMODULE)handle, name);
-}
-int64_t spl_dlclose(void* handle) {
-    return FreeLibrary((HMODULE)handle) ? 0 : -1;
-}
-#else
-#include <dlfcn.h>
-void* spl_dlopen(const char* path) {
-    return dlopen(path, RTLD_NOW);
-}
-void* spl_dlsym(void* handle, const char* name) {
-    return dlsym(handle, name);
-}
-int64_t spl_dlclose(void* handle) {
-    return (int64_t)dlclose(handle);
-}
-#endif
+/* spl_dlopen, spl_dlsym, spl_dlclose — see platform/ headers */
 
 int64_t spl_wffi_call_i64(void* fptr, int64_t* args, int64_t nargs) {
     typedef int64_t (*fn0)(void);
