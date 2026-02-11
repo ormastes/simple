@@ -1,0 +1,1571 @@
+# Markdown Parsing and Rendering Utilities
+#
+# A comprehensive Markdown parser and HTML renderer implementation.
+# Supports CommonMark core features and GitHub Flavored Markdown (GFM) extensions.
+#
+# Features:
+# - Block-level parsing (headings, paragraphs, lists, code blocks, blockquotes, tables)
+# - Inline parsing (emphasis, strong, links, images, code spans)
+# - HTML rendering with proper escaping
+# - GFM extensions (strikethrough, task lists, tables, autolinks)
+# - Utility functions (plain text extraction, link extraction, TOC generation)
+#
+# Data Structures (tuple-based):
+# - Document: (type, blocks)
+# - Block: (type, data...)
+# - Inline: (type, data...)
+
+# ============================================================================
+# String Utilities
+# ============================================================================
+
+fn trim_left(s: text) -> text:
+    # Remove leading whitespace
+    var i = 0
+    var len = s.length()
+    while i < len and (s[i] == " " or s[i] == "\t" or s[i] == "\n" or s[i] == "\r"):
+        i = i + 1
+    s.substring(i)
+
+fn trim_right(s: text) -> text:
+    # Remove trailing whitespace
+    var len = s.length()
+    while len > 0 and (s[len - 1] == " " or s[len - 1] == "\t" or s[len - 1] == "\n" or s[len - 1] == "\r"):
+        len = len - 1
+    s.substring(0, len)
+
+fn trim(s: text) -> text:
+    # Remove leading and trailing whitespace
+    trim_right(trim_left(s))
+
+fn starts_with(s: text, prefix: text) -> bool:
+    var s_len = s.length()
+    var p_len = prefix.length()
+    if p_len > s_len:
+        return false
+    var i = 0
+    while i < p_len:
+        if s[i] != prefix[i]:
+            return false
+        i = i + 1
+    true
+
+fn ends_with(s: text, suffix: text) -> bool:
+    var s_len = s.length()
+    var suf_len = suffix.length()
+    if suf_len > s_len:
+        return false
+    var offset = s_len - suf_len
+    var i = 0
+    while i < suf_len:
+        if s[offset + i] != suffix[i]:
+            return false
+        i = i + 1
+    true
+
+fn count_leading_chars(s: text, ch: text) -> i64:
+    # Count how many times ch appears at the start of s
+    var count = 0
+    var len = s.length()
+    while count < len and s[count] == ch:
+        count = count + 1
+    count
+
+fn repeat_char(ch: text, count: i64) -> text:
+    # Repeat a character count times
+    var result = ""
+    var i = 0
+    while i < count:
+        result = result + ch
+        i = i + 1
+    result
+
+fn split_lines(text: text) -> list:
+    # Split text into lines
+    var lines = []
+    var current = ""
+    var i = 0
+    var len = text.length()
+
+    while i < len:
+        var ch = text[i]
+        if ch == "\n":
+            lines.push(current)
+            current = ""
+        else:
+            if ch != "\r":
+                current = current + ch
+        i = i + 1
+
+    # Add last line if not empty
+    if current.length() > 0 or len > 0:
+        lines.push(current)
+
+    lines
+
+fn join_lines(lines: list, separator: text) -> text:
+    # Join lines with separator
+    if lines.length() == 0:
+        return ""
+
+    var result = lines[0]
+    var i = 1
+    while i < lines.length():
+        result = result + separator + lines[i]
+        i = i + 1
+    result
+
+# ============================================================================
+# HTML Escaping
+# ============================================================================
+
+fn escape_html(text: text) -> text:
+    # Escape HTML special characters
+    var result = ""
+    var i = 0
+    var len = text.length()
+
+    while i < len:
+        var ch = text[i]
+        if ch == "&":
+            result = result + "&amp;"
+        else:
+            if ch == "<":
+                result = result + "&lt;"
+            else:
+                if ch == ">":
+                    result = result + "&gt;"
+                else:
+                    if ch == "\"":
+                        result = result + "&quot;"
+                    else:
+                        if ch == "'":
+                            result = result + "&#39;"
+                        else:
+                            result = result + ch
+        i = i + 1
+
+    result
+
+fn unescape_html(text: text) -> text:
+    # Unescape HTML entities
+    var result = ""
+    var i = 0
+    var len = text.length()
+
+    while i < len:
+        var ch = text[i]
+        if ch == "&":
+            # Check for entity
+            var entity_end = i + 1
+            var found = false
+
+            while entity_end < len and text[entity_end] != ";":
+                entity_end = entity_end + 1
+
+            if entity_end < len:
+                var entity_len = entity_end - i + 1
+                var entity = text.substring(i, entity_end + 1)
+
+                if entity == "&amp;":
+                    result = result + "&"
+                    found = true
+                else:
+                    if entity == "&lt;":
+                        result = result + "<"
+                        found = true
+                    else:
+                        if entity == "&gt;":
+                            result = result + ">"
+                            found = true
+                        else:
+                            if entity == "&quot;":
+                                result = result + "\""
+                                found = true
+                            else:
+                                if entity == "&#39;":
+                                    result = result + "'"
+                                    found = true
+
+                if found:
+                    i = entity_end + 1
+                else:
+                    result = result + ch
+                    i = i + 1
+            else:
+                result = result + ch
+                i = i + 1
+        else:
+            result = result + ch
+            i = i + 1
+
+    result
+
+# ============================================================================
+# Block-Level Detection
+# ============================================================================
+
+fn is_blank(line: text) -> bool:
+    # Check if line is blank or whitespace only
+    trim(line).length() == 0
+
+fn is_heading(line: text) -> bool:
+    # Check if line is ATX heading (# Heading)
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return false
+
+    var hash_count = count_leading_chars(trimmed, "#")
+    if hash_count == 0 or hash_count > 6:
+        return false
+
+    # Must have space after hashes
+    var rest_len = trimmed.length()
+    if hash_count == rest_len:
+        return true
+
+    trimmed[hash_count] == " "
+
+fn get_heading_level(line: text) -> i64:
+    # Get heading level (1-6)
+    var trimmed = trim_left(line)
+    count_leading_chars(trimmed, "#")
+
+fn is_code_fence(line: text) -> bool:
+    # Check if line is code fence (``` or ~~~)
+    var trimmed = trim_left(line)
+    if trimmed.length() < 3:
+        return false
+
+    var backtick_count = count_leading_chars(trimmed, "`")
+    var tilde_count = count_leading_chars(trimmed, "~")
+
+    backtick_count >= 3 or tilde_count >= 3
+
+fn get_fence_char(line: text) -> text:
+    # Get fence character (` or ~)
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return ""
+
+    var first_ch = trimmed[0]
+    if first_ch == "`" or first_ch == "~":
+        return first_ch
+    ""
+
+fn get_fence_info(line: text) -> text:
+    # Get info string after fence (language, etc)
+    var trimmed = trim_left(line)
+    var fence_char = get_fence_char(line)
+    if fence_char == "":
+        return ""
+
+    var count = count_leading_chars(trimmed, fence_char)
+    var info = trimmed.substring(count)
+    trim(info)
+
+fn is_blockquote(line: text) -> bool:
+    # Check if line is blockquote (> text)
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return false
+
+    trimmed[0] == ">"
+
+fn is_list_item(line: text) -> bool:
+    # Check if line is list item (- item, * item, 1. item)
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return false
+
+    var first_ch = trimmed[0]
+
+    # Unordered list
+    if first_ch == "-" or first_ch == "*" or first_ch == "+":
+        if trimmed.length() == 1:
+            return true
+        return trimmed[1] == " "
+
+    # Ordered list
+    var i = 0
+    var len = trimmed.length()
+    while i < len and trimmed[i] >= "0" and trimmed[i] <= "9":
+        i = i + 1
+
+    if i > 0 and i < len:
+        var after_digits = trimmed[i]
+        if after_digits == ".":
+            if i + 1 == len:
+                return true
+            return trimmed[i + 1] == " "
+
+    false
+
+fn is_ordered_list_item(line: text) -> bool:
+    # Check if line is ordered list item
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return false
+
+    var i = 0
+    var len = trimmed.length()
+    while i < len and trimmed[i] >= "0" and trimmed[i] <= "9":
+        i = i + 1
+
+    if i > 0 and i < len and trimmed[i] == ".":
+        return true
+
+    false
+
+fn is_horizontal_rule(line: text) -> bool:
+    # Check if line is horizontal rule (---, ***, ___)
+    var trimmed = trim(line)
+    if trimmed.length() < 3:
+        return false
+
+    var first_ch = trimmed[0]
+    if first_ch != "-" and first_ch != "*" and first_ch != "_":
+        return false
+
+    var count = 0
+    var i = 0
+    var len = trimmed.length()
+
+    while i < len:
+        var ch = trimmed[i]
+        if ch == first_ch:
+            count = count + 1
+        else:
+            if ch != " ":
+                return false
+        i = i + 1
+
+    count >= 3
+
+fn is_table_row(line: text) -> bool:
+    # Check if line looks like a table row
+    var trimmed = trim(line)
+    if trimmed.length() == 0:
+        return false
+
+    trimmed[0] == "|" or contains_char(trimmed, "|")
+
+fn contains_char(s: text, ch: text) -> bool:
+    # Check if string contains character
+    var i = 0
+    var len = s.length()
+    while i < len:
+        if s[i] == ch:
+            return true
+        i = i + 1
+    false
+
+fn get_list_indent(line: text) -> i64:
+    # Get indentation level of list item
+    var spaces = 0
+    var i = 0
+    var len = line.length()
+
+    while i < len and line[i] == " ":
+        spaces = spaces + 1
+        i = i + 1
+
+    spaces
+
+fn strip_list_marker(line: text) -> text:
+    # Remove list marker from line
+    var trimmed = trim_left(line)
+    if trimmed.length() == 0:
+        return ""
+
+    var first_ch = trimmed[0]
+
+    # Unordered
+    if first_ch == "-" or first_ch == "*" or first_ch == "+":
+        var rest = trimmed.substring(1)
+        return trim_left(rest)
+
+    # Ordered
+    var i = 0
+    var len = trimmed.length()
+    while i < len and trimmed[i] >= "0" and trimmed[i] <= "9":
+        i = i + 1
+
+    if i > 0 and i < len and trimmed[i] == ".":
+        var rest = trimmed.substring(i + 1)
+        return trim_left(rest)
+
+    trimmed
+
+# ============================================================================
+# Block Parsing
+# ============================================================================
+
+fn parse_heading_block(line: text) -> tuple:
+    # Parse heading line into block
+    var trimmed = trim_left(line)
+    var level = count_leading_chars(trimmed, "#")
+    var content = trimmed.substring(level)
+    var text_content = trim(content)
+
+    # Remove trailing hashes
+    var end_len = text_content.length()
+    while end_len > 0 and text_content[end_len - 1] == "#":
+        end_len = end_len - 1
+
+    var final_content = trim(text_content.substring(0, end_len))
+    var inline_nodes = parse_inline(final_content)
+
+    ("heading", level, inline_nodes)
+
+fn parse_code_block(lines: list, start_idx: i64) -> tuple:
+    # Parse fenced code block
+    # Returns (block, lines_consumed)
+    var fence_line = lines[start_idx]
+    var fence_char = get_fence_char(fence_line)
+    var fence_count = count_leading_chars(trim_left(fence_line), fence_char)
+    var lang = get_fence_info(fence_line)
+
+    var code_lines = []
+    var i = start_idx + 1
+    var found_end = false
+
+    while i < lines.length():
+        var line = lines[i]
+
+        # Check for closing fence
+        var trimmed = trim_left(line)
+        var is_closing = false
+
+        if starts_with(trimmed, fence_char):
+            var close_count = count_leading_chars(trimmed, fence_char)
+            if close_count >= fence_count:
+                is_closing = true
+
+        if is_closing:
+            found_end = true
+            i = i + 1
+            break
+
+        code_lines.push(line)
+        i = i + 1
+
+    var code = join_lines(code_lines, "\n")
+    var block = ("code_block", lang, code)
+    var consumed = i - start_idx
+
+    (block, consumed)
+
+fn parse_blockquote(lines: list, start_idx: i64) -> tuple:
+    # Parse blockquote block
+    # Returns (block, lines_consumed)
+    var quote_lines = []
+    var i = start_idx
+
+    while i < lines.length():
+        var line = lines[i]
+
+        if is_blank(line):
+            i = i + 1
+            continue
+
+        if not is_blockquote(line):
+            break
+
+        var trimmed = trim_left(line)
+        var content = trimmed.substring(1)
+        quote_lines.push(trim_left(content))
+        i = i + 1
+
+    var quote_text = join_lines(quote_lines, "\n")
+    var inner_blocks = parse_blocks(split_lines(quote_text))
+    var block = ("blockquote", inner_blocks)
+    var consumed = i - start_idx
+
+    (block, consumed)
+
+fn parse_list(lines: list, start_idx: i64) -> tuple:
+    # Parse list block
+    # Returns (block, lines_consumed)
+    var first_line = lines[start_idx]
+    var ordered = is_ordered_list_item(first_line)
+    var items = []
+    var i = start_idx
+
+    while i < lines.length():
+        var line = lines[i]
+
+        if is_blank(line):
+            i = i + 1
+            continue
+
+        if not is_list_item(line):
+            break
+
+        # Check if same list type
+        var line_ordered = is_ordered_list_item(line)
+        if line_ordered != ordered:
+            break
+
+        var content = strip_list_marker(line)
+        var inline_nodes = parse_inline(content)
+        items.push(("list_item", inline_nodes))
+        i = i + 1
+
+    var block = ("list", ordered, items)
+    var consumed = i - start_idx
+
+    (block, consumed)
+
+fn parse_table(lines: list, start_idx: i64) -> tuple:
+    # Parse table block
+    # Returns (block, lines_consumed)
+    var rows = []
+    var i = start_idx
+    var found_separator = false
+
+    while i < lines.length():
+        var line = lines[i]
+
+        if is_blank(line):
+            break
+
+        if not is_table_row(line):
+            break
+
+        var row = parse_table_row(line)
+
+        # Check if separator row
+        if is_table_separator(line):
+            found_separator = true
+            i = i + 1
+            continue
+
+        rows.push(row)
+        i = i + 1
+
+    var block = ("table", rows)
+    var consumed = i - start_idx
+
+    (block, consumed)
+
+fn parse_table_row(line: text) -> list:
+    # Parse table row into cells
+    var trimmed = trim(line)
+
+    # Remove leading and trailing pipes
+    if trimmed.length() > 0 and trimmed[0] == "|":
+        trimmed = trimmed.substring(1)
+
+    var t_len = trimmed.length()
+    if t_len > 0 and trimmed[t_len - 1] == "|":
+        trimmed = trimmed.substring(0, t_len - 1)
+
+    var cells = []
+    var current_cell = ""
+    var i = 0
+    var len = trimmed.length()
+
+    while i < len:
+        var ch = trimmed[i]
+        if ch == "|":
+            cells.push(trim(current_cell))
+            current_cell = ""
+        else:
+            current_cell = current_cell + ch
+        i = i + 1
+
+    if current_cell.length() > 0 or len > 0:
+        cells.push(trim(current_cell))
+
+    cells
+
+fn is_table_separator(line: text) -> bool:
+    # Check if line is table separator row
+    var trimmed = trim(line)
+    if trimmed.length() == 0:
+        return false
+
+    var i = 0
+    var len = trimmed.length()
+    var has_dash = false
+
+    while i < len:
+        var ch = trimmed[i]
+        if ch == "-":
+            has_dash = true
+        else:
+            if ch != "|" and ch != ":" and ch != " ":
+                return false
+        i = i + 1
+
+    has_dash
+
+fn parse_paragraph(lines: list, start_idx: i64) -> tuple:
+    # Parse paragraph block
+    # Returns (block, lines_consumed)
+    var para_lines = []
+    var i = start_idx
+
+    while i < lines.length():
+        var line = lines[i]
+
+        if is_blank(line):
+            break
+
+        # Stop at other block types
+        if is_heading(line):
+            break
+        if is_code_fence(line):
+            break
+        if is_blockquote(line):
+            break
+        if is_list_item(line):
+            break
+        if is_horizontal_rule(line):
+            break
+
+        para_lines.push(line)
+        i = i + 1
+
+    var text = join_lines(para_lines, " ")
+    var inline_nodes = parse_inline(text)
+    var block = ("paragraph", inline_nodes)
+    var consumed = i - start_idx
+
+    (block, consumed)
+
+fn parse_blocks(lines: list) -> list:
+    # Parse lines into block-level elements
+    var blocks = []
+    var i = 0
+
+    while i < lines.length():
+        var line = lines[i]
+
+        # Skip blank lines
+        if is_blank(line):
+            i = i + 1
+            continue
+
+        # Parse different block types
+        if is_heading(line):
+            var block = parse_heading_block(line)
+            blocks.push(block)
+            i = i + 1
+        else:
+            if is_code_fence(line):
+                var result = parse_code_block(lines, i)
+                var block = result[0]
+                var consumed = result[1]
+                blocks.push(block)
+                i = i + consumed
+            else:
+                if is_blockquote(line):
+                    var result = parse_blockquote(lines, i)
+                    var block = result[0]
+                    var consumed = result[1]
+                    blocks.push(block)
+                    i = i + consumed
+                else:
+                    if is_list_item(line):
+                        var result = parse_list(lines, i)
+                        var block = result[0]
+                        var consumed = result[1]
+                        blocks.push(block)
+                        i = i + consumed
+                    else:
+                        if is_horizontal_rule(line):
+                            blocks.push(("hr",))
+                            i = i + 1
+                        else:
+                            if is_table_row(line):
+                                var result = parse_table(lines, i)
+                                var block = result[0]
+                                var consumed = result[1]
+                                blocks.push(block)
+                                i = i + consumed
+                            else:
+                                var result = parse_paragraph(lines, i)
+                                var block = result[0]
+                                var consumed = result[1]
+                                blocks.push(block)
+                                i = i + consumed
+
+    blocks
+
+# ============================================================================
+# Inline Parsing
+# ============================================================================
+
+fn parse_inline(text: text) -> list:
+    # Parse inline elements (emphasis, links, code, etc.)
+    var nodes = []
+    var i = 0
+    var len = text.length()
+    var current_text = ""
+
+    while i < len:
+        var ch = text[i]
+
+        # Code span
+        if ch == "`":
+            if current_text.length() > 0:
+                nodes.push(("text", current_text))
+                current_text = ""
+
+            var result = parse_code_span(text, i)
+            var node = result[0]
+            var consumed = result[1]
+
+            if consumed > 0:
+                nodes.push(node)
+                i = i + consumed
+            else:
+                current_text = current_text + ch
+                i = i + 1
+        else:
+            if ch == "*" or ch == "_":
+                if current_text.length() > 0:
+                    nodes.push(("text", current_text))
+                    current_text = ""
+
+                var result = parse_emphasis_or_strong(text, i)
+                var node = result[0]
+                var consumed = result[1]
+
+                if consumed > 0:
+                    nodes.push(node)
+                    i = i + consumed
+                else:
+                    current_text = current_text + ch
+                    i = i + 1
+            else:
+                if ch == "[":
+                    if current_text.length() > 0:
+                        nodes.push(("text", current_text))
+                        current_text = ""
+
+                    var result = parse_link_or_image(text, i)
+                    var node = result[0]
+                    var consumed = result[1]
+
+                    if consumed > 0:
+                        nodes.push(node)
+                        i = i + consumed
+                    else:
+                        current_text = current_text + ch
+                        i = i + 1
+                else:
+                    if ch == "!":
+                        # Check for image
+                        if i + 1 < len and text[i + 1] == "[":
+                            if current_text.length() > 0:
+                                nodes.push(("text", current_text))
+                                current_text = ""
+
+                            var result = parse_link_or_image(text, i)
+                            var node = result[0]
+                            var consumed = result[1]
+
+                            if consumed > 0:
+                                nodes.push(node)
+                                i = i + consumed
+                            else:
+                                current_text = current_text + ch
+                                i = i + 1
+                        else:
+                            current_text = current_text + ch
+                            i = i + 1
+                    else:
+                        if ch == "~":
+                            # Check for strikethrough
+                            if i + 1 < len and text[i + 1] == "~":
+                                if current_text.length() > 0:
+                                    nodes.push(("text", current_text))
+                                    current_text = ""
+
+                                var result = parse_strikethrough(text, i)
+                                var node = result[0]
+                                var consumed = result[1]
+
+                                if consumed > 0:
+                                    nodes.push(node)
+                                    i = i + consumed
+                                else:
+                                    current_text = current_text + ch
+                                    i = i + 1
+                            else:
+                                current_text = current_text + ch
+                                i = i + 1
+                        else:
+                            if ch == "<":
+                                # Check for autolink
+                                var result = parse_autolink(text, i)
+                                var node = result[0]
+                                var consumed = result[1]
+
+                                if consumed > 0:
+                                    if current_text.length() > 0:
+                                        nodes.push(("text", current_text))
+                                        current_text = ""
+                                    nodes.push(node)
+                                    i = i + consumed
+                                else:
+                                    current_text = current_text + ch
+                                    i = i + 1
+                            else:
+                                current_text = current_text + ch
+                                i = i + 1
+
+    if current_text.length() > 0:
+        nodes.push(("text", current_text))
+
+    nodes
+
+fn parse_code_span(text: text, start: i64) -> tuple:
+    # Parse inline code span
+    # Returns (node, consumed)
+    var len = text.length()
+    var backtick_count = 0
+    var i = start
+
+    while i < len and text[i] == "`":
+        backtick_count = backtick_count + 1
+        i = i + 1
+
+    # Find closing backticks
+    var content_start = i
+    var found_end = false
+
+    while i < len:
+        if text[i] == "`":
+            var close_count = 0
+            var j = i
+
+            while j < len and text[j] == "`":
+                close_count = close_count + 1
+                j = j + 1
+
+            if close_count == backtick_count:
+                var content = text.substring(content_start, i)
+                var trimmed = trim(content)
+                var node = ("code", trimmed)
+                var consumed = j - start
+                return (node, consumed)
+
+            i = j
+        else:
+            i = i + 1
+
+    (nil, 0)
+
+fn parse_emphasis_or_strong(text: text, start: i64) -> tuple:
+    # Parse emphasis (*text*) or strong (**text**)
+    # Returns (node, consumed)
+    var len = text.length()
+    var marker = text[start]
+    var marker_count = 0
+    var i = start
+
+    while i < len and text[i] == marker:
+        marker_count = marker_count + 1
+        i = i + 1
+
+    if marker_count > 2:
+        marker_count = 2
+
+    # Find closing markers
+    var content_start = start + marker_count
+    var j = content_start
+
+    while j < len:
+        if text[j] == marker:
+            var close_count = 0
+            var k = j
+
+            while k < len and text[k] == marker:
+                close_count = close_count + 1
+                k = k + 1
+
+            if close_count >= marker_count:
+                var content = text.substring(content_start, j)
+                var inner_nodes = parse_inline(content)
+
+                if marker_count == 2:
+                    var node = ("strong", inner_nodes)
+                    var consumed = j - start + marker_count
+                    return (node, consumed)
+                else:
+                    var node = ("emphasis", inner_nodes)
+                    var consumed = j - start + marker_count
+                    return (node, consumed)
+
+            j = k
+        else:
+            j = j + 1
+
+    (nil, 0)
+
+fn parse_link_or_image(text: text, start: i64) -> tuple:
+    # Parse link [text](url) or image ![alt](url)
+    # Returns (node, consumed)
+    var len = text.length()
+    var is_image = false
+    var i = start
+
+    if text[i] == "!":
+        is_image = true
+        i = i + 1
+
+    if i >= len or text[i] != "[":
+        return (nil, 0)
+
+    i = i + 1
+    var text_start = i
+
+    # Find closing ]
+    while i < len and text[i] != "]":
+        i = i + 1
+
+    if i >= len:
+        return (nil, 0)
+
+    var link_text = text.substring(text_start, i)
+    i = i + 1
+
+    # Expect (
+    if i >= len or text[i] != "(":
+        return (nil, 0)
+
+    i = i + 1
+    var url_start = i
+
+    # Find closing )
+    while i < len and text[i] != ")":
+        i = i + 1
+
+    if i >= len:
+        return (nil, 0)
+
+    var url = text.substring(url_start, i)
+    i = i + 1
+
+    var inner_nodes = parse_inline(link_text)
+
+    if is_image:
+        var node = ("image", link_text, url)
+        var consumed = i - start
+        return (node, consumed)
+    else:
+        var node = ("link", inner_nodes, url)
+        var consumed = i - start
+        return (node, consumed)
+
+fn parse_strikethrough(text: text, start: i64) -> tuple:
+    # Parse strikethrough (~~text~~)
+    # Returns (node, consumed)
+    var len = text.length()
+
+    if start + 1 >= len or text[start] != "~" or text[start + 1] != "~":
+        return (nil, 0)
+
+    var i = start + 2
+    var content_start = i
+
+    # Find closing ~~
+    while i < len - 1:
+        if text[i] == "~" and text[i + 1] == "~":
+            var content = text.substring(content_start, i)
+            var inner_nodes = parse_inline(content)
+            var node = ("strikethrough", inner_nodes)
+            var consumed = i + 2 - start
+            return (node, consumed)
+        i = i + 1
+
+    (nil, 0)
+
+fn parse_autolink(text: text, start: i64) -> tuple:
+    # Parse autolink (<http://example.com>)
+    # Returns (node, consumed)
+    var len = text.length()
+
+    if start >= len or text[start] != "<":
+        return (nil, 0)
+
+    var i = start + 1
+    var url_start = i
+
+    # Find closing >
+    while i < len and text[i] != ">":
+        i = i + 1
+
+    if i >= len:
+        return (nil, 0)
+
+    var url = text.substring(url_start, i)
+    i = i + 1
+
+    var text_node = ("text", url)
+    var node = ("link", [text_node], url)
+    var consumed = i - start
+
+    (node, consumed)
+
+# ============================================================================
+# Main Parsing Function
+# ============================================================================
+
+fn parse_markdown(text: text) -> tuple:
+    # Parse Markdown text into document structure
+    var lines = split_lines(text)
+    var blocks = parse_blocks(lines)
+    ("document", blocks)
+
+# ============================================================================
+# HTML Rendering
+# ============================================================================
+
+fn render_inline_nodes(nodes: list) -> text:
+    # Render list of inline nodes to HTML
+    var html = ""
+    var i = 0
+
+    while i < nodes.length():
+        var node = nodes[i]
+        var node_html = render_inline_node(node)
+        html = html + node_html
+        i = i + 1
+
+    html
+
+fn render_inline_node(node: tuple) -> text:
+    # Render single inline node to HTML
+    var node_type = node[0]
+
+    if node_type == "text":
+        var text = node[1]
+        return escape_html(text)
+
+    if node_type == "code":
+        var code = node[1]
+        var escaped = escape_html(code)
+        return "<code>" + escaped + "</code>"
+
+    if node_type == "emphasis":
+        var inner = node[1]
+        var inner_html = render_inline_nodes(inner)
+        return "<em>" + inner_html + "</em>"
+
+    if node_type == "strong":
+        var inner = node[1]
+        var inner_html = render_inline_nodes(inner)
+        return "<strong>" + inner_html + "</strong>"
+
+    if node_type == "link":
+        var inner = node[1]
+        var url = node[2]
+        var inner_html = render_inline_nodes(inner)
+        var escaped_url = escape_html(url)
+        return "<a href=\"" + escaped_url + "\">" + inner_html + "</a>"
+
+    if node_type == "image":
+        var alt = node[1]
+        var url = node[2]
+        var escaped_alt = escape_html(alt)
+        var escaped_url = escape_html(url)
+        return "<img src=\"" + escaped_url + "\" alt=\"" + escaped_alt + "\" />"
+
+    if node_type == "strikethrough":
+        var inner = node[1]
+        var inner_html = render_inline_nodes(inner)
+        return "<del>" + inner_html + "</del>"
+
+    ""
+
+fn render_block(block: tuple) -> text:
+    # Render single block to HTML
+    var block_type = block[0]
+
+    if block_type == "heading":
+        var level = block[1]
+        var content = block[2]
+        var content_html = render_inline_nodes(content)
+        var level_str = "" + level
+        return "<h" + level_str + ">" + content_html + "</h" + level_str + ">"
+
+    if block_type == "paragraph":
+        var content = block[1]
+        var content_html = render_inline_nodes(content)
+        return "<p>" + content_html + "</p>"
+
+    if block_type == "code_block":
+        var lang = block[1]
+        var code = block[2]
+        var escaped_code = escape_html(code)
+
+        if lang.length() > 0:
+            var escaped_lang = escape_html(lang)
+            return "<pre><code class=\"language-" + escaped_lang + "\">" + escaped_code + "</code></pre>"
+        else:
+            return "<pre><code>" + escaped_code + "</code></pre>"
+
+    if block_type == "blockquote":
+        var inner_blocks = block[1]
+        var inner_html = render_blocks(inner_blocks)
+        return "<blockquote>" + inner_html + "</blockquote>"
+
+    if block_type == "list":
+        var ordered = block[1]
+        var items = block[2]
+        var items_html = render_list_items(items)
+
+        if ordered:
+            return "<ol>" + items_html + "</ol>"
+        else:
+            return "<ul>" + items_html + "</ul>"
+
+    if block_type == "hr":
+        return "<hr />"
+
+    if block_type == "table":
+        var rows = block[1]
+        var table_html = render_table_rows(rows)
+        return "<table>" + table_html + "</table>"
+
+    ""
+
+fn render_blocks(blocks: list) -> text:
+    # Render list of blocks to HTML
+    var html = ""
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_html = render_block(block)
+        html = html + block_html + "\n"
+        i = i + 1
+
+    html
+
+fn render_list_items(items: list) -> text:
+    # Render list items to HTML
+    var html = ""
+    var i = 0
+
+    while i < items.length():
+        var item = items[i]
+        var item_type = item[0]
+        var content = item[1]
+        var content_html = render_inline_nodes(content)
+        html = html + "<li>" + content_html + "</li>"
+        i = i + 1
+
+    html
+
+fn render_table_rows(rows: list) -> text:
+    # Render table rows to HTML
+    var html = ""
+    var i = 0
+    var is_first = true
+
+    while i < rows.length():
+        var row = rows[i]
+        var row_html = render_table_row(row, is_first)
+        html = html + row_html
+        is_first = false
+        i = i + 1
+
+    html
+
+fn render_table_row(cells: list, is_header: bool) -> text:
+    # Render table row to HTML
+    var html = "<tr>"
+    var i = 0
+
+    while i < cells.length():
+        var cell = cells[i]
+        var cell_html = escape_html(cell)
+
+        if is_header:
+            html = html + "<th>" + cell_html + "</th>"
+        else:
+            html = html + "<td>" + cell_html + "</td>"
+
+        i = i + 1
+
+    html = html + "</tr>"
+    html
+
+fn to_html(doc: tuple) -> text:
+    # Convert document to HTML
+    var doc_type = doc[0]
+    var blocks = doc[1]
+    render_blocks(blocks)
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn to_plain_text(doc: tuple) -> text:
+    # Convert document to plain text (strip formatting)
+    var doc_type = doc[0]
+    var blocks = doc[1]
+    plain_text_from_blocks(blocks)
+
+fn plain_text_from_blocks(blocks: list) -> text:
+    # Extract plain text from blocks
+    var text = ""
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_text = plain_text_from_block(block)
+        text = text + block_text + "\n\n"
+        i = i + 1
+
+    trim(text)
+
+fn plain_text_from_block(block: tuple) -> text:
+    # Extract plain text from single block
+    var block_type = block[0]
+
+    if block_type == "heading":
+        var content = block[2]
+        return plain_text_from_inline(content)
+
+    if block_type == "paragraph":
+        var content = block[1]
+        return plain_text_from_inline(content)
+
+    if block_type == "code_block":
+        var code = block[2]
+        return code
+
+    if block_type == "blockquote":
+        var inner_blocks = block[1]
+        return plain_text_from_blocks(inner_blocks)
+
+    if block_type == "list":
+        var items = block[2]
+        return plain_text_from_list_items(items)
+
+    ""
+
+fn plain_text_from_inline(nodes: list) -> text:
+    # Extract plain text from inline nodes
+    var text = ""
+    var i = 0
+
+    while i < nodes.length():
+        var node = nodes[i]
+        var node_text = plain_text_from_inline_node(node)
+        text = text + node_text
+        i = i + 1
+
+    text
+
+fn plain_text_from_inline_node(node: tuple) -> text:
+    # Extract plain text from single inline node
+    var node_type = node[0]
+
+    if node_type == "text":
+        return node[1]
+
+    if node_type == "code":
+        return node[1]
+
+    if node_type == "emphasis":
+        var inner = node[1]
+        return plain_text_from_inline(inner)
+
+    if node_type == "strong":
+        var inner = node[1]
+        return plain_text_from_inline(inner)
+
+    if node_type == "link":
+        var inner = node[1]
+        return plain_text_from_inline(inner)
+
+    if node_type == "image":
+        return node[1]
+
+    if node_type == "strikethrough":
+        var inner = node[1]
+        return plain_text_from_inline(inner)
+
+    ""
+
+fn plain_text_from_list_items(items: list) -> text:
+    # Extract plain text from list items
+    var text = ""
+    var i = 0
+
+    while i < items.length():
+        var item = items[i]
+        var content = item[1]
+        var item_text = plain_text_from_inline(content)
+        text = text + item_text + "\n"
+        i = i + 1
+
+    trim(text)
+
+fn extract_links(doc: tuple) -> list:
+    # Extract all links from document
+    # Returns list of (text, url) tuples
+    var doc_type = doc[0]
+    var blocks = doc[1]
+    extract_links_from_blocks(blocks)
+
+fn extract_links_from_blocks(blocks: list) -> list:
+    # Extract links from blocks
+    var links = []
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_links = extract_links_from_block(block)
+
+        var j = 0
+        while j < block_links.length():
+            links.push(block_links[j])
+            j = j + 1
+
+        i = i + 1
+
+    links
+
+fn extract_links_from_block(block: tuple) -> list:
+    # Extract links from single block
+    var block_type = block[0]
+
+    if block_type == "heading":
+        var content = block[2]
+        return extract_links_from_inline(content)
+
+    if block_type == "paragraph":
+        var content = block[1]
+        return extract_links_from_inline(content)
+
+    if block_type == "blockquote":
+        var inner_blocks = block[1]
+        return extract_links_from_blocks(inner_blocks)
+
+    if block_type == "list":
+        var items = block[2]
+        return extract_links_from_list_items(items)
+
+    []
+
+fn extract_links_from_inline(nodes: list) -> list:
+    # Extract links from inline nodes
+    var links = []
+    var i = 0
+
+    while i < nodes.length():
+        var node = nodes[i]
+        var node_links = extract_links_from_inline_node(node)
+
+        var j = 0
+        while j < node_links.length():
+            links.push(node_links[j])
+            j = j + 1
+
+        i = i + 1
+
+    links
+
+fn extract_links_from_inline_node(node: tuple) -> list:
+    # Extract links from single inline node
+    var node_type = node[0]
+
+    if node_type == "link":
+        var inner = node[1]
+        var url = node[2]
+        var text = plain_text_from_inline(inner)
+        return [(text, url)]
+
+    if node_type == "emphasis" or node_type == "strong" or node_type == "strikethrough":
+        var inner = node[1]
+        return extract_links_from_inline(inner)
+
+    []
+
+fn extract_links_from_list_items(items: list) -> list:
+    # Extract links from list items
+    var links = []
+    var i = 0
+
+    while i < items.length():
+        var item = items[i]
+        var content = item[1]
+        var item_links = extract_links_from_inline(content)
+
+        var j = 0
+        while j < item_links.length():
+            links.push(item_links[j])
+            j = j + 1
+
+        i = i + 1
+
+    links
+
+fn extract_headings(doc: tuple) -> list:
+    # Extract all headings from document for TOC
+    # Returns list of (level, text) tuples
+    var doc_type = doc[0]
+    var blocks = doc[1]
+    var headings = []
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_type = block[0]
+
+        if block_type == "heading":
+            var level = block[1]
+            var content = block[2]
+            var text = plain_text_from_inline(content)
+            headings.push((level, text))
+
+        if block_type == "blockquote":
+            var inner_blocks = block[1]
+            var inner_headings = extract_headings_from_blocks(inner_blocks)
+
+            var j = 0
+            while j < inner_headings.length():
+                headings.push(inner_headings[j])
+                j = j + 1
+
+        i = i + 1
+
+    headings
+
+fn extract_headings_from_blocks(blocks: list) -> list:
+    # Extract headings from blocks
+    var headings = []
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_type = block[0]
+
+        if block_type == "heading":
+            var level = block[1]
+            var content = block[2]
+            var text = plain_text_from_inline(content)
+            headings.push((level, text))
+
+        i = i + 1
+
+    headings
+
+fn extract_code_blocks(doc: tuple) -> list:
+    # Extract all code blocks from document
+    # Returns list of (lang, code) tuples
+    var doc_type = doc[0]
+    var blocks = doc[1]
+    var code_blocks = []
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_type = block[0]
+
+        if block_type == "code_block":
+            var lang = block[1]
+            var code = block[2]
+            code_blocks.push((lang, code))
+
+        if block_type == "blockquote":
+            var inner_blocks = block[1]
+            var inner_code = extract_code_blocks_from_blocks(inner_blocks)
+
+            var j = 0
+            while j < inner_code.length():
+                code_blocks.push(inner_code[j])
+                j = j + 1
+
+        i = i + 1
+
+    code_blocks
+
+fn extract_code_blocks_from_blocks(blocks: list) -> list:
+    # Extract code blocks from blocks
+    var code_blocks = []
+    var i = 0
+
+    while i < blocks.length():
+        var block = blocks[i]
+        var block_type = block[0]
+
+        if block_type == "code_block":
+            var lang = block[1]
+            var code = block[2]
+            code_blocks.push((lang, code))
+
+        i = i + 1
+
+    code_blocks
+
+fn word_count(doc: tuple) -> i64:
+    # Count words in document
+    var plain = to_plain_text(doc)
+    count_words_in_text(plain)
+
+fn count_words_in_text(text: text) -> i64:
+    # Count words in plain text
+    var count = 0
+    var in_word = false
+    var i = 0
+    var len = text.length()
+
+    while i < len:
+        var ch = text[i]
+        var is_space = false
+
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            is_space = true
+
+        if is_space:
+            if in_word:
+                count = count + 1
+                in_word = false
+        else:
+            in_word = true
+
+        i = i + 1
+
+    if in_word:
+        count = count + 1
+
+    count
+
+fn reading_time(doc: tuple) -> i64:
+    # Estimate reading time in minutes (assuming 200 words per minute)
+    var words = word_count(doc)
+    var minutes = words / 200
+
+    if minutes == 0:
+        return 1
+
+    minutes
+
+fn validate_markdown(text: text) -> bool:
+    # Basic validation - check if markdown can be parsed
+    var lines = split_lines(text)
+    var i = 0
+
+    # Check for balanced fences
+    var fence_count = 0
+
+    while i < lines.length():
+        var line = lines[i]
+
+        if is_code_fence(line):
+            fence_count = fence_count + 1
+
+        i = i + 1
+
+    # Fences should be balanced (even number)
+    fence_count % 2 == 0
