@@ -47,6 +47,7 @@
 #include <cstdint>
 #include <cstdarg>
 #include <cassert>
+#include <cmath>
 #include <vector>
 
 #ifdef _WIN32
@@ -86,6 +87,7 @@ static void emit_indent(int level) {
 static char *source_lines[MAX_LINES];
 static int num_lines = 0;
 
+static void strip_inline_comment(char *line);
 static void load_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "Cannot open: %s\n", path); exit(1); }
@@ -93,6 +95,7 @@ static void load_file(const char *path) {
     while (fgets(buf, sizeof(buf), f) && num_lines < MAX_LINES) {
         int len = strlen(buf);
         if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        strip_inline_comment(buf);
         source_lines[num_lines++] = strdup(buf);
     }
     fclose(f);
@@ -135,6 +138,27 @@ static char *trim(const char *s) {
     while (len > 0 && (buf[len-1] == ' ' || buf[len-1] == '\t' || buf[len-1] == '\n'))
         buf[--len] = '\0';
     return buf;
+}
+
+/* Strip inline # comments (not inside strings) */
+static void strip_inline_comment(char *line) {
+    bool in_str = false;
+    char quote = 0;
+    for (int i = 0; line[i]; i++) {
+        if (in_str) {
+            if (line[i] == '\\') { i++; continue; }
+            if (line[i] == quote) in_str = false;
+        } else {
+            if (line[i] == '"' || line[i] == '\'') { in_str = true; quote = line[i]; }
+            else if (line[i] == '#') {
+                /* Trim trailing spaces before the comment */
+                int j = i;
+                while (j > 0 && (line[j-1] == ' ' || line[j-1] == '\t')) j--;
+                line[j] = '\0';
+                return;
+            }
+        }
+    }
 }
 
 /* ===== Struct Registry ===== */
@@ -853,6 +877,7 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                 else if (starts_with(p, " < ")) { prec = 5; op = "<"; }
                 else if (starts_with(p, " + ")) { prec = 6; op = "+"; }
                 else if (starts_with(p, " - ")) { prec = 6; op = "-"; }
+                else if (starts_with(p, " ** ")) { prec = 8; op = "**"; }
                 else if (starts_with(p, " * ")) { prec = 7; op = "*"; }
                 else if (starts_with(p, " / ")) { prec = 7; op = "/"; }
                 else if (starts_with(p, " % ")) { prec = 7; op = "%"; }
@@ -884,6 +909,7 @@ static void translate_expr(const char *expr, char *out, int outsz) {
             else if (starts_with(op_start, " < ")) { op_str = "<"; skip = 3; }
             else if (starts_with(op_start, " + ")) { op_str = "+"; skip = 3; }
             else if (starts_with(op_start, " - ")) { op_str = "-"; skip = 3; }
+            else if (starts_with(op_start, " ** ")) { op_str = "**"; skip = 4; }
             else if (starts_with(op_start, " * ")) { op_str = "*"; skip = 3; }
             else if (starts_with(op_start, " / ")) { op_str = "/"; skip = 3; }
             else if (starts_with(op_start, " % ")) { op_str = "%"; skip = 3; }
@@ -954,6 +980,12 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                 } else {
                     snprintf(out, outsz, "((%s) ? (%s) : (%s))", left_c, left_c, right_c);
                 }
+                return;
+            }
+
+            /* Power operator: a ** b -> pow(a, b) */
+            if (strcmp(op_str, "**") == 0) {
+                snprintf(out, outsz, "(int64_t)pow((double)%s, (double)%s)", left_c, right_c);
                 return;
             }
 
@@ -1130,6 +1162,17 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                 snprintf(out, outsz, "spl_str_replace(%s, %s, %s)", obj_c, a1c, a2c);
                 return;
             }
+            if (starts_with(rest, "split(")) {
+                char arg[MAX_LINE];
+                const char *a = rest + 6;
+                int len = strlen(a);
+                if (len > 0 && a[len-1] == ')') { strncpy(arg, a, len-1); arg[len-1] = '\0'; }
+                else { strncpy(arg, a, MAX_LINE-1); arg[MAX_LINE-1] = '\0'; }
+                char arg_c[MAX_LINE];
+                translate_expr(trim(arg), arg_c, sizeof(arg_c));
+                snprintf(out, outsz, "spl_str_split(%s, %s)", obj_c, arg_c);
+                return;
+            }
 
             /* Check if rest has [ before ( — if so, it's field+brackets, not method call */
             bool rest_has_bracket_before_paren = false;
@@ -1140,8 +1183,8 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                     rest_has_bracket_before_paren = true;
             }
 
-            /* Static method call: StructName.method(args) → StructName__method(args) */
-            if (!rest_has_bracket_before_paren && strchr(rest, '(') && find_struct(trim(obj))) {
+            /* Static method call: StructName.method(args) or EnumName.method(args) → Type__method(args) */
+            if (!rest_has_bracket_before_paren && strchr(rest, '(') && (find_struct(trim(obj)) || find_enum(trim(obj)))) {
                 char method[MAX_IDENT];
                 int mi = 0;
                 const char *r = rest;
@@ -1342,6 +1385,9 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                 /* Simple field access */
                 if (strcmp(trim(obj), "self") == 0) {
                     snprintf(out, outsz, "self->%s", rest);
+                } else if (find_enum(trim(obj))) {
+                    /* EnumName.Variant -> EnumName_Variant */
+                    snprintf(out, outsz, "%s_%s", trim(obj), rest);
                 } else {
                     snprintf(out, outsz, "%s.%s", obj_c, rest);
                 }

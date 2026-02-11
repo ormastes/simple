@@ -1717,6 +1717,437 @@ TEST(shell_output_invalid_cmd) {
 }
 
 /* ================================================================
+ * Coverage: spl_file_delete / spl_file_size
+ * ================================================================ */
+
+TEST(file_delete_null_path) {
+    ASSERT_EQ_INT(spl_file_delete(NULL), 0);
+}
+
+TEST(file_delete_existing) {
+    const char* path = "/tmp/_spl_test_delete_me.tmp";
+    spl_file_write(path, "deleteme");
+    ASSERT_EQ_INT(spl_file_delete(path), 1);
+    ASSERT(!spl_file_exists(path));
+}
+
+TEST(file_delete_nonexistent) {
+    ASSERT_EQ_INT(spl_file_delete("/tmp/_spl_no_such_file_xyz.tmp"), 0);
+}
+
+TEST(file_size_null_path) {
+    ASSERT_EQ_INT(spl_file_size(NULL), -1);
+}
+
+TEST(file_size_nonexistent) {
+    ASSERT_EQ_INT(spl_file_size("/tmp/_spl_no_such_file_xyz.tmp"), -1);
+}
+
+TEST(file_size_existing) {
+    const char* path = "/tmp/_spl_test_size.tmp";
+    spl_file_write(path, "hello");
+    ASSERT_EQ_INT(spl_file_size(path), 5);
+    spl_file_delete(path);
+}
+
+/* ================================================================
+ * Coverage: rt_cli_get_args / rt_shell_output
+ * ================================================================ */
+
+TEST(cli_get_args_with_args) {
+    char* argv[] = {"prog", "alpha", "beta"};
+    spl_init_args(3, argv);
+    SplArray* args = rt_cli_get_args();
+    ASSERT_EQ_INT(spl_array_len(args), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 0)), "prog");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 1)), "alpha");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 2)), "beta");
+    spl_array_free(args);
+}
+
+TEST(cli_get_args_zero) {
+    spl_init_args(0, NULL);
+    SplArray* args = rt_cli_get_args();
+    ASSERT_EQ_INT(spl_array_len(args), 0);
+    spl_array_free(args);
+}
+
+TEST(rt_shell_output_strips_newline) {
+    const char* r = rt_shell_output("echo hello");
+    ASSERT_EQ_STR(r, "hello\n");
+    free((void*)r);
+}
+
+TEST(rt_shell_output_strips_crlf) {
+    const char* r = rt_shell_output("printf 'line\\r\\n'");
+    ASSERT_EQ_STR(r, "line\r\n");
+    free((void*)r);
+}
+
+TEST(rt_shell_output_null) {
+    const char* r = rt_shell_output(NULL);
+    ASSERT_EQ_STR(r, "");
+    free((void*)r);
+}
+
+/* ================================================================
+ * Coverage: spl_str_last_index_of
+ * ================================================================ */
+
+TEST(last_index_of_null_s) {
+    ASSERT_EQ_INT(spl_str_last_index_of(NULL, "x"), -1);
+}
+
+TEST(last_index_of_null_needle) {
+    ASSERT_EQ_INT(spl_str_last_index_of("hello", NULL), -1);
+}
+
+TEST(last_index_of_both_null) {
+    ASSERT_EQ_INT(spl_str_last_index_of(NULL, NULL), -1);
+}
+
+TEST(last_index_of_empty_needle) {
+    ASSERT_EQ_INT(spl_str_last_index_of("hello", ""), -1);
+}
+
+TEST(last_index_of_needle_longer) {
+    ASSERT_EQ_INT(spl_str_last_index_of("hi", "hello"), -1);
+}
+
+TEST(last_index_of_found_at_end) {
+    ASSERT_EQ_INT(spl_str_last_index_of("hello world", "world"), 6);
+}
+
+TEST(last_index_of_found_at_start) {
+    ASSERT_EQ_INT(spl_str_last_index_of("abcdef", "abc"), 0);
+}
+
+TEST(last_index_of_found_in_middle) {
+    ASSERT_EQ_INT(spl_str_last_index_of("xxabcxx", "abc"), 2);
+}
+
+TEST(last_index_of_multiple_occurrences) {
+    ASSERT_EQ_INT(spl_str_last_index_of("abcabcabc", "abc"), 6);
+}
+
+TEST(last_index_of_not_found) {
+    ASSERT_EQ_INT(spl_str_last_index_of("hello world", "xyz"), -1);
+}
+
+TEST(last_index_of_single_char) {
+    ASSERT_EQ_INT(spl_str_last_index_of("banana", "a"), 5);
+}
+
+TEST(last_index_of_exact_match) {
+    ASSERT_EQ_INT(spl_str_last_index_of("abc", "abc"), 0);
+}
+
+/* ================================================================
+ * Coverage: spl_str_split
+ * ================================================================ */
+
+TEST(split_null_s) {
+    SplArray* arr = spl_str_split(NULL, ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 0);
+    spl_array_free(arr);
+}
+
+TEST(split_null_delim) {
+    SplArray* arr = spl_str_split("hello", NULL);
+    ASSERT_EQ_INT(spl_array_len(arr), 1);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "hello");
+    spl_array_free(arr);
+}
+
+TEST(split_empty_delim) {
+    SplArray* arr = spl_str_split("hello", "");
+    ASSERT_EQ_INT(spl_array_len(arr), 1);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "hello");
+    spl_array_free(arr);
+}
+
+TEST(split_normal) {
+    SplArray* arr = spl_str_split("a,b,c", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "a");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 1)), "b");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 2)), "c");
+    spl_array_free(arr);
+}
+
+TEST(split_delim_not_found) {
+    SplArray* arr = spl_str_split("hello", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 1);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "hello");
+    spl_array_free(arr);
+}
+
+TEST(split_consecutive_delims) {
+    SplArray* arr = spl_str_split("a,,b", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "a");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 1)), "");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 2)), "b");
+    spl_array_free(arr);
+}
+
+TEST(split_delim_at_start) {
+    SplArray* arr = spl_str_split(",a,b", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "");
+    spl_array_free(arr);
+}
+
+TEST(split_delim_at_end) {
+    SplArray* arr = spl_str_split("a,b,", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 2)), "");
+    spl_array_free(arr);
+}
+
+TEST(split_multi_char_delim) {
+    SplArray* arr = spl_str_split("a::b::c", "::");
+    ASSERT_EQ_INT(spl_array_len(arr), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 1)), "b");
+    spl_array_free(arr);
+}
+
+TEST(split_empty_string) {
+    SplArray* arr = spl_str_split("", ",");
+    ASSERT_EQ_INT(spl_array_len(arr), 1);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(arr, 0)), "");
+    spl_array_free(arr);
+}
+
+/* ================================================================
+ * Coverage: spl_str_join
+ * ================================================================ */
+
+TEST(join_null_arr) {
+    char* r = spl_str_join(NULL, ",");
+    ASSERT_EQ_STR(r, "");
+    free(r);
+}
+
+TEST(join_empty_arr) {
+    SplArray* arr = spl_array_new();
+    char* r = spl_str_join(arr, ",");
+    ASSERT_EQ_STR(r, "");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_null_delim) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("a"));
+    spl_array_push(arr, spl_str("b"));
+    char* r = spl_str_join(arr, NULL);
+    ASSERT_EQ_STR(r, "ab");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_single_element) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("hello"));
+    char* r = spl_str_join(arr, ",");
+    ASSERT_EQ_STR(r, "hello");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_multiple_elements) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("a"));
+    spl_array_push(arr, spl_str("b"));
+    spl_array_push(arr, spl_str("c"));
+    char* r = spl_str_join(arr, ",");
+    ASSERT_EQ_STR(r, "a,b,c");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_multi_char_delim) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("x"));
+    spl_array_push(arr, spl_str("y"));
+    char* r = spl_str_join(arr, " -- ");
+    ASSERT_EQ_STR(r, "x -- y");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_with_null_element) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("a"));
+    SplValue null_str;
+    null_str.tag = SPL_STRING;
+    null_str.as_str = NULL;
+    spl_array_push(arr, null_str);
+    spl_array_push(arr, spl_str("c"));
+    char* r = spl_str_join(arr, ",");
+    ASSERT_EQ_STR(r, "a,,c");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_all_null_elements) {
+    SplArray* arr = spl_array_new();
+    SplValue null_str;
+    null_str.tag = SPL_STRING;
+    null_str.as_str = NULL;
+    spl_array_push(arr, null_str);
+    spl_array_push(arr, null_str);
+    char* r = spl_str_join(arr, "-");
+    ASSERT_EQ_STR(r, "-");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(join_empty_delim) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("a"));
+    spl_array_push(arr, spl_str("b"));
+    char* r = spl_str_join(arr, "");
+    ASSERT_EQ_STR(r, "ab");
+    free(r);
+    spl_array_free(arr);
+}
+
+/* ================================================================
+ * Coverage: spl_array_contains_str
+ * ================================================================ */
+
+TEST(contains_str_null_array) {
+    ASSERT(!spl_array_contains_str(NULL, "x"));
+}
+
+TEST(contains_str_null_search) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("hello"));
+    ASSERT(!spl_array_contains_str(arr, NULL));
+    spl_array_free(arr);
+}
+
+TEST(contains_str_found) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("apple"));
+    spl_array_push(arr, spl_str("banana"));
+    ASSERT(spl_array_contains_str(arr, "banana"));
+    spl_array_free(arr);
+}
+
+TEST(contains_str_not_found) {
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("apple"));
+    ASSERT(!spl_array_contains_str(arr, "grape"));
+    spl_array_free(arr);
+}
+
+TEST(contains_str_null_element) {
+    SplArray* arr = spl_array_new();
+    SplValue null_str;
+    null_str.tag = SPL_STRING;
+    null_str.as_str = NULL;
+    spl_array_push(arr, null_str);
+    spl_array_push(arr, spl_str("hello"));
+    ASSERT(spl_array_contains_str(arr, "hello"));
+    ASSERT(!spl_array_contains_str(arr, "nope"));
+    spl_array_free(arr);
+}
+
+TEST(contains_str_empty_array) {
+    SplArray* arr = spl_array_new();
+    ASSERT(!spl_array_contains_str(arr, "x"));
+    spl_array_free(arr);
+}
+
+/* ================================================================
+ * Coverage: rt_file_* Aliases + exec_manager stubs + sprintf edge
+ * ================================================================ */
+
+TEST(rt_file_aliases) {
+    const char* path = "/tmp/_spl_rt_alias_test.tmp";
+    ASSERT(rt_file_write(path, "test123"));
+    ASSERT(rt_file_exists(path));
+    const char* content = rt_file_read_text(path);
+    ASSERT_EQ_STR(content, "test123");
+    free((void*)content);
+    ASSERT_EQ_INT(rt_file_size(path), 7);
+    ASSERT(rt_file_delete(path));
+    ASSERT(!rt_file_exists(path));
+}
+
+TEST(exec_manager_stubs) {
+    int64_t h = rt_exec_manager_create("test");
+    ASSERT_EQ_INT(h, 0);
+    const char* r = rt_exec_manager_compile(h, "data");
+    ASSERT_EQ_STR(r, "");
+    int64_t rv = rt_exec_manager_execute(h, "fn", NULL);
+    ASSERT_EQ_INT(rv, 0);
+    ASSERT(!rt_exec_manager_has_function(h, "fn"));
+    rt_exec_manager_cleanup(h);
+}
+
+TEST(sprintf_many_args) {
+    char* s = spl_sprintf("%s=%d, %s=%d, %s=%.2f", "a", 1, "b", 2, "c", 3.14);
+    ASSERT(spl_str_contains(s, "a=1"));
+    ASSERT(spl_str_contains(s, "b=2"));
+    ASSERT(spl_str_contains(s, "c=3.14"));
+    free(s);
+}
+
+/* ================================================================
+ * Coverage: remaining branch edge cases
+ * ================================================================ */
+
+TEST(contains_str_with_non_string_element) {
+    /* Branch 488:13 — arr->items[i].tag != SPL_STRING */
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_int(42));
+    spl_array_push(arr, spl_str("hello"));
+    ASSERT(spl_array_contains_str(arr, "hello"));
+    ASSERT(!spl_array_contains_str(arr, "nope"));
+    spl_array_free(arr);
+}
+
+TEST(join_with_non_string_element) {
+    /* Branches 522:26, 530:26 — arr->items[i].tag != SPL_STRING */
+    SplArray* arr = spl_array_new();
+    spl_array_push(arr, spl_str("a"));
+    spl_array_push(arr, spl_int(99));
+    spl_array_push(arr, spl_str("c"));
+    char* r = spl_str_join(arr, ",");
+    ASSERT_EQ_STR(r, "a,,c");
+    free(r);
+    spl_array_free(arr);
+}
+
+TEST(cli_get_args_null_entry) {
+    /* Branches 907:47 — g_argv[i] is NULL */
+    char* argv[] = {"prog", NULL, "end"};
+    spl_init_args(3, argv);
+    SplArray* args = rt_cli_get_args();
+    ASSERT_EQ_INT(spl_array_len(args), 3);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 0)), "prog");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 1)), "");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 2)), "end");
+    spl_array_free(args);
+}
+
+TEST(cli_get_args_null_argv) {
+    /* Branch 907:37 — g_argv is NULL but g_argc > 0 */
+    spl_init_args(2, NULL);
+    SplArray* args = rt_cli_get_args();
+    ASSERT_EQ_INT(spl_array_len(args), 2);
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 0)), "");
+    ASSERT_EQ_STR(spl_as_str(spl_array_get(args, 1)), "");
+    spl_array_free(args);
+    /* Restore sane state */
+    spl_init_args(0, NULL);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -1935,6 +2366,81 @@ int main(void) {
     printf("\n--- Coverage: Shell Output Error Path ---\n");
     RUN(shell_output_null);
     RUN(shell_output_invalid_cmd);
+
+    printf("\n--- Coverage: file_delete / file_size ---\n");
+    RUN(file_delete_null_path);
+    RUN(file_delete_existing);
+    RUN(file_delete_nonexistent);
+    RUN(file_size_null_path);
+    RUN(file_size_nonexistent);
+    RUN(file_size_existing);
+
+    printf("\n--- Coverage: rt_cli_get_args / rt_shell_output ---\n");
+    RUN(cli_get_args_with_args);
+    RUN(cli_get_args_zero);
+    RUN(rt_shell_output_strips_newline);
+    RUN(rt_shell_output_strips_crlf);
+    RUN(rt_shell_output_null);
+
+    printf("\n--- Coverage: str_last_index_of ---\n");
+    RUN(last_index_of_null_s);
+    RUN(last_index_of_null_needle);
+    RUN(last_index_of_both_null);
+    RUN(last_index_of_empty_needle);
+    RUN(last_index_of_needle_longer);
+    RUN(last_index_of_found_at_end);
+    RUN(last_index_of_found_at_start);
+    RUN(last_index_of_found_in_middle);
+    RUN(last_index_of_multiple_occurrences);
+    RUN(last_index_of_not_found);
+    RUN(last_index_of_single_char);
+    RUN(last_index_of_exact_match);
+
+    printf("\n--- Coverage: str_split ---\n");
+    RUN(split_null_s);
+    RUN(split_null_delim);
+    RUN(split_empty_delim);
+    RUN(split_normal);
+    RUN(split_delim_not_found);
+    RUN(split_consecutive_delims);
+    RUN(split_delim_at_start);
+    RUN(split_delim_at_end);
+    RUN(split_multi_char_delim);
+    RUN(split_empty_string);
+
+    printf("\n--- Coverage: str_join ---\n");
+    RUN(join_null_arr);
+    RUN(join_empty_arr);
+    RUN(join_null_delim);
+    RUN(join_single_element);
+    RUN(join_multiple_elements);
+    RUN(join_multi_char_delim);
+    RUN(join_with_null_element);
+    RUN(join_all_null_elements);
+    RUN(join_empty_delim);
+
+    printf("\n--- Coverage: array_contains_str ---\n");
+    RUN(contains_str_null_array);
+    RUN(contains_str_null_search);
+    RUN(contains_str_found);
+    RUN(contains_str_not_found);
+    RUN(contains_str_null_element);
+    RUN(contains_str_empty_array);
+
+    printf("\n--- Coverage: remaining branch edges ---\n");
+    RUN(contains_str_with_non_string_element);
+    RUN(join_with_non_string_element);
+    RUN(cli_get_args_null_entry);
+    RUN(cli_get_args_null_argv);
+
+    printf("\n--- Coverage: rt_file aliases ---\n");
+    RUN(rt_file_aliases);
+
+    printf("\n--- Coverage: exec_manager stubs ---\n");
+    RUN(exec_manager_stubs);
+
+    printf("\n--- Coverage: sprintf edge cases ---\n");
+    RUN(sprintf_many_args);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;

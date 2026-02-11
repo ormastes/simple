@@ -91,6 +91,7 @@ int      spl_str_ends_with(const char* s, const char* suffix);
 char*    spl_str_replace(const char* s, const char* old_s, const char* new_s);
 char*    spl_str_trim(const char* s);
 int64_t  spl_str_index_of(const char* s, const char* needle);
+int64_t  spl_str_last_index_of(const char* s, const char* needle);
 char*    spl_str_to_upper(const char* s);
 char*    spl_str_to_lower(const char* s);
 
@@ -112,6 +113,9 @@ SplValue  spl_array_pop(SplArray* a);
 SplArray* spl_array_slice(SplArray* a, int64_t start, int64_t end);
 SplArray* spl_array_concat(SplArray* a, SplArray* b);
 void      spl_array_free(SplArray* a);  /* deep free all elements */
+int       spl_array_contains_str(SplArray* a, const char* needle);
+SplArray* spl_str_split(const char* s, const char* delim);
+char*     spl_str_join(SplArray* arr, const char* delim);
 
 /* Typed convenience: i64 arrays */
 SplArray* spl_array_new_i64(void);
@@ -157,6 +161,8 @@ char*    spl_file_read(const char* path);
 int      spl_file_write(const char* path, const char* content);
 int      spl_file_append(const char* path, const char* content);
 int      spl_file_exists(const char* path);
+int      spl_file_delete(const char* path);
+int64_t  spl_file_size(const char* path);
 
 /* ===== Directory Operations ===== */
 
@@ -201,6 +207,16 @@ char*    spl_strdup(const char* s);
 void        spl_init_args(int argc, char** argv);
 int64_t     spl_arg_count(void);
 const char* spl_get_arg(int64_t idx);
+
+/* ===== rt_ Aliases (FFI-compatible wrappers) ===== */
+
+const char* rt_file_read_text(const char* path);
+int         rt_file_exists(const char* path);
+int         rt_file_write(const char* path, const char* content);
+int         rt_file_delete(const char* path);
+int64_t     rt_file_size(const char* path);
+const char* rt_shell_output(const char* cmd);
+SplArray*   rt_cli_get_args(void);
 
 /* ===== Dynamic Loading (WFFI) ===== */
 

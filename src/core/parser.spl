@@ -20,7 +20,7 @@ use core.tokens.{TOK_KW_EXTERN, TOK_KW_USE, TOK_KW_EXPORT}
 use core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
 use core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
 use core.tokens.{TOK_KW_PASS, TOK_KW_IS}
-use core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL}
+use core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_STATIC, TOK_KW_ME}
 use core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
 use core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
 use core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
@@ -69,6 +69,7 @@ use core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM}
 use core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
 use core.ast.{decl_val_binding, decl_var_binding}
 use core.ast.{decl_use_import, decl_export_names, decl_enum_def}
+use core.ast.{decl_impl_block}
 use core.ast.{arm_new}
 use core.ast.{elif_new}
 use core.ast.{module_set_path, module_add_decl}
@@ -77,8 +78,9 @@ use core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
 use core.types.{TYPE_ARRAY_I64, TYPE_ARRAY_TEXT, TYPE_ARRAY_BOOL}
 use core.types.{TYPE_NIL}
 use core.types.{TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL}
-use core.types.{TYPE_RESULT}
+use core.types.{TYPE_RESULT, TYPE_NAMED_BASE}
 use core.types.{int_to_str}
+use core.types.{named_type_register, named_type_find}
 
 # ===== Parser State =====
 
@@ -88,6 +90,7 @@ var par_line: i64 = 0
 var par_col: i64 = 0
 var par_errors: [text] = []
 var par_had_error: bool = false
+var par_struct_names: [text] = []
 
 # ===== Parser Init =====
 
@@ -198,6 +201,10 @@ fn parser_parse_type() -> i64:
             return TYPE_OPTION
         if type_name == "Result":
             return TYPE_RESULT
+        # Check for struct type
+        val sid = named_type_find(type_name)
+        if sid >= 0:
+            return TYPE_NAMED_BASE + sid
         return TYPE_VOID
     if par_kind == TOK_LBRACKET:
         # Array type: [i64], [text], etc.
@@ -996,11 +1003,16 @@ fn parse_struct_decl() -> i64:
     parser_advance()
     val struct_name = par_text
     parser_expect(TOK_IDENT)
+    par_struct_names.push(struct_name)
+    # Pre-register struct name so type references resolve during parsing
+    named_type_register(struct_name, [], [])
     parser_expect(TOK_COLON)
+    parser_skip_newlines()
     parser_expect(TOK_INDENT)
 
     var field_names: [text] = []
     var field_types: [i64] = []
+    var class_method_ids: [i64] = []
 
     for i in 0..1000:
         parser_skip_newlines()
@@ -1010,6 +1022,23 @@ fn parse_struct_decl() -> i64:
         if par_kind == TOK_EOF:
             break
 
+        # Handle methods in class/struct body
+        if par_kind == TOK_KW_STATIC:
+            val sm_id = parse_class_body_method(struct_name, true, false)
+            if sm_id >= 0:
+                class_method_ids.push(sm_id)
+            continue
+        if par_kind == TOK_KW_FN:
+            val fm_id = parse_class_body_method(struct_name, false, false)
+            if fm_id >= 0:
+                class_method_ids.push(fm_id)
+            continue
+        if par_kind == TOK_KW_ME:
+            val mm_id = parse_class_body_method(struct_name, false, true)
+            if mm_id >= 0:
+                class_method_ids.push(mm_id)
+            continue
+
         val fname = par_text
         parser_expect(TOK_IDENT)
         parser_expect(TOK_COLON)
@@ -1018,13 +1047,21 @@ fn parse_struct_decl() -> i64:
         field_types.push(ftype)
         parser_skip_newlines_and_semicolons()
 
-    decl_struct_def(struct_name, field_names, field_types, 0)
+    val struct_d = decl_struct_def(struct_name, field_names, field_types, 0)
+
+    # If class had methods, create an impl block for them
+    if class_method_ids.len() > 0:
+        val impl_d = decl_impl_block(struct_name, class_method_ids, 0)
+        module_add_decl(impl_d)
+
+    struct_d
 
 fn parse_enum_decl() -> i64:
     parser_advance()
     val enum_name = par_text
     parser_expect(TOK_IDENT)
     parser_expect(TOK_COLON)
+    parser_skip_newlines()
     parser_expect(TOK_INDENT)
 
     var variant_names: [text] = []
@@ -1155,6 +1192,108 @@ fn parse_while_expr() -> i64:
     val body = parse_block()
     expr_while_expr(cond, body, 0)
 
+# ===== Class/Impl Method Parsing =====
+
+fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
+    # Advance past leading keyword (static fn / fn / me)
+    if is_static:
+        if par_kind == TOK_KW_STATIC:
+            parser_advance()
+        if par_kind == TOK_KW_FN:
+            parser_advance()
+    elif is_me:
+        parser_advance()
+    else:
+        if par_kind == TOK_KW_FN:
+            parser_advance()
+
+    val method_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_LPAREN)
+
+    var param_names: [text] = []
+    var param_types: [i64] = []
+
+    if par_kind != TOK_RPAREN:
+        val pname = par_text
+        parser_expect(TOK_IDENT)
+        param_names.push(pname)
+        var ptype = 0
+        if par_kind == TOK_COLON:
+            parser_advance()
+            ptype = parser_parse_type()
+        param_types.push(ptype)
+
+        for i in 0..100:
+            if par_kind != TOK_COMMA:
+                break
+            parser_advance()
+            val pn = par_text
+            parser_expect(TOK_IDENT)
+            param_names.push(pn)
+            var pt = 0
+            if par_kind == TOK_COLON:
+                parser_advance()
+                pt = parser_parse_type()
+            param_types.push(pt)
+
+    parser_expect(TOK_RPAREN)
+
+    var ret_type = TYPE_VOID
+    if par_kind == TOK_ARROW:
+        parser_advance()
+        ret_type = parser_parse_type()
+
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+
+    val mangled_name: text = struct_name + "__" + method_name
+    # static_flag: 0=fn (immutable self), 1=static (no self), 2=me (mutable self)
+    var static_flag: i64 = 0
+    if is_static:
+        static_flag = 1
+    if is_me:
+        static_flag = 2
+    val mid = decl_fn(mangled_name, param_names, param_types, ret_type, body, static_flag, 0)
+    return mid
+
+fn parse_impl_decl() -> i64:
+    # impl StructName:
+    parser_advance()
+    val target_name = par_text
+    parser_expect(TOK_IDENT)
+    parser_expect(TOK_COLON)
+    parser_skip_newlines()
+    parser_expect(TOK_INDENT)
+
+    var method_ids: [i64] = []
+
+    for i in 0..1000:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        if par_kind == TOK_KW_STATIC:
+            val sm_id = parse_class_body_method(target_name, true, false)
+            if sm_id >= 0:
+                method_ids.push(sm_id)
+        elif par_kind == TOK_KW_FN:
+            val fm_id = parse_class_body_method(target_name, false, false)
+            if fm_id >= 0:
+                method_ids.push(fm_id)
+        elif par_kind == TOK_KW_ME:
+            val mm_id = parse_class_body_method(target_name, false, true)
+            if mm_id >= 0:
+                method_ids.push(mm_id)
+        else:
+            parser_error("unexpected token in impl body: " + tok_kind_name(par_kind))
+            parser_advance()
+
+    decl_impl_block(target_name, method_ids, 0)
+
 # ===== Top-Level Module Parsing =====
 
 fn parse_module_body():
@@ -1185,6 +1324,13 @@ fn parse_module_body():
             module_add_decl(d)
         elif par_kind == TOK_KW_ENUM:
             val d = parse_enum_decl()
+            module_add_decl(d)
+        elif par_kind == TOK_KW_CLASS:
+            # class is treated like struct (fields + methods)
+            val d = parse_struct_decl()
+            module_add_decl(d)
+        elif par_kind == TOK_KW_IMPL:
+            val d = parse_impl_decl()
             module_add_decl(d)
         elif par_kind == TOK_KW_USE:
             val d = parse_use_decl()
@@ -1283,6 +1429,7 @@ export parse_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
 export parse_if_expr, parse_for_expr, parse_while_expr
 export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
+export parse_impl_decl, parse_class_body_method
 export parse_use_decl, parse_export_decl, parse_val_decl, parse_var_decl
 export parse_module, parse_module_file, parse_module_body
 export parser_has_errors, parser_get_errors, parser_error_count
