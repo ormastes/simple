@@ -1,123 +1,63 @@
 """
-# MCP Argument Completion Specification
-
-**Feature ID:** #MCP-066
-**Category:** Tooling
-**Difficulty:** 3/5
-**Status:** Complete
-
-## Overview
-
-The MCP server supports argument auto-completion via `completion/complete`.
-Clients can request completion suggestions for prompt and resource arguments.
-
-### Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| completion/complete | Method to request completions |
-| ref/prompt | Reference to a prompt for completion |
-| ref/resource | Reference to a resource for completion |
-| values | Array of completion suggestions (max 100) |
-| total | Total number of matches |
-| hasMore | Whether more results exist beyond returned values |
-
-## Behavior
-
-- Client sends `completion/complete` with ref type, argument name, and current value
-- Server returns matching completions based on argument context
-- Response includes `values` (max 100), `total`, and `hasMore`
-- `ref/prompt` completions use prompt argument metadata
-- `ref/resource` completions use resource URI template parameters
-- Optional `context` parameter provides previously resolved argument values
-- Server advertises `completions: {}` capability
-
-## Implementation Notes
-
-Completions are handled in a separate module (completions.spl) to keep
-the main handler clean. Prompt completions match against known prompt names
-and argument values. Resource completions match against URI template parameters.
+MCP Argument Completion Specification
+Feature: MCP Completions
+Category: MCP, Protocol
+Status: Complete
 """
 
-
-# ============================================================================
-# Test Group 1: Completion Request Handling
-# ============================================================================
+use std.spec
+use app.mcp.helpers.{LB, RB, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, make_result_response}
 
 describe "MCP Completion Request":
-    """
-    ## Complete Method
-
-    Tests the completion/complete request handling.
-    """
-
     context "when requesting prompt completions":
-        """
-        ### Scenario: Prompt Argument Completion
-
-        Client requests completions for a prompt argument.
-        """
-
-        it "accepts completion request":
-            val method = "completion/complete"
-            expect(method).to_equal("completion/complete")
+        it "accepts completion request with ref/prompt":
+            val ref = jo2(jp("type", js("ref/prompt")), jp("name", js("code-review")))
+            val arg = jo2(jp("name", js("language")), jp("value", js("py")))
+            val params = jo2(jp("ref", ref), jp("argument", arg))
+            expect(params.contains("ref/prompt")).to_equal(true)
+            expect(params.contains("language")).to_equal(true)
 
         it "handles ref/prompt reference type":
-            val ref_type = "ref/prompt"
+            val ref = jo1(jp("type", js("ref/prompt")))
+            val ref_type = extract_json_string(ref, "type")
             expect(ref_type).to_equal("ref/prompt")
 
-        it "returns completion values":
-            val has_values = true
-            expect(has_values).to_equal(true)
-
-        it "limits values to 100":
-            val max_values = 100
-            expect(max_values).to_equal(100)
+        it "builds completion params with argument value":
+            val arg = jo2(jp("name", js("language")), jp("value", js("py")))
+            val arg_value = extract_json_string(arg, "value")
+            expect(arg_value).to_equal("py")
 
     context "when requesting resource completions":
-        """
-        ### Scenario: Resource URI Completion
-
-        Client requests completions for a resource URI template parameter.
-        """
-
         it "handles ref/resource reference type":
-            val ref_type = "ref/resource"
+            val ref = jo2(jp("type", js("ref/resource")), jp("uri", js("file:///*")))
+            val ref_type = extract_json_string(ref, "type")
             expect(ref_type).to_equal("ref/resource")
 
-        it "returns matching URIs":
-            val has_values = true
-            expect(has_values).to_equal(true)
-
-# ============================================================================
-# Test Group 2: Completion Response Format
-# ============================================================================
+        it "includes uri in resource ref":
+            val ref = jo2(jp("type", js("ref/resource")), jp("uri", js("bugdb:///*")))
+            expect(ref.contains("bugdb://")).to_equal(true)
 
 describe "MCP Completion Response Format":
-    """
-    ## Response Structure
-
-    Tests the completion response format.
-    """
-
     context "when building completion response":
-        """
-        ### Scenario: Response Fields
-
-        Completion response includes values, total, and hasMore.
-        """
-
         it "includes values array":
-            val has_values = true
-            expect(has_values).to_equal(true)
+            val values = "[" + js("python") + "," + js("perl") + "]"
+            val completion = jo3(jp("values", values), jp("total", "2"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("values")).to_equal(true)
+            expect(response.contains("python")).to_equal(true)
 
         it "includes total count":
-            val total = 5
-            expect(total).to_equal(5)
+            val completion = jo3(jp("values", "[]"), jp("total", "5"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"total\":5")).to_equal(true)
 
         it "includes hasMore flag":
-            val has_more = false
-            expect(has_more).to_equal(false)
+            val completion = jo3(jp("values", "[]"), jp("total", "150"), jp("hasMore", "true"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"hasMore\":true")).to_equal(true)
 
         it "values array has max 100 items":
             val max_items = 100
@@ -125,68 +65,30 @@ describe "MCP Completion Response Format":
             expect(actual_items <= max_items).to_equal(true)
 
     context "when no completions available":
-        """
-        ### Scenario: Empty Completions
-
-        No matches returns empty values with zero total.
-        """
-
         it "returns empty values array":
-            val values_count = 0
-            expect(values_count).to_equal(0)
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            val result = jo1(jp("completion", completion))
+            val response = make_result_response("1", result)
+            expect(response.contains("\"values\":[]")).to_equal(true)
 
         it "returns zero total":
-            val total = 0
-            expect(total).to_equal(0)
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            expect(completion.contains("\"total\":0")).to_equal(true)
 
         it "returns hasMore as false":
-            val has_more = false
-            expect(has_more).to_equal(false)
-
-# ============================================================================
-# Test Group 3: Capability Advertisement
-# ============================================================================
-
-describe "MCP Completion Capability":
-    """
-    ## Capability Declaration
-
-    Tests that completion support is advertised.
-    """
-
-    context "when declaring capabilities":
-        """
-        ### Scenario: Completions Capability
-
-        Server includes completions: {} in capabilities.
-        """
-
-        it "advertises completions capability":
-            val has_completions = true
-            expect(has_completions).to_equal(true)
-
-# ============================================================================
-# Test Group 4: Context-Aware Completions
-# ============================================================================
+            val completion = jo3(jp("values", "[]"), jp("total", "0"), jp("hasMore", "false"))
+            expect(completion.contains("\"hasMore\":false")).to_equal(true)
 
 describe "MCP Context-Aware Completions":
-    """
-    ## Context Parameter
-
-    Tests completions that use previously resolved argument values.
-    """
-
     context "when context arguments provided":
-        """
-        ### Scenario: Context-Dependent Completion
+        it "accepts context parameter in params":
+            val context_arg = jo1(jp("language", js("python")))
+            val arg = jo2(jp("name", js("style")), jp("value", js("d")))
+            val params = jo3(jp("ref", jo1(jp("type", js("ref/prompt")))), jp("argument", arg), jp("context", context_arg))
+            expect(params.contains("context")).to_equal(true)
+            expect(params.contains("python")).to_equal(true)
 
-        Completions can depend on previously resolved argument values.
-        """
-
-        it "accepts context parameter":
-            val has_context = true
-            expect(has_context).to_equal(true)
-
-        it "uses context for filtering":
-            val context_aware = true
-            expect(context_aware).to_equal(true)
+        it "extracts context values":
+            val context_arg = jo1(jp("language", js("python")))
+            val lang = extract_json_string(context_arg, "language")
+            expect(lang).to_equal("python")

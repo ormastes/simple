@@ -1,4 +1,3 @@
-# @pending
 """
 MCP Crash Prevention Tests
 Feature: MCP Crash Prevention and Error Isolation
@@ -8,226 +7,202 @@ Status: Complete
 Tests for crash prevention features to ensure MCP errors don't affect Claude sessions.
 """
 
+use std.spec
+use app.mcp.helpers.{LB, RB, jp, js, jo1, jo2, make_result_response, make_error_response, log_level_to_int}
+use app.mcp.{default_validation_limits, strict_validation_limits, input_validator}
 
 describe "Crash prevention architecture":
     it "validates content length limits exist":
-        # Test that validation limits are reasonable
-        val max_content = 10_000_000  # 10MB default
-        val max_string = 1_000_000    # 1MB default
-        expect(max_content > 0)
-        expect(max_string > 0)
-        expect(max_content > max_string)
+        val limits = default_validation_limits()
+        expect(limits.max_content_length > 0).to_equal(true)
+        expect(limits.max_string_length > 0).to_equal(true)
+        expect(limits.max_content_length > limits.max_string_length).to_equal(true)
 
     it "has error recovery tracking":
-        # Test basic error counting logic
         var consecutive_errors = 0
         var max_errors = 5
-
-        # Simulate errors
         consecutive_errors = consecutive_errors + 1
         consecutive_errors = consecutive_errors + 1
-
-        expect(consecutive_errors == 2)
-        expect(consecutive_errors < max_errors)
+        expect(consecutive_errors).to_equal(2)
+        expect(consecutive_errors < max_errors).to_equal(true)
 
     it "resets error count on success":
         var consecutive_errors = 3
-        # Success resets counter
         consecutive_errors = 0
-        expect(consecutive_errors == 0)
+        expect(consecutive_errors).to_equal(0)
 
     it "stops after max consecutive errors":
         var consecutive_errors = 0
         var max_errors = 5
-
-        # Simulate 5 errors
         for i in 0..5:
             consecutive_errors = consecutive_errors + 1
-
         val should_stop = consecutive_errors >= max_errors
-        expect(should_stop)
+        expect(should_stop).to_equal(true)
 
 describe "Input validation bounds":
     it "rejects negative content length":
-        val length = -100
-        val is_valid = length >= 0
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(-100)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("negative")).to_equal(true)
 
     it "rejects excessive content length":
-        val length = 50_000_000  # 50MB
-        val max_length = 10_000_000  # 10MB
-        val is_valid = length <= max_length
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
 
     it "accepts valid content length":
-        val length = 1_000  # 1KB
-        val max_length = 10_000_000  # 10MB
-        val is_valid = length >= 0 and length <= max_length
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(1000)
+        expect(result).to_be_nil()
 
 describe "URI validation":
     it "validates file URI prefix":
-        val uri = "file:///home/user/test.spl"
-        val is_file = uri.starts_with("file://")
-        expect(is_file)
+        val validator = input_validator()
+        val result = validator.validate_uri("file:///home/user/test.spl")
+        expect(result).to_be_nil()
 
     it "validates symbol URI prefix":
-        val uri = "symbol://project/MyClass"
-        val is_symbol = uri.starts_with("symbol://")
-        expect(is_symbol)
+        val validator = input_validator()
+        val result = validator.validate_uri("symbol://project/MyClass")
+        expect(result).to_be_nil()
 
     it "rejects invalid URI scheme":
-        val uri = "invalid://test"
-        val is_valid_file = uri.starts_with("file://")
-        val is_valid_symbol = uri.starts_with("symbol://")
-        val is_valid_project = uri.starts_with("project://")
-        val is_valid = is_valid_file or is_valid_symbol or is_valid_project
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_uri("invalid://test")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("scheme")).to_equal(true)
 
     it "validates URI length limit":
         val uri = "file:///test.spl"
-        val max_uri_length = 2_048
+        val max_uri_length = 2048
         val is_valid = uri.len() <= max_uri_length
-        expect(is_valid)
+        expect(is_valid).to_equal(true)
 
 describe "Tool name validation":
     it "validates simple tool name":
-        val name = "read_code"
-        val is_valid = name.len() > 0 and name.len() <= 256
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("read_code")
+        expect(result).to_be_nil()
 
     it "validates tool name with slash":
-        val name = "tools/list"
-        val has_valid_length = name.len() > 0 and name.len() <= 256
-        expect(has_valid_length)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("tools/list")
+        expect(result).to_be_nil()
 
     it "rejects empty tool name":
-        val name = ""
-        val is_valid = name.len() > 0
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("empty")).to_equal(true)
 
 describe "Error categories":
     it "has transport errors":
-        val category = "Transport"
-        expect(category == "Transport")
+        val response = make_error_response("1", -32000, "Transport error")
+        expect(response.contains("Transport")).to_equal(true)
 
     it "has protocol errors":
-        val category = "Protocol"
-        expect(category == "Protocol")
+        val response = make_error_response("1", -32600, "Protocol error")
+        expect(response.contains("Protocol")).to_equal(true)
 
     it "has validation errors":
-        val category = "Validation"
-        expect(category == "Validation")
+        val response = make_error_response("1", -32602, "Validation error")
+        expect(response.contains("Validation")).to_equal(true)
 
     it "has resource errors":
-        val category = "Resource"
-        expect(category == "Resource")
+        val response = make_error_response("1", -32001, "Resource error")
+        expect(response.contains("Resource")).to_equal(true)
 
     it "has tool errors":
-        val category = "Tool"
-        expect(category == "Tool")
+        val response = make_error_response("1", -32002, "Tool error")
+        expect(response.contains("Tool")).to_equal(true)
 
     it "has internal errors":
-        val category = "Internal"
-        expect(category == "Internal")
+        val response = make_error_response("1", -32603, "Internal error")
+        expect(response.contains("Internal")).to_equal(true)
 
 describe "Log levels":
     it "has trace level":
-        val level = 0  # Trace
-        expect(level == 0)
-
-    it "has debug level":
-        val level = 1  # Debug
-        expect(level == 1)
+        expect(log_level_to_int("debug")).to_equal(0)
 
     it "has info level":
-        val level = 2  # Info
-        expect(level == 2)
+        expect(log_level_to_int("info")).to_equal(1)
 
     it "has warn level":
-        val level = 3  # Warn
-        expect(level == 3)
+        expect(log_level_to_int("warning")).to_equal(3)
 
     it "has error level":
-        val level = 4  # Error
-        expect(level == 4)
+        expect(log_level_to_int("error")).to_equal(4)
 
-    it "has fatal level":
-        val level = 5  # Fatal
-        expect(level == 5)
+    it "has critical level":
+        expect(log_level_to_int("critical")).to_equal(5)
+
+    it "has emergency level":
+        expect(log_level_to_int("emergency")).to_equal(7)
 
     it "orders levels correctly":
-        val trace = 0
-        val debug = 1
-        val info = 2
-        val warn = 3
-        val error = 4
-        val fatal = 5
-
-        expect(trace < debug)
-        expect(debug < info)
-        expect(info < warn)
-        expect(warn < error)
-        expect(error < fatal)
+        val debug_val = log_level_to_int("debug")
+        val info_val = log_level_to_int("info")
+        val warning_val = log_level_to_int("warning")
+        val error_val = log_level_to_int("error")
+        val emergency_val = log_level_to_int("emergency")
+        expect(debug_val < info_val).to_equal(true)
+        expect(info_val < warning_val).to_equal(true)
+        expect(warning_val < error_val).to_equal(true)
+        expect(error_val < emergency_val).to_equal(true)
 
 describe "Validation limits":
     it "has default limits":
-        val max_content = 10_000_000
-        val max_string = 1_000_000
-        val max_array = 10_000
-        val max_dict = 1_000
-
-        expect(max_content == 10_000_000)
-        expect(max_string == 1_000_000)
-        expect(max_array == 10_000)
-        expect(max_dict == 1_000)
+        val limits = default_validation_limits()
+        expect(limits.max_content_length).to_equal(1048576)
+        expect(limits.max_string_length).to_equal(65536)
+        expect(limits.max_array_length).to_equal(1000)
 
     it "has strict limits":
-        val max_content = 1_000_000
-        val max_string = 100_000
-        val max_array = 1_000
-        val max_dict = 100
-
-        expect(max_content == 1_000_000)
-        expect(max_string == 100_000)
-        expect(max_array == 1_000)
-        expect(max_dict == 100)
+        val limits = strict_validation_limits()
+        expect(limits.max_content_length).to_equal(524288)
+        expect(limits.max_string_length).to_equal(32768)
+        expect(limits.max_array_length).to_equal(500)
 
     it "strict limits are more restrictive":
-        val default_content = 10_000_000
-        val strict_content = 1_000_000
-
-        expect(strict_content < default_content)
+        val d = default_validation_limits()
+        val s = strict_validation_limits()
+        expect(s.max_content_length < d.max_content_length).to_equal(true)
 
 describe "Error codes":
     it "has JSON-RPC parse error code":
-        val code = -32700
-        expect(code == -32700)
+        val response = make_error_response("1", -32700, "Parse error")
+        expect(response.contains("-32700")).to_equal(true)
 
     it "has JSON-RPC invalid request code":
-        val code = -32600
-        expect(code == -32600)
+        val response = make_error_response("1", -32600, "Invalid Request")
+        expect(response.contains("-32600")).to_equal(true)
 
     it "has JSON-RPC method not found code":
-        val code = -32601
-        expect(code == -32601)
+        val response = make_error_response("1", -32601, "Method not found")
+        expect(response.contains("-32601")).to_equal(true)
 
     it "has JSON-RPC invalid params code":
-        val code = -32602
-        expect(code == -32602)
+        val response = make_error_response("1", -32602, "Invalid params")
+        expect(response.contains("-32602")).to_equal(true)
 
     it "has JSON-RPC internal error code":
-        val code = -32603
-        expect(code == -32603)
+        val response = make_error_response("1", -32603, "Internal error")
+        expect(response.contains("-32603")).to_equal(true)
 
     it "has custom timeout code":
-        val code = -32000
-        expect(code == -32000)
+        val response = make_error_response("1", -32000, "Timeout")
+        expect(response.contains("-32000")).to_equal(true)
 
     it "has custom rate limit code":
-        val code = -32001
-        expect(code == -32001)
+        val response = make_error_response("1", -32001, "Rate limit")
+        expect(response.contains("-32001")).to_equal(true)
 
     it "has custom validation code":
-        val code = -32002
-        expect(code == -32002)
+        val response = make_error_response("1", -32002, "Validation")
+        expect(response.contains("-32002")).to_equal(true)

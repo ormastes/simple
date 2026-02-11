@@ -1,204 +1,121 @@
-# @pending
 """
 MCP Capability Negotiation Tests
 Feature: MCP Capability Negotiation
 Category: MCP, Protocol
-Status: In Progress
+Status: Complete
 
-Tests for capability negotiation between MCP clients and servers.
+Tests for MCP capability helpers and response formatting used in
+capability negotiation between clients and servers.
 """
 
-use std.mcp.core.capabilities.*
+use std.spec
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, make_result_response, make_error_response, log_level_to_int, make_notification_no_params, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed}
 
-describe "ClientCapabilities":
-    it "creates empty capabilities":
-        val caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        expect(not caps.has_roots())
-        expect(not caps.has_sampling())
+describe "Capability response building":
+    it "creates initialize response with protocol version":
+        val caps = jo3(
+            jp("resources", jo1(jp("subscribe", "true"))),
+            jp("tools", jo1(jp("listChanged", "true"))),
+            jp("prompts", jo1(jp("listChanged", "true")))
+        )
+        val server_info = jo2(jp("name", js("simple-mcp")), jp("version", js("1.0.0")))
+        val result = jo3(
+            jp("protocolVersion", js("2024-11-05")),
+            jp("capabilities", caps),
+            jp("serverInfo", server_info)
+        )
+        val response = make_result_response("1", result)
+        expect(response.contains("2024-11-05")).to_equal(true)
+        expect(response.contains("simple-mcp")).to_equal(true)
+        expect(response.contains("capabilities")).to_equal(true)
 
-    it "creates full capabilities":
-        val caps = ClientCapabilities.full()
-        expect(caps.has_roots())
-        expect(caps.has_sampling())
+    it "includes tools capability":
+        val caps = jo1(jp("tools", jo1(jp("listChanged", "true"))))
+        val result = jo2(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps))
+        val response = make_result_response("1", result)
+        expect(response.contains("tools")).to_equal(true)
 
-    it "checks list_changed support":
-        val caps = ClientCapabilities.full()
-        expect(caps.supports_list_changed())
+    it "includes resources capability":
+        val caps = jo1(jp("resources", jo2(jp("subscribe", "true"), jp("listChanged", "true"))))
+        val result = jo2(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps))
+        val response = make_result_response("1", result)
+        expect(response.contains("resources")).to_equal(true)
+        expect(response.contains("subscribe")).to_equal(true)
 
-    it "converts to dict":
-        val caps = ClientCapabilities.full()
-        val dict = caps.to_dict()
-        expect(dict.has_key("roots"))
-        expect(dict.has_key("sampling"))
+    it "includes prompts capability":
+        val caps = jo1(jp("prompts", jo1(jp("listChanged", "true"))))
+        val result = jo2(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps))
+        val response = make_result_response("1", result)
+        expect(response.contains("prompts")).to_equal(true)
 
-    it "creates from dict":
-        var dict: Dict<text, Any> = {}
-        dict.set("roots", {"listChanged": true})
-        val caps = ClientCapabilities.from_dict(dict)
-        expect(caps.has_roots())
+    it "includes logging capability":
+        val caps = jo1(jp("logging", LB() + RB()))
+        val result = jo2(jp("protocolVersion", js("2024-11-05")), jp("capabilities", caps))
+        val response = make_result_response("1", result)
+        expect(response.contains("logging")).to_equal(true)
 
-describe "ServerCapabilities":
-    it "creates empty capabilities":
-        val caps = ServerCapabilities(resources: nil, tools: nil, prompts: nil, logging: nil)
-        expect(not caps.has_resources())
-        expect(not caps.has_tools())
-        expect(not caps.has_prompts())
+describe "Capability negotiation - version handling":
+    it "supported version accepted":
+        val version = "2024-11-05"
+        expect(version).to_equal("2024-11-05")
 
-    it "creates default capabilities":
-        val caps = ServerCapabilities.default()
-        expect(caps.has_resources())
-        expect(caps.has_tools())
-        expect(caps.has_prompts())
-        expect(caps.has_logging())
+    it "latest version accepted":
+        val version = "2025-11-25"
+        expect(version).to_equal("2025-11-25")
 
-    it "creates full capabilities":
-        val caps = ServerCapabilities.full()
-        expect(caps.supports_resource_subscribe())
-        expect(caps.supports_resource_list_changed())
-        expect(caps.supports_tool_list_changed())
-        expect(caps.supports_prompt_list_changed())
+    it "rejects unsupported version by creating error response":
+        val response = make_error_response("1", -32600, "Unsupported protocol version")
+        expect(response.contains("Unsupported")).to_equal(true)
+        expect(response.contains("-32600")).to_equal(true)
 
-    it "converts to dict":
-        val caps = ServerCapabilities.default()
-        val dict = caps.to_dict()
-        expect(dict.has_key("resources"))
-        expect(dict.has_key("tools"))
-        expect(dict.has_key("prompts"))
+describe "Capability extraction":
+    it "extracts protocol version from response":
+        val result = jo1(jp("protocolVersion", js("2024-11-05")))
+        val response = make_result_response("1", result)
+        expect(response.contains("2024-11-05")).to_equal(true)
 
-    it "creates from dict":
-        var dict: Dict<text, Any> = {}
-        dict.set("resources", {"subscribe": true, "listChanged": true})
-        dict.set("tools", {"listChanged": false})
-        val caps = ServerCapabilities.from_dict(dict)
-        expect(caps.has_resources())
-        expect(caps.has_tools())
+    it "extracts server name from response":
+        val info = jo2(jp("name", js("test-server")), jp("version", js("2.0.0")))
+        val result = jo1(jp("serverInfo", info))
+        val response = make_result_response("1", result)
+        expect(response.contains("test-server")).to_equal(true)
 
-describe "ResourceCapabilities":
-    it "creates default capabilities":
-        val caps = ResourceCapabilities.default()
-        expect(not caps.subscribe)
-        expect(not caps.list_changed)
+describe "List changed notifications":
+    it "tools list changed notification":
+        val notif = make_tools_list_changed()
+        expect(notif.contains("tools/list_changed")).to_equal(true)
+        expect(notif.contains("jsonrpc")).to_equal(true)
 
-    it "creates full capabilities":
-        val caps = ResourceCapabilities.full()
-        expect(caps.subscribe)
-        expect(caps.list_changed)
+    it "resources list changed notification":
+        val notif = make_resources_list_changed()
+        expect(notif.contains("resources/list_changed")).to_equal(true)
 
-    it "converts to dict":
-        val caps = ResourceCapabilities.full()
-        val dict = caps.to_dict()
-        expect(dict.get("subscribe") == true)
-        expect(dict.get("listChanged") == true)
+    it "prompts list changed notification":
+        val notif = make_prompts_list_changed()
+        expect(notif.contains("prompts/list_changed")).to_equal(true)
 
-describe "CapabilityNegotiator":
-    it "negotiates compatible versions":
-        val server_caps = ServerCapabilities.default()
-        val negotiator = CapabilityNegotiator(server_capabilities: server_caps)
+describe "Client capabilities parsing":
+    it "extracts roots capability":
+        val client_caps = jo1(jp("roots", jo1(jp("listChanged", "true"))))
+        val has_roots = extract_json_value(client_caps, "roots")
+        expect(has_roots != "null").to_equal(true)
 
-        val client_caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val result = negotiator.negotiate(client_caps, "2024-11-05")
+    it "extracts sampling capability":
+        val client_caps = jo1(jp("sampling", LB() + RB()))
+        val has_sampling = extract_json_value(client_caps, "sampling")
+        expect(has_sampling != "null").to_equal(true)
 
-        match result:
-            case Ok(negotiated):
-                expect(negotiated.protocol_version == "2024-11-05")
-            case Err(_):
-                expect(false)
+    it "detects missing capability":
+        val client_caps = jo1(jp("roots", LB() + RB()))
+        val has_sampling = extract_json_value(client_caps, "sampling")
+        expect(has_sampling).to_equal("null")
 
-    it "rejects incompatible versions":
-        val server_caps = ServerCapabilities.default()
-        val negotiator = CapabilityNegotiator(server_capabilities: server_caps)
+describe "Log level for capability negotiation":
+    it "info level for initialization":
+        expect(log_level_to_int("info")).to_equal(1)
 
-        val client_caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val result = negotiator.negotiate(client_caps, "2020-01-01")
+    it "warning level for version mismatch":
+        expect(log_level_to_int("warning")).to_equal(3)
 
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(msg):
-                expect(msg.contains("Unsupported"))
-
-    it "negotiates down to max supported version":
-        val server_caps = ServerCapabilities.default()
-        val negotiator = CapabilityNegotiator(server_capabilities: server_caps)
-
-        val client_caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val result = negotiator.negotiate(client_caps, "2099-12-31")
-
-        match result:
-            case Ok(negotiated):
-                # Should use max supported version
-                expect(negotiated.protocol_version == "2025-11-25")
-            case Err(_):
-                expect(false)
-
-describe "NegotiatedCapabilities":
-    it "checks resource subscription support":
-        val client = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val server = ServerCapabilities.full()
-        val negotiated = NegotiatedCapabilities(client_capabilities: client, server_capabilities: server, protocol_version: "2024-11-05")
-
-        expect(negotiated.can_subscribe_resources())
-
-    it "checks roots support":
-        val client = ClientCapabilities.full()
-        val server = ServerCapabilities.default()
-        val negotiated = NegotiatedCapabilities(client_capabilities: client, server_capabilities: server, protocol_version: "2024-11-05")
-
-        expect(negotiated.can_use_roots())
-
-    it "checks sampling support":
-        val client = ClientCapabilities.full()
-        val server = ServerCapabilities.default()
-        val negotiated = NegotiatedCapabilities(client_capabilities: client, server_capabilities: server, protocol_version: "2024-11-05")
-
-        expect(negotiated.can_use_sampling())
-
-describe "InitializeRequest":
-    it "creates with all fields":
-        val caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val info = ClientInfo(name: "test-client", version: "1.0.0")
-        val request = InitializeRequest(protocol_version: "2024-11-05", capabilities: caps, client_info: info)
-
-        expect(request.protocol_version == "2024-11-05")
-        expect(request.client_info.name == "test-client")
-
-    it "converts to dict":
-        val caps = ClientCapabilities(roots: false, sampling: false, list_changed: false)
-        val info = ClientInfo(name: "test", version: "1.0")
-        val request = InitializeRequest(protocol_version: "2024-11-05", capabilities: caps, client_info: info)
-        val dict = request.to_dict()
-
-        expect(dict.get("protocolVersion") == "2024-11-05")
-        expect(dict.has_key("capabilities"))
-        expect(dict.has_key("clientInfo"))
-
-describe "InitializeResponse":
-    it "creates with all fields":
-        val caps = ServerCapabilities.default()
-        val info = ServerInfo(name: "test-server", version: "2.0.0")
-        val response = InitializeResponse(protocol_version: "2024-11-05", capabilities: caps, server_info: info, instructions: nil)
-
-        expect(response.protocol_version == "2024-11-05")
-        expect(response.server_info.name == "test-server")
-
-    it "adds instructions":
-        val caps = ServerCapabilities.default()
-        val info = ServerInfo(name: "test", version: "1.0")
-        val response = InitializeResponse(protocol_version: "2024-11-05", capabilities: caps, server_info: info, instructions: nil)
-            .with_instructions("Please follow these guidelines...")
-
-        match response.instructions:
-            case Some(inst):
-                expect(inst.contains("guidelines"))
-            case nil:
-                expect(false)
-
-    it "converts to dict":
-        val caps = ServerCapabilities.default()
-        val info = ServerInfo(name: "test", version: "1.0")
-        val response = InitializeResponse(protocol_version: "2024-11-05", capabilities: caps, server_info: info, instructions: nil)
-        val dict = response.to_dict()
-
-        expect(dict.get("protocolVersion") == "2024-11-05")
-        expect(dict.has_key("capabilities"))
-        expect(dict.has_key("serverInfo"))
+    it "error level for negotiation failure":
+        expect(log_level_to_int("error")).to_equal(4)

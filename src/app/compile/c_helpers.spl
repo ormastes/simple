@@ -56,6 +56,12 @@ fn simple_type_to_c(stype: text) -> text:
         return "SimpleStringArrayArray"
     if stype == "[[i64]]" or stype == "[[int]]":
         return "SimpleIntArrayArray"
+    # If the type starts with uppercase, treat it as a struct type name
+    if stype.len() > 0:
+        val first_char = stype[0]
+        val is_upper = first_char >= "A" and first_char <= "Z"
+        if is_upper:
+            return stype
     "long long"
 
 # Translate Simple parameter list to C
@@ -87,9 +93,9 @@ fn parse_fn_signature(trimmed: text) -> [text]:
 
     val name = sig.substring(0, paren_idx).trim()
 
-    # Find return type
+    # Find return type - default to void if no -> annotation
     val arrow_idx = sig.index_of("->") ?? -1
-    var ret_type = "long long"
+    var ret_type = "void"
     if arrow_idx >= 0:
         val ret_str = sig.substring(arrow_idx + 2).trim()
         ret_type = simple_type_to_c(ret_str)
@@ -147,6 +153,18 @@ fn is_fn_returning_text(name: text, types: text) -> bool:
     val marker = ";fn_text:" + name + ";"
     types.contains(marker)
 
+# Check if a function returns a struct type, return struct name or ""
+fn is_fn_returning_struct(name: text, types: text) -> text:
+    val marker = ";fn_struct:" + name + "="
+    val pos = types.index_of(marker) ?? -1
+    if pos < 0:
+        return ""
+    val after = types.substring(pos + marker.len())
+    val end_pos = after.index_of(";") ?? -1
+    if end_pos < 0:
+        return ""
+    after.substring(0, end_pos)
+
 # Check if a variable is a known struct type, return class name or ""
 fn is_struct_type_var(name: text, types: text) -> text:
     val marker = ";struct_var:" + name + "="
@@ -182,6 +200,46 @@ fn is_static_fn(class_name: text, method_name: text, types: text) -> bool:
     val marker = ";static_fn:" + class_name + "." + method_name + ";"
     types.contains(marker)
 
+# Check if a dotted name (e.g., "self.source") is a struct field that is text
+fn is_struct_field_text(dotted: text, types: text) -> bool:
+    val dot_pos = dotted.index_of(".") ?? -1
+    if dot_pos < 0:
+        return false
+    val obj = dotted.substring(0, dot_pos).trim()
+    val field = dotted.substring(dot_pos + 1).trim()
+    val class_name = is_struct_type_var(obj, types)
+    if class_name == "":
+        return false
+    val marker = ";field_text:" + class_name + "." + field + ";"
+    types.contains(marker)
+
+# Check if a dotted name (e.g., "table.names") is a struct field that is a string array
+# Returns true if the struct has field_arr: marker for this field
+fn is_struct_field_str_array(dotted: text, types: text) -> bool:
+    val dot_pos = dotted.index_of(".") ?? -1
+    if dot_pos < 0:
+        return false
+    val obj = dotted.substring(0, dot_pos).trim()
+    val field = dotted.substring(dot_pos + 1).trim()
+    val class_name = is_struct_type_var(obj, types)
+    if class_name == "":
+        return false
+    val marker = ";field_arr:" + class_name + "." + field + ";"
+    types.contains(marker)
+
+# Check if a dotted name is a struct field that is an int array
+fn is_struct_field_int_array(dotted: text, types: text) -> bool:
+    val dot_pos = dotted.index_of(".") ?? -1
+    if dot_pos < 0:
+        return false
+    val obj = dotted.substring(0, dot_pos).trim()
+    val field = dotted.substring(dot_pos + 1).trim()
+    val class_name = is_struct_type_var(obj, types)
+    if class_name == "":
+        return false
+    val marker = ";field_int_arr:" + class_name + "." + field + ";"
+    types.contains(marker)
+
 # Check if variable is a dict
 fn is_dict_var(name: text, types: text) -> bool:
     val marker = ";dict:" + name + ";"
@@ -191,6 +249,27 @@ fn is_dict_var(name: text, types: text) -> bool:
 fn is_option_var(name: text, types: text) -> bool:
     val marker = ";option:" + name + ";"
     types.contains(marker)
+
+# Check if dotted name is a known enum variant (e.g., "PointcutKind.All")
+fn is_enum_variant(dotted: text, types: text) -> bool:
+    val marker = ";enum_variant:" + dotted + ";"
+    types.contains(marker)
+
+# Find the C name for an enum variant by its short name (e.g., "All" -> "PointcutKind_All")
+# Returns "" if not found
+fn resolve_enum_variant(short_name: text, types: text) -> text:
+    val search = "." + short_name + ";"
+    val pos = types.index_of(search) ?? -1
+    if pos < 0:
+        return ""
+    # Walk backwards to find "enum_variant:"
+    val before = types.substring(0, pos)
+    val marker_pos = before.last_index_of(";enum_variant:") ?? -1
+    if marker_pos < 0:
+        return ""
+    val entry = before.substring(marker_pos + 14)
+    # entry is like "PointcutKind"
+    entry + "_" + short_name
 
 # Parse a method signature inside an impl block
 # Returns [method_name, c_signature, forward_decl]
@@ -213,9 +292,9 @@ fn parse_method_signature(trimmed: text, class_name: text, is_me: bool) -> [text
     val method_name = sig.substring(0, paren_idx).trim()
     val mangled = class_name + "__" + method_name
 
-    # Return type
+    # Return type - default to void if no -> annotation
     val arrow_idx = sig.index_of("->") ?? -1
-    var ret_type = "long long"
+    var ret_type = "void"
     if arrow_idx >= 0:
         val ret_str = sig.substring(arrow_idx + 2).trim()
         ret_type = simple_type_to_c(ret_str)
@@ -259,7 +338,7 @@ fn parse_generic_type(type_str: text) -> [text]:
 
 export get_indent_level, get_c_indent, simple_type_to_c, translate_params
 export parse_fn_signature, find_close_paren
-export is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text
+export is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array
 export is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn
-export is_dict_var, is_option_var
+export is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant
 export parse_method_signature, parse_generic_type

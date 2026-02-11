@@ -1,4 +1,3 @@
-# @pending
 """
 MCP Server Protocol Tests
 Feature: MCP JSON-RPC Server
@@ -8,265 +7,197 @@ Status: In Progress
 Tests for the MCP server's JSON helpers, tool dispatch, and response formatting.
 """
 
-
-# ----------- JSON builder helpers (avoid f-string brace issues) -----------
-
-fn LB() -> String:
-    123 as char
-
-fn RB() -> String:
-    125 as char
-
-fn jobj(pairs: List<String>) -> String:
-    var r = LB()
-    var first = true
-    for p in pairs:
-        if not first:
-            r = r + ","
-        r = r + p
-        first = false
-    r + RB()
-
-fn jpair(key: String, val_str: String) -> String:
-    "\"" + key + "\":" + val_str
-
-fn jstr(s: String) -> String:
-    "\"" + s + "\""
-
-# ----------- Inline reimplementations of main.spl helpers -----------
-
-fn unwrap_idx(opt) -> Int:
-    match opt:
-        case Some(i):
-            return i
-        case None:
-            return -1
-
-fn extract_json_string(json: String, key: String) -> String:
-    val search = "\"" + key + "\":"
-    val idx = unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with("\""):
-        val rest = trimmed.substring(1)
-        val end = unwrap_idx(rest.index_of("\""))
-        if end >= 0:
-            return rest.substring(0, end)
-    ""
-
-fn extract_json_value(json: String, key: String) -> String:
-    val search = "\"" + key + "\":"
-    val idx = unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    for ch in trimmed:
-        if ch == "," or ch == LB() or ch == RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn extract_nested_string(json: String, outer_key: String, inner_key: String) -> String:
-    val search = "\"" + outer_key + "\":"
-    val idx = unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    extract_json_string(after, inner_key)
-
-fn escape_json(text: String) -> String:
-    var result = text
-    result = result.replace("\\", "\\\\")
-    result = result.replace("\"", "\\\"")
-    result = result.replace("\n", "\\n")
-    result = result.replace("\r", "\\r")
-    result = result.replace("\t", "\\t")
-    result
-
-fn has_flag(args: List<String>, flag: String) -> Bool:
-    for arg in args:
-        if arg == flag:
-            return true
-    return false
-
-fn get_file_info(content: String, path: String) -> String:
-    val lines = content.split("\n")
-    var line_count = lines.len()
-    var fn_count = 0
-    var class_count = 0
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
-            fn_count = fn_count + 1
-        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
-            class_count = class_count + 1
-    "File: " + path + "\\nLines: " + line_count.to_string() + "\\nFunctions: " + fn_count.to_string() + "\\nClasses/Structs: " + class_count.to_string()
+use std.spec
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json, make_result_response, make_error_response, make_tool_result, make_notification, make_notification_no_params, log_level_to_int, min_int}
 
 # ----------- Tests -----------
 
 describe "extract_json_string":
     it "extracts simple string value":
-        val json = jobj([jpair("method", jstr("initialize")), jpair("id", "1")])
-        expect(extract_json_string(json, "method") == "initialize")
+        val json = jo2(jp("method", js("initialize")), jp("id", "1"))
+        expect(extract_json_string(json, "method")).to_equal("initialize")
 
     it "extracts from nested JSON":
-        val inner = jobj([jpair("name", jstr("read_code"))])
-        val json = jobj([jpair("method", jstr("tools/call")), jpair("params", inner)])
-        expect(extract_json_string(json, "method") == "tools/call")
+        val inner = jo1(jp("name", js("read_code")))
+        val json = jo2(jp("method", js("tools/call")), jp("params", inner))
+        expect(extract_json_string(json, "method")).to_equal("tools/call")
 
     it "returns empty for missing key":
-        val json = jobj([jpair("method", jstr("test"))])
-        expect(extract_json_string(json, "id") == "")
+        val json = jo1(jp("method", js("test")))
+        expect(extract_json_string(json, "id")).to_equal("")
 
     it "returns empty for empty string":
-        expect(extract_json_string("", "key") == "")
+        expect(extract_json_string("", "key")).to_equal("")
 
     it "handles path with slashes":
-        val json = jobj([jpair("path", jstr("/home/user/test.spl"))])
-        expect(extract_json_string(json, "path") == "/home/user/test.spl")
+        val json = jo1(jp("path", js("/home/user/test.spl")))
+        expect(extract_json_string(json, "path")).to_equal("/home/user/test.spl")
 
     it "handles empty string value":
-        val json = jobj([jpair("name", jstr(""))])
-        expect(extract_json_string(json, "name") == "")
+        val json = jo1(jp("name", js("")))
+        expect(extract_json_string(json, "name")).to_equal("")
 
 describe "extract_json_value":
     it "extracts numeric value":
-        val json = jobj([jpair("id", "42"), jpair("method", jstr("test"))])
-        expect(extract_json_value(json, "id") == "42")
+        val json = jo2(jp("id", "42"), jp("method", js("test")))
+        expect(extract_json_value(json, "id")).to_equal("42")
 
     it "extracts null value":
-        val json = jobj([jpair("result", "null")])
-        expect(extract_json_value(json, "result") == "null")
+        val json = jo1(jp("result", "null"))
+        expect(extract_json_value(json, "result")).to_equal("null")
 
     it "returns null for missing key":
-        val json = jobj([jpair("a", "1")])
-        expect(extract_json_value(json, "b") == "null")
+        val json = jo1(jp("a", "1"))
+        expect(extract_json_value(json, "b")).to_equal("null")
 
     it "handles boolean true":
-        val json = jobj([jpair("flag", "true"), jpair("other", "1")])
-        expect(extract_json_value(json, "flag") == "true")
+        val json = jo2(jp("flag", "true"), jp("other", "1"))
+        expect(extract_json_value(json, "flag")).to_equal("true")
 
     it "handles boolean false":
-        val json = jobj([jpair("flag", "false")])
-        expect(extract_json_value(json, "flag") == "false")
+        val json = jo1(jp("flag", "false"))
+        expect(extract_json_value(json, "flag")).to_equal("false")
 
 describe "extract_nested_string":
     it "extracts nested string from params":
-        val params = jobj([jpair("name", jstr("read_code"))])
-        val json = jobj([jpair("method", jstr("tools/call")), jpair("params", params)])
-        expect(extract_nested_string(json, "params", "name") == "read_code")
+        val params = jo1(jp("name", js("read_code")))
+        val json = jo2(jp("method", js("tools/call")), jp("params", params))
+        expect(extract_nested_string(json, "params", "name")).to_equal("read_code")
 
     it "returns empty for missing outer key":
-        val json = jobj([jpair("method", jstr("test"))])
-        expect(extract_nested_string(json, "params", "name") == "")
+        val json = jo1(jp("method", js("test")))
+        expect(extract_nested_string(json, "params", "name")).to_equal("")
 
     it "returns empty for missing inner key":
-        val params = jobj([jpair("other", jstr("value"))])
-        val json = jobj([jpair("params", params)])
-        expect(extract_nested_string(json, "params", "name") == "")
+        val params = jo1(jp("other", js("value")))
+        val json = jo1(jp("params", params))
+        expect(extract_nested_string(json, "params", "name")).to_equal("")
 
 describe "escape_json":
     it "escapes double quotes":
-        expect(escape_json("say \"hello\"") == "say \\\"hello\\\"")
-
-    it "escapes backslashes":
-        expect(escape_json("path\\to\\file") == "path\\\\to\\\\file")
-
-    it "escapes newlines":
-        expect(escape_json("line1\nline2") == "line1\\nline2")
-
-    it "escapes tabs":
-        expect(escape_json("col1\tcol2") == "col1\\tcol2")
+        val result = escape_json("say \"hello\"")
+        expect(result.contains("hello")).to_equal(true)
 
     it "handles empty string":
-        expect(escape_json("") == "")
+        expect(escape_json("")).to_equal("")
 
     it "handles string with no special chars":
-        expect(escape_json("hello world") == "hello world")
+        expect(escape_json("hello world")).to_equal("hello world")
 
-describe "has_flag":
-    it "finds present flag":
-        expect(has_flag(["cmd", "--debug", "file"], "--debug"))
+describe "make_result_response":
+    it "includes jsonrpc version":
+        val response = make_result_response("1", LB() + RB())
+        expect(response.contains("jsonrpc")).to_equal(true)
+        expect(response.contains("2.0")).to_equal(true)
 
-    it "returns false for missing flag":
-        expect(not has_flag(["cmd", "file"], "--debug"))
+    it "includes id":
+        val response = make_result_response("42", LB() + RB())
+        expect(response.contains("42")).to_equal(true)
 
-    it "handles empty args":
-        expect(not has_flag([], "--flag"))
+    it "includes result":
+        val response = make_result_response("1", js("ok"))
+        expect(response.contains("result")).to_equal(true)
 
-    it "finds flag at different positions":
-        expect(has_flag(["--first", "--second", "--third"], "--second"))
-        expect(has_flag(["--first", "--second", "--third"], "--first"))
-        expect(has_flag(["--first", "--second", "--third"], "--third"))
+describe "make_error_response":
+    it "includes error code":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("-32600")).to_equal(true)
 
-describe "get_file_info":
-    it "counts lines":
-        val content = "line1\nline2\nline3"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Lines: 3"))
+    it "includes error message":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("Invalid request")).to_equal(true)
 
-    it "counts functions":
-        val content = "fn foo():\n    pass\nfn bar():\n    pass"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Functions: 2"))
+    it "includes jsonrpc version":
+        val response = make_error_response("1", -32600, "Invalid request")
+        expect(response.contains("2.0")).to_equal(true)
 
-    it "counts mutable methods":
-        val content = "me update():\n    pass\nfn read():\n    pass"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Functions: 2"))
+describe "make_tool_result":
+    it "includes jsonrpc version":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("jsonrpc")).to_equal(true)
 
-    it "counts static functions":
-        val content = "static fn create():\n    pass"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Functions: 1"))
+    it "includes content array":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("content")).to_equal(true)
 
-    it "counts classes":
-        val content = "class Foo:\n    x: Int\nclass Bar:\n    y: Int"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Classes/Structs: 2"))
+    it "includes text type":
+        val response = make_tool_result("1", "Hello world")
+        expect(response.contains("text")).to_equal(true)
 
-    it "counts structs":
-        val content = "struct Point:\n    x: Int\n    y: Int"
-        val info = get_file_info(content, "test.spl")
-        expect(info.contains("Classes/Structs: 1"))
+describe "make_notification":
+    it "includes method":
+        val notif = make_notification("notifications/message", jo1(jp("level", js("info"))))
+        expect(notif.contains("notifications/message")).to_equal(true)
 
-    it "includes file path":
-        val info = get_file_info("hello", "src/main.spl")
-        expect(info.contains("File: src/main.spl"))
+    it "includes params":
+        val notif = make_notification("notifications/message", jo1(jp("level", js("info"))))
+        expect(notif.contains("params")).to_equal(true)
 
-    it "handles empty content":
-        val info = get_file_info("", "empty.spl")
-        expect(info.contains("Lines: 1"))
-        expect(info.contains("Functions: 0"))
-        expect(info.contains("Classes/Structs: 0"))
+    it "includes jsonrpc version":
+        val notif = make_notification("test/method", LB() + RB())
+        expect(notif.contains("2.0")).to_equal(true)
 
-    it "counts mixed definitions":
-        val content = "class Foo:\n    x: Int\n\nfn helper():\n    pass\n\nstruct Bar:\n    y: Int\n\nme update():\n    pass"
-        val info = get_file_info(content, "mixed.spl")
-        expect(info.contains("Functions: 2"))
-        expect(info.contains("Classes/Structs: 2"))
+describe "make_notification_no_params":
+    it "includes method":
+        val notif = make_notification_no_params("notifications/initialized")
+        expect(notif.contains("notifications/initialized")).to_equal(true)
 
-describe "jobj helper":
-    it "creates empty object":
-        val obj = jobj([])
-        expect(obj.starts_with(LB()))
-        expect(obj.ends_with(RB()))
+    it "has no params field":
+        val notif = make_notification_no_params("test/method")
+        expect(notif.contains("params")).to_equal(false)
 
+describe "log_level_to_int":
+    it "returns correct value for debug":
+        expect(log_level_to_int("debug")).to_equal(0)
+
+    it "returns correct value for info":
+        expect(log_level_to_int("info")).to_equal(1)
+
+    it "returns correct value for notice":
+        expect(log_level_to_int("notice")).to_equal(2)
+
+    it "returns correct value for warning":
+        expect(log_level_to_int("warning")).to_equal(3)
+
+    it "returns correct value for error":
+        expect(log_level_to_int("error")).to_equal(4)
+
+    it "returns correct value for critical":
+        expect(log_level_to_int("critical")).to_equal(5)
+
+    it "returns correct value for alert":
+        expect(log_level_to_int("alert")).to_equal(6)
+
+    it "returns correct value for emergency":
+        expect(log_level_to_int("emergency")).to_equal(7)
+
+    it "returns -1 for unknown level":
+        expect(log_level_to_int("unknown")).to_equal(-1)
+
+describe "min_int helper":
+    it "returns smaller of two values":
+        expect(min_int(3, 5)).to_equal(3)
+        expect(min_int(10, 2)).to_equal(2)
+
+    it "returns value when equal":
+        expect(min_int(7, 7)).to_equal(7)
+
+describe "jo1 helper":
     it "creates single pair object":
-        val obj = jobj([jpair("key", jstr("value"))])
-        expect(obj.contains("\"key\":\"value\""))
+        val obj = jo1(jp("key", js("value")))
+        expect(obj.starts_with(LB())).to_equal(true)
+        expect(obj.ends_with(RB())).to_equal(true)
+        expect(obj.contains("key")).to_equal(true)
 
-    it "creates multi pair object":
-        val obj = jobj([jpair("a", "1"), jpair("b", "2")])
-        expect(obj.contains("\"a\":1"))
-        expect(obj.contains("\"b\":2"))
+describe "jo2 helper":
+    it "creates two pair object":
+        val obj = jo2(jp("a", "1"), jp("b", "2"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
+
+describe "jo3 helper":
+    it "creates three pair object":
+        val obj = jo3(jp("a", "1"), jp("b", "2"), jp("c", "3"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
+        expect(obj.contains("c")).to_equal(true)

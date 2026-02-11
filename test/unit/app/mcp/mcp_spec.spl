@@ -1,95 +1,182 @@
-# @pending
 """
 MCP Protocol Tests
-Feature: Model Context Protocol Types
+Feature: Model Context Protocol Helpers
 Category: MCP, Protocol
 Status: Complete
 
-Tests for the Model Context Protocol types including BlockMark,
-Visibility, SymbolKind, Symbol, and MCP metadata types.
+Tests for the MCP helper functions including JSON builders,
+response makers, content type detection, and escape utilities.
 """
 
-# @slow
-# Performance note: ~2 seconds runtime. Exclude for quick dev cycles.
+use std.spec
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, extract_nested_string, escape_json, make_result_response, make_error_response, make_tool_result, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_image_content, make_audio_content, make_resource_link_content, make_embedded_resource_content, make_content_annotations, detect_file_content_type, detect_mime_type, min_int}
 
-use mcp.simple_lang.types.*
+describe "LB and RB helpers":
+    it "LB returns left brace":
+        val lb = LB()
+        expect(lb.len()).to_equal(1)
 
-describe "BlockMark":
-    """
-    Tests for BlockMark enum representing collapsed/expanded code blocks.
-    """
-    it "creates block marks":
-        val class_mark = BlockMark.ClassCollapsed
-        val func_mark = BlockMark.FunctionExpanded
-        expect(class_mark.is_class_collapsed())
-        expect(func_mark.is_function_expanded())
+    it "RB returns right brace":
+        val rb = RB()
+        expect(rb.len()).to_equal(1)
 
-    it "converts block marks to strings":
-        expect(block_mark_to_string(BlockMark.ClassCollapsed) == "C>")
-        expect(block_mark_to_string(BlockMark.ClassExpanded) == "C▼")
-        expect(block_mark_to_string(BlockMark.FunctionCollapsed) == "F>")
-        expect(block_mark_to_string(BlockMark.FunctionExpanded) == "F▼")
-        expect(block_mark_to_string(BlockMark.TraitCollapsed) == "T>")
-        expect(block_mark_to_string(BlockMark.VirtualInfo) == "V•")
+    it "LB and RB are different":
+        expect(LB() != RB()).to_equal(true)
 
-    it "checks collapsed vs expanded":
-        expect(BlockMark.ClassCollapsed.is_collapsed())
-        expect(not BlockMark.ClassCollapsed.is_expanded())
-        expect(BlockMark.FunctionExpanded.is_expanded())
-        expect(not BlockMark.FunctionExpanded.is_collapsed())
+describe "Q helper":
+    it "returns double quote":
+        val q = Q()
+        expect(q.len()).to_equal(1)
 
-    it "provides descriptions":
-        expect(BlockMark.ClassCollapsed.description() == "Collapsed class definition")
-        expect(BlockMark.FunctionExpanded.description() == "Expanded function")
-        expect(BlockMark.VirtualInfo.description() == "Virtual method info")
+describe "jp - JSON pair builder":
+    it "creates key-value pair":
+        val pair = jp("name", js("test"))
+        expect(pair.contains("name")).to_equal(true)
+        expect(pair.contains("test")).to_equal(true)
 
-describe "Visibility":
-    it "converts to string":
-        expect(Visibility.Public.to_string() == "public")
-        expect(Visibility.Private.to_string() == "private")
+describe "js - JSON string builder":
+    it "wraps string in quotes":
+        val result = js("hello")
+        expect(result.starts_with(Q())).to_equal(true)
+        expect(result.ends_with(Q())).to_equal(true)
 
-    it "checks access":
-        expect(Visibility.Public.is_public())
-        expect(Visibility.Public.allows_external_access())
-        expect(Visibility.Private.is_private())
-        expect(not Visibility.Private.allows_external_access())
+describe "jo1 - single pair object":
+    it "creates JSON object with one pair":
+        val obj = jo1(jp("key", js("value")))
+        expect(obj.starts_with(LB())).to_equal(true)
+        expect(obj.ends_with(RB())).to_equal(true)
+        expect(obj.contains("key")).to_equal(true)
 
-describe "SymbolKind":
-    it "converts to string":
-        expect(SymbolKind.Class.to_string() == "class")
-        expect(SymbolKind.Function.to_string() == "function")
-        expect(SymbolKind.Method.to_string() == "method")
-        expect(SymbolKind.Trait.to_string() == "trait")
+describe "jo2 - two pair object":
+    it "creates JSON object with two pairs":
+        val obj = jo2(jp("a", "1"), jp("b", "2"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
 
-    it "checks type categories":
-        expect(SymbolKind.Class.is_type_definition())
-        expect(SymbolKind.Struct.is_type_definition())
-        expect(SymbolKind.Trait.is_type_definition())
-        expect(not SymbolKind.Function.is_type_definition())
+describe "jo3 - three pair object":
+    it "creates JSON object with three pairs":
+        val obj = jo3(jp("a", "1"), jp("b", "2"), jp("c", "3"))
+        expect(obj.contains("a")).to_equal(true)
+        expect(obj.contains("b")).to_equal(true)
+        expect(obj.contains("c")).to_equal(true)
 
-    it "checks callables":
-        expect(SymbolKind.Function.is_callable())
-        expect(SymbolKind.Method.is_callable())
-        expect(not SymbolKind.Class.is_callable())
+describe "make_result_response":
+    it "includes jsonrpc 2.0":
+        val response = make_result_response("1", js("ok"))
+        expect(response.contains("2.0")).to_equal(true)
 
-describe "Symbol":
-    it "creates new symbol":
-        val sym = Symbol.new(SymbolKind.Function, "my_func", Visibility.Public)
-        expect(sym.name == "my_func")
-        expect(sym.kind.is_function())
-        expect(sym.visibility.is_public())
-        expect(sym.is_collapsed)
+    it "includes result":
+        val response = make_result_response("1", js("ok"))
+        expect(response.contains("result")).to_equal(true)
 
-describe "McpMetadata":
-    it "creates default metadata":
-        val meta = McpMetadata.default()
-        expect(meta.mode == "mcp")
-        expect(meta.line_numbers == "plain")
-        expect(not meta.show_coverage)
-        expect(not meta.show_block_guides)
+describe "make_error_response":
+    it "includes error code":
+        val response = make_error_response("1", -32600, "Bad request")
+        expect(response.contains("-32600")).to_equal(true)
 
-describe "McpOutput":
-    it "creates output with text":
-        val output = McpOutput(text: "Hello MCP", meta: nil)
-        expect(output.text == "Hello MCP")
-        expect(output.meta == nil)
+    it "includes error message":
+        val response = make_error_response("1", -32600, "Bad request")
+        expect(response.contains("Bad request")).to_equal(true)
+
+describe "make_tool_result":
+    it "includes content array":
+        val result = make_tool_result("1", "output")
+        expect(result.contains("content")).to_equal(true)
+
+describe "make_notification":
+    it "includes method and params":
+        val notif = make_notification("test/event", LB() + RB())
+        expect(notif.contains("test/event")).to_equal(true)
+        expect(notif.contains("params")).to_equal(true)
+
+describe "make_notification_no_params":
+    it "creates notification without params":
+        val notif = make_notification_no_params("test/ping")
+        expect(notif.contains("test/ping")).to_equal(true)
+
+describe "make_progress_notification":
+    it "includes progress token":
+        val notif = make_progress_notification("token-1", 50, 100, "Halfway")
+        expect(notif.contains("token-1")).to_equal(true)
+
+    it "includes progress value":
+        val notif = make_progress_notification("t", 75, 100, "")
+        expect(notif.contains("75")).to_equal(true)
+
+describe "make_tools_list_changed":
+    it "creates tools list changed notification":
+        val notif = make_tools_list_changed()
+        expect(notif.contains("tools/list_changed")).to_equal(true)
+
+describe "make_resources_list_changed":
+    it "creates resources list changed notification":
+        val notif = make_resources_list_changed()
+        expect(notif.contains("resources/list_changed")).to_equal(true)
+
+describe "make_prompts_list_changed":
+    it "creates prompts list changed notification":
+        val notif = make_prompts_list_changed()
+        expect(notif.contains("prompts/list_changed")).to_equal(true)
+
+describe "make_resource_updated_notification":
+    it "includes resource URI":
+        val notif = make_resource_updated_notification("file:///test.spl")
+        expect(notif.contains("test.spl")).to_equal(true)
+
+describe "make_image_content":
+    it "creates image content object":
+        val content = make_image_content("base64data", "image/png")
+        expect(content.contains("image")).to_equal(true)
+        expect(content.contains("image/png")).to_equal(true)
+
+describe "make_audio_content":
+    it "creates audio content object":
+        val content = make_audio_content("audiodata", "audio/wav")
+        expect(content.contains("audio")).to_equal(true)
+        expect(content.contains("audio/wav")).to_equal(true)
+
+describe "make_resource_link_content":
+    it "creates resource link":
+        val content = make_resource_link_content("file:///test.spl", "test.spl")
+        expect(content.contains("resource_link")).to_equal(true)
+
+describe "make_embedded_resource_content":
+    it "creates embedded resource":
+        val content = make_embedded_resource_content("file:///test.spl", "fn main():", "text/x-simple")
+        expect(content.contains("resource")).to_equal(true)
+
+describe "make_content_annotations":
+    it "creates annotations with audience":
+        val annot = make_content_annotations(["user"], "0.5", "")
+        expect(annot.contains("audience")).to_equal(true)
+
+describe "detect_file_content_type":
+    it "detects image files":
+        expect(detect_file_content_type("photo.png")).to_equal("image")
+
+    it "detects audio files":
+        expect(detect_file_content_type("song.wav")).to_equal("audio")
+
+    it "detects text files":
+        expect(detect_file_content_type("code.spl")).to_equal("text")
+
+describe "detect_mime_type":
+    it "detects Simple files":
+        expect(detect_mime_type("main.spl")).to_equal("text/x-simple")
+
+    it "detects JSON files":
+        expect(detect_mime_type("config.json")).to_equal("application/json")
+
+    it "detects PNG images":
+        expect(detect_mime_type("image.png")).to_equal("image/png")
+
+    it "defaults to text/plain":
+        expect(detect_mime_type("unknown.xyz")).to_equal("text/plain")
+
+describe "min_int":
+    it "returns smaller value":
+        expect(min_int(3, 5)).to_equal(3)
+        expect(min_int(10, 2)).to_equal(2)
+
+    it "handles equal values":
+        expect(min_int(7, 7)).to_equal(7)

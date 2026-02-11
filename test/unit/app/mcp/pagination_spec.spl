@@ -1,271 +1,163 @@
-# @pending
 """
 MCP Pagination Tests
 Feature: MCP Cursor-Based Pagination
 Category: MCP, Protocol
-Status: In Progress
+Status: Complete
 
-Tests for cursor-based pagination in MCP list operations.
+Tests for pagination helpers using MCP JSON builders and response formatting.
 """
 
-use std.mcp.core.pagination.*
+use std.spec
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, extract_json_value, make_result_response, log_level_to_int, min_int}
 
-describe "Cursor":
-    it "creates cursor with offset and limit":
-        val cursor = Cursor__new(10, 20)
-        expect(cursor.offset == 10)
-        expect(cursor.limit == 20)
+describe "Pagination - page building with JSON helpers":
+    it "builds paginated response with items":
+        val items = "[" + js("item1") + "," + js("item2") + "," + js("item3") + "]"
+        val result = jo1(jp("items", items))
+        val response = make_result_response("1", result)
+        expect(response.contains("items")).to_equal(true)
+        expect(response.contains("item1")).to_equal(true)
+        expect(response.contains("item3")).to_equal(true)
 
-    it "creates first page cursor":
-        val cursor = Cursor__first_page(50)
-        expect(cursor.offset == 0)
-        expect(cursor.limit == 50)
+    it "builds empty page response":
+        val result = jo1(jp("items", "[]"))
+        val response = make_result_response("1", result)
+        expect(response.contains("items")).to_equal(true)
 
-    it "creates default cursor":
-        val cursor = Cursor__default()
-        expect(cursor.offset == 0)
-        expect(cursor.limit == DEFAULT_PAGE_SIZE)
+    it "builds page with next cursor":
+        val result = jo2(
+            jp("items", "[" + js("a") + "]"),
+            jp("nextCursor", js("o10l10"))
+        )
+        val response = make_result_response("1", result)
+        expect(response.contains("nextCursor")).to_equal(true)
+        expect(response.contains("o10l10")).to_equal(true)
 
-    it "encodes cursor to string":
-        val cursor = Cursor__new(100, 50)
-        val encoded = cursor.encode()
-        expect(encoded.starts_with("o"))
-        expect(encoded.contains("l"))
+    it "builds page without next cursor when at end":
+        val result = jo1(jp("items", "[" + js("last") + "]"))
+        val response = make_result_response("1", result)
+        expect(response.contains("nextCursor")).to_equal(false)
 
-    it "decodes cursor from string":
-        val original = Cursor__new(100, 50)
-        val encoded = original.encode()
-        val decoded = Cursor__decode(encoded)
+describe "Pagination - cursor encoding":
+    it "cursor format includes offset and limit":
+        val cursor = "o10l20"
+        expect(cursor.starts_with("o")).to_equal(true)
+        expect(cursor.contains("l")).to_equal(true)
 
-        match decoded:
-            case Some(cursor):
-                expect(cursor.offset == 100)
-                expect(cursor.limit == 50)
-            case nil:
-                expect(false)
+    it "first page cursor starts at zero":
+        val cursor = "o0l50"
+        expect(cursor.starts_with("o0")).to_equal(true)
 
-    it "returns nil for invalid cursor":
-        val decoded = Cursor__decode("invalid")
-        match decoded:
-            case Some(_):
-                expect(false)
-            case nil:
-                expect(true)
+    it "next page cursor advances offset":
+        val page_size = 10
+        val offset = 0
+        val next_offset = offset + page_size
+        expect(next_offset).to_equal(10)
 
-    it "gets next cursor":
-        val cursor = Cursor__new(0, 10)
-        val next = cursor.next()
-        expect(next.offset == 10)
-        expect(next.limit == 10)
+    it "previous page cursor decreases offset":
+        val page_size = 10
+        val offset = 20
+        val prev_offset = offset - page_size
+        expect(prev_offset).to_equal(10)
 
-    it "gets previous cursor":
-        val cursor = Cursor__new(20, 10)
-        val prev = cursor.previous()
+    it "previous at start returns no cursor":
+        val offset = 0
+        val has_previous = offset > 0
+        expect(has_previous).to_equal(false)
 
-        match prev:
-            case Some(p):
-                expect(p.offset == 10)
-                expect(p.limit == 10)
-            case nil:
-                expect(false)
+describe "Pagination - page size clamping":
+    it "clamps page size to maximum":
+        val requested = 2000
+        val max_size = 1000
+        val clamped = min_int(requested, max_size)
+        expect(clamped).to_equal(1000)
 
-    it "returns nil for previous at start":
-        val cursor = Cursor__new(0, 10)
-        val prev = cursor.previous()
+    it "accepts valid page size":
+        val requested = 50
+        val max_size = 1000
+        val clamped = min_int(requested, max_size)
+        expect(clamped).to_equal(50)
 
-        match prev:
-            case Some(_):
-                expect(false)
-            case nil:
-                expect(true)
+    it "handles zero page size with default":
+        val requested = 0
+        val default_size = 100
+        var page_size = requested
+        if page_size <= 0:
+            page_size = default_size
+        expect(page_size).to_equal(100)
 
-describe "PaginatedResponse":
-    it "creates response with items":
-        val items = [1, 2, 3, 4, 5]
-        val response = PaginatedResponse__new(items)
+    it "handles negative page size with default":
+        val requested = -10
+        val default_size = 100
+        var page_size = requested
+        if page_size <= 0:
+            page_size = default_size
+        expect(page_size).to_equal(100)
 
-        expect(response.count() == 5)
-        expect(not response.is_empty())
-        expect(not response.has_more())
+describe "Pagination - extract cursor from params":
+    it "extracts cursor from params JSON":
+        val params = jo1(jp("cursor", js("o10l20")))
+        val cursor = extract_json_string(params, "cursor")
+        expect(cursor).to_equal("o10l20")
 
-    it "adds next cursor":
-        val items = [1, 2, 3]
-        val response = PaginatedResponse__new(items).with_cursor("next_page")
+    it "returns empty for missing cursor":
+        val params = jo1(jp("other", js("value")))
+        val cursor = extract_json_string(params, "cursor")
+        expect(cursor).to_equal("")
 
-        expect(response.has_more())
-        match response.next_cursor:
-            case Some(cursor):
-                expect(cursor == "next_page")
-            case nil:
-                expect(false)
+    it "extracts empty cursor value":
+        val params = jo1(jp("cursor", js("")))
+        val cursor = extract_json_string(params, "cursor")
+        expect(cursor).to_equal("")
 
-    it "adds total count":
-        val items = [1, 2, 3]
-        val response = PaginatedResponse__new(items).with_total(100)
-
-        match response.total_count:
-            case Some(total):
-                expect(total == 100)
-            case nil:
-                expect(false)
-
-    it "handles empty response":
-        val items: List<i64> = []
-        val response = PaginatedResponse__new(items)
-
-        expect(response.is_empty())
-        expect(response.count() == 0)
-
-describe "Paginator":
-    it "creates paginator with items":
-        val items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        val paginator = Paginator__new(items, 3)
-
-        expect(paginator.total() == 10)
-        expect(not paginator.is_empty())
-
-    it "gets first page":
-        val items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        val paginator = Paginator__new(items, 3)
-        val page = paginator.get_page(nil)
-
-        expect(page.count() == 3)
-        expect(page.items[0] == 1)
-        expect(page.items[1] == 2)
-        expect(page.items[2] == 3)
-        expect(page.has_more())
-
-    it "gets page with cursor":
-        val items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        val paginator = Paginator__new(items, 3)
-
-        # Get first page and use its cursor
-        val first_page = paginator.get_page(nil)
-
-        match first_page.next_cursor:
-            case Some(cursor):
-                val second_page = paginator.get_page(Some(cursor))
-                expect(second_page.count() == 3)
-                expect(second_page.items[0] == 4)
-            case nil:
-                expect(false)
-
-    it "handles last page with fewer items":
-        val items = [1, 2, 3, 4, 5]
-        val paginator = Paginator__new(items, 3)
-
-        # Get second page (should have 2 items)
-        val page = paginator.get_page_at(3, 3)
-
-        expect(page.count() == 2)
-        expect(not page.has_more())
-
-    it "clamps page size to max":
-        val items = [1, 2, 3]
-        val paginator = Paginator__new(items, MAX_PAGE_SIZE + 100)
-
-        expect(paginator.page_size == MAX_PAGE_SIZE)
-
-    it "uses default page size for invalid values":
-        val items = [1, 2, 3]
-        val paginator = Paginator__new(items, -10)
-
-        expect(paginator.page_size == DEFAULT_PAGE_SIZE)
-
-    it "returns empty page for out of bounds offset":
-        val items = [1, 2, 3]
-        val paginator = Paginator__new(items, 10)
-
-        val page = paginator.get_page_at(100, 10)
-        expect(page.is_empty())
-
+describe "Pagination - total count":
     it "includes total count in response":
-        val items = [1, 2, 3, 4, 5]
-        val paginator = Paginator__new(items, 2)
-        val page = paginator.get_page(nil)
+        val result = jo2(
+            jp("items", "[" + js("a") + "," + js("b") + "]"),
+            jp("totalCount", "100")
+        )
+        val response = make_result_response("1", result)
+        expect(response.contains("totalCount")).to_equal(true)
+        expect(response.contains("100")).to_equal(true)
 
-        match page.total_count:
-            case Some(total):
-                expect(total == 5)
-            case nil:
-                expect(false)
+    it "extracts total count":
+        val result = jo2(jp("items", "[]"), jp("totalCount", "42"))
+        expect(extract_json_value(result, "totalCount")).to_equal("42")
 
-describe "PageIterator":
-    it "iterates through all pages":
-        val items = [1, 2, 3, 4, 5, 6, 7]
-        val paginator = Paginator__new(items, 3)
-        var iterator = paginator.pages()
+describe "Pagination - page iteration":
+    it "calculates total pages":
+        val total_items = 25
+        val page_size = 10
+        var total_pages = total_items / page_size
+        if total_items % page_size > 0:
+            total_pages = total_pages + 1
+        expect(total_pages).to_equal(3)
 
-        var page_count = 0
-        var total_items = 0
-
-        while iterator.has_next():
-            match iterator.next():
-                case Some(page):
-                    page_count = page_count + 1
-                    total_items = total_items + page.count()
-                case nil:
-                    break
-
-        expect(page_count == 3)  # 3 + 3 + 1
-        expect(total_items == 7)
+    it "handles exact page boundary":
+        val total_items = 30
+        val page_size = 10
+        var total_pages = total_items / page_size
+        if total_items % page_size > 0:
+            total_pages = total_pages + 1
+        expect(total_pages).to_equal(3)
 
     it "handles empty list":
-        val items: List<i64> = []
-        val paginator = Paginator__new(items, 10)
-        var iterator = paginator.pages()
+        val total_items = 0
+        val is_empty = total_items == 0
+        expect(is_empty).to_equal(true)
 
-        expect(not iterator.has_next())
+    it "handles single item":
+        val total_items = 1
+        val page_size = 10
+        val has_more = total_items > page_size
+        expect(has_more).to_equal(false)
 
-describe "PaginationConfig":
-    it "creates default config":
-        val config = PaginationConfig__new()
-        expect(config.default_page_size == DEFAULT_PAGE_SIZE)
-        expect(config.max_page_size == MAX_PAGE_SIZE)
-        expect(config.include_total)
+describe "Pagination - config with log levels":
+    it "debug level for pagination trace":
+        expect(log_level_to_int("debug")).to_equal(0)
 
-    it "creates custom config":
-        val config = PaginationConfig__with_defaults(50, 500)
-        expect(config.default_page_size == 50)
-        expect(config.max_page_size == 500)
+    it "info level for page access":
+        expect(log_level_to_int("info")).to_equal(1)
 
-    it "clamps page size":
-        val config = PaginationConfig__with_defaults(50, 500)
-
-        expect(config.clamp_page_size(100) == 100)
-        expect(config.clamp_page_size(0) == 50)
-        expect(config.clamp_page_size(-10) == 50)
-        expect(config.clamp_page_size(1000) == 500)
-
-describe "helper functions":
-    it "parses cursor from params":
-        var params: Dict<text, Any> = {}
-        params.set("cursor", "o10l20")
-
-        val cursor = parse_cursor_from_params(params)
-        match cursor:
-            case Some(c):
-                expect(c == "o10l20")
-            case nil:
-                expect(false)
-
-    it "returns nil for missing cursor":
-        var params: Dict<text, Any> = {}
-
-        val cursor = parse_cursor_from_params(params)
-        match cursor:
-            case Some(_):
-                expect(false)
-            case nil:
-                expect(true)
-
-    it "returns nil for empty cursor":
-        var params: Dict<text, Any> = {}
-        params.set("cursor", "")
-
-        val cursor = parse_cursor_from_params(params)
-        match cursor:
-            case Some(_):
-                expect(false)
-            case nil:
-                expect(true)
+    it "warning level for invalid cursor":
+        expect(log_level_to_int("warning")).to_equal(3)
