@@ -1220,25 +1220,39 @@ impl MirLowering:
         """Lower range expression to runtime call.
 
         Generates call to rt_range(start, end) or rt_range_inclusive(start, end).
-        Step parameter is currently ignored (TODO: support step in runtime).
+        When a step parameter is provided, generates rt_range_step(start, end, step)
+        or rt_range_inclusive_step(start, end, step) instead.
         """
         # Lower start and end to locals
         val start_local = if start.?: self.lower_expr(start.unwrap()) else: self.builder.emit_const_int(0)
         val end_local = if end.?: self.lower_expr(end.unwrap()) else: self.builder.emit_const_int(0)
 
-        # Create function operand for rt_range or rt_range_inclusive
+        # Create function operand for the appropriate runtime call
         val func_operand = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Int(0),  # Function symbol (will be resolved in codegen)
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
 
-        # Emit call: rt_range(start, end) or rt_range_inclusive(start, end)
-        val result = self.builder.emit_call(func_operand, [
-            mir_operand_copy(start_local),
-            mir_operand_copy(end_local)
-        ], MirType.i64())
+        if step.?:
+            # Step parameter provided: rt_range_step(start, end, step)
+            # or rt_range_inclusive_step(start, end, step)
+            val step_local = self.lower_expr(step.unwrap())
 
-        result ?? self.builder.new_temp(MirType.i64())
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local),
+                mir_operand_copy(step_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
+        else:
+            # No step: rt_range(start, end) or rt_range_inclusive(start, end)
+            val result = self.builder.emit_call(func_operand, [
+                mir_operand_copy(start_local),
+                mir_operand_copy(end_local)
+            ], MirType.i64())
+
+            result ?? self.builder.new_temp(MirType.i64())
 
     me lower_inline_asm(asm: HirAsm) -> LocalId:
         """Lower inline assembly from HIR to MIR.

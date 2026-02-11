@@ -1,0 +1,181 @@
+name: Cross-Compile All Platforms
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'seed/**'
+      - 'seed/cmake/toolchains/**'
+      - 'script/build-cross-compile-all.sh'
+      - '.github/workflows/cross-compile-all.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'seed/**'
+      - 'seed/cmake/toolchains/**'
+  workflow_dispatch:
+
+jobs:
+  cross-compile:
+    name: Cross-compile ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            toolchain: seed/cmake/toolchains/linux-x86_64.cmake
+            packages: ""
+            sysroot: ""
+            verify_cmd: "file build/linux-x86_64/seed"
+
+          - target: linux-arm64
+            toolchain: seed/cmake/toolchains/linux-arm64.cmake
+            packages: "gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user"
+            sysroot: ""
+            verify_cmd: "file build/linux-arm64/seed && qemu-aarch64 -L /usr/aarch64-linux-gnu build/linux-arm64/seed"
+
+          - target: linux-riscv64
+            toolchain: seed/cmake/toolchains/linux-riscv64.cmake
+            packages: "gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user"
+            sysroot: ""
+            verify_cmd: "file build/linux-riscv64/seed && qemu-riscv64 -L /usr/riscv64-linux-gnu build/linux-riscv64/seed"
+
+          - target: windows-x86_64
+            toolchain: seed/cmake/toolchains/windows-x86_64.cmake
+            packages: "gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64"
+            sysroot: ""
+            verify_cmd: "file build/windows-x86_64/seed.exe"
+
+          - target: windows-x86
+            toolchain: seed/cmake/toolchains/windows-x86.cmake
+            packages: "gcc-mingw-w64-i686 g++-mingw-w64-i686"
+            sysroot: ""
+            verify_cmd: "file build/windows-x86/seed.exe"
+
+          - target: freebsd-x86_64
+            toolchain: seed/cmake/toolchains/freebsd-x86_64.cmake
+            packages: "clang lld"
+            sysroot: "freebsd-x86_64"
+            verify_cmd: "file build/freebsd-x86_64/seed"
+
+          - target: freebsd-x86
+            toolchain: seed/cmake/toolchains/freebsd-x86.cmake
+            packages: "clang lld"
+            sysroot: "freebsd-x86"
+            verify_cmd: "file build/freebsd-x86/seed"
+
+          - target: macos-arm64
+            toolchain: seed/cmake/toolchains/macos-arm64.cmake
+            packages: "clang lld llvm"
+            sysroot: "macos"
+            verify_cmd: "file build/macos-arm64/seed"
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install cross-compile toolchains
+      if: matrix.packages != ''
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq ${{ matrix.packages }}
+
+    - name: Download FreeBSD x86_64 sysroot
+      if: matrix.sysroot == 'freebsd-x86_64'
+      run: |
+        curl -L -o /tmp/freebsd-base.txz \
+          https://archive.freebsd.org/old-releases/amd64/14.1-RELEASE/base.txz
+        sudo mkdir -p /opt/sysroots/freebsd-x86_64
+        sudo tar xf /tmp/freebsd-base.txz -C /opt/sysroots/freebsd-x86_64 \
+          ./usr/include ./usr/lib ./lib
+        sudo chmod -R a+rX /opt/sysroots/freebsd-x86_64
+
+    - name: Download FreeBSD i386 sysroot
+      if: matrix.sysroot == 'freebsd-x86'
+      run: |
+        curl -L -o /tmp/freebsd-i386-base.txz \
+          https://archive.freebsd.org/old-releases/i386/13.2-RELEASE/base.txz
+        sudo mkdir -p /opt/sysroots/freebsd-x86
+        sudo tar xf /tmp/freebsd-i386-base.txz -C /opt/sysroots/freebsd-x86 \
+          ./usr/include ./usr/lib ./lib
+        sudo chmod -R a+rX /opt/sysroots/freebsd-x86
+
+    - name: Download macOS SDK
+      if: matrix.sysroot == 'macos'
+      run: |
+        curl -L -o /tmp/MacOSX14.5.sdk.tar.xz \
+          https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz
+        sudo mkdir -p /opt/sysroots/macos
+        sudo tar xf /tmp/MacOSX14.5.sdk.tar.xz -C /opt/sysroots/macos
+        sudo chmod -R a+rX /opt/sysroots/macos
+
+    - name: Configure CMake
+      run: |
+        cmake -B build/${{ matrix.target }} seed \
+          -DCMAKE_TOOLCHAIN_FILE=${{ matrix.toolchain }}
+
+    - name: Build seed
+      run: |
+        cmake --build build/${{ matrix.target }} --target seed --target seed_cpp --target spl_runtime
+
+    - name: Build CRT (if available)
+      continue-on-error: true
+      run: cmake --build build/${{ matrix.target }} 2>&1 || true
+
+    - name: Verify binary
+      run: ${{ matrix.verify_cmd }}
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: seed-${{ matrix.target }}
+        path: |
+          build/${{ matrix.target }}/seed*
+          build/${{ matrix.target }}/libspl_runtime.a
+          build/${{ matrix.target }}/startup/libspl_crt_*.a
+        retention-days: 30
+
+  # ---- Roundtrip test (Linux native) ----
+  roundtrip-test:
+    name: Roundtrip test
+    needs: cross-compile
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download Linux x86_64 seed
+      uses: actions/download-artifact@v4
+      with:
+        name: seed-linux-x86_64
+        path: build/linux-x86_64
+
+    - name: Roundtrip test
+      run: |
+        chmod +x build/linux-x86_64/seed
+        cat > /tmp/test_seed.spl <<'EOF'
+        fn main():
+            val x = 42
+            print "hello {x}"
+        EOF
+        ./build/linux-x86_64/seed /tmp/test_seed.spl > /tmp/test_seed.c
+        clang -std=c11 -o /tmp/test_seed /tmp/test_seed.c seed/runtime.c -Iseed
+        OUTPUT=$(/tmp/test_seed)
+        echo "Output: $OUTPUT"
+        echo "$OUTPUT" | grep -q "hello 42" && echo "Roundtrip PASSED" || (echo "FAILED"; exit 1)
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [cross-compile, roundtrip-test]
+    if: always()
+    steps:
+    - name: Generate summary
+      run: |
+        echo "# Cross-Compile Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| All targets | ${{ needs.cross-compile.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Roundtrip test | ${{ needs.roundtrip-test.result }} |" >> $GITHUB_STEP_SUMMARY

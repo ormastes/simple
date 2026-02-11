@@ -4,10 +4,10 @@
 
 | Category | Total | Complete | Failed | Planned | Ignored |
 |----------|-------|----------|--------|---------|---------|
-| [Codegen](category/Codegen.md) | 5 | 0 | 0 | 5 | 0 |
-| [Language](category/Language.md) | 2 | 0 | 0 | 2 | 0 |
-| ["Testing Framework"](category/"Testing_Framework".md) | 7 | 0 | 0 | 7 | 0 |
-| [Infrastructure](category/Infrastructure.md) | 1 | 0 | 0 | 1 | 0 |
-| [Types](category/Types.md) | 1 | 0 | 0 | 1 | 0 |
-| [Concurrency](category/Concurrency.md) | 3 | 0 | 0 | 3 | 0 |
-| [Uncategorized](category/Uncategorized.md) | 4 | 0 | 0 | 4 | 0 |
+| [Codegen](category/Codegen.md) | 5 | 3 | 0 | 2 | 0 |
+| [Language](category/Language.md) | 2 | 2 | 0 | 0 | 0 |
+| [Testing Framework](category/Testing_Framework.md) | 7 | 7 | 0 | 0 | 0 |
+| [Infrastructure](category/Infrastructure.md) | 1 | 1 | 0 | 0 | 0 |
+| [Types](category/Types.md) | 1 | 1 | 0 | 0 | 0 |
+| [Concurrency](category/Concurrency.md) | 3 | 3 | 0 | 0 | 0 |
+| [Uncategorized](category/Uncategorized.md) | 1 | 0 | 1 | 0 | 0 |

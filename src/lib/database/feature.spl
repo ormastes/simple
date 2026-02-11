@@ -73,10 +73,8 @@ fn create_feature_database(path: text) -> FeatureDatabase:
         "category",
         "name",
         "description",
-        "spec_file",
-        "pure_status",
-        "hybrid_status",
-        "llvm_status",
+        "spec",
+        "status",
         "created_at",
         "updated_at",
         "valid"
@@ -100,10 +98,8 @@ fn feature_to_row(feature: Feature) -> SdnRow:
     row.set("category", feature.category)
     row.set("name", feature.name)
     row.set("description", feature.description)
-    row.set("spec_file", feature.spec_file)
-    row.set("pure_status", status_to_string(feature.pure_status))
-    row.set("hybrid_status", status_to_string(feature.hybrid_status))
-    row.set("llvm_status", status_to_string(feature.llvm_status))
+    row.set("spec", feature.spec_file)
+    row.set("status", status_to_string(feature.pure_status))
     row.set("created_at", feature.created_at)
     row.set("updated_at", feature.updated_at)
     val valid_str = if feature.valid: "true" else: "false"
@@ -151,10 +147,13 @@ class FeatureDatabase:
         val category = row.get("category") ?? ""
         val name = row.get("name") ?? ""
         val description = row.get("description") ?? ""
-        val spec_file = row.get("spec_file") ?? ""
-        val pure_status_str = row.get("pure_status") ?? "planned"
-        val hybrid_status_str = row.get("hybrid_status") ?? "planned"
-        val llvm_status_str = row.get("llvm_status") ?? "planned"
+        # Support both column names: "spec" (SDN actual) and "spec_file" (legacy)
+        val spec_file = row.get("spec") ?? row.get("spec_file") ?? ""
+        # Support both schemas: single "status" column or per-mode columns
+        val status_str = row.get("status") ?? "planned"
+        val pure_status_str = row.get("pure_status") ?? status_str
+        val hybrid_status_str = row.get("hybrid_status") ?? status_str
+        val llvm_status_str = row.get("llvm_status") ?? status_str
         val created_at = row.get("created_at") ?? ""
         val updated_at = row.get("updated_at") ?? ""
         val valid_opt = row.get("valid")
@@ -286,15 +285,23 @@ class FeatureDatabase:
         val feature_opt = self.get_feature(id)
         if not feature_opt.?:
             return false
+        val old = feature_opt.unwrap()
 
-        # WORKAROUND: Parser doesn't support mutable field updates (object.field = value).
-        # Re-enable once parser supports mutable field assignment on struct instances:
-        #   var feature = feature_opt?
-        #   feature.pure_status = status
-        #   feature.updated_at = rt_timestamp_now().to_string()
-        #   self.update_feature(id, feature)
-        eprint("Warning: update_feature_status() is a no-op - parser does not yet support mutable field updates")
-        true
+        # Create new Feature with updated status (struct fields are immutable)
+        val updated = Feature(
+            id: old.id,
+            category: old.category,
+            name: old.name,
+            description: old.description,
+            spec_file: old.spec_file,
+            pure_status: status,
+            hybrid_status: status,
+            llvm_status: status,
+            created_at: old.created_at,
+            updated_at: old.updated_at,
+            valid: old.valid
+        )
+        self.update_feature(id, updated)
 
     # Count features by status (any mode)
     fn count_by_status(status: FeatureStatus) -> i64:
@@ -320,6 +327,7 @@ fn status_to_string(status: FeatureStatus) -> text:
 fn parse_status(s: text) -> FeatureStatus:
     match s:
         "done": FeatureStatus.Done
+        "complete": FeatureStatus.Done
         "in_progress": FeatureStatus.InProgress
         "planned": FeatureStatus.Planned
         "failed": FeatureStatus.Failed

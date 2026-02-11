@@ -343,40 +343,184 @@ impl TraitImplEntry:
 # metadata.traits["Iterator"].add_impl(trait_impl)
 #
 # ============================================================================
-# Serialization Format (TODO)
+# Serialization Format
 # ============================================================================
 #
-# When serializing to .smf:
+# Binary layout when serializing to .smf TemplateMeta section:
 #
 # MonomorphizationMetadata:
 #   magic: "META" (4 bytes)
 #   version: u16 (2 bytes)
 #   function_count: u32
-#   functions: [GenericFunctionMeta]
 #   struct_count: u32
-#   structs: [GenericStructMeta]
 #   class_count: u32
-#   classes: [GenericClassMeta]
 #   enum_count: u32
-#   enums: [GenericEnumMeta]
 #   trait_count: u32
+#   functions: [GenericFunctionMeta]
+#   structs: [GenericStructMeta]
+#   classes: [GenericClassMeta]
+#   enums: [GenericEnumMeta]
 #   traits: [GenericTraitMeta]
 #
-# GenericFunctionMeta:
+# GenericFunctionMeta / GenericStructMeta / GenericClassMeta / GenericEnumMeta:
 #   name_len: u32
 #   name: bytes
 #   param_count: u8
-#   params: [String]
+#   params: [length-prefixed String]
 #   spec_count: u32
 #   specializations: [SpecializationEntry]
 #
+# GenericTraitMeta:
+#   name_len: u32
+#   name: bytes
+#   param_count: u8
+#   params: [length-prefixed String]
+#   impl_count: u32
+#   impl_specializations: [TraitImplEntry]
+#
 # SpecializationEntry:
 #   arg_count: u8
-#   type_args: [ConcreteType]
+#   type_args: [length-prefixed String (ConcreteType.to_string())]
 #   mangled_name_len: u32
 #   mangled_name: bytes
 #   binding_count: u8
-#   bindings: [(String, ConcreteType)]
+#   bindings: [(length-prefixed String key, length-prefixed String value)]
+#
+# TraitImplEntry:
+#   trait_name_len: u32
+#   trait_name: bytes
+#   arg_count: u8
+#   type_args: [length-prefixed String]
+#   impl_for_type_len: u32
+#   impl_for_type: bytes
+#   mangled_name_len: u32
+#   mangled_name: bytes
+#
+
+fn meta_u32_to_bytes(value: i64) -> [u8]:
+    """Convert a value to 4 little-endian bytes."""
+    [
+        (value & 0xFF).to_u8(),
+        ((value >> 8) & 0xFF).to_u8(),
+        ((value >> 16) & 0xFF).to_u8(),
+        ((value >> 24) & 0xFF).to_u8()
+    ]
+
+fn meta_serialize_text(buf: [u8], value: text) -> [u8]:
+    """Serialize a text value as length-prefixed bytes."""
+    var out = buf
+    val bytes = value.to_bytes()
+    out = out.concat(meta_u32_to_bytes(bytes.len()))
+    out = out.concat(bytes)
+    out
+
+fn serialize_specialization_entry(buf: [u8], entry: SpecializationEntry) -> [u8]:
+    """Serialize a single SpecializationEntry."""
+    var out = buf
+
+    # Type args count + serialized type strings
+    out = out.push(entry.type_args.len().to_u8())
+    for arg in entry.type_args:
+        out = meta_serialize_text(out, arg.to_string())
+
+    # Mangled name
+    out = meta_serialize_text(out, entry.mangled_name)
+
+    # Bindings count + key-value pairs
+    out = out.push(entry.bindings.len().to_u8())
+    for (key, value) in entry.bindings.items():
+        out = meta_serialize_text(out, key)
+        out = meta_serialize_text(out, value.to_string())
+
+    out
+
+fn serialize_trait_impl_entry(buf: [u8], entry: TraitImplEntry) -> [u8]:
+    """Serialize a single TraitImplEntry."""
+    var out = buf
+
+    # Trait name
+    out = meta_serialize_text(out, entry.trait_name)
+
+    # Type args count + serialized type strings
+    out = out.push(entry.type_args.len().to_u8())
+    for arg in entry.type_args:
+        out = meta_serialize_text(out, arg.to_string())
+
+    # Impl for type
+    out = meta_serialize_text(out, entry.impl_for_type)
+
+    # Mangled name
+    out = meta_serialize_text(out, entry.mangled_name)
+
+    out
+
+fn serialize_generic_meta(buf: [u8], base_name: text, generic_params: [text], specializations: [SpecializationEntry]) -> [u8]:
+    """Serialize the common fields of a generic metadata entry."""
+    var out = buf
+
+    # Name
+    out = meta_serialize_text(out, base_name)
+
+    # Param count + param names
+    out = out.push(generic_params.len().to_u8())
+    for param in generic_params:
+        out = meta_serialize_text(out, param)
+
+    # Specialization count + entries
+    out = out.concat(meta_u32_to_bytes(specializations.len()))
+    for entry in specializations:
+        out = serialize_specialization_entry(out, entry)
+
+    out
+
+impl MonomorphizationMetadata:
+    fn serialize() -> [u8]:
+        """Serialize the complete metadata to binary format.
+
+        Produces the binary layout described in the Serialization Format section above.
+        """
+        var buf: [u8] = []
+
+        # Magic: "META"
+        buf = buf.concat([0x4D, 0x45, 0x54, 0x41])
+
+        # Version: 1.0
+        buf = buf.concat([0x01, 0x00])
+
+        # Category counts
+        buf = buf.concat(meta_u32_to_bytes(self.functions.len()))
+        buf = buf.concat(meta_u32_to_bytes(self.structs.len()))
+        buf = buf.concat(meta_u32_to_bytes(self.classes.len()))
+        buf = buf.concat(meta_u32_to_bytes(self.enums.len()))
+        buf = buf.concat(meta_u32_to_bytes(self.traits.len()))
+
+        # Serialize function metadata entries
+        for (name, func_meta) in self.functions.items():
+            buf = serialize_generic_meta(buf, func_meta.base_name, func_meta.generic_params, func_meta.specializations)
+
+        # Serialize struct metadata entries
+        for (name, struct_meta) in self.structs.items():
+            buf = serialize_generic_meta(buf, struct_meta.base_name, struct_meta.generic_params, struct_meta.specializations)
+
+        # Serialize class metadata entries
+        for (name, class_meta) in self.classes.items():
+            buf = serialize_generic_meta(buf, class_meta.base_name, class_meta.generic_params, class_meta.specializations)
+
+        # Serialize enum metadata entries
+        for (name, enum_meta) in self.enums.items():
+            buf = serialize_generic_meta(buf, enum_meta.base_name, enum_meta.generic_params, enum_meta.specializations)
+
+        # Serialize trait metadata entries
+        for (name, trait_meta) in self.traits.items():
+            buf = meta_serialize_text(buf, trait_meta.base_name)
+            buf = buf.push(trait_meta.generic_params.len().to_u8())
+            for param in trait_meta.generic_params:
+                buf = meta_serialize_text(buf, param)
+            buf = buf.concat(meta_u32_to_bytes(trait_meta.impl_specializations.len()))
+            for entry in trait_meta.impl_specializations:
+                buf = serialize_trait_impl_entry(buf, entry)
+
+        buf
 #
 # ============================================================================
 # Performance Notes
@@ -411,7 +555,8 @@ impl TraitImplEntry:
 # - [x] Trait implementations tracked separately
 #
 # Remaining work:
-# - [ ] Add serialization/deserialization
+# - [x] Add serialization (Phase 6 - serialize() method)
+# - [ ] Add deserialization (deserialize from bytes)
 # - [ ] Add optimization level tracking
 # - [ ] Add dependency tracking between specializations
 # - [ ] Add incremental update support

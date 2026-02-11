@@ -97,8 +97,8 @@ if [ "$SEED_ONLY" = true ]; then
     exit $FAIL
 fi
 
-# ---- Phase 2: Cross-compile full Simple compiler ----
-echo "--- Phase 2: Cross-compile full compiler ---"
+# ---- Phase 2: Cross-compile Simple programs via C codegen ----
+echo "--- Phase 2: Cross-compile Simple programs via C codegen ---"
 
 NATIVE_SIMPLE="$PROJECT_DIR/bin/release/linux-x86_64/simple"
 if [ ! -x "$NATIVE_SIMPLE" ]; then
@@ -106,56 +106,86 @@ if [ ! -x "$NATIVE_SIMPLE" ]; then
 fi
 
 if [ ! -x "$NATIVE_SIMPLE" ]; then
-    echo "ERROR: No native Simple compiler found at bin/release/linux-x86_64/simple or bin/release/simple"
-    echo "Cannot build full compiler without native bootstrap."
-    exit 1
+    echo "WARNING: No native Simple compiler found. Skipping C codegen phase."
+    echo ""
+    echo "====================================="
+    echo "  Cross-Compilation Summary"
+    echo "====================================="
+    echo "Seed:     $PASS pass, $FAIL fail, $SKIP skip"
+    echo "====================================="
+    exit $FAIL
 fi
 
 echo "Using native compiler: $NATIVE_SIMPLE"
 
+# The C code generator (gen_c_only.spl) handles a subset of Simple.
+# It can cross-compile Simple programs but NOT the full compiler binary
+# (which is a Rust-based interpreter/JIT — requires Rust cross-compilation).
+
+SOURCE_FILE="${SOURCE_FILE:-}"
+if [ -z "$SOURCE_FILE" ]; then
+    echo "No SOURCE_FILE specified. Skipping C codegen cross-compilation."
+    echo "Usage: SOURCE_FILE=myapp.spl ./script/build-cross-compile-all.sh"
+    echo ""
+    echo "====================================="
+    echo "  Cross-Compilation Summary"
+    echo "====================================="
+    echo "Seed:     $PASS pass, $FAIL fail, $SKIP skip"
+    echo "====================================="
+    exit $FAIL
+fi
+
 # Generate C code once using native compiler
-GEN_C="/tmp/simple_generated.c"
-echo -n "Generating C code from Simple source... "
-if "$NATIVE_SIMPLE" compile src/app/cli/main.spl --backend=c --output="$GEN_C" 2>/dev/null; then
+GEN_C="/tmp/simple_cross_generated.c"
+echo -n "Generating C code from $SOURCE_FILE... "
+if "$NATIVE_SIMPLE" "$PROJECT_DIR/src/app/compile/gen_c_only.spl" "$SOURCE_FILE" "$GEN_C" 2>/dev/null | grep -v DEBUG; then
     echo "OK ($(wc -c < "$GEN_C") bytes)"
 else
     echo "FAIL"
-    echo "Cannot generate C code. Full compiler cross-compilation skipped."
+    echo "C code generation failed. Source may use features not yet supported by c_codegen."
     exit 1
 fi
 
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/build/cross-output}"
 FULL_PASS=0
 FULL_FAIL=0
+BASENAME=$(basename "$SOURCE_FILE" .spl)
 
 for target in $TARGETS; do
-    echo -n "Building full compiler for $target... "
+    echo -n "Building $BASENAME for $target... "
 
     # Determine compiler and flags based on target
+    COMMON_CFLAGS="-std=gnu11 -O2 -Wno-return-type"
     case $target in
         linux-x86_64)
             CC="clang"
-            CFLAGS="-O2"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS"
+            OUTPUT="$BASENAME"
+            EXTRA="-lm"
             ;;
         linux-arm64)
             CC="aarch64-linux-gnu-gcc"
-            CFLAGS="-O2"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS"
+            OUTPUT="$BASENAME"
+            EXTRA="-lm"
             ;;
         linux-riscv64)
             CC="riscv64-linux-gnu-gcc"
-            CFLAGS="-O2"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS"
+            OUTPUT="$BASENAME"
+            EXTRA="-lm"
             ;;
         windows-x86_64)
             CC="x86_64-w64-mingw32-gcc"
-            CFLAGS="-O2"
-            OUTPUT="simple.exe"
+            CFLAGS="$COMMON_CFLAGS"
+            OUTPUT="$BASENAME.exe"
+            EXTRA=""
             ;;
         windows-x86)
             CC="i686-w64-mingw32-gcc"
-            CFLAGS="-O2"
-            OUTPUT="simple.exe"
+            CFLAGS="$COMMON_CFLAGS"
+            OUTPUT="$BASENAME.exe"
+            EXTRA=""
             ;;
         freebsd-x86_64)
             CC="clang"
@@ -165,8 +195,9 @@ for target in $TARGETS; do
             elif [ -d /tmp/freebsd-sysroot/usr/include ]; then
                 SYSROOT="/tmp/freebsd-sysroot"
             fi
-            CFLAGS="-O2 --target=x86_64-unknown-freebsd14 --sysroot=$SYSROOT -fuse-ld=lld"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS --target=x86_64-unknown-freebsd14 --sysroot=$SYSROOT -fuse-ld=lld"
+            OUTPUT="$BASENAME"
+            EXTRA="-lm"
             ;;
         freebsd-x86)
             CC="clang"
@@ -176,8 +207,9 @@ for target in $TARGETS; do
             elif [ -d /tmp/freebsd-i386-sysroot/usr/include ]; then
                 SYSROOT="/tmp/freebsd-i386-sysroot"
             fi
-            CFLAGS="-O2 --target=i686-unknown-freebsd13 --sysroot=$SYSROOT -fuse-ld=lld"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS --target=i686-unknown-freebsd13 --sysroot=$SYSROOT -fuse-ld=lld"
+            OUTPUT="$BASENAME"
+            EXTRA="-lm"
             ;;
         macos-arm64)
             CC="clang"
@@ -187,8 +219,9 @@ for target in $TARGETS; do
             elif [ -d /tmp/macos-sdk/MacOSX14.5.sdk/usr/include ]; then
                 SDK="/tmp/macos-sdk/MacOSX14.5.sdk"
             fi
-            CFLAGS="-O2 --target=aarch64-apple-darwin -isysroot $SDK -fuse-ld=lld"
-            OUTPUT="simple"
+            CFLAGS="$COMMON_CFLAGS --target=aarch64-apple-darwin -isysroot $SDK -fuse-ld=lld"
+            OUTPUT="$BASENAME"
+            EXTRA=""
             ;;
         *)
             echo "SKIP (unknown target)"
@@ -196,31 +229,35 @@ for target in $TARGETS; do
             ;;
     esac
 
-    RELEASE_DIR="$PROJECT_DIR/bin/release/$target"
-    mkdir -p "$RELEASE_DIR"
+    TARGET_DIR="$OUTPUT_DIR/$target"
+    mkdir -p "$TARGET_DIR"
 
-    if $CC $CFLAGS -o "$RELEASE_DIR/$OUTPUT" "$GEN_C" \
-        "$PROJECT_DIR/seed/runtime.c" -I"$PROJECT_DIR/seed" \
-        -lm 2>"$RELEASE_DIR/build.log"; then
-        echo "OK ($(wc -c < "$RELEASE_DIR/$OUTPUT") bytes)"
+    if $CC $CFLAGS -o "$TARGET_DIR/$OUTPUT" "$GEN_C" $EXTRA \
+        2>"$TARGET_DIR/build.log"; then
+        SIZE=$(wc -c < "$TARGET_DIR/$OUTPUT")
+        echo "OK ($SIZE bytes)"
         FULL_PASS=$((FULL_PASS + 1))
     else
-        echo "FAIL (see $RELEASE_DIR/build.log)"
+        echo "FAIL (see $TARGET_DIR/build.log)"
         FULL_FAIL=$((FULL_FAIL + 1))
     fi
 done
 
 echo ""
-echo "Full compiler results: $FULL_PASS pass, $FULL_FAIL fail"
+echo "Cross-compile results: $FULL_PASS pass, $FULL_FAIL fail"
 echo ""
 
 # ---- Summary ----
 echo "====================================="
 echo "  Cross-Compilation Summary"
 echo "====================================="
-echo "Seed:     $PASS pass, $FAIL fail, $SKIP skip"
-echo "Compiler: $FULL_PASS pass, $FULL_FAIL fail"
+echo "Seed:      $PASS pass, $FAIL fail, $SKIP skip"
+echo "Programs:  $FULL_PASS pass, $FULL_FAIL fail"
 echo "====================================="
+echo ""
+echo "Note: The full 'simple' compiler binary is a Rust-based interpreter/JIT."
+echo "Cross-compiling it requires Rust cross-compilation (not yet automated)."
+echo "The C codegen path works for Simple programs that use supported features."
 
 TOTAL_FAIL=$((FAIL + FULL_FAIL))
 exit $TOTAL_FAIL

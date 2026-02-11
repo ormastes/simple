@@ -1145,9 +1145,9 @@ impl Parser:
                 if self.current.text == "s":
                     self.parse_set_literal()
                 else:
-                    # Regular block - handle it (TODO: implement block parsing in expr context)
-                    self.error("blocks in expression context not yet supported")
-                    Expr(kind: ExprKind.Error, span: self.current.span)
+                    # Regular block in expression context: { stmts; last_expr }
+                    # Evaluates to its last expression
+                    self.parse_block_expr()
 
             case Backslash:
                 self.parse_lambda()
@@ -1218,14 +1218,74 @@ impl Parser:
                 Expr(kind: ExprKind.Error, span: start)
 
     me parse_string_literal() -> Expr:
-        """Parse string literal with interpolation."""
+        """Parse string literal with interpolation.
+
+        Scans the string content for {expr} patterns. Nested braces
+        are tracked so that expressions like {dict[key]} work correctly.
+        Escaped braces (\\{) are treated as literal characters.
+        """
         val start = self.current.span
         val text = self.current.text
         self.advance()
 
-        # For bootstrap: plain string literals only (no interpolation scanning)
-        # TODO: Add interpolation support when needed for self-hosting
-        Expr(kind: ExprKind.StringLit(text, nil), span: start)
+        # Quick check: if no '{' in text, return plain string
+        if not text.contains("{"):
+            return Expr(kind: ExprKind.StringLit(text, nil), span: start)
+
+        # Scan for {expr} interpolation patterns
+        var interpolations: [Interpolation] = []
+        var plain_text = ""
+        var i = 0
+
+        while i < text.len():
+            val c = text[i]
+
+            if c == "\\" and i + 1 < text.len() and text[i + 1] == "{":
+                # Escaped brace: \{ -> literal {
+                plain_text = plain_text + "{"
+                i = i + 2
+            elif c == "{":
+                # Start of interpolation - find matching }
+                var depth = 1
+                var expr_start = i + 1
+                var j = expr_start
+
+                while j < text.len() and depth > 0:
+                    if text[j] == "{":
+                        depth = depth + 1
+                    elif text[j] == "}":
+                        depth = depth - 1
+                    j = j + 1
+
+                if depth == 0:
+                    # Extract expression text (without the braces)
+                    val expr_text = text[expr_start:j - 1]
+
+                    # Parse the expression using a sub-parser
+                    var sub_parser = Parser.new(expr_text)
+                    val expr = sub_parser.parse_expr()
+
+                    interpolations = interpolations.push(Interpolation(
+                        expr: expr,
+                        format: nil,
+                        span: start
+                    ))
+
+                    # Add a placeholder in plain_text for the interpolation position
+                    plain_text = plain_text + "{}"
+                    i = j
+                else:
+                    # Unmatched brace - treat as literal
+                    plain_text = plain_text + c
+                    i = i + 1
+            else:
+                plain_text = plain_text + c
+                i = i + 1
+
+        if interpolations.len() > 0:
+            Expr(kind: ExprKind.StringLit(plain_text, Some(interpolations)), span: start)
+        else:
+            Expr(kind: ExprKind.StringLit(text, nil), span: start)
 
     me parse_array_or_comprehension() -> Expr:
         """Parse array literal or list comprehension.
@@ -1485,6 +1545,42 @@ impl Parser:
         self.match_token(TokenKind.Dedent)
 
         Expr(kind: ExprKind.MatchCase(scrutinee, arms), span: start.merge(self.previous.span))
+
+    me parse_block_expr() -> Expr:
+        """Parse { ... } as a block expression.
+
+        A block expression contains a sequence of statements and evaluates
+        to its last expression. The BlockStart token has already been
+        identified as a non-special block (not s{}, m{}, etc.).
+
+        Example:
+            val result = {
+                val x = 1
+                val y = 2
+                x + y
+            }
+        """
+        val start = self.current.span
+        self.advance()  # Consume BlockStart token
+
+        var stmts: [Stmt] = []
+        self.skip_newlines()
+
+        while not self.check(TokenKind.RBrace) and not self.check(TokenKind.BlockEnd) and not self.is_at_end():
+            self.skip_newlines()
+            if self.check(TokenKind.RBrace) or self.check(TokenKind.BlockEnd):
+                break
+            stmts = stmts.push(self.parse_stmt())
+            self.skip_newlines()
+
+        # Consume closing brace
+        if self.check(TokenKind.RBrace) or self.check(TokenKind.BlockEnd):
+            self.advance()
+        else:
+            self.error("expected '}' after block expression")
+
+        val block = Block(stmts: stmts, span: start.merge(self.previous.span))
+        Expr(kind: ExprKind.Block(block), span: start.merge(self.previous.span))
 
     me parse_loss_block() -> Expr:
         """Parse loss{ ... } block.

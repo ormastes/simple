@@ -11,6 +11,12 @@
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+#if defined(__FreeBSD__)
+#define __BSD_VISIBLE 1
+#endif
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#endif
 #endif
 
 #include "runtime.h"

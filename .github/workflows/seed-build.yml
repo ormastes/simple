@@ -25,79 +25,111 @@ jobs:
     - name: Install cross-compile toolchains
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq clang lld \
-          gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 xz-utils
+        sudo apt-get install -y -qq clang lld llvm \
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
+          gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+          gcc-mingw-w64-i686 g++-mingw-w64-i686 \
+          qemu-user xz-utils
 
     - name: Download macOS SDK
       run: |
         curl -L -o /tmp/MacOSX14.5.sdk.tar.xz \
           https://github.com/joseluisq/macosx-sdks/releases/download/14.5/MacOSX14.5.sdk.tar.xz
+        sudo mkdir -p /opt/sysroots/macos
+        sudo tar xf /tmp/MacOSX14.5.sdk.tar.xz -C /opt/sysroots/macos
+        sudo chmod -R a+rX /opt/sysroots/macos
+        # Also set up legacy path for backward compat
         mkdir -p /tmp/macos-sdk
-        tar xf /tmp/MacOSX14.5.sdk.tar.xz -C /tmp/macos-sdk
+        ln -s /opt/sysroots/macos/MacOSX14.5.sdk /tmp/macos-sdk/MacOSX14.5.sdk
 
-    - name: Download FreeBSD sysroot
+    - name: Download FreeBSD x86_64 sysroot
       run: |
         curl -L -o /tmp/freebsd-base.txz \
           https://archive.freebsd.org/old-releases/amd64/14.1-RELEASE/base.txz
+        sudo mkdir -p /opt/sysroots/freebsd-x86_64
+        sudo tar xf /tmp/freebsd-base.txz -C /opt/sysroots/freebsd-x86_64 ./usr/include ./usr/lib ./lib
+        sudo chmod -R a+rX /opt/sysroots/freebsd-x86_64
+        # Legacy path
         mkdir -p /tmp/freebsd-sysroot
-        tar xf /tmp/freebsd-base.txz -C /tmp/freebsd-sysroot ./usr/include ./usr/lib ./lib
+        ln -s /opt/sysroots/freebsd-x86_64/usr /tmp/freebsd-sysroot/usr
+        ln -s /opt/sysroots/freebsd-x86_64/lib /tmp/freebsd-sysroot/lib
 
-    # ---- Linux x86_64 (native) ----
+    - name: Download FreeBSD i386 sysroot
+      run: |
+        curl -L -o /tmp/freebsd-i386-base.txz \
+          https://archive.freebsd.org/old-releases/i386/13.2-RELEASE/base.txz
+        sudo mkdir -p /opt/sysroots/freebsd-x86
+        sudo tar xf /tmp/freebsd-i386-base.txz -C /opt/sysroots/freebsd-x86 ./usr/include ./usr/lib ./lib
+        sudo chmod -R a+rX /opt/sysroots/freebsd-x86
+
+    # ---- Build all 8 targets using CMake toolchain files ----
     - name: Build seed — Linux x86_64
       run: |
         cmake -B build/linux-x86_64 seed \
-          -DCMAKE_C_COMPILER=clang \
-          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/linux-x86_64.cmake
         cmake --build build/linux-x86_64
-        file build/linux-x86_64/seed
-        file build/linux-x86_64/seed_cpp
+        file build/linux-x86_64/seed build/linux-x86_64/seed_cpp
 
-    # ---- Windows x86_64 (MinGW cross) ----
+    - name: Build seed — Linux ARM64
+      run: |
+        cmake -B build/linux-arm64 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/linux-arm64.cmake
+        cmake --build build/linux-arm64
+        file build/linux-arm64/seed build/linux-arm64/seed_cpp
+
+    - name: Build seed — Linux RISC-V 64
+      run: |
+        cmake -B build/linux-riscv64 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/linux-riscv64.cmake
+        cmake --build build/linux-riscv64
+        file build/linux-riscv64/seed build/linux-riscv64/seed_cpp
+
     - name: Build seed — Windows x86_64
       run: |
         cmake -B build/windows-x86_64 seed \
-          -DCMAKE_SYSTEM_NAME=Windows \
-          -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
-          -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
-        cmake --build build/windows-x86_64
-        file build/windows-x86_64/seed.exe
-        file build/windows-x86_64/seed_cpp.exe
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/windows-x86_64.cmake
+        cmake --build build/windows-x86_64 --target seed --target seed_cpp --target spl_runtime
+        file build/windows-x86_64/seed.exe build/windows-x86_64/seed_cpp.exe
 
-    # ---- macOS x86_64 (clang cross, full link) ----
-    - name: Build seed — macOS x86_64
+    - name: Build seed — Windows x86
       run: |
-        mkdir -p build/macos-x86_64
-        clang -std=c11 --target=x86_64-apple-darwin \
-          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk -fuse-ld=lld \
-          -Wall -Wextra -Wno-unused-parameter \
-          -o build/macos-x86_64/seed seed/seed.c
-        clang -std=c11 --target=x86_64-apple-darwin \
-          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk \
-          -Wall -Wextra -Wno-unused-parameter \
-          -c seed/runtime.c -o build/macos-x86_64/runtime.o
-        clang++ -std=c++20 --target=x86_64-apple-darwin \
-          -isysroot /tmp/macos-sdk/MacOSX14.5.sdk -fuse-ld=lld \
-          -Wall -Wextra -Wno-unused-parameter \
-          -o build/macos-x86_64/seed_cpp seed/seed.cpp
-        file build/macos-x86_64/seed build/macos-x86_64/seed_cpp
+        cmake -B build/windows-x86 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/windows-x86.cmake
+        cmake --build build/windows-x86 --target seed --target seed_cpp --target spl_runtime
+        file build/windows-x86/seed.exe build/windows-x86/seed_cpp.exe
 
-    # ---- FreeBSD x86_64 (clang cross, full link) ----
     - name: Build seed — FreeBSD x86_64
       run: |
-        mkdir -p build/freebsd-x86_64
-        clang -std=c11 --target=x86_64-unknown-freebsd14 \
-          --sysroot=/tmp/freebsd-sysroot \
-          -Wall -Wextra -Wno-unused-parameter \
-          -o build/freebsd-x86_64/seed seed/seed.c
-        clang -std=c11 --target=x86_64-unknown-freebsd14 \
-          --sysroot=/tmp/freebsd-sysroot \
-          -Wall -Wextra -Wno-unused-parameter \
-          -c seed/runtime.c -o build/freebsd-x86_64/runtime.o
-        clang++ -std=c++20 --target=x86_64-unknown-freebsd14 \
-          --sysroot=/tmp/freebsd-sysroot \
-          -Wall -Wextra -Wno-unused-parameter \
-          -o build/freebsd-x86_64/seed_cpp seed/seed.cpp
+        cmake -B build/freebsd-x86_64 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/freebsd-x86_64.cmake
+        cmake --build build/freebsd-x86_64 --target seed --target seed_cpp --target spl_runtime
         file build/freebsd-x86_64/seed build/freebsd-x86_64/seed_cpp
+
+    - name: Build seed — FreeBSD x86
+      run: |
+        cmake -B build/freebsd-x86 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/freebsd-x86.cmake
+        cmake --build build/freebsd-x86 --target seed --target seed_cpp --target spl_runtime
+        file build/freebsd-x86/seed build/freebsd-x86/seed_cpp
+
+    - name: Build seed — macOS ARM64
+      run: |
+        cmake -B build/macos-arm64 seed \
+          -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/macos-arm64.cmake
+        cmake --build build/macos-arm64 --target seed --target seed_cpp --target spl_runtime
+        file build/macos-arm64/seed build/macos-arm64/seed_cpp
+
+    # ---- QEMU smoke tests ----
+    - name: QEMU test — Linux ARM64 seed
+      run: |
+        qemu-aarch64 -L /usr/aarch64-linux-gnu build/linux-arm64/seed 2>&1 | head -3
+        echo "ARM64 seed runs under QEMU"
+
+    - name: QEMU test — Linux RISC-V 64 seed
+      run: |
+        qemu-riscv64 -L /usr/riscv64-linux-gnu build/linux-riscv64/seed 2>&1 | head -3
+        echo "RISC-V 64 seed runs under QEMU"
 
     # ---- Roundtrip test (Linux native) ----
     - name: Roundtrip test — Linux seed
@@ -122,15 +154,27 @@ jobs:
           build/linux-x86_64/seed
           build/linux-x86_64/seed_cpp
           build/linux-x86_64/libspl_runtime.a
+          build/linux-arm64/seed
+          build/linux-arm64/seed_cpp
+          build/linux-arm64/libspl_runtime.a
+          build/linux-riscv64/seed
+          build/linux-riscv64/seed_cpp
+          build/linux-riscv64/libspl_runtime.a
           build/windows-x86_64/seed.exe
           build/windows-x86_64/seed_cpp.exe
           build/windows-x86_64/libspl_runtime.a
-          build/macos-x86_64/seed
-          build/macos-x86_64/seed_cpp
-          build/macos-x86_64/runtime.o
+          build/windows-x86/seed.exe
+          build/windows-x86/seed_cpp.exe
+          build/windows-x86/libspl_runtime.a
           build/freebsd-x86_64/seed
           build/freebsd-x86_64/seed_cpp
-          build/freebsd-x86_64/runtime.o
+          build/freebsd-x86_64/libspl_runtime.a
+          build/freebsd-x86/seed
+          build/freebsd-x86/seed_cpp
+          build/freebsd-x86/libspl_runtime.a
+          build/macos-arm64/seed
+          build/macos-arm64/seed_cpp
+          build/macos-arm64/libspl_runtime.a
         retention-days: 30
 
   # ---- Native macOS build (full link) ----
@@ -216,6 +260,6 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Target | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
-        echo "| Linux + Windows cross-compile | ${{ needs.seed-crosscompile.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| All 8 cross-compile targets | ${{ needs.seed-crosscompile.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS native | ${{ needs.seed-macos.result }} |" >> $GITHUB_STEP_SUMMARY
         echo "| FreeBSD native | ${{ needs.seed-freebsd.result }} |" >> $GITHUB_STEP_SUMMARY

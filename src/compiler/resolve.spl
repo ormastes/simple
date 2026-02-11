@@ -683,16 +683,7 @@ class MethodResolver:
         - Generic impls: impl<T> Display for Vec<T>
         - Where clauses: impl<T: Clone> Trait for Foo<T>
         - Supertrait resolution: impl Ord for Point (requires Eq)
-
-        TODO: Currently a placeholder. Full implementation requires:
-        1. SymbolTable method to find all traits with a given method name
-        2. Iteration over trait_solver.impls to find matching generic impls
-        3. Obligation checking for where clauses
-
-        For now, the legacy path (trait_impls map) handles most cases.
-        Generic impl support will be added in a future enhancement.
         """
-        # Enhanced trait method resolution using TraitSolver
         # Iterate over all registered traits to find one with this method
         for trait_entry in self.trait_solver.trait_methods.entries():
             val trait_name = trait_entry.key
@@ -703,7 +694,26 @@ class MethodResolver:
                 val impl_result = self.trait_solver.find_impl(receiver_type, trait_name)
                 if impl_result.?:
                     val impl_block = impl_result.unwrap()
-                    # Found a matching impl - resolve the method
+
+                    # Verify where clause obligations are satisfied
+                    var where_clauses_ok = true
+                    for bound in impl_block.where_clause:
+                        val bound_result = self.trait_solver.solve_trait_bound(bound, receiver_type.span)
+                        if bound_result.is_err():
+                            where_clauses_ok = false
+
+                    if not where_clauses_ok:
+                        # Where clauses not satisfied, skip this impl
+                        continue
+
+                    # Check supertrait obligations
+                    val supertrait_result = self.trait_solver.check_supertraits(
+                        receiver_type, trait_name, receiver_type.span
+                    )
+                    if supertrait_result.is_err():
+                        continue
+
+                    # Found a matching impl with satisfied obligations
                     return Some(MethodResolution(
                         trait_name: Some(trait_name),
                         impl_block: Some(impl_block),
@@ -711,7 +721,7 @@ class MethodResolver:
                         is_generic: impl_block.type_params.len() > 0
                     ))
 
-        # No trait method found via solver, fall back to legacy path
+        # No trait method found via solver
         nil
 
     me try_ufcs(receiver_type: HirType, method: text, args: [HirCallArg]) -> MethodResolution?:
