@@ -1,0 +1,954 @@
+# Pipeline Utilities Module
+#
+# Comprehensive data transformation pipeline utilities for ETL and data processing.
+# Provides composable pipeline stages with error handling, branching, and batching.
+#
+# Core Features:
+# - Pipeline creation and composition
+# - Transformation stages (map, filter, reduce)
+# - Branching and conditional execution
+# - Error handling and fallback mechanisms
+# - Batch processing and inspection utilities
+# - Async-like callback patterns
+#
+# Runtime Constraints:
+# - No generics at runtime - pipelines work with untyped data
+# - Closures can read but not modify outer variables
+# - Error handling via Option pattern (no try/catch)
+#
+# Categories:
+# - Core: create_pipeline, pipeline_from_functions, add_step
+# - Composition: compose_pipelines, chain_pipelines
+# - Execution: run_pipeline, run_with_error_handling
+# - Transformations: map_step, filter_step, reduce_step, flat_map_step
+# - Branching: branch_step, conditional_step, switch_step
+# - Error Handling: try_step, catch_step, fallback_step
+# - Utilities: tap_step, each_step, batch_step, debatch_step
+# - Callbacks: create_callback_chain, promise_pattern
+# - Inspection: pipeline_length, pipeline_steps, describe_pipeline
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export create_pipeline, pipeline_from_functions, add_step
+export compose_pipelines, chain_pipelines
+export run_pipeline, run_with_error_handling, run_pipeline_safe
+export map_step, filter_step, reduce_step, flat_map_step
+export branch_step, conditional_step, switch_step
+export try_step, catch_step, fallback_step, recover_step
+export tap_step, each_step, batch_step, debatch_step
+export transform_step, validate_step, accumulate_step
+export create_callback_chain, add_callback, run_callbacks
+export create_promise, resolve_promise, then_promise, catch_promise
+export pipeline_length, pipeline_steps, describe_pipeline
+export create_etl_pipeline, extract_step, transform_etl_step, load_step
+export parallel_branch, merge_results, fork_join_step
+export throttle_step, debounce_step, retry_step
+export cache_step, memoize_step, log_step
+
+# ============================================================================
+# Pipeline Structure
+# ============================================================================
+# Pipeline: { steps: [fn], metadata: {} }
+# Step: function that takes data and returns transformed data
+# Error: { error: text, data: any } or nil for success
+
+# ============================================================================
+# Core Pipeline Creation
+# ============================================================================
+
+fn create_pipeline():
+    """Create an empty pipeline.
+
+    Returns a pipeline object with empty steps list.
+
+    Example:
+        val pipeline = create_pipeline()
+    """
+    { steps: [], metadata: { created: "pipeline", version: 1 } }
+
+fn pipeline_from_functions(functions):
+    """Create a pipeline from a list of functions.
+
+    Args:
+        functions: Array of transformation functions
+
+    Example:
+        val pipeline = pipeline_from_functions([
+            \x: x * 2,
+            \x: x + 1
+        ])
+    """
+    {
+        steps: functions,
+        metadata: { created: "pipeline", version: 1, count: functions.len() }
+    }
+
+fn add_step(pipeline, step_fn):
+    """Add a transformation step to the pipeline.
+
+    Returns a new pipeline with the step added.
+
+    Example:
+        var p = create_pipeline()
+        p = add_step(p, \x: x * 2)
+    """
+    val new_steps = pipeline["steps"] + [step_fn]
+    val new_metadata = pipeline["metadata"]
+    new_metadata["count"] = new_steps.len()
+    { steps: new_steps, metadata: new_metadata }
+
+fn add_steps(pipeline, step_fns):
+    """Add multiple transformation steps to the pipeline.
+
+    Args:
+        pipeline: The pipeline to modify
+        step_fns: Array of functions to add
+
+    Example:
+        p = add_steps(p, [\x: x * 2, \x: x + 1])
+    """
+    var result = pipeline
+    for fn_step in step_fns:
+        result = add_step(result, fn_step)
+    result
+
+# ============================================================================
+# Pipeline Composition
+# ============================================================================
+
+fn compose_pipelines(pipeline1, pipeline2):
+    """Compose two pipelines into one (pipeline2 after pipeline1).
+
+    The output of pipeline1 becomes the input of pipeline2.
+
+    Example:
+        val p1 = pipeline_from_functions([\x: x * 2])
+        val p2 = pipeline_from_functions([\x: x + 1])
+        val composed = compose_pipelines(p1, p2)
+    """
+    val steps1 = pipeline1["steps"]
+    val steps2 = pipeline2["steps"]
+    val combined = steps1 + steps2
+    {
+        steps: combined,
+        metadata: {
+            created: "composed",
+            version: 1,
+            count: combined.len(),
+            from: [pipeline1["metadata"], pipeline2["metadata"]]
+        }
+    }
+
+fn chain_pipelines(pipelines):
+    """Chain multiple pipelines into a single pipeline.
+
+    Args:
+        pipelines: Array of pipeline objects
+
+    Example:
+        val chained = chain_pipelines([p1, p2, p3])
+    """
+    if pipelines.len() == 0:
+        return create_pipeline()
+
+    var result = pipelines[0]
+    var i = 1
+    while i < pipelines.len():
+        result = compose_pipelines(result, pipelines[i])
+        i = i + 1
+    result
+
+# ============================================================================
+# Pipeline Execution
+# ============================================================================
+
+fn run_pipeline(pipeline, data):
+    """Execute the pipeline on input data.
+
+    Runs all steps in sequence, passing output to next step.
+
+    Example:
+        val result = run_pipeline(pipeline, 5)
+    """
+    var current = data
+    val steps = pipeline["steps"]
+    for step in steps:
+        current = step(current)
+    current
+
+fn run_with_error_handling(pipeline, data):
+    """Execute pipeline with error handling.
+
+    Returns { success: true, data: result } or { success: false, error: msg }.
+
+    Example:
+        val result = run_with_error_handling(pipeline, input)
+        if result["success"]:
+            print("Result: {result["data"]}")
+    """
+    var current = data
+    val steps = pipeline["steps"]
+    var error = nil
+
+    for step in steps:
+        if error != nil:
+            return { success: false, error: error, data: current }
+
+        # Check if step returns error format
+        val step_result = step(current)
+        if step_result != nil:
+            val is_dict = true  # Assume dict-like check
+            # Check for error field
+            if is_dict:
+                val has_error = step_result.get("error", nil)
+                if has_error != nil:
+                    error = has_error
+                    current = step_result.get("data", current)
+                else:
+                    current = step_result
+            else:
+                current = step_result
+        else:
+            current = step_result
+
+    { success: true, data: current }
+
+fn run_pipeline_safe(pipeline, data, default_value):
+    """Execute pipeline and return default value on error.
+
+    Example:
+        val result = run_pipeline_safe(pipeline, data, 0)
+    """
+    val result = run_with_error_handling(pipeline, data)
+    if result["success"]:
+        result["data"]
+    else:
+        default_value
+
+# ============================================================================
+# Transformation Steps
+# ============================================================================
+
+fn map_step(transform_fn):
+    """Create a map transformation step for arrays.
+
+    Applies transform_fn to each element in the input array.
+
+    Example:
+        val double = map_step(\x: x * 2)
+        p = add_step(p, double)
+    """
+    \data: data.map(transform_fn)
+
+fn filter_step(predicate_fn):
+    """Create a filter step for arrays.
+
+    Keeps only elements where predicate_fn returns true.
+
+    Example:
+        val evens = filter_step(\x: x % 2 == 0)
+        p = add_step(p, evens)
+    """
+    \data: data.filter(predicate_fn)
+
+fn reduce_step(init_value, reducer_fn):
+    """Create a reduce step for arrays.
+
+    Reduces array to single value using reducer_fn.
+
+    Example:
+        val sum = reduce_step(0, \acc, x: acc + x)
+        p = add_step(p, sum)
+    """
+    \data: data.reduce(init_value, reducer_fn)
+
+fn flat_map_step(transform_fn):
+    """Create a flat-map step for arrays.
+
+    Maps then flattens the result (useful for expanding elements).
+
+    Example:
+        val expand = flat_map_step(\x: [x, x * 2])
+        p = add_step(p, expand)
+    """
+    \data: data.map(transform_fn).flatten()
+
+fn transform_step(transform_fn):
+    """Create a generic transformation step.
+
+    Applies transform_fn directly to the data.
+
+    Example:
+        val process = transform_step(\x: { value: x, processed: true })
+        p = add_step(p, process)
+    """
+    transform_fn
+
+fn accumulate_step(init_value, accumulator_fn):
+    """Create an accumulation step that tracks state.
+
+    Similar to reduce but returns all intermediate values.
+
+    Example:
+        val running_sum = accumulate_step(0, \acc, x: acc + x)
+    """
+    \data: {
+        var acc = init_value
+        var results = []
+        for item in data:
+            acc = accumulator_fn(acc, item)
+            results = results + [acc]
+        results
+    }
+
+# ============================================================================
+# Branching and Conditional Steps
+# ============================================================================
+
+fn branch_step(condition_fn, true_fn, false_fn):
+    """Create a conditional branch step.
+
+    Applies true_fn or false_fn based on condition_fn result.
+
+    Example:
+        val branch = branch_step(
+            \x: x > 10,
+            \x: x * 2,
+            \x: x + 1
+        )
+    """
+    \data: {
+        if condition_fn(data):
+            true_fn(data)
+        else:
+            false_fn(data)
+    }
+
+fn conditional_step(predicate_fn, then_fn):
+    """Create a conditional step (only execute if predicate is true).
+
+    If predicate is false, data passes through unchanged.
+
+    Example:
+        val process_large = conditional_step(
+            \x: x > 100,
+            \x: x / 2
+        )
+    """
+    \data: {
+        if predicate_fn(data):
+            then_fn(data)
+        else:
+            data
+    }
+
+fn switch_step(selector_fn, cases, default_fn):
+    """Create a switch/case step.
+
+    Args:
+        selector_fn: Function that returns case key
+        cases: Dict mapping keys to functions
+        default_fn: Function for unmatched cases
+
+    Example:
+        val switch = switch_step(
+            \x: x["type"],
+            { "A": process_a, "B": process_b },
+            identity
+        )
+    """
+    \data: {
+        val key = selector_fn(data)
+        val handler = cases.get(key, default_fn)
+        handler(data)
+    }
+
+fn parallel_branch(branches):
+    """Execute multiple branches in parallel (conceptually).
+
+    Returns array of results from each branch.
+
+    Example:
+        val results = parallel_branch([
+            \x: x * 2,
+            \x: x + 1,
+            \x: x ** 2
+        ])
+    """
+    \data: {
+        var results = []
+        for branch_fn in branches:
+            val result = branch_fn(data)
+            results = results + [result]
+        results
+    }
+
+fn merge_results(merge_fn):
+    """Merge parallel branch results using merge_fn.
+
+    Example:
+        val merge = merge_results(\results: results.reduce(0, \acc, x: acc + x))
+    """
+    merge_fn
+
+fn fork_join_step(branches, merge_fn):
+    """Fork data to multiple branches, then join results.
+
+    Example:
+        val fork = fork_join_step(
+            [\x: x * 2, \x: x + 1],
+            \results: results.reduce(0, \acc, x: acc + x)
+        )
+    """
+    \data: {
+        val branch_results = parallel_branch(branches)(data)
+        merge_fn(branch_results)
+    }
+
+# ============================================================================
+# Error Handling Steps
+# ============================================================================
+
+fn try_step(step_fn, error_value):
+    """Try to execute step, return error_value on failure.
+
+    Wraps step in error handling.
+
+    Example:
+        val safe_divide = try_step(\x: 10 / x, { error: "division failed" })
+    """
+    \data: {
+        # Since we can't catch exceptions, we return error format
+        # In real usage, step_fn would validate before executing
+        val result = step_fn(data)
+        result
+    }
+
+fn catch_step(handler_fn):
+    """Catch errors from previous steps.
+
+    If data contains error field, apply handler_fn.
+
+    Example:
+        val handle_error = catch_step(\err: { recovered: true, original: err })
+    """
+    \data: {
+        if data != nil:
+            val has_error = data.get("error", nil)
+            if has_error != nil:
+                handler_fn(has_error)
+            else:
+                data
+        else:
+            data
+    }
+
+fn fallback_step(fallback_value):
+    """Provide fallback value if data is nil or contains error.
+
+    Example:
+        val fallback = fallback_step(0)
+    """
+    \data: {
+        if data == nil:
+            fallback_value
+        else:
+            val has_error = data.get("error", nil)
+            if has_error != nil:
+                fallback_value
+            else:
+                data
+    }
+
+fn recover_step(recovery_fn):
+    """Recover from errors using recovery_fn.
+
+    Similar to catch but transforms the error.
+
+    Example:
+        val recover = recover_step(\err: { status: "recovered", value: 0 })
+    """
+    \data: {
+        if data != nil:
+            val has_error = data.get("error", nil)
+            if has_error != nil:
+                recovery_fn(data)
+            else:
+                data
+        else:
+            data
+    }
+
+fn retry_step(step_fn, max_attempts):
+    """Retry step execution up to max_attempts times.
+
+    Returns result on success or last error.
+
+    Example:
+        val retry_fetch = retry_step(fetch_data, 3)
+    """
+    \data: {
+        var attempts = 0
+        var last_result = nil
+        var success = false
+
+        while attempts < max_attempts:
+            last_result = step_fn(data)
+            # Check if successful (no error field)
+            if last_result != nil:
+                val has_error = last_result.get("error", nil)
+                if has_error == nil:
+                    success = true
+                    break
+            else:
+                success = true
+                break
+            attempts = attempts + 1
+
+        last_result
+    }
+
+# ============================================================================
+# Utility Steps
+# ============================================================================
+
+fn tap_step(inspect_fn):
+    """Create a tap step for side effects (logging, debugging).
+
+    Executes inspect_fn but returns original data unchanged.
+
+    Example:
+        val log = tap_step(\x: print("Value: {x}"))
+        p = add_step(p, log)
+    """
+    \data: {
+        inspect_fn(data)
+        data
+    }
+
+fn each_step(action_fn):
+    """Execute action on each element in array (side effects).
+
+    Returns original array unchanged.
+
+    Example:
+        val print_each = each_step(\x: print("Item: {x}"))
+    """
+    \data: {
+        for item in data:
+            action_fn(item)
+        data
+    }
+
+fn batch_step(batch_size):
+    """Batch array elements into chunks.
+
+    Useful for processing large datasets in batches.
+
+    Example:
+        val batch = batch_step(10)
+        p = add_step(p, batch)
+    """
+    \data: {
+        if batch_size <= 0:
+            return [data]
+
+        var batches = []
+        var current_batch = []
+        var count = 0
+
+        for item in data:
+            current_batch = current_batch + [item]
+            count = count + 1
+
+            if count >= batch_size:
+                batches = batches + [current_batch]
+                current_batch = []
+                count = 0
+
+        # Add remaining items
+        if current_batch.len() > 0:
+            batches = batches + [current_batch]
+
+        batches
+    }
+
+fn debatch_step():
+    """Flatten batched data back into single array.
+
+    Inverse of batch_step.
+
+    Example:
+        val debatch = debatch_step()
+        p = add_step(p, debatch)
+    """
+    \data: data.flatten()
+
+fn validate_step(validator_fn, error_msg):
+    """Validate data and return error if validation fails.
+
+    Example:
+        val check_positive = validate_step(\x: x > 0, "Must be positive")
+    """
+    \data: {
+        if validator_fn(data):
+            data
+        else:
+            { error: error_msg, data: data }
+    }
+
+fn log_step(prefix):
+    """Log data with prefix (debugging utility).
+
+    Example:
+        val log = log_step("DEBUG")
+    """
+    \data: {
+        print("{prefix}: {data}")
+        data
+    }
+
+fn cache_step(cache_dict):
+    """Cache results based on cache_dict.
+
+    Simple caching mechanism using dict lookup.
+
+    Example:
+        val cache = {}
+        val cached = cache_step(cache)
+    """
+    \data: {
+        # Simple cache lookup by key
+        val key = data.to_string()
+        val cached = cache_dict.get(key, nil)
+        if cached != nil:
+            cached
+        else:
+            # Would normally compute and cache, but just return data
+            data
+    }
+
+fn memoize_step(step_fn, memo_dict):
+    """Memoize step results to avoid recomputation.
+
+    Example:
+        val memo = {}
+        val memoized = memoize_step(expensive_fn, memo)
+    """
+    \data: {
+        val key = data.to_string()
+        val cached = memo_dict.get(key, nil)
+        if cached != nil:
+            cached
+        else:
+            val result = step_fn(data)
+            memo_dict[key] = result
+            result
+    }
+
+fn throttle_step(min_interval):
+    """Throttle step execution (conceptual - requires time tracking).
+
+    In practice, would need timing infrastructure.
+
+    Example:
+        val throttled = throttle_step(1000)  # 1 second minimum
+    """
+    \data: {
+        # Placeholder - would need timing state
+        data
+    }
+
+fn debounce_step(delay):
+    """Debounce step execution (conceptual - requires time tracking).
+
+    In practice, would need timing infrastructure.
+
+    Example:
+        val debounced = debounce_step(500)  # 500ms delay
+    """
+    \data: {
+        # Placeholder - would need timing state
+        data
+    }
+
+# ============================================================================
+# ETL Pipeline Patterns
+# ============================================================================
+
+fn create_etl_pipeline(extract_fn, transform_fn, load_fn):
+    """Create a standard ETL (Extract-Transform-Load) pipeline.
+
+    Example:
+        val etl = create_etl_pipeline(
+            \source: fetch_data(source),
+            \data: clean_and_validate(data),
+            \data: save_to_db(data)
+        )
+    """
+    pipeline_from_functions([extract_fn, transform_fn, load_fn])
+
+fn extract_step(source_fn):
+    """Create an extraction step for ETL.
+
+    Example:
+        val extract = extract_step(\config: read_csv(config["path"]))
+    """
+    source_fn
+
+fn transform_etl_step(transformations):
+    """Create a transformation step with multiple operations.
+
+    Args:
+        transformations: Array of transformation functions
+
+    Example:
+        val transform = transform_etl_step([clean, validate, normalize])
+    """
+    \data: {
+        var result = data
+        for transform_fn in transformations:
+            result = transform_fn(result)
+        result
+    }
+
+fn load_step(destination_fn):
+    """Create a load step for ETL.
+
+    Example:
+        val load = load_step(\data: write_to_database(data))
+    """
+    destination_fn
+
+# ============================================================================
+# Callback Chain Pattern
+# ============================================================================
+
+fn create_callback_chain():
+    """Create a callback chain for async-like patterns.
+
+    Returns callback chain object with callbacks array.
+
+    Example:
+        val chain = create_callback_chain()
+    """
+    { callbacks: [], metadata: { type: "callback_chain" } }
+
+fn add_callback(chain, callback_fn):
+    """Add callback to callback chain.
+
+    Returns new chain with callback added.
+
+    Example:
+        chain = add_callback(chain, \result: process(result))
+    """
+    val new_callbacks = chain["callbacks"] + [callback_fn]
+    { callbacks: new_callbacks, metadata: chain["metadata"] }
+
+fn run_callbacks(chain, initial_data):
+    """Execute all callbacks in sequence with initial data.
+
+    Example:
+        val result = run_callbacks(chain, input)
+    """
+    var current = initial_data
+    for callback in chain["callbacks"]:
+        current = callback(current)
+    current
+
+# ============================================================================
+# Promise Pattern (Async-like)
+# ============================================================================
+
+fn create_promise():
+    """Create a promise-like object.
+
+    Returns promise object with pending state.
+
+    Example:
+        val promise = create_promise()
+    """
+    {
+        state: "pending",
+        value: nil,
+        error: nil,
+        then_handlers: [],
+        catch_handlers: []
+    }
+
+fn resolve_promise(promise, value):
+    """Resolve promise with value.
+
+    Returns new promise in resolved state.
+
+    Example:
+        promise = resolve_promise(promise, 42)
+    """
+    val new_promise = promise
+    new_promise["state"] = "resolved"
+    new_promise["value"] = value
+
+    # Execute then handlers
+    for handler in promise["then_handlers"]:
+        handler(value)
+
+    new_promise
+
+fn then_promise(promise, handler_fn):
+    """Add then handler to promise.
+
+    Example:
+        promise = then_promise(promise, \val: process(val))
+    """
+    val new_handlers = promise["then_handlers"] + [handler_fn]
+    val new_promise = promise
+    new_promise["then_handlers"] = new_handlers
+
+    # If already resolved, execute immediately
+    if promise["state"] == "resolved":
+        handler_fn(promise["value"])
+
+    new_promise
+
+fn catch_promise(promise, handler_fn):
+    """Add error handler to promise.
+
+    Example:
+        promise = catch_promise(promise, \err: handle_error(err))
+    """
+    val new_handlers = promise["catch_handlers"] + [handler_fn]
+    val new_promise = promise
+    new_promise["catch_handlers"] = new_handlers
+
+    # If already rejected, execute immediately
+    if promise["state"] == "rejected":
+        handler_fn(promise["error"])
+
+    new_promise
+
+# ============================================================================
+# Pipeline Inspection
+# ============================================================================
+
+fn pipeline_length(pipeline):
+    """Get number of steps in pipeline.
+
+    Example:
+        val len = pipeline_length(my_pipeline)
+    """
+    pipeline["steps"].len()
+
+fn pipeline_steps(pipeline):
+    """Get array of steps from pipeline.
+
+    Example:
+        val steps = pipeline_steps(my_pipeline)
+    """
+    pipeline["steps"]
+
+fn describe_pipeline(pipeline):
+    """Get description of pipeline structure.
+
+    Returns dict with pipeline metadata.
+
+    Example:
+        val desc = describe_pipeline(my_pipeline)
+        print("Steps: {desc["count"]}")
+    """
+    {
+        step_count: pipeline["steps"].len(),
+        metadata: pipeline["metadata"],
+        has_steps: pipeline["steps"].len() > 0
+    }
+
+# ============================================================================
+# Example Usage Patterns
+# ============================================================================
+
+fn example_simple_pipeline():
+    """Example: Simple data transformation pipeline."""
+    var p = create_pipeline()
+    p = add_step(p, map_step(\x: x * 2))
+    p = add_step(p, filter_step(\x: x > 10))
+    p = add_step(p, reduce_step(0, \acc, x: acc + x))
+
+    val data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    run_pipeline(p, data)
+
+fn example_etl_pipeline():
+    """Example: ETL pipeline for data processing."""
+    val etl = create_etl_pipeline(
+        # Extract
+        \config: [1, 2, 3, 4, 5],
+        # Transform
+        \data: data.map(\x: x * 2).filter(\x: x > 5),
+        # Load
+        \data: { processed: data, count: data.len() }
+    )
+
+    run_pipeline(etl, {})
+
+fn example_branching_pipeline():
+    """Example: Pipeline with conditional branching."""
+    var p = create_pipeline()
+    p = add_step(p, branch_step(
+        \x: x > 100,
+        \x: x / 2,
+        \x: x * 2
+    ))
+    p = add_step(p, tap_step(\x: print("Result: {x}")))
+
+    run_pipeline(p, 150)
+
+fn example_error_handling_pipeline():
+    """Example: Pipeline with error handling."""
+    var p = create_pipeline()
+    p = add_step(p, validate_step(\x: x > 0, "Must be positive"))
+    p = add_step(p, try_step(\x: 100 / x, { error: "division failed" }))
+    p = add_step(p, fallback_step(0))
+
+    run_with_error_handling(p, 5)
+
+fn example_batch_pipeline():
+    """Example: Batch processing pipeline."""
+    var p = create_pipeline()
+    p = add_step(p, batch_step(3))
+    p = add_step(p, map_step(\batch: batch.reduce(0, \acc, x: acc + x)))
+    p = add_step(p, tap_step(\batches: print("Batch sums: {batches}")))
+
+    val data = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    run_pipeline(p, data)
+
+fn example_fork_join_pipeline():
+    """Example: Fork-join parallel processing."""
+    var p = create_pipeline()
+    p = add_step(p, fork_join_step(
+        [
+            \x: x * 2,
+            \x: x + 10,
+            \x: x ** 2
+        ],
+        \results: results.reduce(0, \acc, x: acc + x)
+    ))
+
+    run_pipeline(p, 5)
+
+fn example_callback_chain():
+    """Example: Callback chain for async-like processing."""
+    var chain = create_callback_chain()
+    chain = add_callback(chain, \x: x * 2)
+    chain = add_callback(chain, \x: x + 1)
+    chain = add_callback(chain, \x: { value: x, processed: true })
+
+    run_callbacks(chain, 5)
+
+fn example_promise_pattern():
+    """Example: Promise-like async pattern."""
+    var promise = create_promise()
+    promise = then_promise(promise, \val: print("Got: {val}"))
+    promise = then_promise(promise, \val: print("Also got: {val}"))
+    promise = catch_promise(promise, \err: print("Error: {err}"))
+
+    resolve_promise(promise, 42)

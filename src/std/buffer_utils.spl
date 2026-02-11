@@ -1,0 +1,879 @@
+# Buffer and Byte Array Utilities
+#
+# Provides utilities for working with buffers and byte arrays.
+# Useful for binary data manipulation, serialization, and protocol implementation.
+#
+# Key features:
+# - Buffer creation and allocation
+# - Read/write operations with position tracking
+# - Byte-level operations
+# - Integer encoding/decoding (big-endian and little-endian)
+# - String operations
+# - Buffer manipulation (clear, reset, compact, expand)
+# - Conversion utilities
+#
+# Examples:
+#   # Create a buffer
+#   val buf = Buffer.create(1024)
+#   buf.write_string("Hello")
+#   buf.write_i32(42)
+#
+#   # Read data
+#   buf.reset()
+#   val text = buf.read_string(5)
+#   val num = buf.read_i32()
+#
+#   # Binary protocol
+#   val packet = Buffer.create(256)
+#   packet.write_byte(0x01)        # Version
+#   packet.write_i32_be(payload_len)
+#   packet.write_bytes(payload)
+
+# Buffer class for managing byte arrays with read/write positions
+class Buffer:
+    data: List         # Byte array (list of integers 0-255)
+    read_pos: i64      # Current read position
+    write_pos: i64     # Current write position
+    cap: i64          # Capacity
+
+    # Create a new buffer with specified capacity
+    static fn create(capacity: i64) -> Buffer:
+        val data_list = []
+        var i = 0
+        while i < capacity:
+            data_list.append(0)
+            i = i + 1
+        Buffer(data: data_list, read_pos: 0, write_pos: 0, cap: capacity)
+
+    # Create buffer from existing array
+    static fn from_array(arr: List) -> Buffer:
+        val data_copy = []
+        var i = 0
+        while i < arr.len():
+            data_copy.append(arr.get(i))
+            i = i + 1
+        val cap_val = arr.len()
+        Buffer(data: data_copy, read_pos: 0, write_pos: cap_val, cap: cap_val)
+
+    # Create buffer from string (UTF-8 bytes)
+    static fn from_string(s: text) -> Buffer:
+        val bytes = string_to_bytes(s)
+        Buffer.from_array(bytes)
+
+    # Allocate a buffer filled with a specific byte value
+    static fn allocate(capacity: i64, fill_byte: i64) -> Buffer:
+        val data_list = []
+        var i = 0
+        while i < capacity:
+            data_list.append(fill_byte)
+            i = i + 1
+        Buffer(data: data_list, read_pos: 0, write_pos: capacity, cap: capacity)
+
+    # Get current size (write position)
+    fn size() -> i64:
+        self.write_pos
+
+    # Get capacity
+    fn capacity() -> i64:
+        self.cap
+
+    # Get available bytes to read
+    fn available() -> i64:
+        self.write_pos - self.read_pos
+
+    # Get available capacity to write
+    fn available_capacity() -> i64:
+        self.cap - self.write_pos
+
+    # Check if buffer is full
+    fn is_full() -> bool:
+        self.write_pos >= self.cap
+
+    # Check if all data has been read
+    fn is_empty() -> bool:
+        self.read_pos >= self.write_pos
+
+    # Get current read position
+    fn get_read_pos() -> i64:
+        self.read_pos
+
+    # Get current write position
+    fn get_write_pos() -> i64:
+        self.write_pos
+
+    # Set read position
+    me set_read_pos(pos: i64):
+        if pos >= 0 and pos <= self.write_pos:
+            self.read_pos = pos
+
+    # Set write position
+    me set_write_pos(pos: i64):
+        if pos >= 0 and pos <= self.cap:
+            self.write_pos = pos
+
+    # Read a single byte
+    fn read_byte() -> i64:
+        if self.read_pos >= self.write_pos:
+            return -1
+        val byte_val = self.data.get(self.read_pos)
+        var new_pos = self.read_pos
+        new_pos = new_pos + 1
+        self.read_pos = new_pos
+        byte_val
+
+    # Read multiple bytes into a list
+    fn read_bytes(count: i64) -> List:
+        val result = []
+        var remaining = count
+        while remaining > 0 and self.read_pos < self.write_pos:
+            result.append(self.data.get(self.read_pos))
+            var new_pos = self.read_pos
+            new_pos = new_pos + 1
+            self.read_pos = new_pos
+            remaining = remaining - 1
+        result
+
+    # Read bytes until buffer is empty
+    fn read_all() -> List:
+        self.read_bytes(self.available())
+
+    # Peek at a byte without advancing position
+    fn peek_byte() -> i64:
+        if self.read_pos >= self.write_pos:
+            return -1
+        self.data.get(self.read_pos)
+
+    # Peek at multiple bytes without advancing position
+    fn peek_bytes(count: i64) -> List:
+        val result = []
+        var i = 0
+        var pos = self.read_pos
+        while i < count and pos < self.write_pos:
+            result.append(self.data.get(pos))
+            pos = pos + 1
+            i = i + 1
+        result
+
+    # Write a single byte
+    me write_byte(byte_val: i64):
+        if self.write_pos >= self.cap:
+            return nil
+        val clamped = byte_val & 0xFF
+        self.data.set(self.write_pos, clamped)
+        var new_pos = self.write_pos
+        new_pos = new_pos + 1
+        self.write_pos = new_pos
+
+    # Write multiple bytes from a list
+    me write_bytes(bytes: List):
+        var i = 0
+        while i < bytes.len() and self.write_pos < self.cap:
+            val byte_val = bytes.get(i)
+            val clamped = byte_val & 0xFF
+            self.data.set(self.write_pos, clamped)
+            var new_pos = self.write_pos
+            new_pos = new_pos + 1
+            self.write_pos = new_pos
+            i = i + 1
+
+    # Write a 64-bit integer in big-endian format
+    me write_i64_be(value: i64):
+        self.write_byte((value >> 56) & 0xFF)
+        self.write_byte((value >> 48) & 0xFF)
+        self.write_byte((value >> 40) & 0xFF)
+        self.write_byte((value >> 32) & 0xFF)
+        self.write_byte((value >> 24) & 0xFF)
+        self.write_byte((value >> 16) & 0xFF)
+        self.write_byte((value >> 8) & 0xFF)
+        self.write_byte(value & 0xFF)
+
+    # Write a 64-bit integer in little-endian format
+    me write_i64_le(value: i64):
+        self.write_byte(value & 0xFF)
+        self.write_byte((value >> 8) & 0xFF)
+        self.write_byte((value >> 16) & 0xFF)
+        self.write_byte((value >> 24) & 0xFF)
+        self.write_byte((value >> 32) & 0xFF)
+        self.write_byte((value >> 40) & 0xFF)
+        self.write_byte((value >> 48) & 0xFF)
+        self.write_byte((value >> 56) & 0xFF)
+
+    # Write a 32-bit integer in big-endian format
+    me write_i32_be(value: i64):
+        self.write_byte((value >> 24) & 0xFF)
+        self.write_byte((value >> 16) & 0xFF)
+        self.write_byte((value >> 8) & 0xFF)
+        self.write_byte(value & 0xFF)
+
+    # Write a 32-bit integer in little-endian format
+    me write_i32_le(value: i64):
+        self.write_byte(value & 0xFF)
+        self.write_byte((value >> 8) & 0xFF)
+        self.write_byte((value >> 16) & 0xFF)
+        self.write_byte((value >> 24) & 0xFF)
+
+    # Write a 16-bit integer in big-endian format
+    me write_i16_be(value: i64):
+        self.write_byte((value >> 8) & 0xFF)
+        self.write_byte(value & 0xFF)
+
+    # Write a 16-bit integer in little-endian format
+    me write_i16_le(value: i64):
+        self.write_byte(value & 0xFF)
+        self.write_byte((value >> 8) & 0xFF)
+
+    # Read a 64-bit integer in big-endian format
+    fn read_i64_be() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        val b2 = self.read_byte()
+        val b3 = self.read_byte()
+        val b4 = self.read_byte()
+        val b5 = self.read_byte()
+        val b6 = self.read_byte()
+        val b7 = self.read_byte()
+        var result = 0
+        result = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+        result = result | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+        result
+
+    # Read a 64-bit integer in little-endian format
+    fn read_i64_le() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        val b2 = self.read_byte()
+        val b3 = self.read_byte()
+        val b4 = self.read_byte()
+        val b5 = self.read_byte()
+        val b6 = self.read_byte()
+        val b7 = self.read_byte()
+        var result = 0
+        result = (b7 << 56) | (b6 << 48) | (b5 << 40) | (b4 << 32)
+        result = result | (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+        result
+
+    # Read a 32-bit integer in big-endian format
+    fn read_i32_be() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        val b2 = self.read_byte()
+        val b3 = self.read_byte()
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+    # Read a 32-bit integer in little-endian format
+    fn read_i32_le() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        val b2 = self.read_byte()
+        val b3 = self.read_byte()
+        (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+
+    # Read a 16-bit integer in big-endian format
+    fn read_i16_be() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        (b0 << 8) | b1
+
+    # Read a 16-bit integer in little-endian format
+    fn read_i16_le() -> i64:
+        val b0 = self.read_byte()
+        val b1 = self.read_byte()
+        (b1 << 8) | b0
+
+    # Write a string as UTF-8 bytes with length prefix
+    me write_string(s: text):
+        val bytes = string_to_bytes(s)
+        val len_val = bytes.len()
+        self.write_i32_be(len_val)
+        self.write_bytes(bytes)
+
+    # Read a string with length prefix
+    fn read_string() -> text:
+        val len_val = self.read_i32_be()
+        if len_val < 0 or len_val > self.available():
+            return ""
+        val bytes = self.read_bytes(len_val)
+        bytes_to_string(bytes)
+
+    # Write a string without length prefix
+    me write_raw_string(s: text):
+        val bytes = string_to_bytes(s)
+        self.write_bytes(bytes)
+
+    # Read a fixed-length string
+    fn read_raw_string(length: i64) -> text:
+        val bytes = self.read_bytes(length)
+        bytes_to_string(bytes)
+
+    # Write a line (string + newline)
+    me write_line(s: text):
+        self.write_raw_string(s)
+        self.write_byte(10)  # newline
+
+    # Read until newline or end
+    fn read_line() -> text:
+        val bytes = []
+        var byte_val = self.read_byte()
+        while byte_val != -1 and byte_val != 10:
+            bytes.append(byte_val)
+            byte_val = self.read_byte()
+        bytes_to_string(bytes)
+
+    # Clear the buffer (reset positions and fill with zeros)
+    me clear():
+        self.read_pos = 0
+        self.write_pos = 0
+        var i = 0
+        while i < self.cap:
+            self.data.set(i, 0)
+            i = i + 1
+
+    # Reset positions to start
+    me reset():
+        self.read_pos = 0
+        self.write_pos = 0
+
+    # Reset read position to start
+    me reset_read():
+        self.read_pos = 0
+
+    # Reset write position to start
+    me reset_write():
+        self.write_pos = 0
+
+    # Compact buffer (move unread data to start)
+    me compact():
+        val unread = self.available()
+        if unread == 0:
+            self.reset()
+            return nil
+        if self.read_pos == 0:
+            return nil
+        var i = 0
+        while i < unread:
+            val byte_val = self.data.get(self.read_pos + i)
+            self.data.set(i, byte_val)
+            i = i + 1
+        self.read_pos = 0
+        self.write_pos = unread
+
+    # Expand buffer capacity (create new larger buffer)
+    fn expand(new_capacity: i64) -> Buffer:
+        if new_capacity <= self.cap:
+            return self
+        val new_buf = Buffer.create(new_capacity)
+        var i = 0
+        while i < self.write_pos:
+            new_buf.data.set(i, self.data.get(i))
+            i = i + 1
+        new_buf.read_pos = self.read_pos
+        new_buf.write_pos = self.write_pos
+        new_buf
+
+    # Get a slice of the buffer
+    fn slice(start: i64, end: i64) -> List:
+        val result = []
+        var i = start
+        while i < end and i < self.write_pos:
+            result.append(self.data.get(i))
+            i = i + 1
+        result
+
+    # Copy data from another buffer
+    me copy_from(other: Buffer, count: i64):
+        var remaining = count
+        while remaining > 0 and not other.is_empty() and not self.is_full():
+            val byte_val = other.read_byte()
+            self.write_byte(byte_val)
+            remaining = remaining - 1
+
+    # Copy to another buffer
+    me copy_to(other: Buffer, count: i64):
+        var remaining = count
+        while remaining > 0 and not self.is_empty() and not other.is_full():
+            val byte_val = self.read_byte()
+            other.write_byte(byte_val)
+            remaining = remaining - 1
+
+    # Convert buffer to array
+    fn to_array() -> List:
+        val result = []
+        var i = 0
+        while i < self.write_pos:
+            result.append(self.data.get(i))
+            i = i + 1
+        result
+
+    # Convert buffer to string
+    fn to_string() -> text:
+        val bytes = self.to_array()
+        bytes_to_string(bytes)
+
+    # Compare with another buffer
+    fn compare(other: Buffer) -> i64:
+        val len1 = self.write_pos
+        val len2 = other.write_pos
+        val min_len = if len1 < len2: len1 else: len2
+        var i = 0
+        while i < min_len:
+            val b1 = self.data.get(i)
+            val b2 = other.data.get(i)
+            if b1 < b2:
+                return -1
+            if b1 > b2:
+                return 1
+            i = i + 1
+        if len1 < len2:
+            return -1
+        if len1 > len2:
+            return 1
+        0
+
+    # Check equality with another buffer
+    fn equals(other: Buffer) -> bool:
+        self.compare(other) == 0
+
+    # Fill buffer with a specific byte value
+    me fill(byte_val: i64):
+        val clamped = byte_val & 0xFF
+        var i = 0
+        while i < self.cap:
+            self.data.set(i, clamped)
+            i = i + 1
+        self.write_pos = self.cap
+
+    # Fill a range with a specific byte value
+    me fill_range(start: i64, end: i64, byte_val: i64):
+        val clamped = byte_val & 0xFF
+        var i = start
+        while i < end and i < self.cap:
+            self.data.set(i, clamped)
+            i = i + 1
+
+    # Skip bytes in read position
+    me skip(count: i64):
+        var new_pos = self.read_pos
+        new_pos = new_pos + count
+        if new_pos > self.write_pos:
+            new_pos = self.write_pos
+        self.read_pos = new_pos
+
+    # Rewind read position
+    me rewind(count: i64):
+        var new_pos = self.read_pos
+        new_pos = new_pos - count
+        if new_pos < 0:
+            new_pos = 0
+        self.read_pos = new_pos
+
+    # Get remaining bytes as a new buffer
+    fn remaining() -> Buffer:
+        val bytes = self.read_all()
+        Buffer.from_array(bytes)
+
+    # Clone the buffer
+    fn clone() -> Buffer:
+        val new_buf = Buffer.create(self.cap)
+        var i = 0
+        while i < self.cap:
+            new_buf.data.set(i, self.data.get(i))
+            i = i + 1
+        new_buf.read_pos = self.read_pos
+        new_buf.write_pos = self.write_pos
+        new_buf
+
+
+# Utility functions for byte operations
+
+# Convert string to byte array
+fn string_to_bytes(s: text) -> List:
+    val result = []
+    var i = 0
+    while i < s.len():
+        val ch = s.char_at(i)
+        val code = s.char_code_at(i)
+        result.append(code)
+        i = i + 1
+    result
+
+# Convert byte array to string
+fn bytes_to_string(bytes: List) -> text:
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val code = bytes.get(i)
+        if code >= 0 and code <= 127:
+            val ch = code_to_char(code)
+            result = result + ch
+        i = i + 1
+    result
+
+# Convert character code to character
+fn code_to_char(code: i64) -> text:
+    if code == 32: return " "
+    if code == 33: return "!"
+    if code == 34: return "\""
+    if code == 35: return "#"
+    if code == 36: return "$"
+    if code == 37: return "%"
+    if code == 38: return "&"
+    if code == 39: return "'"
+    if code == 40: return "("
+    if code == 41: return ")"
+    if code == 42: return "*"
+    if code == 43: return "+"
+    if code == 44: return ","
+    if code == 45: return "-"
+    if code == 46: return "."
+    if code == 47: return "/"
+    if code == 48: return "0"
+    if code == 49: return "1"
+    if code == 50: return "2"
+    if code == 51: return "3"
+    if code == 52: return "4"
+    if code == 53: return "5"
+    if code == 54: return "6"
+    if code == 55: return "7"
+    if code == 56: return "8"
+    if code == 57: return "9"
+    if code == 58: return ":"
+    if code == 59: return ";"
+    if code == 60: return "<"
+    if code == 61: return "="
+    if code == 62: return ">"
+    if code == 63: return "?"
+    if code == 64: return "@"
+    if code == 65: return "A"
+    if code == 66: return "B"
+    if code == 67: return "C"
+    if code == 68: return "D"
+    if code == 69: return "E"
+    if code == 70: return "F"
+    if code == 71: return "G"
+    if code == 72: return "H"
+    if code == 73: return "I"
+    if code == 74: return "J"
+    if code == 75: return "K"
+    if code == 76: return "L"
+    if code == 77: return "M"
+    if code == 78: return "N"
+    if code == 79: return "O"
+    if code == 80: return "P"
+    if code == 81: return "Q"
+    if code == 82: return "R"
+    if code == 83: return "S"
+    if code == 84: return "T"
+    if code == 85: return "U"
+    if code == 86: return "V"
+    if code == 87: return "W"
+    if code == 88: return "X"
+    if code == 89: return "Y"
+    if code == 90: return "Z"
+    if code == 91: return "["
+    if code == 92: return "\\"
+    if code == 93: return "]"
+    if code == 94: return "^"
+    if code == 95: return "_"
+    if code == 96: return "`"
+    if code == 97: return "a"
+    if code == 98: return "b"
+    if code == 99: return "c"
+    if code == 100: return "d"
+    if code == 101: return "e"
+    if code == 102: return "f"
+    if code == 103: return "g"
+    if code == 104: return "h"
+    if code == 105: return "i"
+    if code == 106: return "j"
+    if code == 107: return "k"
+    if code == 108: return "l"
+    if code == 109: return "m"
+    if code == 110: return "n"
+    if code == 111: return "o"
+    if code == 112: return "p"
+    if code == 113: return "q"
+    if code == 114: return "r"
+    if code == 115: return "s"
+    if code == 116: return "t"
+    if code == 117: return "u"
+    if code == 118: return "v"
+    if code == 119: return "w"
+    if code == 120: return "x"
+    if code == 121: return "y"
+    if code == 122: return "z"
+    if code == 123: return "{"
+    if code == 124: return "|"
+    if code == 125: return "}"
+    if code == 126: return "~"
+    if code == 10: return "\n"
+    if code == 13: return "\r"
+    if code == 9: return "\t"
+    "?"
+
+# Encode integer as big-endian bytes
+fn i64_to_bytes_be(value: i64) -> List:
+    val result = []
+    result.append((value >> 56) & 0xFF)
+    result.append((value >> 48) & 0xFF)
+    result.append((value >> 40) & 0xFF)
+    result.append((value >> 32) & 0xFF)
+    result.append((value >> 24) & 0xFF)
+    result.append((value >> 16) & 0xFF)
+    result.append((value >> 8) & 0xFF)
+    result.append(value & 0xFF)
+    result
+
+# Encode integer as little-endian bytes
+fn i64_to_bytes_le(value: i64) -> List:
+    val result = []
+    result.append(value & 0xFF)
+    result.append((value >> 8) & 0xFF)
+    result.append((value >> 16) & 0xFF)
+    result.append((value >> 24) & 0xFF)
+    result.append((value >> 32) & 0xFF)
+    result.append((value >> 40) & 0xFF)
+    result.append((value >> 48) & 0xFF)
+    result.append((value >> 56) & 0xFF)
+    result
+
+# Decode big-endian bytes to integer
+fn bytes_to_i64_be(bytes: List) -> i64:
+    if bytes.len() < 8:
+        return 0
+    val b0 = bytes.get(0)
+    val b1 = bytes.get(1)
+    val b2 = bytes.get(2)
+    val b3 = bytes.get(3)
+    val b4 = bytes.get(4)
+    val b5 = bytes.get(5)
+    val b6 = bytes.get(6)
+    val b7 = bytes.get(7)
+    var result = 0
+    result = (b0 << 56) | (b1 << 48) | (b2 << 40) | (b3 << 32)
+    result = result | (b4 << 24) | (b5 << 16) | (b6 << 8) | b7
+    result
+
+# Decode little-endian bytes to integer
+fn bytes_to_i64_le(bytes: List) -> i64:
+    if bytes.len() < 8:
+        return 0
+    val b0 = bytes.get(0)
+    val b1 = bytes.get(1)
+    val b2 = bytes.get(2)
+    val b3 = bytes.get(3)
+    val b4 = bytes.get(4)
+    val b5 = bytes.get(5)
+    val b6 = bytes.get(6)
+    val b7 = bytes.get(7)
+    var result = 0
+    result = (b7 << 56) | (b6 << 48) | (b5 << 40) | (b4 << 32)
+    result = result | (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+    result
+
+# Encode 32-bit integer as big-endian bytes
+fn i32_to_bytes_be(value: i64) -> List:
+    val result = []
+    result.append((value >> 24) & 0xFF)
+    result.append((value >> 16) & 0xFF)
+    result.append((value >> 8) & 0xFF)
+    result.append(value & 0xFF)
+    result
+
+# Encode 32-bit integer as little-endian bytes
+fn i32_to_bytes_le(value: i64) -> List:
+    val result = []
+    result.append(value & 0xFF)
+    result.append((value >> 8) & 0xFF)
+    result.append((value >> 16) & 0xFF)
+    result.append((value >> 24) & 0xFF)
+    result
+
+# Decode big-endian bytes to 32-bit integer
+fn bytes_to_i32_be(bytes: List) -> i64:
+    if bytes.len() < 4:
+        return 0
+    val b0 = bytes.get(0)
+    val b1 = bytes.get(1)
+    val b2 = bytes.get(2)
+    val b3 = bytes.get(3)
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# Decode little-endian bytes to 32-bit integer
+fn bytes_to_i32_le(bytes: List) -> i64:
+    if bytes.len() < 4:
+        return 0
+    val b0 = bytes.get(0)
+    val b1 = bytes.get(1)
+    val b2 = bytes.get(2)
+    val b3 = bytes.get(3)
+    (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+
+# Compare two byte arrays
+fn compare_bytes(a: List, b: List) -> i64:
+    val len_a = a.len()
+    val len_b = b.len()
+    val min_len = if len_a < len_b: len_a else: len_b
+    var i = 0
+    while i < min_len:
+        val byte_a = a.get(i)
+        val byte_b = b.get(i)
+        if byte_a < byte_b:
+            return -1
+        if byte_a > byte_b:
+            return 1
+        i = i + 1
+    if len_a < len_b:
+        return -1
+    if len_a > len_b:
+        return 1
+    0
+
+# Check if two byte arrays are equal
+fn bytes_equal(a: List, b: List) -> bool:
+    compare_bytes(a, b) == 0
+
+# Concatenate two byte arrays
+fn concat_bytes(a: List, b: List) -> List:
+    val result = []
+    var i = 0
+    while i < a.len():
+        result.append(a.get(i))
+        i = i + 1
+    i = 0
+    while i < b.len():
+        result.append(b.get(i))
+        i = i + 1
+    result
+
+# Create a copy of a byte array
+fn copy_bytes(bytes: List) -> List:
+    val result = []
+    var i = 0
+    while i < bytes.len():
+        result.append(bytes.get(i))
+        i = i + 1
+    result
+
+# Reverse a byte array
+fn reverse_bytes(bytes: List) -> List:
+    val result = []
+    var i = 0
+    val len_val = bytes.len()
+    while i < len_val:
+        result.append(bytes.get(len_val - 1 - i))
+        i = i + 1
+    result
+
+# Get a slice of a byte array
+fn slice_bytes(bytes: List, start: i64, end: i64) -> List:
+    val result = []
+    var i = start
+    while i < end and i < bytes.len():
+        result.append(bytes.get(i))
+        i = i + 1
+    result
+
+# Find a byte in a byte array (returns index or -1)
+fn find_byte(bytes: List, target: i64) -> i64:
+    var i = 0
+    while i < bytes.len():
+        if bytes.get(i) == target:
+            return i
+        i = i + 1
+    -1
+
+# Count occurrences of a byte in a byte array
+fn count_byte(bytes: List, target: i64) -> i64:
+    var count = 0
+    var i = 0
+    while i < bytes.len():
+        if bytes.get(i) == target:
+            count = count + 1
+        i = i + 1
+    count
+
+# XOR two byte arrays (result length is minimum of both)
+fn xor_bytes(a: List, b: List) -> List:
+    val result = []
+    val len_a = a.len()
+    val len_b = b.len()
+    val min_len = if len_a < len_b: len_a else: len_b
+    var i = 0
+    while i < min_len:
+        result.append(a.get(i) ^ b.get(i))
+        i = i + 1
+    result
+
+# Convert byte array to hexadecimal string
+fn bytes_to_hex(bytes: List) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val byte_val = bytes.get(i)
+        val high = (byte_val >> 4) & 0x0F
+        val low = byte_val & 0x0F
+        result = result + hex_chars.char_at(high)
+        result = result + hex_chars.char_at(low)
+        i = i + 1
+    result
+
+# Convert hexadecimal string to byte array
+fn hex_to_bytes(hex: text) -> List:
+    val result = []
+    var i = 0
+    while i < hex.len() - 1:
+        val high_char = hex.char_at(i)
+        val low_char = hex.char_at(i + 1)
+        val high = hex_char_to_value(high_char)
+        val low = hex_char_to_value(low_char)
+        if high >= 0 and low >= 0:
+            result.append((high << 4) | low)
+        i = i + 2
+    result
+
+# Convert hex character to value
+fn hex_char_to_value(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "a" or ch == "A": return 10
+    if ch == "b" or ch == "B": return 11
+    if ch == "c" or ch == "C": return 12
+    if ch == "d" or ch == "D": return 13
+    if ch == "e" or ch == "E": return 14
+    if ch == "f" or ch == "F": return 15
+    -1
+
+# Checksum calculation (simple sum modulo 256)
+fn checksum(bytes: List) -> i64:
+    var sum = 0
+    var i = 0
+    while i < bytes.len():
+        sum = sum + bytes.get(i)
+        i = i + 1
+    sum & 0xFF
+
+# CRC-8 calculation
+fn crc8(bytes: List) -> i64:
+    var crc = 0
+    var i = 0
+    while i < bytes.len():
+        crc = crc ^ bytes.get(i)
+        var j = 0
+        while j < 8:
+            var test = (crc & 0x80) != 0
+            if test:
+                crc = (crc << 1) ^ 0x07
+            if not test:
+                crc = crc << 1
+            j = j + 1
+        i = i + 1
+    crc & 0xFF
