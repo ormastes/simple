@@ -1,0 +1,1201 @@
+# Lazy Evaluation and Stream Utilities
+#
+# Provides lazy sequences, streams, and deferred computation utilities.
+# Works around runtime limitations (no generics at runtime, closure capture issues)
+# by using explicit state-passing patterns.
+#
+# Categories:
+# - Lazy Values: lazy_value, force_lazy, is_evaluated
+# - Basic Streams: stream_from_list, stream_range, stream_empty
+# - Infinite Streams: stream_repeat, stream_cycle, stream_iterate, stream_count
+# - Stream Operations: stream_map, stream_filter, stream_take, stream_drop
+# - Stream Predicates: stream_take_while, stream_drop_while
+# - Stream Consumers: stream_to_list, stream_first, stream_nth, stream_fold
+# - Stream Combinators: stream_zip, stream_chain, stream_concat
+# - Stream Queries: stream_any, stream_all, stream_find, stream_count_matches
+# - Advanced: stream_flatmap, stream_distinct, stream_peek
+# - Generators: make_generator, generator_next, generator_has_next
+# - Utilities: stream_enumerate, stream_chunks, stream_windows
+#
+# All functions are pure Simple - no external dependencies required.
+#
+# Stream Representation:
+# A stream is a dict with:
+#   - "type": "stream"
+#   - "data": current list of materialized elements
+#   - "index": current position
+#   - "generator": function to generate next element (or nil if finite)
+#   - "state": generator state (varies by stream type)
+#   - "exhausted": boolean indicating if stream is done
+#
+# Lazy Value Representation:
+# A lazy value is a dict with:
+#   - "type": "lazy"
+#   - "evaluated": boolean
+#   - "thunk": function to compute value (or nil if evaluated)
+#   - "value": computed value (or nil if not evaluated)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export lazy_value, force_lazy, is_evaluated, lazy_map
+export stream_from_list, stream_range, stream_empty
+export stream_repeat, stream_cycle, stream_iterate, stream_count
+export stream_map, stream_filter, stream_take, stream_drop
+export stream_take_while, stream_drop_while
+export stream_to_list, stream_first, stream_nth, stream_fold
+export stream_zip, stream_chain, stream_concat
+export stream_any, stream_all, stream_find, stream_count_matches
+export stream_flatmap, stream_distinct, stream_peek
+export make_generator, generator_next, generator_has_next
+export stream_enumerate, stream_chunks, stream_windows
+export memoize_nullary, memoize_unary, memoize_binary
+export stream_flatten, stream_partition, stream_group_by
+export stream_scan, stream_reduce, stream_min, stream_max
+
+# ============================================================================
+# Lazy Values - Deferred Computation
+# ============================================================================
+
+fn lazy_value(thunk):
+    """Create a lazy value that will be computed on first access.
+
+    The thunk should be a nullary function (takes no arguments).
+
+    Example:
+        val expensive = lazy_value(\: compute_pi())
+        val result = force_lazy(expensive)  # Computed only once
+    """
+    {
+        "type": "lazy",
+        "evaluated": false,
+        "thunk": thunk,
+        "value": nil
+    }
+
+fn force_lazy(lazy_val):
+    """Force evaluation of a lazy value, returning the computed result.
+
+    If already evaluated, returns cached value.
+
+    Example:
+        val lv = lazy_value(\: 42)
+        force_lazy(lv)  # 42
+    """
+    if lazy_val["evaluated"]:
+        return lazy_val["value"]
+
+    # Compute value
+    val computed = lazy_val["thunk"]()
+
+    # Update lazy value (mutation for memoization)
+    lazy_val["evaluated"] = true
+    lazy_val["value"] = computed
+    lazy_val["thunk"] = nil  # Release thunk for GC
+
+    computed
+
+fn is_evaluated(lazy_val):
+    """Check if a lazy value has been evaluated.
+
+    Example:
+        val lv = lazy_value(\: 42)
+        is_evaluated(lv)      # false
+        force_lazy(lv)
+        is_evaluated(lv)      # true
+    """
+    lazy_val["evaluated"]
+
+fn lazy_map(lazy_val, f):
+    """Map a function over a lazy value without forcing evaluation.
+
+    Example:
+        val lv = lazy_value(\: 10)
+        val doubled = lazy_map(lv, \x: x * 2)
+        force_lazy(doubled)  # 20
+    """
+    lazy_value(\: f(force_lazy(lazy_val)))
+
+# ============================================================================
+# Stream Construction - Finite Streams
+# ============================================================================
+
+fn stream_from_list(items):
+    """Create a finite stream from a list.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        stream_to_list(s)  # [1, 2, 3]
+    """
+    {
+        "type": "stream",
+        "data": items,
+        "index": 0,
+        "generator": nil,
+        "state": nil,
+        "exhausted": items.len() == 0
+    }
+
+fn stream_range(start, end):
+    """Create a finite stream of integers from start (inclusive) to end (exclusive).
+
+    Example:
+        val s = stream_range(1, 5)
+        stream_to_list(s)  # [1, 2, 3, 4]
+    """
+    var items = []
+    var i = start
+    while i < end:
+        items.push(i)
+        i = i + 1
+    stream_from_list(items)
+
+fn stream_empty():
+    """Create an empty stream.
+
+    Example:
+        val s = stream_empty()
+        stream_to_list(s)  # []
+    """
+    stream_from_list([])
+
+# ============================================================================
+# Stream Construction - Infinite Streams
+# ============================================================================
+
+fn stream_repeat(value):
+    """Create an infinite stream that repeats the same value.
+
+    CAUTION: This is an infinite stream. Always use with stream_take or similar.
+
+    Example:
+        val s = stream_repeat(42)
+        stream_to_list(stream_take(s, 3))  # [42, 42, 42]
+    """
+    {
+        "type": "stream",
+        "data": [],
+        "index": 0,
+        "generator": "repeat",
+        "state": {"value": value},
+        "exhausted": false
+    }
+
+fn stream_cycle(items):
+    """Create an infinite stream that cycles through the given list.
+
+    CAUTION: This is an infinite stream. Always use with stream_take or similar.
+
+    Example:
+        val s = stream_cycle([1, 2, 3])
+        stream_to_list(stream_take(s, 7))  # [1, 2, 3, 1, 2, 3, 1]
+    """
+    if items.len() == 0:
+        return stream_empty()
+
+    {
+        "type": "stream",
+        "data": [],
+        "index": 0,
+        "generator": "cycle",
+        "state": {"items": items, "position": 0},
+        "exhausted": false
+    }
+
+fn stream_iterate(initial, f):
+    """Create an infinite stream by repeatedly applying function f.
+
+    Generates: initial, f(initial), f(f(initial)), ...
+
+    CAUTION: This is an infinite stream. Always use with stream_take or similar.
+
+    Example:
+        val s = stream_iterate(1, \x: x * 2)
+        stream_to_list(stream_take(s, 5))  # [1, 2, 4, 8, 16]
+    """
+    {
+        "type": "stream",
+        "data": [],
+        "index": 0,
+        "generator": "iterate",
+        "state": {"current": initial, "fn": f, "first": true},
+        "exhausted": false
+    }
+
+fn stream_count(start):
+    """Create an infinite stream of integers starting from start.
+
+    CAUTION: This is an infinite stream. Always use with stream_take or similar.
+
+    Example:
+        val s = stream_count(10)
+        stream_to_list(stream_take(s, 4))  # [10, 11, 12, 13]
+    """
+    stream_iterate(start, \x: x + 1)
+
+# ============================================================================
+# Stream Helper - Get Next Element
+# ============================================================================
+
+fn stream_next_internal(stream):
+    """Internal: Get next element from stream. Returns (element, has_next)."""
+    # Check if already exhausted
+    if stream["exhausted"]:
+        return (nil, false)
+
+    # If we have buffered data, use it
+    if stream["index"] < stream["data"].len():
+        val elem = stream["data"][stream["index"]]
+        stream["index"] = stream["index"] + 1
+        return (elem, true)
+
+    # No generator means finite stream is exhausted
+    if stream["generator"] == nil:
+        stream["exhausted"] = true
+        return (nil, false)
+
+    # Generate next element based on generator type
+    val gen_type = stream["generator"]
+    val state = stream["state"]
+
+    if gen_type == "repeat":
+        val value = state["value"]
+        stream["data"].push(value)
+        stream["index"] = stream["index"] + 1
+        return (value, true)
+
+    if gen_type == "cycle":
+        val items = state["items"]
+        val pos = state["position"]
+        val value = items[pos]
+        state["position"] = (pos + 1) % items.len()
+        stream["data"].push(value)
+        stream["index"] = stream["index"] + 1
+        return (value, true)
+
+    if gen_type == "iterate":
+        val current = state["current"]
+        val fn = state["fn"]
+        val is_first = state["first"]
+
+        if is_first:
+            state["first"] = false
+            stream["data"].push(current)
+            stream["index"] = stream["index"] + 1
+            return (current, true)
+
+        val next_val = fn(current)
+        state["current"] = next_val
+        stream["data"].push(next_val)
+        stream["index"] = stream["index"] + 1
+        return (next_val, true)
+
+    # Unknown generator
+    stream["exhausted"] = true
+    (nil, false)
+
+# ============================================================================
+# Stream Operations - Map and Filter
+# ============================================================================
+
+fn stream_map(stream, f):
+    """Transform each element of a stream using function f.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        val doubled = stream_map(s, \x: x * 2)
+        stream_to_list(doubled)  # [2, 4, 6]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(f(elem))
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_filter(stream, predicate):
+    """Keep only elements that satisfy the predicate.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        val evens = stream_filter(s, \x: x % 2 == 0)
+        stream_to_list(evens)  # [2, 4]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                result.push(elem)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+# ============================================================================
+# Stream Operations - Take and Drop
+# ============================================================================
+
+fn stream_take(stream, n):
+    """Take first n elements from stream.
+
+    Example:
+        val s = stream_count(0)
+        val first_five = stream_take(s, 5)
+        stream_to_list(first_five)  # [0, 1, 2, 3, 4]
+    """
+    var result = []
+    var count = 0
+
+    while count < n:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(elem)
+            count = count + 1
+        else:
+            count = n  # Force exit
+
+    stream_from_list(result)
+
+fn stream_drop(stream, n):
+    """Drop first n elements from stream.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        val dropped = stream_drop(s, 2)
+        stream_to_list(dropped)  # [3, 4, 5]
+    """
+    var count = 0
+
+    # Skip n elements
+    while count < n:
+        val next_result = stream_next_internal(stream)
+        val has_next = next_result[1]
+
+        if has_next:
+            count = count + 1
+        else:
+            count = n  # Force exit
+
+    # Collect remaining
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(elem)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+# ============================================================================
+# Stream Operations - Conditional Take/Drop
+# ============================================================================
+
+fn stream_take_while(stream, predicate):
+    """Take elements while predicate is true, stop at first false.
+
+    Example:
+        val s = stream_from_list([2, 4, 6, 7, 8, 10])
+        val evens = stream_take_while(s, \x: x % 2 == 0)
+        stream_to_list(evens)  # [2, 4, 6]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                result.push(elem)
+            else:
+                continue = false
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_drop_while(stream, predicate):
+    """Drop elements while predicate is true, keep rest.
+
+    Example:
+        val s = stream_from_list([2, 4, 6, 7, 8, 10])
+        val rest = stream_drop_while(s, \x: x % 2 == 0)
+        stream_to_list(rest)  # [7, 8, 10]
+    """
+    var dropping = true
+
+    # Skip while predicate is true
+    while dropping:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if not predicate(elem):
+                dropping = false
+                # Keep this element
+                var result = [elem]
+
+                # Collect remaining
+                var continue = true
+                while continue:
+                    val next_result2 = stream_next_internal(stream)
+                    val elem2 = next_result2[0]
+                    val has_next2 = next_result2[1]
+
+                    if has_next2:
+                        result.push(elem2)
+                    else:
+                        continue = false
+
+                return stream_from_list(result)
+        else:
+            dropping = false
+
+    stream_empty()
+
+# ============================================================================
+# Stream Consumers - Materialization
+# ============================================================================
+
+fn stream_to_list(stream):
+    """Convert stream to list by materializing all elements.
+
+    CAUTION: Do not use on infinite streams without stream_take first.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        stream_to_list(s)  # [1, 2, 3]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(elem)
+        else:
+            continue = false
+
+    result
+
+fn stream_first(stream):
+    """Get the first element of a stream, or nil if empty.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        stream_first(s)  # 1
+    """
+    val next_result = stream_next_internal(stream)
+    val elem = next_result[0]
+    val has_next = next_result[1]
+
+    if has_next:
+        elem
+    else:
+        nil
+
+fn stream_nth(stream, n):
+    """Get the nth element of a stream (0-indexed), or nil if not enough elements.
+
+    Example:
+        val s = stream_from_list([10, 20, 30, 40])
+        stream_nth(s, 2)  # 30
+    """
+    var count = 0
+
+    while count <= n:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if count == n:
+                return elem
+            count = count + 1
+        else:
+            return nil
+
+    nil
+
+fn stream_fold(stream, init, f):
+    """Fold/reduce a stream from left with initial value.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4])
+        stream_fold(s, 0, \acc, x: acc + x)  # 10
+    """
+    var acc = init
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            acc = f(acc, elem)
+        else:
+            continue = false
+
+    acc
+
+# ============================================================================
+# Stream Combinators - Zip and Chain
+# ============================================================================
+
+fn stream_zip(stream1, stream2):
+    """Zip two streams into stream of tuples. Stops when either exhausts.
+
+    Example:
+        val s1 = stream_from_list([1, 2, 3])
+        val s2 = stream_from_list([4, 5, 6])
+        stream_to_list(stream_zip(s1, s2))  # [(1, 4), (2, 5), (3, 6)]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next1 = stream_next_internal(stream1)
+        val elem1 = next1[0]
+        val has1 = next1[1]
+
+        val next2 = stream_next_internal(stream2)
+        val elem2 = next2[0]
+        val has2 = next2[1]
+
+        if has1 and has2:
+            result.push((elem1, elem2))
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_chain(stream1, stream2):
+    """Chain two streams together - stream2 starts after stream1 exhausts.
+
+    Example:
+        val s1 = stream_from_list([1, 2])
+        val s2 = stream_from_list([3, 4])
+        stream_to_list(stream_chain(s1, s2))  # [1, 2, 3, 4]
+    """
+    var result = []
+
+    # Consume first stream
+    var continue = true
+    while continue:
+        val next_result = stream_next_internal(stream1)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(elem)
+        else:
+            continue = false
+
+    # Consume second stream
+    continue = true
+    while continue:
+        val next_result = stream_next_internal(stream2)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push(elem)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_concat(streams):
+    """Concatenate a list of streams into a single stream.
+
+    Example:
+        val s1 = stream_from_list([1, 2])
+        val s2 = stream_from_list([3, 4])
+        val s3 = stream_from_list([5, 6])
+        stream_to_list(stream_concat([s1, s2, s3]))  # [1, 2, 3, 4, 5, 6]
+    """
+    var result = []
+
+    for stream in streams:
+        var continue = true
+        while continue:
+            val next_result = stream_next_internal(stream)
+            val elem = next_result[0]
+            val has_next = next_result[1]
+
+            if has_next:
+                result.push(elem)
+            else:
+                continue = false
+
+    stream_from_list(result)
+
+# ============================================================================
+# Stream Queries - Search and Predicates
+# ============================================================================
+
+fn stream_any(stream, predicate):
+    """Check if any element satisfies predicate.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4])
+        stream_any(s, \x: x > 3)  # true
+    """
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                return true
+        else:
+            continue = false
+
+    false
+
+fn stream_all(stream, predicate):
+    """Check if all elements satisfy predicate.
+
+    Example:
+        val s = stream_from_list([2, 4, 6, 8])
+        stream_all(s, \x: x % 2 == 0)  # true
+    """
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if not predicate(elem):
+                return false
+        else:
+            continue = false
+
+    true
+
+fn stream_find(stream, predicate):
+    """Find first element that satisfies predicate, or nil.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        stream_find(s, \x: x > 3)  # 4
+    """
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                return elem
+        else:
+            continue = false
+
+    nil
+
+fn stream_count_matches(stream, predicate):
+    """Count how many elements satisfy predicate.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        stream_count_matches(s, \x: x % 2 == 0)  # 2
+    """
+    var count = 0
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                count = count + 1
+        else:
+            continue = false
+
+    count
+
+# ============================================================================
+# Stream Advanced Operations
+# ============================================================================
+
+fn stream_flatmap(stream, f):
+    """Map each element to a list and flatten the results.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        val doubled = stream_flatmap(s, \x: [x, x])
+        stream_to_list(doubled)  # [1, 1, 2, 2, 3, 3]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            val mapped = f(elem)
+            for item in mapped:
+                result.push(item)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_distinct(stream):
+    """Remove duplicate elements from stream (keeps first occurrence).
+
+    Example:
+        val s = stream_from_list([1, 2, 2, 3, 1, 4])
+        stream_to_list(stream_distinct(s))  # [1, 2, 3, 4]
+    """
+    var seen = []
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if not seen.contains(elem):
+                seen.push(elem)
+                result.push(elem)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_peek(stream, action):
+    """Execute action on each element while passing it through unchanged.
+
+    Useful for side effects like logging.
+
+    Example:
+        val s = stream_from_list([1, 2, 3])
+        val peeked = stream_peek(s, \x: print("Saw: {x}"))
+        stream_to_list(peeked)  # [1, 2, 3] (with print side effects)
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            action(elem)
+            result.push(elem)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+# ============================================================================
+# Generator Pattern
+# ============================================================================
+
+fn make_generator(items):
+    """Create a generator from a list.
+
+    Generators maintain iteration state explicitly.
+
+    Example:
+        val gen = make_generator([1, 2, 3])
+        generator_next(gen)  # 1
+        generator_next(gen)  # 2
+    """
+    {
+        "type": "generator",
+        "items": items,
+        "index": 0
+    }
+
+fn generator_next(generator):
+    """Get next value from generator, or nil if exhausted.
+
+    Example:
+        val gen = make_generator([1, 2])
+        generator_next(gen)  # 1
+        generator_next(gen)  # 2
+        generator_next(gen)  # nil
+    """
+    val idx = generator["index"]
+    val items = generator["items"]
+
+    if idx >= items.len():
+        return nil
+
+    val value = items[idx]
+    generator["index"] = idx + 1
+    value
+
+fn generator_has_next(generator):
+    """Check if generator has more values.
+
+    Example:
+        val gen = make_generator([1, 2])
+        generator_has_next(gen)  # true
+        generator_next(gen)
+        generator_next(gen)
+        generator_has_next(gen)  # false
+    """
+    val idx = generator["index"]
+    val items = generator["items"]
+    idx < items.len()
+
+# ============================================================================
+# Stream Utilities - Enumerate, Chunks, Windows
+# ============================================================================
+
+fn stream_enumerate(stream):
+    """Add indices to stream elements as tuples (index, element).
+
+    Example:
+        val s = stream_from_list([10, 20, 30])
+        stream_to_list(stream_enumerate(s))  # [(0, 10), (1, 20), (2, 30)]
+    """
+    var result = []
+    var index = 0
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            result.push((index, elem))
+            index = index + 1
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_chunks(stream, size):
+    """Split stream into chunks of given size. Last chunk may be smaller.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        stream_to_list(stream_chunks(s, 2))  # [[1, 2], [3, 4], [5]]
+    """
+    if size <= 0:
+        return stream_empty()
+
+    var result = []
+    var current_chunk = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            current_chunk.push(elem)
+            if current_chunk.len() == size:
+                result.push(current_chunk)
+                current_chunk = []
+        else:
+            if current_chunk.len() > 0:
+                result.push(current_chunk)
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_windows(stream, size):
+    """Create sliding windows of given size over stream.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4])
+        stream_to_list(stream_windows(s, 2))  # [[1, 2], [2, 3], [3, 4]]
+    """
+    if size <= 0:
+        return stream_empty()
+
+    # Collect all elements first (needed for sliding window)
+    val all_items = stream_to_list(stream)
+
+    if all_items.len() < size:
+        return stream_empty()
+
+    var result = []
+    var i = 0
+    while i <= all_items.len() - size:
+        var window = []
+        var j = 0
+        while j < size:
+            window.push(all_items[i + j])
+            j = j + 1
+        result.push(window)
+        i = i + 1
+
+    stream_from_list(result)
+
+# ============================================================================
+# Memoization Helpers
+# ============================================================================
+
+fn memoize_nullary(f):
+    """Memoize a nullary function (no arguments).
+
+    Returns a new function that caches the result of first call.
+
+    Example:
+        var call_count = 0
+        val expensive = \: (call_count = call_count + 1, 42)[1]
+        val memoized = memoize_nullary(expensive)
+        memoized()  # call_count = 1, returns 42
+        memoized()  # call_count = 1, returns 42 (cached)
+    """
+    val cache = {"computed": false, "value": nil}
+
+    \: if cache["computed"]:
+        cache["value"]
+    else:
+        val result = f()
+        cache["computed"] = true
+        cache["value"] = result
+        result
+
+fn memoize_unary(f):
+    """Memoize a unary function (one argument).
+
+    Returns a new function that caches results by argument value.
+
+    Example:
+        var call_count = 0
+        val expensive = \x: (call_count = call_count + 1, x * x)[1]
+        val memoized = memoize_unary(expensive)
+        memoized(5)  # call_count = 1, returns 25
+        memoized(5)  # call_count = 1, returns 25 (cached)
+    """
+    val cache = {}
+
+    \x:
+        val key = "{x}"
+        if cache.contains(key):
+            cache[key]
+        else:
+            val result = f(x)
+            cache[key] = result
+            result
+
+fn memoize_binary(f):
+    """Memoize a binary function (two arguments).
+
+    Returns a new function that caches results by argument pair.
+
+    Example:
+        var call_count = 0
+        val expensive = \x, y: (call_count = call_count + 1, x + y)[1]
+        val memoized = memoize_binary(expensive)
+        memoized(3, 4)  # call_count = 1, returns 7
+        memoized(3, 4)  # call_count = 1, returns 7 (cached)
+    """
+    val cache = {}
+
+    \x, y:
+        val key = "{x},{y}"
+        if cache.contains(key):
+            cache[key]
+        else:
+            val result = f(x, y)
+            cache[key] = result
+            result
+
+# ============================================================================
+# Additional Stream Operations
+# ============================================================================
+
+fn stream_flatten(stream_of_lists):
+    """Flatten a stream of lists into a stream of elements.
+
+    Example:
+        val s = stream_from_list([[1, 2], [3, 4], [5]])
+        stream_to_list(stream_flatten(s))  # [1, 2, 3, 4, 5]
+    """
+    var result = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream_of_lists)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            for item in elem:
+                result.push(item)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_partition(stream, predicate):
+    """Partition stream into two lists: (matching, not_matching).
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        stream_partition(s, \x: x % 2 == 0)  # ([2, 4], [1, 3, 5])
+    """
+    var matching = []
+    var not_matching = []
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            if predicate(elem):
+                matching.push(elem)
+            else:
+                not_matching.push(elem)
+        else:
+            continue = false
+
+    (matching, not_matching)
+
+fn stream_group_by(stream, key_fn):
+    """Group stream elements by key function.
+
+    Returns a dict mapping keys to lists of elements.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4, 5])
+        stream_group_by(s, \x: x % 2)  # {0: [2, 4], 1: [1, 3, 5]}
+    """
+    var groups = {}
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            val key = "{key_fn(elem)}"
+            if not groups.contains(key):
+                groups[key] = []
+            groups[key].push(elem)
+        else:
+            continue = false
+
+    groups
+
+fn stream_scan(stream, init, f):
+    """Like fold, but returns stream of intermediate results.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4])
+        stream_to_list(stream_scan(s, 0, \acc, x: acc + x))  # [0, 1, 3, 6, 10]
+    """
+    var result = [init]
+    var acc = init
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            acc = f(acc, elem)
+            result.push(acc)
+        else:
+            continue = false
+
+    stream_from_list(result)
+
+fn stream_reduce(stream, f):
+    """Reduce stream without initial value (uses first element).
+
+    Returns nil if stream is empty.
+
+    Example:
+        val s = stream_from_list([1, 2, 3, 4])
+        stream_reduce(s, \acc, x: acc + x)  # 10
+    """
+    val first_result = stream_next_internal(stream)
+    val first_elem = first_result[0]
+    val has_first = first_result[1]
+
+    if not has_first:
+        return nil
+
+    var acc = first_elem
+    var continue = true
+
+    while continue:
+        val next_result = stream_next_internal(stream)
+        val elem = next_result[0]
+        val has_next = next_result[1]
+
+        if has_next:
+            acc = f(acc, elem)
+        else:
+            continue = false
+
+    acc
+
+fn stream_min(stream):
+    """Find minimum element in stream, or nil if empty.
+
+    Example:
+        val s = stream_from_list([3, 1, 4, 1, 5])
+        stream_min(s)  # 1
+    """
+    stream_reduce(stream, \acc, x: if x < acc: x else: acc)
+
+fn stream_max(stream):
+    """Find maximum element in stream, or nil if empty.
+
+    Example:
+        val s = stream_from_list([3, 1, 4, 1, 5])
+        stream_max(s)  # 5
+    """
+    stream_reduce(stream, \acc, x: if x > acc: x else: acc)
