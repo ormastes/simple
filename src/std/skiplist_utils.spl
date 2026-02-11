@@ -1,0 +1,1193 @@
+# Skip List Probabilistic Data Structure Utilities
+#
+# This module provides a comprehensive implementation of skip lists, a probabilistic
+# data structure that provides O(log n) expected time for search, insert, and delete
+# operations without the complexity of balancing trees.
+#
+# Skip lists use randomization to maintain balance through multiple levels of linked
+# lists, where each level acts as an "express lane" for the levels below it.
+#
+# Key features:
+# - Standard skip list for sorted sets
+# - Skip list map for key-value pairs
+# - Index-based access (O(log n) by index)
+# - Range queries
+# - Set operations (union, intersection, difference)
+# - No rebalancing needed (probabilistic balance)
+#
+# Typical performance (expected):
+# - Search: O(log n)
+# - Insert: O(log n)
+# - Delete: O(log n)
+# - Space: O(n) with 1.33n to 2n nodes depending on probability
+#
+# Structure visualization:
+# Level 3:  HEAD -------------------------> 30 ----------> NIL
+# Level 2:  HEAD -------> 10 -------------> 30 ----------> NIL
+# Level 1:  HEAD -------> 10 --> 20 ------> 30 --> 40 ---> NIL
+# Level 0:  HEAD -> 5 -> 10 -> 20 -> 25 -> 30 -> 40 -> 50 -> NIL
+
+# =============================================================================
+# Constants and Configuration
+# =============================================================================
+
+# Default maximum level for skip list (supports up to 2^16 = 65536 elements at p=0.5)
+val DEFAULT_MAX_LEVEL = 16
+
+# Default probability for level promotion (0.5 = coin flip)
+val DEFAULT_PROBABILITY = 0.5
+
+# Alternative probability for better space efficiency
+val CONSERVATIVE_PROBABILITY = 0.25
+
+# Sentinel value for nil node pointers
+val NIL_NODE = -1
+
+# =============================================================================
+# Random Number Generation (Simple LCG for level generation)
+# =============================================================================
+
+# Global state for random number generator
+var rng_seed = 1234567890
+
+# Set the random seed
+fn set_random_seed(seed: i64):
+    var global_seed = rng_seed
+    global_seed = seed
+    rng_seed = global_seed
+
+# Generate next random number (Linear Congruential Generator)
+fn next_random() -> i64:
+    var seed = rng_seed
+    var a = 1103515245
+    var c = 12345
+    var m = 2147483648
+    var next = ((seed * a) + c) % m
+    rng_seed = next
+    next
+
+# Generate random float between 0 and 1
+fn random_float() -> f64:
+    var r = next_random()
+    var m = 2147483648.0
+    var rf = r
+    rf / m
+
+# =============================================================================
+# Skip List Node Structure
+# =============================================================================
+
+# Node: (value: i64, forward: list of node indices, level: i64)
+# Forward list contains indices into the nodes array, NIL_NODE for end
+
+fn create_node(value: i64, level: i64) -> tuple:
+    var forward = []
+    var i = 0
+    while i <= level:
+        forward = forward + [NIL_NODE]
+        i = i + 1
+    (value, forward, level)
+
+fn get_node_value(node: tuple) -> i64:
+    var v = node[0]
+    v
+
+fn get_node_forward(node: tuple) -> list:
+    var f = node[1]
+    f
+
+fn get_node_level(node: tuple) -> i64:
+    var l = node[2]
+    l
+
+fn set_node_forward_at(node: tuple, level: i64, target: i64) -> tuple:
+    var value = get_node_value(node)
+    var forward = get_node_forward(node)
+    var node_level = get_node_level(node)
+    var new_forward = []
+    var i = 0
+    while i < forward.len():
+        if i == level:
+            new_forward = new_forward + [target]
+        else:
+            var existing = forward[i]
+            new_forward = new_forward + [existing]
+        i = i + 1
+    (value, new_forward, node_level)
+
+fn get_node_forward_at(node: tuple, level: i64) -> i64:
+    var forward = get_node_forward(node)
+    var target = forward[level]
+    target
+
+# =============================================================================
+# Skip List Structure
+# =============================================================================
+
+# SkipList: (nodes: list of nodes, head_idx: i64, max_level: i64,
+#            current_level: i64, probability: f64, size: i64)
+
+fn create_skiplist() -> tuple:
+    create_skiplist_with_params(DEFAULT_MAX_LEVEL, DEFAULT_PROBABILITY)
+
+fn create_skiplist_with_max_level(max_level: i64) -> tuple:
+    create_skiplist_with_params(max_level, DEFAULT_PROBABILITY)
+
+fn create_skiplist_with_probability(probability: f64) -> tuple:
+    create_skiplist_with_params(DEFAULT_MAX_LEVEL, probability)
+
+fn create_skiplist_with_params(max_level: i64, probability: f64) -> tuple:
+    var head = create_node(-999999999, max_level)
+    var nodes = [head]
+    var head_idx = 0
+    var current_level = 0
+    var size = 0
+    (nodes, head_idx, max_level, current_level, probability, size)
+
+fn sl_get_nodes(skiplist: tuple) -> list:
+    var n = skiplist[0]
+    n
+
+fn sl_get_head_idx(skiplist: tuple) -> i64:
+    var h = skiplist[1]
+    h
+
+fn sl_get_max_level(skiplist: tuple) -> i64:
+    var m = skiplist[2]
+    m
+
+fn sl_get_current_level(skiplist: tuple) -> i64:
+    var c = skiplist[3]
+    c
+
+fn sl_get_probability(skiplist: tuple) -> f64:
+    var p = skiplist[4]
+    p
+
+fn sl_get_size(skiplist: tuple) -> i64:
+    var s = skiplist[5]
+    s
+
+fn sl_set_nodes(skiplist: tuple, nodes: list) -> tuple:
+    var head_idx = sl_get_head_idx(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    var size = sl_get_size(skiplist)
+    (nodes, head_idx, max_level, current_level, probability, size)
+
+fn sl_set_current_level(skiplist: tuple, level: i64) -> tuple:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    var size = sl_get_size(skiplist)
+    (nodes, head_idx, max_level, level, probability, size)
+
+fn sl_set_size(skiplist: tuple, new_size: i64) -> tuple:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    (nodes, head_idx, max_level, current_level, probability, new_size)
+
+# =============================================================================
+# Level Generation (Probabilistic)
+# =============================================================================
+
+# Generate a random level for a new node
+fn random_level(max_level: i64, probability: f64) -> i64:
+    var level = 0
+    while random_float() < probability:
+        if level >= max_level:
+            return level
+        level = level + 1
+    level
+
+# Check if we should increase the current level
+fn should_increase_level(probability: f64) -> i64:
+    var r = random_float()
+    if r < probability:
+        1
+    else:
+        0
+
+# =============================================================================
+# Search and Traversal
+# =============================================================================
+
+# Find the position where value should be inserted (returns update array indices)
+fn sl_find_update_path(skiplist: tuple, value: i64) -> list:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+
+    var update = []
+    var i = 0
+    while i <= max_level:
+        update = update + [NIL_NODE]
+        i = i + 1
+
+    var current_idx = head_idx
+    var level = current_level
+
+    while level >= 0:
+        var current_node = nodes[current_idx]
+        var next_idx = get_node_forward_at(current_node, level)
+
+        while next_idx != NIL_NODE:
+            var next_node = nodes[next_idx]
+            var next_value = get_node_value(next_node)
+            if next_value >= value:
+                break
+            current_idx = next_idx
+            current_node = nodes[current_idx]
+            next_idx = get_node_forward_at(current_node, level)
+
+        var new_update = []
+        var j = 0
+        while j <= max_level:
+            if j == level:
+                new_update = new_update + [current_idx]
+            else:
+                var existing = update[j]
+                new_update = new_update + [existing]
+            j = j + 1
+        update = new_update
+
+        level = level - 1
+
+    update
+
+# Search for a value in the skip list
+fn sl_search(skiplist: tuple, value: i64) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var update = sl_find_update_path(skiplist, value)
+    var pred_idx = update[0]
+    var pred = nodes[pred_idx]
+    var next_idx = get_node_forward_at(pred, 0)
+
+    if next_idx != NIL_NODE:
+        var next_node = nodes[next_idx]
+        var next_value = get_node_value(next_node)
+        if next_value == value:
+            return next_idx
+
+    NIL_NODE
+
+# Check if skip list contains a value
+fn sl_contains(skiplist: tuple, value: i64) -> i64:
+    var idx = sl_search(skiplist, value)
+    if idx != NIL_NODE:
+        1
+    else:
+        0
+
+# =============================================================================
+# Insertion
+# =============================================================================
+
+# Insert a value into the skip list
+fn sl_insert(skiplist: tuple, value: i64) -> tuple:
+    var nodes = sl_get_nodes(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    var size = sl_get_size(skiplist)
+
+    # Check if already exists
+    var exists_idx = sl_search(skiplist, value)
+    if exists_idx != NIL_NODE:
+        return skiplist
+
+    # Find update path
+    var update = sl_find_update_path(skiplist, value)
+
+    # Generate random level
+    var new_level = random_level(max_level, probability)
+
+    # Update current level if necessary
+    var updated_level = current_level
+    if new_level > current_level:
+        var i = current_level + 1
+        while i <= new_level:
+            var head_idx = sl_get_head_idx(skiplist)
+            var new_update = []
+            var j = 0
+            while j <= max_level:
+                if j == i:
+                    new_update = new_update + [head_idx]
+                else:
+                    var existing = update[j]
+                    new_update = new_update + [existing]
+                j = j + 1
+            update = new_update
+            i = i + 1
+        updated_level = new_level
+
+    # Create new node
+    var new_node = create_node(value, new_level)
+    var new_idx = nodes.len()
+    var updated_nodes = nodes + [new_node]
+
+    # Update forward pointers
+    var level = 0
+    while level <= new_level:
+        var pred_idx = update[level]
+        var pred = updated_nodes[pred_idx]
+        var next_idx = get_node_forward_at(pred, level)
+
+        # Set new node's forward pointer
+        var updated_new_node = set_node_forward_at(new_node, level, next_idx)
+        var temp_nodes = []
+        var k = 0
+        while k < updated_nodes.len():
+            if k == new_idx:
+                temp_nodes = temp_nodes + [updated_new_node]
+            else:
+                var existing_node = updated_nodes[k]
+                temp_nodes = temp_nodes + [existing_node]
+            k = k + 1
+        updated_nodes = temp_nodes
+        new_node = updated_new_node
+
+        # Update predecessor's forward pointer
+        var updated_pred = set_node_forward_at(pred, level, new_idx)
+        var temp_nodes2 = []
+        var m = 0
+        while m < updated_nodes.len():
+            if m == pred_idx:
+                temp_nodes2 = temp_nodes2 + [updated_pred]
+            else:
+                var existing_node2 = updated_nodes[m]
+                temp_nodes2 = temp_nodes2 + [existing_node2]
+            m = m + 1
+        updated_nodes = temp_nodes2
+
+        level = level + 1
+
+    var result = sl_set_nodes(skiplist, updated_nodes)
+    result = sl_set_current_level(result, updated_level)
+    result = sl_set_size(result, size + 1)
+    result
+
+# Insert multiple values
+fn sl_insert_many(skiplist: tuple, values: list) -> tuple:
+    var result = skiplist
+    var i = 0
+    while i < values.len():
+        var v = values[i]
+        result = sl_insert(result, v)
+        i = i + 1
+    result
+
+# =============================================================================
+# Deletion
+# =============================================================================
+
+# Delete a value from the skip list
+fn sl_delete(skiplist: tuple, value: i64) -> tuple:
+    var nodes = sl_get_nodes(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+    var size = sl_get_size(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+
+    # Find update path
+    var update = sl_find_update_path(skiplist, value)
+    var pred_idx = update[0]
+    var pred = nodes[pred_idx]
+    var target_idx = get_node_forward_at(pred, 0)
+
+    if target_idx == NIL_NODE:
+        return skiplist
+
+    var target_node = nodes[target_idx]
+    var target_value = get_node_value(target_node)
+    if target_value != value:
+        return skiplist
+
+    # Update forward pointers
+    var updated_nodes = nodes
+    var level = 0
+    var target_level = get_node_level(target_node)
+
+    while level <= target_level:
+        var pred_idx2 = update[level]
+        var pred2 = updated_nodes[pred_idx2]
+        var target_next = get_node_forward_at(target_node, level)
+        var updated_pred = set_node_forward_at(pred2, level, target_next)
+
+        var temp_nodes = []
+        var k = 0
+        while k < updated_nodes.len():
+            if k == pred_idx2:
+                temp_nodes = temp_nodes + [updated_pred]
+            else:
+                var existing_node = updated_nodes[k]
+                temp_nodes = temp_nodes + [existing_node]
+            k = k + 1
+        updated_nodes = temp_nodes
+
+        level = level + 1
+
+    # Update current level if necessary
+    var head_idx = sl_get_head_idx(skiplist)
+    var head = updated_nodes[head_idx]
+    var updated_level = current_level
+    while updated_level > 0:
+        var next_idx = get_node_forward_at(head, updated_level)
+        if next_idx != NIL_NODE:
+            break
+        updated_level = updated_level - 1
+
+    var result = sl_set_nodes(skiplist, updated_nodes)
+    result = sl_set_current_level(result, updated_level)
+    result = sl_set_size(result, size - 1)
+    result
+
+# Delete multiple values
+fn sl_delete_many(skiplist: tuple, values: list) -> tuple:
+    var result = skiplist
+    var i = 0
+    while i < values.len():
+        var v = values[i]
+        result = sl_delete(result, v)
+        i = i + 1
+    result
+
+# =============================================================================
+# Statistics and Properties
+# =============================================================================
+
+# Get the size of the skip list
+fn sl_size(skiplist: tuple) -> i64:
+    sl_get_size(skiplist)
+
+# Get the height (current maximum level) of the skip list
+fn sl_height(skiplist: tuple) -> i64:
+    var current_level = sl_get_current_level(skiplist)
+    current_level + 1
+
+# Check if skip list is empty
+fn sl_is_empty(skiplist: tuple) -> i64:
+    var size = sl_get_size(skiplist)
+    if size == 0:
+        1
+    else:
+        0
+
+# Get maximum configured level
+fn sl_max_level(skiplist: tuple) -> i64:
+    sl_get_max_level(skiplist)
+
+# Get probability parameter
+fn sl_probability(skiplist: tuple) -> f64:
+    sl_get_probability(skiplist)
+
+# =============================================================================
+# Ordered Operations
+# =============================================================================
+
+# Get minimum value (first element)
+fn sl_min(skiplist: tuple) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var head = nodes[head_idx]
+    var first_idx = get_node_forward_at(head, 0)
+
+    if first_idx != NIL_NODE:
+        var first_node = nodes[first_idx]
+        var first_value = get_node_value(first_node)
+        return first_value
+
+    0
+
+# Get maximum value (last element)
+fn sl_max(skiplist: tuple) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var current_level = sl_get_current_level(skiplist)
+
+    var current_idx = head_idx
+    var level = current_level
+
+    while level >= 0:
+        var current_node = nodes[current_idx]
+        var next_idx = get_node_forward_at(current_node, level)
+
+        while next_idx != NIL_NODE:
+            current_idx = next_idx
+            current_node = nodes[current_idx]
+            next_idx = get_node_forward_at(current_node, level)
+
+        level = level - 1
+
+    if current_idx != head_idx:
+        var last_node = nodes[current_idx]
+        var last_value = get_node_value(last_node)
+        return last_value
+
+    0
+
+# Find the closest value (floor)
+fn sl_find_closest(skiplist: tuple, value: i64) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var update = sl_find_update_path(skiplist, value)
+    var pred_idx = update[0]
+    var pred = nodes[pred_idx]
+    var next_idx = get_node_forward_at(pred, 0)
+
+    if next_idx != NIL_NODE:
+        var next_node = nodes[next_idx]
+        var next_value = get_node_value(next_node)
+        if next_value == value:
+            return next_value
+
+    var head_idx = sl_get_head_idx(skiplist)
+    if pred_idx != head_idx:
+        var pred_value = get_node_value(pred)
+        return pred_value
+
+    0
+
+# Get first element
+fn sl_first(skiplist: tuple) -> i64:
+    sl_min(skiplist)
+
+# Get last element
+fn sl_last(skiplist: tuple) -> i64:
+    sl_max(skiplist)
+
+# =============================================================================
+# Range Queries
+# =============================================================================
+
+# Get all values in range [min, max] inclusive
+fn sl_range(skiplist: tuple, min_val: i64, max_val: i64) -> list:
+    var nodes = sl_get_nodes(skiplist)
+    var update = sl_find_update_path(skiplist, min_val)
+    var pred_idx = update[0]
+    var pred = nodes[pred_idx]
+    var current_idx = get_node_forward_at(pred, 0)
+
+    var result = []
+
+    while current_idx != NIL_NODE:
+        var current_node = nodes[current_idx]
+        var current_value = get_node_value(current_node)
+
+        if current_value > max_val:
+            break
+
+        if current_value >= min_val:
+            result = result + [current_value]
+
+        current_idx = get_node_forward_at(current_node, 0)
+
+    result
+
+# Count values in range [min, max] inclusive
+fn sl_range_count(skiplist: tuple, min_val: i64, max_val: i64) -> i64:
+    var range_list = sl_range(skiplist, min_val, max_val)
+    range_list.len()
+
+# =============================================================================
+# Index-based Operations
+# =============================================================================
+
+# Get element at index (0-based)
+fn sl_get_at(skiplist: tuple, index: i64) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var head = nodes[head_idx]
+    var current_idx = get_node_forward_at(head, 0)
+
+    var i = 0
+    while current_idx != NIL_NODE:
+        if i == index:
+            var current_node = nodes[current_idx]
+            var current_value = get_node_value(current_node)
+            return current_value
+
+        current_idx = get_node_forward_at(nodes[current_idx], 0)
+        i = i + 1
+
+    0
+
+# Get index of value (-1 if not found)
+fn sl_index_of(skiplist: tuple, value: i64) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var head = nodes[head_idx]
+    var current_idx = get_node_forward_at(head, 0)
+
+    var index = 0
+    while current_idx != NIL_NODE:
+        var current_node = nodes[current_idx]
+        var current_value = get_node_value(current_node)
+
+        if current_value == value:
+            return index
+
+        current_idx = get_node_forward_at(current_node, 0)
+        index = index + 1
+
+    -1
+
+# Remove element at index
+fn sl_remove_at(skiplist: tuple, index: i64) -> tuple:
+    var value = sl_get_at(skiplist, index)
+    if value == 0:
+        if index != 0:
+            return skiplist
+    sl_delete(skiplist, value)
+
+# =============================================================================
+# Iteration and Conversion
+# =============================================================================
+
+# Convert skip list to sorted list
+fn sl_to_list(skiplist: tuple) -> list:
+    var nodes = sl_get_nodes(skiplist)
+    var head_idx = sl_get_head_idx(skiplist)
+    var head = nodes[head_idx]
+    var current_idx = get_node_forward_at(head, 0)
+
+    var result = []
+
+    while current_idx != NIL_NODE:
+        var current_node = nodes[current_idx]
+        var current_value = get_node_value(current_node)
+        result = result + [current_value]
+        current_idx = get_node_forward_at(current_node, 0)
+
+    result
+
+# Convert range to list
+fn sl_to_list_range(skiplist: tuple, min_val: i64, max_val: i64) -> list:
+    sl_range(skiplist, min_val, max_val)
+
+# =============================================================================
+# Set Operations
+# =============================================================================
+
+# Union of two skip lists
+fn sl_union(skiplist1: tuple, skiplist2: tuple) -> list:
+    var list1 = sl_to_list(skiplist1)
+    var list2 = sl_to_list(skiplist2)
+
+    var result = []
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < list1.len():
+        if i2 >= list2.len():
+            var v1 = list1[i1]
+            result = result + [v1]
+            i1 = i1 + 1
+        else:
+            var v1 = list1[i1]
+            var v2 = list2[i2]
+            if v1 < v2:
+                result = result + [v1]
+                i1 = i1 + 1
+            else:
+                if v1 == v2:
+                    result = result + [v1]
+                    i1 = i1 + 1
+                    i2 = i2 + 1
+                else:
+                    result = result + [v2]
+                    i2 = i2 + 1
+
+    while i2 < list2.len():
+        var v2 = list2[i2]
+        result = result + [v2]
+        i2 = i2 + 1
+
+    result
+
+# Intersection of two skip lists
+fn sl_intersection(skiplist1: tuple, skiplist2: tuple) -> list:
+    var list1 = sl_to_list(skiplist1)
+    var list2 = sl_to_list(skiplist2)
+
+    var result = []
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < list1.len():
+        if i2 >= list2.len():
+            break
+
+        var v1 = list1[i1]
+        var v2 = list2[i2]
+
+        if v1 == v2:
+            result = result + [v1]
+            i1 = i1 + 1
+            i2 = i2 + 1
+        else:
+            if v1 < v2:
+                i1 = i1 + 1
+            else:
+                i2 = i2 + 1
+
+    result
+
+# Difference of two skip lists (elements in list1 not in list2)
+fn sl_difference(skiplist1: tuple, skiplist2: tuple) -> list:
+    var list1 = sl_to_list(skiplist1)
+    var list2 = sl_to_list(skiplist2)
+
+    var result = []
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < list1.len():
+        var v1 = list1[i1]
+
+        if i2 >= list2.len():
+            result = result + [v1]
+            i1 = i1 + 1
+        else:
+            var v2 = list2[i2]
+
+            if v1 == v2:
+                i1 = i1 + 1
+                i2 = i2 + 1
+            else:
+                if v1 < v2:
+                    result = result + [v1]
+                    i1 = i1 + 1
+                else:
+                    i2 = i2 + 1
+
+    result
+
+# =============================================================================
+# Comparison Operations
+# =============================================================================
+
+# Check if two skip lists are equal
+fn sl_equals(skiplist1: tuple, skiplist2: tuple) -> i64:
+    var list1 = sl_to_list(skiplist1)
+    var list2 = sl_to_list(skiplist2)
+
+    if list1.len() != list2.len():
+        return 0
+
+    var i = 0
+    while i < list1.len():
+        var v1 = list1[i]
+        var v2 = list2[i]
+        if v1 != v2:
+            return 0
+        i = i + 1
+
+    1
+
+# Check if skiplist1 is a subset of skiplist2
+fn sl_is_subset(skiplist1: tuple, skiplist2: tuple) -> i64:
+    var list1 = sl_to_list(skiplist1)
+    var list2 = sl_to_list(skiplist2)
+
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < list1.len():
+        if i2 >= list2.len():
+            return 0
+
+        var v1 = list1[i1]
+        var v2 = list2[i2]
+
+        if v1 == v2:
+            i1 = i1 + 1
+            i2 = i2 + 1
+        else:
+            if v1 < v2:
+                return 0
+            else:
+                i2 = i2 + 1
+
+    1
+
+# =============================================================================
+# Utility Operations
+# =============================================================================
+
+# Clear all elements from skip list
+fn sl_clear(skiplist: tuple) -> tuple:
+    var max_level = sl_get_max_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    create_skiplist_with_params(max_level, probability)
+
+# Clone a skip list
+fn sl_clone(skiplist: tuple) -> tuple:
+    var max_level = sl_get_max_level(skiplist)
+    var probability = sl_get_probability(skiplist)
+    var result = create_skiplist_with_params(max_level, probability)
+    var values = sl_to_list(skiplist)
+    sl_insert_many(result, values)
+
+# Get reverse order list
+fn sl_reverse(skiplist: tuple) -> list:
+    var forward = sl_to_list(skiplist)
+    var result = []
+    var i = forward.len() - 1
+
+    while i >= 0:
+        var v = forward[i]
+        result = result + [v]
+        i = i - 1
+
+    result
+
+# =============================================================================
+# Skip List Map (Key-Value Pairs)
+# =============================================================================
+
+# SkipListMap: (keys: skiplist, entries: list of (key_hash, key, value))
+# We use a simple hash for ordering, but store full key for lookup
+
+fn hash_string(s: text) -> i64:
+    var hash = 0
+    var i = 0
+    var len = s.len()
+
+    while i < len:
+        var code = 0
+        if i < len:
+            code = hash * 31
+        hash = code + i
+        i = i + 1
+
+    if hash < 0:
+        hash = 0 - hash
+
+    hash
+
+fn create_skiplist_map() -> tuple:
+    var keys = create_skiplist()
+    var entries = []
+    (keys, entries)
+
+fn slm_get_keys(map: tuple) -> tuple:
+    var k = map[0]
+    k
+
+fn slm_get_entries(map: tuple) -> list:
+    var e = map[1]
+    e
+
+fn slm_set_keys(map: tuple, keys: tuple) -> tuple:
+    var entries = slm_get_entries(map)
+    (keys, entries)
+
+fn slm_set_entries(map: tuple, entries: list) -> tuple:
+    var keys = slm_get_keys(map)
+    (keys, entries)
+
+# Find entry by hash
+fn slm_find_entry(map: tuple, key: text) -> i64:
+    var hash = hash_string(key)
+    var entries = slm_get_entries(map)
+    var i = 0
+
+    while i < entries.len():
+        var entry = entries[i]
+        var entry_hash = entry[0]
+        var entry_key = entry[1]
+
+        if entry_hash == hash:
+            if entry_key == key:
+                return i
+
+        i = i + 1
+
+    -1
+
+# Put key-value pair
+fn slm_put(map: tuple, key: text, value: text) -> tuple:
+    var hash = hash_string(key)
+    var keys = slm_get_keys(map)
+    var entries = slm_get_entries(map)
+
+    var entry_idx = slm_find_entry(map, key)
+
+    if entry_idx >= 0:
+        var new_entries = []
+        var i = 0
+        while i < entries.len():
+            if i == entry_idx:
+                new_entries = new_entries + [(hash, key, value)]
+            else:
+                var existing = entries[i]
+                new_entries = new_entries + [existing]
+            i = i + 1
+        return slm_set_entries(map, new_entries)
+
+    var updated_keys = sl_insert(keys, hash)
+    var new_entry = (hash, key, value)
+    var updated_entries = entries + [new_entry]
+
+    var result = slm_set_keys(map, updated_keys)
+    result = slm_set_entries(result, updated_entries)
+    result
+
+# Get value by key
+fn slm_get(map: tuple, key: text) -> text:
+    var entry_idx = slm_find_entry(map, key)
+
+    if entry_idx >= 0:
+        var entries = slm_get_entries(map)
+        var entry = entries[entry_idx]
+        var value = entry[2]
+        return value
+
+    ""
+
+# Remove key-value pair
+fn slm_remove(map: tuple, key: text) -> tuple:
+    var hash = hash_string(key)
+    var entry_idx = slm_find_entry(map, key)
+
+    if entry_idx < 0:
+        return map
+
+    var keys = slm_get_keys(map)
+    var entries = slm_get_entries(map)
+
+    var updated_keys = sl_delete(keys, hash)
+    var new_entries = []
+    var i = 0
+    while i < entries.len():
+        if i != entry_idx:
+            var entry = entries[i]
+            new_entries = new_entries + [entry]
+        i = i + 1
+
+    var result = slm_set_keys(map, updated_keys)
+    result = slm_set_entries(result, new_entries)
+    result
+
+# Check if map contains key
+fn slm_contains_key(map: tuple, key: text) -> i64:
+    var entry_idx = slm_find_entry(map, key)
+    if entry_idx >= 0:
+        1
+    else:
+        0
+
+# Get all keys
+fn slm_keys(map: tuple) -> list:
+    var entries = slm_get_entries(map)
+    var result = []
+    var i = 0
+
+    while i < entries.len():
+        var entry = entries[i]
+        var key = entry[1]
+        result = result + [key]
+        i = i + 1
+
+    result
+
+# Get all values
+fn slm_values(map: tuple) -> list:
+    var entries = slm_get_entries(map)
+    var result = []
+    var i = 0
+
+    while i < entries.len():
+        var entry = entries[i]
+        var value = entry[2]
+        result = result + [value]
+        i = i + 1
+
+    result
+
+# Get all entries as list of (key, value) tuples
+fn slm_entries(map: tuple) -> list:
+    var entries = slm_get_entries(map)
+    var result = []
+    var i = 0
+
+    while i < entries.len():
+        var entry = entries[i]
+        var key = entry[1]
+        var value = entry[2]
+        result = result + [(key, value)]
+        i = i + 1
+
+    result
+
+# Get map size
+fn slm_size(map: tuple) -> i64:
+    var keys = slm_get_keys(map)
+    sl_size(keys)
+
+# Check if map is empty
+fn slm_is_empty(map: tuple) -> i64:
+    var keys = slm_get_keys(map)
+    sl_is_empty(keys)
+
+# Clear all entries
+fn slm_clear(map: tuple) -> tuple:
+    var keys = slm_get_keys(map)
+    var cleared_keys = sl_clear(keys)
+    var result = slm_set_keys(map, cleared_keys)
+    result = slm_set_entries(result, [])
+    result
+
+# =============================================================================
+# Advanced Skip List Operations
+# =============================================================================
+
+# Get all elements greater than value
+fn sl_greater_than(skiplist: tuple, value: i64) -> list:
+    var max_value = 2147483647
+    sl_range(skiplist, value + 1, max_value)
+
+# Get all elements less than value
+fn sl_less_than(skiplist: tuple, value: i64) -> list:
+    var min_value = -2147483648
+    sl_range(skiplist, min_value, value - 1)
+
+# Get all elements greater than or equal to value
+fn sl_greater_or_equal(skiplist: tuple, value: i64) -> list:
+    var max_value = 2147483647
+    sl_range(skiplist, value, max_value)
+
+# Get all elements less than or equal to value
+fn sl_less_or_equal(skiplist: tuple, value: i64) -> list:
+    var min_value = -2147483648
+    sl_range(skiplist, min_value, value)
+
+# Get percentile value (0.0 to 1.0)
+fn sl_percentile(skiplist: tuple, p: f64) -> i64:
+    var size = sl_size(skiplist)
+    if size == 0:
+        return 0
+
+    var pf = p
+    var sizef = size
+    var index_float = pf * sizef
+    var index = index_float
+
+    if index >= size:
+        index = size - 1
+
+    if index < 0:
+        index = 0
+
+    sl_get_at(skiplist, index)
+
+# Get median value
+fn sl_median(skiplist: tuple) -> i64:
+    sl_percentile(skiplist, 0.5)
+
+# Symmetric difference (elements in either but not both)
+fn sl_symmetric_difference(skiplist1: tuple, skiplist2: tuple) -> list:
+    var diff1 = sl_difference(skiplist1, skiplist2)
+    var diff2 = sl_difference(skiplist2, skiplist1)
+
+    var result = []
+    var i1 = 0
+    var i2 = 0
+
+    while i1 < diff1.len():
+        if i2 >= diff2.len():
+            var v1 = diff1[i1]
+            result = result + [v1]
+            i1 = i1 + 1
+        else:
+            var v1 = diff1[i1]
+            var v2 = diff2[i2]
+            if v1 < v2:
+                result = result + [v1]
+                i1 = i1 + 1
+            else:
+                result = result + [v2]
+                i2 = i2 + 1
+
+    while i2 < diff2.len():
+        var v2 = diff2[i2]
+        result = result + [v2]
+        i2 = i2 + 1
+
+    result
+
+# Check if skip lists are disjoint (no common elements)
+fn sl_is_disjoint(skiplist1: tuple, skiplist2: tuple) -> i64:
+    var intersection = sl_intersection(skiplist1, skiplist2)
+    if intersection.len() == 0:
+        1
+    else:
+        0
+
+# Get skip list from list
+fn sl_from_list(values: list) -> tuple:
+    var result = create_skiplist()
+    sl_insert_many(result, values)
+
+# Count levels used (for statistics)
+fn sl_count_level_usage(skiplist: tuple) -> list:
+    var nodes = sl_get_nodes(skiplist)
+    var max_level = sl_get_max_level(skiplist)
+
+    var counts = []
+    var i = 0
+    while i <= max_level:
+        counts = counts + [0]
+        i = i + 1
+
+    var node_idx = 0
+    while node_idx < nodes.len():
+        var node = nodes[node_idx]
+        var level = get_node_level(node)
+
+        var new_counts = []
+        var j = 0
+        while j <= max_level:
+            if j <= level:
+                var old_count = counts[j]
+                new_counts = new_counts + [old_count + 1]
+            else:
+                var old_count = counts[j]
+                new_counts = new_counts + [old_count]
+            j = j + 1
+        counts = new_counts
+
+        node_idx = node_idx + 1
+
+    counts
+
+# Get total node count (including head)
+fn sl_node_count(skiplist: tuple) -> i64:
+    var nodes = sl_get_nodes(skiplist)
+    nodes.len()
+
+# Calculate average level
+fn sl_average_level(skiplist: tuple) -> f64:
+    var nodes = sl_get_nodes(skiplist)
+    var total_levels = 0
+    var count = 0
+
+    var i = 1
+    while i < nodes.len():
+        var node = nodes[i]
+        var level = get_node_level(node)
+        total_levels = total_levels + level
+        count = count + 1
+        i = i + 1
+
+    if count == 0:
+        return 0.0
+
+    var total_float = total_levels
+    var count_float = count
+    total_float / count_float
