@@ -1586,6 +1586,137 @@ TEST(panic_null_msg) {
 }
 
 /* ================================================================
+ * Coverage: Directory Operations
+ * ================================================================ */
+
+TEST(dir_remove_all) {
+    /* Create temp directory structure */
+    system("mkdir -p /tmp/rt_test_dir/subdir");
+    system("touch /tmp/rt_test_dir/file.txt");
+    system("touch /tmp/rt_test_dir/subdir/file2.txt");
+
+    /* Remove all should work */
+    ASSERT(rt_dir_remove_all("/tmp/rt_test_dir"));
+    ASSERT(!spl_file_exists("/tmp/rt_test_dir"));
+}
+
+TEST(dir_remove_all_null) {
+    ASSERT(!rt_dir_remove_all(NULL));
+}
+
+/* ================================================================
+ * Coverage: File Locking
+ * ================================================================ */
+
+TEST(file_lock_unlock) {
+    const char* path = "/tmp/rt_test_lock.txt";
+    spl_file_write(path, "test");
+
+    /* Lock file */
+    int64_t handle = rt_file_lock(path, 0);
+    ASSERT(handle >= 0);
+
+    /* Unlock file */
+    ASSERT(rt_file_unlock(handle));
+
+    remove(path);
+}
+
+TEST(file_lock_null_path) {
+    ASSERT_EQ_INT(rt_file_lock(NULL, 0), -1);
+}
+
+TEST(file_lock_invalid_path) {
+    /* Try to lock non-existent directory path */
+    ASSERT_EQ_INT(rt_file_lock("/nonexistent_dir_12345/file.txt", 0), -1);
+}
+
+TEST(file_lock_with_timeout) {
+    const char* path = "/tmp/rt_test_lock_timeout.txt";
+    spl_file_write(path, "test");
+
+    /* Lock with timeout */
+    int64_t handle = rt_file_lock(path, 1);
+    ASSERT(handle >= 0);
+
+    rt_file_unlock(handle);
+    remove(path);
+}
+
+TEST(file_unlock_invalid_handle) {
+    ASSERT(!rt_file_unlock(-1));
+}
+
+/* Note: Testing flock failure (line 718) and popen/vsnprintf errors (lines 792, 811)
+ * requires extreme conditions (resource exhaustion, system errors) that are impractical
+ * to simulate in unit tests. These 3 remaining uncovered branches represent legitimate
+ * error handling paths that are tested through system-level testing. */
+
+/* ================================================================
+ * Coverage: FFI Call
+ * ================================================================ */
+
+static int64_t test_fn0(void) { return 42; }
+static int64_t test_fn1(int64_t a) { return a + 10; }
+static int64_t test_fn2(int64_t a, int64_t b) { return a + b; }
+static int64_t test_fn3(int64_t a, int64_t b, int64_t c) { return a + b + c; }
+static int64_t test_fn4(int64_t a, int64_t b, int64_t c, int64_t d) { return a + b + c + d; }
+
+TEST(wffi_call_null) {
+    int64_t args[1] = {0};
+    ASSERT_EQ_INT(spl_wffi_call_i64(NULL, args, 1), 0);
+}
+
+TEST(wffi_call_0_args) {
+    int64_t args[1] = {0};
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn0, args, 0), 42);
+}
+
+TEST(wffi_call_1_arg) {
+    int64_t args[1] = {5};
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn1, args, 1), 15);
+}
+
+TEST(wffi_call_2_args) {
+    int64_t args[2] = {10, 20};
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn2, args, 2), 30);
+}
+
+TEST(wffi_call_3_args) {
+    int64_t args[3] = {1, 2, 3};
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn3, args, 3), 6);
+}
+
+TEST(wffi_call_4_args) {
+    int64_t args[4] = {1, 2, 3, 4};
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn4, args, 4), 10);
+}
+
+TEST(wffi_call_invalid_nargs) {
+    int64_t args[5] = {0};
+    /* 5 args should hit default case and return 0 */
+    ASSERT_EQ_INT(spl_wffi_call_i64((void*)test_fn0, args, 5), 0);
+}
+
+/* ================================================================
+ * Coverage: Shell Output Error Path
+ * ================================================================ */
+
+TEST(shell_output_null) {
+    char* output = spl_shell_output(NULL);
+    ASSERT_EQ_STR(output, "");
+    free(output);
+}
+
+TEST(shell_output_invalid_cmd) {
+    /* Invalid command should still return something (empty or error) */
+    char* output = spl_shell_output("/nonexistent_command_12345_xyz");
+    /* Just ensure we get a valid string back, even if empty */
+    ASSERT(output != NULL);
+    free(output);
+}
+
+/* ================================================================
  * Main
  * ================================================================ */
 
@@ -1780,6 +1911,30 @@ int main(void) {
     printf("\n--- Branch Coverage: Panic ---\n");
     RUN(panic_exits);
     RUN(panic_null_msg);
+
+    printf("\n--- Coverage: Directory Operations ---\n");
+    RUN(dir_remove_all);
+    RUN(dir_remove_all_null);
+
+    printf("\n--- Coverage: File Locking ---\n");
+    RUN(file_lock_unlock);
+    RUN(file_lock_null_path);
+    RUN(file_lock_invalid_path);
+    RUN(file_lock_with_timeout);
+    RUN(file_unlock_invalid_handle);
+
+    printf("\n--- Coverage: FFI Call ---\n");
+    RUN(wffi_call_null);
+    RUN(wffi_call_0_args);
+    RUN(wffi_call_1_arg);
+    RUN(wffi_call_2_args);
+    RUN(wffi_call_3_args);
+    RUN(wffi_call_4_args);
+    RUN(wffi_call_invalid_nargs);
+
+    printf("\n--- Coverage: Shell Output Error Path ---\n");
+    RUN(shell_output_null);
+    RUN(shell_output_invalid_cmd);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;

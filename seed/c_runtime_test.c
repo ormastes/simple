@@ -558,6 +558,12 @@ TEST(trim_only_cr) {
     free(s);
 }
 
+TEST(trim_trailing_tab_only) {
+    char* s = simple_trim("hello\t");
+    ASSERT_EQ_STR(s, "hello");
+    free(s);
+}
+
 TEST(file_write_invalid_path) {
     ASSERT(!simple_file_write("/nonexistent_dir_12345/file.txt", "test"));
 }
@@ -716,6 +722,32 @@ TEST(string_array_array_push) {
     free(arr.items);
 }
 
+TEST(string_array_array_grow) {
+    SimpleStringArrayArray arr = simple_new_string_array_array();
+
+    /* Push 20 items to trigger growth (initial capacity is 16) */
+    for (int i = 0; i < 20; i++) {
+        SimpleStringArray sub = simple_new_string_array();
+        char buf[32];
+        snprintf(buf, sizeof(buf), "item_%d", i);
+        simple_string_push(&sub, buf);
+        simple_string_array_push(&arr, sub);
+    }
+
+    ASSERT_EQ_INT(arr.len, 20);
+    ASSERT_EQ_STR(arr.items[0].items[0], "item_0");
+    ASSERT_EQ_STR(arr.items[19].items[0], "item_19");
+
+    /* Cleanup */
+    for (int i = 0; i < arr.len; i++) {
+        for (int j = 0; j < arr.items[i].len; j++) {
+            free((void*)arr.items[i].items[j]);
+        }
+        free(arr.items[i].items);
+    }
+    free(arr.items);
+}
+
 /* ================================================================
  * SimpleIntArrayArray tests
  * ================================================================ */
@@ -750,6 +782,27 @@ TEST(int_array_array_push) {
     ASSERT_EQ_INT(arr.items[1].len, 2);
     ASSERT_EQ_INT(arr.items[1].items[0], 10);
     ASSERT_EQ_INT(arr.items[1].items[1], 20);
+
+    /* Cleanup */
+    for (int i = 0; i < arr.len; i++) {
+        free(arr.items[i].items);
+    }
+    free(arr.items);
+}
+
+TEST(int_array_array_grow) {
+    SimpleIntArrayArray arr = simple_new_int_array_array();
+
+    /* Push 20 items to trigger growth (initial capacity is 16) */
+    for (int i = 0; i < 20; i++) {
+        SimpleIntArray sub = simple_new_int_array();
+        simple_int_push(&sub, i * 100);
+        simple_int_array_push(&arr, sub);
+    }
+
+    ASSERT_EQ_INT(arr.len, 20);
+    ASSERT_EQ_INT(arr.items[0].items[0], 0);
+    ASSERT_EQ_INT(arr.items[19].items[0], 1900);
 
     /* Cleanup */
     for (int i = 0; i < arr.len; i++) {
@@ -804,6 +857,14 @@ TEST(dict_set_get_str) {
     ASSERT_EQ_STR(simple_dict_get(d, "name"), "Bob");
     ASSERT_EQ_INT(simple_dict_len(d), 2);
 
+    /* Test NULL value - should convert to empty string */
+    simple_dict_set_str(d, "empty", NULL);
+    ASSERT_EQ_STR(simple_dict_get(d, "empty"), "");
+
+    /* Overwrite with NULL value */
+    simple_dict_set_str(d, "name", NULL);
+    ASSERT_EQ_STR(simple_dict_get(d, "name"), "");
+
     /* Cleanup */
     for (int i = 0; i < d->len; i++) {
         free((void*)d->entries[i].key);
@@ -838,6 +899,10 @@ TEST(dict_contains) {
 
     ASSERT(simple_dict_contains(d, "x"));
     ASSERT(!simple_dict_contains(d, "y"));
+
+    /* Test NULL dict and NULL key to hit simple_dict_find branches */
+    ASSERT(!simple_dict_contains(NULL, "key"));
+    ASSERT(!simple_dict_contains(d, NULL));
 
     /* Cleanup */
     free((void*)d->entries[0].key);
@@ -904,20 +969,67 @@ TEST(dict_get_int_converts_from_str) {
 }
 
 TEST(dict_null_operations) {
+    /* Test all NULL dict operations */
     ASSERT_EQ_INT(simple_dict_len(NULL), 0);
     ASSERT_EQ_INT(simple_dict_get_int(NULL, "key"), 0);
     ASSERT(simple_dict_get_ptr(NULL, "key") == NULL);
     ASSERT(simple_dict_get(NULL, "key") == NULL);
 
+    /* Test NULL key operations */
     SimpleDict* d = simple_dict_new();
     simple_dict_set_int(d, NULL, 42);
     simple_dict_set_str(d, NULL, "test");
     simple_dict_set_ptr(d, NULL, NULL);
-    ASSERT_EQ_INT(simple_dict_len(d), 0);
+    ASSERT_EQ_INT(simple_dict_len(d), 0);  /* Nothing should be added */
 
     simple_dict_remove(d, NULL);
     simple_dict_remove(NULL, "key");
 
+    /* Test get operations with NULL key */
+    ASSERT_EQ_INT(simple_dict_get_int(d, NULL), 0);
+    ASSERT(simple_dict_get_ptr(d, NULL) == NULL);
+    ASSERT(simple_dict_get(d, NULL) == NULL);
+
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_set_int_null_dict) {
+    /* Directly test NULL dict - should be no-op */
+    simple_dict_set_int(NULL, "key", 42);
+    /* No assertion needed - just exercising the branch */
+}
+
+TEST(dict_set_str_null_dict) {
+    /* Directly test NULL dict - should be no-op */
+    simple_dict_set_str(NULL, "key", "value");
+    /* No assertion needed - just exercising the branch */
+}
+
+TEST(dict_set_ptr_null_dict) {
+    /* Directly test NULL dict - should be no-op */
+    int x = 10;
+    simple_dict_set_ptr(NULL, "key", &x);
+    /* No assertion needed - just exercising the branch */
+}
+
+TEST(dict_null_key_in_entries) {
+    /* Test defensive NULL key checks in dict_find and dict_keys */
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "valid", 42);
+
+    /* Manually corrupt an entry to have NULL key (for coverage) */
+    d->entries[0].key = NULL;
+
+    /* This should skip the NULL key entry */
+    ASSERT(!simple_dict_contains(d, "valid"));
+
+    /* dict_keys should also skip NULL key */
+    SimpleStringArray keys = simple_dict_keys(d);
+    ASSERT_EQ_INT(keys.len, 0);
+
+    /* Cleanup (don't free the NULL key) */
+    free(keys.items);
     free(d->entries);
     free(d);
 }
@@ -938,6 +1050,103 @@ TEST(dict_grow) {
     for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
     free(d->entries);
     free(d);
+}
+
+TEST(dict_grow_str) {
+    SimpleDict* d = simple_dict_new();
+    /* Push 40 string entries to trigger growth */
+    for (int i = 0; i < 40; i++) {
+        char key[32], val[32];
+        snprintf(key, sizeof(key), "key_%d", i);
+        snprintf(val, sizeof(val), "val_%d", i);
+        simple_dict_set_str(d, key, val);
+    }
+    ASSERT_EQ_INT(simple_dict_len(d), 40);
+    ASSERT_EQ_STR(simple_dict_get(d, "key_0"), "val_0");
+    ASSERT_EQ_STR(simple_dict_get(d, "key_39"), "val_39");
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) {
+        free((void*)d->entries[i].key);
+        if (d->entries[i].type_tag == SIMPLE_DICT_TYPE_STR) {
+            free((void*)d->entries[i].value.str_val);
+        }
+    }
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_grow_ptr) {
+    SimpleDict* d = simple_dict_new();
+    int values[40];
+    /* Push 40 ptr entries to trigger growth */
+    for (int i = 0; i < 40; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "ptr_%d", i);
+        values[i] = i * 100;
+        simple_dict_set_ptr(d, key, &values[i]);
+    }
+    ASSERT_EQ_INT(simple_dict_len(d), 40);
+    ASSERT(simple_dict_get_ptr(d, "ptr_0") == &values[0]);
+    ASSERT(simple_dict_get_ptr(d, "ptr_39") == &values[39]);
+
+    /* Cleanup */
+    for (int i = 0; i < d->len; i++) free((void*)d->entries[i].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_set_ptr_overwrite) {
+    SimpleDict* d = simple_dict_new();
+    int x = 10, y = 20;
+
+    /* Set then overwrite */
+    simple_dict_set_ptr(d, "ptr", &x);
+    ASSERT(simple_dict_get_ptr(d, "ptr") == &x);
+
+    simple_dict_set_ptr(d, "ptr", &y);
+    ASSERT(simple_dict_get_ptr(d, "ptr") == &y);
+    ASSERT_EQ_INT(simple_dict_len(d), 1);  /* Should still be 1 entry */
+
+    /* Cleanup */
+    free((void*)d->entries[0].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_get_missing_key) {
+    SimpleDict* d = simple_dict_new();
+    simple_dict_set_int(d, "exists", 42);
+
+    /* Get missing key returns NULL/0 */
+    ASSERT(simple_dict_get(d, "missing") == NULL);
+    ASSERT_EQ_INT(simple_dict_get_int(d, "missing"), 0);
+    ASSERT(simple_dict_get_ptr(d, "missing") == NULL);
+
+    /* Cleanup */
+    free((void*)d->entries[0].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_get_ptr_value) {
+    SimpleDict* d = simple_dict_new();
+    int x = 123;
+    simple_dict_set_ptr(d, "myptr", &x);
+
+    /* Get ptr value through generic get should return NULL (not a string) */
+    ASSERT(simple_dict_get(d, "myptr") == NULL);
+
+    /* Cleanup */
+    free((void*)d->entries[0].key);
+    free(d->entries);
+    free(d);
+}
+
+TEST(dict_keys_null) {
+    SimpleStringArray keys = simple_dict_keys(NULL);
+    ASSERT_EQ_INT(keys.len, 0);
+    free(keys.items);
 }
 
 /* ================================================================
@@ -1111,6 +1320,7 @@ int main(void) {
     RUN(trim_trailing_cr_only);
     RUN(trim_leading_cr);
     RUN(trim_only_cr);
+    RUN(trim_trailing_tab_only);
     RUN(file_write_invalid_path);
 
     printf("\n--- Shell ---\n");
@@ -1135,10 +1345,12 @@ int main(void) {
     printf("\n--- String Array Array ---\n");
     RUN(string_array_array_new);
     RUN(string_array_array_push);
+    RUN(string_array_array_grow);
 
     printf("\n--- Int Array Array ---\n");
     RUN(int_array_array_new);
     RUN(int_array_array_push);
+    RUN(int_array_array_grow);
 
     printf("\n--- Dictionary ---\n");
     RUN(dict_new);
@@ -1151,6 +1363,16 @@ int main(void) {
     RUN(dict_get_int_converts_from_str);
     RUN(dict_null_operations);
     RUN(dict_grow);
+    RUN(dict_get_missing_key);
+    RUN(dict_get_ptr_value);
+    RUN(dict_keys_null);
+    RUN(dict_set_int_null_dict);
+    RUN(dict_set_str_null_dict);
+    RUN(dict_set_ptr_null_dict);
+    RUN(dict_grow_str);
+    RUN(dict_grow_ptr);
+    RUN(dict_set_ptr_overwrite);
+    RUN(dict_null_key_in_entries);
 
     printf("\n--- Option Type ---\n");
     RUN(option_none);
