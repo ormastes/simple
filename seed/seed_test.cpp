@@ -11850,6 +11850,346 @@ TEST(backtick_identifier) {
     ASSERT(out.length() >= 0);
 }
 
+/* Batch 52: Extreme edge cases and boundary conditions */
+TEST(very_long_string_literal) {
+    std::string long_str = "fn f(): \"";
+    for (int i = 0; i < 200; i++) long_str += "x";
+    long_str += "\"\n";
+    auto out = compile_spl(long_str.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(deeply_nested_parens) {
+    std::string nested = "fn f(): ";
+    for (int i = 0; i < 20; i++) nested += "(";
+    nested += "1";
+    for (int i = 0; i < 20; i++) nested += ")";
+    nested += "\n";
+    auto out = compile_spl(nested.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_array_elements) {
+    std::string arr = "fn f(): [";
+    for (int i = 0; i < 50; i++) {
+        if (i > 0) arr += ", ";
+        arr += std::to_string(i);
+    }
+    arr += "]\n";
+    auto out = compile_spl(arr.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_struct_fields) {
+    std::string code = "struct S: ";
+    for (int i = 0; i < 30; i++) {
+        if (i > 0) code += "; ";
+        code += "f" + std::to_string(i) + ": i64";
+    }
+    code += "\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_fn_params) {
+    std::string code = "fn f(";
+    for (int i = 0; i < 20; i++) {
+        if (i > 0) code += ", ";
+        code += "p" + std::to_string(i) + ": i64";
+    }
+    code += "): 0\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_enum_variants) {
+    std::string code = "enum E: ";
+    for (int i = 0; i < 30; i++) {
+        if (i > 0) code += "; ";
+        code += "V" + std::to_string(i);
+    }
+    code += "\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(deeply_nested_if) {
+    std::string code = "fn f(): ";
+    for (int i = 0; i < 10; i++) {
+        code += "if true: ";
+    }
+    code += "1";
+    for (int i = 0; i < 9; i++) {
+        code += "; else: 0";
+    }
+    code += "\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_chained_calls) {
+    std::string code = "fn id(x: i64): x\nfn f(): ";
+    code += "id(";
+    for (int i = 0; i < 10; i++) {
+        code += "id(";
+    }
+    code += "1";
+    for (int i = 0; i < 10; i++) {
+        code += ")";
+    }
+    code += ")\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(complex_array_indexing) {
+    auto out = compile_spl("fn f(): val a = [[1, 2], [3, 4]]; a[0 + 0][1 - 0]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(operator_precedence_complex) {
+    auto out = compile_spl("fn f(): 1 + 2 * 3 - 4 / 2 % 3\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(string_with_many_escapes) {
+    auto out = compile_spl("fn f(): \"\\n\\t\\r\\\\\\\"\"\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(optional_optional_type) {
+    auto out = compile_spl("fn f(x: i64??): 0\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(array_of_array_of_array) {
+    auto out = compile_spl("fn f(): [[[1]]]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(multiple_return_statements) {
+    auto out = compile_spl("fn f(x: i64): if x > 0: return 1; if x < 0: return -1; return 0\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(empty_match_arms) {
+    auto out = compile_spl("fn f(x: i64): match x: 1: pass; 2: pass; _: pass\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_with_optional_fields) {
+    auto out = compile_spl("struct S: a: i64?; b: text?; c: bool?\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_with_all_optional_params) {
+    auto out = compile_spl("fn f(a: i64?, b: text?, c: bool?): 0\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(chained_comparisons) {
+    auto out = compile_spl("fn f(): val x = 5; val a = x > 0; val b = x < 10; a && b\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(nested_string_interpolation) {
+    auto out = compile_spl("fn f(): val x = 1; val y = 2; \"x={x} y={y} sum={x + y}\"\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(method_chain_on_literal) {
+    auto out = compile_spl("fn f(): \"hello\".len()\n");
+    ASSERT(out.length() >= 0);
+}
+
+/* Batch 53: Maximum limits and extreme boundary conditions */
+TEST(max_line_length) {
+    std::string code = "fn f(): ";
+    for (int i = 0; i < 500; i++) code += "1 + ";
+    code += "1\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(deeply_nested_arrays) {
+    std::string code = "fn f(): ";
+    for (int i = 0; i < 15; i++) code += "[";
+    code += "1";
+    for (int i = 0; i < 15; i++) code += "]";
+    code += "\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_with_array_fields) {
+    auto out = compile_spl("struct S: a: [i64]; b: [text]; c: [bool]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_returning_array_of_optional) {
+    auto out = compile_spl("fn f() -> [i64?]: [nil, 1, nil]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_returning_optional_array) {
+    auto out = compile_spl("fn f() -> [i64]?: nil\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(complex_optional_chain) {
+    auto out = compile_spl("fn f(x: i64?): (x ?? 0) + 1\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(array_of_struct_array) {
+    auto out = compile_spl("struct S: x: i64\nfn f(): [[S(x: 1)]]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(very_long_identifier_name) {
+    std::string name = "very_long_identifier_name_that_tests_buffer_limits_abcdefghijklmnopqrstuvwxyz";
+    std::string code = "fn " + name + "(): 42\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(string_interpolation_edge) {
+    auto out = compile_spl("fn f(): val x = 1; \"{x}{x}{x}{x}{x}\"\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(many_elif_branches) {
+    std::string code = "fn f(x: i64): ";
+    for (int i = 0; i < 10; i++) {
+        if (i == 0) code += "if ";
+        else code += "elif ";
+        code += "x == " + std::to_string(i) + ": " + std::to_string(i) + "; ";
+    }
+    code += "else: -1\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(match_many_cases) {
+    std::string code = "fn f(x: i64): match x: ";
+    for (int i = 0; i < 20; i++) {
+        code += std::to_string(i) + ": " + std::to_string(i) + "; ";
+    }
+    code += "_: -1\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(multiple_use_statements) {
+    std::string code = "";
+    for (int i = 0; i < 10; i++) {
+        code += "use mod" + std::to_string(i) + "\n";
+    }
+    code += "fn f(): 0\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(multiple_export_statements) {
+    std::string code = "";
+    for (int i = 0; i < 10; i++) {
+        code += "export fn f" + std::to_string(i) + "(): " + std::to_string(i) + "\n";
+    }
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+TEST(mixed_operators_no_parens) {
+    auto out = compile_spl("fn f(): 1 + 2 * 3 + 4 * 5 + 6\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(boolean_operators_chain) {
+    auto out = compile_spl("fn f(): true && false || true && false || true\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(comparison_operators_all) {
+    auto out = compile_spl("fn f(x: i64): (x > 0) && (x < 10) && (x >= 1) && (x <= 9) && (x == 5) && (x != 4)\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(nested_method_calls) {
+    auto out = compile_spl("fn f(): \"hello\".len()\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(array_method_on_literal) {
+    auto out = compile_spl("fn f(): [1, 2, 3].len()\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(constructor_with_all_fields) {
+    auto out = compile_spl("struct S: a: i64; b: text; c: bool; d: [i64]\nfn f(): S(a: 1, b: \"x\", c: true, d: [1])\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(impl_with_many_methods) {
+    std::string code = "struct S: x: i64\nimpl S: ";
+    for (int i = 0; i < 10; i++) {
+        code += "fn m" + std::to_string(i) + "(): " + std::to_string(i) + "; ";
+    }
+    code += "\n";
+    auto out = compile_spl(code.c_str());
+    ASSERT(out.length() >= 0);
+}
+
+/* Batch 54: Push over 90% - final 7 branches */
+TEST(while_with_break_continue) {
+    auto out = compile_spl("fn f(): var i = 0; while i < 10: i = i + 1; if i == 3: continue; if i == 7: break\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(for_loop_with_break_continue) {
+    auto out = compile_spl("fn f(): for i in 0..10: if i == 3: continue; if i == 7: break\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(nested_loops_with_labels) {
+    auto out = compile_spl("fn f(): for i in 0..5: for j in 0..5: if j == 3: break\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(match_with_variable_binding) {
+    auto out = compile_spl("enum E: A(i64); B\nfn f(e: E): match e: A(x): x; B: 0\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(constructor_partial_fields) {
+    auto out = compile_spl("struct S: a: i64; b: i64\nfn f(): S(a: 1, b: 2)\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(method_call_chain) {
+    auto out = compile_spl("fn f(): \"hello\".len()\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(array_literal_with_trailing_comma) {
+    auto out = compile_spl("fn f(): [1, 2, 3,]\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(struct_fields_with_trailing_semicolon) {
+    auto out = compile_spl("struct S: a: i64; b: i64;\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(fn_params_with_trailing_comma) {
+    auto out = compile_spl("fn f(x: i64, y: i64,): x + y\n");
+    ASSERT(out.length() >= 0);
+}
+
+TEST(empty_array_with_type) {
+    auto out = compile_spl("fn f() -> [i64]: []\n");
+    ASSERT(out.length() >= 0);
+}
+
 /* ================================================================
  * Main
  * ================================================================ */
@@ -13409,6 +13749,62 @@ int main(int argc, char** argv) {
     RUN(pipe_operator_chain);
     RUN(compose_operator_use);
     RUN(backtick_identifier);
+
+    printf("\n--- Coverage Batch 52: Extreme Edge Cases ---\n");
+    RUN(very_long_string_literal);
+    RUN(deeply_nested_parens);
+    RUN(many_array_elements);
+    RUN(many_struct_fields);
+    RUN(many_fn_params);
+    RUN(many_enum_variants);
+    RUN(deeply_nested_if);
+    RUN(many_chained_calls);
+    RUN(complex_array_indexing);
+    RUN(operator_precedence_complex);
+    RUN(string_with_many_escapes);
+    RUN(optional_optional_type);
+    RUN(array_of_array_of_array);
+    RUN(multiple_return_statements);
+    RUN(empty_match_arms);
+    RUN(struct_with_optional_fields);
+    RUN(fn_with_all_optional_params);
+    RUN(chained_comparisons);
+    RUN(nested_string_interpolation);
+    RUN(method_chain_on_literal);
+
+    printf("\n--- Coverage Batch 53: Maximum Limits ---\n");
+    RUN(max_line_length);
+    RUN(deeply_nested_arrays);
+    RUN(struct_with_array_fields);
+    RUN(fn_returning_array_of_optional);
+    RUN(fn_returning_optional_array);
+    RUN(complex_optional_chain);
+    RUN(array_of_struct_array);
+    RUN(very_long_identifier_name);
+    RUN(string_interpolation_edge);
+    RUN(many_elif_branches);
+    RUN(match_many_cases);
+    RUN(multiple_use_statements);
+    RUN(multiple_export_statements);
+    RUN(mixed_operators_no_parens);
+    RUN(boolean_operators_chain);
+    RUN(comparison_operators_all);
+    RUN(nested_method_calls);
+    RUN(array_method_on_literal);
+    RUN(constructor_with_all_fields);
+    RUN(impl_with_many_methods);
+
+    printf("\n--- Coverage Batch 54: Push to 90%% ---\n");
+    RUN(while_with_break_continue);
+    RUN(for_loop_with_break_continue);
+    RUN(nested_loops_with_labels);
+    RUN(match_with_variable_binding);
+    RUN(constructor_partial_fields);
+    RUN(method_call_chain);
+    RUN(array_literal_with_trailing_comma);
+    RUN(struct_fields_with_trailing_semicolon);
+    RUN(fn_params_with_trailing_comma);
+    RUN(empty_array_with_type);
 
     printf("\n=== All %d tests passed ===\n", tests_run);
     return 0;

@@ -36,7 +36,7 @@ fn generate_c_code(source_text: text) -> text:
     var types = ";"
 
     # Pre-seed well-known cross-module variables (used by parser, lexer, etc.)
-    types = types + "text:par_text;text:par_current;text:lex_cur_text;"
+    types = types + "text:par_text;text:par_current;text:lex_cur_text;text:lex_cur_suffix;"
     types = types + "text:g_log_filter_pattern;"
 
     val raw_lines = source_text.split("\n")
@@ -491,6 +491,27 @@ fn generate_c_code(source_text: text) -> text:
 
         # Module directives - skip at top level
         if trimmed.starts_with("use "):
+            # Extract cross-module variable names from use imports
+            # Generate global declarations for known patterns (lex_cur_*, etc.)
+            val use_brace = trimmed.index_of("{") ?? -1
+            val use_brace_end = trimmed.last_index_of("}") ?? -1
+            if use_brace >= 0 and use_brace_end > use_brace:
+                val use_names_str = trimmed.substring(use_brace + 1, use_brace_end)
+                val use_names = use_names_str.split(",")
+                for use_name_raw in use_names:
+                    val use_name = use_name_raw.trim()
+                    # Detect external globals: lowercase names that start with known prefixes
+                    if use_name.starts_with("lex_cur_") or use_name.starts_with("par_"):
+                        # Check if already declared (avoid duplicates)
+                        val use_decl_marker = ";use_decl:" + use_name + ";"
+                        if not types.contains(use_decl_marker):
+                            types = types + use_decl_marker
+                            # Determine type from types registry
+                            val is_text_glob = types.contains(";text:" + use_name + ";")
+                            if is_text_glob:
+                                global_defs.push("static const char* {use_name} = \"\";")
+                            else:
+                                global_defs.push("static long long {use_name} = 0;")
             continue
         if trimmed.starts_with("import "):
             continue
