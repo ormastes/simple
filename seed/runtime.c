@@ -10,6 +10,7 @@
 
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 500
 #endif
 
 #include "runtime.h"
@@ -20,6 +21,14 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <errno.h>
+#include <sys/stat.h>
+
+#ifndef _WIN32
+#include <ftw.h>
+#include <sys/file.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <io.h>
@@ -667,6 +676,67 @@ int spl_file_exists(const char* path) {
     if (f) { fclose(f); return 1; }
     return 0;
 }
+
+/* ================================================================
+ * Directory Operations
+ * ================================================================ */
+
+#ifndef _WIN32
+static int unlink_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
+    (void)sb; (void)typeflag; (void)ftwbuf;
+    return remove(fpath);
+}
+
+bool rt_dir_remove_all(const char* path) {
+    if (!path) return false;
+    return nftw(path, unlink_cb, 64, FTW_DEPTH | FTW_PHYS) == 0;
+}
+
+/* ================================================================
+ * File Locking
+ * ================================================================ */
+
+int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
+    if (!path) return -1;
+
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return -1;
+
+    if (timeout_secs > 0) {
+        alarm(timeout_secs);
+    }
+
+    int result = flock(fd, LOCK_EX);
+    alarm(0);
+
+    if (result == 0) return fd;
+    close(fd);
+    return -1;
+}
+
+bool rt_file_unlock(int64_t handle) {
+    if (handle < 0) return false;
+    flock((int)handle, LOCK_UN);
+    close((int)handle);
+    return true;
+}
+#else
+/* Windows stubs - not implemented yet */
+bool rt_dir_remove_all(const char* path) {
+    (void)path;
+    return false;
+}
+
+int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
+    (void)path; (void)timeout_secs;
+    return -1;
+}
+
+bool rt_file_unlock(int64_t handle) {
+    (void)handle;
+    return false;
+}
+#endif
 
 /* ================================================================
  * Output
