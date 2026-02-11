@@ -158,6 +158,15 @@ int      spl_file_write(const char* path, const char* content);
 int      spl_file_append(const char* path, const char* content);
 int      spl_file_exists(const char* path);
 
+/* ===== Directory Operations ===== */
+
+bool     rt_dir_remove_all(const char* path);
+
+/* ===== File Locking ===== */
+
+int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
+bool     rt_file_unlock(int64_t handle);
+
 /* ===== Output ===== */
 
 void     spl_print(const char* s);

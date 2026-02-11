@@ -26,6 +26,7 @@ use core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF, TOK_ERROR}
 use core.tokens.{TOK_HASH_LBRACKET, TOK_DOTDOTDOT, TOK_DOTDOT_EQ}
 use core.tokens.{TOK_SEMICOLON, TOK_AT, TOK_UNDERSCORE}
 use core.tokens.{TOK_PIPE_FORWARD, TOK_DOUBLE_STAR}
+use core.tokens.{TOK_SUFFIXED_INT, TOK_SUFFIXED_FLOAT}
 
 # ===== Character Classification (pure functions) =====
 
@@ -73,6 +74,7 @@ var lex_cur_kind: i64 = 0
 var lex_cur_text: text = ""
 var lex_cur_line: i64 = 0
 var lex_cur_col: i64 = 0
+var lex_cur_suffix: text = ""
 
 # ===== Lexer Init/State Access =====
 
@@ -90,6 +92,7 @@ fn lex_init(source: text):
     lex_cur_text = ""
     lex_cur_line = 0
     lex_cur_col = 0
+    lex_cur_suffix = ""
 
 fn lex_at_end() -> bool:
     lex_pos >= lex_source.len()
@@ -258,11 +261,40 @@ fn lex_scan_number():
             else:
                 break
 
-    val num_text: text = lex_source[start:lex_pos]
+    val num_text_raw: text = lex_source[start:lex_pos]
+
+    # Suffix detection: if number text ends with _ and next char is alpha
+    val raw_len: i64 = num_text_raw.len()
+    var ends_underscore: bool = false
+    if raw_len > 0:
+        val last_ch: text = num_text_raw[raw_len - 1:raw_len]
+        ends_underscore = last_ch == "_"
+    val after_num: text = lex_peek()
+    val next_is_alpha: bool = is_alpha(after_num)
+    if ends_underscore and next_is_alpha:
+        # Suffix detected: strip trailing _, scan suffix identifier
+        val num_text: text = num_text_raw[0:raw_len - 1]
+        var suffix_start: i64 = lex_pos
+        for i in 0..1000:
+            val sc: text = lex_peek()
+            if is_ident_char(sc):
+                lex_advance()
+            else:
+                break
+        val suffix: text = lex_source[suffix_start:lex_pos]
+        lex_cur_suffix = suffix
+        if is_float:
+            lex_make_token(TOK_SUFFIXED_FLOAT, num_text, start_line, start_col)
+        else:
+            lex_make_token(TOK_SUFFIXED_INT, num_text, start_line, start_col)
+        return
+
+    # Normal number token (no suffix)
+    lex_cur_suffix = ""
     if is_float:
-        lex_make_token(TOK_FLOAT_LIT, num_text, start_line, start_col)
+        lex_make_token(TOK_FLOAT_LIT, num_text_raw, start_line, start_col)
     else:
-        lex_make_token(TOK_INT_LIT, num_text, start_line, start_col)
+        lex_make_token(TOK_INT_LIT, num_text_raw, start_line, start_col)
 
 # ===== String Scanning =====
 
