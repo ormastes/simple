@@ -25,7 +25,7 @@
 #   - c_translate.spl: Expression/statement/control-flow translation to C
 #   - c_runtime.spl: C runtime generation, struct parsing, result splitting
 
-use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type}
+use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr}
 use app.compile.c_translate.{translate_condition, translate_method_expr, translate_expr, translate_interpolated_print, translate_print, translate_array_decl, translate_var_decl, translate_for_loop, translate_case, translate_statement, close_blocks, build_function}
 use app.compile.c_runtime.{generate_c_runtime, parse_struct_fields, split_result}
 
@@ -34,6 +34,10 @@ fn generate_c_code(source_text: text) -> text:
     # Type registry - tracks variable types and function return types
     # Format: ";text:name;arr:name;fn_text:funcname;struct:StructName;"
     var types = ";"
+
+    # Pre-seed well-known cross-module variables (used by parser, lexer, etc.)
+    types = types + "text:par_text;text:par_current;text:lex_cur_text;"
+    types = types + "text:g_log_filter_pattern;"
 
     val raw_lines = source_text.split("\n")
     # Pre-process: join multi-line expressions (unclosed parentheses)
@@ -144,6 +148,13 @@ fn generate_c_code(source_text: text) -> text:
                         types = types + "field_arr:" + p_name + "." + pf_fname + ";"
                     if pf_ftype == "[i64]" or pf_ftype == "[int]" or pf_ftype == "[bool]":
                         types = types + "field_int_arr:" + p_name + "." + pf_fname + ";"
+                    # Struct array field: [StructName]
+                    if pf_ftype.starts_with("[") and pf_ftype.ends_with("]"):
+                        val pf_elem = pf_ftype.substring(1, pf_ftype.len() - 1).trim()
+                        if pf_elem.len() > 0:
+                            val pf_ef = pf_elem[0]
+                            if pf_ef >= "A" and pf_ef <= "Z":
+                                types = types + "field_struct_arr:" + p_name + "." + pf_fname + "=" + pf_elem + ";"
         if p_is_enum:
             val pe_name = ptrim.substring(5, ptrim.len() - 1).trim()
             # Scan variants
@@ -258,6 +269,12 @@ fn generate_c_code(source_text: text) -> text:
                                 val rt_upper = rt_first >= "A" and rt_first <= "Z"
                                 if rt_upper:
                                     types = types + "fn_struct:" + current_impl_class + "__" + impl_method_name + "=" + ret_type + ";"
+                            if ret_type.starts_with("[") and ret_type.ends_with("]"):
+                                val rt_sa_elem = ret_type.substring(1, ret_type.len() - 1).trim()
+                                if rt_sa_elem.len() > 0:
+                                    val rt_sa_f = rt_sa_elem[0]
+                                    if rt_sa_f >= "A" and rt_sa_f <= "Z":
+                                        types = types + "fn_struct_arr:" + current_impl_class + "__" + impl_method_name + "=" + rt_sa_elem + ";"
                         # Track method parameter types
                         val mp_open = trimmed.index_of("(") ?? -1
                         val mp_close = trimmed.index_of(")") ?? -1
@@ -280,6 +297,12 @@ fn generate_c_code(source_text: text) -> text:
                                         types = types + "str_arr_arr:" + mp_name + ";"
                                     if mp_type == "[[i64]]" or mp_type == "[[int]]":
                                         types = types + "int_arr_arr:" + mp_name + ";"
+                                    if mp_type.starts_with("[") and mp_type.ends_with("]"):
+                                        val mp_elem = mp_type.substring(1, mp_type.len() - 1).trim()
+                                        if mp_elem.len() > 0:
+                                            val mp_ef = mp_elem[0]
+                                            if mp_ef >= "A" and mp_ef <= "Z":
+                                                types = types + "struct_arr_var:" + mp_name + "=" + mp_elem + ";"
                                     if mp_type.len() > 0:
                                         val mp_first = mp_type[0]
                                         val mp_is_upper = mp_first >= "A" and mp_first <= "Z"
@@ -332,6 +355,12 @@ fn generate_c_code(source_text: text) -> text:
                                         types = types + "str_arr_arr:" + mp_name + ";"
                                     if mp_type == "[[i64]]" or mp_type == "[[int]]":
                                         types = types + "int_arr_arr:" + mp_name + ";"
+                                    if mp_type.starts_with("[") and mp_type.ends_with("]"):
+                                        val mp_elem = mp_type.substring(1, mp_type.len() - 1).trim()
+                                        if mp_elem.len() > 0:
+                                            val mp_ef = mp_elem[0]
+                                            if mp_ef >= "A" and mp_ef <= "Z":
+                                                types = types + "struct_arr_var:" + mp_name + "=" + mp_elem + ";"
                                     if mp_type.len() > 0:
                                         val mp_first = mp_type[0]
                                         val mp_is_upper = mp_first >= "A" and mp_first <= "Z"
@@ -385,6 +414,12 @@ fn generate_c_code(source_text: text) -> text:
                                         types = types + "arr:" + mp_name + ";"
                                     if mp_type == "[i64]" or mp_type == "[int]" or mp_type == "[bool]":
                                         types = types + "int_arr:" + mp_name + ";"
+                                    if mp_type.starts_with("[") and mp_type.ends_with("]"):
+                                        val mp_elem = mp_type.substring(1, mp_type.len() - 1).trim()
+                                        if mp_elem.len() > 0:
+                                            val mp_ef = mp_elem[0]
+                                            if mp_ef >= "A" and mp_ef <= "Z":
+                                                types = types + "struct_arr_var:" + mp_name + "=" + mp_elem + ";"
                                     if mp_type.len() > 0:
                                         val mp_first = mp_type[0]
                                         val mp_is_upper = mp_first >= "A" and mp_first <= "Z"
@@ -496,6 +531,16 @@ fn generate_c_code(source_text: text) -> text:
                     if eparams_str.len() > 0:
                         ec_params = translate_params(eparams_str)
                     forward_decls.push("{eret_type} {extern_name}({ec_params});")
+                    # Track extern fn return types for type inference
+                    if eret_type == "const char*":
+                        types = types + "fn_text:" + extern_name + ";"
+                    # Track struct return types
+                    if earrow >= 0:
+                        val eret_raw = extern_rest.substring(earrow + 2).trim()
+                        if eret_raw.len() > 0:
+                            val eret_first = eret_raw[0]
+                            if eret_first >= "A" and eret_first <= "Z":
+                                types = types + "fn_struct:" + extern_name + "=" + eret_raw + ";"
             continue
 
         # Type alias - skip
@@ -544,6 +589,13 @@ fn generate_c_code(source_text: text) -> text:
                         types = types + "field_arr:" + struct_name + "." + fname + ";"
                     if ftype == "[i64]" or ftype == "[int]" or ftype == "[bool]":
                         types = types + "field_int_arr:" + struct_name + "." + fname + ";"
+                    # Struct array field: [StructName]
+                    if ftype.starts_with("[") and ftype.ends_with("]"):
+                        val sf_elem = ftype.substring(1, ftype.len() - 1).trim()
+                        if sf_elem.len() > 0:
+                            val sf_ef = sf_elem[0]
+                            if sf_ef >= "A" and sf_ef <= "Z":
+                                types = types + "field_struct_arr:" + struct_name + "." + fname + "=" + sf_elem + ";"
             skip_until_unindent = true
             continue
 
@@ -687,6 +739,13 @@ fn generate_c_code(source_text: text) -> text:
                         types = types + "field_arr:" + class_name + "." + fname + ";"
                     if ftype == "[i64]" or ftype == "[int]" or ftype == "[bool]":
                         types = types + "field_int_arr:" + class_name + "." + fname + ";"
+                    # Struct array field: [StructName]
+                    if ftype.starts_with("[") and ftype.ends_with("]"):
+                        val cf_elem = ftype.substring(1, ftype.len() - 1).trim()
+                        if cf_elem.len() > 0:
+                            val cf_ef = cf_elem[0]
+                            if cf_ef >= "A" and cf_ef <= "Z":
+                                types = types + "field_struct_arr:" + class_name + "." + fname + "=" + cf_elem + ";"
             skip_until_unindent = true
             continue
 
@@ -734,6 +793,13 @@ fn generate_c_code(source_text: text) -> text:
                     val ret_is_upper = ret_first >= "A" and ret_first <= "Z"
                     if ret_is_upper:
                         types = types + "fn_struct:" + current_fn_name + "=" + ret_type + ";"
+                # Track struct array return type: [StructName]
+                if ret_type.starts_with("[") and ret_type.ends_with("]"):
+                    val ret_sa_elem = ret_type.substring(1, ret_type.len() - 1).trim()
+                    if ret_sa_elem.len() > 0:
+                        val ret_sa_f = ret_sa_elem[0]
+                        if ret_sa_f >= "A" and ret_sa_f <= "Z":
+                            types = types + "fn_struct_arr:" + current_fn_name + "=" + ret_sa_elem + ";"
             # Save types AFTER return type tracking so it persists
             types_before_fn = types
             # Track parameter types (text/str params, string array params)
@@ -758,6 +824,13 @@ fn generate_c_code(source_text: text) -> text:
                             types = types + "str_arr_arr:" + fp_name + ";"
                         if fp_type == "[[i64]]" or fp_type == "[[int]]":
                             types = types + "int_arr_arr:" + fp_name + ";"
+                        # Track struct array parameters: [StructName]
+                        if fp_type.starts_with("[") and fp_type.ends_with("]"):
+                            val fp_elem = fp_type.substring(1, fp_type.len() - 1).trim()
+                            if fp_elem.len() > 0:
+                                val fp_ef = fp_elem[0]
+                                if fp_ef >= "A" and fp_ef <= "Z":
+                                    types = types + "struct_arr_var:" + fp_name + "=" + fp_elem + ";"
                         # Track struct-typed parameters (uppercase type name)
                         if fp_type.len() > 0:
                             val fp_first = fp_type[0]
@@ -910,6 +983,20 @@ fn generate_c_code(source_text: text) -> text:
                         main_body.push("    {clean_name} = simple_new_int_array_array();")
                         continue
                     global_code = "static " + global_code
+                elif global_code.starts_with("SimpleStructArray "):
+                    # Struct arrays need deferred init
+                    val sarr_eq = global_code.index_of(" = ") ?? -1
+                    if sarr_eq >= 0:
+                        val sarr_decl = global_code.substring(0, sarr_eq)
+                        global_defs.push("static {sarr_decl};")
+                        val sarr_name = sarr_decl.substring(18).trim()
+                        val sarr_semi = sarr_name.index_of(";") ?? -1
+                        var clean_sarr = sarr_name
+                        if sarr_semi >= 0:
+                            clean_sarr = sarr_name.substring(0, sarr_semi).trim()
+                        main_body.push("    {clean_sarr} = simple_new_struct_array();")
+                        continue
+                    global_code = "static " + global_code
                 elif global_code.starts_with("SimpleDict* "):
                     val dict_eq = global_code.index_of(" = ") ?? -1
                     if dict_eq >= 0:
@@ -932,7 +1019,11 @@ fn generate_c_code(source_text: text) -> text:
             if new_types != "":
                 types = types + new_types
             if code != "":
-                main_body.push("    {code}")
+                val mod_indent = get_indent_level(line)
+                var mod_padding = "    "
+                for mpi in range(0, mod_indent):
+                    mod_padding = mod_padding + "    "
+                main_body.push("{mod_padding}{code}")
 
     # Flush pending impl method
     if in_impl and in_impl_method:
