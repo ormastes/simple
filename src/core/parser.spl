@@ -21,6 +21,7 @@ use core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
 use core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
 use core.tokens.{TOK_KW_PASS, TOK_KW_IS}
 use core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL}
+use core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
 use core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
 use core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
 use core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN}
@@ -44,6 +45,7 @@ use core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE}
 use core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
 use core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_UNIT, EXPR_PASS}
 use core.ast.{EXPR_NULL_COALESCE, EXPR_SLICE, EXPR_INTERPOLATED_STRING}
+use core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN}
 use core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use core.ast.{expr_binary, expr_unary, expr_call, expr_index}
@@ -54,6 +56,7 @@ use core.ast.{expr_range, expr_assign, expr_compound_assign}
 use core.ast.{expr_unit, expr_pass, expr_null_coalesce, expr_slice}
 use core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use core.ast.{expr_match_expr, expr_block}
+use core.ast.{expr_await, expr_yield, expr_spawn}
 use core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL}
 use core.ast.{STMT_RETURN, STMT_IF, STMT_FOR, STMT_WHILE}
 use core.ast.{STMT_MATCH, STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN}
@@ -626,6 +629,21 @@ fn parse_primary() -> i64:
         parser_advance()
         return expr_ident("self", 0)
 
+    if par_kind == TOK_KW_AWAIT:
+        parser_advance()
+        val future_expr = parse_expr()
+        return expr_await(future_expr, 0)
+
+    if par_kind == TOK_KW_YIELD:
+        parser_advance()
+        val value_expr = parse_expr()
+        return expr_yield(value_expr, 0)
+
+    if par_kind == TOK_KW_SPAWN:
+        parser_advance()
+        val call_expr = parse_expr()
+        return expr_spawn(call_expr, 0)
+
     if par_kind == TOK_LPAREN:
         parser_advance()
         if par_kind == TOK_RPAREN:
@@ -885,7 +903,7 @@ fn parse_match_stmt() -> i64:
 
 # ===== Declaration Parsing =====
 
-fn parse_fn_decl() -> i64:
+fn parse_fn_decl(is_async: i64) -> i64:
     parser_advance()
     val fn_name = par_text
     parser_expect(TOK_IDENT)
@@ -930,7 +948,7 @@ fn parse_fn_decl() -> i64:
     parser_expect(TOK_COLON)
     val body = parse_block()
 
-    decl_fn(fn_name, param_names, param_types, ret_type, body, 0)
+    decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, 0)
 
 fn parse_extern_fn_decl() -> i64:
     # Already consumed 'extern'
@@ -1147,8 +1165,16 @@ fn parse_module_body():
         if par_kind == TOK_DEDENT:
             # Stray dedent at module level — skip it
             parser_advance()
+        elif par_kind == TOK_KW_ASYNC:
+            # Async function: async fn name()
+            parser_advance()
+            if par_kind == TOK_KW_FN:
+                val d = parse_fn_decl(1)  # 1 = is_async
+                module_add_decl(d)
+            else:
+                parser_error("expected 'fn' after 'async'")
         elif par_kind == TOK_KW_FN:
-            val d = parse_fn_decl()
+            val d = parse_fn_decl(0)  # 0 = not async
             module_add_decl(d)
         elif par_kind == TOK_KW_EXTERN:
             parser_advance()

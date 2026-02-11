@@ -1,323 +1,180 @@
-# @pending
 """
 MCP Input Validation Tests
 Feature: MCP Input Validation and Bounds Checking
 Category: MCP, Validation, Security
 Status: Complete
-
-Comprehensive tests for input validation to prevent DoS and malicious input.
 """
 
+use std.spec
+use app.mcp.{ErrorCategory, McpError, ValidationLimits, InputValidator}
+use app.mcp.{mcp_error, default_validation_limits, strict_validation_limits, input_validator}
 
 describe "Content length validation":
     it "accepts zero length":
-        val length = 0
-        val is_valid = length >= 0
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(0)
+        expect(result).to_be_nil()
 
     it "accepts normal length":
-        val length = 1_000
-        val max_length = 10_000_000
-        val is_valid = length >= 0 and length <= max_length
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(1000)
+        expect(result).to_be_nil()
 
     it "rejects negative length":
-        val length = -100
-        val is_valid = length >= 0
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_content_length(-100)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("negative")).to_equal(true)
 
-    it "rejects excessive length in default mode":
-        val length = 15_000_000  # 15MB
-        val max_default = 10_000_000  # 10MB
-        val is_valid = length <= max_default
-        expect(not is_valid)
-
-    it "rejects excessive length in strict mode":
-        val length = 2_000_000  # 2MB
-        val max_strict = 1_000_000  # 1MB
-        val is_valid = length <= max_strict
-        expect(not is_valid)
+    it "rejects excessive length":
+        val validator = input_validator()
+        val result = validator.validate_content_length(2000000)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
 
     it "accepts at exact limit":
-        val length = 10_000_000
-        val max_length = 10_000_000
-        val is_valid = length >= 0 and length <= max_length
-        expect(is_valid)
+        val validator = input_validator()
+        val limits = default_validation_limits()
+        val result = validator.validate_content_length(limits.max_content_length)
+        expect(result).to_be_nil()
 
 describe "String length validation":
     it "accepts empty string":
-        val str_len = 0
-        val max_len = 1_000_000
-        val is_valid = str_len <= max_len
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_string("")
+        expect(result).to_be_nil()
 
     it "accepts normal string":
-        val str_len = 100
-        val max_len = 1_000_000
-        val is_valid = str_len <= max_len
-        expect(is_valid)
-
-    it "rejects excessive string in default mode":
-        val str_len = 2_000_000
-        val max_default = 1_000_000
-        val is_valid = str_len <= max_default
-        expect(not is_valid)
-
-    it "rejects excessive string in strict mode":
-        val str_len = 200_000
-        val max_strict = 100_000
-        val is_valid = str_len <= max_strict
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_string("hello world")
+        expect(result).to_be_nil()
 
 describe "URI scheme validation":
     it "accepts file URI":
-        val uri = "file:///home/user/test.spl"
-        val is_file = uri.starts_with("file://")
-        expect(is_file)
+        val validator = input_validator()
+        val result = validator.validate_uri("file:///home/user/test.spl")
+        expect(result).to_be_nil()
 
     it "accepts symbol URI":
-        val uri = "symbol://project/MyClass"
-        val is_symbol = uri.starts_with("symbol://")
-        expect(is_symbol)
+        val validator = input_validator()
+        val result = validator.validate_uri("symbol://project/MyClass")
+        expect(result).to_be_nil()
 
     it "accepts project URI":
-        val uri = "project://myproject/src"
-        val is_project = uri.starts_with("project://")
-        expect(is_project)
+        val validator = input_validator()
+        val result = validator.validate_uri("project://myproject/src")
+        expect(result).to_be_nil()
 
     it "accepts http URI":
-        val uri = "http://example.com/resource"
-        val is_http = uri.starts_with("http://")
-        expect(is_http)
+        val validator = input_validator()
+        val result = validator.validate_uri("http://example.com/resource")
+        expect(result).to_be_nil()
 
     it "accepts https URI":
-        val uri = "https://example.com/resource"
-        val is_https = uri.starts_with("https://")
-        expect(is_https)
+        val validator = input_validator()
+        val result = validator.validate_uri("https://example.com/resource")
+        expect(result).to_be_nil()
 
     it "rejects ftp URI":
-        val uri = "ftp://example.com/file"
-        val is_file = uri.starts_with("file://")
-        val is_symbol = uri.starts_with("symbol://")
-        val is_project = uri.starts_with("project://")
-        val is_http = uri.starts_with("http://")
-        val is_https = uri.starts_with("https://")
-        val is_valid = is_file or is_symbol or is_project or is_http or is_https
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_uri("ftp://example.com/file")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("scheme")).to_equal(true)
 
     it "rejects invalid scheme":
-        val uri = "invalid://test"
-        val is_valid = uri.starts_with("file://") or uri.starts_with("symbol://")
-        expect(not is_valid)
-
-describe "URI length validation":
-    it "accepts short URI":
-        val uri = "file:///test.spl"
-        val max_len = 2_048
-        val is_valid = uri.len() <= max_len
-        expect(is_valid)
-
-    it "accepts URI at limit":
-        val uri_len = 2_048
-        val max_len = 2_048
-        val is_valid = uri_len <= max_len
-        expect(is_valid)
-
-    it "rejects excessive URI":
-        val uri_len = 3_000
-        val max_len = 2_048
-        val is_valid = uri_len <= max_len
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_uri("invalid://test")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("scheme")).to_equal(true)
 
 describe "URI emptiness validation":
     it "rejects empty URI":
-        val uri = ""
-        val is_valid = uri.len() > 0
-        expect(not is_valid)
-
-    it "rejects whitespace-only URI":
-        val uri = "   "
-        val trimmed = uri.trim()
-        val is_valid = trimmed.len() > 0
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_uri("")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("empty")).to_equal(true)
 
 describe "Tool name validation":
     it "accepts simple name":
-        val name = "read_code"
-        val is_valid = name.len() > 0 and name.len() <= 256
-        expect(is_valid)
-
-    it "accepts name with underscores":
-        val name = "read_user_code"
-        val is_valid = name.len() > 0 and name.len() <= 256
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("read_code")
+        expect(result).to_be_nil()
 
     it "accepts name with hyphens":
-        val name = "read-code"
-        val is_valid = name.len() > 0 and name.len() <= 256
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("read-code")
+        expect(result).to_be_nil()
 
     it "accepts name with slashes":
-        val name = "tools/list"
-        val is_valid = name.len() > 0 and name.len() <= 256
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("tools/list")
+        expect(result).to_be_nil()
 
     it "rejects empty name":
-        val name = ""
-        val is_valid = name.len() > 0
-        expect(not is_valid)
-
-    it "rejects excessive length":
-        val name_len = 300
-        val max_len = 256
-        val is_valid = name_len <= max_len
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_tool_name("")
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("empty")).to_equal(true)
 
 describe "Array size validation":
     it "accepts zero size":
-        val size = 0
-        val is_valid = size >= 0
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_array_length(0)
+        expect(result).to_be_nil()
 
     it "accepts normal size":
-        val size = 100
-        val max_size = 10_000
-        val is_valid = size >= 0 and size <= max_size
-        expect(is_valid)
+        val validator = input_validator()
+        val result = validator.validate_array_length(100)
+        expect(result).to_be_nil()
 
     it "rejects negative size":
-        val size = -10
-        val is_valid = size >= 0
-        expect(not is_valid)
+        val validator = input_validator()
+        val result = validator.validate_array_length(-10)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("negative")).to_equal(true)
 
-    it "rejects excessive size in default mode":
-        val size = 15_000
-        val max_default = 10_000
-        val is_valid = size <= max_default
-        expect(not is_valid)
-
-    it "rejects excessive size in strict mode":
-        val size = 1_500
-        val max_strict = 1_000
-        val is_valid = size <= max_strict
-        expect(not is_valid)
-
-describe "Dict size validation":
-    it "accepts empty dict":
-        val size = 0
-        val max_size = 1_000
-        val is_valid = size >= 0 and size <= max_size
-        expect(is_valid)
-
-    it "accepts normal dict":
-        val size = 50
-        val max_size = 1_000
-        val is_valid = size >= 0 and size <= max_size
-        expect(is_valid)
-
-    it "rejects negative size":
-        val size = -5
-        val is_valid = size >= 0
-        expect(not is_valid)
-
-    it "rejects excessive dict in default mode":
-        val size = 1_500
-        val max_default = 1_000
-        val is_valid = size <= max_default
-        expect(not is_valid)
-
-    it "rejects excessive dict in strict mode":
-        val size = 150
-        val max_strict = 100
-        val is_valid = size <= max_strict
-        expect(not is_valid)
-
-describe "Validation mode comparison":
-    it "default is more permissive than strict":
-        val default_content = 10_000_000
-        val strict_content = 1_000_000
-        expect(default_content > strict_content)
-
-    it "strict array limit is 10x smaller":
-        val default_array = 10_000
-        val strict_array = 1_000
-        expect(default_array == strict_array * 10)
-
-    it "strict dict limit is 10x smaller":
-        val default_dict = 1_000
-        val strict_dict = 100
-        expect(default_dict == strict_dict * 10)
-
-describe "JSON depth validation":
-    it "accepts shallow nesting":
-        val depth = 5
-        val max_depth = 32
-        val is_valid = depth <= max_depth
-        expect(is_valid)
-
-    it "accepts at limit":
-        val depth = 32
-        val max_depth = 32
-        val is_valid = depth <= max_depth
-        expect(is_valid)
-
-    it "rejects excessive nesting in default mode":
-        val depth = 40
-        val max_default = 32
-        val is_valid = depth <= max_default
-        expect(not is_valid)
-
-    it "rejects excessive nesting in strict mode":
-        val depth = 20
-        val max_strict = 16
-        val is_valid = depth <= max_strict
-        expect(not is_valid)
+    it "rejects excessive size":
+        val validator = input_validator()
+        val result = validator.validate_array_length(2000)
+        match result:
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
 
 describe "Validation limits constants":
-    it "has default content limit":
-        val limit = 10_000_000
-        expect(limit == 10_000_000)
+    it "has correct default content limit":
+        val limits = default_validation_limits()
+        expect(limits.max_content_length).to_equal(1048576)
 
-    it "has strict content limit":
-        val limit = 1_000_000
-        expect(limit == 1_000_000)
+    it "has correct strict content limit":
+        val limits = strict_validation_limits()
+        expect(limits.max_content_length).to_equal(524288)
 
-    it "has default string limit":
-        val limit = 1_000_000
-        expect(limit == 1_000_000)
+    it "has correct default string limit":
+        val limits = default_validation_limits()
+        expect(limits.max_string_length).to_equal(65536)
 
-    it "has strict string limit":
-        val limit = 100_000
-        expect(limit == 100_000)
+    it "has correct strict string limit":
+        val limits = strict_validation_limits()
+        expect(limits.max_string_length).to_equal(32768)
 
-    it "has default array limit":
-        val limit = 10_000
-        expect(limit == 10_000)
+    it "has correct default array limit":
+        val limits = default_validation_limits()
+        expect(limits.max_array_length).to_equal(1000)
 
-    it "has strict array limit":
-        val limit = 1_000
-        expect(limit == 1_000)
+    it "has correct strict array limit":
+        val limits = strict_validation_limits()
+        expect(limits.max_array_length).to_equal(500)
 
-    it "has default dict limit":
-        val limit = 1_000
-        expect(limit == 1_000)
-
-    it "has strict dict limit":
-        val limit = 100
-        expect(limit == 100)
-
-    it "has default JSON depth limit":
-        val limit = 32
-        expect(limit == 32)
-
-    it "has strict JSON depth limit":
-        val limit = 16
-        expect(limit == 16)
-
-    it "has URI length limit":
-        val limit = 2_048
-        expect(limit == 2_048)
-
-    it "has tool name length limit":
-        val limit = 256
-        expect(limit == 256)
+    it "default is more permissive than strict":
+        val d = default_validation_limits()
+        val s = strict_validation_limits()
+        expect(d.max_content_length > s.max_content_length).to_equal(true)
+        expect(d.max_string_length > s.max_string_length).to_equal(true)
+        expect(d.max_array_length > s.max_array_length).to_equal(true)

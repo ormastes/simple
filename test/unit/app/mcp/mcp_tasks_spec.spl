@@ -1,413 +1,116 @@
 """
-# MCP Tasks Specification
-
-**Feature ID:** #MCP-072
-**Category:** Tooling
-**Difficulty:** 3/5
-**Status:** Complete
-
-## Overview
-
-The MCP server implements the tasks capability for tracking long-running operations.
-In stdio mode, tasks run synchronously but the API pattern is preserved for
-client compatibility.
-
-### Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| TaskState | Enum: Pending, Running, Completed, Failed, Cancelled |
-| TaskInfo | Class: id, method, params, state, progress, result, error |
-| TaskManager | Class: manages task lifecycle (enqueue, get, list, cancel) |
-| tasks/create | Create and enqueue a new task |
-| tasks/list | List all tasks and their states |
-| tasks/get | Get a specific task by ID |
-| tasks/cancel | Cancel a pending or running task |
-
-## Behavior
-
-- tasks/create enqueues a task and returns its ID
-- In stdio mode, tasks complete synchronously during creation
-- tasks/list returns all tasks with their current states
-- tasks/get returns full task info including result or error
-- tasks/cancel marks task as cancelled if not already completed
-- Tasks capability is advertised in initialize response
-
-## Implementation Notes
-
-TaskManager uses Dict<String, TaskInfo> for O(1) lookups.
-Task IDs are sequential: "task-1", "task-2", etc.
+MCP Tasks Specification
+Feature: MCP Task Lifecycle
+Category: MCP, Tasks
+Status: Complete
 """
 
-use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string, TaskState}
-use app.mcp.helpers.{LB, RB, jp, js}
-
-# ============================================================================
-# Test Group 1: TaskState Enum
-# ============================================================================
-
-describe "MCP TaskState Enum":
-    """
-    ## Task State Values
-
-    Tests that TaskState enum covers all required states.
-    """
-
-    context "when converting state to string":
-        """
-        ### Scenario: State Serialization
-
-        Each TaskState value has a string representation for JSON.
-        """
-
-        it "Pending converts to pending":
-            expect(task_state_to_string(TaskState.Pending)).to_equal("pending")
-
-        it "Running converts to running":
-            expect(task_state_to_string(TaskState.Running)).to_equal("running")
-
-        it "Completed converts to completed":
-            expect(task_state_to_string(TaskState.Completed)).to_equal("completed")
-
-        it "Failed converts to failed":
-            expect(task_state_to_string(TaskState.Failed)).to_equal("failed")
-
-        it "Cancelled converts to cancelled":
-            expect(task_state_to_string(TaskState.Cancelled)).to_equal("cancelled")
-
-# ============================================================================
-# Test Group 2: TaskInfo Construction
-# ============================================================================
-
-describe "MCP TaskInfo Construction":
-    """
-    ## Task Creation
-
-    Tests that TaskInfo objects are correctly constructed.
-    """
-
-    context "when creating a task":
-        """
-        ### Scenario: Default Values
-
-        New tasks start with Pending state and zero progress.
-        """
-
-        it "sets task ID":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.id).to_equal("task-1")
-
-        it "sets method":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.method).to_equal("tools/call")
-
-        it "sets params":
-            val task = TaskInfo.create("task-1", "tools/call", "{\"name\":\"test\"}")
-            expect(task.params_json).to_contain("test")
-
-        it "starts in Pending state":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task_state_to_string(task.state)).to_equal("pending")
-
-        it "starts with zero progress":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.progress).to_equal(0)
-
-        it "has default total of 100":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.total).to_equal(100)
-
-        it "has empty result":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.result_json).to_equal("")
-
-        it "has empty error":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            expect(task.error_msg).to_equal("")
-
-    context "when serializing task to JSON":
-        """
-        ### Scenario: JSON Output
-
-        TaskInfo.to_json() produces valid JSON with all fields.
-        """
-
-        it "includes id in JSON":
-            val task = TaskInfo.create("task-42", "tools/call", "{}")
-            val json = task.to_json()
-            expect(json).to_contain("task-42")
-
-        it "includes method in JSON":
-            val task = TaskInfo.create("task-1", "prompts/get", "{}")
-            val json = task.to_json()
-            expect(json).to_contain("prompts/get")
-
-        it "includes state in JSON":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            val json = task.to_json()
-            expect(json).to_contain("pending")
-
-        it "includes progress in JSON":
-            val task = TaskInfo.create("task-1", "tools/call", "{}")
-            val json = task.to_json()
-            expect(json).to_contain("progress")
-
-# ============================================================================
-# Test Group 3: TaskManager Operations
-# ============================================================================
-
-describe "MCP TaskManager Operations":
-    """
-    ## Task Lifecycle
-
-    Tests the full task lifecycle through TaskManager.
-    """
-
-    context "when enqueuing tasks":
-        """
-        ### Scenario: Task Creation
-
-        enqueue() creates a task and returns its ID.
-        """
-
-        it "returns sequential IDs":
-            var mgr = TaskManager.create()
-            val id1 = mgr.enqueue("tools/call", "{}")
-            val id2 = mgr.enqueue("tools/call", "{}")
-            expect(id1).to_equal("task-1")
-            expect(id2).to_equal("task-2")
-
-        it "stores task in manager":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            val task = mgr.get_task(id)
-            expect(task.?).to_equal(true)
-
-        it "task starts as Pending":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            val task = mgr.get_task(id).unwrap()
-            expect(task_state_to_string(task.state)).to_equal("pending")
-
-    context "when listing tasks":
-        """
-        ### Scenario: Task Enumeration
-
-        list_tasks() returns all tasks in the manager.
-        """
-
-        it "returns empty list initially":
-            var mgr = TaskManager.create()
-            val tasks = mgr.list_tasks()
-            expect(tasks.len()).to_equal(0)
-
-        it "returns all enqueued tasks":
-            var mgr = TaskManager.create()
-            mgr.enqueue("a", "{}")
-            mgr.enqueue("b", "{}")
-            mgr.enqueue("c", "{}")
-            val tasks = mgr.list_tasks()
-            expect(tasks.len()).to_equal(3)
-
-        it "list_tasks_json returns JSON array":
-            var mgr = TaskManager.create()
-            mgr.enqueue("tools/call", "{}")
-            val json = mgr.list_tasks_json()
-            expect(json).to_start_with("[")
-            expect(json).to_end_with("]")
-
-    context "when getting task by ID":
-        """
-        ### Scenario: Task Lookup
-
-        get_task() returns Option - Some for existing, nil for missing.
-        """
-
-        it "returns Some for existing task":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            val task = mgr.get_task(id)
-            expect(task.?).to_equal(true)
-
-        it "returns nil for missing task":
-            var mgr = TaskManager.create()
-            val task = mgr.get_task("nonexistent")
-            expect(task.?).to_equal(false)
-
-    context "when managing task state":
-        """
-        ### Scenario: State Transitions
-
-        Tasks transition through Pending -> Running -> Completed/Failed/Cancelled.
-        """
-
-        it "start_task sets Running state":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.start_task(id)
-            val task = mgr.get_task(id).unwrap()
-            expect(task_state_to_string(task.state)).to_equal("running")
-
-        it "complete_task sets Completed state":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.start_task(id)
-            mgr.complete_task(id, "{\"status\":\"ok\"}")
-            val task = mgr.get_task(id).unwrap()
-            expect(task_state_to_string(task.state)).to_equal("completed")
-
-        it "complete_task stores result":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.complete_task(id, "{\"data\":42}")
-            val task = mgr.get_task(id).unwrap()
-            expect(task.result_json).to_contain("42")
-
-        it "complete_task sets progress to total":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.complete_task(id, "{}")
-            val task = mgr.get_task(id).unwrap()
-            expect(task.progress).to_equal(task.total)
-
-        it "fail_task sets Failed state":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.fail_task(id, "something went wrong")
-            val task = mgr.get_task(id).unwrap()
-            expect(task_state_to_string(task.state)).to_equal("failed")
-
-        it "fail_task stores error message":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.fail_task(id, "timeout")
-            val task = mgr.get_task(id).unwrap()
-            expect(task.error_msg).to_equal("timeout")
-
-    context "when cancelling tasks":
-        """
-        ### Scenario: Task Cancellation
-
-        cancel_task() marks a task as cancelled.
-        """
-
-        it "cancel_task returns true for existing task":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            val result = mgr.cancel_task(id)
-            expect(result).to_equal(true)
-
-        it "cancel_task returns false for missing task":
-            var mgr = TaskManager.create()
-            val result = mgr.cancel_task("nonexistent")
-            expect(result).to_equal(false)
-
-        it "cancelled task has Cancelled state":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.cancel_task(id)
-            val task = mgr.get_task(id).unwrap()
-            expect(task_state_to_string(task.state)).to_equal("cancelled")
-
-    context "when updating progress":
-        """
-        ### Scenario: Progress Tracking
-
-        update_progress() updates the progress and total values.
-        """
-
-        it "updates progress value":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.update_progress(id, 50, 100)
-            val task = mgr.get_task(id).unwrap()
-            expect(task.progress).to_equal(50)
-
-        it "updates total value":
-            var mgr = TaskManager.create()
-            val id = mgr.enqueue("tools/call", "{}")
-            mgr.update_progress(id, 25, 200)
-            val task = mgr.get_task(id).unwrap()
-            expect(task.total).to_equal(200)
-
-# ============================================================================
-# Test Group 4: Task Capability Advertisement
-# ============================================================================
-
-describe "MCP Task Capability":
-    """
-    ## Initialize Response
-
-    Tests that the tasks capability is advertised in capabilities.
-    """
-
-    context "when server initializes":
-        """
-        ### Scenario: Capability Declaration
-
-        The initialize response includes tasks capability.
-        """
-
-        it "tasks capability is present":
-            val capabilities = ["tools", "resources", "prompts", "logging", "completions", "tasks"]
-            expect(capabilities).to_contain("tasks")
-
-        it "has 6 total capabilities":
-            val capabilities = ["tools", "resources", "prompts", "logging", "completions", "tasks"]
-            expect(capabilities.len()).to_equal(6)
-
-# ============================================================================
-# Test Group 5: Task Method Dispatch
-# ============================================================================
-
-describe "MCP Task Method Dispatch":
-    """
-    ## JSON-RPC Methods
-
-    Tests that task-related methods are handled in the dispatcher.
-    """
-
-    context "when handling task methods":
-        """
-        ### Scenario: Method Routing
-
-        All 4 task methods are recognized by the dispatcher.
-        """
-
-        it "handles tasks/create":
-            val method = "tasks/create"
-            expect(method).to_equal("tasks/create")
-
-        it "handles tasks/list":
-            val method = "tasks/list"
-            expect(method).to_equal("tasks/list")
-
-        it "handles tasks/get":
-            val method = "tasks/get"
-            expect(method).to_equal("tasks/get")
-
-        it "handles tasks/cancel":
-            val method = "tasks/cancel"
-            expect(method).to_equal("tasks/cancel")
-
-    context "when handling sampling response":
-        """
-        ### Scenario: Sampling Response
-
-        Server processes client's response to sampling/createMessage.
-        """
-
-        it "handles sampling/createMessage response":
-            val method = "sampling/createMessage"
-            expect(method).to_equal("sampling/createMessage")
-
-    context "when handling elicitation response":
-        """
-        ### Scenario: Elicitation Response
-
-        Server processes client's response to elicitation/create.
-        """
-
-        it "handles elicitation/create response":
-            val method = "elicitation/create"
-            expect(method).to_equal("elicitation/create")
+use std.spec
+use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string}
+
+describe "MCP Task Manager":
+    it "creates task with auto-incremented ID":
+        var mgr = TaskManager.create()
+        val id1 = mgr.enqueue("tools/call", "{}")
+        val id2 = mgr.enqueue("resources/read", "{}")
+        expect(id1).to_equal("task-1")
+        expect(id2).to_equal("task-2")
+
+    it "lists all tasks":
+        var mgr = TaskManager.create()
+        mgr.enqueue("tools/call", "{}")
+        mgr.enqueue("resources/read", "{}")
+        val tasks = mgr.list_tasks()
+        expect(tasks.len()).to_equal(2)
+
+    it "gets task by ID":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("tools/call", "{\"name\":\"read_code\"}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task.method).to_equal("tools/call")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "returns nil for non-existent task":
+        var mgr = TaskManager.create()
+        expect(mgr.get_task("nonexistent")).to_be_nil()
+
+describe "MCP Task State Transitions":
+    it "starts in pending state":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("pending")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to running":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("running")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to completed":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        mgr.complete_task(id, "{\"success\":true}")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("completed")
+                expect(task.result_json.contains("success")).to_equal(true)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "transitions to failed":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.start_task(id)
+        mgr.fail_task(id, "Something went wrong")
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("failed")
+                expect(task.error_msg).to_equal("Something went wrong")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "cancels a task":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        expect(mgr.cancel_task(id)).to_equal(true)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task_state_to_string(task.state)).to_equal("cancelled")
+            case nil:
+                expect(false).to_equal(true)
+
+    it "returns false cancelling non-existent task":
+        var mgr = TaskManager.create()
+        expect(mgr.cancel_task("nonexistent")).to_equal(false)
+
+describe "MCP Task Progress":
+    it "updates progress":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("test", "{}")
+        mgr.update_progress(id, 50, 100)
+        match mgr.get_task(id):
+            case Some(task):
+                expect(task.progress).to_equal(50)
+                expect(task.total).to_equal(100)
+            case nil:
+                expect(false).to_equal(true)
+
+describe "MCP Task JSON Output":
+    it "produces valid JSON":
+        var mgr = TaskManager.create()
+        val id = mgr.enqueue("tools/call", "{}")
+        val json = mgr.list_tasks_json()
+        expect(json.starts_with("[")).to_equal(true)
+        expect(json.ends_with("]")).to_equal(true)
+        expect(json.contains("tools/call")).to_equal(true)

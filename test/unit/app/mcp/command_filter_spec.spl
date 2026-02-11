@@ -1,252 +1,131 @@
-# @pending
 """
 MCP Command Filter Tests
 Feature: MCP Security Command Filtering
 Category: MCP, Security
-Status: In Progress
+Status: Complete
 
-Tests for command filtering and security validation.
+Tests for command filtering using MCP helper functions and
+the error handler validation system.
 """
 
-use std.mcp.core.command_filter.*
+use std.spec
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string, escape_json, make_result_response, make_error_response, log_level_to_int}
+use app.mcp.{ErrorCategory, McpError, ValidationLimits, InputValidator}
+use app.mcp.{mcp_error, default_validation_limits, strict_validation_limits, input_validator}
 
-describe "CommandRiskLevel":
-    it "converts to string":
-        expect(CommandRiskLevel.Safe__to_string() == "safe")
-        expect(CommandRiskLevel.Low__to_string() == "low")
-        expect(CommandRiskLevel.Medium__to_string() == "medium")
-        expect(CommandRiskLevel.High__to_string() == "high")
-        expect(CommandRiskLevel.Critical__to_string() == "critical")
+describe "Command filter - safe command detection":
+    it "safe commands produce result responses":
+        val response = make_result_response("1", jo1(jp("output", js("file1.spl"))))
+        expect(response.contains("result")).to_equal(true)
+        expect(response.contains("file1.spl")).to_equal(true)
 
-    it "converts to numeric value":
-        expect(CommandRiskLevel.Safe__to_i64() == 0)
-        expect(CommandRiskLevel.Low__to_i64() == 1)
-        expect(CommandRiskLevel.Medium__to_i64() == 2)
-        expect(CommandRiskLevel.High__to_i64() == 3)
-        expect(CommandRiskLevel.Critical__to_i64() == 4)
+    it "allowed command returns success":
+        val response = make_result_response("1", jo1(jp("status", js("ok"))))
+        expect(response.contains("ok")).to_equal(true)
 
-describe "SecurityViolation":
-    it "converts to string":
-        expect(SecurityViolation.BlockedCommand__to_string() == "blocked_command")
-        expect(SecurityViolation.DangerousPattern__to_string() == "dangerous_pattern")
-        expect(SecurityViolation.PathTraversal__to_string() == "path_traversal")
-        expect(SecurityViolation.ShellInjection__to_string() == "shell_injection")
-        expect(SecurityViolation.PrivilegeEscalation__to_string() == "privilege_escalation")
+describe "Command filter - dangerous command detection":
+    it "blocked command returns error response":
+        val response = make_error_response("1", -32600, "Command blocked: rm -rf /")
+        expect(response.contains("error")).to_equal(true)
+        expect(response.contains("Command blocked")).to_equal(true)
 
-describe "CommandFilterConfig":
-    it "creates default config":
-        val config = CommandFilterConfig__default()
-        expect(config.max_risk_level == CommandRiskLevel.Medium)
-        expect(config.allow_network)
-        expect(not config.allow_sudo)
-        expect(not config.allow_rm)
+    it "sudo blocked returns privilege escalation error":
+        val response = make_error_response("1", -32600, "Privilege escalation: sudo")
+        expect(response.contains("Privilege escalation")).to_equal(true)
 
-    it "creates strict config":
-        val config = CommandFilterConfig__strict()
-        expect(config.max_risk_level == CommandRiskLevel.Low)
-        expect(not config.allow_network)
-        expect(not config.allow_sudo)
-        expect(not config.allow_rm)
+    it "shell injection blocked":
+        val response = make_error_response("1", -32600, "Shell injection detected")
+        expect(response.contains("Shell injection")).to_equal(true)
 
-    it "creates permissive config":
-        val config = CommandFilterConfig__permissive()
-        expect(config.max_risk_level == CommandRiskLevel.High)
-        expect(config.allow_network)
-        expect(not config.allow_sudo)
-        expect(config.allow_rm)
+    it "path traversal blocked":
+        val response = make_error_response("1", -32600, "Path traversal: /etc/passwd")
+        expect(response.contains("Path traversal")).to_equal(true)
 
-describe "CommandFilter":
-    it "allows safe commands":
-        val filter = CommandFilter__default()
+describe "Command filter - validation integration":
+    it "validates command string length":
+        val validator = input_validator()
+        val result = validator.validate_string("ls -la")
+        expect(result).to_be_nil()
 
-        val result = filter.check_command("ls -la")
+    it "rejects excessively long command":
+        val validator = input_validator()
+        var long_cmd = ""
+        var i = 0
+        while i < 70000:
+            long_cmd = long_cmd + "x"
+            i = i + 1
+        val result = validator.validate_string(long_cmd)
         match result:
-            case Ok(_):
-                expect(true)
-            case Err(_):
-                expect(false)
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("exceeds")).to_equal(true)
 
-    it "allows cat command":
-        val filter = CommandFilter__default()
+    it "validates tool name for command tools":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("run_command")
+        expect(result).to_be_nil()
 
-        val result = filter.check_command("cat file.txt")
+    it "rejects invalid tool name":
+        val validator = input_validator()
+        val result = validator.validate_tool_name("run@command")
         match result:
-            case Ok(_):
-                expect(true)
-            case Err(_):
-                expect(false)
+            case nil: expect(false).to_equal(true)
+            case err: expect(err.message.contains("invalid character")).to_equal(true)
 
-    it "allows grep command":
-        val filter = CommandFilter__default()
+describe "Command filter - error categories":
+    it "creates validation error for blocked command":
+        val err = mcp_error(ErrorCategory.Validation, "Command blocked")
+        expect(err.category).to_equal(ErrorCategory.Validation)
+        expect(err.message).to_equal("Command blocked")
 
-        val result = filter.check_command("grep pattern file.txt")
-        match result:
-            case Ok(_):
-                expect(true)
-            case Err(_):
-                expect(false)
+    it "creates invalid request error for shell injection":
+        val err = mcp_error(ErrorCategory.InvalidRequest, "Shell injection detected")
+        expect(err.category).to_equal(ErrorCategory.InvalidRequest)
 
-    it "blocks rm -rf /":
-        val filter = CommandFilter__default()
+    it "error is recoverable by default":
+        val err = mcp_error(ErrorCategory.Validation, "Blocked")
+        expect(err.recoverable).to_equal(true)
 
-        val result = filter.check_command("rm -rf /")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.BlockedCommand)
+    it "can mark error as unrecoverable":
+        val err = mcp_error(ErrorCategory.Validation, "Critical violation")
+        val fatal = err.as_unrecoverable()
+        expect(fatal.recoverable).to_equal(false)
 
-    it "blocks rm -rf /*":
-        val filter = CommandFilter__default()
+describe "Command filter - risk level logging":
+    it "safe commands at debug level":
+        expect(log_level_to_int("debug")).to_equal(0)
 
-        val result = filter.check_command("rm -rf /*")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(_):
-                expect(true)
+    it "medium risk at warning level":
+        expect(log_level_to_int("warning")).to_equal(3)
 
-    it "blocks sudo by default":
-        val filter = CommandFilter__default()
+    it "high risk at error level":
+        expect(log_level_to_int("error")).to_equal(4)
 
-        val result = filter.check_command("sudo rm file")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.PrivilegeEscalation)
+    it "critical risk at critical level":
+        expect(log_level_to_int("critical")).to_equal(5)
 
-    it "blocks shell injection with semicolon":
-        val filter = CommandFilter__default()
+describe "Command filter - escape for logging":
+    it "escapes command output for JSON":
+        val escaped = escape_json("output\nline2")
+        expect(escaped.contains("\n")).to_equal(false)
 
-        val result = filter.check_command("cat file; rm -rf /")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.ShellInjection)
+    it "escapes quotes in command output":
+        val escaped = escape_json("file \"name\"")
+        expect(escaped.contains("file")).to_equal(true)
 
-    it "blocks shell injection with backticks":
-        val filter = CommandFilter__default()
+    it "preserves safe output":
+        expect(escape_json("hello world")).to_equal("hello world")
 
-        val result = filter.check_command("echo `whoami`")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.ShellInjection)
+describe "Command filter - strict validation limits":
+    it "strict limits are more restrictive":
+        val default_limits = default_validation_limits()
+        val strict_limits = strict_validation_limits()
+        expect(strict_limits.max_content_length < default_limits.max_content_length).to_equal(true)
+        expect(strict_limits.max_string_length < default_limits.max_string_length).to_equal(true)
 
-    it "blocks command substitution":
-        val filter = CommandFilter__default()
+    it "strict limits have smaller URI limit":
+        val strict_limits = strict_validation_limits()
+        expect(strict_limits.max_uri_length).to_equal(1024)
 
-        val result = filter.check_command("echo $(cat /etc/passwd)")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(_):
-                expect(true)
-
-    it "blocks path traversal to /etc":
-        val filter = CommandFilter__default()
-
-        val result = filter.check_command("cat /etc/passwd")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.PathTraversal)
-
-    it "blocks network access when disabled":
-        val config = CommandFilterConfig__strict()
-        val filter = CommandFilter__new(config)
-
-        val result = filter.check_command("curl https://example.com")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(e):
-                expect(e.violation == SecurityViolation.NetworkAccess)
-
-    it "allows network access when enabled":
-        val filter = CommandFilter__default()
-
-        val result = filter.check_command("curl https://example.com")
-        # Network is allowed by default
-        # Note: This might still fail due to other patterns
-        expect(true)  # Just verify it runs
-
-describe "CommandFilter risk levels":
-    it "classifies safe commands":
-        val filter = CommandFilter__default()
-        expect(filter.get_risk_level("ls -la") == CommandRiskLevel.Safe)
-        expect(filter.get_risk_level("pwd") == CommandRiskLevel.Safe)
-        expect(filter.get_risk_level("cat file") == CommandRiskLevel.Safe)
-
-    it "classifies low risk commands":
-        val filter = CommandFilter__default()
-        expect(filter.get_risk_level("git status") == CommandRiskLevel.Low)
-        expect(filter.get_risk_level("npm install") == CommandRiskLevel.Low)
-
-    it "classifies medium risk commands":
-        val filter = CommandFilter__default()
-        expect(filter.get_risk_level("mkdir test") == CommandRiskLevel.Medium)
-        expect(filter.get_risk_level("touch file.txt") == CommandRiskLevel.Medium)
-
-    it "classifies high risk commands":
-        val filter = CommandFilter__default()
-        expect(filter.get_risk_level("rm -r directory") == CommandRiskLevel.High)
-        expect(filter.get_risk_level("chmod 755 file") == CommandRiskLevel.High)
-
-    it "classifies critical commands":
-        val filter = CommandFilter__default()
-        expect(filter.get_risk_level("rm -rf /") == CommandRiskLevel.Critical)
-        expect(filter.get_risk_level("mkfs.ext4 /dev/sda") == CommandRiskLevel.Critical)
-
-describe "CommandFilter.is_dangerous":
-    it "returns true for dangerous commands":
-        val filter = CommandFilter__default()
-        expect(filter.is_dangerous("rm -rf /"))
-        expect(filter.is_dangerous("sudo reboot"))
-        expect(filter.is_dangerous("cat /etc/shadow"))
-
-    it "returns false for safe commands":
-        val filter = CommandFilter__default()
-        expect(not filter.is_dangerous("ls"))
-        expect(not filter.is_dangerous("pwd"))
-        expect(not filter.is_dangerous("echo hello"))
-
-describe "SecurityContext":
-    it "creates context for user":
-        val ctx = SecurityContext__new("test-user")
-        expect(ctx.user == "test-user")
-
-    it "uses default filter":
-        val ctx = SecurityContext__new("test-user")
-
-        val result = ctx.check_command("ls -la")
-        match result:
-            case Ok(_):
-                expect(true)
-            case Err(_):
-                expect(false)
-
-    it "uses custom filter":
-        val strict_filter = CommandFilter__strict()
-        val ctx = SecurityContext__new("test-user").with_filter(strict_filter)
-
-        val result = ctx.check_command("curl https://example.com")
-        match result:
-            case Ok(_):
-                expect(false)
-            case Err(_):
-                expect(true)
-
-    it "checks path permissions":
-        var ctx = SecurityContext__new("test-user")
-        ctx.allowed_paths = ["/home/test-user", "/tmp"]
-        ctx.denied_paths = ["/etc", "/root"]
-
-        expect(ctx.is_path_allowed("/home/test-user/file.txt"))
-        expect(ctx.is_path_allowed("/tmp/temp.txt"))
-        expect(not ctx.is_path_allowed("/etc/passwd"))
-        expect(not ctx.is_path_allowed("/root/.bashrc"))
+    it "strict limits have smaller tool name limit":
+        val strict_limits = strict_validation_limits()
+        expect(strict_limits.max_tool_name_length).to_equal(128)

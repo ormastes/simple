@@ -930,3 +930,60 @@ verify-package:
 	@PKG=$$(ls -t simple-bootstrap-*.spk | head -1); \
 	echo "Verifying $$PKG"; \
 	./rust/target/release-opt/simple_runtime src/app/package/main.spl verify "$$PKG"
+
+# ============================================================================
+# MCP Server Development
+# ============================================================================
+
+.PHONY: mcp-build mcp-test mcp-coverage mcp-server mcp-server-debug \
+        mcp-lint mcp-fmt mcp-e2e mcp-validate mcp-pending
+
+# Build project
+mcp-build:
+	bin/simple build
+
+# Run all MCP tests
+mcp-test:
+	bin/simple test test/unit/app/mcp/
+
+# Run MCP tests with coverage
+mcp-coverage:
+	bin/simple test --coverage test/unit/app/mcp/
+
+# Start MCP server (stdio mode)
+mcp-server:
+	bin/simple mcp server
+
+# Start MCP server with debug logging
+mcp-server-debug:
+	bin/simple mcp server --debug
+
+# Lint check
+mcp-lint:
+	bin/simple build lint
+
+# Format check
+mcp-fmt:
+	bin/simple build fmt
+
+# End-to-end integration tests
+mcp-e2e:
+	bin/simple test test/integration/mcp/
+
+# Full validation: build + lint + test + coverage
+mcp-validate: mcp-build mcp-lint mcp-test mcp-coverage
+	@echo ""
+	@echo "=============================================="
+	@echo "MCP VALIDATION COMPLETE"
+	@echo "=============================================="
+	@echo "Build:    PASS"
+	@echo "Lint:     PASS"
+	@echo "Tests:    PASS"
+	@echo "Coverage: PASS"
+
+# Show count of @pending test files
+mcp-pending:
+	@echo "Pending MCP test files:"
+	@grep -rl '@pending' test/unit/app/mcp/ 2>/dev/null | wc -l
+	@echo "Files:"
+	@grep -rl '@pending' test/unit/app/mcp/ 2>/dev/null || echo "  (none)"

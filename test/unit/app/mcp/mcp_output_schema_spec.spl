@@ -1,282 +1,95 @@
 """
-# MCP Output Schema Validation Specification
-
-**Feature ID:** #MCP-069
-**Category:** Tooling
-**Difficulty:** 3/5
-**Status:** Complete
-
-## Overview
-
-MCP tools can declare an `outputSchema` (JSON Schema) that describes the
-structure of their `structuredContent`. When a tool has an outputSchema,
-its results include both `content` (human-readable) and `structuredContent`
-(machine-parseable JSON conforming to the schema).
-
-### Key Concepts
-
-| Concept | Description |
-|---------|-------------|
-| outputSchema | JSON Schema in tool definition |
-| structuredContent | JSON object in tool result conforming to schema |
-| content | Human-readable content (text, image, etc.) |
-| Dual output | Both content and structuredContent in result |
-
-## Behavior
-
-- Tools MAY declare `outputSchema` in their tool definition
-- When outputSchema is present, tool results include `structuredContent`
-- `structuredContent` MUST conform to the declared `outputSchema`
-- `content` is always present for human-readable display
-- Schema validation ensures structured content matches expected format
-
-## Implementation Notes
-
-Tools like file_info and check_diagnostics benefit from outputSchema
-since they already return structured JSON. The schema is included in
-the tool definition alongside inputSchema.
-
-## Content Types
-
-### Structured Content Types
-
-| Type | Fields | Description |
-|------|--------|-------------|
-| TextContent | type, text | Plain text content |
-| ImageContent | type, data, mimeType | Base64-encoded image |
-| AudioContent | type, data, mimeType | Base64-encoded audio |
-| ResourceLinkContent | type, uri, name + optional title/description/mimeType/size | URI reference for deferred fetch |
-| EmbeddedResourceContent | type, resource | Inline resource with content |
-
-### Content Annotations
-
-| Field | Type | Description |
-|-------|------|-------------|
-| audience | string[] | "user", "assistant", or both |
-| priority | number | 0.0 to 1.0, higher = more important |
-| lastModified | string | ISO 8601 timestamp |
+MCP Output Schema Validation Specification
+Feature: MCP Output Schema
+Category: MCP, Protocol
+Status: Complete
 """
 
-
-# ============================================================================
-# Test Group 1: Output Schema in Tool Definition
-# ============================================================================
+use std.spec
+use app.mcp.helpers.{LB, RB, jp, js, jo1, jo2, jo3, make_tool_result_with_structured, make_tool_schema_with_output, make_image_content, make_audio_content, make_resource_link_content, make_resource_link_content_full, make_embedded_resource_content, make_content_annotations, register_tool}
 
 describe "MCP Output Schema in Tool Definition":
-    """
-    ## Schema Declaration
-
-    Tests that tools can declare outputSchema in their definition.
-    """
-
     context "when tool declares outputSchema":
-        """
-        ### Scenario: Schema in Tool Definition
-
-        Tool definition includes outputSchema alongside inputSchema.
-        """
-
         it "includes outputSchema field":
-            val has_output_schema = true
-            expect(has_output_schema).to_equal(true)
+            val props = jo1(jp("path", jo1(jp("type", js("string")))))
+            val required = "[" + js("path") + "]"
+            val output_schema = jo2(jp("type", js("object")), jp("properties", jo1(jp("lines", jo1(jp("type", js("integer")))))))
+            val schema = make_tool_schema_with_output("file_info", "Get file info", props, required, output_schema, true, false, true)
+            expect(schema.contains("outputSchema")).to_equal(true)
 
-        it "outputSchema is valid JSON Schema":
-            val schema_type = "object"
-            expect(schema_type).to_equal("object")
-
-        it "schema has properties":
-            val has_properties = true
-            expect(has_properties).to_equal(true)
+        it "outputSchema contains type object":
+            val output_schema = jo1(jp("type", js("object")))
+            val schema = make_tool_schema_with_output("tool", "desc", LB() + RB(), "[]", output_schema, true, false, true)
+            expect(schema.contains("\"type\":\"object\"")).to_equal(true)
 
     context "when tool has no outputSchema":
-        """
-        ### Scenario: No Output Schema
-
-        Tools without outputSchema return only content.
-        """
-
-        it "omits outputSchema from definition":
-            val has_output_schema = false
-            expect(has_output_schema).to_equal(false)
-
-        it "returns only content in result":
-            val has_content = true
-            val has_structured = false
-            expect(has_content).to_equal(true)
-            expect(has_structured).to_equal(false)
-
-# ============================================================================
-# Test Group 2: Structured Content in Tool Result
-# ============================================================================
+        it "regular register_tool omits outputSchema":
+            val schema = register_tool("simple_tool", "A tool", ["x"], ["Param"], ["x"], true, false, true)
+            expect(schema.contains("outputSchema")).to_equal(false)
 
 describe "MCP Structured Content in Tool Result":
-    """
-    ## Result Format
-
-    Tests the tool result format with structuredContent.
-    """
-
     context "when tool returns structured content":
-        """
-        ### Scenario: Dual Output
+        it "includes content and structuredContent":
+            val content = "[" + jo2(jp("type", js("text")), jp("text", js("File has 120 lines"))) + "]"
+            val structured = jo2(jp("path", js("test.spl")), jp("lines", "120"))
+            val result = make_tool_result_with_structured("1", content, structured)
+            expect(result.contains("content")).to_equal(true)
+            expect(result.contains("structuredContent")).to_equal(true)
 
-        Tool result includes both content and structuredContent.
-        """
-
-        it "includes content array":
-            val has_content = true
-            expect(has_content).to_equal(true)
-
-        it "includes structuredContent object":
-            val has_structured = true
-            expect(has_structured).to_equal(true)
-
-        it "structuredContent conforms to outputSchema":
-            val conforms = true
-            expect(conforms).to_equal(true)
-
-# ============================================================================
-# Test Group 3: Content Types
-# ============================================================================
+        it "structured content includes data fields":
+            val structured = jo2(jp("path", js("test.spl")), jp("lines", "120"))
+            val content = "[" + jo2(jp("type", js("text")), jp("text", js("info"))) + "]"
+            val result = make_tool_result_with_structured("1", content, structured)
+            expect(result.contains("test.spl")).to_equal(true)
+            expect(result.contains("120")).to_equal(true)
 
 describe "MCP Rich Content Types":
-    """
-    ## Content Type Support
-
-    Tests the various content types supported in tool results.
-    """
-
-    context "when returning text content":
-        """
-        ### Scenario: TextContent
-
-        Standard text content with type and text fields.
-        """
-
-        it "has type text":
-            val content_type = "text"
-            expect(content_type).to_equal("text")
-
-        it "has text field":
-            val has_text = true
-            expect(has_text).to_equal(true)
-
     context "when returning image content":
-        """
-        ### Scenario: ImageContent
-
-        Base64-encoded image with MIME type.
-        """
-
-        it "has type image":
-            val content_type = "image"
-            expect(content_type).to_equal("image")
-
-        it "has data field (base64)":
-            val has_data = true
-            expect(has_data).to_equal(true)
-
-        it "has mimeType field":
-            val mime_type = "image/png"
-            expect(mime_type).to_equal("image/png")
+        it "builds image content":
+            val img = make_image_content("iVBOR...base64", "image/png")
+            expect(img.contains("image")).to_equal(true)
+            expect(img.contains("image/png")).to_equal(true)
+            expect(img.contains("iVBOR")).to_equal(true)
 
     context "when returning audio content":
-        """
-        ### Scenario: AudioContent
-
-        Base64-encoded audio with MIME type.
-        """
-
-        it "has type audio":
-            val content_type = "audio"
-            expect(content_type).to_equal("audio")
-
-        it "has data field (base64)":
-            val has_data = true
-            expect(has_data).to_equal(true)
-
-        it "has mimeType field":
-            val mime_type = "audio/wav"
-            expect(mime_type).to_equal("audio/wav")
+        it "builds audio content":
+            val audio = make_audio_content("UklGR...base64", "audio/wav")
+            expect(audio.contains("audio")).to_equal(true)
+            expect(audio.contains("audio/wav")).to_equal(true)
 
     context "when returning resource link":
-        """
-        ### Scenario: ResourceLinkContent
+        it "builds basic resource link":
+            val link = make_resource_link_content("file:///test.spl", "test.spl")
+            expect(link.contains("resource_link")).to_equal(true)
+            expect(link.contains("file:///test.spl")).to_equal(true)
+            expect(link.contains("test.spl")).to_equal(true)
 
-        URI reference for deferred resource fetch.
-        Includes required name field and optional title, description, mimeType, size.
-        """
-
-        it "has type resource_link":
-            val content_type = "resource_link"
-            expect(content_type).to_equal("resource_link")
-
-        it "has uri field":
-            val has_uri = true
-            expect(has_uri).to_equal(true)
-
-        it "has required name field":
-            val name = "example-resource"
-            expect(name.len() > 0).to_equal(true)
-
-        it "supports optional title":
-            val title = "Example Resource Title"
-            expect(title.len() > 0).to_equal(true)
-
-        it "supports optional description":
-            val description = "A detailed description of the resource"
-            expect(description.len() > 0).to_equal(true)
-
-        it "supports optional mimeType":
-            val mime_type = "text/plain"
-            expect(mime_type).to_equal("text/plain")
-
-        it "supports optional size":
-            val size = 1024
-            expect(size > 0).to_equal(true)
+        it "builds full resource link with optional fields":
+            val link = make_resource_link_content_full("file:///test.spl", "test.spl", "Test File", "A test file", "text/x-simple", 1024)
+            expect(link.contains("Test File")).to_equal(true)
+            expect(link.contains("A test file")).to_equal(true)
+            expect(link.contains("text/x-simple")).to_equal(true)
 
     context "when returning embedded resource":
-        """
-        ### Scenario: EmbeddedResourceContent
-
-        Inline resource with full content.
-        """
-
-        it "has type resource":
-            val content_type = "resource"
-            expect(content_type).to_equal("resource")
-
-        it "has resource field":
-            val has_resource = true
-            expect(has_resource).to_equal(true)
-
-# ============================================================================
-# Test Group 4: Content Annotations
-# ============================================================================
+        it "builds embedded resource content":
+            val embedded = make_embedded_resource_content("file:///test.spl", "fn main(): pass", "text/x-simple")
+            expect(embedded.contains("resource")).to_equal(true)
+            expect(embedded.contains("fn main")).to_equal(true)
+            expect(embedded.contains("text/x-simple")).to_equal(true)
 
 describe "MCP Content Annotations":
-    """
-    ## Annotation Support
-
-    Tests content annotations for audience, priority, and timestamp.
-    """
-
     context "when adding annotations":
-        """
-        ### Scenario: Annotation Fields
-
-        Content items can include annotations for client behavior hints.
-        """
-
         it "supports audience annotation":
-            val audience = ["user", "assistant"]
-            expect(audience.len()).to_equal(2)
+            val ann = make_content_annotations(["user", "assistant"], "0.8", "2026-02-09T12:00:00Z")
+            expect(ann.contains("audience")).to_equal(true)
+            expect(ann.contains("user")).to_equal(true)
+            expect(ann.contains("assistant")).to_equal(true)
 
         it "supports priority annotation":
-            val priority = 0.8
-            expect(priority > 0.0).to_equal(true)
-            expect(priority <= 1.0).to_equal(true)
+            val ann = make_content_annotations(["user"], "0.9", "")
+            expect(ann.contains("priority")).to_equal(true)
 
         it "supports lastModified annotation":
-            val last_modified = "2026-02-09T12:00:00Z"
-            expect(last_modified.len() > 0).to_equal(true)
+            val ann = make_content_annotations([], "", "2026-02-09T12:00:00Z")
+            expect(ann.contains("lastModified")).to_equal(true)
+            expect(ann.contains("2026-02-09")).to_equal(true)
