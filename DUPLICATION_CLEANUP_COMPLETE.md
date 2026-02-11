@@ -118,3 +118,73 @@ Consider updating these files to reflect new counts:
 - **Result**: Cleaner, more maintainable codebase
 
 The codebase now has a clean structure with no tool or test duplications. The MCP tool architecture was already well-designed, and test file redundancy has been eliminated.
+
+---
+
+## Phase 4: APP Test Consolidation (2026-02-11)
+
+**Objective:** Remove 175 additional trivial test file duplications discovered in app_complete and app_extended directories.
+
+### Changes Made
+
+#### app_complete Directory
+- **Before**: 50 test files (25 pairs of `*_1_complete_spec.spl` and `*_2_complete_spec.spl`)
+- **After**: 25 test files (kept `*_1_complete_spec.spl` variants)
+- **Removed**: 25 files (100% identical duplicates)
+- **Impact**: ~975 lines removed
+
+#### app_extended Directory
+- **Before**: 225 test files (75 commands × 3 variants: `basic`, `advanced`, `edge`)
+- **After**: 75 test files (kept `*_basic_spec.spl` variants)
+- **Removed**: 150 files (all three variants were 100% identical)
+- **Impact**: ~3,000 lines removed
+
+### Total Impact
+
+- **Files removed:** 175
+- **Lines removed:** ~3,975
+- **Duplication reduction:** ~60% in app test directories
+- **Test coverage:** Maintained (all removed files were exact duplicates)
+
+### Verification
+
+```bash
+# After cleanup
+find test/app_complete/ -name "*.spl" | wc -l  # 25 (was 50)
+find test/app_extended/ -name "*.spl" | wc -l  # 75 (was 225)
+```
+
+### Files Affected
+
+**app_complete (25 files removed):**
+- Removed all `*_2_complete_spec.spl` files (exact duplicates of `*_1_complete_spec.spl`)
+
+**app_extended (150 files removed):**
+- Removed all `*_advanced_spec.spl` files (75 files)
+- Removed all `*_edge_spec.spl` files (75 files)
+- Kept all `*_basic_spec.spl` files (75 files)
+
+### Rationale
+
+All removed files were **100% byte-for-byte identical** to their retained counterparts.
+These were placeholder tests created to simulate coverage but provided no unique test scenarios.
+
+### Documentation Added
+
+Created two README files explaining intentional duplications:
+- `src/compiler/README.md` - Explains compiler/ vs compiler_core/ duplication (bootstrap requirement)
+- `src/compiler_core/README.md` - Documents Core Simple constraints and transformation rules
+
+These prevent future confusion about the ~15,000 lines of intentional duplication
+between Full Simple and Core Simple implementations.
+
+---
+
+## CUMULATIVE CLEANUP RESULTS
+
+### Total Across All Phases
+- **Phase 1-3**: 318 files removed (core_system, integration_e2e)
+- **Phase 4**: 175 files removed (app_complete, app_extended)
+- **Grand Total**: **493 files removed**
+- **Lines saved**: ~4,000+ lines
+- **Codebase health**: Significantly improved
