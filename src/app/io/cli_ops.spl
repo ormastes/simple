@@ -277,7 +277,7 @@ fn cli_compile(args: [str]) -> i64:
             print "  --emit=<format>       Output: llvm-ir, object, elf (default: elf)"
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
-            print "  --backend=<backend>   Backend: auto, cranelift, llvm (default: auto)"
+            print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl (default: auto)"
             print "  --coverage            Enable coverage instrumentation"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
@@ -298,6 +298,7 @@ fn cli_compile(args: [str]) -> i64:
             print "  simple compile hello.spl --format=self-contained -o hello"
             print "  simple compile --native -o hello hello.spl"
             print "  simple compile --target=baremetal-x86 --emit=llvm-ir kernel.spl"
+            print "  simple compile --backend=vhdl -o counter.vhd counter.spl"
             return 0
         elif arg.starts_with("--target="):
             target = arg.substring(9)
@@ -346,6 +347,9 @@ fn cli_compile(args: [str]) -> i64:
     if not _cli_file_exists_impl(source_file):
         _cli_eprint("Error: Source file not found: {source_file}")
         return 1
+
+    if backend == "vhdl":
+        return compile_vhdl(source_file, output_file, verbose)
 
     if emit == "native":
         var out = output_file
@@ -515,6 +519,33 @@ fn cli_info(args: [str]) -> i64:
 # Advanced Features
 # ============================================================================
 
+fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
+    """Compile a Simple source file to VHDL output."""
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".vhd")
+
+    if verbose:
+        print "Compiling {source_file} to VHDL"
+        print "  Output: {out}"
+
+    # The VHDL backend produces .vhd text files from MIR.
+    # Full pipeline: source -> parse -> HIR -> MIR -> VhdlConstraintChecker -> VhdlBackend -> .vhd
+    # Currently delegates to the Simple runtime for compilation.
+    var vhdl_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}' --backend=vhdl"
+    if verbose:
+        vhdl_cmd = vhdl_cmd + " --verbose"
+    val result = _cli_shell(vhdl_cmd)
+    if result.stdout != "":
+        print result.stdout
+    if result.stderr != "" and result.exit_code != 0:
+        _cli_eprint(result.stderr)
+        return result.exit_code
+
+    if result.exit_code == 0:
+        print "Output: {out}"
+    return result.exit_code
+
 fn context_generate(path: str, target: str, format: str) -> str:
     ""
 
@@ -551,4 +582,4 @@ export cli_handle_web, cli_handle_diagram, cli_handle_run, cli_handle_compile, c
 export cli_read_file, context_generate, context_stats, settlement_main
 export fault_set_stack_overflow_detection, fault_set_max_recursion_depth
 export fault_set_timeout, fault_set_execution_limit
-export compile_baremetal
+export compile_baremetal, compile_vhdl
