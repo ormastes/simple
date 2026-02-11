@@ -21,11 +21,20 @@ fn translate_condition(cond: text, types: text) -> text:
     if result.starts_with("not "):
         result = "!(" + translate_condition(result.substring(4), types) + ")"
         return result
-    # Handle "and" / "or"
-    if result.contains(" and "):
-        result = result.replace(" and ", " && ")
+    # Handle compound "or" (lower precedence - split first, translate each part recursively)
     if result.contains(" or "):
-        result = result.replace(" or ", " || ")
+        val or_pos = result.index_of(" or ") ?? -1
+        if or_pos >= 0:
+            val or_left = result.substring(0, or_pos).trim()
+            val or_right = result.substring(or_pos + 4).trim()
+            return translate_condition(or_left, types) + " || " + translate_condition(or_right, types)
+    # Handle compound "and" (higher precedence - split and translate each part recursively)
+    if result.contains(" and "):
+        val and_pos = result.index_of(" and ") ?? -1
+        if and_pos >= 0:
+            val and_left = result.substring(0, and_pos).trim()
+            val and_right = result.substring(and_pos + 5).trim()
+            return translate_condition(and_left, types) + " && " + translate_condition(and_right, types)
     # Handle "!= nil" and "== nil" - use NULL for text, < 0 for integers
     if result.contains(" != nil"):
         val nil_neq_pos = result.index_of(" != nil") ?? -1
@@ -1649,6 +1658,9 @@ fn close_blocks(body_lines: [text]) -> [text]:
         elif trimmed.contains(") {") and not trimmed.ends_with("}"):
             # Inline opening brace (e.g., for-loop with inline body start)
             brace_indents.push(current_indent)
+        elif trimmed.starts_with("{") and not trimmed.ends_with("}"):
+            # Match block opening: { long long _match_val = ...;
+            brace_indents.push(current_indent)
 
     for ci in range(0, brace_indents.len()):
         val pop_idx = brace_indents.len() - 1 - ci
@@ -1686,12 +1698,26 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
 
     # Deduplicate variable declarations: if a name is declared multiple times
     # (e.g., in different branches), convert subsequent declarations to assignments
+    # Scope-aware: track indent level of each declaration so that variables in
+    # sibling scopes (e.g., two if-blocks at the same indent) are not deduped
     var declared_vars: [text] = []
+    var declared_indents: [i64] = []
     var deduped_lines: [text] = []
     val c_types_arr: [text] = ["const char* ", "long long ", "int ", "double ", "SimpleStringArray ", "SimpleIntArray ", "SimpleStringArrayArray ", "SimpleIntArrayArray ", "SimpleStructArray ", "SimpleDict* ", "SimpleOption "]
     for dl_idx in range(0, closed_lines.len()):
         val dl = closed_lines[dl_idx]
         val dl_trim = dl.trim()
+        val dl_c_indent = get_c_indent(dl)
+        # Scope cleanup: remove vars declared at indent > current indent
+        # (they went out of scope when their block's } was processed)
+        var scope_new_vars: [text] = []
+        var scope_new_indents: [i64] = []
+        for scope_vi in range(0, declared_vars.len()):
+            if declared_indents[scope_vi] <= dl_c_indent:
+                scope_new_vars.push(declared_vars[scope_vi])
+                scope_new_indents.push(declared_indents[scope_vi])
+        declared_vars = scope_new_vars
+        declared_indents = scope_new_indents
         # Check if this line is a C variable declaration
         var found_type = ""
         var found_name = ""
@@ -1717,7 +1743,7 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
                         found_type = first_word + " "
                         found_name = after_struct.substring(0, eq_pos).trim()
         if found_name != "":
-            # Check if already declared
+            # Check if already declared (only vars still in scope)
             var already = false
             for dv in declared_vars:
                 if dv == found_name:
@@ -1730,6 +1756,7 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
                 deduped_lines.push("{dl_indent}{assignment}")
             else:
                 declared_vars.push(found_name)
+                declared_indents.push(dl_c_indent)
                 deduped_lines.push(dl)
         else:
             deduped_lines.push(dl)
