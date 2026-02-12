@@ -72,6 +72,51 @@ bool rt_file_unlock(int64_t handle) {
 }
 
 /* ----------------------------------------------------------------
+ * Offset-based File I/O
+ * ---------------------------------------------------------------- */
+
+const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
+    if (!path || size <= 0 || offset < 0) return "";
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return "";
+
+    /* Allocate buffer with null terminator */
+    char* buffer = (char*)malloc((size_t)size + 1);
+    if (!buffer) {
+        close(fd);
+        return "";
+    }
+
+    ssize_t bytes_read = pread(fd, buffer, (size_t)size, (off_t)offset);
+    close(fd);
+
+    if (bytes_read < 0) {
+        free(buffer);
+        return "";
+    }
+
+    buffer[bytes_read] = '\0';
+    return buffer;
+}
+
+int64_t rt_file_write_text_at(const char* path, int64_t offset, const char* data) {
+    if (!path || !data || offset < 0) return -1;
+
+    int64_t size = (int64_t)strlen(data);
+    if (size == 0) return 0;
+
+    /* Open or create file, preserve existing content */
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return -1;
+
+    ssize_t bytes_written = pwrite(fd, data, (size_t)size, (off_t)offset);
+    close(fd);
+
+    return (int64_t)bytes_written;
+}
+
+/* ----------------------------------------------------------------
  * High-Resolution Time
  * ---------------------------------------------------------------- */
 

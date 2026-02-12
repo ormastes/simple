@@ -38,6 +38,76 @@ bool rt_file_unlock(int64_t handle) {
 }
 
 /* ----------------------------------------------------------------
+ * Offset-based File I/O
+ * ---------------------------------------------------------------- */
+
+const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
+    if (!path || size <= 0 || offset < 0) return "";
+
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return "";
+
+    /* Allocate buffer with null terminator */
+    char* buffer = (char*)malloc((size_t)size + 1);
+    if (!buffer) {
+        CloseHandle(hFile);
+        return "";
+    }
+
+    /* Set file pointer */
+    LARGE_INTEGER li_offset;
+    li_offset.QuadPart = offset;
+    if (!SetFilePointerEx(hFile, li_offset, NULL, FILE_BEGIN)) {
+        CloseHandle(hFile);
+        free(buffer);
+        return "";
+    }
+
+    /* Read data */
+    DWORD bytes_read = 0;
+    if (!ReadFile(hFile, buffer, (DWORD)size, &bytes_read, NULL)) {
+        CloseHandle(hFile);
+        free(buffer);
+        return "";
+    }
+
+    CloseHandle(hFile);
+    buffer[bytes_read] = '\0';
+    return buffer;
+}
+
+int64_t rt_file_write_text_at(const char* path, int64_t offset, const char* data) {
+    if (!path || !data || offset < 0) return -1;
+
+    int64_t size = (int64_t)strlen(data);
+    if (size == 0) return 0;
+
+    /* Open or create file, preserve existing content */
+    HANDLE hFile = CreateFileA(path, GENERIC_WRITE, 0, NULL,
+                               OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return -1;
+
+    /* Set file pointer */
+    LARGE_INTEGER li_offset;
+    li_offset.QuadPart = offset;
+    if (!SetFilePointerEx(hFile, li_offset, NULL, FILE_BEGIN)) {
+        CloseHandle(hFile);
+        return -1;
+    }
+
+    /* Write data */
+    DWORD bytes_written = 0;
+    if (!WriteFile(hFile, data, (DWORD)size, &bytes_written, NULL)) {
+        CloseHandle(hFile);
+        return -1;
+    }
+
+    CloseHandle(hFile);
+    return (int64_t)bytes_written;
+}
+
+/* ----------------------------------------------------------------
  * High-Resolution Time
  * ---------------------------------------------------------------- */
 
