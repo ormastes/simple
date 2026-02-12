@@ -37,6 +37,56 @@ fn objectfileresolver_new(verbose: bool) -> ObjectFileResolver:
         )
 
 
+"""Resolve an object file for a module name.
+
+Searches through all configured search paths for candidate object files.
+Results are cached so subsequent lookups for the same module are fast.
+
+Args:
+    resolver: The resolver instance (mutated for cache)
+    module_name: Module name to resolve (e.g. "std/io/mod")
+
+Returns:
+    Ok(path) with the resolved object file path, or Err with a message.
+"""
+fn resolver_resolve(resolver: ObjectFileResolver, module_name: text) -> Result<text, text>:
+    # Check cache first
+    if resolver.cache.contains_key(module_name):
+        return Ok(resolver.cache[module_name])
+
+    # Generate candidate filenames for this module
+    val candidates = generate_object_candidates(module_name)
+
+    # Search each path + candidate combination
+    for search_dir in resolver.search_paths:
+        for candidate in candidates:
+            val full_path = "{search_dir}/{candidate}"
+            if file_exists(full_path):
+                # Cache the result
+                resolver.cache[module_name] = full_path
+                if resolver.verbose:
+                    print "[object-resolver] Found {module_name} at {full_path}"
+                return Ok(full_path)
+
+    # Also try absolute path based on working directory
+    val work_dir = cwd()
+    for candidate in candidates:
+        val abs_path = "{work_dir}/{candidate}"
+        if file_exists(abs_path):
+            resolver.cache[module_name] = abs_path
+            if resolver.verbose:
+                print "[object-resolver] Found {module_name} at {abs_path}"
+            return Ok(abs_path)
+
+    # Build helpful error message with searched locations
+    var searched: [text] = []
+    for search_dir in resolver.search_paths:
+        for candidate in candidates:
+            searched.push("{search_dir}/{candidate}")
+
+    val searched_str = searched.join(", ")
+    Err("Object file not found for module '{module_name}'. Searched: {searched_str}")
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -73,11 +123,18 @@ fn generate_object_candidates(module_name: text) -> [text]:
 
     candidates
 
-"""Check if we can compile SMF to object."""
+"""Check if we can compile SMF to object.
+Looks for the smf-to-object tool or the Simple compiler with codegen support."""
 fn can_compile_smf_to_object() -> bool:
-    # Check if smf-to-object tool is available
-    # For now, return false (not yet implemented)
-    false
+    # Check if 'simple' compiler binary exists and supports codegen
+    val (stdout, stderr, code) = shell("which simple 2>/dev/null")
+    if code == 0:
+        val compiler_path = stdout.trim()
+        if compiler_path.len() > 0:
+            return file_exists(compiler_path)
+    # Check for smf-to-object tool
+    val (stdout2, stderr2, code2) = shell("which smf-to-object 2>/dev/null")
+    code2 == 0
 
 """Attempt to compile SMF module to object file (future)."""
 fn compile_smf_to_object(
@@ -110,7 +167,7 @@ fn resolve_objects_for_modules(
 
         match result:
             case Ok(obj_path):
-                object_paths_push(object_paths, obj_path)
+                object_paths.push(obj_path)
                 if verbose:
                     print "[object-resolver] Resolved {module.module_name} → {obj_path}"
             case Err(e):
@@ -131,6 +188,7 @@ struct ResolvedModule:
 
 export ObjectFileResolver
 export resolve_objects_for_modules
+export resolver_resolve
 export generate_object_candidates
 export default_object_search_paths
 export can_compile_smf_to_object

@@ -92,9 +92,13 @@ class LlvmBackend:
         Slower but works on older hardware.
         """
         val cpu_compat = match target:
-            case CodegenTarget.X86_64: "x86-64"      # Baseline, no AVX
-            case CodegenTarget.AArch64: "generic"     # Generic ARM
-            case _: nil                               # Use default
+            case CodegenTarget.X86_64: "x86-64"          # Baseline, no AVX
+            case CodegenTarget.X86: "i686"               # 32-bit baseline
+            case CodegenTarget.AArch64: "generic"        # Generic ARM64
+            case CodegenTarget.Arm: "generic"            # Generic ARM32
+            case CodegenTarget.Riscv64: "generic-rv64"   # Generic RISC-V 64
+            case CodegenTarget.Riscv32: "generic-rv32"   # Generic RISC-V 32
+            case _: nil                                  # Use default
 
         LlvmBackend(
             target: target,
@@ -158,6 +162,23 @@ class LlvmBackend:
         """Get effective target configuration."""
         LlvmTargetConfig__for_target(self.target, self.cpu_override)
 
+    fn optimize_ir(ir_path: text, output_path: text) -> Result<text, text>:
+        """Run LLVM optimizer on IR file."""
+        val opt_tool = find_opt()
+        if not opt_tool.?:
+            return Err("LLVM opt not found")
+        val opt_flag = match self.opt_level:
+            case Debug: "-O0"
+            case Size: "-Os"
+            case Speed: "-O2"
+            case Aggressive: "-O3"
+            case _: "-O0"
+        val result = shell("{opt_tool.unwrap()} {opt_flag} -S {ir_path} -o {output_path}")
+        if result.exit_code != 0:
+            Err("opt failed: {result.stderr}")
+        else:
+            Ok(output_path)
+
     fn compile_module(module: MirModule):
         """Compile a MIR module using LLVM."""
         val start_time = time_now_unix_micros()
@@ -175,9 +196,24 @@ class LlvmBackend:
             MirToLlvm__create(module.name, self.target, self.cpu_override)
 
         # Add runtime FFI declarations
-        val runtime_decls = generate_runtime_declarations()
+        val runtime_decls = generate_runtime_declarations_for_target(self.target)
         var llvm_ir = runtime_decls + "\n\n"
         llvm_ir = llvm_ir + translator.translate_module(module)
+
+        # Run LLVM opt if available (optimize IR before llc)
+        val opt_tool = find_opt()
+        if opt_tool.?:
+            val pid = getpid()
+            val opt_ir_path = "/tmp/simple_opt_{pid}.ll"
+            val opt_out_path = "/tmp/simple_opt_{pid}_out.ll"
+            if file_write(opt_ir_path, llvm_ir):
+                val opt_result = self.optimize_ir(opt_ir_path, opt_out_path)
+                if opt_result.is_ok():
+                    val optimized = shell("cat {opt_out_path}")
+                    if optimized.exit_code == 0:
+                        llvm_ir = optimized.stdout
+                file_delete(opt_ir_path)
+                file_delete(opt_out_path)
 
         # Compile IR to object code
         var object_code: [u8]? = nil
@@ -227,12 +263,19 @@ impl LlvmCompileResult:
 # ============================================================================
 
 fn generate_runtime_declarations() -> text:
+    """Generate runtime declarations for the host target (default 64-bit)."""
+    generate_runtime_declarations_for_target(CodegenTarget.Host)
+
+fn generate_runtime_declarations_for_target(target: CodegenTarget) -> text:
     """
     Generate LLVM IR declarations for runtime functions.
 
     These declarations allow compiled code to call runtime functions
     for I/O, memory management, strings, collections, etc.
+    Parameterized by target for correct intrinsic types on 32-bit targets.
     """
+    val size_ty = if target.is_32bit(): "i32" else: "i64"
+    val int_ty = if target.is_32bit(): "i32" else: "i64"
     var decls = "; Runtime function declarations\n"
 
     # File I/O
@@ -316,10 +359,10 @@ fn generate_runtime_declarations() -> text:
     decls = decls + "declare double @rt_sqrt(double)\n"
     decls = decls + "declare double @rt_pow(double, double)\n"
 
-    # LLVM intrinsics
-    decls = decls + "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
-    decls = decls + "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"
-    decls = decls + "declare i64 @llvm.powi.i64.i64(i64, i64)\n"
+    # LLVM intrinsics (size type depends on target architecture)
+    decls = decls + "declare void @llvm.memcpy.p0.p0.{size_ty}(ptr, ptr, {size_ty}, i1)\n"
+    decls = decls + "declare void @llvm.memset.p0.{size_ty}(ptr, i8, {size_ty}, i1)\n"
+    decls = decls + "declare {int_ty} @llvm.powi.{int_ty}.{int_ty}({int_ty}, {int_ty})\n"
 
     decls
 
@@ -339,6 +382,23 @@ fn find_llc() -> text?:
         if result.exit_code == 0:
             return Some(candidate)
     nil
+
+fn find_opt() -> text?:
+    """
+    Find LLVM opt binary with fallback chain: opt-18 → opt-17 → opt.
+
+    Returns the command name if found, otherwise nil.
+    """
+    val candidates = ["opt-18", "opt-17", "opt-16", "opt"]
+    for candidate in candidates:
+        val result = shell("command -v {candidate} >/dev/null 2>&1")
+        if result.exit_code == 0:
+            return Some(candidate)
+    nil
+
+fn opt_available() -> bool:
+    """Check if opt (LLVM optimizer) is available on PATH."""
+    find_opt().?
 
 fn llc_available() -> bool:
     """Check if llc (LLVM static compiler) is available on PATH."""
@@ -439,5 +499,5 @@ export MirToLlvm__create, MirToLlvm__create_baremetal
 
 # This module's exports
 export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, llc_available, find_llc, generate_runtime_declarations
+export compile_ir_to_object, llc_available, find_llc, find_opt, opt_available, generate_runtime_declarations, generate_runtime_declarations_for_target
 export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__compatibility_build, LlvmBackend__default_backend

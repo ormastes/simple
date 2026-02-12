@@ -987,26 +987,169 @@ fn char_to_digit(char: text) -> i64:
     val code = string.char_code(char)
     code - 48  # '0' = 48
 
-# Simple SHA-256 hash (mock implementation)
+# Real SHA-256 hash per FIPS 180-4
+# Returns 64-character lowercase hex string
 fn hash_sha256(input: text) -> text:
-    # In production, use proper cryptographic hash
-    # This is a placeholder that returns a hex-like string
-    var hash = ""
-    var i = 0
-    val len = string.length(input)
+    val mask32 = 4294967295
 
-    while i < len:
-        val char = string.char_at(input, i)
-        val code = string.char_code(char)
-        val hex = i64_to_hex(code)
-        hash = string.concat(hash, hex)
-        i = i + 1
+    # SHA-256 initial hash values
+    var h0 = 1779033703
+    var h1 = 3144134277
+    var h2 = 1013904242
+    var h3 = 2773480762
+    var h4 = 1359893119
+    var h5 = 2600822924
+    var h6 = 528734635
+    var h7 = 1541459225
 
-    # Pad to 64 characters (256 bits)
-    while string.length(hash) < 64:
-        hash = string.concat(hash, "0")
+    # Round constants
+    var kk = [
+        1116352408, 1899447441, 3049323471, 3921009573,
+        961987163, 1508970993, 2453635748, 2870763221,
+        3624381080, 310598401, 607225278, 1426881987,
+        1925078388, 2162078206, 2614888103, 3248222580,
+        3835390401, 4022224774, 264347078, 604807628,
+        770255983, 1249150122, 1555081692, 1996064986,
+        2554220882, 2821834349, 2952996808, 3210313671,
+        3336571891, 3584528711, 113926993, 338241895,
+        666307205, 773529912, 1294757372, 1396182291,
+        1695183700, 1986661051, 2177026350, 2456956037,
+        2730485921, 2820302411, 3259730800, 3345764771,
+        3516065817, 3600352804, 4094571909, 275423344,
+        430227734, 506948616, 659060556, 883997877,
+        958139571, 1322822218, 1537002063, 1747873779,
+        1955562222, 2024104815, 2227730452, 2361852424,
+        2428436474, 2756734187, 3204031479, 3329325298
+    ]
 
-    hash
+    # Convert to bytes
+    val input_len = string.length(input)
+    var bytes = []
+    var bi = 0
+    while bi < input_len:
+        val ch = string.char_at(input, bi)
+        val code = string.char_code(ch)
+        bytes = array.push(bytes, code)
+        bi = bi + 1
+
+    # Pad message
+    val data_len = array.length(bytes)
+    bytes = array.push(bytes, 128)
+    val pad_target = data_len + 1
+    var pad_zeros = 56 - (pad_target % 64)
+    if pad_zeros < 0:
+        pad_zeros = pad_zeros + 64
+    var pz = 0
+    while pz < pad_zeros:
+        bytes = array.push(bytes, 0)
+        pz = pz + 1
+
+    val bit_length = data_len * 8
+    bytes = array.push(bytes, 0)
+    bytes = array.push(bytes, 0)
+    bytes = array.push(bytes, 0)
+    bytes = array.push(bytes, 0)
+    bytes = array.push(bytes, (bit_length >> 24) & 255)
+    bytes = array.push(bytes, (bit_length >> 16) & 255)
+    bytes = array.push(bytes, (bit_length >> 8) & 255)
+    bytes = array.push(bytes, bit_length & 255)
+
+    # Process 64-byte blocks
+    val total_len = array.length(bytes)
+    var block_off = 0
+    while block_off < total_len:
+        var w = []
+        var wi = 0
+        while wi < 16:
+            val base = block_off + (wi * 4)
+            val vb0 = bytes[base] & 255
+            val vb1 = bytes[base + 1] & 255
+            val vb2 = bytes[base + 2] & 255
+            val vb3 = bytes[base + 3] & 255
+            val word = ((vb0 << 24) | (vb1 << 16) | (vb2 << 8) | vb3) & mask32
+            w = array.push(w, word)
+            wi = wi + 1
+
+        wi = 16
+        while wi < 64:
+            val w15 = w[wi - 15] & mask32
+            val w2 = w[wi - 2] & mask32
+            val r7 = ((w15 >> 7) | (w15 << 25)) & mask32
+            val r18 = ((w15 >> 18) | (w15 << 14)) & mask32
+            val sh3 = (w15 >> 3) & mask32
+            val s0 = (r7 ^ r18 ^ sh3) & mask32
+            val r17 = ((w2 >> 17) | (w2 << 15)) & mask32
+            val r19 = ((w2 >> 19) | (w2 << 13)) & mask32
+            val sh10 = (w2 >> 10) & mask32
+            val s1 = (r17 ^ r19 ^ sh10) & mask32
+            val new_w = (w[wi - 16] + s0 + w[wi - 7] + s1) & mask32
+            w = array.push(w, new_w)
+            wi = wi + 1
+
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var f = h5
+        var g = h6
+        var hv = h7
+
+        var ri = 0
+        while ri < 64:
+            val ea = e & mask32
+            val er6 = ((ea >> 6) | (ea << 26)) & mask32
+            val er11 = ((ea >> 11) | (ea << 21)) & mask32
+            val er25 = ((ea >> 25) | (ea << 7)) & mask32
+            val big_s1 = (er6 ^ er11 ^ er25) & mask32
+            val ch = ((ea & (f & mask32)) ^ ((~ea & mask32) & (g & mask32))) & mask32
+            val temp1 = (hv + big_s1 + ch + kk[ri] + w[ri]) & mask32
+
+            val aa = a & mask32
+            val ar2 = ((aa >> 2) | (aa << 30)) & mask32
+            val ar13 = ((aa >> 13) | (aa << 19)) & mask32
+            val ar22 = ((aa >> 22) | (aa << 10)) & mask32
+            val big_s0 = (ar2 ^ ar13 ^ ar22) & mask32
+            val maj = ((aa & (b & mask32)) ^ (aa & (c & mask32)) ^ ((b & mask32) & (c & mask32))) & mask32
+            val temp2 = (big_s0 + maj) & mask32
+
+            hv = g
+            g = f
+            f = e
+            e = (d + temp1) & mask32
+            d = c
+            c = b
+            b = a
+            a = (temp1 + temp2) & mask32
+            ri = ri + 1
+
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        h5 = (h5 + f) & mask32
+        h6 = (h6 + g) & mask32
+        h7 = (h7 + hv) & mask32
+
+        block_off = block_off + 64
+
+    # Convert to hex string
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var h_vals = [h0, h1, h2, h3, h4, h5, h6, h7]
+    var hi = 0
+    while hi < 8:
+        val word = h_vals[hi] & mask32
+        var nibble_idx = 7
+        while nibble_idx >= 0:
+            val nibble = (word >> (nibble_idx * 4)) & 15
+            val hex_char = string.char_at(hex_chars, nibble)
+            result = string.concat(result, hex_char)
+            nibble_idx = nibble_idx - 1
+        hi = hi + 1
+
+    result
 
 # Convert i64 to hex
 fn i64_to_hex(value: i64) -> text:

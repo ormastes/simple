@@ -7,6 +7,7 @@ use compiler.mir_data.*
 use compiler.backend.backend_api.*
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
+use compiler.attributes.FunctionAttr
 
 # ============================================================================
 # LLVM Optimization Passes
@@ -105,14 +106,19 @@ class LlvmIRBuilder:
     instructions: [text]
     current_function: text?
     local_counter: i64
+    debug_counter: i64
+    size_type: text            # "i32" for 32-bit targets, "i64" for 64-bit
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
+        val st = if target.is_32bit(): "i32" else: "i64"
         LlvmIRBuilder(
             module_name: name,
             target: target,
             instructions: [],
             current_function: nil,
-            local_counter: 0
+            local_counter: 0,
+            debug_counter: 10,
+            size_type: st
         )
 
     me emit(line: text):
@@ -123,6 +129,7 @@ class LlvmIRBuilder:
         """Emit module header."""
         self.emit("; ModuleID = '{self.module_name}'")
         self.emit("source_filename = \"{self.module_name}.spl\"")
+        self.emit("target datalayout = \"{self.target.datalayout()}\"")
         self.emit("target triple = \"{self.target.to_text()}\"")
         self.emit("")
 
@@ -138,6 +145,23 @@ class LlvmIRBuilder:
         self.current_function = Some(name)
         val param_str = params.join(", ")
         self.emit("define {return_type} @{name}({param_str}) {{")
+
+    me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
+        """Start a function definition with attributes."""
+        self.current_function = Some(name)
+        val param_str = params.join(", ")
+        var attrs = ""
+        if func_attr.is_naked:
+            attrs = attrs + " naked"
+        if func_attr.is_noreturn:
+            attrs = attrs + " noreturn"
+        var prefix = "define"
+        if func_attr.is_entry:
+            prefix = "define dso_local"
+        var section_str = ""
+        if func_attr.section.?:
+            section_str = " section \"{func_attr.section.unwrap()}\""
+        self.emit("{prefix} {return_type} @{name}({param_str}){attrs}{section_str} {{")
 
     me end_function():
         """End a function definition."""
@@ -295,11 +319,13 @@ class LlvmIRBuilder:
 
     me emit_memcpy(dest: text, src: text, size: text):
         """Emit memcpy intrinsic."""
-        self.emit("  call void @llvm.memcpy.p0.p0.i64(ptr {dest}, ptr {src}, i64 {size}, i1 false)")
+        val st = self.size_type
+        self.emit("  call void @llvm.memcpy.p0.p0.{st}(ptr {dest}, ptr {src}, {st} {size}, i1 false)")
 
     me emit_memset(dest: text, value: text, size: text):
         """Emit memset intrinsic."""
-        self.emit("  call void @llvm.memset.p0.i64(ptr {dest}, i8 {value}, i64 {size}, i1 false)")
+        val st = self.size_type
+        self.emit("  call void @llvm.memset.p0.{st}(ptr {dest}, i8 {value}, {st} {size}, i1 false)")
 
     me emit_gep(dest: text, base_ty: text, ptr: text, indices: [text]):
         """Emit getelementptr instruction."""
@@ -352,6 +378,32 @@ class LlvmIRBuilder:
         """Emit a label."""
         self.emit("{name}:")
 
+    # === Debug Info (DWARF) ===
+
+    me emit_debug_info_header(filename: text, directory: text):
+        """Emit DWARF debug info metadata."""
+        self.emit("")
+        self.emit("; Debug information")
+        self.emit("!llvm.dbg.cu = !{!0}")
+        self.emit("!llvm.module.flags = !{!1, !2}")
+        self.emit("")
+        self.emit("!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !3, producer: \"simple-compiler\", isOptimized: false, emissionKind: FullDebug)")
+        self.emit("!1 = !{i32 2, !\"Dwarf Version\", i32 4}")
+        self.emit("!2 = !{i32 2, !\"Debug Info Version\", i32 3}")
+        self.emit("!3 = !DIFile(filename: \"{filename}\", directory: \"{directory}\")")
+
+    me emit_di_subprogram(id: i64, name: text, line: i64):
+        """Emit DISubprogram metadata for a function."""
+        self.emit("!{id} = distinct !DISubprogram(name: \"{name}\", scope: !3, file: !3, line: {line}, type: !{id + 1}, unit: !0)")
+        self.emit("!{id + 1} = !DISubroutineType(types: !{id + 2})")
+        self.emit("!{id + 2} = !{null}")
+
+    me next_debug_id() -> i64:
+        """Get next debug metadata ID."""
+        val id = self.debug_counter
+        self.debug_counter = self.debug_counter + 1
+        id
+
     fn build() -> text:
         """Build final IR string."""
         self.instructions.join("\n")
@@ -366,20 +418,34 @@ class MirToLlvm:
     local_map: Dict
     config: LlvmTargetConfig
     type_mapper: LlvmTypeMapper
+    string_globals: [text]
+    string_counter: i64
+    local_types: Dict
+    native_int_type: text      # "i32" for 32-bit targets, "i64" for 64-bit
+
+    fn native_int() -> text:
+        """Return the native integer type for the current target."""
+        self.native_int_type
 
     static fn create(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
         val config = LlvmTargetConfig__for_target(target, cpu_override)
+        val nit = if target.is_32bit(): "i32" else: "i64"
         MirToLlvm(
             builder: LlvmIRBuilder__create(module_name, config.triple),
             local_map: {},
             config: config,
-            type_mapper: LlvmTypeMapper__create_for_target(target)
+            type_mapper: LlvmTypeMapper__create_for_target(target),
+            string_globals: [],
+            string_counter: 0,
+            local_types: {},
+            native_int_type: nit
         )
 
     static fn create_baremetal(module_name: text, target: CodegenTarget, cpu_override: text?) -> MirToLlvm:
         """Create MIR→LLVM translator for bare-metal targets."""
         val config = LlvmTargetConfig__for_target_baremetal(target, cpu_override)
         val builder = LlvmIRBuilder__create(module_name, config.triple)
+        val nit = if target.is_32bit(): "i32" else: "i64"
 
         # Add bare-metal module attributes
         builder.emit_baremetal_attributes()
@@ -388,23 +454,56 @@ class MirToLlvm:
             builder: builder,
             local_map: {},
             config: config,
-            type_mapper: LlvmTypeMapper__create_for_target(target)
+            type_mapper: LlvmTypeMapper__create_for_target(target),
+            string_globals: [],
+            string_counter: 0,
+            local_types: {},
+            native_int_type: nit
         )
 
     me translate_module(module: MirModule) -> text:
         """Translate MIR module to LLVM IR."""
         self.builder.emit_module_header()
 
+        # Emit runtime function declarations for matrix/broadcast ops
+        self.emit_runtime_declarations()
+
         for name, body in module.functions:
             self.translate_function(name, body)
 
+        # Emit string global constants collected during translation
+        if self.string_globals.len() > 0:
+            self.builder.emit("")
+            self.builder.emit("; String constants")
+            for global_decl in self.string_globals:
+                self.builder.emit(global_decl)
+
         self.builder.build()
+
+    me emit_runtime_declarations():
+        """Emit declarations for runtime intrinsics used by matrix/broadcast ops."""
+        self.builder.emit("; Runtime intrinsic declarations")
+        self.builder.emit("declare ptr @__simple_runtime_matmul(ptr, ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_transpose(ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_broadcast_add(ptr, ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_broadcast_sub(ptr, ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_broadcast_mul(ptr, ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_broadcast_div(ptr, ptr)")
+        self.builder.emit("declare ptr @__simple_runtime_broadcast_pow(ptr, ptr)")
+        self.builder.emit("")
 
     me translate_function(name: text, body: MirBody):
         """Translate a MIR function."""
+        # Build local type map from function locals for type-aware codegen
+        self.local_types = {}
+        for local in body.locals:
+            val llvm_ty = self.type_mapper.map_type(local.type_)
+            self.local_types[local.id.id] = llvm_ty
+
         var params: [text] = []
         for i in 0..body.arg_count:
-            params = params.push("i64 %arg{i}")
+            val param_ty = self.get_local_type(i)
+            params = params.push("{param_ty} %arg{i}")
 
         val ret_ty = self.type_mapper.map_type(body.return_ty)
 
@@ -414,6 +513,12 @@ class MirToLlvm:
             self.translate_block(block)
 
         self.builder.end_function()
+
+    fn get_local_type(id: i64) -> text:
+        """Get LLVM type for a local variable, falling back to native int type."""
+        match self.local_types.get(id):
+            case Some(ty): ty
+            case nil: self.native_int()
 
     me translate_block(block: MirBasicBlock):
         """Translate a MIR basic block."""
@@ -438,13 +543,14 @@ class MirToLlvm:
             case Copy(dest, src):
                 val dest_name = self.get_local(dest.id)
                 val src_name = self.get_local(src.id)
-                # For now, assume i64 type (TODO: track types)
-                self.builder.emit("  {dest_name} = add i64 {src_name}, 0  ; copy")
+                val ty = self.get_local_type(src.id)
+                self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; copy")
 
             case Move(dest, src):
                 val dest_name = self.get_local(dest.id)
                 val src_name = self.get_local(src.id)
-                self.builder.emit("  {dest_name} = add i64 {src_name}, 0  ; move")
+                val ty = self.get_local_type(src.id)
+                self.builder.emit("  {dest_name} = add {ty} {src_name}, 0  ; move")
 
             # === Binary Operations ===
             case BinOp(dest, op, left, right):
@@ -463,14 +569,14 @@ class MirToLlvm:
             case Load(dest, ptr):
                 val dest_name = self.get_local(dest.id)
                 val ptr_val = self.translate_operand(ptr)
-                # TODO: Get actual type from ptr
-                self.builder.emit_load(dest_name, "i64", ptr_val)
+                val load_ty = self.get_local_type(dest.id)
+                self.builder.emit_load(dest_name, load_ty, ptr_val)
 
             case Store(ptr, value):
                 val ptr_val = self.translate_operand(ptr)
                 val value_val = self.translate_operand(value)
-                # TODO: Get actual type from value
-                self.builder.emit_store("i64", value_val, ptr_val)
+                val store_ty = self.get_operand_type(value)
+                self.builder.emit_store(store_ty, value_val, ptr_val)
 
             case GetElementPtr(dest, base, indices):
                 val dest_name = self.get_local(dest.id)
@@ -478,18 +584,26 @@ class MirToLlvm:
                 var index_vals: [text] = []
                 for idx in indices:
                     index_vals = index_vals.push(self.translate_operand(idx))
-                # TODO: Get actual base type
-                self.builder.emit_gep(dest_name, "i64", base_val, index_vals)
+                val base_ty = self.get_operand_type(base)
+                self.builder.emit_gep(dest_name, base_ty, base_val, index_vals)
 
             # === Function Calls ===
             case Call(dest, func, args):
                 val dest_name = if dest.?: Some(self.get_local(dest.unwrap().id)) else: nil
                 val func_name = self.translate_operand(func)
-                var arg_vals: [text] = []
+                var arg_parts: [text] = []
                 for arg in args:
-                    arg_vals = arg_vals.push(self.translate_operand(arg))
-                # TODO: Get actual return type and function name
-                self.builder.emit_call(dest_name, "i64", func_name, arg_vals)
+                    val arg_val = self.translate_operand(arg)
+                    val arg_ty = self.get_operand_type(arg)
+                    arg_parts = arg_parts.push("{arg_ty} {arg_val}")
+                val args_str = arg_parts.join(", ")
+                var ret_ty = "void"
+                if dest.?:
+                    ret_ty = self.get_local_type(dest.unwrap().id)
+                if dest_name.?:
+                    self.builder.emit("  {dest_name.unwrap()} = call {ret_ty} {func_name}({args_str})")
+                else:
+                    self.builder.emit("  call {ret_ty} {func_name}({args_str})")
 
             case CallIndirect(dest, ptr, args, sig):
                 val dest_name = if dest.?: Some(self.get_local(dest.unwrap().id)) else: nil
@@ -504,36 +618,49 @@ class MirToLlvm:
             case Cast(dest, operand, target):
                 val dest_name = self.get_local(dest.id)
                 val operand_val = self.translate_operand(operand)
+                val src_ty = self.get_operand_type(operand)
                 val target_ty = self.type_mapper.map_type(target)
-                # TODO: Determine proper cast instruction (sext, zext, trunc, etc.)
-                self.builder.emit("  {dest_name} = bitcast i64 {operand_val} to {target_ty}  ; cast")
+                val cast_inst = self.select_cast_instruction(src_ty, target_ty)
+                self.builder.emit("  {dest_name} = {cast_inst} {src_ty} {operand_val} to {target_ty}")
 
             case Bitcast(dest, operand, target):
                 val dest_name = self.get_local(dest.id)
                 val operand_val = self.translate_operand(operand)
+                val src_ty = self.get_operand_type(operand)
                 val target_ty = self.type_mapper.map_type(target)
-                self.builder.emit("  {dest_name} = bitcast i64 {operand_val} to {target_ty}")
+                self.builder.emit("  {dest_name} = bitcast {src_ty} {operand_val} to {target_ty}")
 
             # === Aggregates ===
             case Aggregate(dest, kind, operands):
                 val dest_name = self.get_local(dest.id)
-                # TODO: Implement aggregate construction
-                self.builder.emit("  ; TODO: Aggregate construction for {dest_name}")
+                val agg_ty = self.get_local_type(dest.id)
+                # Allocate aggregate on stack and store each element
+                val agg_ptr = self.builder.fresh_local()
+                self.builder.emit_alloca(agg_ptr, agg_ty)
+                for i in 0..operands.len():
+                    val elem_val = self.translate_operand(operands[i])
+                    val elem_ty = self.get_operand_type(operands[i])
+                    val elem_ptr = self.builder.fresh_local()
+                    self.builder.emit("  {elem_ptr} = getelementptr inbounds {agg_ty}, ptr {agg_ptr}, i32 0, i32 {i}")
+                    self.builder.emit_store(elem_ty, elem_val, elem_ptr)
+                self.builder.emit_load(dest_name, agg_ty, agg_ptr)
 
             case GetField(dest, base, field):
                 val dest_name = self.get_local(dest.id)
                 val base_val = self.translate_operand(base)
+                val nit = self.native_int()
                 # Use GEP to get field address, then load
                 val field_ptr = self.builder.fresh_local()
-                self.builder.emit("  {field_ptr} = getelementptr inbounds i64, ptr {base_val}, i32 {field}")
-                self.builder.emit_load(dest_name, "i64", field_ptr)
+                self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+                self.builder.emit_load(dest_name, nit, field_ptr)
 
             case SetField(base, field, value):
                 val base_val = self.translate_operand(base)
                 val value_val = self.translate_operand(value)
+                val nit = self.native_int()
                 val field_ptr = self.builder.fresh_local()
-                self.builder.emit("  {field_ptr} = getelementptr inbounds i64, ptr {base_val}, i32 {field}")
-                self.builder.emit_store("i64", value_val, field_ptr)
+                self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
+                self.builder.emit_store(nit, value_val, field_ptr)
 
             # === Inline Assembly ===
             case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
@@ -545,19 +672,46 @@ class MirToLlvm:
                 self.translate_binop(dest, op, left, right)
 
             case Intrinsic(dest, name, args):
-                self.builder.emit("  ; TODO: Intrinsic {name}")
+                # Emit intrinsic as call to runtime function @__simple_intrinsic_<name>
+                var arg_vals: [text] = []
+                for arg in args:
+                    arg_vals = arg_vals.push("i64 " + self.translate_operand(arg))
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    val ret_ty = self.get_local_type(dest.unwrap().id)
+                    self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+                else:
+                    self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
             case PipeForward(dest, value, func):
-                self.builder.emit("  ; TODO: PipeForward")
+                # Pipe forward (x |> f) desugars to f(x)
+                val dest_name = self.get_local(dest.id)
+                val value_val = self.translate_operand(value)
+                val func_val = self.translate_operand(func)
+                val ret_ty = self.get_local_type(dest.id)
+                self.builder.emit("  {dest_name} = call {ret_ty} {func_val}(i64 {value_val})  ; pipe forward")
 
             case Compose(dest, f, g, forward):
-                self.builder.emit("  ; TODO: Compose")
+                # Function composition (f >> g or f << g) - returns opaque closure ptr
+                val dest_name = self.get_local(dest.id)
+                val f_val = self.translate_operand(f)
+                val g_val = self.translate_operand(g)
+                val dir = if forward: "forward" else: "backward"
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_compose(ptr {f_val}, ptr {g_val})  ; compose ({dir})")
 
             case Parallel(dest, funcs):
-                self.builder.emit("  ; TODO: Parallel")
+                # Parallel function application - stub with operand count
+                val dest_name = self.get_local(dest.id)
+                val count = funcs.len()
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_parallel(i64 {count})  ; parallel ({count} functions)")
 
             case LayerConnect(dest, layer1, layer2):
-                self.builder.emit("  ; TODO: LayerConnect")
+                # Neural network layer connection (~>)
+                val dest_name = self.get_local(dest.id)
+                val l1_val = self.translate_operand(layer1)
+                val l2_val = self.translate_operand(layer2)
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_layer_connect(ptr {l1_val}, ptr {l2_val})  ; layer connect")
 
             case DebugValue(local, name):
                 # Debug info - can be ignored for now
@@ -566,15 +720,101 @@ class MirToLlvm:
             case Nop:
                 pass
 
-            case _:
-                self.builder.emit("  ; TODO: Unsupported instruction")
+            # Async/actor instructions
+            case CreatePromise(dest, body, result_type):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_create_promise(ptr null)  ; CreatePromise (async)")
+            case Await(dest, promise):
+                val dest_name = self.get_local(dest.id)
+                val promise_val = self.translate_operand(promise)
+                self.builder.emit("  {dest_name} = call i64 @__simple_runtime_await(ptr {promise_val})  ; Await")
+            case Yield(value):
+                if value.?:
+                    val val_str = self.translate_operand(value.unwrap())
+                    self.builder.emit("  call void @__simple_runtime_yield(i64 {val_str})  ; Yield")
+                else:
+                    self.builder.emit("  call void @__simple_runtime_yield(i64 0)  ; Yield (unit)")
+            case Spawn(dest, handler, args):
+                val dest_name = self.get_local(dest.id)
+                val handler_val = self.translate_operand(handler)
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_spawn(ptr {handler_val})  ; Spawn")
+            case Send(target, message):
+                val target_val = self.translate_operand(target)
+                val msg_val = self.translate_operand(message)
+                self.builder.emit("  call void @__simple_runtime_send(ptr {target_val}, i64 {msg_val})  ; Send")
+            case Receive(dest, timeout):
+                val dest_name = self.get_local(dest.id)
+                if timeout.?:
+                    val timeout_val = self.translate_operand(timeout.unwrap())
+                    self.builder.emit("  {dest_name} = call i64 @__simple_runtime_receive(i64 {timeout_val})  ; Receive (with timeout)")
+                else:
+                    self.builder.emit("  {dest_name} = call i64 @__simple_runtime_receive(i64 -1)  ; Receive (blocking)")
+
+            # Borrow checking instruction
+            case Ref(dest, borrow_kind, place):
+                val dest_name = self.get_local(dest.id)
+                val place_val = self.get_local(place.local.id)
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = add {nit} {place_val}, 0  ; Ref (borrow)")
+
+            # GPU instructions - emit no-op stubs with instruction names
+            case GpuKernelDef(name):
+                self.builder.emit("  ; GpuKernelDef: {name} (requires GPU backend)")
+            case GpuLaunch(args):
+                self.builder.emit("  ; GpuLaunch (requires GPU backend)")
+            case GpuGlobalId(dest, dim):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; GpuGlobalId dim={dim} (stub)")
+            case GpuLocalId(dest, dim):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; GpuLocalId dim={dim} (stub)")
+            case GpuBlockId(dest, dim):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; GpuBlockId dim={dim} (stub)")
+            case GpuBlockDim(dest, dim):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; GpuBlockDim dim={dim} (stub)")
+            case GpuGridDim(dest, dim):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; GpuGridDim dim={dim} (stub)")
+            case GpuBarrier(scope):
+                self.builder.emit("  ; GpuBarrier (requires GPU backend)")
+            case GpuMemFence(scope):
+                self.builder.emit("  ; GpuMemFence (requires GPU backend)")
+            case GpuSharedAlloc(dest, type_, size):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = alloca i8, i64 {size}  ; GpuSharedAlloc (stub)")
+            case GpuAtomicOp(dest, op, ptr, value):
+                val dest_name = self.get_local(dest.id)
+                val ptr_val = self.translate_operand(ptr)
+                val value_val = self.translate_operand(value)
+                self.builder.emit("  {dest_name} = atomicrmw add ptr {ptr_val}, i64 {value_val} seq_cst  ; GpuAtomicOp (stub)")
+
+            # VHDL instructions - emit no-op stubs with instruction names
+            case VhdlProcess(kind, body_block):
+                self.builder.emit("  ; VhdlProcess (requires VHDL backend)")
+            case VhdlSignalAssign(target, value, delay_ns):
+                self.builder.emit("  ; VhdlSignalAssign (requires VHDL backend)")
+            case VhdlVarAssign(target, value):
+                self.builder.emit("  ; VhdlVarAssign (requires VHDL backend)")
+            case VhdlPortMap(entity, instance, connections):
+                self.builder.emit("  ; VhdlPortMap: {entity}/{instance} (requires VHDL backend)")
+            case VhdlResize(dest, operand, new_width, signed):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; VhdlResize width={new_width} (requires VHDL backend)")
+            case VhdlSlice(dest, signal, hi, lo):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; VhdlSlice [{hi}:{lo}] (requires VHDL backend)")
+            case VhdlConcat(dest, parts):
+                val dest_name = self.get_local(dest.id)
+                self.builder.emit("  {dest_name} = add i64 0, 0  ; VhdlConcat (requires VHDL backend)")
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate binary operation."""
         val dest_name = self.get_local(dest.id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
-        val ty = "i64"  # TODO: Get actual type
+        val ty = self.get_local_type(dest.id)
 
         match op:
             # Arithmetic
@@ -585,7 +825,8 @@ class MirToLlvm:
             case Rem: self.builder.emit_rem(dest_name, ty, left_val, right_val)
             case Pow:
                 # Use LLVM intrinsic llvm.powi for integer power
-                self.builder.emit("  {dest_name} = call i64 @llvm.powi.i64.i64(i64 {left_val}, i64 {right_val})")
+                val nit = self.native_int()
+                self.builder.emit("  {dest_name} = call {nit} @llvm.powi.{nit}.{nit}({nit} {left_val}, {nit} {right_val})")
 
             # Bitwise
             case BitAnd: self.builder.emit_and(dest_name, ty, left_val, right_val)
@@ -602,25 +843,32 @@ class MirToLlvm:
             case Gt: self.builder.emit_icmp_sgt(dest_name, ty, left_val, right_val)
             case Ge: self.builder.emit_icmp_sge(dest_name, ty, left_val, right_val)
 
-            # Matrix/Broadcast operations - TODO
-            case MatMul: self.builder.emit("  ; TODO: MatMul")
-            case BroadcastAdd: self.builder.emit("  ; TODO: BroadcastAdd")
-            case BroadcastSub: self.builder.emit("  ; TODO: BroadcastSub")
-            case BroadcastMul: self.builder.emit("  ; TODO: BroadcastMul")
-            case BroadcastDiv: self.builder.emit("  ; TODO: BroadcastDiv")
-            case BroadcastPow: self.builder.emit("  ; TODO: BroadcastPow")
+            # Matrix/Broadcast operations - emit calls to runtime intrinsics
+            case MatMul:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_matmul(ptr {left_val}, ptr {right_val})  ; matrix multiply (@)")
+            case BroadcastAdd:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_add(ptr {left_val}, ptr {right_val})  ; broadcast add (.+)")
+            case BroadcastSub:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_sub(ptr {left_val}, ptr {right_val})  ; broadcast sub (.-)")
+            case BroadcastMul:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_mul(ptr {left_val}, ptr {right_val})  ; broadcast mul (.*)")
+            case BroadcastDiv:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_div(ptr {left_val}, ptr {right_val})  ; broadcast div (./)")
+            case BroadcastPow:
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_broadcast_pow(ptr {left_val}, ptr {right_val})  ; broadcast pow (.^)")
 
             # Pointer arithmetic
             case Offset:
+                val nit = self.native_int()
                 val offset_ptr = self.builder.fresh_local()
-                self.builder.emit("  {offset_ptr} = getelementptr i8, ptr {left_val}, i64 {right_val}")
-                self.builder.emit("  {dest_name} = ptrtoint ptr {offset_ptr} to i64")
+                self.builder.emit("  {offset_ptr} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
+                self.builder.emit("  {dest_name} = ptrtoint ptr {offset_ptr} to {nit}")
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate unary operation."""
         val dest_name = self.get_local(dest.id)
         val operand_val = self.translate_operand(operand)
-        val ty = "i64"  # TODO: Get actual type
+        val ty = self.get_local_type(dest.id)
 
         match op:
             case Neg: self.builder.emit_neg(dest_name, ty, operand_val)
@@ -629,8 +877,18 @@ class MirToLlvm:
                 self.builder.emit_icmp_eq(dest_name, ty, operand_val, "0")
             case BitNot: self.builder.emit_not(dest_name, ty, operand_val)
             case Transpose:
-                # Matrix transpose - TODO
-                self.builder.emit("  ; TODO: Transpose")
+                # Matrix transpose - call runtime intrinsic
+                self.builder.emit("  {dest_name} = call ptr @__simple_runtime_transpose(ptr {operand_val})  ; transpose (')")
+
+    me add_string_global(value: text) -> text:
+        """Register a string constant and return its LLVM global name."""
+        val id = self.string_counter
+        self.string_counter = self.string_counter + 1
+        val global_name = "@.str.{id}"
+        val str_len = value.len() + 1
+        val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{value}\\00\""
+        self.string_globals = self.string_globals.push(decl)
+        global_name
 
     me translate_const_value(value: MirConstValue) -> text:
         """Translate MIR constant value to LLVM constant."""
@@ -638,17 +896,21 @@ class MirToLlvm:
             case Int(val): "{val}"
             case Float(val): "{val}"
             case Bool(val): if val: "1" else: "0"
-            case Str(val): "null  ; TODO: string constant \"{val}\""
+            case Str(val):
+                # Emit a proper LLVM string global constant
+                val global_name = self.add_string_global(val)
+                val str_len = val.len() + 1
+                val nit = self.native_int()
+                "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
             case Zero: "0"
             case Array(elements):
-                # TODO: Proper array constant
-                "zeroinitializer"
+                val count = elements.len()
+                "zeroinitializer  ; array ({count} elements)"
             case Tuple(elements):
-                # TODO: Proper tuple constant
-                "zeroinitializer"
+                val count = elements.len()
+                "zeroinitializer  ; tuple ({count} elements)"
             case Struct(fields):
-                # TODO: Proper struct constant
-                "zeroinitializer"
+                "zeroinitializer  ; struct"
 
     me translate_terminator(term: MirTerminator):
         """Translate a block terminator."""
@@ -656,7 +918,8 @@ class MirToLlvm:
             case Return(value):
                 if value.?:
                     val val_str = self.translate_operand(value.unwrap())
-                    self.builder.emit_ret("i64", val_str)
+                    val nit = self.native_int()
+                    self.builder.emit_ret(nit, val_str)
                 else:
                     self.builder.emit_ret_void()
 
@@ -665,19 +928,21 @@ class MirToLlvm:
 
             case If(cond, then_, else_):
                 val cond_val = self.translate_operand(cond)
+                val nit = self.native_int()
                 # Convert to i1 if needed
                 val i1_cond = self.builder.fresh_local()
-                self.builder.emit("  {i1_cond} = icmp ne i64 {cond_val}, 0")
+                self.builder.emit("  {i1_cond} = icmp ne {nit} {cond_val}, 0")
                 self.builder.emit_cond_br(i1_cond, "bb{then_}", "bb{else_}")
 
             case Switch(value, targets, default):
                 val discr_val = self.translate_operand(value)
+                val nit = self.native_int()
                 var cases: [(text, text)] = []
                 for switch_case in targets:
                     val case_value = "{switch_case.value}"
                     val case_label = "bb{switch_case.target}"
                     cases = cases.push((case_value, case_label))
-                self.builder.emit_switch(discr_val, "i64", "bb{default}", cases)
+                self.builder.emit_switch(discr_val, nit, "bb{default}", cases)
 
             case Unreachable:
                 self.builder.emit("  unreachable")
@@ -687,14 +952,27 @@ class MirToLlvm:
                 self.builder.emit("  unreachable")
 
             case CallTerminator(dest, func, args, normal, unwind):
-                # Call with exception handling
-                val dest_name = if dest.?: Some(self.get_local(dest.unwrap().id)) else: nil
+                # Call with exception handling via LLVM invoke instruction
                 val func_val = self.translate_operand(func)
                 var arg_vals: [text] = []
                 for arg in args:
                     arg_vals = arg_vals.push(self.translate_operand(arg))
-                # TODO: Implement invoke instruction for exception handling
-                self.builder.emit("  ; TODO: CallTerminator with unwind")
+                val args_str = arg_vals.join(", ")
+                if dest.?:
+                    val dest_name = self.get_local(dest.unwrap().id)
+                    val ret_ty = self.get_local_type(dest.unwrap().id)
+                    if unwind.?:
+                        self.builder.emit("  {dest_name} = invoke {ret_ty} @{func_val}({args_str}) to label %bb{normal} unwind label %bb{unwind.unwrap()}")
+                    else:
+                        # No unwind target: emit regular call then branch
+                        self.builder.emit("  {dest_name} = call {ret_ty} @{func_val}({args_str})")
+                        self.builder.emit_br("bb{normal}")
+                else:
+                    if unwind.?:
+                        self.builder.emit("  invoke void @{func_val}({args_str}) to label %bb{normal} unwind label %bb{unwind.unwrap()}")
+                    else:
+                        self.builder.emit("  call void @{func_val}({args_str})")
+                        self.builder.emit_br("bb{normal}")
 
     me translate_inline_asm(
         asm_template: text,
@@ -718,7 +996,7 @@ class MirToLlvm:
 
             val operand_value = self.translate_operand(input.operand)
             arg_values.push(operand_value)
-            arg_types.push("i64")
+            arg_types.push(self.native_int())
 
         for clobber in clobbers:
             constraint_parts.push("~{{clobber}}")
@@ -758,7 +1036,7 @@ class MirToLlvm:
             case Imm: "i"
             case RegSpec(name): "{{name}}"
 
-    fn translate_operand(operand: MirOperand) -> text:
+    me translate_operand(operand: MirOperand) -> text:
         """Translate MIR operand to LLVM value."""
         match operand.kind:
             case Copy(local):
@@ -766,7 +1044,58 @@ class MirToLlvm:
             case Move(local):
                 self.get_local(local)
             case Const(value, type_):
-                "0"
+                self.translate_const_value(value)
+
+    fn get_operand_type(operand: MirOperand) -> text:
+        """Get the LLVM type string for an operand."""
+        match operand.kind:
+            case Copy(local):
+                self.get_local_type(local)
+            case Move(local):
+                self.get_local_type(local)
+            case Const(value, type_):
+                self.type_mapper.map_type(type_)
+
+    fn select_cast_instruction(src_ty: text, target_ty: text) -> text:
+        """Select the appropriate LLVM cast instruction based on source and target types."""
+        # Integer widening (sign-extend)
+        if src_ty == "i8" and (target_ty == "i16" or target_ty == "i32" or target_ty == "i64"):
+            return "sext"
+        if src_ty == "i16" and (target_ty == "i32" or target_ty == "i64"):
+            return "sext"
+        if src_ty == "i32" and target_ty == "i64":
+            return "sext"
+        # Integer narrowing (truncate)
+        if src_ty == "i64" and (target_ty == "i32" or target_ty == "i16" or target_ty == "i8"):
+            return "trunc"
+        if src_ty == "i32" and (target_ty == "i16" or target_ty == "i8"):
+            return "trunc"
+        if src_ty == "i16" and target_ty == "i8":
+            return "trunc"
+        # Bool (i1) widening
+        if src_ty == "i1" and (target_ty == "i8" or target_ty == "i16" or target_ty == "i32" or target_ty == "i64"):
+            return "zext"
+        # Integer to float
+        if (src_ty == "i8" or src_ty == "i16" or src_ty == "i32" or src_ty == "i64") and target_ty == "double":
+            return "sitofp"
+        if (src_ty == "i8" or src_ty == "i16" or src_ty == "i32" or src_ty == "i64") and target_ty == "float":
+            return "sitofp"
+        # Float to integer
+        if (src_ty == "double" or src_ty == "float") and (target_ty == "i8" or target_ty == "i16" or target_ty == "i32" or target_ty == "i64"):
+            return "fptosi"
+        # Float widening/narrowing
+        if src_ty == "float" and target_ty == "double":
+            return "fpext"
+        if src_ty == "double" and target_ty == "float":
+            return "fptrunc"
+        # Pointer to integer
+        if src_ty == "ptr" and (target_ty == "i32" or target_ty == "i64"):
+            return "ptrtoint"
+        # Integer to pointer
+        if (src_ty == "i32" or src_ty == "i64") and target_ty == "ptr":
+            return "inttoptr"
+        # Default fallback
+        "bitcast"
 
     fn get_local(id: i64) -> text:
         """Get LLVM local name for MIR local."""

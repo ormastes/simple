@@ -679,20 +679,52 @@ impl StrengthReduction:
         Try to reduce binary operation.
 
         Patterns:
-        - x * 2^n -> x << n
-        - x / 2^n -> x >> n (unsigned)
+        - x * 0 -> 0 (identity)
+        - x * 1 -> x (identity)
+        - x * 2^n -> x << n (shift)
+        - x / 1 -> x (identity)
+        - x / 2^n -> x >> n (shift, unsigned)
+        - x % 1 -> 0 (identity)
+        - x % 2^n -> x & (2^n - 1) (bitmask)
+        - x + 0 -> x, x - 0 -> x (identity)
         """
-        # Strength reduction: multiply/divide by power of 2 → shift
         match op:
             case Mul:
-                # Check if right operand is a constant power of 2
+                # Check for multiply by constant on right
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x * 0 -> 0
+                    if rv == 0:
+                        return MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        )
+                    # x * 1 -> x (copy)
+                    if rv == 1:
+                        return self.copy_operand_to_dest(dest, left, span)
+
+                # Check for multiply by constant on left
+                val left_const = self.operand_const_int_value(left)
+                if left_const.?:
+                    val lv = left_const.unwrap()
+                    # 0 * x -> 0
+                    if lv == 0:
+                        return MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        )
+                    # 1 * x -> x (copy)
+                    if lv == 1:
+                        return self.copy_operand_to_dest(dest, right, span)
+
+                # Power-of-2 multiply -> shift left
                 val shift = self.const_log2(right)
                 if shift.?:
                     return MirInst(
                         kind: MirInstKind.BinOp(dest, MirBinOp.Shl, left, mir_operand_const_int(shift.unwrap())),
                         span: span
                     )
-                # Also check left operand
                 val shift_l = self.const_log2(left)
                 if shift_l.?:
                     return MirInst(
@@ -701,6 +733,13 @@ impl StrengthReduction:
                     )
                 nil
             case Div:
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x / 1 -> x
+                    if rv == 1:
+                        return self.copy_operand_to_dest(dest, left, span)
+
                 # x / 2^n -> x >> n (for positive divisors)
                 val shift = self.const_log2(right)
                 if shift.?:
@@ -710,6 +749,16 @@ impl StrengthReduction:
                     )
                 nil
             case Rem:
+                val right_const = self.operand_const_int_value(right)
+                if right_const.?:
+                    val rv = right_const.unwrap()
+                    # x % 1 -> 0
+                    if rv == 1:
+                        return MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(0), MirType.i64()),
+                            span: span
+                        )
+
                 # x % 2^n -> x & (2^n - 1) (for positive values)
                 val shift = self.const_log2(right)
                 if shift.?:
@@ -719,8 +768,42 @@ impl StrengthReduction:
                         span: span
                     )
                 nil
+            case Add:
+                # x + 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                val left_const = self.operand_const_int_value(left)
+                if left_const.? and left_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, right, span)
+                nil
+            case Sub:
+                # x - 0 -> x
+                val right_const = self.operand_const_int_value(right)
+                if right_const.? and right_const.unwrap() == 0:
+                    return self.copy_operand_to_dest(dest, left, span)
+                nil
             case _:
                 nil
+
+    fn operand_const_int_value(op: MirOperand) -> i64?:
+        """Extract constant integer value from operand."""
+        match op.kind:
+            case Const(value, _):
+                match value:
+                    case Int(n): Some(n)
+                    case _: nil
+            case _: nil
+
+    fn copy_operand_to_dest(dest: LocalId, op: MirOperand, span: Span) -> MirInst?:
+        """Create a copy/move/const instruction from operand to dest."""
+        match op.kind:
+            case Copy(src):
+                Some(MirInst(kind: MirInstKind.Copy(dest, src), span: span))
+            case Move(src):
+                Some(MirInst(kind: MirInstKind.Move(dest, src), span: span))
+            case Const(value, type_):
+                Some(MirInst(kind: MirInstKind.Const(dest, value, type_), span: span))
 
     fn const_log2(operand: MirOperand) -> i64?:
         """Check if operand is a constant power of 2, return log2 if so."""

@@ -1,0 +1,74 @@
+"""
+# LLVM Backend i686 (x86 32-bit) Specification
+
+**Feature IDs:** #4001
+**Category:** Infrastructure
+**Difficulty:** 3/5
+**Status:** In Progress
+
+Validates that the LLVM backend correctly generates code for 32-bit x86 (i686) targets.
+This includes target triple generation, datalayout, native integer types, and CPU defaults.
+"""
+
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, LlvmIRBuilder__create, MirToLlvm, MirToLlvm__create}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetTriple__from_target, LlvmTargetConfig, LlvmTargetConfig__for_target, LlvmTargetConfig__compatibility_build}
+use compiler.backend.llvm_type_mapper.{LlvmTypeMapper, LlvmTypeMapper__create_for_target}
+use compiler.backend.backend_types.{CodegenTarget, OptimizationLevel}
+
+describe "LLVM Backend i686":
+
+    context "target triple":
+        it "generates correct i686 triple":
+            val triple = LlvmTargetTriple__from_target(CodegenTarget.X86)
+            expect(triple.arch).to_equal("i686")
+            expect(triple.to_text()).to_contain("i686")
+
+        it "includes correct OS in triple":
+            val triple = LlvmTargetTriple__from_target(CodegenTarget.X86)
+            val text = triple.to_text()
+            # Should have linux-gnu or similar env
+            expect(text).to_contain("i686")
+
+    context "datalayout":
+        it "contains 32-bit pointer specification":
+            val triple = LlvmTargetTriple__from_target(CodegenTarget.X86)
+            val dl = triple.datalayout()
+            expect(dl).to_contain("p:32:32")
+
+        it "emits datalayout in module header":
+            val triple = LlvmTargetTriple__from_target(CodegenTarget.X86)
+            var builder = LlvmIRBuilder__create("test_i686", triple)
+            builder.emit_module_header()
+            val ir = builder.instructions.join("\n")
+            expect(ir).to_contain("target datalayout")
+            expect(ir).to_contain("p:32:32")
+
+    context "type mapping":
+        it "uses 32-bit target_bits":
+            val mapper = LlvmTypeMapper__create_for_target(CodegenTarget.X86)
+            expect(mapper.target_bits).to_equal(32)
+
+    context "native integer type":
+        it "native_int_type is i32":
+            var translator = MirToLlvm__create("test", CodegenTarget.X86, nil)
+            expect(translator.native_int()).to_equal("i32")
+
+    context "CPU defaults":
+        it "defaults to i686 CPU":
+            val config = LlvmTargetConfig__for_target(CodegenTarget.X86, nil)
+            expect(config.cpu).to_equal("i686")
+
+        it "includes sse2 feature":
+            val config = LlvmTargetConfig__for_target(CodegenTarget.X86, nil)
+            expect(config.features).to_contain("+sse2")
+
+    context "compatibility build":
+        it "works for i686":
+            val config = LlvmTargetConfig__compatibility_build(CodegenTarget.X86)
+            expect(config.cpu).to_equal("i686")
+
+    context "builder size type":
+        it "uses i32 size type for memcpy/memset":
+            val triple = LlvmTargetTriple__from_target(CodegenTarget.X86)
+            var builder = LlvmIRBuilder__create("test", triple)
+            expect(builder.size_type).to_equal("i32")

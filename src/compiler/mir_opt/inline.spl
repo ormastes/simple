@@ -326,6 +326,10 @@ class FunctionInlining:
        b. Check inlining heuristics
        c. Perform inlining if beneficial
     3. Repeat until fixed point or max iterations
+
+    The function_table maps function names to MirFunction definitions,
+    allowing find_callee_function to resolve call targets for inlining.
+    Populate it via set_function_table before running run_on_function.
     """
     threshold: i64
     policy: InlinePolicy
@@ -333,6 +337,7 @@ class FunctionInlining:
     inlined_functions: i64
     inlined_call_sites: i64
     iterations: i64
+    function_table: Dict<text, MirFunction>
 
 impl FunctionInlining:
     static fn new(threshold: i64, policy: InlinePolicy) -> FunctionInlining:
@@ -342,7 +347,8 @@ impl FunctionInlining:
             cost_analyzer: InlineCostAnalyzer.new(threshold),
             inlined_functions: 0,
             inlined_call_sites: 0,
-            iterations: 0
+            iterations: 0,
+            function_table: {}
         )
 
     static fn small_functions() -> FunctionInlining:
@@ -356,6 +362,15 @@ impl FunctionInlining:
     static fn very_aggressive() -> FunctionInlining:
         """Very aggressive inlining (max speed, may increase code size)."""
         FunctionInlining.new(2000, InlinePolicy.Aggressive)
+
+    me set_function_table(table: Dict<text, MirFunction>):
+        """Set the function table for cross-function callee resolution.
+
+        Call this before run_on_function to enable inlining of calls
+        to functions defined in the same module. The table maps function
+        names to their MirFunction definitions.
+        """
+        self.function_table = table
 
     fn name() -> text:
         "function_inlining"
@@ -373,9 +388,9 @@ impl FunctionInlining:
         """
         Run inlining on a function.
 
-        Note: This pass needs access to other functions in the module
-        to perform inlining. For now, we implement a simplified version
-        that only handles single-block functions.
+        Resolves call targets using the function_table (set via
+        set_function_table). Only inlines small, non-recursive,
+        single-block callees that pass the cost/policy check.
         """
         self.iterations = self.iterations + 1
 
@@ -459,15 +474,45 @@ impl FunctionInlining:
         """
         Try to resolve a callee operand to a function definition.
 
-        For single-function inlining, checks if the callee is a small
-        single-block function defined within the same compilation context.
+        Looks up the callee in the function_table by extracting the function
+        name from the operand. Returns the MirFunction if found and it is
+        not the caller itself (to avoid trivial self-inlining at this level).
         Returns nil if the callee cannot be resolved or is external.
         """
-        # In a full implementation, this would look up the function symbol
-        # in the module's function table. For now, we cannot resolve cross-function
-        # references without module context, so return nil.
-        # Module-level inlining (ModuleInliner) handles cross-function cases.
+        # Extract function name from the callee operand
+        val func_name = self.extract_callee_name(callee_op)
+        if not func_name.?:
+            return nil
+
+        val name = func_name.unwrap()
+
+        # Don't inline self (recursion is handled by is_recursive check,
+        # but avoid even looking up self as a candidate)
+        if name == caller.name:
+            return nil
+
+        # Look up in function table
+        if self.function_table.has(name):
+            return Some(self.function_table[name])
+
         nil
+
+    fn extract_callee_name(op: MirOperand) -> text?:
+        """Extract function name from a callee operand.
+
+        Callee operands are typically Const with a Str value (function name)
+        and FuncPtr type, or Const with Int value and FuncPtr type (symbol ID).
+        """
+        match op.kind:
+            case Const(value, type_):
+                # Check that this is a function pointer type
+                match type_.kind:
+                    case FuncPtr(_):
+                        match value:
+                            case Str(name): Some(name)
+                            case _: nil
+                    case _: nil
+            case _: nil
 
     # ========================================================================
     # Statistics
@@ -504,15 +549,17 @@ impl ModuleInliner:
         Perform inlining across module.
 
         Strategy:
-        1. Build call graph
-        2. Identify inline candidates (leaf functions first)
-        3. Bottom-up inlining (inline callees into callers)
-        4. Repeat until fixed point
+        1. Identify inline candidates (small, non-recursive, single-block)
+        2. Build both symbol-ID and name-based lookup tables
+        3. For each function in the module, inline eligible callees
+        4. Return optimized module
         """
         val cost_analyzer = InlineCostAnalyzer.new(self.threshold)
 
         # Phase 1: Identify small single-block functions eligible for inlining
+        # Build both ID-based and name-based candidate tables for lookup
         var inline_candidates: Dict<i64, MirFunction> = {}
+        var inline_candidates_by_name: Dict<text, MirFunction> = {}
         for func_symbol in module.functions.keys():
             val func = module.functions[func_symbol]
             val size = cost_analyzer.estimate_function_size(func)
@@ -520,6 +567,7 @@ impl ModuleInliner:
 
             if not is_recursive and func.blocks.len() == 1 and self.policy.should_inline(size, self.threshold):
                 inline_candidates[func_symbol.id] = func
+                inline_candidates_by_name[func.name] = func
 
         if inline_candidates.len() == 0:
             return module
@@ -533,7 +581,7 @@ impl ModuleInliner:
 
             for block in func.blocks:
                 val result = self.inline_calls_in_block_with_candidates(
-                    block, func, inline_candidates, cost_analyzer
+                    block, func, inline_candidates, inline_candidates_by_name, cost_analyzer
                 )
                 optimized_blocks.push(result.block)
                 if result.did_inline:
@@ -565,14 +613,16 @@ impl ModuleInliner:
         block: MirBlock,
         caller: MirFunction,
         candidates: Dict<i64, MirFunction>,
+        candidates_by_name: Dict<text, MirFunction>,
         cost_analyzer: InlineCostAnalyzer
     ) -> InlineResult:
         """
         Inline eligible calls in a block using known candidate functions.
 
         Scans block instructions for Call instructions whose callee symbol
-        matches a candidate function. For matching calls, replaces the call
-        with the inlined function body.
+        matches a candidate function. Looks up candidates by symbol ID first,
+        then falls back to name-based lookup. For matching calls, replaces
+        the call with the inlined function body.
         """
         var new_instructions: [MirInst] = []
         var did_inline = false
@@ -580,10 +630,23 @@ impl ModuleInliner:
         for inst in block.instructions:
             match inst.kind:
                 case Call(dest, callee_op, args):
-                    # Try to resolve callee to a candidate function by symbol ID
+                    # Try to resolve callee to a candidate function
+                    # First try by symbol ID
+                    var resolved_callee: MirFunction? = nil
                     val callee_id = self.extract_func_symbol_id(callee_op)
                     if callee_id.? and candidates.has(callee_id.unwrap()):
-                        val callee = candidates[callee_id.unwrap()]
+                        resolved_callee = Some(candidates[callee_id.unwrap()])
+
+                    # Fall back to name-based lookup
+                    if not resolved_callee.?:
+                        val callee_name = self.extract_func_name(callee_op)
+                        if callee_name.? and candidates_by_name.has(callee_name.unwrap()):
+                            # Don't inline self
+                            if callee_name.unwrap() != caller.name:
+                                resolved_callee = Some(candidates_by_name[callee_name.unwrap()])
+
+                    if resolved_callee.?:
+                        val callee = resolved_callee.unwrap()
                         # Perform inlining for single-block callees
                         var inliner = FunctionInliner.new(caller.locals.len() + 100)
                         val temp_block = MirBlock(
@@ -622,6 +685,18 @@ impl ModuleInliner:
                     case Int(id):
                         match type_.kind:
                             case FuncPtr(_): Some(id)
+                            case _: nil
+                    case _: nil
+            case _: nil
+
+    fn extract_func_name(op: MirOperand) -> text?:
+        """Extract function name from a Const operand with FuncPtr type and Str value."""
+        match op.kind:
+            case Const(value, type_):
+                match type_.kind:
+                    case FuncPtr(_):
+                        match value:
+                            case Str(name): Some(name)
                             case _: nil
                     case _: nil
             case _: nil

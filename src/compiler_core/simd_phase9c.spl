@@ -2,9 +2,12 @@
 SIMD Complete - Phase 9C: Platform Detection & Intrinsics
 
 Implements SIMD capability detection and platform-specific optimizations.
+Detects capabilities via /proc/cpuinfo (Linux) at runtime.
 
-Status: Phase 9C In Progress
+Status: Phase 9C Complete
 """
+
+extern fn rt_file_read_text(path: text) -> text?
 
 # ============================================================================
 # SIMD Platform Detection
@@ -42,7 +45,7 @@ class SimdCapabilities:
 
 fn simdcapabilities_detect() -> SimdCapabilities:
         """
-        Detect available SIMD platform
+        Detect available SIMD platform by reading /proc/cpuinfo flags.
 
         Detection order (best to worst):
         1. AVX-512 (512-bit)
@@ -51,39 +54,122 @@ fn simdcapabilities_detect() -> SimdCapabilities:
         4. SSE2 (128-bit, doubles)
         5. SSE (128-bit)
         6. NEON (ARM, 128-bit)
-        7. nil (scalar fallback)
-
-        Note: Actual detection would use CPUID on x86 or
-        /proc/cpuinfo on Linux. This is a placeholder.
+        7. None_Platform (scalar fallback)
         """
-        # Placeholder: In real implementation, would detect via CPUID
-        # For now, assume SSE2 (common baseline on modern x86_64)
-        SimdCapabilities(platform: SimdPlatform.SSE2)
+        # Read /proc/cpuinfo to detect CPU flags
+        val cpuinfo = _read_cpuinfo()
+        val flags = _extract_cpu_flags(cpuinfo)
+
+        # Check for ARM first (flags field is "Features" on ARM)
+        val is_arm = cpuinfo.contains("CPU architecture") or cpuinfo.contains("processor\t:")
+        val is_arm_2 = cpuinfo.contains("Features\t")
+        val arm_detected = is_arm and is_arm_2
+
+        if arm_detected:
+            val arm_platform = simdcapabilities_detect_arm_from_flags(flags)
+            return SimdCapabilities(platform: arm_platform)
+
+        # x86/x86_64 detection from flags
+        val x86_platform = simdcapabilities_detect_x86_from_flags(flags)
+        SimdCapabilities(platform: x86_platform)
 
 
 fn simdcapabilities_detect_x86() -> SimdPlatform:
         """
-        Detect x86/x86_64 SIMD capabilities
+        Detect x86/x86_64 SIMD capabilities from /proc/cpuinfo.
 
-        Would use CPUID instruction:
-        - EAX=1: Check SSE/SSE2 bits
-        - EAX=7, ECX=0: Check AVX2/AVX512 bits
+        Reads CPU flags and checks for:
+        - SSE (flag: sse)
+        - SSE2 (flag: sse2)
+        - AVX (flag: avx)
+        - AVX2 (flag: avx2)
+        - AVX-512 (flag: avx512f)
         """
-        # Placeholder: Assume SSE2 baseline
-        SimdPlatform.SSE2
+        val cpuinfo = _read_cpuinfo()
+        val flags = _extract_cpu_flags(cpuinfo)
+        simdcapabilities_detect_x86_from_flags(flags)
+
+
+fn simdcapabilities_detect_x86_from_flags(flags: text) -> SimdPlatform:
+        """Detect x86 SIMD from parsed flags string."""
+        # Check best to worst
+        val has_avx512 = flags.contains(" avx512f ") or flags.contains(" avx512f\n")
+        if has_avx512:
+            return SimdPlatform.AVX512
+
+        val has_avx2 = flags.contains(" avx2 ") or flags.contains(" avx2\n")
+        if has_avx2:
+            return SimdPlatform.AVX2
+
+        val has_avx = flags.contains(" avx ") or flags.contains(" avx\n")
+        if has_avx:
+            return SimdPlatform.AVX
+
+        val has_sse2 = flags.contains(" sse2 ") or flags.contains(" sse2\n")
+        if has_sse2:
+            return SimdPlatform.SSE2
+
+        val has_sse = flags.contains(" sse ") or flags.contains(" sse\n")
+        if has_sse:
+            return SimdPlatform.SSE
+
+        SimdPlatform.None_Platform
 
 
 fn simdcapabilities_detect_arm() -> SimdPlatform:
         """
-        Detect ARM SIMD capabilities
+        Detect ARM SIMD capabilities from /proc/cpuinfo.
 
-        Would check:
-        - /proc/cpuinfo for NEON
-        - HWCAP_ASIMD for NEON
-        - HWCAP_SVE for SVE
+        Reads Features field and checks for:
+        - SVE (flag: sve)
+        - NEON / ASIMD (flag: asimd or neon)
         """
-        # Placeholder: Assume NEON on ARM
-        SimdPlatform.NEON
+        val cpuinfo = _read_cpuinfo()
+        val flags = _extract_cpu_flags(cpuinfo)
+        simdcapabilities_detect_arm_from_flags(flags)
+
+
+fn simdcapabilities_detect_arm_from_flags(flags: text) -> SimdPlatform:
+        """Detect ARM SIMD from parsed flags string."""
+        val has_sve = flags.contains(" sve ") or flags.contains(" sve\n")
+        if has_sve:
+            return SimdPlatform.SVE
+
+        val has_asimd = flags.contains(" asimd ") or flags.contains(" asimd\n")
+        val has_neon = flags.contains(" neon ") or flags.contains(" neon\n")
+        if has_asimd or has_neon:
+            return SimdPlatform.NEON
+
+        SimdPlatform.None_Platform
+
+
+fn _read_cpuinfo() -> text:
+        """Read /proc/cpuinfo. Returns empty string if not available."""
+        val result = rt_file_read_text("/proc/cpuinfo")
+        if result.?:
+            result.unwrap()
+        else:
+            ""
+
+
+fn _extract_cpu_flags(cpuinfo: text) -> text:
+        """Extract flags/features line from cpuinfo text.
+        On x86: 'flags' field. On ARM: 'Features' field.
+        Returns the flags with leading space for word-boundary matching."""
+        val lines = cpuinfo.split("\n")
+        for line in lines:
+            val trimmed = line.trim()
+            # x86 format: "flags\t\t: sse sse2 avx ..."
+            if trimmed.starts_with("flags"):
+                val colon_pos = trimmed.find(":")
+                if colon_pos >= 0:
+                    return " " + trimmed[(colon_pos + 1):].trim() + " "
+            # ARM format: "Features\t: neon asimd ..."
+            if trimmed.starts_with("Features"):
+                val colon_pos = trimmed.find(":")
+                if colon_pos >= 0:
+                    return " " + trimmed[(colon_pos + 1):].trim() + " "
+        ""
 
 
 # ============================================================================

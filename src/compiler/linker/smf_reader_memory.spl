@@ -29,6 +29,8 @@ struct SmfHeader:
     has_templates: bool
     has_note_sdn: bool
     compression: CompressionType
+    section_table_offset: i64
+    symbol_table_offset: i64
 
 impl SmfHeader:
     fn is_valid() -> bool:
@@ -116,11 +118,44 @@ impl SmfReaderMemory:
 
     """Read code bytes for a symbol."""
     fn read_code(symbol: SmfSymbol) -> Result<[u8], text>:
-        # For now, return a stub implementation
-        # Full implementation would:
-        # 1. Find the code section using symbol.section_index
-        # 2. Extract bytes from symbol.offset to symbol.offset + symbol.size
-        Err("read_code not yet implemented for memory reader")
+        # Each section table entry is 64 bytes:
+        #   section_type (1) + padding (3) + flags (4) + offset (8) +
+        #   size (8) + virtual_size (8) + alignment (4) + name (16) + pad (12)
+        val section_entry_size = 64
+        val sec_idx = symbol.section_index as i64
+        val sec_entry_offset = self.sections_offset + sec_idx * section_entry_size
+
+        # Validate section entry is within data bounds
+        val sec_entry_end = sec_entry_offset + section_entry_size
+        if sec_entry_end > self.data.len():
+            return Err("Section entry {sec_idx} out of bounds")
+
+        # Read the section's file offset from the entry (bytes 8..16 within entry)
+        val sec_offset = bytes_to_u64(self.data, sec_entry_offset + 8) as i64
+
+        # Read the section's size from the entry (bytes 16..24 within entry)
+        val sec_size = bytes_to_u64(self.data, sec_entry_offset + 16) as i64
+
+        # Calculate start and end within self.data
+        val start = sec_offset + symbol.offset
+        val end = start + symbol.size
+
+        # Bounds check against section size
+        val sym_end_in_sec = symbol.offset + symbol.size
+        if sym_end_in_sec > sec_size:
+            return Err("Symbol {symbol.name} extends beyond section (offset={symbol.offset}, size={symbol.size}, section_size={sec_size})")
+
+        # Bounds check against data length
+        if end > self.data.len():
+            return Err("Symbol {symbol.name} data extends beyond file (end={end}, data_len={self.data.len()})")
+
+        # Extract bytes
+        var result: [u8] = []
+        var i = start
+        while i < end:
+            result.push(self.data[i])
+            i = i + 1
+        Ok(result)
 
     """Get the parsed header."""
     fn get_header() -> SmfHeader:
@@ -206,30 +241,160 @@ fn parse_header_from_bytes(data: [u8]) -> Result<SmfHeader, text>:
         entry_point: entry_point as i64,
         has_templates: (flags_raw & 0x10) != 0,
         has_note_sdn: (flags_raw & 0x20) != 0,
-        compression: compression
+        compression: compression,
+        section_table_offset: section_table_offset as i64,
+        symbol_table_offset: symbol_table_offset as i64
     )
 
     Ok(header)
 
 """Extract string table from SMF data."""
 fn extract_string_table(data: [u8], header: SmfHeader) -> Result<[u8], text>:
-    # String table location is typically after symbol table
-    # For now, return an empty table as a stub
-    # Full implementation would parse section table to find StrTab section
-    Ok([])
+    val section_entry_size = 64
+    val section_count = header.section_count as i64
+    val sections_off = header.section_table_offset
+
+    # First, scan the section table for a StrTab section (section_type == 6)
+    # Section types: 1=Code, 2=Data, 3=RoData, 4=Bss, 5=SymTab, 6=StrTab
+    var i = 0
+    while i < section_count:
+        val entry_off = sections_off + i * section_entry_size
+        val entry_end = entry_off + section_entry_size
+        if entry_end > data.len():
+            i = i + 1
+            continue
+
+        val sec_type = data[entry_off] as i32
+        # StrTab section type (match smf_writer.spl SectionType enum order:
+        # Code=0/1, Data=1/2, RoData=2/3, Bss=3/4, SymTab=4/5, StrTab=5/6)
+        # The writer uses numeric section types: 1=Code, 12=TemplateCode, 13=TemplateMeta
+        # StrTab would be type 6 if present as a section entry
+        if sec_type == 6:
+            val str_offset = bytes_to_u64(data, entry_off + 8) as i64
+            val str_size = bytes_to_u64(data, entry_off + 16) as i64
+            val str_end = str_offset + str_size
+            if str_end > data.len():
+                return Err("String table section extends beyond data")
+            var result: [u8] = []
+            var j = str_offset
+            while j < str_end:
+                result.push(data[j])
+                j = j + 1
+            return Ok(result)
+        i = i + 1
+
+    # No StrTab section found in section table.
+    # Fall back: string table is after symbol table, before the 128-byte trailer header.
+    # Symbol entry size is 52 bytes (as written by backend/native and smf_writer).
+    val symbol_entry_size = 52
+    val sym_table_off = header.symbol_table_offset
+    val sym_count = header.symbol_count as i64
+    val str_start = sym_table_off + sym_count * symbol_entry_size
+
+    # The header trailer is the last 128 bytes of data
+    val header_trailer_off = data.len() - 128
+    # But if header is at offset 0 (v1.0 or archive-stored format), string table
+    # extends to end of data or just before next structure
+    var str_end = data.len()
+    if header_trailer_off > str_start:
+        str_end = header_trailer_off
+
+    if str_start > data.len():
+        return Err("String table offset beyond data (sym_table={sym_table_off}, sym_count={sym_count})")
+
+    if str_start >= str_end:
+        # Empty string table
+        return Ok([])
+
+    var result: [u8] = []
+    var k = str_start
+    while k < str_end:
+        result.push(data[k])
+        k = k + 1
+    Ok(result)
 
 """Parse symbol table from SMF data."""
 fn parse_symbol_table(data: [u8], header: SmfHeader, string_table: [u8]) -> Result<Dict<text, SmfSymbol>, text>:
     var symbols: Dict<text, SmfSymbol> = {}
 
-    # Symbol table starts at symbol_table_offset
-    # Each symbol is 72 bytes
-    # For now, return empty as a stub
-    # Full implementation would:
-    # 1. Seek to symbol_table_offset
-    # 2. Read symbol_count * 72 bytes
-    # 3. Parse each symbol
-    # 4. Resolve names from string table
+    # Symbol entry layout (52 bytes, matching build_symbol_entry in smf_writer.spl):
+    #   name_offset:           u32 (4 bytes)  offset 0
+    #   name_hash:             u64 (8 bytes)  offset 4
+    #   sym_type:              u8  (1 byte)   offset 12
+    #   binding:               u8  (1 byte)   offset 13
+    #   visibility:            u8  (1 byte)   offset 14
+    #   flags:                 u8  (1 byte)   offset 15
+    #   value:                 u64 (8 bytes)  offset 16
+    #   size:                  u64 (8 bytes)  offset 24
+    #   type_id:               u32 (4 bytes)  offset 32
+    #   version:               u32 (4 bytes)  offset 36
+    #   template_param_count:  u8  (1 byte)   offset 40
+    #   reserved:              3 bytes         offset 41
+    #   template_offset:       u64 (8 bytes)  offset 44
+    #   Total: 52 bytes
+    val symbol_entry_size = 52
+    val sym_table_off = header.symbol_table_offset
+    val sym_count = header.symbol_count as i64
+
+    var i = 0
+    while i < sym_count:
+        val entry_off = sym_table_off + i * symbol_entry_size
+        val entry_end = entry_off + symbol_entry_size
+        if entry_end > data.len():
+            return Err("Symbol entry {i} extends beyond data")
+
+        # Read name_offset (u32 at offset 0)
+        val name_offset = bytes_to_u32(data, entry_off)
+
+        # Read sym_type (u8 at offset 12)
+        val sym_type = data[entry_off + 12]
+
+        # Read binding (u8 at offset 13)
+        val binding_raw = data[entry_off + 13]
+
+        # Read flags (u8 at offset 15)
+        val flags_raw = data[entry_off + 15]
+
+        # Read value (u64 at offset 16) - offset within section
+        val value = bytes_to_u64(data, entry_off + 16)
+
+        # Read size (u64 at offset 24)
+        val size = bytes_to_u64(data, entry_off + 24)
+
+        # Read template_param_count (u8 at offset 40)
+        val tpl_param_count = data[entry_off + 40]
+
+        # Read template_offset (u64 at offset 44)
+        val tpl_offset = bytes_to_u64(data, entry_off + 44)
+
+        # Resolve name from string table
+        val name = read_string_from_table(string_table, name_offset as i64)
+
+        # Derive section index from symbol type
+        val section_idx = derive_section_index(sym_type)
+
+        # Parse binding
+        val binding = parse_binding(binding_raw)
+
+        # Parse symbol type
+        val sym_ty = parse_sym_type(sym_type)
+
+        # Check if generic template
+        val is_generic = (flags_raw & 0x10) != 0
+
+        val symbol = SmfSymbol(
+            name: name,
+            section_index: section_idx,
+            offset: value as i64,
+            size: size as i64,
+            ty: sym_ty,
+            binding: binding,
+            is_generic_template: is_generic,
+            template_param_count: tpl_param_count as i32,
+            template_offset: tpl_offset as i64
+        )
+        symbols[name] = symbol
+        i = i + 1
 
     Ok(symbols)
 
@@ -258,6 +423,55 @@ fn bytes_to_u64(bytes: [u8], offset: i64) -> u64:
     val b7 = bytes[offset + 7] as u64
 
     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+
+"""Read a null-terminated string from the string table at the given byte offset."""
+fn read_string_from_table(table: [u8], offset: i64) -> text:
+    var chars: [text] = []
+    var pos = offset
+    while pos < table.len():
+        val byte = table[pos]
+        if byte == 0:
+            return chars.join("")
+        chars.push(char_from_byte(byte))
+        pos = pos + 1
+    chars.join("")
+
+"""Convert a single byte to its ASCII character as text."""
+fn char_from_byte(b: u8) -> text:
+    val ascii_table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    val idx = (b as i32) - 32
+    if idx >= 0 and idx < ascii_table.len():
+        ascii_table[idx:idx + 1]
+    else:
+        "?"
+
+"""Derive section index from symbol type byte."""
+fn derive_section_index(sym_type: u8) -> i32:
+    # Functions go in code section (0), data/constants in data section (1).
+    match sym_type:
+        0: 0   # Function -> code section
+        1: 1   # Data -> data section
+        5: 1   # Constant -> data section
+        _: 0   # Default to code section
+
+"""Parse symbol binding from byte value."""
+fn parse_binding(b: u8) -> SymbolBinding:
+    match b:
+        0: SymbolBinding.Local
+        1: SymbolBinding.Global
+        2: SymbolBinding.Weak
+        _: SymbolBinding.Local
+
+"""Parse symbol type from byte value."""
+fn parse_sym_type(t: u8) -> SymbolType:
+    match t:
+        0: SymbolType.Function
+        1: SymbolType.Data
+        2: SymbolType.Type
+        3: SymbolType.Trait
+        4: SymbolType.ActorSymbol
+        5: SymbolType.Constant
+        _: SymbolType.Unknown
 
 # ============================================================================
 # Exports

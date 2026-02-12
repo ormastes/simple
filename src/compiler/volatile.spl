@@ -16,9 +16,11 @@
 from hir_types import {HirType, SymbolId}
 from hir_definitions import {HirExpr, HirExprKind}
 from lexer import {Span}
+from attributes import {FunctionAttr, VolatileAttr, VolatileMode, is_volatile}
 
 export VolatileAccess, VolatileContext, VolatileKind
 export is_volatile_access, mark_volatile, generate_volatile_read, generate_volatile_write
+export volatile_for_naked_context
 
 # Kind of volatile access
 enum VolatileKind:
@@ -114,13 +116,21 @@ impl VolatileContext:
 
 # Check if an expression involves volatile access
 fn is_volatile_access(expr: HirExpr, ctx: VolatileContext) -> bool:
+    # File-level or project-level volatile makes everything volatile
+    if ctx.file_volatile or ctx.project_volatile:
+        return true
+
     match expr.kind:
         case HirExprKind.Var(sym):
-            # Check if variable is marked volatile
-            # Would need symbol table lookup here
-            false  # Placeholder
+            # Check if variable is in volatile context
+            val name = sym.name
+            val in_vars = ctx.volatile_vars.contains_key(name)
+            if in_vars:
+                return ctx.volatile_vars[name]
+            # Check type-level volatility via context helper
+            ctx.is_type_volatile(sym.type_name)
         case HirExprKind.Field(base, field, _):
-            # Check if base type has volatile field
+            # Check if base type has volatile field or base is volatile
             is_volatile_access(base, ctx)
         case HirExprKind.Index(base, _):
             # Array access inherits volatility from base
@@ -174,33 +184,39 @@ fn generate_volatile_write(access: VolatileAccess, value_reg: text) -> text:
 
 # Read a byte from a volatile address
 fn volatile_read_u8(addr: i64) -> u8:
-    # This would generate actual volatile read instruction
-    # Implementation depends on codegen backend
+    var result: u8 = 0
     asm """
-        mov eax, [{addr}]
+        movzx eax, byte ptr [{addr}]
+        mov {result}, al
     """
-    0  # Placeholder return
+    result
 
 # Read a word from a volatile address
 fn volatile_read_u16(addr: i64) -> u16:
+    var result: u16 = 0
     asm """
-        mov ax, [{addr}]
+        movzx eax, word ptr [{addr}]
+        mov {result}, ax
     """
-    0
+    result
 
 # Read a dword from a volatile address
 fn volatile_read_u32(addr: i64) -> u32:
+    var result: u32 = 0
     asm """
-        mov eax, [{addr}]
+        mov eax, dword ptr [{addr}]
+        mov {result}, eax
     """
-    0
+    result
 
 # Read a qword from a volatile address
 fn volatile_read_u64(addr: i64) -> u64:
+    var result: u64 = 0
     asm """
-        mov rax, [{addr}]
+        mov rax, qword ptr [{addr}]
+        mov {result}, rax
     """
-    0
+    result
 
 # Write a byte to a volatile address
 fn volatile_write_u8(addr: i64, value: u8):
@@ -253,3 +269,18 @@ fn compiler_barrier():
         # compiler barrier - no CPU instructions needed
         # just prevents optimization across this point
     """
+
+# Volatile access kind for fields in attribute-marked functions
+fn volatile_for_naked_context(vol_attr: VolatileAttr, func_attr: FunctionAttr) -> VolatileKind:
+    """Determine volatile access kind for fields in attribute-marked functions.
+    In naked functions, all volatile accesses are ReadWrite (no register save/restore)."""
+    if func_attr.is_naked and is_volatile(vol_attr):
+        VolatileKind.ReadWrite
+    elif is_volatile(vol_attr):
+        match vol_attr.mode:
+            case VolatileMode.Full: VolatileKind.ReadWrite
+            case VolatileMode.ReadOnly: VolatileKind.Read
+            case VolatileMode.WriteOnly: VolatileKind.Write
+            case _: VolatileKind.None_
+    else:
+        VolatileKind.None_

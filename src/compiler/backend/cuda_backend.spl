@@ -253,6 +253,61 @@ class CudaBackend:
             case GpuAtomicOp(dest, op, ptr, value):
                 self.compile_atomic(builder, dest, op, ptr, value)
 
+            # --- Function Calls ---
+
+            case Call(dest, func, args):
+                self.compile_call(builder, dest, func, args)
+
+            case CallIndirect(dest, ptr, args, sig):
+                # Indirect calls are not supported in PTX; emit comment
+                builder.emit_comment("Indirect call not supported on GPU")
+
+            # --- Aggregate Operations ---
+
+            case Aggregate(dest, kind, operands):
+                self.compile_aggregate(builder, dest, kind, operands)
+
+            case GetField(dest, base, field):
+                self.compile_get_field(builder, dest, base, field)
+
+            case SetField(base, field, value):
+                self.compile_set_field(builder, base, field, value)
+
+            # --- Cast Operations ---
+
+            case Cast(dest, operand, target):
+                self.compile_cast(builder, dest, operand, target)
+
+            case Bitcast(dest, operand, target):
+                # Bitcast is a reinterpretation, use mov in PTX
+                val dest_reg = "%r{dest.id}"
+                val src_reg = self.operand_to_reg(operand)
+                builder.emit_line("mov.b64 {dest_reg}, {src_reg};")
+
+            # --- Memory Allocation ---
+
+            case Alloc(dest, type_):
+                self.compile_alloc(builder, dest, type_)
+
+            case GetElementPtr(dest, base, indices):
+                self.compile_gep(builder, dest, base, indices)
+
+            # --- Checked Arithmetic ---
+
+            case CheckedBinOp(dest, op, left, right):
+                # Checked operations compile same as unchecked on GPU
+                self.compile_binop(builder, dest, op, left, right)
+
+            # --- Intrinsics ---
+
+            case Intrinsic(dest, name, args):
+                self.compile_intrinsic(builder, dest, name, args)
+
+            # --- Debug ---
+
+            case DebugValue(local, name):
+                builder.emit_comment("debug: {name} = %r{local.id}")
+
             case Nop:
                 ()
 
@@ -364,6 +419,131 @@ class CudaBackend:
                 builder.emit_line("atom.global.exch.u64 {dest_reg}, [{addr_reg}], {value_reg};")
             case _:
                 builder.emit_comment("Unsupported atomic op: {op}")
+
+    fn compile_call(builder: PtxBuilder, dest: LocalId?, func: MirOperand, args: [MirOperand]):
+        """Compile device function call."""
+        val arg_regs = args.map(\a: self.operand_to_reg(a))
+
+        # Get function name from operand
+        val func_name = self.operand_to_reg(func)
+
+        if dest.?:
+            val dest_reg = "%r{dest.unwrap().id}"
+            builder.emit_call(dest_reg, PrimitiveType.I64, func_name, arg_regs)
+        else:
+            builder.emit_call_void(func_name, arg_regs)
+
+    fn compile_aggregate(builder: PtxBuilder, dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Compile aggregate construction via local memory."""
+        val dest_reg = "%r{dest.id}"
+        # Store each field to local memory at offset
+        builder.emit_comment("aggregate construct -> {dest_reg}")
+        var offset = 0
+        for i, operand in operands.enumerate():
+            val src_reg = self.operand_to_reg(operand)
+            # Store field value at base + offset in local memory
+            builder.emit_line("st.local.u64 [{dest_reg}+{offset}], {src_reg};")
+            offset = offset + 8
+
+    fn compile_get_field(builder: PtxBuilder, dest: LocalId, base: MirOperand, field: i64):
+        """Compile field access via offset load."""
+        val dest_reg = "%r{dest.id}"
+        val base_reg = self.operand_to_reg(base)
+        val offset = field * 8
+        builder.emit_line("ld.local.u64 {dest_reg}, [{base_reg}+{offset}];")
+
+    fn compile_set_field(builder: PtxBuilder, base: MirOperand, field: i64, value: MirOperand):
+        """Compile field write via offset store."""
+        val base_reg = self.operand_to_reg(base)
+        val value_reg = self.operand_to_reg(value)
+        val offset = field * 8
+        builder.emit_line("st.local.u64 [{base_reg}+{offset}], {value_reg};")
+
+    fn compile_cast(builder: PtxBuilder, dest: LocalId, operand: MirOperand, target: MirType):
+        """Compile type conversion using PTX cvt instruction."""
+        val dest_reg = "%r{dest.id}"
+        val src_reg = self.operand_to_reg(operand)
+        val dest_ty = self.mir_type_to_primitive(target)
+        # Infer source type - default to I64
+        val src_ty = PrimitiveType.I64
+        builder.emit_convert(dest_reg, dest_ty, src_reg, src_ty)
+
+    fn compile_alloc(builder: PtxBuilder, dest: LocalId, type_: MirType):
+        """Compile local memory allocation."""
+        val dest_reg = "%r{dest.id}"
+        val prim_ty = self.mir_type_to_primitive(type_)
+        val size = type_.size_bytes()
+        val alloc_name = "local_{dest.id}"
+        builder.emit_local_alloc(alloc_name, prim_ty, 1)
+        # Load address of local allocation into dest register
+        builder.emit_line("mov.u64 {dest_reg}, {alloc_name};")
+
+    fn compile_gep(builder: PtxBuilder, dest: LocalId, base: MirOperand, indices: [MirOperand]):
+        """Compile GetElementPtr - pointer arithmetic with indices."""
+        val dest_reg = "%r{dest.id}"
+        val base_reg = self.operand_to_reg(base)
+        # For simple single-index GEP, compute base + index * element_size
+        if indices.length > 0:
+            val idx_reg = self.operand_to_reg(indices.get(0))
+            val tmp = builder.alloc_reg(PrimitiveType.U64)
+            builder.emit_reg_decl(tmp, PrimitiveType.U64)
+            # Assume 8-byte elements (i64/ptr)
+            builder.emit_line("mul.lo.u64 {tmp}, {idx_reg}, 8;")
+            builder.emit_line("add.u64 {dest_reg}, {base_reg}, {tmp};")
+        else:
+            builder.emit_line("mov.u64 {dest_reg}, {base_reg};")
+
+    fn compile_intrinsic(builder: PtxBuilder, dest: LocalId?, name: text, args: [MirOperand]):
+        """Compile math and GPU intrinsics."""
+        val ty = PrimitiveType.F32  # Default to F32 for math intrinsics
+
+        match name:
+            case "sin":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_sin(d, ty, src)
+            case "cos":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_cos(d, ty, src)
+            case "sqrt":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_sqrt(d, ty, src)
+            case "abs":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_abs(d, ty, src)
+            case "min":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(args.get(0))
+                val b = self.operand_to_reg(args.get(1))
+                builder.emit_intrinsic_min(d, ty, a, b)
+            case "max":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(args.get(0))
+                val b = self.operand_to_reg(args.get(1))
+                builder.emit_intrinsic_max(d, ty, a, b)
+            case "fma":
+                val d = "%r{dest.unwrap().id}"
+                val a = self.operand_to_reg(args.get(0))
+                val b = self.operand_to_reg(args.get(1))
+                val c = self.operand_to_reg(args.get(2))
+                builder.emit_intrinsic_fma(d, ty, a, b, c)
+            case "exp2":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_ex2(d, ty, src)
+            case "log2":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_lg2(d, ty, src)
+            case "rcp":
+                val d = "%r{dest.unwrap().id}"
+                val src = self.operand_to_reg(args.get(0))
+                builder.emit_intrinsic_rcp(d, ty, src)
+            case _:
+                builder.emit_comment("Unknown intrinsic: {name}")
 
     fn compile_terminator(builder: PtxBuilder, term: MirTerminator):
         """Compile block terminator."""

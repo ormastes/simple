@@ -14,6 +14,7 @@ enum Value:
     Unit
     List([Value])
     Function([text], Expr, Environment)
+    Record([(text, Value)])  # Field-value pairs for struct/dict values
 
 # Environment for variable bindings
 class Environment:
@@ -118,8 +119,12 @@ fn eval_stmt(stmt: Stmt, env: Environment) -> Result<Value, EvalError>:
             eval_for(var_name, iter, body, env)
 
         case Stmt.Function(name, params, return_type, body):
-            # Store function in environment
-            # Simplified: just return Unit for now
+            # Store function as a closure in the environment.
+            # Convert the body statements into a block expression so it
+            # can be evaluated when called.
+            var body_expr = Expr.Block(body)
+            var func_val = Value.Function(params, body_expr, env)
+            env.define(name, func_val)
             Ok(Value.Unit)
 
         case Stmt.Struct(name, fields):
@@ -218,13 +223,13 @@ fn eval_expr(expr: Expr, env: Environment) -> Result<Value, EvalError>:
             eval_index(list_expr, index_expr, env)
 
         case Expr.Field(obj, field):
-            Err(EvalError(message: "Field access not yet implemented"))
+            eval_field_access(obj, field, env)
 
         case Expr.If(cond, then_expr, else_expr):
             eval_if(cond, then_expr, else_expr, env)
 
         case Expr.MatchCase(subject, arms):
-            Err(EvalError(message: "Match expression not yet implemented"))
+            eval_match(subject, arms, env)
 
         case Expr.Block(stmts):
             eval_block(stmts, env)
@@ -235,7 +240,9 @@ fn eval_literal(lit: Literal) -> Result<Value, EvalError>:
         case Literal.Int(n):
             Ok(Value.Int(n))
         case Literal.Float(f):
-            Ok(Value.Float(0.0))  # Simplified
+            # f is a text representation; parse to f64
+            var float_val = _parse_float_text(f)
+            Ok(Value.Float(float_val))
         case Literal.String(s):
             Ok(Value.String(s))
         case Literal.Bool(b):
@@ -347,6 +354,109 @@ fn apply_binary_op(op: BinOp, left: Value, right: Value) -> Result<Value, EvalEr
                 case _:
                     Err(EvalError(message: "Type error in logical or"))
 
+        case BinOp.Pow:
+            match (left, right):
+                case (Value.Int(base_val), Value.Int(exp)):
+                    var result = _int_pow(base_val, exp)
+                    Ok(Value.Int(result))
+                case _:
+                    Err(EvalError(message: "Type error in power"))
+
+        case BinOp.BitAnd:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a & b))
+                case _:
+                    Err(EvalError(message: "Type error in bitwise and"))
+
+        case BinOp.BitOr:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a | b))
+                case _:
+                    Err(EvalError(message: "Type error in bitwise or"))
+
+        case BinOp.BitXor:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a ^ b))
+                case _:
+                    Err(EvalError(message: "Type error in bitwise xor"))
+
+        case BinOp.BitShl:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a << b))
+                case _:
+                    Err(EvalError(message: "Type error in left shift"))
+
+        case BinOp.BitShr:
+            match (left, right):
+                case (Value.Int(a), Value.Int(b)):
+                    Ok(Value.Int(a >> b))
+                case _:
+                    Err(EvalError(message: "Type error in right shift"))
+
+        case BinOp.Range:
+            match (left, right):
+                case (Value.Int(start), Value.Int(end)):
+                    var items: [Value] = []
+                    var idx = start
+                    while idx < end:
+                        items.push(Value.Int(idx))
+                        idx = idx + 1
+                    Ok(Value.List(items))
+                case _:
+                    Err(EvalError(message: "Type error in range"))
+
+        case BinOp.RangeInclusive:
+            match (left, right):
+                case (Value.Int(start), Value.Int(end)):
+                    var items: [Value] = []
+                    var idx = start
+                    while idx <= end:
+                        items.push(Value.Int(idx))
+                        idx = idx + 1
+                    Ok(Value.List(items))
+                case _:
+                    Err(EvalError(message: "Type error in inclusive range"))
+
+        case BinOp.MatMul:
+            # 1D dot product for lists of numerics
+            match (left, right):
+                case (Value.List(a), Value.List(b)):
+                    val n = a.len()
+                    if n != b.len():
+                        Err(EvalError(message: "MatMul: vectors must have same length"))
+                    else:
+                        var sum = 0
+                        var i = 0
+                        while i < n:
+                            match (a[i], b[i]):
+                                case (Value.Int(x), Value.Int(y)):
+                                    sum = sum + x * y
+                                case _:
+                                    return Err(EvalError(message: "MatMul: elements must be numeric"))
+                            i = i + 1
+                        Ok(Value.Int(sum))
+                case _:
+                    Err(EvalError(message: "MatMul requires two lists"))
+
+        case BinOp.BroadcastAdd:
+            broadcast_add(left, right)
+
+        case BinOp.BroadcastSub:
+            broadcast_sub(left, right)
+
+        case BinOp.BroadcastMul:
+            broadcast_mul(left, right)
+
+        case BinOp.BroadcastDiv:
+            broadcast_div(left, right)
+
+        case BinOp.BroadcastPow:
+            broadcast_pow(left, right)
+
         case _:
             Err(EvalError(message: "Operator not implemented"))
 
@@ -363,6 +473,192 @@ fn values_equal(left: Value, right: Value) -> bool:
             true
         case _:
             false
+
+# Broadcast add: element-wise addition between scalar+list or list+list
+fn broadcast_add(left: Value, right: Value) -> Result<Value, EvalError>:
+    match (left, right):
+        case (Value.Int(s), Value.List(items)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(s + v))
+                    case _: return Err(EvalError(message: "BroadcastAdd: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(items), Value.Int(s)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(v + s))
+                    case _: return Err(EvalError(message: "BroadcastAdd: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(a), Value.List(b)):
+            val n = a.len()
+            if n != b.len():
+                return Err(EvalError(message: "BroadcastAdd: lists must have same length"))
+            var result: [Value] = []
+            var i = 0
+            while i < n:
+                match (a[i], b[i]):
+                    case (Value.Int(x), Value.Int(y)): result.push(Value.Int(x + y))
+                    case _: return Err(EvalError(message: "BroadcastAdd: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case _:
+            Err(EvalError(message: "BroadcastAdd: requires list or scalar operands"))
+
+fn broadcast_sub(left: Value, right: Value) -> Result<Value, EvalError>:
+    match (left, right):
+        case (Value.Int(s), Value.List(items)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(s - v))
+                    case _: return Err(EvalError(message: "BroadcastSub: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(items), Value.Int(s)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(v - s))
+                    case _: return Err(EvalError(message: "BroadcastSub: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(a), Value.List(b)):
+            val n = a.len()
+            if n != b.len():
+                return Err(EvalError(message: "BroadcastSub: lists must have same length"))
+            var result: [Value] = []
+            var i = 0
+            while i < n:
+                match (a[i], b[i]):
+                    case (Value.Int(x), Value.Int(y)): result.push(Value.Int(x - y))
+                    case _: return Err(EvalError(message: "BroadcastSub: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case _:
+            Err(EvalError(message: "BroadcastSub: requires list or scalar operands"))
+
+fn broadcast_mul(left: Value, right: Value) -> Result<Value, EvalError>:
+    match (left, right):
+        case (Value.Int(s), Value.List(items)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(s * v))
+                    case _: return Err(EvalError(message: "BroadcastMul: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(items), Value.Int(s)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(v * s))
+                    case _: return Err(EvalError(message: "BroadcastMul: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(a), Value.List(b)):
+            val n = a.len()
+            if n != b.len():
+                return Err(EvalError(message: "BroadcastMul: lists must have same length"))
+            var result: [Value] = []
+            var i = 0
+            while i < n:
+                match (a[i], b[i]):
+                    case (Value.Int(x), Value.Int(y)): result.push(Value.Int(x * y))
+                    case _: return Err(EvalError(message: "BroadcastMul: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case _:
+            Err(EvalError(message: "BroadcastMul: requires list or scalar operands"))
+
+fn broadcast_div(left: Value, right: Value) -> Result<Value, EvalError>:
+    match (left, right):
+        case (Value.Int(s), Value.List(items)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(s / v))
+                    case _: return Err(EvalError(message: "BroadcastDiv: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(items), Value.Int(s)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(v / s))
+                    case _: return Err(EvalError(message: "BroadcastDiv: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(a), Value.List(b)):
+            val n = a.len()
+            if n != b.len():
+                return Err(EvalError(message: "BroadcastDiv: lists must have same length"))
+            var result: [Value] = []
+            var i = 0
+            while i < n:
+                match (a[i], b[i]):
+                    case (Value.Int(x), Value.Int(y)): result.push(Value.Int(x / y))
+                    case _: return Err(EvalError(message: "BroadcastDiv: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case _:
+            Err(EvalError(message: "BroadcastDiv: requires list or scalar operands"))
+
+fn broadcast_pow(left: Value, right: Value) -> Result<Value, EvalError>:
+    match (left, right):
+        case (Value.Int(s), Value.List(items)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(_int_pow(s, v)))
+                    case _: return Err(EvalError(message: "BroadcastPow: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(items), Value.Int(s)):
+            var result: [Value] = []
+            val n = items.len()
+            var i = 0
+            while i < n:
+                match items[i]:
+                    case Value.Int(v): result.push(Value.Int(_int_pow(v, s)))
+                    case _: return Err(EvalError(message: "BroadcastPow: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case (Value.List(a), Value.List(b)):
+            val n = a.len()
+            if n != b.len():
+                return Err(EvalError(message: "BroadcastPow: lists must have same length"))
+            var result: [Value] = []
+            var i = 0
+            while i < n:
+                match (a[i], b[i]):
+                    case (Value.Int(x), Value.Int(y)): result.push(Value.Int(_int_pow(x, y)))
+                    case _: return Err(EvalError(message: "BroadcastPow: elements must be numeric"))
+                i = i + 1
+            Ok(Value.List(result))
+        case _:
+            Err(EvalError(message: "BroadcastPow: requires list or scalar operands"))
 
 # Evaluate unary operation
 fn eval_unary(op: UnaryOp, operand: Expr, env: Environment) -> Result<Value, EvalError>:
@@ -475,3 +771,192 @@ fn eval_block(stmts: [Stmt], env: Environment) -> Result<Value, EvalError>:
                 return Err(e)
         i = i + 1
     Ok(last_value)
+
+# Evaluate field access on records
+fn eval_field_access(obj: Expr, field: text, env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(obj, env):
+        case Ok(Value.Record(fields)):
+            # Search for the field in the record
+            var i = 0
+            while i < fields.len():
+                val pair = fields[i]
+                if pair.0 == field:
+                    return Ok(pair.1)
+                i = i + 1
+            Err(EvalError(message: "Record has no field '{field}'"))
+        case Ok(Value.List(items)):
+            # Support .len() on lists as a common operation
+            if field == "len":
+                Ok(Value.Int(items.len()))
+            else:
+                Err(EvalError(message: "List has no field '{field}'"))
+        case Ok(Value.String(s)):
+            # Support .length on strings
+            if field == "length":
+                Ok(Value.Int(s.length()))
+            else:
+                Err(EvalError(message: "String has no field '{field}'"))
+        case Ok(_):
+            Err(EvalError(message: "Cannot access field on this value type"))
+        case Err(e):
+            Err(e)
+
+# Evaluate match expression with pattern matching
+fn eval_match(subject: Expr, arms: [(Pattern, Expr)], env: Environment) -> Result<Value, EvalError>:
+    match eval_expr(subject, env):
+        case Ok(subject_val):
+            var i = 0
+            while i < arms.len():
+                val arm = arms[i]
+                val pattern = arm.0
+                val body = arm.1
+                var match_env = Environment.with_parent(env)
+                var matched = _try_match(pattern, subject_val, match_env)
+                if matched:
+                    return eval_expr(body, match_env)
+                i = i + 1
+            Err(EvalError(message: "No matching arm in match expression"))
+        case Err(e):
+            Err(e)
+
+# Attempt to match a value against a pattern, binding variables in match_env.
+# Returns true if the pattern matches, false otherwise.
+fn _try_match(pattern: Pattern, value: Value, env: Environment) -> bool:
+    match pattern:
+        case Pattern.Wildcard:
+            true
+        case Pattern.Identifier(name):
+            # Bind the value to the name
+            env.define(name, value)
+            true
+        case Pattern.Literal(lit):
+            # Compare against the literal value
+            match lit:
+                case Literal.Int(n):
+                    match value:
+                        case Value.Int(v):
+                            v == n
+                        case _:
+                            false
+                case Literal.Bool(b):
+                    match value:
+                        case Value.Bool(v):
+                            v == b
+                        case _:
+                            false
+                case Literal.String(s):
+                    match value:
+                        case Value.String(v):
+                            v == s
+                        case _:
+                            false
+                case Literal.Unit:
+                    match value:
+                        case Value.Unit:
+                            true
+                        case _:
+                            false
+                case _:
+                    false
+        case Pattern.Tuple(sub_patterns):
+            match value:
+                case Value.List(items):
+                    if items.len() != sub_patterns.len():
+                        return false
+                    var i = 0
+                    var all_matched = true
+                    while i < sub_patterns.len():
+                        var sub_matched = _try_match(sub_patterns[i], items[i], env)
+                        if not sub_matched:
+                            all_matched = false
+                        i = i + 1
+                    all_matched
+                case _:
+                    false
+        case Pattern.Constructor(name, sub_patterns):
+            # Constructor patterns match records whose first field is the constructor name
+            match value:
+                case Value.Record(fields):
+                    if fields.len() == 0:
+                        return false
+                    val tag = fields[0]
+                    var tag_matches = false
+                    match tag.1:
+                        case Value.String(tag_name):
+                            tag_matches = tag_name == name
+                        case _:
+                            tag_matches = false
+                    if not tag_matches:
+                        return false
+                    # Match sub-patterns against remaining fields
+                    var si = 0
+                    var all_matched = true
+                    while si < sub_patterns.len():
+                        val field_idx = si + 1
+                        if field_idx >= fields.len():
+                            all_matched = false
+                            si = sub_patterns.len()  # break
+                        else:
+                            var sub_matched = _try_match(sub_patterns[si], fields[field_idx].1, env)
+                            if not sub_matched:
+                                all_matched = false
+                        si = si + 1
+                    all_matched
+                case _:
+                    false
+
+# Parse a float from text representation
+fn _parse_float_text(s: text) -> f64:
+    # Parse integer and decimal parts
+    var integer_part = 0
+    var decimal_part = 0.0
+    var decimal_divisor = 1.0
+    var in_decimal = false
+    var is_negative = false
+    var i = 0
+    var slen = s.length()
+
+    if slen > 0:
+        var first_char = s.substring(0, 1)
+        if first_char == "-":
+            is_negative = true
+            i = 1
+
+    while i < slen:
+        var ch = s.substring(i, i + 1)
+        if ch == ".":
+            in_decimal = true
+        else:
+            var code = s.char_code_at(i)
+            var digit = code - 48
+            if digit >= 0:
+                var is_digit = digit <= 9
+                if is_digit:
+                    if in_decimal:
+                        decimal_divisor = decimal_divisor * 10.0
+                        decimal_part = decimal_part + (digit * 1.0 / decimal_divisor)
+                    else:
+                        integer_part = integer_part * 10 + digit
+        i = i + 1
+
+    var result = integer_part * 1.0 + decimal_part
+    if is_negative:
+        result = 0.0 - result
+    result
+
+# Integer power function
+fn _int_pow(base: i64, exp: i64) -> i64:
+    if exp == 0:
+        return 1
+    if exp < 0:
+        return 0  # Integer division truncates to 0
+    var result = 1
+    var b = base
+    var e = exp
+    while e > 0:
+        var is_odd = (e % 2) == 1
+        if is_odd:
+            result = result * b
+        b = b * b
+        e = e / 2
+    result
