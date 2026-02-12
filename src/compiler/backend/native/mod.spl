@@ -62,8 +62,7 @@ fn compile_native_aarch64(module: MirModule) -> [i64]:
     val encoded_funcs = encode_module_aarch64(allocated)
 
     # Phase 4: Layout Optimization & ELF Emission
-    # TODO: Add layout optimization support (same as x86_64)
-    emit_elf_aarch64(encoded_funcs, allocated)
+    emit_elf_aarch64(encoded_funcs, allocated, module)
 
 fn compile_native_riscv64(module: MirModule) -> [i64]:
     # Phase 1: Instruction Selection (MIR -> MachInst)
@@ -76,8 +75,7 @@ fn compile_native_riscv64(module: MirModule) -> [i64]:
     val encoded_funcs = encode_module_riscv64(allocated)
 
     # Phase 4: Layout Optimization & ELF Emission
-    # TODO: Add layout optimization support (same as x86_64)
-    emit_elf_riscv64(encoded_funcs, allocated)
+    emit_elf_riscv64(encoded_funcs, allocated, module)
 
 fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
     # Stub for unsupported architectures - returns empty ELF
@@ -288,8 +286,22 @@ fn emit_elf_x86_64(
 
     write_elf64(writer)
 
-fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64]:
+fn emit_elf_aarch64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
     var writer = elf_writer_aarch64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
 
     # Combine all function code into a single .text section
     var all_code: [i64] = []
@@ -317,8 +329,8 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             sym_names = sym_names + [ext_sym]
             sym_name_to_idx[ext_sym] = idx
 
-    # Collect function names
-    for func in encoded_funcs:
+    # Collect function names (use ordered functions for correct layout)
+    for func in ordered_funcs:
         if not sym_name_to_idx.contains(func.name):
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
@@ -340,7 +352,17 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
     val sym_base_a = 1 + num_cs_a
 
     # Concatenate function code (AArch64: 4-byte instruction alignment)
-    for func in encoded_funcs:
+    for func in ordered_funcs:
+        # Check for phase boundary (4KB page alignment)
+        if phase_boundaries.contains(func.name):
+            val page_size = phase_boundaries[func.name]
+            val current_offset = all_code.len()
+            val aligned_offset = ((current_offset + page_size - 1) / page_size) * page_size
+            val boundary_padding = aligned_offset - current_offset
+            for i in 0..boundary_padding:
+                all_code = all_code + [0x00]
+
+        # Standard 4-byte instruction alignment
         var padding = all_code.len() % 4
         if padding != 0:
             padding = 4 - padding
@@ -417,8 +439,22 @@ fn emit_elf_aarch64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
 
     write_elf64(writer)
 
-fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64]:
+fn emit_elf_riscv64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
     var writer = elf_writer_riscv64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
 
     # Combine all function code into a single .text section
     var all_code: [i64] = []
@@ -446,8 +482,8 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
             sym_names = sym_names + [ext_sym]
             sym_name_to_idx[ext_sym] = idx
 
-    # Collect function names
-    for func in encoded_funcs:
+    # Collect function names (use ordered functions for correct layout)
+    for func in ordered_funcs:
         if not sym_name_to_idx.contains(func.name):
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
@@ -469,7 +505,17 @@ fn emit_elf_riscv64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i6
     val sym_base_r = 1 + num_cs_r
 
     # Concatenate function code (RISC-V: 4-byte instruction alignment)
-    for func in encoded_funcs:
+    for func in ordered_funcs:
+        # Check for phase boundary (4KB page alignment)
+        if phase_boundaries.contains(func.name):
+            val page_size = phase_boundaries[func.name]
+            val current_offset = all_code.len()
+            val aligned_offset = ((current_offset + page_size - 1) / page_size) * page_size
+            val boundary_padding = aligned_offset - current_offset
+            for i in 0..boundary_padding:
+                all_code = all_code + [0x00]
+
+        # Standard 4-byte instruction alignment
         var padding = all_code.len() % 4
         if padding != 0:
             padding = 4 - padding
