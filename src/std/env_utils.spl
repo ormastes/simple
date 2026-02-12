@@ -1,0 +1,1398 @@
+# Environment Variable Utilities
+#
+# Comprehensive environment variable utilities for working with
+# environment variables, PATH operations, variable expansion,
+# dotenv parsing, and platform-specific paths.
+#
+# Pure Simple implementation - no generics at runtime.
+#
+# Core Features:
+# - Environment variables: get, set, unset, has, clear, list
+# - Variable expansion: ${VAR}, ${VAR:-default}, ${VAR:=default}
+# - PATH operations: split, search, add, prepend, deduplicate
+# - Platform detection: OS, architecture, paths
+# - User info: username, home, config dirs
+# - System info: hostname, temp dir, current dir
+# - Environment merging: combine, override, diff
+# - Variable validation: required checks, format validation
+# - Export format: bash, fish, powershell, dotenv
+# - Dotenv parsing: parse .env files, load environment
+# - Variable substitution: replace placeholders
+# - Utility functions: escape, validate names
+
+# Import dependencies
+import std.string
+import std.path
+
+# External FFI declarations
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_vars() -> [(text, text)]
+extern fn rt_env_remove(key: text) -> bool
+extern fn rt_env_cwd() -> text
+extern fn rt_env_home() -> text
+extern fn rt_hostname() -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# Core Environment Variable Operations
+# ============================================================================
+
+fn env_get(key: text) -> text:
+    """Get environment variable value. Returns empty string if not set.
+
+    Example:
+        env_get("HOME")  # "/home/user"
+        env_get("NONEXISTENT")  # ""
+    """
+    val value = rt_env_get(key)
+    if value == nil:
+        ""
+    else:
+        value
+
+fn env_get_or(key: text, default: text) -> text:
+    """Get environment variable or return default if not set.
+
+    Example:
+        env_get_or("EDITOR", "vim")  # "vim" if EDITOR not set
+    """
+    val value = env_get(key)
+    if value == "":
+        default
+    else:
+        value
+
+fn env_set(key: text, value: text) -> bool:
+    """Set environment variable.
+
+    Example:
+        env_set("MY_VAR", "hello")  # true
+    """
+    rt_env_set(key, value)
+
+fn env_unset(key: text) -> bool:
+    """Remove environment variable.
+
+    Example:
+        env_unset("MY_VAR")  # true
+    """
+    rt_env_remove(key)
+
+fn env_has(key: text) -> bool:
+    """Check if environment variable exists.
+
+    Example:
+        env_has("HOME")  # true
+        env_has("NONEXISTENT")  # false
+    """
+    val value = rt_env_get(key)
+    if value == nil:
+        false
+    else:
+        value != ""
+
+fn env_list() -> [(text, text)]:
+    """Get all environment variables as list of (name, value) tuples.
+
+    Example:
+        env_list()  # [("HOME", "/home/user"), ("PATH", "/usr/bin"), ...]
+    """
+    rt_env_vars()
+
+fn env_clear():
+    """Clear all environment variables (dangerous, use with caution)."""
+    val vars = env_list()
+    for pair in vars:
+        val (name, value) = pair
+        env_unset(name)
+
+fn env_keys() -> [text]:
+    """Get list of all environment variable names.
+
+    Example:
+        env_keys()  # ["HOME", "PATH", "USER", ...]
+    """
+    val vars = env_list()
+    var keys = []
+    for pair in vars:
+        val (name, value) = pair
+        keys.push(name)
+    keys
+
+fn env_values() -> [text]:
+    """Get list of all environment variable values.
+
+    Example:
+        env_values()  # ["/home/user", "/usr/bin", "alice", ...]
+    """
+    val vars = env_list()
+    var values = []
+    for pair in vars:
+        val (name, value) = pair
+        values.push(value)
+    values
+
+fn env_size() -> i64:
+    """Get number of environment variables.
+
+    Example:
+        env_size()  # 42
+    """
+    val vars = env_list()
+    vars.len()
+
+fn env_snapshot() -> [(text, text)]:
+    """Take snapshot of current environment.
+
+    Example:
+        env_snapshot()  # captures current state
+    """
+    env_list()
+
+fn env_restore(snapshot: [(text, text)]):
+    """Restore environment from snapshot.
+
+    Example:
+        env_restore(snapshot)  # restores previous state
+    """
+    # Clear current environment
+    env_clear()
+
+    # Restore snapshot
+    for pair in snapshot:
+        val (name, value) = pair
+        env_set(name, value)
+
+fn env_diff(before: [(text, text)], after: [(text, text)]) -> [(text, text, text)]:
+    """Compare two environment snapshots.
+
+    Returns list of (name, before_value, after_value) tuples for changes.
+
+    Example:
+        env_diff(snap1, snap2)  # [("FOO", "old", "new")]
+    """
+    var changes = []
+
+    # Check for modified and new vars
+    for after_pair in after:
+        val (name, after_val) = after_pair
+        var found = false
+        var before_val = ""
+
+        for before_pair in before:
+            val (before_name, before_value) = before_pair
+            if before_name == name:
+                found = true
+                before_val = before_value
+                break
+
+        if not found:
+            # New variable
+            changes.push((name, "", after_val))
+        elif before_val != after_val:
+            # Modified variable
+            changes.push((name, before_val, after_val))
+
+    # Check for deleted vars
+    for before_pair in before:
+        val (name, before_val) = before_pair
+        var found = false
+
+        for after_pair in after:
+            val (after_name, after_val) = after_pair
+            if after_name == name:
+                found = true
+                break
+
+        if not found:
+            # Deleted variable
+            changes.push((name, before_val, ""))
+
+    changes
+
+fn env_has_prefix(prefix: text) -> bool:
+    """Check if any environment variable starts with prefix.
+
+    Example:
+        env_has_prefix("XDG_")  # true if any XDG_ vars exist
+    """
+    val vars = env_list()
+
+    for pair in vars:
+        val (name, value) = pair
+        if name.starts_with(prefix):
+            return true
+
+    false
+
+fn env_count_prefix(prefix: text) -> i64:
+    """Count environment variables with prefix.
+
+    Example:
+        env_count_prefix("XDG_")  # 3
+    """
+    val vars = env_list()
+    var count = 0
+
+    for pair in vars:
+        val (name, value) = pair
+        if name.starts_with(prefix):
+            count = count + 1
+
+    count
+
+fn env_find(pattern: text) -> [(text, text)]:
+    """Find environment variables matching pattern (simple contains).
+
+    Example:
+        env_find("HOME")  # [("HOME", "/home/user"), ("XDG_CONFIG_HOME", "...")]
+    """
+    val vars = env_list()
+    var results = []
+
+    for pair in vars:
+        val (name, value) = pair
+        if name.contains(pattern):
+            results.push((name, value))
+
+    results
+
+fn env_sort_by_name(vars: [(text, text)]) -> [(text, text)]:
+    """Sort environment variables by name.
+
+    Example:
+        env_sort_by_name(vars)  # sorted alphabetically
+    """
+    # Simple bubble sort (good enough for environment variables)
+    var result = vars
+    var n = result.len()
+    var i = 0
+
+    while i < n:
+        var j = 0
+        while j < n - i - 1:
+            val (name1, val1) = result[j]
+            val (name2, val2) = result[j + 1]
+
+            if name1 > name2:
+                # Swap
+                val temp = result[j]
+                result[j] = result[j + 1]
+                result[j + 1] = temp
+
+            j = j + 1
+        i = i + 1
+
+    result
+
+# ============================================================================
+# Variable Expansion
+# ============================================================================
+
+fn expand_var(text: text) -> text:
+    """Expand environment variables in text.
+
+    Supports:
+    - ${VAR} - expand variable
+    - ${VAR:-default} - use default if not set
+    - ${VAR:=default} - set and use default if not set
+
+    Example:
+        expand_var("Hello ${USER}")  # "Hello alice"
+        expand_var("${MISSING:-default}")  # "default"
+    """
+    var result = text
+    var pos = 0
+
+    while pos < result.len():
+        val dollar_pos = result.substring(pos).find("$")
+        if not dollar_pos.?:
+            break
+
+        val start = pos + dollar_pos.unwrap()
+        if start + 1 >= result.len():
+            break
+
+        if result[start + 1] == "{":
+            # Find closing brace
+            val close_pos = result.substring(start + 2).find("}")
+            if close_pos.?:
+                val close_idx = start + 2 + close_pos.unwrap()
+                val var_expr = result.substring(start + 2, close_idx)
+                val expanded = expand_var_expr(var_expr)
+
+                # Replace ${...} with expanded value
+                val before = result.substring(0, start)
+                val after = result.substring(close_idx + 1)
+                result = before + expanded + after
+                pos = start + expanded.len()
+            else:
+                pos = start + 2
+        else:
+            pos = start + 1
+
+    result
+
+fn expand_var_expr(expr: text) -> text:
+    """Expand variable expression like VAR, VAR:-default, VAR:=default.
+
+    Internal helper for expand_var.
+    """
+    # Check for :- (use default)
+    val default_pos = expr.find(":-")
+    if default_pos.?:
+        val sep_idx = default_pos.unwrap()
+        val var_name = expr.substring(0, sep_idx)
+        val default_val = expr.substring(sep_idx + 2)
+        return env_get_or(var_name, default_val)
+
+    # Check for := (set default)
+    val set_pos = expr.find(":=")
+    if set_pos.?:
+        val sep_idx = set_pos.unwrap()
+        val var_name = expr.substring(0, sep_idx)
+        val default_val = expr.substring(sep_idx + 2)
+
+        if not env_has(var_name):
+            env_set(var_name, default_val)
+            return default_val
+        else:
+            return env_get(var_name)
+
+    # Simple variable
+    env_get(expr)
+
+fn substitute_vars(text: text, vars: [(text, text)]) -> text:
+    """Substitute variables in text from given list.
+
+    Example:
+        substitute_vars("Hello ${name}!", [("name", "World")])  # "Hello World!"
+    """
+    var result = text
+
+    for pair in vars:
+        val (name, value) = pair
+        val placeholder = "$" + "{" + name + "}"
+        result = result.replace(placeholder, value)
+
+    result
+
+# ============================================================================
+# PATH Operations
+# ============================================================================
+
+fn path_separator() -> text:
+    """Get platform-specific PATH separator (: or ;).
+
+    Example:
+        path_separator()  # ":" on Unix, ";" on Windows
+    """
+    val os = detect_os()
+    if os == "windows":
+        ";"
+    else:
+        ":"
+
+fn split_path(path: text) -> [text]:
+    """Split PATH environment variable into list of directories.
+
+    Example:
+        split_path("/usr/bin:/usr/local/bin")  # ["/usr/bin", "/usr/local/bin"]
+    """
+    val sep = path_separator()
+    path.split(sep)
+
+fn join_path(paths: [text]) -> text:
+    """Join list of directories into PATH string.
+
+    Example:
+        join_path(["/usr/bin", "/usr/local/bin"])  # "/usr/bin:/usr/local/bin"
+    """
+    val sep = path_separator()
+    paths.join(sep)
+
+fn path_add(path: text, dir: text) -> text:
+    """Add directory to end of PATH.
+
+    Example:
+        path_add("/usr/bin:/usr/local/bin", "/opt/bin")  # "/usr/bin:/usr/local/bin:/opt/bin"
+    """
+    if path == "":
+        return dir
+
+    val sep = path_separator()
+    path + sep + dir
+
+fn path_prepend(path: text, dir: text) -> text:
+    """Add directory to beginning of PATH.
+
+    Example:
+        path_prepend("/usr/bin:/usr/local/bin", "/opt/bin")  # "/opt/bin:/usr/bin:/usr/local/bin"
+    """
+    if path == "":
+        return dir
+
+    val sep = path_separator()
+    dir + sep + path
+
+fn path_remove(path: text, dir: text) -> text:
+    """Remove directory from PATH.
+
+    Example:
+        path_remove("/usr/bin:/opt/bin:/usr/local/bin", "/opt/bin")  # "/usr/bin:/usr/local/bin"
+    """
+    val parts = split_path(path)
+    var result = []
+
+    for part in parts:
+        if part != dir:
+            result.push(part)
+
+    join_path(result)
+
+fn path_contains(path: text, dir: text) -> bool:
+    """Check if PATH contains directory.
+
+    Example:
+        path_contains("/usr/bin:/usr/local/bin", "/usr/bin")  # true
+    """
+    val parts = split_path(path)
+
+    for part in parts:
+        if part == dir:
+            return true
+
+    false
+
+fn search_path(executable: text) -> text:
+    """Search for executable in PATH. Returns full path or empty string.
+
+    Example:
+        search_path("ls")  # "/usr/bin/ls"
+        search_path("nonexistent")  # ""
+    """
+    val path_env = env_get("PATH")
+    val dirs = split_path(path_env)
+
+    for dir in dirs:
+        val full_path = path.join2(dir, executable)
+        if file_exists(full_path):
+            return full_path
+
+    ""
+
+fn which(executable: text) -> text:
+    """Alias for search_path. Find executable in PATH.
+
+    Example:
+        which("python3")  # "/usr/bin/python3"
+    """
+    search_path(executable)
+
+fn path_deduplicate(path: text) -> text:
+    """Remove duplicate directories from PATH.
+
+    Example:
+        path_deduplicate("/usr/bin:/usr/bin:/opt/bin")  # "/usr/bin:/opt/bin"
+    """
+    val parts = split_path(path)
+    var seen = []
+    var result = []
+
+    for part in parts:
+        var is_duplicate = false
+        for seen_part in seen:
+            if seen_part == part:
+                is_duplicate = true
+                break
+
+        if not is_duplicate:
+            seen.push(part)
+            result.push(part)
+
+    join_path(result)
+
+fn path_normalize(path: text) -> text:
+    """Normalize PATH by removing duplicates and non-existent dirs.
+
+    Example:
+        path_normalize("/usr/bin:/nonexistent:/opt/bin")  # removes /nonexistent
+    """
+    val parts = split_path(path)
+    var result = []
+
+    for part in parts:
+        if part != "" and dir_exists(part):
+            var is_duplicate = false
+            for seen in result:
+                if seen == part:
+                    is_duplicate = true
+                    break
+
+            if not is_duplicate:
+                result.push(part)
+
+    join_path(result)
+
+fn path_find_all(executable: text) -> [text]:
+    """Find all occurrences of executable in PATH.
+
+    Example:
+        path_find_all("python")  # ["/usr/bin/python", "/usr/local/bin/python"]
+    """
+    val path_env = env_get("PATH")
+    val dirs = split_path(path_env)
+    var results = []
+
+    for dir in dirs:
+        val full_path = path.join2(dir, executable)
+        if file_exists(full_path):
+            results.push(full_path)
+
+    results
+
+fn path_get_index(path: text, dir: text) -> i64:
+    """Get index of directory in PATH, or -1 if not found.
+
+    Example:
+        path_get_index("/usr/bin:/opt/bin", "/opt/bin")  # 1
+    """
+    val parts = split_path(path)
+    var i = 0
+
+    for part in parts:
+        if part == dir:
+            return i
+        i = i + 1
+
+    -1
+
+fn path_insert(path: text, dir: text, index: i64) -> text:
+    """Insert directory at specific position in PATH.
+
+    Example:
+        path_insert("/usr/bin:/usr/local/bin", "/opt/bin", 1)  # "/usr/bin:/opt/bin:/usr/local/bin"
+    """
+    val parts = split_path(path)
+    var result = []
+    var i = 0
+
+    for part in parts:
+        if i == index:
+            result.push(dir)
+        result.push(part)
+        i = i + 1
+
+    if index >= parts.len():
+        result.push(dir)
+
+    join_path(result)
+
+# ============================================================================
+# Platform Detection
+# ============================================================================
+
+fn detect_os() -> text:
+    """Detect operating system.
+
+    Returns: "linux", "macos", "windows", "freebsd", "openbsd", "netbsd", or "unknown"
+
+    Example:
+        detect_os()  # "linux"
+    """
+    # Check OS environment variable for Windows
+    val os_env = env_get("OS")
+    if os_env != "":
+        if os_env.lower().contains("windows"):
+            return "windows"
+
+    # Try uname for Unix-like systems
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "uname -s"])
+    if code == 0:
+        val os_name = stdout.trim()
+        if os_name == "Linux":
+            return "linux"
+        elif os_name == "Darwin":
+            return "macos"
+        elif os_name == "FreeBSD":
+            return "freebsd"
+        elif os_name == "OpenBSD":
+            return "openbsd"
+        elif os_name == "NetBSD":
+            return "netbsd"
+
+    "unknown"
+
+fn detect_arch() -> text:
+    """Detect CPU architecture.
+
+    Returns: "x86_64", "aarch64", "arm", "i686", "riscv64", or "unknown"
+
+    Example:
+        detect_arch()  # "x86_64"
+    """
+    val os = detect_os()
+
+    if os == "windows":
+        # Windows: Use PROCESSOR_ARCHITECTURE
+        val arch_env = env_get("PROCESSOR_ARCHITECTURE")
+        if arch_env == "AMD64" or arch_env == "x64":
+            return "x86_64"
+        elif arch_env == "ARM64":
+            return "aarch64"
+        elif arch_env == "x86":
+            return "i686"
+        else:
+            return arch_env.lower()
+    else:
+        # Unix: Use uname -m
+        val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "uname -m"])
+        if code == 0:
+            val arch = stdout.trim()
+            if arch == "x86_64" or arch == "amd64":
+                return "x86_64"
+            elif arch == "aarch64" or arch == "arm64":
+                return "aarch64"
+            elif arch == "armv7l" or arch == "armv7":
+                return "arm"
+            elif arch == "i686" or arch == "i386":
+                return "i686"
+            elif arch == "riscv64":
+                return "riscv64"
+            else:
+                return arch
+
+    "unknown"
+
+fn is_windows() -> bool:
+    """Check if running on Windows.
+
+    Example:
+        is_windows()  # false on Linux
+    """
+    detect_os() == "windows"
+
+fn is_unix() -> bool:
+    """Check if running on Unix-like system.
+
+    Example:
+        is_unix()  # true on Linux/macOS
+    """
+    val os = detect_os()
+    os == "linux" or os == "macos" or os == "freebsd" or os == "openbsd" or os == "netbsd"
+
+fn is_linux() -> bool:
+    """Check if running on Linux.
+
+    Example:
+        is_linux()  # true on Linux
+    """
+    detect_os() == "linux"
+
+fn is_macos() -> bool:
+    """Check if running on macOS.
+
+    Example:
+        is_macos()  # false on Linux
+    """
+    detect_os() == "macos"
+
+# ============================================================================
+# User Information
+# ============================================================================
+
+fn get_username() -> text:
+    """Get current username.
+
+    Example:
+        get_username()  # "alice"
+    """
+    # Try USER first (Unix)
+    var username = env_get("USER")
+    if username != "":
+        return username
+
+    # Try USERNAME (Windows)
+    username = env_get("USERNAME")
+    if username != "":
+        return username
+
+    # Try whoami command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "whoami"])
+    if code == 0:
+        return stdout.trim()
+
+    "unknown"
+
+fn get_home_dir() -> text:
+    """Get user home directory.
+
+    Example:
+        get_home_dir()  # "/home/alice"
+    """
+    val home = rt_env_home()
+    if home != "" and home != nil:
+        return home
+
+    # Fallback to HOME environment variable
+    val home_env = env_get("HOME")
+    if home_env != "":
+        return home_env
+
+    # Windows fallback
+    val userprofile = env_get("USERPROFILE")
+    if userprofile != "":
+        return userprofile
+
+    "."
+
+fn get_config_dir() -> text:
+    """Get user configuration directory.
+
+    Returns:
+    - Linux: ~/.config
+    - macOS: ~/Library/Application Support
+    - Windows: %APPDATA%
+
+    Example:
+        get_config_dir()  # "/home/alice/.config"
+    """
+    val os = detect_os()
+
+    if os == "windows":
+        val appdata = env_get("APPDATA")
+        if appdata != "":
+            return appdata
+        val home = get_home_dir()
+        return path.join2(home, "AppData/Roaming")
+    elif os == "macos":
+        val home = get_home_dir()
+        return path.join2(home, "Library/Application Support")
+    else:
+        # Linux and other Unix
+        val xdg_config = env_get("XDG_CONFIG_HOME")
+        if xdg_config != "":
+            return xdg_config
+        val home = get_home_dir()
+        return path.join2(home, ".config")
+
+fn get_cache_dir() -> text:
+    """Get user cache directory.
+
+    Returns:
+    - Linux: ~/.cache
+    - macOS: ~/Library/Caches
+    - Windows: %LOCALAPPDATA%
+
+    Example:
+        get_cache_dir()  # "/home/alice/.cache"
+    """
+    val os = detect_os()
+
+    if os == "windows":
+        val localappdata = env_get("LOCALAPPDATA")
+        if localappdata != "":
+            return localappdata
+        val home = get_home_dir()
+        return path.join2(home, "AppData/Local")
+    elif os == "macos":
+        val home = get_home_dir()
+        return path.join2(home, "Library/Caches")
+    else:
+        # Linux and other Unix
+        val xdg_cache = env_get("XDG_CACHE_HOME")
+        if xdg_cache != "":
+            return xdg_cache
+        val home = get_home_dir()
+        return path.join2(home, ".cache")
+
+fn get_data_dir() -> text:
+    """Get user data directory.
+
+    Returns:
+    - Linux: ~/.local/share
+    - macOS: ~/Library/Application Support
+    - Windows: %APPDATA%
+
+    Example:
+        get_data_dir()  # "/home/alice/.local/share"
+    """
+    val os = detect_os()
+
+    if os == "windows":
+        val appdata = env_get("APPDATA")
+        if appdata != "":
+            return appdata
+        val home = get_home_dir()
+        return path.join2(home, "AppData/Roaming")
+    elif os == "macos":
+        val home = get_home_dir()
+        return path.join2(home, "Library/Application Support")
+    else:
+        # Linux and other Unix
+        val xdg_data = env_get("XDG_DATA_HOME")
+        if xdg_data != "":
+            return xdg_data
+        val home = get_home_dir()
+        return path.join2(home, ".local/share")
+
+# ============================================================================
+# System Information
+# ============================================================================
+
+fn get_hostname() -> text:
+    """Get system hostname.
+
+    Example:
+        get_hostname()  # "my-computer"
+    """
+    val hostname = rt_hostname()
+    if hostname != "" and hostname != nil:
+        return hostname
+
+    # Fallback to hostname command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "hostname"])
+    if code == 0:
+        return stdout.trim()
+
+    "localhost"
+
+fn get_current_dir() -> text:
+    """Get current working directory.
+
+    Example:
+        get_current_dir()  # "/home/alice/project"
+    """
+    val cwd = rt_env_cwd()
+    if cwd != "" and cwd != nil:
+        return cwd
+
+    # Fallback to pwd command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "pwd"])
+    if code == 0:
+        return stdout.trim()
+
+    "."
+
+fn get_temp_dir() -> text:
+    """Get temporary directory.
+
+    Example:
+        get_temp_dir()  # "/tmp"
+    """
+    # Try TMPDIR first (Unix)
+    var tmp = env_get("TMPDIR")
+    if tmp != "":
+        return tmp
+
+    # Try TMP (Windows)
+    tmp = env_get("TMP")
+    if tmp != "":
+        return tmp
+
+    # Try TEMP (Windows)
+    tmp = env_get("TEMP")
+    if tmp != "":
+        return tmp
+
+    # Default fallbacks
+    val os = detect_os()
+    if os == "windows":
+        "C:/Windows/Temp"
+    else:
+        "/tmp"
+
+# ============================================================================
+# Environment Merging and Overriding
+# ============================================================================
+
+fn merge_env(base: [(text, text)], overrides: [(text, text)]) -> [(text, text)]:
+    """Merge two environment variable lists, with overrides taking precedence.
+
+    Example:
+        merge_env([("A", "1")], [("B", "2"), ("A", "3")])  # [("A", "3"), ("B", "2")]
+    """
+    var result = []
+    var override_keys = []
+
+    # Collect override keys
+    for pair in overrides:
+        val (name, value) = pair
+        override_keys.push(name)
+        result.push((name, value))
+
+    # Add base vars not in overrides
+    for pair in base:
+        val (name, value) = pair
+        var found = false
+        for key in override_keys:
+            if key == name:
+                found = true
+                break
+        if not found:
+            result.push((name, value))
+
+    result
+
+fn filter_env(vars: [(text, text)], prefix: text) -> [(text, text)]:
+    """Filter environment variables by prefix.
+
+    Example:
+        filter_env([("PATH", "/usr/bin"), ("PWD", "/home")], "P")  # [("PATH", "..."), ("PWD", "...")]
+    """
+    var result = []
+
+    for pair in vars:
+        val (name, value) = pair
+        if name.starts_with(prefix):
+            result.push((name, value))
+
+    result
+
+fn exclude_env(vars: [(text, text)], keys: [text]) -> [(text, text)]:
+    """Exclude specific environment variables.
+
+    Example:
+        exclude_env([("A", "1"), ("B", "2")], ["A"])  # [("B", "2")]
+    """
+    var result = []
+
+    for pair in vars:
+        val (name, value) = pair
+        var excluded = false
+        for key in keys:
+            if key == name:
+                excluded = true
+                break
+        if not excluded:
+            result.push((name, value))
+
+    result
+
+fn include_env(vars: [(text, text)], keys: [text]) -> [(text, text)]:
+    """Include only specific environment variables.
+
+    Example:
+        include_env([("A", "1"), ("B", "2")], ["A"])  # [("A", "1")]
+    """
+    var result = []
+
+    for pair in vars:
+        val (name, value) = pair
+        for key in keys:
+            if key == name:
+                result.push((name, value))
+                break
+
+    result
+
+# ============================================================================
+# Variable Validation
+# ============================================================================
+
+fn validate_var_name(name: text) -> bool:
+    """Validate environment variable name.
+
+    Valid names: alphanumeric and underscore, starting with letter or underscore.
+
+    Example:
+        validate_var_name("MY_VAR")  # true
+        validate_var_name("123VAR")  # false
+    """
+    if name.len() == 0:
+        return false
+
+    # First character must be letter or underscore
+    val first = name[0]
+    val is_valid_first = (first >= 'a' and first <= 'z') or (first >= 'A' and first <= 'Z') or first == '_'
+    if not is_valid_first:
+        return false
+
+    # Rest must be alphanumeric or underscore
+    var i = 1
+    while i < name.len():
+        val ch = name[i]
+        val is_alpha = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')
+        val is_digit = (ch >= '0' and ch <= '9')
+        val is_valid = is_alpha or is_digit or ch == '_'
+        if not is_valid:
+            return false
+        i = i + 1
+
+    true
+
+fn check_required_vars(required: [text]) -> [(text, bool)]:
+    """Check which required variables are set.
+
+    Returns list of (name, is_set) tuples.
+
+    Example:
+        check_required_vars(["HOME", "MISSING"])  # [("HOME", true), ("MISSING", false)]
+    """
+    var results = []
+
+    for var_name in required:
+        val is_set = env_has(var_name)
+        results.push((var_name, is_set))
+
+    results
+
+fn ensure_required_vars(required: [text]) -> bool:
+    """Ensure all required variables are set. Returns true if all set.
+
+    Example:
+        ensure_required_vars(["HOME", "USER"])  # true if both set
+    """
+    for var_name in required:
+        if not env_has(var_name):
+            return false
+
+    true
+
+fn validate_var_value(name: text, value: text, pattern: text) -> bool:
+    """Validate variable value against pattern (simple contains check).
+
+    Example:
+        validate_var_value("PATH", "/usr/bin", "/usr")  # true
+    """
+    value.contains(pattern)
+
+fn normalize_var_name(name: text) -> text:
+    """Normalize variable name to uppercase with underscores.
+
+    Example:
+        normalize_var_name("my-var")  # "MY_VAR"
+    """
+    var result = name.upper()
+    result = result.replace("-", "_")
+    result = result.replace(".", "_")
+    result
+
+fn split_var_name(name: text) -> [text]:
+    """Split variable name by underscores.
+
+    Example:
+        split_var_name("MY_VAR_NAME")  # ["MY", "VAR", "NAME"]
+    """
+    name.split("_")
+
+fn is_system_var(name: text) -> bool:
+    """Check if variable is a system variable (common system vars).
+
+    Example:
+        is_system_var("PATH")  # true
+        is_system_var("MY_VAR")  # false
+    """
+    val system_vars = [
+        "PATH", "HOME", "USER", "SHELL", "TERM", "PWD", "OLDPWD",
+        "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP", "EDITOR",
+        "DISPLAY", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"
+    ]
+
+    for sys_var in system_vars:
+        if sys_var == name:
+            return true
+
+    false
+
+fn is_private_var(name: text) -> bool:
+    """Check if variable is private (starts with underscore).
+
+    Example:
+        is_private_var("_MY_VAR")  # true
+        is_private_var("MY_VAR")  # false
+    """
+    name.starts_with("_")
+
+fn is_readonly_var(name: text) -> bool:
+    """Check if variable is typically readonly (common readonly vars).
+
+    Example:
+        is_readonly_var("HOME")  # true (common readonly)
+    """
+    val readonly_vars = ["HOME", "USER", "LOGNAME", "SHELL", "UID"]
+
+    for ro_var in readonly_vars:
+        if ro_var == name:
+            return true
+
+    false
+
+# ============================================================================
+# Export Formats
+# ============================================================================
+
+fn export_bash(vars: [(text, text)]) -> text:
+    """Export environment variables in bash format.
+
+    Example:
+        export_bash([("FOO", "bar")])  # "export FOO=\"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "export " + name + "=\"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_fish(vars: [(text, text)]) -> text:
+    """Export environment variables in fish format.
+
+    Example:
+        export_fish([("FOO", "bar")])  # "set -gx FOO \"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "set -gx " + name + " \"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_powershell(vars: [(text, text)]) -> text:
+    """Export environment variables in PowerShell format.
+
+    Example:
+        export_powershell([("FOO", "bar")])  # "$env:FOO = \"bar\""
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_shell_value(value)
+        val line = "$" + "env:" + name + " = \"" + escaped + "\""
+        lines.push(line)
+
+    lines.join("\n")
+
+fn export_dotenv(vars: [(text, text)]) -> text:
+    """Export environment variables in dotenv format.
+
+    Example:
+        export_dotenv([("FOO", "bar")])  # "FOO=bar"
+    """
+    var lines = []
+
+    for pair in vars:
+        val (name, value) = pair
+        val escaped = escape_dotenv_value(value)
+        val line = name + "=" + escaped
+        lines.push(line)
+
+    lines.join("\n")
+
+# ============================================================================
+# Dotenv Parsing
+# ============================================================================
+
+fn parse_dotenv(content: text) -> [(text, text)]:
+    """Parse dotenv file content into list of (name, value) tuples.
+
+    Supports:
+    - Simple: KEY=value
+    - Quoted: KEY="value with spaces"
+    - Comments: # comment
+    - Empty lines
+
+    Example:
+        parse_dotenv("FOO=bar\nBAZ=qux")  # [("FOO", "bar"), ("BAZ", "qux")]
+    """
+    val lines = content.split("\n")
+    var result = []
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip empty lines and comments
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Parse KEY=VALUE
+        val eq_pos = trimmed.find("=")
+        if eq_pos.?:
+            val eq_idx = eq_pos.unwrap()
+            val name = trimmed.substring(0, eq_idx).trim()
+            val value_raw = trimmed.substring(eq_idx + 1).trim()
+            val value = unquote_dotenv_value(value_raw)
+
+            if validate_var_name(name):
+                result.push((name, value))
+
+    result
+
+fn load_dotenv(path: text):
+    """Load dotenv file and set environment variables.
+
+    Example:
+        load_dotenv(".env")  # loads variables from .env file
+    """
+    val content = file_read_text(path)
+    val vars = parse_dotenv(content)
+
+    for pair in vars:
+        val (name, value) = pair
+        env_set(name, value)
+
+fn unquote_dotenv_value(value: text) -> text:
+    """Remove quotes from dotenv value if present.
+
+    Internal helper.
+    """
+    if value.starts_with("\"") and value.ends_with("\"") and value.len() >= 2:
+        return value.substring(1, value.len() - 1)
+
+    if value.starts_with("'") and value.ends_with("'") and value.len() >= 2:
+        return value.substring(1, value.len() - 1)
+
+    value
+
+# ============================================================================
+# Shell Integration
+# ============================================================================
+
+fn shell_eval(shell: text, command: text) -> text:
+    """Evaluate command in specific shell.
+
+    Example:
+        shell_eval("bash", "echo $HOME")  # "/home/user"
+    """
+    val (stdout, stderr, code) = rt_process_run(shell, ["-c", command])
+    if code == 0:
+        stdout.trim()
+    else:
+        ""
+
+fn source_file(path: text) -> [(text, text)]:
+    """Source shell file and return exported variables.
+
+    Example:
+        source_file(".env")  # loads and returns variables
+    """
+    # Simple implementation: read and parse as dotenv
+    val content = file_read_text(path)
+    parse_dotenv(content)
+
+fn write_dotenv(path: text, vars: [(text, text)]):
+    """Write environment variables to dotenv file.
+
+    Example:
+        write_dotenv(".env", [("FOO", "bar")])
+    """
+    val content = export_dotenv(vars)
+    file_write_text(path, content)
+
+# ============================================================================
+# Escape/Unescape Utilities
+# ============================================================================
+
+fn escape_shell_value(value: text) -> text:
+    """Escape value for safe shell usage.
+
+    Example:
+        escape_shell_value("hello \"world\"")  # "hello \\\"world\\\""
+    """
+    var result = value
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("$", "\\$")
+    result = result.replace("`", "\\`")
+    result
+
+fn escape_dotenv_value(value: text) -> text:
+    """Escape value for dotenv format.
+
+    Example:
+        escape_dotenv_value("hello world")  # "\"hello world\""
+    """
+    # Quote if contains spaces or special chars
+    if value.contains(" ") or value.contains("\"") or value.contains("'"):
+        return "\"" + value.replace("\"", "\\\"") + "\""
+
+    value
+
+fn unescape_shell_value(value: text) -> text:
+    """Unescape shell value.
+
+    Example:
+        unescape_shell_value("hello \\\"world\\\"")  # "hello \"world\""
+    """
+    var result = value
+    result = result.replace("\\\"", "\"")
+    result = result.replace("\\$", "$")
+    result = result.replace("\\`", "`")
+    result = result.replace("\\\\", "\\")
+    result
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn file_exists(path: text) -> bool:
+    """Check if file exists (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run test command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "test -f " + path])
+    code == 0
+
+fn dir_exists(path: text) -> bool:
+    """Check if directory exists (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run test command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "test -d " + path])
+    code == 0
+
+fn file_read_text(path: text) -> text:
+    """Read text file (simple implementation).
+
+    Internal helper.
+    """
+    # Try to run cat command
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", "cat " + path])
+    if code == 0:
+        stdout
+    else:
+        ""
+
+fn file_write_text(path: text, content: text):
+    """Write text file (simple implementation).
+
+    Internal helper.
+    """
+    # Use echo to write file
+    val escaped = content.replace("'", "'\\''")
+    rt_process_run("/bin/sh", ["-c", "echo '" + escaped + "' > " + path])
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export env_get, env_get_or, env_set, env_unset, env_has
+export env_list, env_clear, env_keys, env_values, env_size
+export env_snapshot, env_restore, env_diff
+export env_has_prefix, env_count_prefix, env_find, env_sort_by_name
+export expand_var, expand_var_expr, substitute_vars
+export path_separator, split_path, join_path
+export path_add, path_prepend, path_remove, path_contains
+export path_deduplicate, path_normalize, path_find_all, path_get_index, path_insert
+export search_path, which
+export detect_os, detect_arch, is_windows, is_unix, is_linux, is_macos
+export get_username, get_home_dir, get_config_dir, get_cache_dir, get_data_dir
+export get_hostname, get_current_dir, get_temp_dir
+export merge_env, filter_env, exclude_env, include_env
+export validate_var_name, check_required_vars, ensure_required_vars, validate_var_value
+export normalize_var_name, split_var_name
+export is_system_var, is_private_var, is_readonly_var
+export export_bash, export_fish, export_powershell, export_dotenv
+export parse_dotenv, load_dotenv, unquote_dotenv_value
+export escape_shell_value, escape_dotenv_value, unescape_shell_value
+export shell_eval, source_file, write_dotenv
