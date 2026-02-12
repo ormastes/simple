@@ -72,6 +72,26 @@ bool rt_file_unlock(int64_t handle) {
 }
 
 /* ----------------------------------------------------------------
+ * High-Resolution Time
+ * ---------------------------------------------------------------- */
+
+int64_t rt_time_now_nanos(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
+        return 0;  /* Fallback on error */
+    }
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+int64_t rt_time_now_micros(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) != 0) {
+        return 0;  /* Fallback on error */
+    }
+    return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
+}
+
+/* ----------------------------------------------------------------
  * Environment
  * ---------------------------------------------------------------- */
 

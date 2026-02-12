@@ -173,6 +173,11 @@ bool     rt_dir_remove_all(const char* path);
 int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
+/* ===== High-Resolution Time ===== */
+
+int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
+int64_t  rt_time_now_micros(void);  /* Microsecond precision monotonic time */
+
 /* ===== Output ===== */
 
 void     spl_print(const char* s);
