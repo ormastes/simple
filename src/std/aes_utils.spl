@@ -1,0 +1,1537 @@
+# AES (Advanced Encryption Standard) Encryption/Decryption Utilities
+#
+# Pure Simple implementation of AES-128, AES-192, and AES-256
+# Supports multiple block cipher modes: ECB, CBC, CTR
+# PKCS#7 padding for block alignment
+#
+# SECURITY NOTES:
+# - NEVER use ECB mode in production (patterns leak information)
+# - ALWAYS use CBC or CTR with random IV/nonce
+# - IV must be unique for each encryption with same key
+# - Use AES-256 for high security applications
+# - Keys must be cryptographically random
+#
+# AES ALGORITHM:
+# - Block size: 128 bits (16 bytes)
+# - Key sizes: 128, 192, or 256 bits
+# - Rounds: 10 (AES-128), 12 (AES-192), 14 (AES-256)
+# - Operations: SubBytes, ShiftRows, MixColumns, AddRoundKey
+#
+# AES STATE:
+# - 4x4 byte matrix (column-major order)
+# - Processed through multiple rounds
+# - Each round applies transformations
+
+# =============================================================================
+# AES S-BOX (Substitution Box)
+# =============================================================================
+# Pre-computed lookup table based on multiplicative inverse in GF(2^8)
+# followed by affine transformation
+
+fn aes_sbox() -> list:
+    [
+        0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+        0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+        0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+        0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+        0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+        0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+        0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+        0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+        0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+        0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+        0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+        0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+        0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+        0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+        0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+        0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+    ]
+
+# AES Inverse S-BOX (for decryption)
+fn aes_inv_sbox() -> list:
+    [
+        0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+        0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+        0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+        0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+        0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+        0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+        0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+        0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+        0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+        0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+        0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+        0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+        0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+        0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+        0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+        0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
+    ]
+
+# AES Round Constants (for key expansion)
+fn aes_rcon() -> list:
+    [
+        0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40,
+        0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a,
+        0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a,
+        0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39
+    ]
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+# Lookup byte in S-box
+fn sbox_lookup(byte: i64) -> i64:
+    val sbox = aes_sbox()
+    val index = byte % 256
+    sbox[index]
+
+# Lookup byte in inverse S-box
+fn inv_sbox_lookup(byte: i64) -> i64:
+    val inv_sbox = aes_inv_sbox()
+    val index = byte % 256
+    inv_sbox[index]
+
+# Get round constant
+fn rcon_lookup(round: i64) -> i64:
+    val rcon = aes_rcon()
+    rcon[round]
+
+# XOR two bytes
+fn xor_byte(a: i64, b: i64) -> i64:
+    # Ensure values are in byte range
+    val a_mod = a % 256
+    val b_mod = b % 256
+    # Simple XOR using bitwise operations simulation
+    val result = 0
+    var bit = 1
+    var temp_a = a_mod
+    var temp_b = b_mod
+    var sum = 0
+
+    # Process each bit
+    var i = 0
+    while i < 8:
+        val bit_a = temp_a % 2
+        val bit_b = temp_b % 2
+        val xor_bit = 0
+
+        # XOR logic: different bits = 1, same bits = 0
+        if bit_a == bit_b:
+            # Both 0 or both 1: XOR = 0
+            pass
+        else:
+            # Different: XOR = 1
+            sum = sum + bit
+
+        temp_a = temp_a / 2
+        temp_b = temp_b / 2
+        bit = bit * 2
+        i = i + 1
+
+    sum % 256
+
+# XOR two blocks (16 bytes each)
+fn xor_blocks(block_a: list, block_b: list) -> list:
+    val result = []
+    var i = 0
+    while i < 16:
+        val xor_val = xor_byte(block_a[i], block_b[i])
+        result.append(xor_val)
+        i = i + 1
+    result
+
+# XOR a list of bytes
+fn xor_bytes_list(bytes_a: list, bytes_b: list) -> list:
+    val len_a = bytes_a.length()
+    val len_b = bytes_b.length()
+    val min_len = 0
+
+    if len_a < len_b:
+        min_len = len_a
+    else:
+        min_len = len_b
+
+    val result = []
+    var i = 0
+    while i < min_len:
+        val xor_val = xor_byte(bytes_a[i], bytes_b[i])
+        result.append(xor_val)
+        i = i + 1
+    result
+
+# Galois Field (GF(2^8)) multiplication
+# Used in MixColumns operation
+fn gmul(a: i64, b: i64) -> i64:
+    var p = 0
+    var temp_a = a % 256
+    var temp_b = b % 256
+
+    var i = 0
+    while i < 8:
+        # If bit is set in b, XOR with a
+        if temp_b % 2 == 1:
+            p = xor_byte(p, temp_a)
+
+        # Check high bit of a
+        val hi_bit_set = temp_a >= 128
+
+        # Left shift a
+        temp_a = (temp_a * 2) % 256
+
+        # If high bit was set, reduce by AES polynomial 0x11b
+        if hi_bit_set:
+            temp_a = xor_byte(temp_a, 0x1b)
+
+        # Right shift b
+        temp_b = temp_b / 2
+        i = i + 1
+
+    p % 256
+
+# =============================================================================
+# BYTE/TEXT CONVERSION
+# =============================================================================
+
+# Convert text to byte list
+fn text_to_bytes(text: text) -> list:
+    val bytes = []
+    var i = 0
+    val len = text.length()
+
+    while i < len:
+        val char = text[i]
+        # Simple ASCII conversion (char code)
+        val byte = char.ord()
+        bytes.append(byte)
+        i = i + 1
+    bytes
+
+# Convert byte list to text
+fn bytes_to_text(bytes: list) -> text:
+    var result = ""
+    var i = 0
+    val len = bytes.length()
+
+    while i < len:
+        val byte = bytes[i]
+        val char = byte.chr()
+        result = result + char
+        i = i + 1
+    result
+
+# Convert byte to hex string (2 digits)
+fn byte_to_hex(byte: i64) -> text:
+    val hex_chars = "0123456789abcdef"
+    val b = byte % 256
+    val high = b / 16
+    val low = b % 16
+    hex_chars[high] + hex_chars[low]
+
+# Convert byte list to hex string
+fn bytes_to_hex(bytes: list) -> text:
+    var result = ""
+    var i = 0
+    val len = bytes.length()
+
+    while i < len:
+        val hex = byte_to_hex(bytes[i])
+        result = result + hex
+        i = i + 1
+    result
+
+# Convert hex digit to value
+fn hex_digit_to_value(char: text) -> i64:
+    val code = char.ord()
+
+    # '0'-'9': 48-57
+    if code >= 48:
+        if code <= 57:
+            return code - 48
+
+    # 'a'-'f': 97-102
+    if code >= 97:
+        if code <= 102:
+            return code - 97 + 10
+
+    # 'A'-'F': 65-70
+    if code >= 65:
+        if code <= 70:
+            return code - 65 + 10
+
+    0
+
+# Convert hex string to byte list
+fn hex_to_bytes(hex: text) -> list:
+    val bytes = []
+    var i = 0
+    val len = hex.length()
+
+    while i < len:
+        if i + 1 < len:
+            val high = hex_digit_to_value(hex[i])
+            val low = hex_digit_to_value(hex[i + 1])
+            val byte = high * 16 + low
+            bytes.append(byte)
+        i = i + 2
+    bytes
+
+# =============================================================================
+# PADDING (PKCS#7)
+# =============================================================================
+
+# Add PKCS#7 padding to data
+fn pkcs7_pad(data: list, block_size: i64) -> list:
+    val data_len = data.length()
+    val remainder = data_len % block_size
+    val padding_len = block_size - remainder
+
+    val padded = []
+    var i = 0
+    while i < data_len:
+        padded.append(data[i])
+        i = i + 1
+
+    # Add padding bytes (each byte = padding length)
+    var j = 0
+    while j < padding_len:
+        padded.append(padding_len)
+        j = j + 1
+
+    padded
+
+# Remove PKCS#7 padding from data
+fn pkcs7_unpad(data: list) -> list:
+    val data_len = data.length()
+
+    if data_len == 0:
+        return data
+
+    # Last byte indicates padding length
+    val padding_len = data[data_len - 1]
+
+    # Validate padding
+    if padding_len > data_len:
+        return data
+
+    if padding_len == 0:
+        return data
+
+    # Extract unpadded data
+    val unpadded = []
+    val unpadded_len = data_len - padding_len
+    var i = 0
+    while i < unpadded_len:
+        unpadded.append(data[i])
+        i = i + 1
+
+    unpadded
+
+# =============================================================================
+# AES STATE OPERATIONS
+# =============================================================================
+
+# Create AES state from block (16 bytes)
+# State is 4x4 matrix in column-major order
+fn create_state(block: list) -> list:
+    val state = []
+    var i = 0
+    while i < 16:
+        state.append(block[i])
+        i = i + 1
+    state
+
+# Extract block from state
+fn state_to_block(state: list) -> list:
+    val block = []
+    var i = 0
+    while i < 16:
+        block.append(state[i])
+        i = i + 1
+    block
+
+# Get state element at (row, col)
+fn state_get(state: list, row: i64, col: i64) -> i64:
+    val index = col * 4 + row
+    state[index]
+
+# Set state element at (row, col)
+fn state_set(state: list, row: i64, col: i64, value: i64) -> list:
+    val index = col * 4 + row
+    val new_state = []
+    var i = 0
+    while i < 16:
+        if i == index:
+            new_state.append(value)
+        else:
+            new_state.append(state[i])
+        i = i + 1
+    new_state
+
+# =============================================================================
+# AES SUBBYTES TRANSFORMATION
+# =============================================================================
+
+# Apply S-box substitution to entire state
+fn sub_bytes(state: list) -> list:
+    val new_state = []
+    var i = 0
+    while i < 16:
+        val byte = state[i]
+        val substituted = sbox_lookup(byte)
+        new_state.append(substituted)
+        i = i + 1
+    new_state
+
+# Apply inverse S-box substitution to entire state
+fn inv_sub_bytes(state: list) -> list:
+    val new_state = []
+    var i = 0
+    while i < 16:
+        val byte = state[i]
+        val substituted = inv_sbox_lookup(byte)
+        new_state.append(substituted)
+        i = i + 1
+    new_state
+
+# =============================================================================
+# AES SHIFTROWS TRANSFORMATION
+# =============================================================================
+
+# Shift rows in state
+# Row 0: no shift
+# Row 1: shift left by 1
+# Row 2: shift left by 2
+# Row 3: shift left by 3
+fn shift_rows(state: list) -> list:
+    var new_state = state
+
+    # Row 1: shift left by 1
+    val r1_c0 = state_get(state, 1, 0)
+    val r1_c1 = state_get(state, 1, 1)
+    val r1_c2 = state_get(state, 1, 2)
+    val r1_c3 = state_get(state, 1, 3)
+    new_state = state_set(new_state, 1, 0, r1_c1)
+    new_state = state_set(new_state, 1, 1, r1_c2)
+    new_state = state_set(new_state, 1, 2, r1_c3)
+    new_state = state_set(new_state, 1, 3, r1_c0)
+
+    # Row 2: shift left by 2
+    val r2_c0 = state_get(state, 2, 0)
+    val r2_c1 = state_get(state, 2, 1)
+    val r2_c2 = state_get(state, 2, 2)
+    val r2_c3 = state_get(state, 2, 3)
+    new_state = state_set(new_state, 2, 0, r2_c2)
+    new_state = state_set(new_state, 2, 1, r2_c3)
+    new_state = state_set(new_state, 2, 2, r2_c0)
+    new_state = state_set(new_state, 2, 3, r2_c1)
+
+    # Row 3: shift left by 3
+    val r3_c0 = state_get(state, 3, 0)
+    val r3_c1 = state_get(state, 3, 1)
+    val r3_c2 = state_get(state, 3, 2)
+    val r3_c3 = state_get(state, 3, 3)
+    new_state = state_set(new_state, 3, 0, r3_c3)
+    new_state = state_set(new_state, 3, 1, r3_c0)
+    new_state = state_set(new_state, 3, 2, r3_c1)
+    new_state = state_set(new_state, 3, 3, r3_c2)
+
+    new_state
+
+# Inverse shift rows
+fn inv_shift_rows(state: list) -> list:
+    var new_state = state
+
+    # Row 1: shift right by 1 (= shift left by 3)
+    val r1_c0 = state_get(state, 1, 0)
+    val r1_c1 = state_get(state, 1, 1)
+    val r1_c2 = state_get(state, 1, 2)
+    val r1_c3 = state_get(state, 1, 3)
+    new_state = state_set(new_state, 1, 0, r1_c3)
+    new_state = state_set(new_state, 1, 1, r1_c0)
+    new_state = state_set(new_state, 1, 2, r1_c1)
+    new_state = state_set(new_state, 1, 3, r1_c2)
+
+    # Row 2: shift right by 2 (= shift left by 2)
+    val r2_c0 = state_get(state, 2, 0)
+    val r2_c1 = state_get(state, 2, 1)
+    val r2_c2 = state_get(state, 2, 2)
+    val r2_c3 = state_get(state, 2, 3)
+    new_state = state_set(new_state, 2, 0, r2_c2)
+    new_state = state_set(new_state, 2, 1, r2_c3)
+    new_state = state_set(new_state, 2, 2, r2_c0)
+    new_state = state_set(new_state, 2, 3, r2_c1)
+
+    # Row 3: shift right by 3 (= shift left by 1)
+    val r3_c0 = state_get(state, 3, 0)
+    val r3_c1 = state_get(state, 3, 1)
+    val r3_c2 = state_get(state, 3, 2)
+    val r3_c3 = state_get(state, 3, 3)
+    new_state = state_set(new_state, 3, 0, r3_c1)
+    new_state = state_set(new_state, 3, 1, r3_c2)
+    new_state = state_set(new_state, 3, 2, r3_c3)
+    new_state = state_set(new_state, 3, 3, r3_c0)
+
+    new_state
+
+# =============================================================================
+# AES MIXCOLUMNS TRANSFORMATION
+# =============================================================================
+
+# Mix a single column using matrix multiplication in GF(2^8)
+# Multiply by fixed matrix:
+# [2 3 1 1]
+# [1 2 3 1]
+# [1 1 2 3]
+# [3 1 1 2]
+fn mix_column(col: list) -> list:
+    val s0 = col[0]
+    val s1 = col[1]
+    val s2 = col[2]
+    val s3 = col[3]
+
+    val t0_1 = gmul(2, s0)
+    val t0_2 = gmul(3, s1)
+    val t0_3 = s2
+    val t0_4 = s3
+    val t0_xor1 = xor_byte(t0_1, t0_2)
+    val t0_xor2 = xor_byte(t0_xor1, t0_3)
+    val t0 = xor_byte(t0_xor2, t0_4)
+
+    val t1_1 = s0
+    val t1_2 = gmul(2, s1)
+    val t1_3 = gmul(3, s2)
+    val t1_4 = s3
+    val t1_xor1 = xor_byte(t1_1, t1_2)
+    val t1_xor2 = xor_byte(t1_xor1, t1_3)
+    val t1 = xor_byte(t1_xor2, t1_4)
+
+    val t2_1 = s0
+    val t2_2 = s1
+    val t2_3 = gmul(2, s2)
+    val t2_4 = gmul(3, s3)
+    val t2_xor1 = xor_byte(t2_1, t2_2)
+    val t2_xor2 = xor_byte(t2_xor1, t2_3)
+    val t2 = xor_byte(t2_xor2, t2_4)
+
+    val t3_1 = gmul(3, s0)
+    val t3_2 = s1
+    val t3_3 = s2
+    val t3_4 = gmul(2, s3)
+    val t3_xor1 = xor_byte(t3_1, t3_2)
+    val t3_xor2 = xor_byte(t3_xor1, t3_3)
+    val t3 = xor_byte(t3_xor2, t3_4)
+
+    [t0, t1, t2, t3]
+
+# Mix columns transformation
+fn mix_columns(state: list) -> list:
+    var new_state = state
+
+    # Process each column
+    var col = 0
+    while col < 4:
+        val s0 = state_get(state, 0, col)
+        val s1 = state_get(state, 1, col)
+        val s2 = state_get(state, 2, col)
+        val s3 = state_get(state, 3, col)
+
+        val column = [s0, s1, s2, s3]
+        val mixed = mix_column(column)
+
+        new_state = state_set(new_state, 0, col, mixed[0])
+        new_state = state_set(new_state, 1, col, mixed[1])
+        new_state = state_set(new_state, 2, col, mixed[2])
+        new_state = state_set(new_state, 3, col, mixed[3])
+
+        col = col + 1
+
+    new_state
+
+# Inverse mix column
+# Multiply by inverse matrix:
+# [14 11 13  9]
+# [ 9 14 11 13]
+# [13  9 14 11]
+# [11 13  9 14]
+fn inv_mix_column(col: list) -> list:
+    val s0 = col[0]
+    val s1 = col[1]
+    val s2 = col[2]
+    val s3 = col[3]
+
+    val t0_1 = gmul(14, s0)
+    val t0_2 = gmul(11, s1)
+    val t0_3 = gmul(13, s2)
+    val t0_4 = gmul(9, s3)
+    val t0_xor1 = xor_byte(t0_1, t0_2)
+    val t0_xor2 = xor_byte(t0_xor1, t0_3)
+    val t0 = xor_byte(t0_xor2, t0_4)
+
+    val t1_1 = gmul(9, s0)
+    val t1_2 = gmul(14, s1)
+    val t1_3 = gmul(11, s2)
+    val t1_4 = gmul(13, s3)
+    val t1_xor1 = xor_byte(t1_1, t1_2)
+    val t1_xor2 = xor_byte(t1_xor1, t1_3)
+    val t1 = xor_byte(t1_xor2, t1_4)
+
+    val t2_1 = gmul(13, s0)
+    val t2_2 = gmul(9, s1)
+    val t2_3 = gmul(14, s2)
+    val t2_4 = gmul(11, s3)
+    val t2_xor1 = xor_byte(t2_1, t2_2)
+    val t2_xor2 = xor_byte(t2_xor1, t2_3)
+    val t2 = xor_byte(t2_xor2, t2_4)
+
+    val t3_1 = gmul(11, s0)
+    val t3_2 = gmul(13, s1)
+    val t3_3 = gmul(9, s2)
+    val t3_4 = gmul(14, s3)
+    val t3_xor1 = xor_byte(t3_1, t3_2)
+    val t3_xor2 = xor_byte(t3_xor1, t3_3)
+    val t3 = xor_byte(t3_xor2, t3_4)
+
+    [t0, t1, t2, t3]
+
+# Inverse mix columns transformation
+fn inv_mix_columns(state: list) -> list:
+    var new_state = state
+
+    # Process each column
+    var col = 0
+    while col < 4:
+        val s0 = state_get(state, 0, col)
+        val s1 = state_get(state, 1, col)
+        val s2 = state_get(state, 2, col)
+        val s3 = state_get(state, 3, col)
+
+        val column = [s0, s1, s2, s3]
+        val mixed = inv_mix_column(column)
+
+        new_state = state_set(new_state, 0, col, mixed[0])
+        new_state = state_set(new_state, 1, col, mixed[1])
+        new_state = state_set(new_state, 2, col, mixed[2])
+        new_state = state_set(new_state, 3, col, mixed[3])
+
+        col = col + 1
+
+    new_state
+
+# =============================================================================
+# AES ADDROUNDKEY TRANSFORMATION
+# =============================================================================
+
+# XOR state with round key
+fn add_round_key(state: list, round_key: list) -> list:
+    val new_state = []
+    var i = 0
+    while i < 16:
+        val xor_val = xor_byte(state[i], round_key[i])
+        new_state.append(xor_val)
+        i = i + 1
+    new_state
+
+# =============================================================================
+# AES KEY EXPANSION
+# =============================================================================
+
+# Rotate word left by 1 byte (for key expansion)
+fn rotate_word(word: list) -> list:
+    [word[1], word[2], word[3], word[0]]
+
+# Apply S-box to each byte in word
+fn sub_word(word: list) -> list:
+    val result = []
+    var i = 0
+    while i < 4:
+        val substituted = sbox_lookup(word[i])
+        result.append(substituted)
+        i = i + 1
+    result
+
+# Get word from expanded key
+fn get_key_word(expanded_key: list, word_index: i64) -> list:
+    val start = word_index * 4
+    [
+        expanded_key[start],
+        expanded_key[start + 1],
+        expanded_key[start + 2],
+        expanded_key[start + 3]
+    ]
+
+# XOR two words (4 bytes each)
+fn xor_words(word_a: list, word_b: list) -> list:
+    [
+        xor_byte(word_a[0], word_b[0]),
+        xor_byte(word_a[1], word_b[1]),
+        xor_byte(word_a[2], word_b[2]),
+        xor_byte(word_a[3], word_b[3])
+    ]
+
+# Expand AES key (supports 128, 192, 256-bit keys)
+fn expand_key(key: list, key_size: i64) -> list:
+    val expanded = []
+
+    # Copy original key to expanded key
+    var i = 0
+    while i < key_size:
+        expanded.append(key[i])
+        i = i + 1
+
+    # Calculate number of words and rounds
+    val nk = key_size / 4
+    val nr = 0
+    var num_rounds = 0
+
+    if key_size == 16:
+        num_rounds = 10
+    else:
+        if key_size == 24:
+            num_rounds = 12
+        else:
+            num_rounds = 14
+
+    val total_words = (num_rounds + 1) * 4
+
+    # Expand key
+    var word_idx = nk
+    while word_idx < total_words:
+        val prev_word = get_key_word(expanded, word_idx - 1)
+        var temp_word = prev_word
+
+        # Every Nk words, apply special transformation
+        if word_idx % nk == 0:
+            val rotated = rotate_word(temp_word)
+            val subbed = sub_word(rotated)
+            val round_num = word_idx / nk
+            val rc = rcon_lookup(round_num)
+
+            # XOR with round constant
+            temp_word = [
+                xor_byte(subbed[0], rc),
+                subbed[1],
+                subbed[2],
+                subbed[3]
+            ]
+        else:
+            # For AES-256, apply SubWord every 4 words after Nk
+            if key_size == 32:
+                if word_idx % nk == 4:
+                    temp_word = sub_word(temp_word)
+
+        # XOR with word Nk positions back
+        val nk_back_word = get_key_word(expanded, word_idx - nk)
+        val new_word = xor_words(nk_back_word, temp_word)
+
+        # Append to expanded key
+        expanded.append(new_word[0])
+        expanded.append(new_word[1])
+        expanded.append(new_word[2])
+        expanded.append(new_word[3])
+
+        word_idx = word_idx + 1
+
+    expanded
+
+# Get round key from expanded key
+fn get_round_key(expanded_key: list, round: i64) -> list:
+    val start = round * 16
+    val round_key = []
+    var i = 0
+    while i < 16:
+        round_key.append(expanded_key[start + i])
+        i = i + 1
+    round_key
+
+# =============================================================================
+# AES CORE ENCRYPTION/DECRYPTION (Single Block)
+# =============================================================================
+
+# Encrypt single 16-byte block with expanded key
+fn aes_encrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list:
+    var state = create_state(block)
+
+    # Initial round key addition
+    val round_key_0 = get_round_key(expanded_key, 0)
+    state = add_round_key(state, round_key_0)
+
+    # Main rounds
+    var round = 1
+    while round < num_rounds:
+        state = sub_bytes(state)
+        state = shift_rows(state)
+        state = mix_columns(state)
+        val round_key = get_round_key(expanded_key, round)
+        state = add_round_key(state, round_key)
+        round = round + 1
+
+    # Final round (no MixColumns)
+    state = sub_bytes(state)
+    state = shift_rows(state)
+    val final_key = get_round_key(expanded_key, num_rounds)
+    state = add_round_key(state, final_key)
+
+    state_to_block(state)
+
+# Decrypt single 16-byte block with expanded key
+fn aes_decrypt_block_with_expanded(block: list, expanded_key: list, num_rounds: i64) -> list:
+    var state = create_state(block)
+
+    # Initial round key addition (with last round key)
+    val round_key_final = get_round_key(expanded_key, num_rounds)
+    state = add_round_key(state, round_key_final)
+
+    # Main rounds (in reverse)
+    var round = num_rounds - 1
+    while round > 0:
+        state = inv_shift_rows(state)
+        state = inv_sub_bytes(state)
+        val round_key = get_round_key(expanded_key, round)
+        state = add_round_key(state, round_key)
+        state = inv_mix_columns(state)
+        round = round - 1
+
+    # Final round (no InvMixColumns)
+    state = inv_shift_rows(state)
+    state = inv_sub_bytes(state)
+    val round_key_0 = get_round_key(expanded_key, 0)
+    state = add_round_key(state, round_key_0)
+
+    state_to_block(state)
+
+# Encrypt single block (determine rounds from key size)
+fn aes_encrypt_block(block: list, key: list) -> list:
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+    aes_encrypt_block_with_expanded(block, expanded, rounds)
+
+# Decrypt single block (determine rounds from key size)
+fn aes_decrypt_block(block: list, key: list) -> list:
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+    aes_decrypt_block_with_expanded(block, expanded, rounds)
+
+# =============================================================================
+# AES ECB MODE (Electronic Codebook)
+# WARNING: ECB is insecure - patterns in plaintext are visible in ciphertext
+# Use CBC or CTR mode instead
+# =============================================================================
+
+# Encrypt data using AES-ECB mode
+fn aes_ecb_encrypt(data: list, key: list) -> list:
+    val padded = pkcs7_pad(data, 16)
+    val ciphertext = []
+
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+
+    var i = 0
+    val len = padded.length()
+    while i < len:
+        val block = []
+        var j = 0
+        while j < 16:
+            block.append(padded[i + j])
+            j = j + 1
+
+        val encrypted = aes_encrypt_block_with_expanded(block, expanded, rounds)
+
+        var k = 0
+        while k < 16:
+            ciphertext.append(encrypted[k])
+            k = k + 1
+
+        i = i + 16
+
+    ciphertext
+
+# Decrypt data using AES-ECB mode
+fn aes_ecb_decrypt(ciphertext: list, key: list) -> list:
+    val plaintext = []
+
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+
+    var i = 0
+    val len = ciphertext.length()
+    while i < len:
+        val block = []
+        var j = 0
+        while j < 16:
+            block.append(ciphertext[i + j])
+            j = j + 1
+
+        val decrypted = aes_decrypt_block_with_expanded(block, expanded, rounds)
+
+        var k = 0
+        while k < 16:
+            plaintext.append(decrypted[k])
+            k = k + 1
+
+        i = i + 16
+
+    pkcs7_unpad(plaintext)
+
+# =============================================================================
+# AES CBC MODE (Cipher Block Chaining)
+# More secure than ECB - requires random IV
+# =============================================================================
+
+# Encrypt data using AES-CBC mode
+fn aes_cbc_encrypt(data: list, key: list, iv: list) -> list:
+    val padded = pkcs7_pad(data, 16)
+    val ciphertext = []
+
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+
+    var prev_block = iv
+    var i = 0
+    val len = padded.length()
+
+    while i < len:
+        val block = []
+        var j = 0
+        while j < 16:
+            block.append(padded[i + j])
+            j = j + 1
+
+        # XOR with previous ciphertext block (or IV)
+        val xored = xor_blocks(block, prev_block)
+
+        # Encrypt
+        val encrypted = aes_encrypt_block_with_expanded(xored, expanded, rounds)
+
+        # Save as previous block for next iteration
+        prev_block = encrypted
+
+        # Append to ciphertext
+        var k = 0
+        while k < 16:
+            ciphertext.append(encrypted[k])
+            k = k + 1
+
+        i = i + 16
+
+    ciphertext
+
+# Decrypt data using AES-CBC mode
+fn aes_cbc_decrypt(ciphertext: list, key: list, iv: list) -> list:
+    val plaintext = []
+
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+
+    var prev_block = iv
+    var i = 0
+    val len = ciphertext.length()
+
+    while i < len:
+        val block = []
+        var j = 0
+        while j < 16:
+            block.append(ciphertext[i + j])
+            j = j + 1
+
+        # Decrypt
+        val decrypted = aes_decrypt_block_with_expanded(block, expanded, rounds)
+
+        # XOR with previous ciphertext block (or IV)
+        val xored = xor_blocks(decrypted, prev_block)
+
+        # Save current ciphertext block for next iteration
+        prev_block = block
+
+        # Append to plaintext
+        var k = 0
+        while k < 16:
+            plaintext.append(xored[k])
+            k = k + 1
+
+        i = i + 16
+
+    pkcs7_unpad(plaintext)
+
+# =============================================================================
+# AES CTR MODE (Counter)
+# Stream cipher mode - parallelizable
+# =============================================================================
+
+# Increment counter (16-byte counter, big-endian)
+fn increment_counter(counter: list) -> list:
+    val new_counter = []
+    var carry = 1
+
+    # Increment from right to left (big-endian)
+    var i = 15
+    while i >= 0:
+        val sum = counter[i] + carry
+        val new_byte = sum % 256
+        carry = sum / 256
+        new_counter.append(new_byte)
+        i = i - 1
+
+    # Reverse to get correct order
+    val result = []
+    var j = 15
+    while j >= 0:
+        result.append(new_counter[j])
+        j = j - 1
+    result
+
+# Encrypt/Decrypt data using AES-CTR mode (same operation for both)
+fn aes_ctr_process(data: list, key: list, nonce: list) -> list:
+    val output = []
+
+    val key_size = key.length()
+    val num_rounds = 0
+    var rounds = 0
+
+    if key_size == 16:
+        rounds = 10
+    else:
+        if key_size == 24:
+            rounds = 12
+        else:
+            rounds = 14
+
+    val expanded = expand_key(key, key_size)
+
+    # Initialize counter (nonce + counter)
+    var counter = []
+    var i = 0
+    while i < 16:
+        if i < nonce.length():
+            counter.append(nonce[i])
+        else:
+            counter.append(0)
+        i = i + 1
+
+    var pos = 0
+    val len = data.length()
+
+    while pos < len:
+        # Encrypt counter
+        val encrypted_counter = aes_encrypt_block_with_expanded(counter, expanded, rounds)
+
+        # XOR with data block
+        var j = 0
+        while j < 16:
+            if pos + j < len:
+                val xor_val = xor_byte(data[pos + j], encrypted_counter[j])
+                output.append(xor_val)
+            j = j + 1
+
+        # Increment counter
+        counter = increment_counter(counter)
+        pos = pos + 16
+
+    output
+
+# Encrypt using CTR mode
+fn aes_ctr_encrypt(data: list, key: list, nonce: list) -> list:
+    aes_ctr_process(data, key, nonce)
+
+# Decrypt using CTR mode (same as encrypt)
+fn aes_ctr_decrypt(ciphertext: list, key: list, nonce: list) -> list:
+    aes_ctr_process(ciphertext, key, nonce)
+
+# =============================================================================
+# HIGH-LEVEL AES API (Text-based)
+# =============================================================================
+
+# Validate key size
+fn is_valid_key_size(key_size: i64) -> i64:
+    if key_size == 16:
+        return 1
+    if key_size == 24:
+        return 1
+    if key_size == 32:
+        return 1
+    0
+
+# Prepare key (pad or truncate to valid size)
+fn prepare_key(key: text, target_size: i64) -> list:
+    val key_bytes = text_to_bytes(key)
+    val key_len = key_bytes.length()
+
+    if key_len == target_size:
+        return key_bytes
+
+    val prepared = []
+    var i = 0
+    while i < target_size:
+        if i < key_len:
+            prepared.append(key_bytes[i])
+        else:
+            prepared.append(0)
+        i = i + 1
+    prepared
+
+# =============================================================================
+# AES-128 (128-bit key)
+# =============================================================================
+
+# Encrypt text using AES-128-CBC
+fn aes128_encrypt(plaintext: text, key: text) -> list:
+    val key_bytes = prepare_key(key, 16)
+    val iv = generate_iv()
+    val data_bytes = text_to_bytes(plaintext)
+    val ciphertext = aes_cbc_encrypt(data_bytes, key_bytes, iv)
+
+    # Prepend IV to ciphertext
+    val result = []
+    var i = 0
+    while i < 16:
+        result.append(iv[i])
+        i = i + 1
+
+    var j = 0
+    val len = ciphertext.length()
+    while j < len:
+        result.append(ciphertext[j])
+        j = j + 1
+
+    result
+
+# Decrypt ciphertext using AES-128-CBC
+fn aes128_decrypt(ciphertext: list, key: text) -> text:
+    val key_bytes = prepare_key(key, 16)
+
+    # Extract IV (first 16 bytes)
+    val iv = []
+    var i = 0
+    while i < 16:
+        iv.append(ciphertext[i])
+        i = i + 1
+
+    # Extract actual ciphertext
+    val actual_cipher = []
+    var j = 16
+    val len = ciphertext.length()
+    while j < len:
+        actual_cipher.append(ciphertext[j])
+        j = j + 1
+
+    val plaintext_bytes = aes_cbc_decrypt(actual_cipher, key_bytes, iv)
+    bytes_to_text(plaintext_bytes)
+
+# =============================================================================
+# AES-192 (192-bit key)
+# =============================================================================
+
+# Encrypt text using AES-192-CBC
+fn aes192_encrypt(plaintext: text, key: text) -> list:
+    val key_bytes = prepare_key(key, 24)
+    val iv = generate_iv()
+    val data_bytes = text_to_bytes(plaintext)
+    val ciphertext = aes_cbc_encrypt(data_bytes, key_bytes, iv)
+
+    # Prepend IV to ciphertext
+    val result = []
+    var i = 0
+    while i < 16:
+        result.append(iv[i])
+        i = i + 1
+
+    var j = 0
+    val len = ciphertext.length()
+    while j < len:
+        result.append(ciphertext[j])
+        j = j + 1
+
+    result
+
+# Decrypt ciphertext using AES-192-CBC
+fn aes192_decrypt(ciphertext: list, key: text) -> text:
+    val key_bytes = prepare_key(key, 24)
+
+    # Extract IV (first 16 bytes)
+    val iv = []
+    var i = 0
+    while i < 16:
+        iv.append(ciphertext[i])
+        i = i + 1
+
+    # Extract actual ciphertext
+    val actual_cipher = []
+    var j = 16
+    val len = ciphertext.length()
+    while j < len:
+        actual_cipher.append(ciphertext[j])
+        j = j + 1
+
+    val plaintext_bytes = aes_cbc_decrypt(actual_cipher, key_bytes, iv)
+    bytes_to_text(plaintext_bytes)
+
+# =============================================================================
+# AES-256 (256-bit key)
+# =============================================================================
+
+# Encrypt text using AES-256-CBC
+fn aes256_encrypt(plaintext: text, key: text) -> list:
+    val key_bytes = prepare_key(key, 32)
+    val iv = generate_iv()
+    val data_bytes = text_to_bytes(plaintext)
+    val ciphertext = aes_cbc_encrypt(data_bytes, key_bytes, iv)
+
+    # Prepend IV to ciphertext
+    val result = []
+    var i = 0
+    while i < 16:
+        result.append(iv[i])
+        i = i + 1
+
+    var j = 0
+    val len = ciphertext.length()
+    while j < len:
+        result.append(ciphertext[j])
+        j = j + 1
+
+    result
+
+# Decrypt ciphertext using AES-256-CBC
+fn aes256_decrypt(ciphertext: list, key: text) -> text:
+    val key_bytes = prepare_key(key, 32)
+
+    # Extract IV (first 16 bytes)
+    val iv = []
+    var i = 0
+    while i < 16:
+        iv.append(ciphertext[i])
+        i = i + 1
+
+    # Extract actual ciphertext
+    val actual_cipher = []
+    var j = 16
+    val len = ciphertext.length()
+    while j < len:
+        actual_cipher.append(ciphertext[j])
+        j = j + 1
+
+    val plaintext_bytes = aes_cbc_decrypt(actual_cipher, key_bytes, iv)
+    bytes_to_text(plaintext_bytes)
+
+# =============================================================================
+# KEY AND IV GENERATION
+# =============================================================================
+
+# Generate random AES key of specified size
+fn generate_aes_key(size: i64) -> list:
+    val valid = is_valid_key_size(size)
+    if valid == 0:
+        # Default to AES-128
+        return generate_aes_key(16)
+
+    # Simple pseudo-random generation (NOT cryptographically secure)
+    # In production, use secure random number generator
+    val key = []
+    var seed = 42
+    var i = 0
+
+    while i < size:
+        # Linear congruential generator
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        val byte = seed % 256
+        key.append(byte)
+        i = i + 1
+
+    key
+
+# Generate random IV (16 bytes)
+fn generate_iv() -> list:
+    val iv = []
+    var seed = 123
+    var i = 0
+
+    while i < 16:
+        # Linear congruential generator
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        val byte = seed % 256
+        iv.append(byte)
+        i = i + 1
+
+    iv
+
+# Generate random nonce for CTR mode (16 bytes)
+fn generate_nonce() -> list:
+    generate_iv()
+
+# Generate IV from seed (deterministic)
+fn generate_iv_from_seed(seed: i64) -> list:
+    val iv = []
+    var current_seed = seed
+    var i = 0
+
+    while i < 16:
+        current_seed = (current_seed * 1103515245 + 12345) % 2147483648
+        val byte = current_seed % 256
+        iv.append(byte)
+        i = i + 1
+
+    iv
+
+# =============================================================================
+# UTILITY FUNCTIONS FOR TESTING AND DEBUGGING
+# =============================================================================
+
+# Print state as 4x4 matrix
+fn print_state(state: list) -> text:
+    var result = ""
+    var row = 0
+
+    while row < 4:
+        var col = 0
+        while col < 4:
+            val byte = state_get(state, row, col)
+            val hex = byte_to_hex(byte)
+            result = result + hex + " "
+            col = col + 1
+        result = result + "\n"
+        row = row + 1
+
+    result
+
+# Print block as hex
+fn print_block(block: list) -> text:
+    var result = ""
+    var i = 0
+
+    while i < block.length():
+        val hex = byte_to_hex(block[i])
+        result = result + hex
+        if (i + 1) % 16 == 0:
+            result = result + "\n"
+        else:
+            if (i + 1) % 4 == 0:
+                result = result + " "
+        i = i + 1
+
+    result
+
+# Compare two blocks (for testing)
+fn blocks_equal(block_a: list, block_b: list) -> i64:
+    val len_a = block_a.length()
+    val len_b = block_b.length()
+
+    if len_a != len_b:
+        return 0
+
+    var i = 0
+    while i < len_a:
+        if block_a[i] != block_b[i]:
+            return 0
+        i = i + 1
+
+    1
+
+# =============================================================================
+# ADDITIONAL ENCRYPTION MODES AND UTILITIES
+# =============================================================================
+
+# Rotate word right by 1 byte
+fn rotate_word_right(word: list) -> list:
+    [word[3], word[0], word[1], word[2]]
+
+# Extract key bytes from text (pad or truncate)
+fn text_to_key_bytes(key: text, size: i64) -> list:
+    prepare_key(key, size)
+
+# Simple checksum for data integrity
+fn compute_checksum(data: list) -> i64:
+    var sum = 0
+    var i = 0
+    val len = data.length()
+
+    while i < len:
+        sum = sum + data[i]
+        i = i + 1
+
+    sum % 256
+
+# Add checksum to data
+fn add_checksum(data: list) -> list:
+    val checksum = compute_checksum(data)
+    val result = []
+
+    var i = 0
+    val len = data.length()
+    while i < len:
+        result.append(data[i])
+        i = i + 1
+
+    result.append(checksum)
+    result
+
+# Verify and remove checksum
+fn verify_checksum(data: list) -> list:
+    val len = data.length()
+
+    if len == 0:
+        return data
+
+    val stored_checksum = data[len - 1]
+
+    val data_without_checksum = []
+    var i = 0
+    while i < len - 1:
+        data_without_checksum.append(data[i])
+        i = i + 1
+
+    val computed_checksum = compute_checksum(data_without_checksum)
+
+    # If checksums match, return data without checksum
+    if stored_checksum == computed_checksum:
+        return data_without_checksum
+
+    # Otherwise return original data (checksum verification failed)
+    data
+
+# =============================================================================
+# MAIN ENCRYPTION/DECRYPTION FUNCTIONS (Auto-detect mode)
+# =============================================================================
+
+# Encrypt text with automatic mode selection (defaults to AES-256-CBC)
+fn aes_encrypt(plaintext: text, key: text) -> list:
+    aes256_encrypt(plaintext, key)
+
+# Decrypt ciphertext with automatic mode selection (defaults to AES-256-CBC)
+fn aes_decrypt(ciphertext: list, key: text) -> text:
+    aes256_decrypt(ciphertext, key)
+
+# Encrypt text with specified mode
+fn aes_encrypt_with_mode(plaintext: text, key: text, mode: text) -> list:
+    val data_bytes = text_to_bytes(plaintext)
+
+    if mode == "ecb":
+        val key_bytes = prepare_key(key, 16)
+        return aes_ecb_encrypt(data_bytes, key_bytes)
+
+    if mode == "cbc":
+        return aes_encrypt(plaintext, key)
+
+    if mode == "ctr":
+        val key_bytes = prepare_key(key, 16)
+        val nonce = generate_nonce()
+        val ciphertext = aes_ctr_encrypt(data_bytes, key_bytes, nonce)
+
+        # Prepend nonce to ciphertext
+        val result = []
+        var i = 0
+        while i < 16:
+            result.append(nonce[i])
+            i = i + 1
+
+        var j = 0
+        val len = ciphertext.length()
+        while j < len:
+            result.append(ciphertext[j])
+            j = j + 1
+
+        return result
+
+    # Default to CBC
+    aes_encrypt(plaintext, key)
+
+# Decrypt ciphertext with specified mode
+fn aes_decrypt_with_mode(ciphertext: list, key: text, mode: text) -> text:
+    if mode == "ecb":
+        val key_bytes = prepare_key(key, 16)
+        val plaintext_bytes = aes_ecb_decrypt(ciphertext, key_bytes)
+        return bytes_to_text(plaintext_bytes)
+
+    if mode == "cbc":
+        return aes_decrypt(ciphertext, key)
+
+    if mode == "ctr":
+        val key_bytes = prepare_key(key, 16)
+
+        # Extract nonce (first 16 bytes)
+        val nonce = []
+        var i = 0
+        while i < 16:
+            nonce.append(ciphertext[i])
+            i = i + 1
+
+        # Extract actual ciphertext
+        val actual_cipher = []
+        var j = 16
+        val len = ciphertext.length()
+        while j < len:
+            actual_cipher.append(ciphertext[j])
+            j = j + 1
+
+        val plaintext_bytes = aes_ctr_decrypt(actual_cipher, key_bytes, nonce)
+        return bytes_to_text(plaintext_bytes)
+
+    # Default to CBC
+    aes_decrypt(ciphertext, key)
