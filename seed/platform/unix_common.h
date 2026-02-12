@@ -13,6 +13,12 @@
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _BSD_SOURCE
+#define _BSD_SOURCE
+#endif
 
 /* POSIX headers */
 #include <ftw.h>
@@ -20,6 +26,11 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <sys/mman.h>
+#include <string.h>
+#include <time.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -114,6 +125,54 @@ int64_t rt_file_write_text_at(const char* path, int64_t offset, const char* data
     close(fd);
 
     return (int64_t)bytes_written;
+}
+
+/* ----------------------------------------------------------------
+ * Memory-Mapped File I/O
+ * ---------------------------------------------------------------- */
+
+void* rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly) {
+    if (!path || size <= 0 || offset < 0) return NULL;
+
+    int prot = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    int flags = MAP_SHARED;
+    int open_flags = readonly ? O_RDONLY : O_RDWR;
+
+    int fd = open(path, open_flags);
+    if (fd < 0) return NULL;
+
+    void* addr = mmap(NULL, (size_t)size, prot, flags, fd, (off_t)offset);
+    close(fd);
+
+    if (addr == MAP_FAILED) return NULL;
+    return addr;
+}
+
+bool rt_munmap(void* addr, int64_t size) {
+    if (!addr || size <= 0) return false;
+    return munmap(addr, (size_t)size) == 0;
+}
+
+bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+    if (!addr || size <= 0) return false;
+
+    /* Convert advice codes: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED */
+    int posix_advice;
+    switch (advice) {
+        case 0: posix_advice = MADV_NORMAL; break;
+        case 1: posix_advice = MADV_RANDOM; break;
+        case 2: posix_advice = MADV_SEQUENTIAL; break;
+        case 3: posix_advice = MADV_WILLNEED; break;
+        case 4: posix_advice = MADV_DONTNEED; break;
+        default: return false;
+    }
+
+    return madvise(addr, (size_t)size, posix_advice) == 0;
+}
+
+bool rt_msync(void* addr, int64_t size) {
+    if (!addr || size <= 0) return false;
+    return msync(addr, (size_t)size, MS_SYNC) == 0;
 }
 
 /* ----------------------------------------------------------------

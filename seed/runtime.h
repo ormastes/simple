@@ -178,6 +178,13 @@ bool     rt_file_unlock(int64_t handle);
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
 int64_t     rt_file_write_text_at(const char* path, int64_t offset, const char* data);
 
+/* ===== Memory-Mapped File I/O ===== */
+
+void*    rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly);
+bool     rt_munmap(void* addr, int64_t size);
+bool     rt_madvise(void* addr, int64_t size, int64_t advice);
+bool     rt_msync(void* addr, int64_t size);
+
 /* ===== High-Resolution Time ===== */
 
 int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
