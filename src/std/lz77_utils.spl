@@ -1,0 +1,939 @@
+# LZ77 Sliding Window Compression Utilities
+# Pure Simple implementation of LZ77 compression algorithm
+# Features: sliding window, lookahead buffer, hash table optimization, lazy matching
+
+# Constants
+val DEFAULT_WINDOW_SIZE = 32768  # 32KB sliding window
+val DEFAULT_LOOKAHEAD_SIZE = 258  # Maximum lookahead buffer
+val MIN_MATCH_LENGTH = 3  # Minimum match length for compression
+val MAX_MATCH_LENGTH = 258  # Maximum match length
+val HASH_BITS = 15  # Hash table size (2^15 entries)
+val HASH_SIZE = 32768  # 2^15
+val HASH_MASK = 32767  # 2^15 - 1
+val NIL_INDEX = -1  # Marker for no match
+
+# Token types
+val TOKEN_LITERAL = "literal"
+val TOKEN_MATCH = "match"
+
+# ============================================================================
+# Core Data Structures
+# ============================================================================
+
+# Compression token (literal or match)
+class LZ77Token:
+    token_type: text  # "literal" or "match"
+    value: any  # For literal: byte value, for match: (distance, length)
+
+    fn is_literal() -> bool:
+        self.token_type == TOKEN_LITERAL
+
+    fn is_match() -> bool:
+        self.token_type == TOKEN_MATCH
+
+    fn get_literal_value() -> i64:
+        if self.token_type == TOKEN_LITERAL:
+            self.value
+        else:
+            0
+
+    fn get_match_distance() -> i64:
+        if self.token_type == TOKEN_MATCH:
+            val match_data = self.value
+            match_data.0
+        else:
+            0
+
+    fn get_match_length() -> i64:
+        if self.token_type == TOKEN_MATCH:
+            val match_data = self.value
+            match_data.1
+        else:
+            0
+
+# Match result
+class MatchResult:
+    distance: i64  # Distance back in window
+    length: i64  # Length of match
+    position: i64  # Position in search buffer
+
+    fn is_valid() -> bool:
+        self.length >= MIN_MATCH_LENGTH
+
+# Compression statistics
+class LZ77Stats:
+    input_bytes: i64
+    output_tokens: i64
+    literal_count: i64
+    match_count: i64
+    total_match_length: i64
+    total_match_distance: i64
+    max_match_length: i64
+    max_match_distance: i64
+
+    fn compression_ratio() -> i64:
+        if self.input_bytes == 0:
+            0
+        else:
+            val total_match = self.total_match_length
+            val ratio = (total_match * 100) / self.input_bytes
+            ratio
+
+# Sliding window state
+class SlidingWindow:
+    buffer: list  # Circular buffer for window data
+    size: i64  # Window size
+    position: i64  # Current position in buffer
+    head: i64  # Head position (oldest data)
+    tail: i64  # Tail position (newest data)
+    count: i64  # Number of bytes in window
+
+    fn is_empty() -> bool:
+        self.count == 0
+
+    fn is_full() -> bool:
+        self.count == self.size
+
+    fn available_space() -> i64:
+        self.size - self.count
+
+# Hash table for fast match finding
+class HashTable:
+    table: list  # Hash table entries (head pointers)
+    prev: list  # Previous pointers for chain
+    size: i64  # Table size
+
+    fn clear_entry(index: i64):
+        self.table[index] = NIL_INDEX
+
+    fn get_head(hash: i64) -> i64:
+        val idx = hash & HASH_MASK
+        self.table[idx]
+
+# Lookahead buffer
+class LookaheadBuffer:
+    data: list  # Buffer data
+    size: i64  # Buffer size
+    length: i64  # Current data length
+
+    fn is_empty() -> bool:
+        self.length == 0
+
+    fn is_full() -> bool:
+        self.length == self.size
+
+    fn available_space() -> i64:
+        self.size - self.length
+
+# Compression context
+class CompressionContext:
+    window: any  # SlidingWindow
+    lookahead: any  # LookaheadBuffer
+    hash_table: any  # HashTable
+    stats: any  # LZ77Stats
+    input_pos: i64  # Position in input
+    lazy_match: any  # MatchResult or nil
+
+    fn has_lazy_match() -> bool:
+        val lazy = self.lazy_match
+        lazy != nil
+
+# ============================================================================
+# Token Creation and Manipulation
+# ============================================================================
+
+fn create_literal_token(value: i64) -> any:
+    # Create a literal token
+    LZ77Token(token_type: TOKEN_LITERAL, value: value)
+
+fn create_match_token(distance: i64, length: i64) -> any:
+    # Create a match token
+    val match_data = (distance, length)
+    LZ77Token(token_type: TOKEN_MATCH, value: match_data)
+
+fn token_to_string(token: any) -> text:
+    # Convert token to string representation
+    val t = token
+    if t.is_literal():
+        val v = t.get_literal_value()
+        "L({v})"
+    else:
+        val d = t.get_match_distance()
+        val l = t.get_match_length()
+        "M({d},{l})"
+
+fn tokens_to_string_list(tokens: list) -> list:
+    # Convert token list to string list
+    val result = []
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val tok = tokens[i]
+        val str = token_to_string(tok)
+        result.push(str)
+        i = i + 1
+    result
+
+fn count_literal_tokens(tokens: list) -> i64:
+    # Count literal tokens in list
+    var count = 0
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val tok = tokens[i]
+        if tok.is_literal():
+            count = count + 1
+        i = i + 1
+    count
+
+fn count_match_tokens(tokens: list) -> i64:
+    # Count match tokens in list
+    var count = 0
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val tok = tokens[i]
+        if tok.is_match():
+            count = count + 1
+        i = i + 1
+    count
+
+fn get_token_at(tokens: list, index: i64) -> any:
+    # Get token at index with bounds checking
+    val len = tokens.len()
+    if index >= 0:
+        if index < len:
+            tokens[index]
+        else:
+            nil
+    else:
+        nil
+
+fn extract_literals(tokens: list) -> list:
+    # Extract all literal values from token list
+    val result = []
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val tok = tokens[i]
+        if tok.is_literal():
+            val v = tok.get_literal_value()
+            result.push(v)
+        i = i + 1
+    result
+
+fn extract_matches(tokens: list) -> list:
+    # Extract all match tuples from token list
+    val result = []
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val tok = tokens[i]
+        if tok.is_match():
+            val d = tok.get_match_distance()
+            val l = tok.get_match_length()
+            val match_tuple = (d, l)
+            result.push(match_tuple)
+        i = i + 1
+    result
+
+# ============================================================================
+# Hash Functions
+# ============================================================================
+
+fn calculate_hash_single(byte: i64) -> i64:
+    # Calculate hash for single byte
+    val h = byte & HASH_MASK
+    h
+
+fn calculate_hash_two(byte1: i64, byte2: i64) -> i64:
+    # Calculate hash for two bytes
+    val h1 = byte1 << 8
+    val h2 = byte2
+    val h = (h1 + h2) & HASH_MASK
+    h
+
+fn calculate_hash_three(byte1: i64, byte2: i64, byte3: i64) -> i64:
+    # Calculate hash for three bytes (standard LZ77)
+    val h1 = byte1 << 10
+    val h2 = byte2 << 5
+    val h3 = byte3
+    val temp = h1 + h2
+    val h = (temp + h3) & HASH_MASK
+    h
+
+fn calculate_hash_bytes(bytes: list, start: i64, count: i64) -> i64:
+    # Calculate hash for byte sequence
+    val len = bytes.len()
+    if start < 0:
+        0
+    else:
+        if start >= len:
+            0
+        else:
+            if count <= 0:
+                0
+            else:
+                if count == 1:
+                    val b = bytes[start]
+                    calculate_hash_single(b)
+                else:
+                    if count == 2:
+                        val b1 = bytes[start]
+                        val next = start + 1
+                        if next < len:
+                            val b2 = bytes[next]
+                            calculate_hash_two(b1, b2)
+                        else:
+                            calculate_hash_single(b1)
+                    else:
+                        val b1 = bytes[start]
+                        val next1 = start + 1
+                        val next2 = start + 2
+                        if next2 < len:
+                            val b2 = bytes[next1]
+                            val b3 = bytes[next2]
+                            calculate_hash_three(b1, b2, b3)
+                        else:
+                            if next1 < len:
+                                val b2 = bytes[next1]
+                                calculate_hash_two(b1, b2)
+                            else:
+                                calculate_hash_single(b1)
+
+fn update_hash(old_hash: i64, old_byte: i64, new_byte: i64) -> i64:
+    # Update rolling hash (simple version)
+    val temp = old_hash << 1
+    val h = (temp + new_byte) & HASH_MASK
+    h
+
+fn hash_to_index(hash: i64) -> i64:
+    # Convert hash to table index
+    hash & HASH_MASK
+
+fn is_valid_hash(hash: i64) -> bool:
+    # Check if hash is valid
+    if hash >= 0:
+        hash < HASH_SIZE
+    else:
+        false
+
+fn normalize_hash(hash: i64) -> i64:
+    # Normalize hash to valid range
+    if hash < 0:
+        0
+    else:
+        hash & HASH_MASK
+
+# ============================================================================
+# Match Finding
+# ============================================================================
+
+fn create_match_result(distance: i64, length: i64, position: i64) -> any:
+    # Create match result
+    MatchResult(distance: distance, length: length, position: position)
+
+fn is_better_match(new_match: any, old_match: any) -> bool:
+    # Compare two matches, return true if new is better
+    if old_match == nil:
+        true
+    else:
+        val new_len = new_match.length
+        val old_len = old_match.length
+        if new_len > old_len:
+            true
+        else:
+            if new_len == old_len:
+                val new_dist = new_match.distance
+                val old_dist = old_match.distance
+                new_dist < old_dist
+            else:
+                false
+
+fn compare_bytes(data1: list, pos1: i64, data2: list, pos2: i64, max_len: i64) -> i64:
+    # Compare bytes and return match length
+    var length = 0
+    var i = 0
+    val len1 = data1.len()
+    val len2 = data2.len()
+    while i < max_len:
+        val idx1 = pos1 + i
+        val idx2 = pos2 + i
+        if idx1 >= len1:
+            length
+        else:
+            if idx2 >= len2:
+                length
+            else:
+                val b1 = data1[idx1]
+                val b2 = data2[idx2]
+                if b1 == b2:
+                    length = length + 1
+                    i = i + 1
+                else:
+                    length
+    length
+
+fn find_longest_match_simple(window: list, window_pos: i64, lookahead: list, lookahead_pos: i64, max_length: i64) -> any:
+    # Find longest match using simple linear search
+    var best_match = nil
+    var search_pos = 0
+    val window_len = window.len()
+    while search_pos < window_pos:
+        val match_len = compare_bytes(window, search_pos, lookahead, lookahead_pos, max_length)
+        if match_len >= MIN_MATCH_LENGTH:
+            val distance = window_pos - search_pos
+            val match = create_match_result(distance, match_len, search_pos)
+            val is_better = is_better_match(match, best_match)
+            if is_better:
+                best_match = match
+        search_pos = search_pos + 1
+    best_match
+
+fn find_match_at_position(window: list, window_pos: i64, search_pos: i64, lookahead: list, lookahead_pos: i64, max_length: i64) -> any:
+    # Find match at specific position
+    val match_len = compare_bytes(window, search_pos, lookahead, lookahead_pos, max_length)
+    if match_len >= MIN_MATCH_LENGTH:
+        val distance = window_pos - search_pos
+        create_match_result(distance, match_len, search_pos)
+    else:
+        nil
+
+fn find_match_with_hash(window: list, window_pos: i64, lookahead: list, lookahead_pos: i64, hash_chain: list, max_length: i64, max_chain: i64) -> any:
+    # Find match using hash chain
+    var best_match = nil
+    var chain_pos = 0
+    var i = 0
+    val chain_len = hash_chain.len()
+    while i < max_chain:
+        if i >= chain_len:
+            best_match
+        else:
+            val search_pos = hash_chain[i]
+            if search_pos < 0:
+                best_match
+            else:
+                if search_pos >= window_pos:
+                    best_match
+                else:
+                    val match = find_match_at_position(window, window_pos, search_pos, lookahead, lookahead_pos, max_length)
+                    val is_better = is_better_match(match, best_match)
+                    if is_better:
+                        best_match = match
+                    i = i + 1
+    best_match
+
+fn calculate_max_match_length(lookahead_remaining: i64) -> i64:
+    # Calculate maximum possible match length
+    if lookahead_remaining > MAX_MATCH_LENGTH:
+        MAX_MATCH_LENGTH
+    else:
+        lookahead_remaining
+
+fn is_valid_match(match: any) -> bool:
+    # Check if match is valid
+    if match == nil:
+        false
+    else:
+        match.is_valid()
+
+fn get_match_savings(match: any) -> i64:
+    # Calculate bytes saved by match
+    if match == nil:
+        0
+    else:
+        val len = match.length
+        len - 2
+
+# ============================================================================
+# Sliding Window Operations
+# ============================================================================
+
+fn create_sliding_window(size: i64) -> any:
+    # Create new sliding window
+    val buffer = []
+    SlidingWindow(buffer: buffer, size: size, position: 0, head: 0, tail: 0, count: 0)
+
+fn window_add_byte(window: any, byte: i64):
+    # Add byte to sliding window
+    val buf = window.buffer
+    val pos = window.position
+    buf.push(byte)
+    val new_count = window.count + 1
+    window.count = new_count
+    val new_pos = pos + 1
+    window.position = new_pos
+    window.tail = new_pos
+
+fn window_get_byte(window: any, index: i64) -> i64:
+    # Get byte from window at index
+    val buf = window.buffer
+    val len = buf.len()
+    if index >= 0:
+        if index < len:
+            buf[index]
+        else:
+            0
+    else:
+        0
+
+fn window_get_bytes(window: any, start: i64, count: i64) -> list:
+    # Get multiple bytes from window
+    val result = []
+    var i = 0
+    while i < count:
+        val idx = start + i
+        val byte = window_get_byte(window, idx)
+        result.push(byte)
+        i = i + 1
+    result
+
+fn window_copy_bytes(window: any, start: i64, count: i64, dest: list):
+    # Copy bytes from window to destination
+    var i = 0
+    while i < count:
+        val idx = start + i
+        val byte = window_get_byte(window, idx)
+        dest.push(byte)
+        i = i + 1
+
+fn window_slide(window: any, distance: i64):
+    # Slide window by distance
+    val new_head = window.head + distance
+    window.head = new_head
+    val new_count = window.count - distance
+    window.count = new_count
+
+fn window_reset(window: any):
+    # Reset window to empty
+    window.buffer = []
+    window.position = 0
+    window.head = 0
+    window.tail = 0
+    window.count = 0
+
+fn window_current_size(window: any) -> i64:
+    # Get current window size
+    window.count
+
+fn window_get_buffer(window: any) -> list:
+    # Get window buffer
+    window.buffer
+
+# ============================================================================
+# Lookahead Buffer Operations
+# ============================================================================
+
+fn create_lookahead_buffer(size: i64) -> any:
+    # Create new lookahead buffer
+    val data = []
+    LookaheadBuffer(data: data, size: size, length: 0)
+
+fn lookahead_add_byte(lookahead: any, byte: i64):
+    # Add byte to lookahead buffer
+    val data = lookahead.data
+    data.push(byte)
+    val new_len = lookahead.length + 1
+    lookahead.length = new_len
+
+fn lookahead_add_bytes(lookahead: any, bytes: list, count: i64):
+    # Add multiple bytes to lookahead
+    var i = 0
+    val src_len = bytes.len()
+    while i < count:
+        if i >= src_len:
+            ()
+        else:
+            val byte = bytes[i]
+            lookahead_add_byte(lookahead, byte)
+            i = i + 1
+
+fn lookahead_get_byte(lookahead: any, index: i64) -> i64:
+    # Get byte from lookahead at index
+    val data = lookahead.data
+    val len = data.len()
+    if index >= 0:
+        if index < len:
+            data[index]
+        else:
+            0
+    else:
+        0
+
+fn lookahead_get_bytes(lookahead: any, start: i64, count: i64) -> list:
+    # Get multiple bytes from lookahead
+    val result = []
+    var i = 0
+    while i < count:
+        val idx = start + i
+        val byte = lookahead_get_byte(lookahead, idx)
+        result.push(byte)
+        i = i + 1
+    result
+
+fn lookahead_remove_bytes(lookahead: any, count: i64):
+    # Remove bytes from front of lookahead
+    val data = lookahead.data
+    var i = 0
+    while i < count:
+        if data.len() > 0:
+            data.remove(0)
+            val new_len = lookahead.length - 1
+            lookahead.length = new_len
+        i = i + 1
+
+fn lookahead_clear(lookahead: any):
+    # Clear lookahead buffer
+    lookahead.data = []
+    lookahead.length = 0
+
+fn lookahead_current_length(lookahead: any) -> i64:
+    # Get current lookahead length
+    lookahead.length
+
+fn lookahead_get_data(lookahead: any) -> list:
+    # Get lookahead data
+    lookahead.data
+
+# ============================================================================
+# Hash Table Operations
+# ============================================================================
+
+fn create_hash_table(size: i64) -> any:
+    # Create new hash table
+    val table = []
+    val prev = []
+    var i = 0
+    while i < HASH_SIZE:
+        table.push(NIL_INDEX)
+        i = i + 1
+    HashTable(table: table, prev: prev, size: HASH_SIZE)
+
+fn hash_table_insert(ht: any, hash: i64, position: i64):
+    # Insert position into hash table
+    val idx = hash & HASH_MASK
+    val table = ht.table
+    val old_head = table[idx]
+    table[idx] = position
+    val prev = ht.prev
+    val prev_len = prev.len()
+    if position >= prev_len:
+        var i = prev_len
+        while i <= position:
+            prev.push(NIL_INDEX)
+            i = i + 1
+    prev[position] = old_head
+
+fn hash_table_get_chain(ht: any, hash: i64, max_length: i64) -> list:
+    # Get hash chain for lookup
+    val idx = hash & HASH_MASK
+    val table = ht.table
+    val head = table[idx]
+    val chain = []
+    if head == NIL_INDEX:
+        chain
+    else:
+        var pos = head
+        var count = 0
+        val prev = ht.prev
+        val prev_len = prev.len()
+        while count < max_length:
+            if pos == NIL_INDEX:
+                chain
+            else:
+                chain.push(pos)
+                count = count + 1
+                if pos >= prev_len:
+                    chain
+                else:
+                    pos = prev[pos]
+        chain
+
+fn hash_table_clear(ht: any):
+    # Clear hash table
+    val table = ht.table
+    var i = 0
+    val len = table.len()
+    while i < len:
+        table[i] = NIL_INDEX
+        i = i + 1
+    ht.prev = []
+
+fn hash_table_remove_old(ht: any, threshold: i64):
+    # Remove entries older than threshold
+    val table = ht.table
+    var i = 0
+    val len = table.len()
+    while i < len:
+        val head = table[i]
+        if head < threshold:
+            table[i] = NIL_INDEX
+        i = i + 1
+
+# ============================================================================
+# Statistics
+# ============================================================================
+
+fn create_stats() -> any:
+    # Create new statistics object
+    LZ77Stats(input_bytes: 0, output_tokens: 0, literal_count: 0, match_count: 0, total_match_length: 0, total_match_distance: 0, max_match_length: 0, max_match_distance: 0)
+
+fn stats_add_literal(stats: any):
+    # Record literal token
+    val new_literal = stats.literal_count + 1
+    stats.literal_count = new_literal
+    val new_tokens = stats.output_tokens + 1
+    stats.output_tokens = new_tokens
+
+fn stats_add_match(stats: any, distance: i64, length: i64):
+    # Record match token
+    val new_match = stats.match_count + 1
+    stats.match_count = new_match
+    val new_tokens = stats.output_tokens + 1
+    stats.output_tokens = new_tokens
+    val new_total_len = stats.total_match_length + length
+    stats.total_match_length = new_total_len
+    val new_total_dist = stats.total_match_distance + distance
+    stats.total_match_distance = new_total_dist
+    if length > stats.max_match_length:
+        stats.max_match_length = length
+    if distance > stats.max_match_distance:
+        stats.max_match_distance = distance
+
+fn stats_add_input_bytes(stats: any, count: i64):
+    # Add input bytes to statistics
+    val new_input = stats.input_bytes + count
+    stats.input_bytes = new_input
+
+fn stats_get_compression_ratio(stats: any) -> i64:
+    # Get compression ratio percentage
+    stats.compression_ratio()
+
+fn stats_get_average_match_length(stats: any) -> i64:
+    # Get average match length
+    val count = stats.match_count
+    if count == 0:
+        0
+    else:
+        val total = stats.total_match_length
+        total / count
+
+fn stats_get_average_match_distance(stats: any) -> i64:
+    # Get average match distance
+    val count = stats.match_count
+    if count == 0:
+        0
+    else:
+        val total = stats.total_match_distance
+        total / count
+
+fn stats_to_string(stats: any) -> text:
+    # Convert stats to string
+    val input = stats.input_bytes
+    val output = stats.output_tokens
+    val literals = stats.literal_count
+    val matches = stats.match_count
+    val ratio = stats_get_compression_ratio(stats)
+    "Input: {input} bytes, Tokens: {output}, Literals: {literals}, Matches: {matches}, Ratio: {ratio}%"
+
+fn stats_reset(stats: any):
+    # Reset statistics
+    stats.input_bytes = 0
+    stats.output_tokens = 0
+    stats.literal_count = 0
+    stats.match_count = 0
+    stats.total_match_length = 0
+    stats.total_match_distance = 0
+    stats.max_match_length = 0
+    stats.max_match_distance = 0
+
+# ============================================================================
+# Compression Context
+# ============================================================================
+
+fn create_compression_context(window_size: i64, lookahead_size: i64) -> any:
+    # Create compression context
+    val window = create_sliding_window(window_size)
+    val lookahead = create_lookahead_buffer(lookahead_size)
+    val hash_table = create_hash_table(HASH_SIZE)
+    val stats = create_stats()
+    CompressionContext(window: window, lookahead: lookahead, hash_table: hash_table, stats: stats, input_pos: 0, lazy_match: nil)
+
+fn context_reset(ctx: any):
+    # Reset compression context
+    val window = ctx.window
+    window_reset(window)
+    val lookahead = ctx.lookahead
+    lookahead_clear(lookahead)
+    val hash_table = ctx.hash_table
+    hash_table_clear(hash_table)
+    val stats = ctx.stats
+    stats_reset(stats)
+    ctx.input_pos = 0
+    ctx.lazy_match = nil
+
+fn context_get_stats(ctx: any) -> any:
+    # Get context statistics
+    ctx.stats
+
+# ============================================================================
+# Compression Core
+# ============================================================================
+
+fn compress_bytes_simple(input: list) -> list:
+    # Simple compression without hash table
+    val tokens = []
+    val input_len = input.len()
+    var pos = 0
+    while pos < input_len:
+        val remaining = input_len - pos
+        val max_len = calculate_max_match_length(remaining)
+        if max_len < MIN_MATCH_LENGTH:
+            val byte = input[pos]
+            val token = create_literal_token(byte)
+            tokens.push(token)
+            pos = pos + 1
+        else:
+            val match = find_longest_match_simple(input, pos, input, pos, max_len)
+            if match == nil:
+                val byte = input[pos]
+                val token = create_literal_token(byte)
+                tokens.push(token)
+                pos = pos + 1
+            else:
+                val distance = match.distance
+                val length = match.length
+                val token = create_match_token(distance, length)
+                tokens.push(token)
+                pos = pos + length
+    tokens
+
+fn decompress_tokens_simple(tokens: list) -> list:
+    # Simple decompression from token list
+    val output = []
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val token = tokens[i]
+        if token.is_literal():
+            val byte = token.get_literal_value()
+            output.push(byte)
+        else:
+            val distance = token.get_match_distance()
+            val length = token.get_match_length()
+            val out_len = output.len()
+            val start_pos = out_len - distance
+            var j = 0
+            while j < length:
+                val src_idx = start_pos + j
+                if src_idx >= 0:
+                    if src_idx < output.len():
+                        val byte = output[src_idx]
+                        output.push(byte)
+                j = j + 1
+        i = i + 1
+    output
+
+# ============================================================================
+# Lazy Matching
+# ============================================================================
+
+fn should_use_lazy_match(current: any, lazy: any) -> bool:
+    # Decide if lazy match is better than current
+    if lazy == nil:
+        false
+    else:
+        val lazy_len = lazy.length
+        val curr_len = current.length
+        val gain = lazy_len - curr_len
+        gain >= 2
+
+fn apply_lazy_matching(ctx: any, current_match: any) -> any:
+    # Apply lazy matching strategy
+    val has_lazy = ctx.has_lazy_match()
+    if has_lazy:
+        val lazy = ctx.lazy_match
+        val should_use = should_use_lazy_match(current_match, lazy)
+        if should_use:
+            ctx.lazy_match = nil
+            lazy
+        else:
+            ctx.lazy_match = current_match
+            nil
+    else:
+        ctx.lazy_match = current_match
+        nil
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn bytes_to_string(bytes: list) -> text:
+    # Convert byte list to string representation
+    val len = bytes.len()
+    if len == 0:
+        "[]"
+    else:
+        var result = "["
+        var i = 0
+        while i < len:
+            val byte = bytes[i]
+            if i > 0:
+                result = result + ", "
+            result = result + "{byte}"
+            i = i + 1
+        result = result + "]"
+        result
+
+fn validate_window_size(size: i64) -> i64:
+    # Validate and normalize window size
+    if size <= 0:
+        DEFAULT_WINDOW_SIZE
+    else:
+        if size > 65536:
+            65536
+        else:
+            size
+
+fn validate_lookahead_size(size: i64) -> i64:
+    # Validate and normalize lookahead size
+    if size <= 0:
+        DEFAULT_LOOKAHEAD_SIZE
+    else:
+        if size > MAX_MATCH_LENGTH:
+            MAX_MATCH_LENGTH
+        else:
+            size
+
+fn validate_match_length(length: i64) -> bool:
+    # Validate match length
+    if length < MIN_MATCH_LENGTH:
+        false
+    else:
+        length <= MAX_MATCH_LENGTH
+
+fn validate_match_distance(distance: i64, window_size: i64) -> bool:
+    # Validate match distance
+    if distance <= 0:
+        false
+    else:
+        distance <= window_size
+
+fn calculate_token_size(token: any) -> i64:
+    # Calculate encoded size of token in bytes
+    if token.is_literal():
+        1
+    else:
+        3
+
+fn calculate_tokens_size(tokens: list) -> i64:
+    # Calculate total encoded size of tokens
+    var total = 0
+    var i = 0
+    val len = tokens.len()
+    while i < len:
+        val token = tokens[i]
+        val size = calculate_token_size(token)
+        total = total + size
+        i = i + 1
+    total
