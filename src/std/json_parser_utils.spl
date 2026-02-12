@@ -1,0 +1,1773 @@
+# JSON Parser and Serializer Utilities
+#
+# Comprehensive JSON parser and serializer module with tuple-based values.
+# Pure Simple implementation - no external dependencies or FFI.
+#
+# Value Representation:
+#   JSON values are tuples: (type, value)
+#   - ("object", {text: json_value})  # Object with key-value pairs
+#   - ("array", [json_value])         # Array of values
+#   - ("string", text)                # String value
+#   - ("number", f64)                 # Number value
+#   - ("boolean", bool)               # Boolean value
+#   - ("null", nil)                   # Null value
+#
+# Categories:
+# - Parser: tokenize, parse_value, parse_object, parse_array
+# - Serializer: serialize, pretty_print, format_value
+# - Object ops: get, set, has, remove, keys, values, entries
+# - Array ops: get_at, set_at, append, length, map, filter
+# - Path ops: get_path, set_path, has_path, delete_path
+# - Validation: validate_schema, type_check, is_valid
+# - Utilities: escape_string, unescape_string, parse_number, deep_clone
+#
+# All functions are pure Simple - no external dependencies required.
+
+# ============================================================================
+# Type Definitions
+# ============================================================================
+
+# JSON value type: (type_name, value)
+# type_name: "object" | "array" | "string" | "number" | "boolean" | "null"
+# value: depends on type_name
+
+# Parse result: (success, value, error_message, position)
+# success: true if parsing succeeded, false otherwise
+# value: parsed JSON value if success=true, nil otherwise
+# error_message: error description if success=false, "" otherwise
+# position: character position where parsing stopped
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export json_null, json_boolean, json_number, json_string, json_array, json_object
+export json_parse, json_parse_with_error
+export json_serialize, json_pretty, json_format
+export json_get_type, json_type_check, json_is_null, json_is_boolean, json_is_number, json_is_string, json_is_array, json_is_object
+export json_to_boolean, json_to_number, json_to_string, json_to_array, json_to_object
+export json_object_get, json_object_set, json_object_has, json_object_remove, json_object_keys, json_object_values, json_object_entries, json_object_size, json_object_empty, json_object_merge
+export json_array_get, json_array_set, json_array_append, json_array_prepend, json_array_insert, json_array_remove, json_array_length, json_array_empty, json_array_first, json_array_last, json_array_slice, json_array_concat, json_array_reverse
+export json_array_map, json_array_filter, json_array_find, json_array_contains, json_array_index_of, json_array_every, json_array_some
+export json_path_get, json_path_set, json_path_has, json_path_delete
+export json_validate_schema, json_deep_equals, json_deep_clone
+export json_escape_string, json_unescape_string
+export json_tokenize, json_parse_tokens
+export json_array_reduce, json_array_flatten, json_array_unique, json_array_sort_by, json_array_group_by
+export json_object_map_values, json_object_filter, json_object_find, json_object_without, json_object_pick
+export json_stringify, json_minify, json_beautify
+export json_merge_deep, json_diff, json_patch
+export json_from_entries, json_flatten_object, json_unflatten_object
+
+# ============================================================================
+# Constructors
+# ============================================================================
+
+fn json_null():
+    """Create a JSON null value.
+
+    Returns:
+        ("null", nil)
+
+    Example:
+        val n = json_null()
+    """
+    ("null", nil)
+
+fn json_boolean(value: bool):
+    """Create a JSON boolean value.
+
+    Args:
+        value: Boolean value
+
+    Returns:
+        ("boolean", value)
+
+    Example:
+        val b = json_boolean(true)
+    """
+    ("boolean", value)
+
+fn json_number(value: f64):
+    """Create a JSON number value.
+
+    Args:
+        value: Number value
+
+    Returns:
+        ("number", value)
+
+    Example:
+        val n = json_number(42.5)
+    """
+    ("number", value)
+
+fn json_string(value: text):
+    """Create a JSON string value.
+
+    Args:
+        value: String value
+
+    Returns:
+        ("string", value)
+
+    Example:
+        val s = json_string("hello")
+    """
+    ("string", value)
+
+fn json_array(values: [any]):
+    """Create a JSON array value.
+
+    Args:
+        values: Array of JSON values
+
+    Returns:
+        ("array", values)
+
+    Example:
+        val arr = json_array([json_number(1), json_number(2)])
+    """
+    ("array", values)
+
+fn json_object(pairs: {text: any}):
+    """Create a JSON object value.
+
+    Args:
+        pairs: Map of key-value pairs
+
+    Returns:
+        ("object", pairs)
+
+    Example:
+        val obj = json_object({"name": json_string("Alice")})
+    """
+    ("object", pairs)
+
+# ============================================================================
+# Type Checking
+# ============================================================================
+
+fn json_get_type(value: any) -> text:
+    """Get the type of a JSON value.
+
+    Args:
+        value: JSON value tuple
+
+    Returns:
+        Type name: "object", "array", "string", "number", "boolean", "null"
+
+    Example:
+        json_get_type(json_string("hi"))  # "string"
+    """
+    if value == nil:
+        return "null"
+    val type_part = value.0
+    if type_part == nil:
+        return "null"
+    type_part
+
+fn json_type_check(value: any, expected_type: text) -> bool:
+    """Check if a JSON value has the expected type.
+
+    Args:
+        value: JSON value
+        expected_type: Expected type name
+
+    Returns:
+        true if types match, false otherwise
+
+    Example:
+        json_type_check(json_number(5), "number")  # true
+    """
+    json_get_type(value) == expected_type
+
+fn json_is_null(value: any) -> bool:
+    """Check if value is JSON null.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if null, false otherwise
+    """
+    json_get_type(value) == "null"
+
+fn json_is_boolean(value: any) -> bool:
+    """Check if value is JSON boolean.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if boolean, false otherwise
+    """
+    json_get_type(value) == "boolean"
+
+fn json_is_number(value: any) -> bool:
+    """Check if value is JSON number.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if number, false otherwise
+    """
+    json_get_type(value) == "number"
+
+fn json_is_string(value: any) -> bool:
+    """Check if value is JSON string.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if string, false otherwise
+    """
+    json_get_type(value) == "string"
+
+fn json_is_array(value: any) -> bool:
+    """Check if value is JSON array.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if array, false otherwise
+    """
+    json_get_type(value) == "array"
+
+fn json_is_object(value: any) -> bool:
+    """Check if value is JSON object.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        true if object, false otherwise
+    """
+    json_get_type(value) == "object"
+
+# ============================================================================
+# Type Conversion
+# ============================================================================
+
+fn json_to_boolean(value: any) -> any:
+    """Extract boolean from JSON value.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Boolean value if type matches, nil otherwise
+
+    Example:
+        json_to_boolean(json_boolean(true))  # true
+    """
+    if json_is_boolean(value):
+        return value.1
+    nil
+
+fn json_to_number(value: any) -> any:
+    """Extract number from JSON value.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Number value if type matches, nil otherwise
+
+    Example:
+        json_to_number(json_number(42))  # 42
+    """
+    if json_is_number(value):
+        return value.1
+    nil
+
+fn json_to_string(value: any) -> any:
+    """Extract string from JSON value.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        String value if type matches, nil otherwise
+
+    Example:
+        json_to_string(json_string("hi"))  # "hi"
+    """
+    if json_is_string(value):
+        return value.1
+    nil
+
+fn json_to_array(value: any) -> any:
+    """Extract array from JSON value.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Array value if type matches, nil otherwise
+
+    Example:
+        json_to_array(json_array([json_number(1)]))  # [json_number(1)]
+    """
+    if json_is_array(value):
+        return value.1
+    nil
+
+fn json_to_object(value: any) -> any:
+    """Extract object from JSON value.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Object map if type matches, nil otherwise
+
+    Example:
+        json_to_object(json_object({"k": json_string("v")}))  # {"k": json_string("v")}
+    """
+    if json_is_object(value):
+        return value.1
+    nil
+
+# ============================================================================
+# Object Operations
+# ============================================================================
+
+fn json_object_get(obj: any, key: text) -> any:
+    """Get value from JSON object by key.
+
+    Args:
+        obj: JSON object
+        key: Key to look up
+
+    Returns:
+        Value if key exists, nil otherwise
+
+    Example:
+        json_object_get(obj, "name")
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return nil
+    if map.has_key(key):
+        return map[key]
+    nil
+
+fn json_object_set(obj: any, key: text, value: any) -> any:
+    """Set value in JSON object.
+
+    Args:
+        obj: JSON object
+        key: Key to set
+        value: JSON value to set
+
+    Returns:
+        New JSON object with updated value
+
+    Example:
+        json_object_set(obj, "age", json_number(30))
+    """
+    var map = json_to_object(obj)
+    if map == nil:
+        map = {}
+    map[key] = value
+    json_object(map)
+
+fn json_object_has(obj: any, key: text) -> bool:
+    """Check if JSON object has a key.
+
+    Args:
+        obj: JSON object
+        key: Key to check
+
+    Returns:
+        true if key exists, false otherwise
+
+    Example:
+        json_object_has(obj, "name")
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return false
+    map.has_key(key)
+
+fn json_object_remove(obj: any, key: text) -> any:
+    """Remove key from JSON object.
+
+    Args:
+        obj: JSON object
+        key: Key to remove
+
+    Returns:
+        New JSON object without the key
+
+    Example:
+        json_object_remove(obj, "old_field")
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return json_object({})
+    var new_map: {text: any} = {}
+    for k in map.keys():
+        if k != key:
+            new_map[k] = map[k]
+    json_object(new_map)
+
+fn json_object_keys(obj: any) -> [text]:
+    """Get all keys from JSON object.
+
+    Args:
+        obj: JSON object
+
+    Returns:
+        Array of keys
+
+    Example:
+        json_object_keys(obj)  # ["name", "age"]
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return []
+    map.keys()
+
+fn json_object_values(obj: any) -> [any]:
+    """Get all values from JSON object.
+
+    Args:
+        obj: JSON object
+
+    Returns:
+        Array of values
+
+    Example:
+        json_object_values(obj)
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return []
+    map.values()
+
+fn json_object_entries(obj: any) -> [(text, any)]:
+    """Get all key-value pairs from JSON object.
+
+    Args:
+        obj: JSON object
+
+    Returns:
+        Array of (key, value) tuples
+
+    Example:
+        json_object_entries(obj)  # [("name", json_string("Alice"))]
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return []
+    var result: [(text, any)] = []
+    for key in map.keys():
+        result = result + [(key, map[key])]
+    result
+
+fn json_object_size(obj: any) -> i64:
+    """Get number of keys in JSON object.
+
+    Args:
+        obj: JSON object
+
+    Returns:
+        Number of keys
+
+    Example:
+        json_object_size(obj)  # 3
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return 0
+    map.len()
+
+fn json_object_empty(obj: any) -> bool:
+    """Check if JSON object is empty.
+
+    Args:
+        obj: JSON object
+
+    Returns:
+        true if empty, false otherwise
+
+    Example:
+        json_object_empty(obj)
+    """
+    json_object_size(obj) == 0
+
+fn json_object_merge(obj1: any, obj2: any) -> any:
+    """Merge two JSON objects. obj2 values override obj1.
+
+    Args:
+        obj1: First JSON object
+        obj2: Second JSON object
+
+    Returns:
+        Merged JSON object
+
+    Example:
+        json_object_merge(obj1, obj2)
+    """
+    val map1 = json_to_object(obj1)
+    val map2 = json_to_object(obj2)
+    if map1 == nil and map2 == nil:
+        return json_object({})
+    if map1 == nil:
+        return obj2
+    if map2 == nil:
+        return obj1
+    var result: {text: any} = {}
+    for key in map1.keys():
+        result[key] = map1[key]
+    for key in map2.keys():
+        result[key] = map2[key]
+    json_object(result)
+
+# ============================================================================
+# Array Operations
+# ============================================================================
+
+fn json_array_get(arr: any, index: i64) -> any:
+    """Get element from JSON array by index.
+
+    Args:
+        arr: JSON array
+        index: Array index (0-based)
+
+    Returns:
+        Value at index if valid, nil otherwise
+
+    Example:
+        json_array_get(arr, 0)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return nil
+    if index < 0 or index >= list.len():
+        return nil
+    list[index]
+
+fn json_array_set(arr: any, index: i64, value: any) -> any:
+    """Set element in JSON array at index.
+
+    Args:
+        arr: JSON array
+        index: Array index
+        value: JSON value to set
+
+    Returns:
+        New JSON array with updated value
+
+    Example:
+        json_array_set(arr, 0, json_string("new"))
+    """
+    var list = json_to_array(arr)
+    if list == nil:
+        list = []
+    if index < 0 or index >= list.len():
+        return arr
+    var new_list: [any] = []
+    for i in 0..list.len():
+        if i == index:
+            new_list = new_list + [value]
+        else:
+            new_list = new_list + [list[i]]
+    json_array(new_list)
+
+fn json_array_append(arr: any, value: any) -> any:
+    """Append element to JSON array.
+
+    Args:
+        arr: JSON array
+        value: JSON value to append
+
+    Returns:
+        New JSON array with appended value
+
+    Example:
+        json_array_append(arr, json_number(4))
+    """
+    var list = json_to_array(arr)
+    if list == nil:
+        list = []
+    json_array(list + [value])
+
+fn json_array_prepend(arr: any, value: any) -> any:
+    """Prepend element to JSON array.
+
+    Args:
+        arr: JSON array
+        value: JSON value to prepend
+
+    Returns:
+        New JSON array with prepended value
+
+    Example:
+        json_array_prepend(arr, json_number(0))
+    """
+    var list = json_to_array(arr)
+    if list == nil:
+        list = []
+    json_array([value] + list)
+
+fn json_array_insert(arr: any, index: i64, value: any) -> any:
+    """Insert element into JSON array at index.
+
+    Args:
+        arr: JSON array
+        index: Insert position
+        value: JSON value to insert
+
+    Returns:
+        New JSON array with inserted value
+
+    Example:
+        json_array_insert(arr, 1, json_number(5))
+    """
+    var list = json_to_array(arr)
+    if list == nil:
+        list = []
+    if index < 0 or index > list.len():
+        return arr
+    var new_list: [any] = []
+    for i in 0..list.len():
+        if i == index:
+            new_list = new_list + [value]
+        new_list = new_list + [list[i]]
+    if index == list.len():
+        new_list = new_list + [value]
+    json_array(new_list)
+
+fn json_array_remove(arr: any, index: i64) -> any:
+    """Remove element from JSON array at index.
+
+    Args:
+        arr: JSON array
+        index: Index to remove
+
+    Returns:
+        New JSON array without the element
+
+    Example:
+        json_array_remove(arr, 1)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    if index < 0 or index >= list.len():
+        return arr
+    var new_list: [any] = []
+    for i in 0..list.len():
+        if i != index:
+            new_list = new_list + [list[i]]
+    json_array(new_list)
+
+fn json_array_length(arr: any) -> i64:
+    """Get length of JSON array.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        Array length
+
+    Example:
+        json_array_length(arr)  # 5
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return 0
+    list.len()
+
+fn json_array_empty(arr: any) -> bool:
+    """Check if JSON array is empty.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        true if empty, false otherwise
+
+    Example:
+        json_array_empty(arr)
+    """
+    json_array_length(arr) == 0
+
+fn json_array_first(arr: any) -> any:
+    """Get first element of JSON array.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        First element if array not empty, nil otherwise
+
+    Example:
+        json_array_first(arr)
+    """
+    json_array_get(arr, 0)
+
+fn json_array_last(arr: any) -> any:
+    """Get last element of JSON array.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        Last element if array not empty, nil otherwise
+
+    Example:
+        json_array_last(arr)
+    """
+    val list = json_to_array(arr)
+    if list == nil or list.len() == 0:
+        return nil
+    json_array_get(arr, list.len() - 1)
+
+fn json_array_slice(arr: any, start: i64, end: i64) -> any:
+    """Get slice of JSON array.
+
+    Args:
+        arr: JSON array
+        start: Start index (inclusive)
+        end: End index (exclusive)
+
+    Returns:
+        New JSON array with sliced elements
+
+    Example:
+        json_array_slice(arr, 1, 3)  # elements at index 1 and 2
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    val actual_start = if start < 0: 0 else: start
+    val actual_end = if end > list.len(): list.len() else: end
+    if actual_start >= actual_end:
+        return json_array([])
+    var new_list: [any] = []
+    for i in actual_start..actual_end:
+        new_list = new_list + [list[i]]
+    json_array(new_list)
+
+fn json_array_concat(arr1: any, arr2: any) -> any:
+    """Concatenate two JSON arrays.
+
+    Args:
+        arr1: First JSON array
+        arr2: Second JSON array
+
+    Returns:
+        New JSON array with concatenated elements
+
+    Example:
+        json_array_concat(arr1, arr2)
+    """
+    val list1 = json_to_array(arr1)
+    val list2 = json_to_array(arr2)
+    if list1 == nil and list2 == nil:
+        return json_array([])
+    if list1 == nil:
+        return arr2
+    if list2 == nil:
+        return arr1
+    json_array(list1 + list2)
+
+fn json_array_reverse(arr: any) -> any:
+    """Reverse JSON array.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        New JSON array with reversed elements
+
+    Example:
+        json_array_reverse(arr)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var new_list: [any] = []
+    for i in 0..list.len():
+        val rev_idx = list.len() - 1 - i
+        new_list = new_list + [list[rev_idx]]
+    json_array(new_list)
+
+# ============================================================================
+# Array Higher-Order Operations
+# ============================================================================
+
+fn json_array_map(arr: any, mapper: fn(any) -> any) -> any:
+    """Map function over JSON array elements.
+
+    Args:
+        arr: JSON array
+        mapper: Function to apply to each element
+
+    Returns:
+        New JSON array with mapped elements
+
+    Example:
+        json_array_map(arr, \x: json_number(json_to_number(x) * 2))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var new_list: [any] = []
+    for elem in list:
+        new_list = new_list + [mapper(elem)]
+    json_array(new_list)
+
+fn json_array_filter(arr: any, predicate: fn(any) -> bool) -> any:
+    """Filter JSON array elements by predicate.
+
+    Args:
+        arr: JSON array
+        predicate: Function to test each element
+
+    Returns:
+        New JSON array with filtered elements
+
+    Example:
+        json_array_filter(arr, \x: json_to_number(x) > 5)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var new_list: [any] = []
+    for elem in list:
+        if predicate(elem):
+            new_list = new_list + [elem]
+    json_array(new_list)
+
+fn json_array_find(arr: any, predicate: fn(any) -> bool) -> any:
+    """Find first element matching predicate.
+
+    Args:
+        arr: JSON array
+        predicate: Function to test each element
+
+    Returns:
+        First matching element, or nil if none found
+
+    Example:
+        json_array_find(arr, \x: json_to_number(x) > 10)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return nil
+    for elem in list:
+        if predicate(elem):
+            return elem
+    nil
+
+fn json_array_contains(arr: any, value: any) -> bool:
+    """Check if JSON array contains value.
+
+    Args:
+        arr: JSON array
+        value: Value to search for
+
+    Returns:
+        true if value found, false otherwise
+
+    Example:
+        json_array_contains(arr, json_string("hello"))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return false
+    for elem in list:
+        if json_deep_equals(elem, value):
+            return true
+    false
+
+fn json_array_index_of(arr: any, value: any) -> i64:
+    """Find index of value in JSON array.
+
+    Args:
+        arr: JSON array
+        value: Value to search for
+
+    Returns:
+        Index of value, or -1 if not found
+
+    Example:
+        json_array_index_of(arr, json_number(42))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return -1
+    for i in 0..list.len():
+        if json_deep_equals(list[i], value):
+            return i
+    -1
+
+fn json_array_every(arr: any, predicate: fn(any) -> bool) -> bool:
+    """Check if all elements match predicate.
+
+    Args:
+        arr: JSON array
+        predicate: Function to test each element
+
+    Returns:
+        true if all match, false otherwise
+
+    Example:
+        json_array_every(arr, \x: json_to_number(x) > 0)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return true
+    for elem in list:
+        if not predicate(elem):
+            return false
+    true
+
+fn json_array_some(arr: any, predicate: fn(any) -> bool) -> bool:
+    """Check if any element matches predicate.
+
+    Args:
+        arr: JSON array
+        predicate: Function to test each element
+
+    Returns:
+        true if any match, false otherwise
+
+    Example:
+        json_array_some(arr, \x: json_to_number(x) < 0)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return false
+    for elem in list:
+        if predicate(elem):
+            return true
+    false
+
+# ============================================================================
+# Path Operations (JSONPath-like)
+# ============================================================================
+
+fn json_path_parse(path: text) -> [text]:
+    """Parse path string into components.
+
+    Args:
+        path: Path string (e.g., "user.address.city")
+
+    Returns:
+        Array of path components
+
+    Example:
+        json_path_parse("user.name")  # ["user", "name"]
+    """
+    if path == "":
+        return []
+    path.split(".")
+
+fn json_path_get(value: any, path: text) -> any:
+    """Get value at path.
+
+    Args:
+        value: JSON value
+        path: Dot-separated path (e.g., "user.address.city")
+
+    Returns:
+        Value at path, or nil if not found
+
+    Example:
+        json_path_get(data, "user.name")
+    """
+    val parts = json_path_parse(path)
+    var current = value
+    for part in parts:
+        if current == nil:
+            return nil
+        if json_is_object(current):
+            current = json_object_get(current, part)
+        else:
+            if json_is_array(current):
+                val idx = part.to_int()
+                current = json_array_get(current, idx)
+            else:
+                return nil
+    current
+
+fn json_path_set(value: any, path: text, new_value: any) -> any:
+    """Set value at path.
+
+    Args:
+        value: JSON value
+        path: Dot-separated path
+        new_value: New JSON value to set
+
+    Returns:
+        New JSON value with updated path
+
+    Example:
+        json_path_set(data, "user.age", json_number(31))
+    """
+    val parts = json_path_parse(path)
+    if parts.len() == 0:
+        return new_value
+    if parts.len() == 1:
+        if json_is_object(value):
+            return json_object_set(value, parts[0], new_value)
+        return value
+    val first = parts[0]
+    var rest_path = ""
+    for i in 1..parts.len():
+        if i > 1:
+            rest_path = rest_path + "."
+        rest_path = rest_path + parts[i]
+    if json_is_object(value):
+        val nested = json_object_get(value, first)
+        val updated_nested = json_path_set(nested, rest_path, new_value)
+        return json_object_set(value, first, updated_nested)
+    value
+
+fn json_path_has(value: any, path: text) -> bool:
+    """Check if path exists in JSON value.
+
+    Args:
+        value: JSON value
+        path: Dot-separated path
+
+    Returns:
+        true if path exists, false otherwise
+
+    Example:
+        json_path_has(data, "user.email")
+    """
+    json_path_get(value, path) != nil
+
+fn json_path_delete(value: any, path: text) -> any:
+    """Delete value at path.
+
+    Args:
+        value: JSON value
+        path: Dot-separated path
+
+    Returns:
+        New JSON value with deleted path
+
+    Example:
+        json_path_delete(data, "user.temp_field")
+    """
+    val parts = json_path_parse(path)
+    if parts.len() == 0:
+        return value
+    if parts.len() == 1:
+        if json_is_object(value):
+            return json_object_remove(value, parts[0])
+        return value
+    val first = parts[0]
+    var rest_path = ""
+    for i in 1..parts.len():
+        if i > 1:
+            rest_path = rest_path + "."
+        rest_path = rest_path + parts[i]
+    if json_is_object(value):
+        val nested = json_object_get(value, first)
+        val updated_nested = json_path_delete(nested, rest_path)
+        return json_object_set(value, first, updated_nested)
+    value
+
+# ============================================================================
+# String Escaping
+# ============================================================================
+
+fn json_escape_string(s: text) -> text:
+    """Escape string for JSON encoding.
+
+    Args:
+        s: String to escape
+
+    Returns:
+        Escaped string
+
+    Example:
+        json_escape_string("hello\nworld")  # "hello\\nworld"
+    """
+    var result = ""
+    for i in 0..s.len():
+        val c = s.char_at(i)
+        if c == "\"":
+            result = result + "\\\""
+        else:
+            if c == "\\":
+                result = result + "\\\\"
+            else:
+                if c == "\n":
+                    result = result + "\\n"
+                else:
+                    if c == "\r":
+                        result = result + "\\r"
+                    else:
+                        if c == "\t":
+                            result = result + "\\t"
+                        else:
+                            result = result + c
+    result
+
+fn json_unescape_string(s: text) -> text:
+    """Unescape JSON string.
+
+    Args:
+        s: Escaped string
+
+    Returns:
+        Unescaped string
+
+    Example:
+        json_unescape_string("hello\\nworld")  # "hello\nworld"
+    """
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val c = s.char_at(i)
+        if c == "\\":
+            if i + 1 < s.len():
+                val next = s.char_at(i + 1)
+                if next == "\"":
+                    result = result + "\""
+                    i = i + 2
+                else:
+                    if next == "\\":
+                        result = result + "\\"
+                        i = i + 2
+                    else:
+                        if next == "n":
+                            result = result + "\n"
+                            i = i + 2
+                        else:
+                            if next == "r":
+                                result = result + "\r"
+                                i = i + 2
+                            else:
+                                if next == "t":
+                                    result = result + "\t"
+                                    i = i + 2
+                                else:
+                                    result = result + c
+                                    i = i + 1
+            else:
+                result = result + c
+                i = i + 1
+        else:
+            result = result + c
+            i = i + 1
+    result
+
+# ============================================================================
+# Tokenizer
+# ============================================================================
+
+fn json_skip_whitespace(text: text, pos: i64) -> i64:
+    """Skip whitespace characters.
+
+    Args:
+        text: Input text
+        pos: Current position
+
+    Returns:
+        Position after whitespace
+    """
+    var p = pos
+    while p < text.len():
+        val c = text.char_at(p)
+        if c == " " or c == "\n" or c == "\r" or c == "\t":
+            p = p + 1
+        else:
+            return p
+    p
+
+fn json_tokenize(text: text) -> [(text, text)]:
+    """Tokenize JSON text.
+
+    Args:
+        text: JSON text
+
+    Returns:
+        Array of (token_type, token_value) tuples
+        Token types: "LBRACE", "RBRACE", "LBRACKET", "RBRACKET", "COLON", "COMMA",
+                     "STRING", "NUMBER", "TRUE", "FALSE", "NULL"
+
+    Example:
+        json_tokenize("{\"key\": 42}")
+    """
+    var tokens: [(text, text)] = []
+    var pos = 0
+    while pos < text.len():
+        pos = json_skip_whitespace(text, pos)
+        if pos >= text.len():
+            break
+        val c = text.char_at(pos)
+        if c == "{":
+            tokens = tokens + [("LBRACE", "{")]
+            pos = pos + 1
+        else:
+            if c == "}":
+                tokens = tokens + [("RBRACE", "}")]
+                pos = pos + 1
+            else:
+                if c == "[":
+                    tokens = tokens + [("LBRACKET", "[")]
+                    pos = pos + 1
+                else:
+                    if c == "]":
+                        tokens = tokens + [("RBRACKET", "]")]
+                        pos = pos + 1
+                    else:
+                        if c == ":":
+                            tokens = tokens + [("COLON", ":")]
+                            pos = pos + 1
+                        else:
+                            if c == ",":
+                                tokens = tokens + [("COMMA", ",")]
+                                pos = pos + 1
+                            else:
+                                if c == "\"":
+                                    var str_val = ""
+                                    pos = pos + 1
+                                    var escaped = false
+                                    while pos < text.len():
+                                        val sc = text.char_at(pos)
+                                        if escaped:
+                                            str_val = str_val + "\\" + sc
+                                            escaped = false
+                                            pos = pos + 1
+                                        else:
+                                            if sc == "\\":
+                                                escaped = true
+                                                pos = pos + 1
+                                            else:
+                                                if sc == "\"":
+                                                    pos = pos + 1
+                                                    break
+                                                else:
+                                                    str_val = str_val + sc
+                                                    pos = pos + 1
+                                    tokens = tokens + [("STRING", str_val)]
+                                else:
+                                    if c == "t":
+                                        if text.slice(pos, pos + 4) == "true":
+                                            tokens = tokens + [("TRUE", "true")]
+                                            pos = pos + 4
+                                        else:
+                                            pos = pos + 1
+                                    else:
+                                        if c == "f":
+                                            if text.slice(pos, pos + 5) == "false":
+                                                tokens = tokens + [("FALSE", "false")]
+                                                pos = pos + 5
+                                            else:
+                                                pos = pos + 1
+                                        else:
+                                            if c == "n":
+                                                if text.slice(pos, pos + 4) == "null":
+                                                    tokens = tokens + [("NULL", "null")]
+                                                    pos = pos + 4
+                                                else:
+                                                    pos = pos + 1
+                                            else:
+                                                if c == "-" or (c >= "0" and c <= "9"):
+                                                    var num_str = ""
+                                                    while pos < text.len():
+                                                        val nc = text.char_at(pos)
+                                                        if nc == "-" or nc == "." or nc == "e" or nc == "E" or nc == "+" or (nc >= "0" and nc <= "9"):
+                                                            num_str = num_str + nc
+                                                            pos = pos + 1
+                                                        else:
+                                                            break
+                                                    tokens = tokens + [("NUMBER", num_str)]
+                                                else:
+                                                    pos = pos + 1
+    tokens
+
+# ============================================================================
+# Parser
+# ============================================================================
+
+fn json_parse_tokens(tokens: [(text, text)]) -> (bool, any, text, i64):
+    """Parse tokens into JSON value.
+
+    Args:
+        tokens: Array of tokens from json_tokenize
+
+    Returns:
+        (success, value, error_message, position)
+
+    Example:
+        json_parse_tokens(json_tokenize("{\"key\": 42}"))
+    """
+    if tokens.len() == 0:
+        return (false, nil, "Empty input", 0)
+    val result = json_parse_value_at(tokens, 0)
+    result
+
+fn json_parse_value_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    """Parse value at token position.
+
+    Args:
+        tokens: Token array
+        pos: Current position
+
+    Returns:
+        (success, value, error_message, next_position)
+    """
+    if pos >= tokens.len():
+        return (false, nil, "Unexpected end of input", pos)
+    val token = tokens[pos]
+    val token_type = token.0
+    val token_value = token.1
+    if token_type == "STRING":
+        val unescaped = json_unescape_string(token_value)
+        return (true, json_string(unescaped), "", pos + 1)
+    if token_type == "NUMBER":
+        val num = token_value.to_float()
+        return (true, json_number(num), "", pos + 1)
+    if token_type == "TRUE":
+        return (true, json_boolean(true), "", pos + 1)
+    if token_type == "FALSE":
+        return (true, json_boolean(false), "", pos + 1)
+    if token_type == "NULL":
+        return (true, json_null(), "", pos + 1)
+    if token_type == "LBRACKET":
+        return json_parse_array_at(tokens, pos)
+    if token_type == "LBRACE":
+        return json_parse_object_at(tokens, pos)
+    (false, nil, "Unexpected token: {token_type}", pos)
+
+fn json_parse_array_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    """Parse array at token position.
+
+    Args:
+        tokens: Token array
+        pos: Current position (should be at LBRACKET)
+
+    Returns:
+        (success, array_value, error_message, next_position)
+    """
+    var p = pos + 1
+    var elements: [any] = []
+    while p < tokens.len():
+        val token = tokens[p]
+        val token_type = token.0
+        if token_type == "RBRACKET":
+            return (true, json_array(elements), "", p + 1)
+        if elements.len() > 0:
+            if token_type != "COMMA":
+                return (false, nil, "Expected comma in array", p)
+            p = p + 1
+        val result = json_parse_value_at(tokens, p)
+        val success = result.0
+        val value = result.1
+        val error_msg = result.2
+        val next_pos = result.3
+        if not success:
+            return (false, nil, error_msg, next_pos)
+        elements = elements + [value]
+        p = next_pos
+    (false, nil, "Unclosed array", p)
+
+fn json_parse_object_at(tokens: [(text, text)], pos: i64) -> (bool, any, text, i64):
+    """Parse object at token position.
+
+    Args:
+        tokens: Token array
+        pos: Current position (should be at LBRACE)
+
+    Returns:
+        (success, object_value, error_message, next_position)
+    """
+    var p = pos + 1
+    var pairs: {text: any} = {}
+    while p < tokens.len():
+        val token = tokens[p]
+        val token_type = token.0
+        if token_type == "RBRACE":
+            return (true, json_object(pairs), "", p + 1)
+        if pairs.len() > 0:
+            if token_type != "COMMA":
+                return (false, nil, "Expected comma in object", p)
+            p = p + 1
+            if p >= tokens.len():
+                return (false, nil, "Unexpected end in object", p)
+            val next_token = tokens[p]
+            val next_type = next_token.0
+            if next_type == "RBRACE":
+                return (true, json_object(pairs), "", p + 1)
+        if p >= tokens.len():
+            return (false, nil, "Unexpected end in object", p)
+        val key_token = tokens[p]
+        val key_type = key_token.0
+        val key_value = key_token.1
+        if key_type != "STRING":
+            return (false, nil, "Expected string key in object", p)
+        val key = json_unescape_string(key_value)
+        p = p + 1
+        if p >= tokens.len():
+            return (false, nil, "Unexpected end after key", p)
+        val colon_token = tokens[p]
+        val colon_type = colon_token.0
+        if colon_type != "COLON":
+            return (false, nil, "Expected colon after key", p)
+        p = p + 1
+        val result = json_parse_value_at(tokens, p)
+        val success = result.0
+        val value = result.1
+        val error_msg = result.2
+        val next_pos = result.3
+        if not success:
+            return (false, nil, error_msg, next_pos)
+        pairs[key] = value
+        p = next_pos
+    (false, nil, "Unclosed object", p)
+
+fn json_parse(text: text) -> any:
+    """Parse JSON text to value.
+
+    Args:
+        text: JSON text
+
+    Returns:
+        JSON value if successful, nil otherwise
+
+    Example:
+        val data = json_parse("{\"name\": \"Alice\"}")
+    """
+    val tokens = json_tokenize(text)
+    val result = json_parse_tokens(tokens)
+    if result.0:
+        return result.1
+    nil
+
+fn json_parse_with_error(text: text) -> (any, text):
+    """Parse JSON text with error message.
+
+    Args:
+        text: JSON text
+
+    Returns:
+        (value, error_message) - value is nil if error occurred
+
+    Example:
+        val (data, error) = json_parse_with_error(json_text)
+        if error != "":
+            print "Parse error: {error}"
+    """
+    val tokens = json_tokenize(text)
+    val result = json_parse_tokens(tokens)
+    if result.0:
+        return (result.1, "")
+    (nil, result.2)
+
+# ============================================================================
+# Serializer
+# ============================================================================
+
+fn json_serialize(value: any) -> text:
+    """Serialize JSON value to text.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        JSON text
+
+    Example:
+        json_serialize(json_object({"key": json_string("value")}))
+    """
+    if value == nil:
+        return "null"
+    val value_type = json_get_type(value)
+    if value_type == "null":
+        return "null"
+    if value_type == "boolean":
+        val b = json_to_boolean(value)
+        if b:
+            return "true"
+        return "false"
+    if value_type == "number":
+        val n = json_to_number(value)
+        return n.to_string()
+    if value_type == "string":
+        val s = json_to_string(value)
+        val escaped = json_escape_string(s)
+        return "\"{escaped}\""
+    if value_type == "array":
+        val list = json_to_array(value)
+        var result = "["
+        for i in 0..list.len():
+            if i > 0:
+                result = result + ","
+            result = result + json_serialize(list[i])
+        result = result + "]"
+        return result
+    if value_type == "object":
+        val map = json_to_object(value)
+        var result = "{"
+        val keys = map.keys()
+        for i in 0..keys.len():
+            if i > 0:
+                result = result + ","
+            val key = keys[i]
+            val escaped_key = json_escape_string(key)
+            result = result + "\"{escaped_key}\":"
+            result = result + json_serialize(map[key])
+        result = result + "}"
+        return result
+    "null"
+
+fn json_pretty(value: any) -> text:
+    """Serialize JSON value to pretty-printed text.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        Formatted JSON text with indentation
+
+    Example:
+        json_pretty(data)
+    """
+    json_format(value, 0, 2)
+
+fn json_format(value: any, indent_level: i64, indent_size: i64) -> text:
+    """Serialize JSON value with custom indentation.
+
+    Args:
+        value: JSON value
+        indent_level: Current indentation level
+        indent_size: Number of spaces per indent level
+
+    Returns:
+        Formatted JSON text
+
+    Example:
+        json_format(data, 0, 4)
+    """
+    if value == nil:
+        return "null"
+    val value_type = json_get_type(value)
+    if value_type == "null":
+        return "null"
+    if value_type == "boolean":
+        val b = json_to_boolean(value)
+        if b:
+            return "true"
+        return "false"
+    if value_type == "number":
+        val n = json_to_number(value)
+        return n.to_string()
+    if value_type == "string":
+        val s = json_to_string(value)
+        val escaped = json_escape_string(s)
+        return "\"{escaped}\""
+    if value_type == "array":
+        val list = json_to_array(value)
+        if list.len() == 0:
+            return "[]"
+        var result = "[\n"
+        for i in 0..list.len():
+            result = result + json_indent(indent_level + 1, indent_size)
+            result = result + json_format(list[i], indent_level + 1, indent_size)
+            if i < list.len() - 1:
+                result = result + ","
+            result = result + "\n"
+        result = result + json_indent(indent_level, indent_size)
+        result = result + "]"
+        return result
+    if value_type == "object":
+        val map = json_to_object(value)
+        val keys = map.keys()
+        if keys.len() == 0:
+            return "{}"
+        var result = "{\n"
+        for i in 0..keys.len():
+            result = result + json_indent(indent_level + 1, indent_size)
+            val key = keys[i]
+            val escaped_key = json_escape_string(key)
+            result = result + "\"{escaped_key}\": "
+            result = result + json_format(map[key], indent_level + 1, indent_size)
+            if i < keys.len() - 1:
+                result = result + ","
+            result = result + "\n"
+        result = result + json_indent(indent_level, indent_size)
+        result = result + "}"
+        return result
+    "null"
+
+fn json_indent(level: i64, size: i64) -> text:
+    """Generate indentation string.
+
+    Args:
+        level: Indentation level
+        size: Spaces per level
+
+    Returns:
+        Indentation string
+    """
+    var result = ""
+    val total = level * size
+    for i in 0..total:
+        result = result + " "
+    result
+
+# ============================================================================
+# Deep Comparison and Cloning
+# ============================================================================
+
+fn json_deep_equals(a: any, b: any) -> bool:
+    """Deep equality comparison for JSON values.
+
+    Args:
+        a: First JSON value
+        b: Second JSON value
+
+    Returns:
+        true if values are deeply equal, false otherwise
+
+    Example:
+        json_deep_equals(val1, val2)
+    """
+    if a == nil and b == nil:
+        return true
+    if a == nil or b == nil:
+        return false
+    val type_a = json_get_type(a)
+    val type_b = json_get_type(b)
+    if type_a != type_b:
+        return false
+    if type_a == "null":
+        return true
+    if type_a == "boolean":
+        return json_to_boolean(a) == json_to_boolean(b)
+    if type_a == "number":
+        return json_to_number(a) == json_to_number(b)
+    if type_a == "string":
+        return json_to_string(a) == json_to_string(b)
+    if type_a == "array":
+        val list_a = json_to_array(a)
+        val list_b = json_to_array(b)
+        if list_a.len() != list_b.len():
+            return false
+        for i in 0..list_a.len():
+            if not json_deep_equals(list_a[i], list_b[i]):
+                return false
+        return true
+    if type_a == "object":
+        val map_a = json_to_object(a)
+        val map_b = json_to_object(b)
+        val keys_a = map_a.keys()
+        val keys_b = map_b.keys()
+        if keys_a.len() != keys_b.len():
+            return false
+        for key in keys_a:
+            if not map_b.has_key(key):
+                return false
+            if not json_deep_equals(map_a[key], map_b[key]):
+                return false
+        return true
+    false
+
+fn json_deep_clone(value: any) -> any:
+    """Deep clone a JSON value.
+
+    Args:
+        value: JSON value to clone
+
+    Returns:
+        Deep copy of the value
+
+    Example:
+        val copy = json_deep_clone(original)
+    """
+    if value == nil:
+        return nil
+    val value_type = json_get_type(value)
+    if value_type == "null":
+        return json_null()
+    if value_type == "boolean":
+        return json_boolean(json_to_boolean(value))
+    if value_type == "number":
+        return json_number(json_to_number(value))
+    if value_type == "string":
+        return json_string(json_to_string(value))
+    if value_type == "array":
+        val list = json_to_array(value)
+        var new_list: [any] = []
+        for elem in list:
+            new_list = new_list + [json_deep_clone(elem)]
+        return json_array(new_list)
+    if value_type == "object":
+        val map = json_to_object(value)
+        var new_map: {text: any} = {}
+        for key in map.keys():
+            new_map[key] = json_deep_clone(map[key])
+        return json_object(new_map)
+    nil
+
+# ============================================================================
+# Schema Validation
+# ============================================================================
+
+fn json_validate_schema(value: any, schema: any) -> (bool, text):
+    """Validate JSON value against a schema.
+
+    Args:
+        value: JSON value to validate
+        schema: Schema definition (JSON object with type requirements)
+
+    Returns:
+        (is_valid, error_message)
+
+    Schema format:
+        {"type": "object"|"array"|"string"|"number"|"boolean"|"null"}
+        {"type": "object", "properties": {...}}
+        {"type": "array", "items": {...}}
+
+    Example:
+        val schema = json_object({"type": json_string("number")})
+        val (valid, error) = json_validate_schema(value, schema)
+    """
+    if schema == nil:
+        return (true, "")
+    val schema_type = json_object_get(schema, "type")
+    if schema_type == nil:
+        return (true, "")
+    val expected_type = json_to_string(schema_type)
+    if expected_type == nil:
+        return (true, "")
+    val actual_type = json_get_type(value)
+    if actual_type != expected_type:
+        return (false, "Expected type {expected_type}, got {actual_type}")
+    if expected_type == "object":
+        val properties = json_object_get(schema, "properties")
+        if properties != nil:
+            val props_map = json_to_object(properties)
+            if props_map != nil:
+                for key in props_map.keys():
+                    val prop_schema = props_map[key]
+                    val prop_value = json_object_get(value, key)
+                    val result = json_validate_schema(prop_value, prop_schema)
+                    if not result.0:
+                        return (false, "Property '{key}': {result.1}")
+    if expected_type == "array":
+        val items_schema = json_object_get(schema, "items")
+        if items_schema != nil:
+            val list = json_to_array(value)
+            if list != nil:
+                for i in 0..list.len():
+                    val result = json_validate_schema(list[i], items_schema)
+                    if not result.0:
+                        return (false, "Item {i}: {result.1}")
+    (true, "")
