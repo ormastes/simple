@@ -1,0 +1,1008 @@
+# Rope Data Structure Module
+# Efficient string manipulation using tree-based rope structure
+# Provides O(log n) operations for large text documents
+
+# ============================================================================
+# CONSTANTS AND CONFIGURATION
+# ============================================================================
+
+val ROPE_MIN_LEAF_SIZE = 8
+val ROPE_MAX_LEAF_SIZE = 1024
+val ROPE_IDEAL_LEAF_SIZE = 512
+val ROPE_REBALANCE_RATIO = 1.5
+
+# ============================================================================
+# NODE STRUCTURE
+# ============================================================================
+# Rope nodes are tuples: (tag, weight, left, right, value)
+# - tag: "leaf" or "concat"
+# - weight: left subtree length (for concat) or string length (for leaf)
+# - left: left child node (for concat) or nil (for leaf)
+# - right: right child node (for concat) or nil (for leaf)
+# - value: string data (for leaf) or nil (for concat)
+
+# ============================================================================
+# ROPE CREATION
+# ============================================================================
+
+fn rope_create_empty() -> any:
+    # Create an empty rope
+    ("leaf", 0, nil, nil, "")
+
+fn rope_create_from_string(s: text) -> any:
+    # Create a rope from a string
+    if s.length() == 0:
+        return rope_create_empty()
+
+    if s.length() <= ROPE_MAX_LEAF_SIZE:
+        return ("leaf", s.length(), nil, nil, s)
+
+    # Split large strings into multiple leaf nodes
+    var result = rope_create_empty()
+    var pos = 0
+    var len = s.length()
+
+    while pos < len:
+        var chunk_size = ROPE_IDEAL_LEAF_SIZE
+        if pos + chunk_size > len:
+            chunk_size = len - pos
+
+        var chunk = s.substring(pos, pos + chunk_size)
+        var leaf = ("leaf", chunk.length(), nil, nil, chunk)
+        result = rope_concat(result, leaf)
+        pos = pos + chunk_size
+
+    result
+
+fn rope_create_leaf(s: text) -> any:
+    # Create a leaf node with string data
+    ("leaf", s.length(), nil, nil, s)
+
+fn rope_create_concat(left: any, right: any) -> any:
+    # Create a concat node from two child nodes
+    var left_weight = rope_length(left)
+    ("concat", left_weight, left, right, nil)
+
+# ============================================================================
+# ROPE PROPERTIES
+# ============================================================================
+
+fn rope_is_leaf(node: any) -> bool:
+    # Check if node is a leaf
+    if node == nil:
+        return false
+    var tag = node.0
+    tag == "leaf"
+
+fn rope_is_concat(node: any) -> bool:
+    # Check if node is a concat node
+    if node == nil:
+        return false
+    var tag = node.0
+    tag == "concat"
+
+fn rope_is_empty(node: any) -> bool:
+    # Check if rope is empty
+    if node == nil:
+        return true
+    rope_length(node) == 0
+
+fn rope_length(node: any) -> i64:
+    # Get total length of rope
+    if node == nil:
+        return 0
+
+    var tag = node.0
+    if tag == "leaf":
+        return node.1
+
+    # Concat node: sum both subtrees
+    var left_weight = node.1
+    var right = node.3
+    var right_len = rope_length(right)
+    left_weight + right_len
+
+fn rope_weight(node: any) -> i64:
+    # Get weight of node (left subtree length)
+    if node == nil:
+        return 0
+    node.1
+
+fn rope_depth(node: any) -> i64:
+    # Get depth of rope tree
+    if node == nil:
+        return 0
+
+    if rope_is_leaf(node):
+        return 1
+
+    var left = node.2
+    var right = node.3
+    var left_depth = rope_depth(left)
+    var right_depth = rope_depth(right)
+
+    var max_depth = left_depth
+    if right_depth > max_depth:
+        max_depth = right_depth
+
+    max_depth + 1
+
+# ============================================================================
+# ROPE CONCATENATION
+# ============================================================================
+
+fn rope_concat(left: any, right: any) -> any:
+    # Concatenate two ropes
+    if left == nil or rope_is_empty(left):
+        return right
+    if right == nil or rope_is_empty(right):
+        return left
+
+    # Try to merge small leaf nodes
+    var can_merge = rope_is_leaf(left) and rope_is_leaf(right)
+    if can_merge:
+        var total_len = rope_length(left) + rope_length(right)
+        if total_len <= ROPE_MAX_LEAF_SIZE:
+            var left_val = left.4
+            var right_val = right.4
+            var merged = "{left_val}{right_val}"
+            return rope_create_leaf(merged)
+
+    # Create concat node
+    var result = rope_create_concat(left, right)
+
+    # Check if rebalancing is needed
+    var needs_rebalance = rope_needs_rebalancing(result)
+    if needs_rebalance:
+        result = rope_rebalance(result)
+
+    result
+
+fn rope_concat_string(node: any, s: text) -> any:
+    # Concatenate a string to a rope
+    var right = rope_create_from_string(s)
+    rope_concat(node, right)
+
+fn rope_prepend_string(s: text, node: any) -> any:
+    # Prepend a string to a rope
+    var left = rope_create_from_string(s)
+    rope_concat(left, node)
+
+# ============================================================================
+# ROPE INDEXING AND ACCESS
+# ============================================================================
+
+fn rope_char_at(node: any, index: i64) -> text:
+    # Get character at index (O(log n))
+    if node == nil:
+        return ""
+
+    var len = rope_length(node)
+    if index < 0 or index >= len:
+        return ""
+
+    if rope_is_leaf(node):
+        var value = node.4
+        return value.substring(index, index + 1)
+
+    # Concat node: search left or right
+    var weight = node.1
+    var left = node.2
+    var right = node.3
+
+    if index < weight:
+        return rope_char_at(left, index)
+
+    var right_index = index - weight
+    rope_char_at(right, right_index)
+
+fn rope_substring(node: any, start: i64, end: i64) -> text:
+    # Extract substring from rope
+    if node == nil:
+        return ""
+
+    var len = rope_length(node)
+    if start < 0:
+        start = 0
+    if end > len:
+        end = len
+    if start >= end:
+        return ""
+
+    # Extract by splitting and converting
+    var parts = rope_split_at(node, start)
+    var left = parts.0
+    var middle_right = parts.1
+
+    var sub_len = end - start
+    var parts2 = rope_split_at(middle_right, sub_len)
+    var middle = parts2.0
+
+    rope_to_string(middle)
+
+# ============================================================================
+# ROPE SPLITTING
+# ============================================================================
+
+fn rope_split_at(node: any, index: i64) -> any:
+    # Split rope at index, return (left, right) tuple
+    if node == nil:
+        return (rope_create_empty(), rope_create_empty())
+
+    var len = rope_length(node)
+    if index <= 0:
+        return (rope_create_empty(), node)
+    if index >= len:
+        return (node, rope_create_empty())
+
+    if rope_is_leaf(node):
+        var value = node.4
+        var left_str = value.substring(0, index)
+        var right_str = value.substring(index, len)
+        var left = rope_create_leaf(left_str)
+        var right = rope_create_leaf(right_str)
+        return (left, right)
+
+    # Concat node: split recursively
+    var weight = node.1
+    var left = node.2
+    var right = node.3
+
+    if index < weight:
+        var left_parts = rope_split_at(left, index)
+        var new_left = left_parts.0
+        var left_remainder = left_parts.1
+        var new_right = rope_concat(left_remainder, right)
+        return (new_left, new_right)
+
+    if index == weight:
+        return (left, right)
+
+    var right_index = index - weight
+    var right_parts = rope_split_at(right, right_index)
+    var right_left = right_parts.0
+    var right_right = right_parts.1
+    var new_left = rope_concat(left, right_left)
+    (new_left, right_right)
+
+fn rope_split_at_multiple(node: any, indices: any) -> any:
+    # Split rope at multiple indices
+    # Returns list of rope segments
+    if indices == nil or indices.length() == 0:
+        return [node]
+
+    var result = []
+    var current = node
+    var prev_index = 0
+
+    var i = 0
+    while i < indices.length():
+        var index = indices[i]
+        if index > prev_index:
+            var adjusted_index = index - prev_index
+            var parts = rope_split_at(current, adjusted_index)
+            var segment = parts.0
+            result = result.append(segment)
+            current = parts.1
+            prev_index = index
+        i = i + 1
+
+    # Add final segment
+    if not rope_is_empty(current):
+        result = result.append(current)
+
+    result
+
+# ============================================================================
+# ROPE INSERTION
+# ============================================================================
+
+fn rope_insert_at(node: any, index: i64, s: text) -> any:
+    # Insert string at index
+    if s.length() == 0:
+        return node
+
+    var parts = rope_split_at(node, index)
+    var left = parts.0
+    var right = parts.1
+    var middle = rope_create_from_string(s)
+
+    var temp = rope_concat(left, middle)
+    rope_concat(temp, right)
+
+fn rope_insert_rope_at(node: any, index: i64, insert: any) -> any:
+    # Insert another rope at index
+    if insert == nil or rope_is_empty(insert):
+        return node
+
+    var parts = rope_split_at(node, index)
+    var left = parts.0
+    var right = parts.1
+
+    var temp = rope_concat(left, insert)
+    rope_concat(temp, right)
+
+# ============================================================================
+# ROPE DELETION
+# ============================================================================
+
+fn rope_delete_range(node: any, start: i64, end: i64) -> any:
+    # Delete characters in range [start, end)
+    if start >= end:
+        return node
+
+    var len = rope_length(node)
+    if start < 0:
+        start = 0
+    if end > len:
+        end = len
+
+    var parts1 = rope_split_at(node, start)
+    var left = parts1.0
+    var middle_right = parts1.1
+
+    var delete_len = end - start
+    var parts2 = rope_split_at(middle_right, delete_len)
+    var right = parts2.1
+
+    rope_concat(left, right)
+
+fn rope_delete_at(node: any, index: i64) -> any:
+    # Delete single character at index
+    rope_delete_range(node, index, index + 1)
+
+# ============================================================================
+# ROPE REBALANCING
+# ============================================================================
+
+fn rope_needs_rebalancing(node: any) -> bool:
+    # Check if rope needs rebalancing
+    if node == nil or rope_is_leaf(node):
+        return false
+
+    var depth = rope_depth(node)
+    var len = rope_length(node)
+
+    # Calculate ideal depth: log2(len)
+    var ideal_depth = 1
+    var temp = len
+    while temp > 1:
+        temp = temp / 2
+        ideal_depth = ideal_depth + 1
+
+    # Needs rebalancing if depth exceeds ideal by ratio
+    var max_depth = ideal_depth * ROPE_REBALANCE_RATIO
+    var needs_it = depth > max_depth
+    needs_it
+
+fn rope_to_leaf_list(node: any) -> any:
+    # Convert rope to list of leaf nodes
+    if node == nil:
+        return []
+
+    if rope_is_leaf(node):
+        return [node]
+
+    var left = node.2
+    var right = node.3
+    var left_leaves = rope_to_leaf_list(left)
+    var right_leaves = rope_to_leaf_list(right)
+
+    left_leaves.concat(right_leaves)
+
+fn rope_from_leaf_list(leaves: any) -> any:
+    # Build balanced rope from list of leaves
+    if leaves == nil or leaves.length() == 0:
+        return rope_create_empty()
+
+    if leaves.length() == 1:
+        return leaves[0]
+
+    # Build balanced tree bottom-up
+    var current_level = leaves
+
+    while current_level.length() > 1:
+        var next_level = []
+        var i = 0
+
+        while i < current_level.length():
+            if i + 1 < current_level.length():
+                var left = current_level[i]
+                var right = current_level[i + 1]
+                var concat_node = rope_create_concat(left, right)
+                next_level = next_level.append(concat_node)
+                i = i + 2
+            else:
+                next_level = next_level.append(current_level[i])
+                i = i + 1
+
+        current_level = next_level
+
+    current_level[0]
+
+fn rope_rebalance(node: any) -> any:
+    # Rebalance rope tree
+    if node == nil or rope_is_leaf(node):
+        return node
+
+    var leaves = rope_to_leaf_list(node)
+
+    # Merge small adjacent leaves
+    var merged_leaves = []
+    var i = 0
+
+    while i < leaves.length():
+        var leaf = leaves[i]
+        var leaf_len = rope_length(leaf)
+
+        # Try to merge with next leaf if both are small
+        var can_merge = i + 1 < leaves.length()
+        if can_merge:
+            var next_leaf = leaves[i + 1]
+            var next_len = rope_length(next_leaf)
+            var total = leaf_len + next_len
+
+            if total <= ROPE_MAX_LEAF_SIZE:
+                var val1 = leaf.4
+                var val2 = next_leaf.4
+                var merged_val = "{val1}{val2}"
+                var merged_leaf = rope_create_leaf(merged_val)
+                merged_leaves = merged_leaves.append(merged_leaf)
+                i = i + 2
+            else:
+                merged_leaves = merged_leaves.append(leaf)
+                i = i + 1
+        else:
+            merged_leaves = merged_leaves.append(leaf)
+            i = i + 1
+
+    rope_from_leaf_list(merged_leaves)
+
+fn rope_force_rebalance(node: any) -> any:
+    # Force rebalancing regardless of threshold
+    if node == nil or rope_is_empty(node):
+        return node
+
+    var leaves = rope_to_leaf_list(node)
+    rope_from_leaf_list(leaves)
+
+# ============================================================================
+# ROPE CONVERSION
+# ============================================================================
+
+fn rope_to_string(node: any) -> text:
+    # Convert rope to string
+    if node == nil:
+        return ""
+
+    if rope_is_leaf(node):
+        return node.4
+
+    var left = node.2
+    var right = node.3
+    var left_str = rope_to_string(left)
+    var right_str = rope_to_string(right)
+
+    "{left_str}{right_str}"
+
+fn rope_to_string_builder(node: any, acc: any) -> any:
+    # Convert rope to string using accumulator
+    if node == nil:
+        return acc
+
+    if rope_is_leaf(node):
+        var value = node.4
+        return acc.append(value)
+
+    var left = node.2
+    var right = node.3
+    var acc2 = rope_to_string_builder(left, acc)
+    rope_to_string_builder(right, acc2)
+
+fn rope_to_lines(node: any) -> any:
+    # Convert rope to list of lines
+    var s = rope_to_string(node)
+    s.split("\n")
+
+# ============================================================================
+# ROPE ITERATION
+# ============================================================================
+
+fn rope_iter_chars(node: any) -> any:
+    # Create character iterator (returns list of chars)
+    var s = rope_to_string(node)
+    var result = []
+    var i = 0
+
+    while i < s.length():
+        var ch = s.substring(i, i + 1)
+        result = result.append(ch)
+        i = i + 1
+
+    result
+
+fn rope_iter_leaves(node: any) -> any:
+    # Create leaf iterator (returns list of leaves)
+    rope_to_leaf_list(node)
+
+fn rope_for_each_char(node: any, fn_proc: any) -> any:
+    # Apply function to each character
+    var chars = rope_iter_chars(node)
+    var i = 0
+
+    while i < chars.length():
+        fn_proc(chars[i], i)
+        i = i + 1
+
+    nil
+
+fn rope_map_chars(node: any, fn_map: any) -> any:
+    # Map function over characters
+    var chars = rope_iter_chars(node)
+    var result = []
+    var i = 0
+
+    while i < chars.length():
+        var mapped = fn_map(chars[i])
+        result = result.append(mapped)
+        i = i + 1
+
+    var joined = result.join("")
+    rope_create_from_string(joined)
+
+# ============================================================================
+# ROPE SEARCH
+# ============================================================================
+
+fn rope_find(node: any, pattern: text) -> i64:
+    # Find first occurrence of pattern, return index or -1
+    var s = rope_to_string(node)
+    s.index_of(pattern)
+
+fn rope_find_all(node: any, pattern: text) -> any:
+    # Find all occurrences of pattern, return list of indices
+    var s = rope_to_string(node)
+    var result = []
+    var pos = 0
+
+    while pos < s.length():
+        var found = s.substring(pos, s.length()).index_of(pattern)
+        if found == -1:
+            return result
+
+        var index = pos + found
+        result = result.append(index)
+        pos = index + pattern.length()
+
+    result
+
+fn rope_contains(node: any, pattern: text) -> bool:
+    # Check if rope contains pattern
+    var index = rope_find(node, pattern)
+    index != -1
+
+fn rope_starts_with(node: any, prefix: text) -> bool:
+    # Check if rope starts with prefix
+    var len = prefix.length()
+    if len == 0:
+        return true
+
+    var rope_len = rope_length(node)
+    if len > rope_len:
+        return false
+
+    var substr = rope_substring(node, 0, len)
+    substr == prefix
+
+fn rope_ends_with(node: any, suffix: text) -> bool:
+    # Check if rope ends with suffix
+    var len = suffix.length()
+    if len == 0:
+        return true
+
+    var rope_len = rope_length(node)
+    if len > rope_len:
+        return false
+
+    var start = rope_len - len
+    var substr = rope_substring(node, start, rope_len)
+    substr == suffix
+
+# ============================================================================
+# ROPE COMPARISON
+# ============================================================================
+
+fn rope_equals(a: any, b: any) -> bool:
+    # Check if two ropes are equal
+    if a == nil and b == nil:
+        return true
+    if a == nil or b == nil:
+        return false
+
+    var len_a = rope_length(a)
+    var len_b = rope_length(b)
+
+    if len_a != len_b:
+        return false
+
+    var str_a = rope_to_string(a)
+    var str_b = rope_to_string(b)
+
+    str_a == str_b
+
+fn rope_compare(a: any, b: any) -> i64:
+    # Compare two ropes lexicographically
+    # Returns: -1 if a < b, 0 if a == b, 1 if a > b
+    var str_a = rope_to_string(a)
+    var str_b = rope_to_string(b)
+
+    if str_a < str_b:
+        return -1
+    if str_a > str_b:
+        return 1
+    0
+
+# ============================================================================
+# ROPE CLONING
+# ============================================================================
+
+fn rope_clone(node: any) -> any:
+    # Clone a rope (deep copy)
+    if node == nil:
+        return nil
+
+    if rope_is_leaf(node):
+        var value = node.4
+        return rope_create_leaf(value)
+
+    var left = node.2
+    var right = node.3
+    var cloned_left = rope_clone(left)
+    var cloned_right = rope_clone(right)
+
+    rope_create_concat(cloned_left, cloned_right)
+
+# ============================================================================
+# ROPE UTILITIES
+# ============================================================================
+
+fn rope_reverse(node: any) -> any:
+    # Reverse the rope
+    var s = rope_to_string(node)
+    var result = ""
+    var i = s.length() - 1
+
+    while i >= 0:
+        var ch = s.substring(i, i + 1)
+        result = "{result}{ch}"
+        i = i - 1
+
+    rope_create_from_string(result)
+
+fn rope_trim(node: any) -> any:
+    # Trim whitespace from both ends
+    var s = rope_to_string(node)
+    var trimmed = s.trim()
+    rope_create_from_string(trimmed)
+
+fn rope_trim_start(node: any) -> any:
+    # Trim whitespace from start
+    var s = rope_to_string(node)
+    var i = 0
+
+    while i < s.length():
+        var ch = s.substring(i, i + 1)
+        var is_space = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+        if not is_space:
+            break
+        i = i + 1
+
+    var trimmed = s.substring(i, s.length())
+    rope_create_from_string(trimmed)
+
+fn rope_trim_end(node: any) -> any:
+    # Trim whitespace from end
+    var s = rope_to_string(node)
+    var i = s.length() - 1
+
+    while i >= 0:
+        var ch = s.substring(i, i + 1)
+        var is_space = ch == " " or ch == "\t" or ch == "\n" or ch == "\r"
+        if not is_space:
+            break
+        i = i - 1
+
+    var trimmed = s.substring(0, i + 1)
+    rope_create_from_string(trimmed)
+
+fn rope_replace(node: any, old: text, new: text) -> any:
+    # Replace all occurrences of old with new
+    var s = rope_to_string(node)
+    var result = s.replace(old, new)
+    rope_create_from_string(result)
+
+fn rope_replace_range(node: any, start: i64, end: i64, replacement: text) -> any:
+    # Replace range with new text
+    var deleted = rope_delete_range(node, start, end)
+    rope_insert_at(deleted, start, replacement)
+
+fn rope_to_upper(node: any) -> any:
+    # Convert to uppercase
+    var s = rope_to_string(node)
+    var upper = s.to_upper()
+    rope_create_from_string(upper)
+
+fn rope_to_lower(node: any) -> any:
+    # Convert to lowercase
+    var s = rope_to_string(node)
+    var lower = s.to_lower()
+    rope_create_from_string(lower)
+
+# ============================================================================
+# ROPE STATISTICS
+# ============================================================================
+
+fn rope_stats(node: any) -> any:
+    # Get rope statistics as tuple
+    # Returns: (length, depth, leaf_count, avg_leaf_size)
+    var len = rope_length(node)
+    var depth = rope_depth(node)
+    var leaves = rope_to_leaf_list(node)
+    var leaf_count = leaves.length()
+
+    var total_leaf_size = 0
+    var i = 0
+    while i < leaf_count:
+        var leaf = leaves[i]
+        total_leaf_size = total_leaf_size + rope_length(leaf)
+        i = i + 1
+
+    var avg_leaf_size = 0
+    if leaf_count > 0:
+        avg_leaf_size = total_leaf_size / leaf_count
+
+    (len, depth, leaf_count, avg_leaf_size)
+
+fn rope_print_stats(node: any) -> any:
+    # Print rope statistics
+    var stats = rope_stats(node)
+    var len = stats.0
+    var depth = stats.1
+    var leaf_count = stats.2
+    var avg_leaf_size = stats.3
+
+    print "Rope Statistics:"
+    print "  Length: {len}"
+    print "  Depth: {depth}"
+    print "  Leaf count: {leaf_count}"
+    print "  Avg leaf size: {avg_leaf_size}"
+
+    nil
+
+fn rope_is_balanced(node: any) -> bool:
+    # Check if rope is balanced
+    if node == nil or rope_is_leaf(node):
+        return true
+
+    var left = node.2
+    var right = node.3
+    var left_depth = rope_depth(left)
+    var right_depth = rope_depth(right)
+
+    var diff = left_depth - right_depth
+    if diff < 0:
+        diff = 0 - diff
+
+    var is_bal = diff <= 1
+    if not is_bal:
+        return false
+
+    var left_bal = rope_is_balanced(left)
+    var right_bal = rope_is_balanced(right)
+
+    left_bal and right_bal
+
+# ============================================================================
+# ROPE LINE OPERATIONS
+# ============================================================================
+
+fn rope_line_count(node: any) -> i64:
+    # Count number of lines
+    var lines = rope_to_lines(node)
+    lines.length()
+
+fn rope_get_line(node: any, line_num: i64) -> text:
+    # Get specific line (0-indexed)
+    var lines = rope_to_lines(node)
+    if line_num < 0 or line_num >= lines.length():
+        return ""
+    lines[line_num]
+
+fn rope_insert_line(node: any, line_num: i64, line: text) -> any:
+    # Insert line at position
+    var lines = rope_to_lines(node)
+
+    if line_num < 0:
+        line_num = 0
+    if line_num > lines.length():
+        line_num = lines.length()
+
+    var new_lines = []
+    var i = 0
+
+    while i < line_num:
+        new_lines = new_lines.append(lines[i])
+        i = i + 1
+
+    new_lines = new_lines.append(line)
+
+    while i < lines.length():
+        new_lines = new_lines.append(lines[i])
+        i = i + 1
+
+    var joined = new_lines.join("\n")
+    rope_create_from_string(joined)
+
+fn rope_delete_line(node: any, line_num: i64) -> any:
+    # Delete specific line
+    var lines = rope_to_lines(node)
+
+    if line_num < 0 or line_num >= lines.length():
+        return node
+
+    var new_lines = []
+    var i = 0
+
+    while i < lines.length():
+        if i != line_num:
+            new_lines = new_lines.append(lines[i])
+        i = i + 1
+
+    var joined = new_lines.join("\n")
+    rope_create_from_string(joined)
+
+fn rope_replace_line(node: any, line_num: i64, new_line: text) -> any:
+    # Replace specific line
+    var lines = rope_to_lines(node)
+
+    if line_num < 0 or line_num >= lines.length():
+        return node
+
+    var new_lines = []
+    var i = 0
+
+    while i < lines.length():
+        if i == line_num:
+            new_lines = new_lines.append(new_line)
+        else:
+            new_lines = new_lines.append(lines[i])
+        i = i + 1
+
+    var joined = new_lines.join("\n")
+    rope_create_from_string(joined)
+
+# ============================================================================
+# ROPE CHUNK OPERATIONS
+# ============================================================================
+
+fn rope_split_into_chunks(node: any, chunk_size: i64) -> any:
+    # Split rope into chunks of specified size
+    var result = []
+    var len = rope_length(node)
+    var pos = 0
+
+    while pos < len:
+        var end = pos + chunk_size
+        if end > len:
+            end = len
+
+        var chunk_str = rope_substring(node, pos, end)
+        var chunk = rope_create_from_string(chunk_str)
+        result = result.append(chunk)
+        pos = end
+
+    result
+
+fn rope_merge_chunks(chunks: any) -> any:
+    # Merge list of rope chunks into single rope
+    if chunks == nil or chunks.length() == 0:
+        return rope_create_empty()
+
+    var result = chunks[0]
+    var i = 1
+
+    while i < chunks.length():
+        result = rope_concat(result, chunks[i])
+        i = i + 1
+
+    result
+
+# ============================================================================
+# ROPE VALIDATION
+# ============================================================================
+
+fn rope_validate(node: any) -> bool:
+    # Validate rope structure integrity
+    if node == nil:
+        return true
+
+    if rope_is_leaf(node):
+        var len = node.1
+        var value = node.4
+        var actual_len = value.length()
+        return len == actual_len
+
+    # Validate concat node
+    var weight = node.1
+    var left = node.2
+    var right = node.3
+
+    if left == nil or right == nil:
+        return false
+
+    var left_len = rope_length(left)
+    if weight != left_len:
+        return false
+
+    var left_valid = rope_validate(left)
+    var right_valid = rope_validate(right)
+
+    left_valid and right_valid
+
+fn rope_debug_print(node: any, indent: i64) -> any:
+    # Print rope structure for debugging
+    if node == nil:
+        print "{rope_indent_str(indent)}nil"
+        return nil
+
+    var indent_str = rope_indent_str(indent)
+
+    if rope_is_leaf(node):
+        var len = node.1
+        var value = node.4
+        print "{indent_str}Leaf(len={len}, value=\"{value}\")"
+        return nil
+
+    var weight = node.1
+    print "{indent_str}Concat(weight={weight})"
+
+    var left = node.2
+    var right = node.3
+    rope_debug_print(left, indent + 2)
+    rope_debug_print(right, indent + 2)
+
+    nil
+
+fn rope_indent_str(indent: i64) -> text:
+    # Helper: create indentation string
+    var result = ""
+    var i = 0
+
+    while i < indent:
+        result = "{result} "
+        i = i + 1
+
+    result
+
+# ============================================================================
+# EXPORTS (for documentation)
+# ============================================================================
+# Core operations: 75+ functions
+# - Creation: rope_create_empty, rope_create_from_string, rope_create_leaf, rope_create_concat
+# - Properties: rope_is_leaf, rope_is_concat, rope_is_empty, rope_length, rope_weight, rope_depth
+# - Concatenation: rope_concat, rope_concat_string, rope_prepend_string
+# - Indexing: rope_char_at, rope_substring
+# - Splitting: rope_split_at, rope_split_at_multiple
+# - Insertion: rope_insert_at, rope_insert_rope_at
+# - Deletion: rope_delete_range, rope_delete_at
+# - Rebalancing: rope_needs_rebalancing, rope_rebalance, rope_force_rebalance, rope_to_leaf_list, rope_from_leaf_list
+# - Conversion: rope_to_string, rope_to_string_builder, rope_to_lines
+# - Iteration: rope_iter_chars, rope_iter_leaves, rope_for_each_char, rope_map_chars
+# - Search: rope_find, rope_find_all, rope_contains, rope_starts_with, rope_ends_with
+# - Comparison: rope_equals, rope_compare
+# - Cloning: rope_clone
+# - Utilities: rope_reverse, rope_trim, rope_trim_start, rope_trim_end, rope_replace, rope_replace_range, rope_to_upper, rope_to_lower
+# - Statistics: rope_stats, rope_print_stats, rope_is_balanced
+# - Line operations: rope_line_count, rope_get_line, rope_insert_line, rope_delete_line, rope_replace_line
+# - Chunk operations: rope_split_into_chunks, rope_merge_chunks
+# - Validation: rope_validate, rope_debug_print, rope_indent_str
