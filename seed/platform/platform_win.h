@@ -84,4 +84,80 @@ int64_t spl_dlclose(void* handle) {
     return FreeLibrary((HMODULE)handle) ? 0 : -1;
 }
 
+/* ----------------------------------------------------------------
+ * Process Async
+ * ---------------------------------------------------------------- */
+
+int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
+    if (!cmd) return -1;
+
+    /* Build command line */
+    char cmdline[4096] = {0};
+    snprintf(cmdline, sizeof(cmdline), "%s", cmd);
+    for (int64_t i = 0; i < arg_count; i++) {
+        strncat(cmdline, " ", sizeof(cmdline) - strlen(cmdline) - 1);
+        strncat(cmdline, args[i], sizeof(cmdline) - strlen(cmdline) - 1);
+    }
+
+    STARTUPINFOA si = {0};
+    PROCESS_INFORMATION pi = {0};
+    si.cb = sizeof(si);
+
+    if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        return -1;
+    }
+
+    CloseHandle(pi.hThread);
+    int64_t pid = (int64_t)pi.hProcess;
+    return pid;
+}
+
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    if (pid <= 0) return -1;
+
+    HANDLE hProcess = (HANDLE)pid;
+    DWORD timeout = (timeout_ms <= 0) ? INFINITE : (DWORD)timeout_ms;
+
+    DWORD result = WaitForSingleObject(hProcess, timeout);
+    if (result == WAIT_TIMEOUT) {
+        return -2;  /* Timeout */
+    }
+    if (result != WAIT_OBJECT_0) {
+        return -1;  /* Error */
+    }
+
+    DWORD exit_code = 0;
+    if (!GetExitCodeProcess(hProcess, &exit_code)) {
+        return -1;
+    }
+
+    CloseHandle(hProcess);
+    return (int64_t)exit_code;
+}
+
+bool rt_process_is_running(int64_t pid) {
+    if (pid <= 0) return false;
+
+    HANDLE hProcess = (HANDLE)pid;
+    DWORD exit_code = 0;
+
+    if (!GetExitCodeProcess(hProcess, &exit_code)) {
+        return false;
+    }
+
+    return exit_code == STILL_ACTIVE;
+}
+
+bool rt_process_kill(int64_t pid) {
+    if (pid <= 0) return false;
+
+    HANDLE hProcess = (HANDLE)pid;
+    if (!TerminateProcess(hProcess, 1)) {
+        return false;
+    }
+
+    CloseHandle(hProcess);
+    return true;
+}
+
 #endif /* SPL_PLATFORM_WIN_H */
