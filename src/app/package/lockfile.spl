@@ -253,24 +253,86 @@ val second = rt_timestamp_get_second(micros)
 
 struct SdnTableRow:
     """Table row from SDN"""
-    data: text    # Placeholder
+    fields: Dict<text, text>
+
+    static fn empty() -> SdnTableRow:
+        SdnTableRow(fields: {})
 
     fn get_string(key: text) -> Result<text, text>:
-        Err("Not implemented")
+        if self.fields.contains_key(key):
+            Ok(self.fields[key])
+        else:
+            Err("Missing field: {key}")
 
     fn get_string_array_opt(key: text) -> [text]?:
-        nil
+        if not self.fields.contains_key(key):
+            return nil
+        val raw = self.fields[key].trim()
+        if raw == "[]":
+            return Some([])
+        if not raw.starts_with("["):
+            return nil
+        # Strip brackets
+        val inner = raw.substring(1, raw.length - 1)
+        val parts = inner.split(",")
+        val result = parts.map(\s: s.trim())
+        Some(result)
 
 struct SdnTable:
     """Table from SDN"""
+    columns: [text]
     rows: [SdnTableRow]
+
+    static fn empty() -> SdnTable:
+        SdnTable(columns: [], rows: [])
 
 # Extension to SdnValue for table support
 impl SdnValue:
+    fn get_string(key: text) -> Result<text, text>:
+        val child = self.get(key)
+        if child.?:
+            val s = child.unwrap().as_str()
+            if s.?:
+                Ok(s.unwrap())
+            else:
+                Err("Field '{key}' is not a string")
+        else:
+            Err("Missing field: {key}")
+
     fn get_int(key: text) -> Result<i64, text>:
-        Err("Not implemented")
+        val child = self.get(key)
+        if child.?:
+            val n = child.unwrap().as_i64()
+            if n.?:
+                Ok(n.unwrap())
+            else:
+                Err("Field '{key}' is not an integer")
+        else:
+            Err("Missing field: {key}")
+
     fn get_table(key: text) -> Result<SdnTable, text>:
-        Err("Not implemented")
+        val child = self.get(key)
+        if not child.?:
+            return Err("Missing table: {key}")
+        val table_val = child.unwrap()
+        if not table_val.is_table():
+            return Err("Field '{key}' is not a table")
+        # Extract table fields and rows from SdnValue.Table
+        match table_val:
+            case SdnValue.Table(fields_opt, types_opt, raw_rows):
+                val columns = fields_opt ?? []
+                var rows: [SdnTableRow] = []
+                for raw_row in raw_rows:
+                    var row_fields: Dict<text, text> = {}
+                    var ci = 0
+                    while ci < columns.len() and ci < raw_row.len():
+                        val cell_str = raw_row[ci].as_str() ?? raw_row[ci].to_text()
+                        row_fields[columns[ci]] = cell_str
+                        ci = ci + 1
+                    rows.push(SdnTableRow(fields: row_fields))
+                Ok(SdnTable(columns: columns, rows: rows))
+            case _:
+                Err("Field '{key}' is not a table")
 # ============================================================================
 # Lockfile Comparison (for updates)
 # ============================================================================

@@ -10,12 +10,13 @@
 
 use lib.qemu.{QemuArch, QemuConfig, QemuInstance}
 use lib.qemu.boot_runner.{BootTestConfig, BootTestResult, BootTestRunner}
-use remote.protocol.gdb_mi.{GdbMiClient, GdbMiCommand, GdbMiResponse}
-use remote.target.riscv32.{RiscV32Target}
+use remote.protocol.gdb_mi.{GdbMiClient}
+use remote.protocol.gdb_mi_parser.{GdbMiParser, parse_hex_value}
+use remote.types.{DebugConfig, Architecture}
 use app.io.{shell, ProcessResult}
 
-export DebugBootConfig, DebugBootRunner, DebugInfo
-export run_debug_boot_test
+export DebugBootConfig, DebugBootRunner, DebugInfo, StackFrame, StopInfo
+export run_debug_boot_test, format_debug_info, analyze_crash, parse_hex_value_u64
 
 # ===========================================================================
 # Debug Boot Configuration
@@ -179,12 +180,17 @@ impl DebugBootRunner:
         if gdb_path.len() == 0:
             return Err("GDB not found for architecture {self.config.base_config.arch}")
 
-        # Create GDB MI client
-        val client_result = GdbMiClient__connect(
-            gdb_path,
-            "localhost",
-            self.config.gdb_port
+        # Build debug config for GDB MI client
+        val debug_config = DebugConfig(
+            host: "localhost",
+            port: self.config.gdb_port,
+            target: arch_to_debug_arch(self.config.base_config.arch),
+            program: self.config.base_config.kernel_path,
+            options: {}
         )
+
+        # Create GDB MI client
+        val client_result = GdbMiClient.connect(debug_config)
 
         client_result
     fn find_gdb() -> text:
@@ -211,13 +217,12 @@ impl DebugBootRunner:
             return Err("GDB not connected")
 
         val gdb = self.gdb_client.unwrap()
-        val cmd = GdbMiCommand__break_insert("*0x{addr:x}")
-        val response = gdb.send_command(cmd)
+        val bp_result = gdb.set_breakpoint_at_addr(addr)
 
-        if response.class == "done":
+        if bp_result.is_ok():
             Ok(())
         else:
-            Err("Failed to set breakpoint at 0x{addr:x}")
+            Err("Failed to set breakpoint at 0x{addr:x}: {bp_result.err.unwrap()}")
     fn continue_execution() -> (BootTestResult, DebugInfo):
         """Continue execution and wait for halt or crash."""
         if not self.gdb_client.?:
@@ -226,9 +231,12 @@ impl DebugBootRunner:
 
         val gdb = self.gdb_client.unwrap()
 
-        # Continue execution
-        val cont_cmd = GdbMiCommand__exec_continue()
-        val cont_response = gdb.send_command(cont_cmd)
+        # Continue execution using GDB MI exec-continue
+        val cont_result = gdb.resume()
+        if not cont_result.is_ok():
+            val err_msg = cont_result.err.unwrap()
+            val result = BootTestResult__failure("Failed to continue: {err_msg}", "", -1)
+            return (result, DebugInfo__unavailable())
 
         # Wait for stop event
         val stop_result = self.wait_for_stop()
@@ -272,10 +280,46 @@ impl DebugBootRunner:
 
         val gdb = self.gdb_client.unwrap()
 
-        # Query stop reason
-        # This is architecture-specific, would use GDB MI commands
+        # Query thread info to determine stop reason
+        val thread_result = gdb.send_command("thread-info")
+        if not thread_result.is_ok():
+            return Err("Failed to query thread info: {thread_result.err.unwrap()}")
 
-        Ok(StopInfo(reason: "unknown", address: 0))
+        val data = thread_result.ok.unwrap()
+        val threads_raw = data.get("threads") ?? "[]"
+        val threads = GdbMiParser.parse_tuple_list(threads_raw)
+
+        var reason = "unknown"
+        var address: u64 = 0
+        var signal = ""
+
+        # Parse the first thread's stop reason
+        if threads.len() > 0:
+            val thread = threads[0]
+
+            # Extract the frame to get address
+            val frame_raw = thread.get("frame") ?? "{}"
+            val frame = GdbMiParser.parse_key_values(frame_raw)
+            val addr_str = frame.get("addr") ?? "0x0"
+            address = parse_hex_value(addr_str)
+
+            # Extract stop reason from thread state
+            val state = thread.get("state") ?? ""
+            val stop_reason = thread.get("reason") ?? ""
+
+            if stop_reason.len() > 0:
+                reason = stop_reason
+            elif state == "stopped":
+                reason = "stopped"
+
+            # Extract signal name if present
+            val sig_name = thread.get("signal-name") ?? ""
+            if sig_name.len() > 0:
+                signal = sig_name
+                if reason == "unknown" or reason == "stopped":
+                    reason = "signal-received"
+
+        Ok(StopInfo(reason: reason, address: address, signal: signal))
     fn extract_debug_info() -> DebugInfo:
         """Extract registers and stack trace from stopped program."""
         if not self.gdb_client.?:
@@ -307,29 +351,78 @@ impl DebugBootRunner:
 
         val gdb = self.gdb_client.unwrap()
 
-        # Use GDB MI to read registers
-        # Architecture-specific register names
+        # Use GDB MI to read all register names and values
+        # read_all_registers returns Dict<text, i64> with parsed numeric values
+        val all_regs_result = gdb.read_all_registers()
+        if not all_regs_result.is_ok():
+            return registers
 
+        val all_regs = all_regs_result.ok.unwrap()
+
+        # Filter to architecture-relevant registers
         match self.config.base_config.arch:
             case QemuArch.RiscV32 | QemuArch.RiscV64:
-                # Read RISC-V registers
+                # RISC-V general-purpose registers x0-x31 and pc
                 for i in 0..32:
                     val reg_name = "x{i}"
-                    # val value = gdb.read_register(reg_name)
-                    # registers[reg_name] = value
+                    val value = all_regs.get(reg_name)
+                    if value != nil:
+                        registers[reg_name] = value
+                # Also map pc
+                val pc_val = all_regs.get("pc")
+                if pc_val != nil:
+                    registers["pc"] = pc_val
 
-            case QemuArch.ARM32 | QemuArch.ARM64:
-                # Read ARM registers
+            case QemuArch.ARM32:
+                # ARM32 registers r0-r15, cpsr
                 for i in 0..16:
                     val reg_name = "r{i}"
-                    # registers[reg_name] = gdb.read_register(reg_name)
+                    val value = all_regs.get(reg_name)
+                    if value != nil:
+                        registers[reg_name] = value
+                # Map pc (r15 is PC on ARM32)
+                val pc_val = all_regs.get("pc")
+                if pc_val != nil:
+                    registers["pc"] = pc_val
 
-            case QemuArch.X86 | QemuArch.X86_64:
-                # Read x86 registers
-                val reg_names = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip"]
-                for reg_name in reg_names:
-                    # registers[reg_name] = gdb.read_register(reg_name)
-                    pass
+            case QemuArch.ARM64:
+                # AArch64 registers x0-x30, sp, pc
+                for i in 0..31:
+                    val reg_name = "x{i}"
+                    val value = all_regs.get(reg_name)
+                    if value != nil:
+                        registers[reg_name] = value
+                val sp_val = all_regs.get("sp")
+                if sp_val != nil:
+                    registers["sp"] = sp_val
+                val pc_val = all_regs.get("pc")
+                if pc_val != nil:
+                    registers["pc"] = pc_val
+
+            case QemuArch.X86:
+                # x86 32-bit registers
+                val x86_names = ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "eip", "eflags"]
+                for reg_name in x86_names:
+                    val value = all_regs.get(reg_name)
+                    if value != nil:
+                        registers[reg_name] = value
+                # Map pc alias
+                val eip_val = registers.get("eip")
+                if eip_val != nil:
+                    registers["pc"] = eip_val
+
+            case QemuArch.X86_64:
+                # x86_64 registers
+                val x64_names = ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip",
+                                 "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rflags"]
+                for reg_name in x64_names:
+                    val value = all_regs.get(reg_name)
+                    if value != nil:
+                        registers[reg_name] = value
+                # Map pc alias
+                val rip_val = registers.get("rip")
+                if rip_val != nil:
+                    registers["pc"] = rip_val
 
         registers
     fn read_stack_trace() -> [StackFrame]:
@@ -341,13 +434,31 @@ impl DebugBootRunner:
 
         val gdb = self.gdb_client.unwrap()
 
-        # Use GDB backtrace command
-        # val bt_cmd = GdbMiCommand.stack_list_frames()
-        # val bt_response = gdb.send_command(bt_cmd)
+        # Use GDB MI stack-list-frames to get backtrace with addresses
+        val bt_result = gdb.send_command("stack-list-frames")
+        if not bt_result.is_ok():
+            return frames
 
-        # Parse frames from response
-        # for i in 0..10:
-        #     frames.push(StackFrame(...))
+        val data = bt_result.ok.unwrap()
+        val frames_raw = data.get("stack") ?? "[]"
+        val tuples = GdbMiParser.parse_tuple_list(frames_raw)
+
+        for t in tuples:
+            val level = (t.get("level") ?? "0").parse_int() ?? 0
+            val addr_str = t.get("addr") ?? "0x0"
+            val addr = parse_hex_value(addr_str)
+            val func = t.get("func") ?? "??"
+            val file = t.get("fullname") ?? t.get("file") ?? ""
+            val line = (t.get("line") ?? "0").parse_int() ?? 0
+
+            val frame = StackFrame(
+                frame_num: level,
+                address: addr,
+                function: func,
+                file: file,
+                line: line
+            )
+            frames.push(frame)
 
         frames
     fn cleanup():
@@ -381,6 +492,42 @@ fn run_debug_boot_test(arch: QemuArch, kernel: text, expected: text) -> (BootTes
 
     val runner = DebugBootRunner__new(config)
     runner.run()
+
+# ===========================================================================
+# Architecture Mapping Helper
+# ===========================================================================
+
+# Map QemuArch to remote.types.Architecture for DebugConfig
+fn arch_to_debug_arch(arch: QemuArch) -> Architecture:
+    match arch:
+        case QemuArch.RiscV32: Architecture.RiscV32
+        case QemuArch.RiscV64: Architecture.RiscV64
+        case QemuArch.ARM32: Architecture.Arm32
+        case QemuArch.ARM64: Architecture.Arm64
+        case QemuArch.X86: Architecture.X86
+        case QemuArch.X86_64: Architecture.X86_64
+
+# ===========================================================================
+# Hex Parsing Helper
+# ===========================================================================
+
+# Parse a hex string to u64 (convenience wrapper)
+fn parse_hex_value_u64(s: text) -> u64:
+    var clean = s
+    if s.starts_with("0x") or s.starts_with("0X"):
+        clean = s.slice(2, s.len())
+    var result: u64 = 0
+    for i in 0..clean.len():
+        val ch = clean.char_at(i)
+        var digit: u64 = 0
+        if ch >= 48 and ch <= 57:
+            digit = ch - 48
+        elif ch >= 97 and ch <= 102:
+            digit = ch - 97 + 10
+        elif ch >= 65 and ch <= 70:
+            digit = ch - 65 + 10
+        result = result * 16 + digit
+    result
 
 # ===========================================================================
 # Crash Analysis Utilities

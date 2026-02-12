@@ -800,8 +800,27 @@ fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
         return ([], 0)
 
     if addl == addl_indefinite():
-        # Indefinite-length byte string - not implemented yet
-        return ([], 0)
+        # Indefinite-length byte string (RFC 7049 Section 2.2.1):
+        # Sequence of definite-length byte string chunks terminated by break (0xFF)
+        var result: [i64] = []
+        var pos = offset + 1  # Skip the initial indefinite-length header byte
+        while pos < bytes.len():
+            val current_byte = bytes[pos]
+            # Check for break code (0xFF)
+            if current_byte == 0xFF:
+                pos = pos + 1
+                break
+            # Decode the next definite-length chunk
+            val chunk = cbor_decode_bytes(bytes, pos)
+            val chunk_data = chunk.0
+            val chunk_consumed = chunk.1
+            if chunk_consumed == 0:
+                return ([], 0)  # Error decoding chunk
+            for b in chunk_data:
+                result = result.push(b)
+            pos = pos + chunk_consumed
+        val total_consumed = pos - offset
+        return (result, total_consumed)
 
     val length_info = decode_uint_value(bytes, offset, addl)
     val length = length_info.0
@@ -826,8 +845,26 @@ fn cbor_decode_text(bytes: [i64], offset: i64) -> (text, i64):
         return ("", 0)
 
     if addl == addl_indefinite():
-        # Indefinite-length text string - not implemented yet
-        return ("", 0)
+        # Indefinite-length text string (RFC 7049 Section 2.2.1):
+        # Sequence of definite-length text string chunks terminated by break (0xFF)
+        var result = ""
+        var pos = offset + 1  # Skip the initial indefinite-length header byte
+        while pos < bytes.len():
+            val current_byte = bytes[pos]
+            # Check for break code (0xFF)
+            if current_byte == 0xFF:
+                pos = pos + 1
+                break
+            # Decode the next definite-length text chunk
+            val chunk = cbor_decode_text(bytes, pos)
+            val chunk_text = chunk.0
+            val chunk_consumed = chunk.1
+            if chunk_consumed == 0:
+                return ("", 0)  # Error decoding chunk
+            result = result + chunk_text
+            pos = pos + chunk_consumed
+        val total_consumed = pos - offset
+        return (result, total_consumed)
 
     val length_info = decode_uint_value(bytes, offset, addl)
     val length = length_info.0

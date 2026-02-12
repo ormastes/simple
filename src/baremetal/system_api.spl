@@ -163,14 +163,62 @@ fn semi_time() -> i32:
 # Low-Level Semihosting Call Interface
 # ============================================================================
 
-# Architecture-specific semihosting call (stub)
+# Architecture-specific semihosting call
+# Dispatches to the correct instruction based on target architecture.
+# ARM Thumb (Cortex-M): BKPT #0xAB
+# ARM mode: SVC #0x123456
+# RISC-V: EBREAK with .option push/norvc magic
+# x86/QEMU: Fallback to serial debug output
 fn semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
-    # Placeholder - actual implementation depends on target architecture
-    # ARM: BKPT #0xAB
-    # RISC-V: EBREAK + magic sequence
-    # x86/QEMU: Serial protocol
-    print "[SEMIHOST] op=0x{op:08x} arg0=0x{arg0:08x} arg1=0x{arg1:08x}"
-    0
+    var result = 0
+
+    # ARM Thumb mode (Cortex-M): BKPT #0xAB
+    @cfg("target_arch", "thumbv7m")
+    asm """
+        mov r0, {op}
+        mov r1, {arg0}
+        bkpt #0xAB
+        mov {result}, r0
+    """
+
+    # ARM mode: SVC #0x123456 (Angel monitor)
+    @cfg("target_arch", "arm")
+    asm """
+        mov r0, {op}
+        mov r1, {arg0}
+        svc #0x123456
+        mov {result}, r0
+    """
+
+    # RISC-V: EBREAK with semihosting magic sequence
+    # The magic sequence is: SLLI x0, x0, 0x1f; EBREAK; SRAI x0, x0, 7
+    @cfg("target_arch", "riscv64")
+    asm """
+        mv a0, {op}
+        mv a1, {arg0}
+        .option push
+        .option norvc
+        slli zero, zero, 0x1f
+        ebreak
+        srai zero, zero, 7
+        .option pop
+        mv {result}, a0
+    """
+
+    @cfg("target_arch", "riscv32")
+    asm """
+        mv a0, {op}
+        mv a1, {arg0}
+        .option push
+        .option norvc
+        slli zero, zero, 0x1f
+        ebreak
+        srai zero, zero, 7
+        .option pop
+        mv {result}, a0
+    """
+
+    result
 
 # ============================================================================
 # Test Output Protocol (SSpec Compatible)

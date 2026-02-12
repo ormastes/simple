@@ -435,10 +435,136 @@ fn get_env_optional(key: text) -> text?:
         Some(result)
 
 fn sha256_hex(data: text) -> text:
-    # Proper SHA256 requires FFI to a crypto library (not yet available).
-    # Using string length as a placeholder hash.
-    eprint("Warning: sha256_hex() using placeholder hash (data length) - proper FFI not yet available")
-    "{data.len()}"
+    """Compute SHA-256 hash of text data and return hex string.
+    Pure Simple implementation of FIPS 180-4 SHA-256."""
+    # Convert text to byte array
+    var msg: [i64] = []
+    for i in 0..data.len():
+        val c = data[i:i + 1]
+        msg = msg.push(char_to_byte(c))
+
+    # SHA-256 initial hash values (first 32 bits of fractional parts of sqrt(2..19))
+    var h0 = 0x6a09e667
+    var h1 = 0xbb67ae85
+    var h2 = 0x3c6ef372
+    var h3 = 0xa54ff53a
+    var h4 = 0x510e527f
+    var h5 = 0x9b05688c
+    var h6 = 0x1f83d9ab
+    var h7 = 0x5be0cd19
+
+    # SHA-256 round constants
+    val k = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+
+    # Pre-processing: pad message to 512-bit boundary
+    val orig_len = msg.len()
+    val orig_bit_len = orig_len * 8
+    msg = msg.push(0x80)  # Append bit '1'
+    # Pad with zeros until length ≡ 448 mod 512 (in bits) = 56 mod 64 (in bytes)
+    while (msg.len() % 64) != 56:
+        msg = msg.push(0)
+    # Append original length as 64-bit big-endian
+    for i in 0..8:
+        val shift = (7 - i) * 8
+        msg = msg.push((orig_bit_len >> shift) & 0xFF)
+
+    # Process each 512-bit (64-byte) block
+    val num_blocks = msg.len() / 64
+    for block_idx in 0..num_blocks:
+        val block_start = block_idx * 64
+
+        # Prepare message schedule (w[0..63])
+        var w: [i64] = []
+        # First 16 words from block (big-endian)
+        for i in 0..16:
+            val base = block_start + i * 4
+            val word = (msg[base] << 24) | (msg[base + 1] << 16) | (msg[base + 2] << 8) | msg[base + 3]
+            w = w.push(word & 0xFFFFFFFF)
+        # Extend to 64 words
+        for i in 16..64:
+            val s0 = sha256_rotr(w[i - 15], 7) xor sha256_rotr(w[i - 15], 18) xor (w[i - 15] >> 3)
+            val s1 = sha256_rotr(w[i - 2], 17) xor sha256_rotr(w[i - 2], 19) xor (w[i - 2] >> 10)
+            val word = (w[i - 16] + s0 + w[i - 7] + s1) & 0xFFFFFFFF
+            w = w.push(word)
+
+        # Initialize working variables
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+        var f = h5
+        var g = h6
+        var h = h7
+
+        # 64 rounds
+        for i in 0..64:
+            val s1 = sha256_rotr(e, 6) xor sha256_rotr(e, 11) xor sha256_rotr(e, 25)
+            val ch = (e & f) xor ((~e) & g)
+            val temp1 = (h + s1 + ch + k[i] + w[i]) & 0xFFFFFFFF
+            val s0 = sha256_rotr(a, 2) xor sha256_rotr(a, 13) xor sha256_rotr(a, 22)
+            val maj = (a & b) xor (a & c) xor (b & c)
+            val temp2 = (s0 + maj) & 0xFFFFFFFF
+
+            h = g
+            g = f
+            f = e
+            e = (d + temp1) & 0xFFFFFFFF
+            d = c
+            c = b
+            b = a
+            a = (temp1 + temp2) & 0xFFFFFFFF
+
+        # Add compressed chunk to hash
+        h0 = (h0 + a) & 0xFFFFFFFF
+        h1 = (h1 + b) & 0xFFFFFFFF
+        h2 = (h2 + c) & 0xFFFFFFFF
+        h3 = (h3 + d) & 0xFFFFFFFF
+        h4 = (h4 + e) & 0xFFFFFFFF
+        h5 = (h5 + f) & 0xFFFFFFFF
+        h6 = (h6 + g) & 0xFFFFFFFF
+        h7 = (h7 + h) & 0xFFFFFFFF
+
+    # Produce final hex string
+    sha256_word_hex(h0) + sha256_word_hex(h1) + sha256_word_hex(h2) + sha256_word_hex(h3) + sha256_word_hex(h4) + sha256_word_hex(h5) + sha256_word_hex(h6) + sha256_word_hex(h7)
+
+fn sha256_rotr(value: i64, amount: i64) -> i64:
+    """32-bit right rotation."""
+    val v = value & 0xFFFFFFFF
+    ((v >> amount) | (v << (32 - amount))) & 0xFFFFFFFF
+
+fn sha256_word_hex(word: i64) -> text:
+    """Convert a 32-bit word to 8-char hex string."""
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    for i in 0..8:
+        val nibble = (word >> ((7 - i) * 4)) & 0xF
+        result = result + hex_chars[nibble:nibble + 1]
+    result
+
+fn char_to_byte(c: text) -> i64:
+    """Convert single character to byte value (ASCII)."""
+    if c.len() == 0:
+        return 0
+    # Lookup table for common ASCII characters
+    val ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    for i in 0..ascii.len():
+        if ascii[i:i + 1] == c:
+            return 32 + i
+    # Control characters and special cases
+    if c == "\n": return 10
+    if c == "\r": return 13
+    if c == "\t": return 9
+    0
 
 fn try_parse_int(s: text) -> i64?:
     val trimmed = s.trim()

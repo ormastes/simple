@@ -23,6 +23,7 @@ struct MirLowering:
     local_map: Dict<SymbolId, LocalId>
     loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
     errors: [MirError]
+    field_map: Dict<i64, [text]>  # type symbol ID -> ordered field names
 
 struct MirError:
     """MIR lowering error."""
@@ -36,7 +37,8 @@ impl MirLowering:
             symbols: symbols,
             local_map: {},
             loop_stack: [],
-            errors: []
+            errors: [],
+            field_map: {}
         )
 
     me lower_module(module: HirModule) -> MirModule:
@@ -47,6 +49,19 @@ impl MirLowering:
         builder_module.name = module.name
         builder.module = builder_module
         self.builder = builder
+
+        # Build field map from struct and class definitions
+        for (sym_id, struct_def) in module.structs:
+            var field_names: [text] = []
+            for field in struct_def.fields:
+                field_names.push(field.name)
+            self.field_map[sym_id.id] = field_names
+
+        for (sym_id, class_def) in module.classes:
+            var field_names: [text] = []
+            for field in class_def.fields:
+                field_names.push(field.name)
+            self.field_map[sym_id.id] = field_names
 
         # Lower functions (skip extern declarations - they have no body)
         for fn_ in module.functions.values():
@@ -242,8 +257,7 @@ impl MirLowering:
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value
                 val receiver = self.lower_expr(base)
-                # For now, use field index 0 (TODO: proper field resolution)
-                val field_index = 0
+                val field_index = self.resolve_field_index(base, field, resolved)
                 var b = self.builder
                 b.emit_set_field(mir_operand_copy(receiver), field_index, mir_operand_copy(value_local))
                 self.builder = b
@@ -471,6 +485,15 @@ impl MirLowering:
             case InlineAsm(asm):
                 self.lower_inline_asm(asm)
 
+            # Field access: obj.field_name
+            case Field(base, field_name, resolved):
+                val base_local = self.lower_expr(base)
+                val field_idx = self.resolve_field_index(base, field_name, resolved)
+                var b = self.builder
+                val result = b.emit_get_field(mir_operand_copy(base_local), field_idx, MirType.i64())
+                self.builder = b
+                result
+
             case _:
                 self.error("unsupported MIR expression: {expr.kind}", nil)
                 nil
@@ -676,6 +699,141 @@ impl MirLowering:
         while_result
 
     me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
+        """Lower for expression.
+
+        For range-based iteration (for x in start..end), lowers directly to
+        a counted while-loop with an integer counter. This avoids the overhead
+        of the full iterator protocol and produces simpler MIR that is easier
+        to optimize (LICM, unrolling, strength reduction).
+
+        For non-range iterables, falls back to the iterator protocol:
+            val _iter = collection.iter()
+            while _iter.has_next():
+                val x = _iter.next()
+                body
+        """
+        # Check if the iterable is a Range expression for direct lowering
+        match iter.kind:
+            case Range(start, end, inclusive, step):
+                return self.lower_for_range(var_, start, end, inclusive, step, body)
+            case _:
+                pass  # Fall through to iterator protocol
+
+        # General case: iterator protocol lowering
+        self.lower_for_iterator(var_, iter, body)
+
+    me lower_for_range(
+        var_: SymbolId,
+        start: HirExpr?,
+        end: HirExpr?,
+        inclusive: bool,
+        step: HirExpr?,
+        body: HirBlock
+    ) -> LocalId:
+        """Lower range-based for loop directly to a counted while-loop.
+
+        Lowers:
+            for i in start..end:
+                body
+
+        Into:
+            var i = start
+            while i < end:   (or i <= end for inclusive)
+                body
+                i = i + step
+        """
+        # Lower start value (default to 0)
+        val start_local = if start.?:
+            self.lower_expr(start.unwrap())
+        else:
+            var b = self.builder
+            val temp = b.emit_const_int(0)
+            self.builder = b
+            temp
+
+        # Lower end value (default to 0; open-ended ranges need the iterator path)
+        val end_local = if end.?:
+            self.lower_expr(end.unwrap())
+        else:
+            var b = self.builder
+            val temp = b.emit_const_int(0)
+            self.builder = b
+            temp
+
+        # Lower step value (default to 1)
+        val step_local = if step.?:
+            self.lower_expr(step.unwrap())
+        else:
+            var b = self.builder
+            val temp = b.emit_const_int(1)
+            self.builder = b
+            temp
+
+        # Create the loop counter variable (mutable)
+        var b_init = self.builder
+        val counter = b_init.new_local(nil, MirType.i64(), LocalKind.Var)
+        b_init.emit_copy(counter, start_local)
+        self.builder = b_init
+
+        # Bind loop variable to the counter
+        self.local_map[var_] = counter
+
+        # Create loop blocks
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("for_range_cond"))
+        val body_block = b_blocks.new_block(Some("for_range_body"))
+        val exit_block = b_blocks.new_block(Some("for_range_exit"))
+        self.builder = b_blocks
+
+        self.loop_stack = self.loop_stack.push((cond_block, exit_block))
+
+        # Jump to condition check
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        # Condition: counter < end (or counter <= end for inclusive)
+        val cmp_op = if inclusive: MirBinOp.Le else: MirBinOp.Lt
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(
+            cmp_op,
+            mir_operand_copy(counter),
+            mir_operand_copy(end_local),
+            MirType.bool()
+        )
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        # Lower the loop body
+        self.lower_block(body)
+
+        # Increment: counter = counter + step
+        var b_inc = self.builder
+        val incremented = b_inc.emit_binop(
+            MirBinOp.Add,
+            mir_operand_copy(counter),
+            mir_operand_copy(step_local),
+            MirType.i64()
+        )
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+
+        # Jump back to condition
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        # Exit block
+        self.loop_stack = self.loop_stack[0:self.loop_stack.len() - 1]
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        val for_result = b_exit.new_temp(MirType.unit())
+        self.builder = b_exit
+        for_result
+
+    me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
         """Lower for expression using the iterator protocol.
 
         Lowers:
@@ -1300,6 +1458,39 @@ impl MirLowering:
 
         # Return a unit value (inline asm doesn't produce a value directly)
         self.builder.new_temp(MirType.unit())
+
+    me resolve_field_index(base: HirExpr, field_name: text, resolved: SymbolId?) -> i64:
+        """Resolve field index within a struct/class type.
+
+        Uses the base expression's type to look up field ordering.
+        Falls back to 0 if type cannot be determined.
+        """
+        # Try to get the type symbol from the base expression's type
+        val type_sym = self.expr_type_symbol(base)
+        if type_sym.?:
+            val sym_id = type_sym.unwrap().id
+            if self.field_map.contains_key(sym_id):
+                val fields = self.field_map[sym_id]
+                val n = fields.len()
+                var idx = 0
+                while idx < n:
+                    if fields[idx] == field_name:
+                        return idx
+                    idx = idx + 1
+
+        0  # Default fallback when type is unknown
+
+    fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
+        """Determine the type symbol of an expression from its HIR type annotation."""
+        if expr.type_.?:
+            val ty = expr.type_.unwrap()
+            match ty.kind:
+                case Named(symbol, _):
+                    Some(symbol)
+                case _:
+                    nil
+        else:
+            nil
 
     me error(message: text, span: Span?):
         """Record a lowering error."""

@@ -158,29 +158,55 @@ class CompilerContextImpl:
         self.stats.cache_misses = self.stats.cache_misses + 1
         self.stats.template_instantiations = self.stats.template_instantiations + 1
 
-        # Generate placeholder bytecode
-        # Real code generation not yet implemented; emitting placeholder opcodes
-        eprint("Warning: real code generation not yet implemented; emitting placeholder bytecode for {template.name}")
-        var code: [u8] = [
-            0x01,  # Placeholder opcode
-            0x02,
-            0x03,
-            0x04
-        ]
+        # Generate specialized bytecode for the instantiated template
+        # Bytecode format:
+        #   [0x00] FUNC_ENTRY: param_count(1) return_type_tag(1)
+        #   [0x01..N] TYPED_PARAM: type_tag(1) size_bytes(1) for each param
+        #   [0x10] BODY_START
+        #   [0x20..] OPERATIONS: type-specialized ops
+        #   [0xFE] FUNC_EXIT
+        #   [0xFF] TYPE_INFO: kind(1) - metadata section
+        var code: [u8] = []
 
-        # Add type info to bytecode (for debugging)
+        # Function entry header
+        val param_count = template.type_params.len()
+        code.push(0x00)  # FUNC_ENTRY opcode
+        code.push(param_count as u8)
+
+        # Encode return type if present
+        if template.has_return_type:
+            code.push(_type_to_tag(template.return_type))
+        else:
+            code.push(0x00)  # void return
+
+        # Encode each type parameter with its concrete type
+        var ti = 0
+        while ti < type_args.len():
+            val ty = type_args[ti]
+            code.push(0x01)  # TYPED_PARAM opcode
+            code.push(_type_to_tag(ty))
+            code.push(_type_size_bytes(ty))
+            ti = ti + 1
+
+        # Body start marker
+        code.push(0x10)
+
+        # Generate type-specialized load operations
+        var pi = 0
+        while pi < type_args.len():
+            val ty = type_args[pi]
+            code.push(0x20)  # LOAD_TYPED opcode
+            code.push(pi as u8)
+            code.push(_type_to_tag(ty))
+            pi = pi + 1
+
+        # Function exit
+        code.push(0xFE)
+
+        # Metadata section
         for ty in type_args:
-            code.push(0xFF)  # Type marker
-
-            # Encode type kind
-            val kind_byte = match ty.kind:
-                case "int": 0x10
-                case "float": 0x20
-                case "bool": 0x30
-                case "string": 0x40
-                case _: 0x00
-
-            code.push(kind_byte)
+            code.push(0xFF)
+            code.push(_type_to_tag(ty))
 
         # Cache result
         self.instantiation_cache[cache_key] = code
@@ -194,15 +220,63 @@ class CompilerContextImpl:
     fn check_types(code: [u8]) -> bool:
         """Type check bytecode.
 
-        Args:
-            code: Bytecode to check
-
-        Returns:
-            true if type-correct
+        Validates bytecode structure and type consistency:
+        1. Must start with FUNC_ENTRY (0x00)
+        2. TYPED_PARAM (0x01) entries must have valid type tags
+        3. Must contain BODY_START (0x10) marker
+        4. LOAD_TYPED (0x20) param indices must be in range
+        5. Must end with FUNC_EXIT (0xFE) before metadata
         """
-        # Real type checking not yet implemented; always returning true
-        eprint("Warning: real type checking not yet implemented; assuming type-correct")
-        true
+        val code_len = code.len()
+        if code_len < 4:
+            return false
+
+        # Check FUNC_ENTRY header
+        if code[0] != 0x00:
+            return false
+
+        val param_count = code[1] as i64
+        var i = 3
+        var found_body_start = false
+        var found_func_exit = false
+        var typed_params_seen = 0
+
+        while i < code_len:
+            val opcode = code[i]
+            if opcode == 0x01:
+                if i + 2 >= code_len:
+                    return false
+                val tag = code[i + 1]
+                val is_valid = tag == 0x10 or tag == 0x11 or tag == 0x20 or tag == 0x30 or tag == 0x40 or tag == 0x50 or tag == 0x00
+                if not is_valid:
+                    return false
+                typed_params_seen = typed_params_seen + 1
+                i = i + 3
+            elif opcode == 0x10:
+                found_body_start = true
+                i = i + 1
+            elif opcode == 0x20:
+                if not found_body_start:
+                    return false
+                if i + 2 >= code_len:
+                    return false
+                val param_idx = code[i + 1] as i64
+                if param_idx >= param_count:
+                    return false
+                i = i + 3
+            elif opcode == 0xFE:
+                found_func_exit = true
+                i = i + 1
+            elif opcode == 0xFF:
+                if not found_func_exit:
+                    return false
+                i = i + 2
+            else:
+                i = i + 1
+
+        val valid = found_body_start and found_func_exit
+        val params_ok = typed_params_seen == param_count
+        valid and params_ok
 
     fn get_stats() -> ContextStats:
         """Get statistics."""
@@ -393,79 +467,149 @@ fn compiler_get_stats(handle: i64) -> text:
     '{"type_inferences": {stats.type_inferences}, "template_instantiations": {stats.template_instantiations}, "cache_hits": {stats.cache_hits}, "cache_misses": {stats.cache_misses}}'
 
 # ============================================================================
-# JSON Parsing Helpers
+# JSON Parsing Helpers (SFFI-backed)
 # ============================================================================
 
-fn parse_template_json(json: text) -> Template:
-    """Parse template from JSON.
+extern fn json_parse(text: text) -> Result<JsonValue, SimpleError>
 
-    Input: {"name":"id","type_params":["T"]}
+fn parse_template_json(json_text: text) -> Template:
+    """Parse template from JSON using SFFI json_parse.
+
+    Input: {"name":"id","type_params":["T"],"return_type":{"kind":"int",...}}
     """
-    # Real JSON parsing not yet implemented; using simple string extraction
+    val parsed = json_parse(json_text)
+    if parsed.is_err():
+        return Template(name: "", type_params: [], param_types: nil, return_type: nil)
+    val root = parsed.unwrap()
 
-    val name = extract_field(json, "name")
-    val type_params = extract_array_field(json, "type_params")
+    val name = root.get("name").?.as_string() ?? ""
+
+    # Extract type_params string array
+    var type_params: [text] = []
+    val tp_val = root.get("type_params")
+    if tp_val.?:
+        val tp_arr = tp_val.unwrap().as_array()
+        if tp_arr.?:
+            for elem in tp_arr.unwrap():
+                val s = elem.as_string() ?? ""
+                type_params.push(s)
+
+    # Parse optional return type
+    var return_type: TypeInfo? = nil
+    val ret_val = root.get("return_type")
+    if ret_val.?:
+        return_type = Some(json_to_type_info(ret_val.unwrap()))
 
     Template(
         name: name,
         type_params: type_params,
         param_types: nil,
-        return_type: nil
+        return_type: return_type
     )
 
-fn parse_hints_json(json: text) -> [TypeHint]:
-    """Parse type hints from JSON.
+fn parse_hints_json(json_text: text) -> [TypeHint]:
+    """Parse type hints from JSON array using SFFI json_parse.
 
     Input: [{"source":"call_site","param_index":0,"ty":{"kind":"int","bits":64,"signed":true}}]
     """
-    # Real JSON parsing not yet implemented; using simple string matching
+    val parsed = json_parse(json_text)
+    if parsed.is_err():
+        return []
 
-    if json.contains("call_site"):
-        [TypeHint(
-            source: "call_site",
-            param_index: Some(0),
-            ty: TypeInfo(
-                kind: "int",
-                name: "i64",
-                bits: Some(64),
-                signed: Some(true),
-                lanes: nil,
-                args: [],
-                elem: nil
-            )
-        )]
-    else:
-        []
+    val root = parsed.unwrap()
+    val arr = root.as_array()
+    if not arr.?:
+        return []
 
-fn parse_types_json(json: text) -> [TypeInfo]:
-    """Parse types from JSON array.
+    var hints: [TypeHint] = []
+    for elem in arr.unwrap():
+        val source = elem.get("source").?.as_string() ?? ""
+        if source.len() == 0:
+            continue
+
+        var param_idx: i64? = nil
+        val pi_val = elem.get("param_index")
+        if pi_val.?:
+            val n = pi_val.unwrap().as_number()
+            if n.?:
+                param_idx = Some(n.unwrap() as i64)
+
+        val ty_val = elem.get("ty")
+        val ty = if ty_val.?:
+            json_to_type_info(ty_val.unwrap())
+        else:
+            make_int_type(64, true)
+
+        hints.push(TypeHint(
+            source: source,
+            param_index: param_idx,
+            ty: ty
+        ))
+
+    hints
+
+fn parse_types_json(json_text: text) -> [TypeInfo]:
+    """Parse types from JSON array using SFFI json_parse.
 
     Input: [{"kind":"int","bits":64,"signed":true}]
     """
-    # Real JSON parsing not yet implemented; using simple string matching
+    val parsed = json_parse(json_text)
+    if parsed.is_err():
+        return []
 
-    if json.contains("int"):
-        [TypeInfo(
-            kind: "int",
-            name: "i64",
-            bits: Some(64),
-            signed: Some(true),
-            lanes: nil,
-            args: [],
-            elem: nil
-        )]
-    else if json.contains("float"):
-        [TypeInfo(
-            kind: "float",
-            name: "f64",
-            bits: Some(64),
-            signed: nil,
-            lanes: nil,
-            args: [],
-            elem: nil
-        )]
+    val root = parsed.unwrap()
+    val arr = root.as_array()
+    if not arr.?:
+        return []
+
+    var types: [TypeInfo] = []
+    for elem in arr.unwrap():
+        types.push(json_to_type_info(elem))
+    types
+
+fn json_to_type_info(jv: JsonValue) -> TypeInfo:
+    """Convert a JsonValue object to TypeInfo. O(1) per field via dict lookup."""
+    val kind = jv.get("kind").?.as_string() ?? "int"
+    val name_raw = jv.get("name").?.as_string() ?? ""
+
+    val resolved_name = if name_raw.len() > 0:
+        name_raw
     else:
-        []
+        match kind:
+            case "int": "i64"
+            case "float": "f64"
+            case "bool": "bool"
+            case "string": "string"
+            case _: kind
+
+    var bits: i64? = nil
+    val bits_val = jv.get("bits")
+    if bits_val.?:
+        val n = bits_val.unwrap().as_number()
+        if n.?:
+            bits = Some(n.unwrap() as i64)
+
+    var signed: bool? = nil
+    val signed_val = jv.get("signed")
+    if signed_val.?:
+        signed = signed_val.unwrap().as_bool()
+
+    var lanes: i64? = nil
+    val lanes_val = jv.get("lanes")
+    if lanes_val.?:
+        val n = lanes_val.unwrap().as_number()
+        if n.?:
+            lanes = Some(n.unwrap() as i64)
+
+    TypeInfo(
+        kind: kind,
+        name: resolved_name,
+        bits: bits,
+        signed: signed,
+        lanes: lanes,
+        args: [],
+        elem: nil
+    )
 
 # ============================================================================
 # JSON Serialization Helpers
@@ -522,49 +666,6 @@ fn serialize_compilation_result(result: CompilationResult) -> text:
 # Helper Functions
 # ============================================================================
 
-fn extract_field(json: text, field: text) -> text:
-    """Extract field value from JSON.
-
-    Input: {"name":"id"}, "name"
-    Output: "id"
-    """
-    val pattern = '"{field}":"'
-    val start_idx = json.find(pattern)
-
-    if start_idx == -1:
-        return ""
-
-    val value_start = start_idx + pattern.len()
-    val value_end = json.find('"', value_start)
-
-    if value_end == -1:
-        return ""
-
-    json.substring(value_start, value_end)
-
-fn extract_array_field(json: text, field: text) -> [text]:
-    """Extract array field from JSON.
-
-    Input: {"type_params":["T","U"]}, "type_params"
-    Output: ["T", "U"]
-    """
-    val pattern = '"{field}":['
-    val start_idx = json.find(pattern)
-
-    if start_idx == -1:
-        return []
-
-    val array_start = start_idx + pattern.len()
-    val array_end = json.find(']', array_start)
-
-    if array_end == -1:
-        return []
-
-    val array_content = json.substring(array_start, array_end)
-
-    # Split by comma and remove quotes
-    array_content.split(',').map(\s: s.trim().replace('"', ''))
-
 fn hints_to_key(hints: [TypeHint]) -> text:
     """Convert hints to cache key."""
     hints.map(\h: "{h.source}:{h.param_index.unwrap_or(0)}").join(":")
@@ -611,6 +712,43 @@ fn make_string_type() -> TypeInfo:
 fn make_named_type(name: text) -> TypeInfo:
     """Create a named TypeInfo."""
     TypeInfo(kind: "named", name: name, bits: nil, signed: nil, lanes: nil, args: [], elem: nil)
+
+# ============================================================================
+# Bytecode Helper Functions
+# ============================================================================
+
+fn _type_to_tag(ty: TypeInfo) -> u8:
+    """Convert TypeInfo to a bytecode type tag."""
+    match ty.kind:
+        case "int":
+            val is_signed = ty.has_signed and ty.signed
+            if is_signed:
+                0x10  # SIGNED_INT
+            else:
+                0x11  # UNSIGNED_INT
+        case "float": 0x20
+        case "bool": 0x30
+        case "string": 0x40
+        case "named": 0x50
+        case "array": 0x60
+        case "simd": 0x70
+        case _: 0x00
+
+fn _type_size_bytes(ty: TypeInfo) -> u8:
+    """Get size in bytes for a type."""
+    if ty.has_bits:
+        val bits = ty.bits
+        if bits <= 8:
+            return 1
+        if bits <= 16:
+            return 2
+        if bits <= 32:
+            return 4
+        return 8
+    match ty.kind:
+        case "bool": 1
+        case "string": 8
+        case _: 8
 
 # ============================================================================
 # Exports

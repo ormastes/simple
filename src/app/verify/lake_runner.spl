@@ -1,0 +1,72 @@
+# Lake Build Runner
+#
+# Invokes Lean 4's Lake build system for verification projects.
+# Handles lake discovery, build, check, and clean operations.
+
+use app.io.mod.{shell, file_exists}
+
+# ============================================================================
+# Lake Runner
+# ============================================================================
+
+class LakeRunner:
+    project_dir: text
+    lake_path: text
+
+fn LakeRunner__new(project_dir: text) -> LakeRunner:
+    val lake = _find_lake()
+    LakeRunner(
+        project_dir: project_dir,
+        lake_path: lake
+    )
+
+fn _find_lake() -> text:
+    """Find the lake executable on the system."""
+    val check = shell("which lake 2>/dev/null")
+    if check.exit_code == 0:
+        return check.stdout.trim()
+    val check2 = shell("which ~/.elan/bin/lake 2>/dev/null")
+    if check2.exit_code == 0:
+        return check2.stdout.trim()
+    ""
+
+impl LakeRunner:
+    fn is_available() -> bool:
+        """Check if Lake is available on the system."""
+        self.lake_path.len() > 0
+
+    fn build() -> Result<text, text>:
+        """Run lake build in the project directory."""
+        if not self.is_available():
+            return Err("Lake not found. Install Lean 4 / elan first.")
+        val result = shell("cd {self.project_dir} && {self.lake_path} build 2>&1")
+        if result.exit_code == 0:
+            Ok(result.stdout)
+        else:
+            Err("Lake build failed:\n{result.stdout}\n{result.stderr}")
+
+    fn check_file(path: text) -> Result<text, text>:
+        """Type-check a single Lean file."""
+        if not self.is_available():
+            return Err("Lake not found")
+        val result = shell("cd {self.project_dir} && {self.lake_path} env lean {path} 2>&1")
+        if result.exit_code == 0:
+            Ok("No errors")
+        else:
+            Err(result.stdout + result.stderr)
+
+    fn clean() -> Result<text, text>:
+        """Clean the Lake build artifacts."""
+        if not self.is_available():
+            return Err("Lake not found")
+        val result = shell("cd {self.project_dir} && {self.lake_path} clean 2>&1")
+        if result.exit_code == 0:
+            Ok("Clean successful")
+        else:
+            Err("Clean failed: {result.stderr}")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export LakeRunner

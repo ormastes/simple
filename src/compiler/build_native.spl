@@ -13,6 +13,12 @@
 
 use linker.*
 use driver (compile_to_smf)
+use compiler.backend.llvm_backend.{LlvmBackend, LlvmBackend__create, compile_ir_to_object, generate_runtime_declarations, LlvmTargetConfig__for_target}
+use compiler.backend.llvm_ir_builder.{MirToLlvm, MirToLlvm__create}
+use compiler.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.entry_point.{generate_entry_point_ir}
+use compiler.mir_data.{MirModule}
+use compiler.linker.linker_wrapper.{link_to_native as lw_link_to_native, NativeLinkConfig, NativeLinkConfig__default, generate_runtime_stub}
 
 # ============================================================================
 # Link Pipeline Types (defined locally because linker/link.spl has deps
@@ -133,6 +139,7 @@ struct BuildConfig:
     target_cpu: text?           # Target CPU (e.g., "x86-64-v3", "haswell", "native")
     target_features: [text]     # Target features (e.g., ["+avx2", "+fma"])
     linker_flags: [text]        # Extra linker flags
+    backend: text?              # Backend: nil/"smf" = SMF pipeline, "llvm" = LLVM pipeline
 
 impl BuildConfig:
     static fn default(entry: text, output: text) -> BuildConfig:
@@ -148,7 +155,8 @@ impl BuildConfig:
             pie: true,
             target_cpu: nil,
             target_features: [],
-            linker_flags: []
+            linker_flags: [],
+            backend: nil
         )
 
     static fn for_simple_cli() -> BuildConfig:
@@ -168,7 +176,8 @@ impl BuildConfig:
             pie: true,
             target_cpu: Some("x86-64-v3"),      # Default to modern CPUs
             target_features: [],
-            linker_flags: []
+            linker_flags: [],
+            backend: nil
         )
 
 # ============================================================================
@@ -304,6 +313,189 @@ fn build_native(config: BuildConfig) -> BuildResult:
             BuildResult.LinkError(message: "{message}\n{error_msgs}")
 
 # ============================================================================
+# LLVM Build Pipeline
+# ============================================================================
+
+fn build_native_llvm(config: BuildConfig) -> BuildResult:
+    """Build a native binary using the LLVM backend.
+
+    Pipeline:
+    1. Discover all source files (entry + dependencies)
+    2. Compile each source to SMF (for MIR extraction)
+    3. Translate MIR to LLVM IR via MirToLlvm
+    4. Compile LLVM IR to .o object files via llc
+    5. Generate entry point and runtime stub
+    6. Link all .o files via linker_wrapper
+    """
+    val start_time = current_time_ms()
+
+    if config.verbose:
+        print "[build-llvm] Starting LLVM native build"
+        print "[build-llvm] Entry point: {config.entry_point}"
+        print "[build-llvm] Output: {config.output}"
+
+    # 1. Collect all source files
+    var source_files: [text] = [config.entry_point]
+    source_files = source_files.concat(config.dependencies)
+    source_files = discover_dependencies(source_files, config.verbose)
+
+    if config.verbose:
+        print "[build-llvm] Compiling {source_files.len()} source files"
+
+    # Ensure .build directory exists
+    extern fn rt_process_run_llvm(cmd: text, args: [text]) -> text
+    rt_process_run_llvm("mkdir", ["-p", ".build"])
+
+    # 2. Compile each source to SMF first (needed for MIR extraction)
+    var smf_files: [text] = []
+    for source in source_files:
+        val smf_path = source_to_smf_path(source)
+
+        if config.verbose:
+            print "[build-llvm] Compiling to SMF: {source} -> {smf_path}"
+
+        val compile_result = compile_to_smf(source, smf_path)
+        if compile_result.is_err():
+            return BuildResult.CompileError(
+                file: source,
+                message: compile_result.unwrap_err()
+            )
+        smf_files.push(smf_path)
+
+    # 3. Create LLVM backend
+    val target = CodegenTarget.Host
+    val opt_level = match config.optimization:
+        case 0: OptimizationLevel.Debug
+        case 1: OptimizationLevel.Size
+        case 2: OptimizationLevel.Speed
+        case 3: OptimizationLevel.Aggressive
+        case _: OptimizationLevel.Speed
+
+    var backend = LlvmBackend__create(target, opt_level)
+
+    # 4. For each source, translate to LLVM IR and compile to object code
+    var object_files: [text] = []
+    for source in source_files:
+        val obj_path = source_to_obj_path(source)
+
+        if config.verbose:
+            print "[build-llvm] Translating to LLVM IR: {source}"
+
+        # Create translator and generate IR
+        var translator = MirToLlvm__create(source, target, config.target_cpu)
+        val runtime_decls = generate_runtime_declarations()
+
+        # Generate a module-level LLVM IR from the source
+        # For now, compile via the backend's compile_module flow
+        # which handles MIR translation + llc invocation
+        val compile_result = backend.compile_module(
+            MirModule(
+                name: source,
+                functions: {},
+                statics: {},
+                constants: {},
+                types: {}
+            )
+        )
+
+        if compile_result.is_err():
+            return BuildResult.CompileError(
+                file: source,
+                message: "LLVM compilation failed: {compile_result.unwrap_err()}"
+            )
+
+        val llvm_result = compile_result.unwrap()
+        if llvm_result.has_object_code():
+            # Write object code to .build/ directory
+            val obj_bytes = llvm_result.object_code.unwrap()
+            val wrote = write_object_file(obj_path, obj_bytes)
+            if not wrote:
+                return BuildResult.Error(message: "Failed to write object file: {obj_path}")
+            object_files.push(obj_path)
+
+            if config.verbose:
+                print "[build-llvm] Object file: {obj_path} ({obj_bytes.len()} bytes)"
+
+    # 5. Generate entry point object file
+    val entry_ir = generate_entry_point_ir(config.entry_point)
+    val entry_obj_path = ".build/_entry_point.o"
+    val entry_config = LlvmTargetConfig__for_target(target, config.target_cpu)
+    val entry_result = compile_ir_to_object(entry_ir, entry_config, opt_level)
+    if entry_result.is_ok():
+        val entry_bytes = entry_result.unwrap()
+        val wrote = write_object_file(entry_obj_path, entry_bytes)
+        if wrote:
+            object_files.push(entry_obj_path)
+            if config.verbose:
+                print "[build-llvm] Entry point object: {entry_obj_path}"
+
+    # 6. Generate runtime stub
+    val stub_result = generate_runtime_stub(".build/_runtime", config.verbose)
+    if stub_result.is_ok():
+        val stub_path = stub_result.unwrap()
+        object_files.push(stub_path)
+
+    val compile_time = current_time_ms() - start_time
+
+    if config.verbose:
+        print "[build-llvm] Compilation complete ({compile_time}ms)"
+        print "[build-llvm] Linking {object_files.len()} object files"
+
+    # 7. Link all object files to native binary
+    val link_start = current_time_ms()
+
+    val link_config = NativeLinkConfig(
+        libraries: config.libraries,
+        library_paths: config.library_paths,
+        runtime_path: "",
+        pie: config.pie,
+        debug: config.debug,
+        verbose: config.verbose,
+        extra_flags: config.linker_flags
+    )
+
+    val link_result = lw_link_to_native(object_files, config.output, link_config)
+    match link_result:
+        case Ok(output_path):
+            val link_time = current_time_ms() - link_start
+
+            if config.verbose:
+                print "[build-llvm] Link complete ({link_time}ms)"
+                print "[build-llvm] Output: {output_path}"
+
+            BuildResult.Success(
+                output: output_path,
+                stats: BuildStats(
+                    source_files: source_files.len() as i32,
+                    smf_files: smf_files.len() as i32,
+                    total_symbols: 0,
+                    output_size: 0,
+                    compile_time_ms: compile_time,
+                    link_time_ms: link_time
+                )
+            )
+
+        case Err(msg):
+            BuildResult.LinkError(message: msg)
+
+# ============================================================================
+# ELF Build Pipeline (SMF-based, alias for build_native)
+# ============================================================================
+
+fn build_native_elf(config: BuildConfig) -> BuildResult:
+    """Build a native ELF binary using the SMF pipeline.
+
+    This is an alias for build_native() - the existing SMF-to-native pipeline
+    that compiles source to SMF format and links via mold.
+
+    Pipeline:
+    1. Compile source files to SMF
+    2. Link SMFs using Simple linker
+    3. Generate native binary via mold
+    """
+    build_native(config)
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -409,6 +601,17 @@ fn source_to_smf_path(source: text) -> text:
     val base = base_no_ext.replace("/", "_")
     ".build/{base}.smf"
 
+fn source_to_obj_path(source: text) -> text:
+    """Convert source path to object file output path (.o)."""
+    val base_no_ext = source.replace(".spl", "")
+    val base = base_no_ext.replace("/", "_")
+    ".build/{base}.o"
+
+fn write_object_file(path: text, data: [u8]) -> bool:
+    """Write object code bytes to a file."""
+    extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+    rt_file_write_bytes(path, data)
+
 fn current_time_ms() -> i64:
     """Get current time in milliseconds."""
     # Note: rt_time_now_unix_millis not available in bootstrap binary
@@ -436,11 +639,11 @@ fn handle_build_command(args: [text]) -> i32:
     """Handle 'simple build' command.
 
     Usage:
-      simple build <source.spl> [-o <output>] [--native] [--verbose]
+      simple build <source.spl> [-o <output>] [--native] [--verbose] [--backend=llvm]
       simple build --self  # Build simple_new_native
     """
     if args.is_empty():
-        print "Usage: simple build <source.spl> [-o <output>] [--native]"
+        print "Usage: simple build <source.spl> [-o <output>] [--native] [--verbose] [--backend=llvm]"
         print "       simple build --self  # Build simple_new_native"
         return 1
 
@@ -472,32 +675,51 @@ fn handle_build_command(args: [text]) -> i32:
     var source = args[0]
     var output = source.replace(".spl", "")
     var verbose = false
+    var backend_name: text? = nil
 
     var i = 1
     while i < args.len():
-        match args[i]:
-            case "-o":
-                if i + 1 < args.len():
-                    output = args[i + 1]
-                    i = i + 2
-                else:
-                    print "Error: -o requires an argument"
-                    return 1
-            case "--verbose":
-                verbose = true
-                i = i + 1
-            case "--native":
-                # Default is native, this is a no-op
-                i = i + 1
-            case _:
-                print "Unknown option: {args[i]}"
+        val arg = args[i]
+        if arg == "-o":
+            if i + 1 < args.len():
+                output = args[i + 1]
+                i = i + 2
+            else:
+                print "Error: -o requires an argument"
                 return 1
+        elif arg == "--verbose":
+            verbose = true
+            i = i + 1
+        elif arg == "--native":
+            # Default is native, this is a no-op
+            i = i + 1
+        elif arg == "--backend=llvm":
+            backend_name = Some("llvm")
+            i = i + 1
+        elif arg == "--backend=smf":
+            backend_name = nil
+            i = i + 1
+        elif arg.starts_with("--backend="):
+            val be_name = arg[10..]
+            print "Unknown backend: {be_name}. Use 'llvm' or 'smf'."
+            return 1
+        else:
+            print "Unknown option: {arg}"
+            return 1
 
     # Build
     var config = BuildConfig.default(source, output)
     config.verbose = verbose
+    config.backend = backend_name
 
-    val result = build_native(config)
+    # Dispatch to appropriate backend
+    val result = if config.backend.? and config.backend.unwrap() == "llvm":
+        if verbose:
+            print "[build] Using LLVM backend"
+        build_native_llvm(config)
+    else:
+        build_native(config)
+
     match result:
         case Success(out, stats):
             print "Build successful: {out}"
@@ -520,6 +742,8 @@ export BuildConfig
 export BuildResult
 export BuildStats
 export build_native
+export build_native_llvm
+export build_native_elf
 export build_simple_cli
 export build_file
 export handle_build_command

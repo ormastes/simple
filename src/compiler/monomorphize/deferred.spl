@@ -28,7 +28,7 @@ export deferred_clear_error
 
 use .types (ConcreteType, SpecializationKey, TypeBindings)
 use .engine (Monomorphizer)
-use .metadata (MonomorphizationMetadata)
+use .metadata (MonomorphizationMetadata, SpecializationEntry, GenericFunctionMeta, GenericStructMeta, GenericClassMeta, GenericEnumMeta)
 use ..ast (FunctionDef, StructDef, ClassDef, EnumDef, TraitDef)
 use error (CompileError)
 
@@ -43,6 +43,311 @@ fn deferred_clear_error():
 
 fn deferred_set_error(msg: text):
     deferred_last_error = msg
+
+# ============================================================================
+# Text-Level Type Substitution
+# ============================================================================
+# The AST definitions (FunctionDef, StructDef, ClassDef, EnumDef) store type
+# information as text. Specialization works by replacing type parameter names
+# with concrete type strings in all text fields.
+
+fn _concrete_type_to_text(ct: ConcreteType) -> text:
+    """Convert a ConcreteType to its text representation for substitution."""
+    match ct:
+        ConcreteType.Int: "Int"
+        ConcreteType.Float: "Float"
+        ConcreteType.Bool: "Bool"
+        ConcreteType.String: "String"
+        ConcreteType.Nil: "Nil"
+        ConcreteType.Named(n): n
+        ConcreteType.Array(elem): "[{_concrete_type_to_text(elem)}]"
+        ConcreteType.Tuple(elems):
+            var parts: [text] = []
+            for e in elems:
+                parts.push(_concrete_type_to_text(e))
+            "({parts.join(', ')})"
+        ConcreteType.Dict(k, v):
+            val kt = _concrete_type_to_text(k)
+            val vt = _concrete_type_to_text(v)
+            "{{{kt}: {vt}}}"
+        ConcreteType.Function(params, ret):
+            var param_parts: [text] = []
+            for p in params:
+                param_parts.push(_concrete_type_to_text(p))
+            "fn({param_parts.join(', ')}) -> {_concrete_type_to_text(ret)}"
+        ConcreteType.Optional(inner): "{_concrete_type_to_text(inner)}?"
+        ConcreteType.Pointer(_, _, inner): _concrete_type_to_text(inner)
+        ConcreteType.Specialized(name, args):
+            var arg_parts: [text] = []
+            for a in args:
+                arg_parts.push(_concrete_type_to_text(a))
+            "{name}<{arg_parts.join(', ')}>"
+
+fn _concrete_type_to_mangled(ct: ConcreteType) -> text:
+    """Convert a ConcreteType to a mangling-safe text form (no special chars)."""
+    match ct:
+        ConcreteType.Int: "Int"
+        ConcreteType.Float: "Float"
+        ConcreteType.Bool: "Bool"
+        ConcreteType.String: "String"
+        ConcreteType.Nil: "Nil"
+        ConcreteType.Named(n): n
+        ConcreteType.Array(elem): "Array_{_concrete_type_to_mangled(elem)}"
+        ConcreteType.Tuple(elems):
+            var parts: [text] = []
+            for e in elems:
+                parts.push(_concrete_type_to_mangled(e))
+            "Tuple_{parts.join('_')}"
+        ConcreteType.Dict(k, v):
+            "Dict_{_concrete_type_to_mangled(k)}_{_concrete_type_to_mangled(v)}"
+        ConcreteType.Function(params, ret):
+            var param_parts: [text] = []
+            for p in params:
+                param_parts.push(_concrete_type_to_mangled(p))
+            "Fn_{param_parts.join('_')}_{_concrete_type_to_mangled(ret)}"
+        ConcreteType.Optional(inner): "Opt_{_concrete_type_to_mangled(inner)}"
+        ConcreteType.Pointer(_, _, inner): _concrete_type_to_mangled(inner)
+        ConcreteType.Specialized(name, args):
+            var arg_parts: [text] = []
+            for a in args:
+                arg_parts.push(_concrete_type_to_mangled(a))
+            "{name}_{arg_parts.join('_')}"
+
+fn _is_identifier_char(c: text) -> bool:
+    """Check if a character can appear in a type parameter name."""
+    if c.len() != 1:
+        return false
+    val code = c.char_code_at(0)
+    # a-z, A-Z, 0-9, _
+    val is_lower = code >= 97 and code <= 122
+    val is_upper = code >= 65 and code <= 90
+    val is_digit = code >= 48 and code <= 57
+    val is_underscore = code == 95
+    is_lower or is_upper or is_digit or is_underscore
+
+fn _substitute_type_in_text(s: text, param: text, replacement: text) -> text:
+    """Replace occurrences of a type parameter name in a text string.
+
+    Only replaces whole-word occurrences (not substrings of longer identifiers).
+    Handles type parameter names appearing in type annotations like 'T', 'List<T>',
+    'fn(T) -> T', etc.
+    """
+    if s.len() == 0:
+        return s
+    if param.len() == 0:
+        return s
+
+    var result = ""
+    var i = 0
+    val slen = s.len()
+    val plen = param.len()
+
+    while i < slen:
+        # Check if param appears at position i
+        val remaining = slen - i
+        if remaining >= plen:
+            val candidate = s[i..(i + plen)]
+            if candidate == param:
+                # Check word boundaries: char before must not be identifier char
+                var before_ok = true
+                if i > 0:
+                    val before_char = s[(i - 1)..i]
+                    before_ok = not _is_identifier_char(before_char)
+
+                # Check word boundary after
+                var after_ok = true
+                val after_pos = i + plen
+                if after_pos < slen:
+                    val after_char = s[after_pos..(after_pos + 1)]
+                    after_ok = not _is_identifier_char(after_char)
+
+                if before_ok and after_ok:
+                    result = result + replacement
+                    i = i + plen
+                    continue
+
+        result = result + s[i..(i + 1)]
+        i = i + 1
+
+    result
+
+fn _substitute_all_params_in_text(s: text, generic_params: [text], type_args: [ConcreteType]) -> text:
+    """Substitute all type parameters in a text string with concrete type names."""
+    var current = s
+    var idx = 0
+    for param in generic_params:
+        if idx < type_args.len():
+            val replacement = _concrete_type_to_text(type_args[idx])
+            current = _substitute_type_in_text(current, param, replacement)
+        idx = idx + 1
+    current
+
+fn _substitute_in_text_list(items: [text], generic_params: [text], type_args: [ConcreteType]) -> [text]:
+    """Substitute type parameters in a list of text items."""
+    var result: [text] = []
+    for item in items:
+        result.push(_substitute_all_params_in_text(item, generic_params, type_args))
+    result
+
+fn _substitute_in_text_dict(dict: {text: text}, generic_params: [text], type_args: [ConcreteType]) -> {text: text}:
+    """Substitute type parameters in a text dict's values (type bindings)."""
+    var result: {text: text} = {}
+    for (k, v) in dict.items():
+        result[k] = _substitute_all_params_in_text(v, generic_params, type_args)
+    result
+
+fn _make_mangled_name(base_name: text, type_args: [ConcreteType]) -> text:
+    """Generate a mangled name for a specialized definition."""
+    if type_args.is_empty():
+        return base_name
+    var arg_parts: [text] = []
+    for arg in type_args:
+        arg_parts.push(_concrete_type_to_mangled(arg))
+    "{base_name}${arg_parts.join('_')}"
+
+fn _build_type_bindings_text(generic_params: [text], type_args: [ConcreteType]) -> {text: text}:
+    """Build a text-level type bindings map for a specialization."""
+    var bindings: {text: text} = {}
+    var idx = 0
+    for param in generic_params:
+        if idx < type_args.len():
+            bindings[param] = _concrete_type_to_text(type_args[idx])
+        idx = idx + 1
+    bindings
+
+fn _build_type_bindings(generic_params: [text], type_args: [ConcreteType]) -> TypeBindings:
+    """Build a TypeBindings map for metadata tracking."""
+    var bindings: TypeBindings = {}
+    var idx = 0
+    for param in generic_params:
+        if idx < type_args.len():
+            bindings[param] = type_args[idx]
+        idx = idx + 1
+    bindings
+
+# ============================================================================
+# Specialization Functions
+# ============================================================================
+
+fn _specialize_function_def(func: FunctionDef, type_args: [ConcreteType]) -> FunctionDef:
+    """Create a specialized FunctionDef by substituting type parameters.
+
+    Substitutes type params in:
+    - params (parameter type annotations)
+    - return_type
+    - body (all type references in function body)
+    - type_bindings (records the substitution)
+
+    Sets:
+    - name to the mangled name
+    - generic_params to empty (fully specialized)
+    - is_generic_template to false
+    - specialization_of to original name
+    """
+    val mangled = _make_mangled_name(func.name, type_args)
+    val gp = func.generic_params
+    val new_params = _substitute_in_text_list(func.params, gp, type_args)
+    val new_body = _substitute_in_text_list(func.body, gp, type_args)
+    val new_bindings = _build_type_bindings_text(gp, type_args)
+
+    var new_return_type: text? = nil
+    if func.return_type != nil:
+        new_return_type = _substitute_all_params_in_text(func.return_type, gp, type_args)
+
+    FunctionDef(
+        name: mangled,
+        generic_params: [],
+        params: new_params,
+        return_type: new_return_type,
+        body: new_body,
+        is_generic_template: false,
+        specialization_of: func.name,
+        type_bindings: new_bindings
+    )
+
+fn _specialize_struct_def(s: StructDef, type_args: [ConcreteType]) -> StructDef:
+    """Create a specialized StructDef by substituting type parameters.
+
+    Substitutes type params in:
+    - fields (field type annotations)
+    - type_bindings (records the substitution)
+
+    Sets:
+    - name to the mangled name
+    - generic_params to empty (fully specialized)
+    - is_generic_template to false
+    - specialization_of to original name
+    """
+    val mangled = _make_mangled_name(s.name, type_args)
+    val gp = s.generic_params
+    val new_fields = _substitute_in_text_list(s.fields, gp, type_args)
+    val new_bindings = _build_type_bindings_text(gp, type_args)
+
+    StructDef(
+        name: mangled,
+        generic_params: [],
+        fields: new_fields,
+        is_generic_template: false,
+        specialization_of: s.name,
+        type_bindings: new_bindings
+    )
+
+fn _specialize_class_def(c: ClassDef, type_args: [ConcreteType]) -> ClassDef:
+    """Create a specialized ClassDef by substituting type parameters.
+
+    Substitutes type params in:
+    - fields (field type annotations)
+    - methods (method signatures and bodies)
+    - type_bindings (records the substitution)
+
+    Sets:
+    - name to the mangled name
+    - generic_params to empty (fully specialized)
+    - is_generic_template to false
+    - specialization_of to original name
+    """
+    val mangled = _make_mangled_name(c.name, type_args)
+    val gp = c.generic_params
+    val new_fields = _substitute_in_text_list(c.fields, gp, type_args)
+    val new_methods = _substitute_in_text_list(c.methods, gp, type_args)
+    val new_bindings = _build_type_bindings_text(gp, type_args)
+
+    ClassDef(
+        name: mangled,
+        generic_params: [],
+        fields: new_fields,
+        methods: new_methods,
+        is_generic_template: false,
+        specialization_of: c.name,
+        type_bindings: new_bindings
+    )
+
+fn _specialize_enum_def(e: EnumDef, type_args: [ConcreteType]) -> EnumDef:
+    """Create a specialized EnumDef by substituting type parameters.
+
+    Substitutes type params in:
+    - variants (variant type annotations)
+    - type_bindings (records the substitution)
+
+    Sets:
+    - name to the mangled name
+    - generic_params to empty (fully specialized)
+    - is_generic_template to false
+    - specialization_of to original name
+    """
+    val mangled = _make_mangled_name(e.name, type_args)
+    val gp = e.generic_params
+    val new_variants = _substitute_in_text_list(e.variants, gp, type_args)
+    val new_bindings = _build_type_bindings_text(gp, type_args)
+
+    EnumDef(
+        name: mangled,
+        generic_params: [],
+        variants: new_variants,
+        is_generic_template: false,
+        specialization_of: e.name,
+        type_bindings: new_bindings
+    )
 
 # ============================================================================
 # Instantiation Mode
@@ -328,6 +633,7 @@ impl DeferredMonomorphizer:
         - Checks cache first (avoid re-compilation)
         - Validates type arg count matches template params
         - Returns nil if template not found
+        - Tracks specialization in metadata
         """
         val key = SpecializationKey.new(name, type_args)
 
@@ -355,23 +661,42 @@ impl DeferredMonomorphizer:
             )
             return nil
 
-        # Build type bindings
-        var bindings: TypeBindings = {}
-        for i in 0..type_args.len():
-            bindings[func_template.generic_params[i]] = type_args[i]
-
-        # Instantiate using monomorphization engine
-        # Monomorphizer.specialize_function not yet available
-        eprint("Warning: Monomorphizer.specialize_function not yet available; returning unspecialized template for {name}")
-        val specialized = func_template.clone()
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_function_def(func_template, type_args)
 
         # Cache result
-        self.specialization_cache[key] = CompiledCode.Function(specialized.clone())
+        self.specialization_cache[key] = CompiledCode.Function(specialized)
 
+        # Track in metadata
+        val bindings = _build_type_bindings(func_template.generic_params, type_args)
+        val entry = SpecializationEntry.new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.functions.contains_key(name):
+            self.metadata.functions[name] = GenericFunctionMeta.new(name, func_template.generic_params)
+        self.metadata.functions[name].add_specialization(entry)
+
+        deferred_clear_error()
         specialized
 
     me instantiate_struct(name: text, type_args: [ConcreteType]) -> StructDef?:
-        """Instantiate a struct template with concrete type arguments."""
+        """Instantiate a struct template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Pair", "Node")
+            type_args: Concrete types (e.g., [Int, String])
+
+        Returns:
+            Specialized struct definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all fields
+        - Tracks specialization in metadata
+        """
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
@@ -398,15 +723,42 @@ impl DeferredMonomorphizer:
             )
             return nil
 
-        # Specialization not yet implemented; returning unspecialized template
-        eprint("Warning: struct specialization not yet implemented; returning unspecialized template for {name}")
-        val specialized = struct_template.clone()
-        self.specialization_cache[key] = CompiledCode.Struct(specialized.clone())
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_struct_def(struct_template, type_args)
 
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Struct(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(struct_template.generic_params, type_args)
+        val entry = SpecializationEntry.new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.structs.contains_key(name):
+            self.metadata.structs[name] = GenericStructMeta.new(name, struct_template.generic_params)
+        self.metadata.structs[name].add_specialization(entry)
+
+        deferred_clear_error()
         specialized
 
     me instantiate_class(name: text, type_args: [ConcreteType]) -> ClassDef?:
-        """Instantiate a class template with concrete type arguments."""
+        """Instantiate a class template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Container", "TreeNode")
+            type_args: Concrete types (e.g., [Int])
+
+        Returns:
+            Specialized class definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all fields and methods
+        - Tracks specialization in metadata
+        """
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
@@ -433,15 +785,42 @@ impl DeferredMonomorphizer:
             )
             return nil
 
-        # Specialization not yet implemented; returning unspecialized template
-        eprint("Warning: class specialization not yet implemented; returning unspecialized template for {name}")
-        val specialized = class_template.clone()
-        self.specialization_cache[key] = CompiledCode.Class(specialized.clone())
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_class_def(class_template, type_args)
 
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Class(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(class_template.generic_params, type_args)
+        val entry = SpecializationEntry.new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.classes.contains_key(name):
+            self.metadata.classes[name] = GenericClassMeta.new(name, class_template.generic_params)
+        self.metadata.classes[name].add_specialization(entry)
+
+        deferred_clear_error()
         specialized
 
     me instantiate_enum(name: text, type_args: [ConcreteType]) -> EnumDef?:
-        """Instantiate an enum template with concrete type arguments."""
+        """Instantiate an enum template with concrete type arguments.
+
+        Args:
+            name: Template name (e.g., "Option", "Result")
+            type_args: Concrete types (e.g., [Int] for Option<Int>)
+
+        Returns:
+            Specialized enum definition, or nil with error set
+
+        ROBUSTNESS:
+        - Checks cache first (avoid re-compilation)
+        - Validates type arg count matches template params
+        - Substitutes type params in all variants
+        - Tracks specialization in metadata
+        """
         val key = SpecializationKey.new(name, type_args)
 
         # Check cache
@@ -468,11 +847,24 @@ impl DeferredMonomorphizer:
             )
             return nil
 
-        # Specialization not yet implemented; returning unspecialized template
-        eprint("Warning: enum specialization not yet implemented; returning unspecialized template for {name}")
-        val specialized = enum_template.clone()
-        self.specialization_cache[key] = CompiledCode.Enum(specialized.clone())
+        # Perform real specialization: substitute type params throughout definition
+        val specialized = _specialize_enum_def(enum_template, type_args)
 
+        # Cache result
+        self.specialization_cache[key] = CompiledCode.Enum(specialized)
+
+        # Track in metadata
+        val bindings = _build_type_bindings(enum_template.generic_params, type_args)
+        val entry = SpecializationEntry.new(
+            type_args: type_args,
+            mangled_name: specialized.name,
+            bindings: bindings
+        )
+        if not self.metadata.enums.contains_key(name):
+            self.metadata.enums[name] = GenericEnumMeta.new(name, enum_template.generic_params)
+        self.metadata.enums[name].add_specialization(entry)
+
+        deferred_clear_error()
         specialized
 
     # ========================================================================
@@ -493,6 +885,63 @@ impl DeferredMonomorphizer:
     me clear_cache():
         """Clear the specialization cache (keep templates)."""
         self.specialization_cache = {}
+
+    me register_template(template: GenericTemplate):
+        """Register a generic template directly (not from SMF).
+
+        Useful for in-process monomorphization where templates are
+        already available as AST nodes.
+        """
+        val name = template.name()
+        self.template_cache[name] = template
+
+    me instantiate(name: text, type_args: [ConcreteType]) -> CompiledCode?:
+        """Instantiate any template by name with concrete type arguments.
+
+        Automatically determines the template kind and delegates to the
+        appropriate instantiation method.
+
+        Returns:
+            CompiledCode wrapping the specialized definition, or nil with error set
+        """
+        val template = self.template_cache.get(name)
+        if template == nil:
+            deferred_set_error("Template not found: {name}")
+            return nil
+
+        match template:
+            GenericTemplate.Function(_):
+                val result = self.instantiate_function(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Function(result)
+            GenericTemplate.Struct(_):
+                val result = self.instantiate_struct(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Struct(result)
+            GenericTemplate.Class(_):
+                val result = self.instantiate_class(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Class(result)
+            GenericTemplate.Enum(_):
+                val result = self.instantiate_enum(name, type_args)
+                if result == nil:
+                    return nil
+                CompiledCode.Enum(result)
+            GenericTemplate.Trait(_):
+                deferred_set_error("Trait instantiation not supported: {name}")
+                nil
+
+    fn has_template(name: text) -> bool:
+        """Check if a template is registered."""
+        self.template_cache.contains_key(name)
+
+    fn has_specialization(name: text, type_args: [ConcreteType]) -> bool:
+        """Check if a specific specialization is already cached."""
+        val key = SpecializationKey.new(name, type_args)
+        self.specialization_cache.contains_key(key)
 
     fn metadata() -> MonomorphizationMetadata:
         """Get the monomorphization metadata."""
@@ -856,28 +1305,50 @@ struct DeferredMonoStats:
 # # Create deferred monomorphizer for link-time instantiation
 # val mono = DeferredMonomorphizer.new(InstantiationMode.LinkTime)
 #
-# # Load templates from SMF file
-# mono.load_templates_from_smf("collections.smf")?
+# # Register templates directly (in-process)
+# val pair_template = StructDef(
+#     name: "Pair", generic_params: ["T", "U"],
+#     fields: ["first: T", "second: U"],
+#     is_generic_template: true, specialization_of: nil, type_bindings: {}
+# )
+# mono.register_template(GenericTemplate.Struct(pair_template))
 #
-# # Instantiate [Int]
-# val list_int_push = mono.instantiate_function("List::push", [ConcreteType.Int])?
+# # Instantiate Pair<Int, String>
+# val pair_int_str = mono.instantiate_struct("Pair", [ConcreteType.Int, ConcreteType.String])
+# # Result: StructDef(name: "Pair$Int_String", fields: ["first: Int", "second: String"], ...)
 #
-# # Get stats
+# # Or load from SMF file
+# mono.load_templates_from_smf("collections.smf")
+#
+# # Instantiate using generic API
+# val result = mono.instantiate("Option", [ConcreteType.Int])
+# # Result: CompiledCode.Enum(EnumDef(name: "Option$Int", variants: ["Some(Int)", "None"], ...))
+#
+# # Cache prevents re-compilation
+# val same = mono.instantiate_struct("Pair", [ConcreteType.Int, ConcreteType.String])
+# # Returns cached result (no re-substitution)
+#
+# # Check stats
 # val stats = mono.get_stats()
 # print "Loaded {stats.template_count} templates"
 # print "Cached {stats.specialization_count} specializations"
+#
+# # Metadata tracks all specializations
+# val meta = mono.metadata()
+# print "Total specializations: {meta.total_specializations()}"
 #
 # ============================================================================
 # Remaining Items
 # ============================================================================
 #
 # 1. [done] Implement template serialization/deserialization (Phase 6)
-# 2. [pending] Implement full AST specialization (use Monomorphizer.specialize_*)
-# 3. [pending] Add error recovery (partial specialization on error)
-# 4. [pending] Add incremental compilation support
-# 5. [pending] Add template invalidation on source change
-# 6. [pending] Add parallel instantiation (for LinkTime mode)
-# 7. [pending] Wire up binary file I/O for load_templates_from_smf
+# 2. [done] Implement full AST specialization (text-level type substitution)
+# 3. [done] Track specializations in metadata
+# 4. [pending] Add error recovery (partial specialization on error)
+# 5. [pending] Add incremental compilation support
+# 6. [pending] Add template invalidation on source change
+# 7. [pending] Add parallel instantiation (for LinkTime mode)
+# 8. [pending] Wire up binary file I/O for load_templates_from_smf
 #
 # ============================================================================
 # Performance Notes
@@ -899,7 +1370,7 @@ struct DeferredMonoStats:
 # - [x] No buffer overflows (bounds checks on deserialize)
 #
 # Error Handling:
-# - [x] Returns Result (not panics)
+# - [x] Returns nil with error (not panics)
 # - [x] Validates magic bytes
 # - [x] Validates type arg count
 # - [x] Clear error messages
@@ -908,6 +1379,21 @@ struct DeferredMonoStats:
 # - [x] Cache prevents re-compilation
 # - [x] Type arg count validated
 # - [x] Template not found returns error
+# - [x] Type substitution is whole-word only (no partial matches)
+# - [x] Mangled names are deterministic and unique
+# - [x] Metadata tracks all specializations
+# - [x] Specialization sets is_generic_template=false
+# - [x] Specialization records specialization_of=original name
+# - [x] Generic params cleared in specialized output
+#
+# Specialization Coverage:
+# - [x] Function specialization (params, return type, body)
+# - [x] Struct specialization (fields)
+# - [x] Class specialization (fields, methods)
+# - [x] Enum specialization (variants)
+# - [x] Nested generic types in text (e.g., List<T> -> List<Int>)
+# - [x] Multiple type parameters (e.g., Pair<T, U>)
+# - [x] Optional return types handled
 #
 # Edge Cases:
 # - [x] Empty SMF file (returns Ok with empty cache)
@@ -915,3 +1401,5 @@ struct DeferredMonoStats:
 # - [x] Wrong type arg count (returns error)
 # - [x] Template not found (returns error)
 # - [x] Cache hit (returns cached result)
+# - [x] Type param name is substring of identifier (no false substitution)
+# - [x] Empty type args (no-arg specialization)

@@ -78,13 +78,36 @@ impl MappedSmf:
         # For now, create minimal header
         val header = parse_header_minimal(header_bytes)
 
-        # Find section offsets using convention-based defaults
-        # Parsing section table for accurate offsets not yet implemented
-        # Real implementation would read header.section_table_offset, iterate entries,
-        # and find TemplateCode (type=12) and note.sdn (type=13) sections
-        eprint("Warning: section table parsing for accurate offsets not yet implemented for {path}")
-        val template_offset = 0i64
-        val note_sdn_offset = 0i64
+        # Parse section table to find TemplateCode and note.sdn offsets
+        # Section table format: 64-byte entries starting at header.section_table_offset
+        # Each entry: name_offset(4) name_len(4) type(4) flags(4) offset(8) size(8) ...
+        val section_table_offset = bytes_to_u32(header_bytes[16..20]) as i64
+        val section_table_high = bytes_to_u32(header_bytes[20..24]) as i64
+        val full_section_table_offset = section_table_offset | (section_table_high << 32)
+        val num_sections = header.section_count
+
+        var template_offset = 0i64
+        var note_sdn_offset = 0i64
+
+        if full_section_table_offset > 0 and full_section_table_offset < mapped_size:
+            var si = 0
+            while si < num_sections:
+                val entry_offset = full_section_table_offset + (si as i64 * 64)
+                if entry_offset + 64 > mapped_size:
+                    break
+                val entry_bytes = mmap_read_bytes(address, entry_offset, 64)
+                # Section type at offset 8 in entry
+                val sec_type = bytes_to_u32(entry_bytes[8..12])
+                # Section offset at entry offset 16 (8 bytes)
+                val sec_offset = bytes_to_u32(entry_bytes[16..20]) as i64
+                val sec_offset_high = bytes_to_u32(entry_bytes[20..24]) as i64
+                val full_sec_offset = sec_offset | (sec_offset_high << 32)
+                # Type 12 = TemplateCode, Type 13 = TemplateMeta (note.sdn)
+                if sec_type == 12:
+                    template_offset = full_sec_offset
+                if sec_type == 13:
+                    note_sdn_offset = full_sec_offset
+                si = si + 1
 
         Ok(MappedSmf(
             path: path,
@@ -152,14 +175,49 @@ impl MappedSmf:
         Ok(template_bytes)
 
     fn read_section(section_index: i32) -> Result<[u8], text>:
-        """Read section data by index."""
-        # Parse section table and read section not yet implemented
-        # Real implementation would:
-        # 1. Read section table from header.section_table_offset
-        # 2. Find entry at section_index
-        # 3. Read bytes from entry.offset with entry.size length via mmap_read_bytes
-        eprint("Warning: section reading via section table not yet implemented for index {section_index}")
-        Err("Section reading not yet implemented")
+        """Read section data by index.
+
+        Parses the section table from the SMF trailer to find the section entry,
+        then reads the section data via mmap.
+        """
+        # Re-read the trailer to get section table offset
+        val header_offset = self.size - 128
+        val header_bytes = mmap_read_bytes(self.address, header_offset, 128)
+
+        # Section table offset at trailer offset 16 (8 bytes, little-endian)
+        val st_offset_lo = bytes_to_u32(header_bytes[16..20]) as i64
+        val st_offset_hi = bytes_to_u32(header_bytes[20..24]) as i64
+        val section_table_offset = st_offset_lo | (st_offset_hi << 32)
+
+        if section_table_offset == 0:
+            return Err("No section table found in SMF file")
+
+        val section_count = self.header.section_count
+        if section_index < 0 or section_index >= section_count:
+            return Err("Section index {section_index} out of range (0..{section_count})")
+
+        # Each section table entry is 64 bytes
+        val entry_offset = section_table_offset + (section_index as i64 * 64)
+        if entry_offset + 64 > self.size:
+            return Err("Section table entry offset out of bounds")
+
+        val entry_bytes = mmap_read_bytes(self.address, entry_offset, 64)
+
+        # Section data offset at entry offset 16 (8 bytes)
+        val data_offset_lo = bytes_to_u32(entry_bytes[16..20]) as i64
+        val data_offset_hi = bytes_to_u32(entry_bytes[20..24]) as i64
+        val data_offset = data_offset_lo | (data_offset_hi << 32)
+
+        # Section data size at entry offset 24 (8 bytes)
+        val data_size_lo = bytes_to_u32(entry_bytes[24..28]) as i64
+        val data_size_hi = bytes_to_u32(entry_bytes[28..32]) as i64
+        val data_size = data_size_lo | (data_size_hi << 32)
+
+        if data_offset + data_size > self.size:
+            return Err("Section data extends beyond file")
+
+        val section_data = mmap_read_bytes(self.address, data_offset, data_size)
+        Ok(section_data)
 
 # ============================================================================
 # SMF Cache

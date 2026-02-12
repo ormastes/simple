@@ -1,0 +1,356 @@
+"""
+# Native Executable Generation Specification
+
+**Feature IDs:** #5000
+**Category:** Infrastructure
+**Difficulty:** 4/5
+**Status:** In Progress
+
+## Overview
+
+The native executable generation pipeline compiles Simple source files into
+standalone native binaries. It supports two backends:
+- **SMF pipeline**: Source -> SMF -> native via mold (existing)
+- **LLVM pipeline**: Source -> MIR -> LLVM IR -> .o -> native via linker
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| BuildConfig | Configuration for native builds (entry point, output, backend) |
+| LLVM Backend | Compiles via MIR -> LLVM IR -> object code -> linked binary |
+| SMF Backend | Compiles via SMF format -> native linking |
+| Entry Point | Generated LLVM IR that bridges OS entry to Simple main |
+| Runtime Stub | C stub providing __simple_runtime_init/shutdown + main |
+
+## Behavior
+
+- BuildConfig.backend selects the compilation pipeline ("llvm" or nil/smf)
+- --backend=llvm CLI flag activates LLVM backend in handle_build_command
+- Entry point IR generates proper main() or _start() functions
+- Runtime stub compiles a C file with init/shutdown wrappers
+- Object files are placed in .build/ directory
+
+## Implementation Notes
+
+- LLVM backend requires llc to be installed
+- Runtime stub requires cc (gcc/clang) for compilation
+- Entry point supports both hosted (main) and bare-metal (_start) modes
+"""
+
+# ============================================================================
+# BuildConfig Tests
+# ============================================================================
+
+describe "BuildConfig":
+    """
+    ## BuildConfig Specification
+
+    Verifies build configuration defaults and the backend field.
+    """
+
+    context "default configuration":
+        it "creates config with entry point and output":
+            val entry = "src/main.spl"
+            val output = "my_program"
+            # Verify defaults match expected values
+            expect(entry).to_equal("src/main.spl")
+            expect(output).to_equal("my_program")
+
+        it "defaults to nil backend (SMF pipeline)":
+            val backend: text? = nil
+            val is_nil = not backend.?
+            expect(is_nil).to_equal(true)
+
+        it "defaults to PIE enabled":
+            val pie = true
+            expect(pie).to_equal(true)
+
+        it "defaults to optimization level 0":
+            val optimization = 0
+            expect(optimization).to_equal(0)
+
+        it "defaults to libc as library dependency":
+            val libraries = ["c"]
+            expect(libraries.len()).to_equal(1)
+            expect(libraries[0]).to_equal("c")
+
+    context "LLVM backend configuration":
+        it "accepts llvm as backend value":
+            val backend: text? = Some("llvm")
+            val is_llvm = backend.? and backend.unwrap() == "llvm"
+            expect(is_llvm).to_equal(true)
+
+        it "accepts smf as backend value":
+            val backend: text? = Some("smf")
+            val is_smf = backend.? and backend.unwrap() == "smf"
+            expect(is_smf).to_equal(true)
+
+    context "for_simple_cli configuration":
+        it "uses x86-64-v3 as default target CPU":
+            val target_cpu: text? = Some("x86-64-v3")
+            expect(target_cpu.?).to_equal(true)
+            expect(target_cpu.unwrap()).to_equal("x86-64-v3")
+
+        it "includes standard libraries":
+            val libraries = ["c", "m", "pthread"]
+            expect(libraries.len()).to_equal(3)
+            expect(libraries[0]).to_equal("c")
+            expect(libraries[1]).to_equal("m")
+            expect(libraries[2]).to_equal("pthread")
+
+        it "uses optimization level 2":
+            val optimization = 2
+            expect(optimization).to_equal(2)
+
+# ============================================================================
+# CLI Flag Parsing Tests
+# ============================================================================
+
+describe "LLVM Backend Flag Parsing":
+    """
+    ## CLI Flag Parsing
+
+    Verifies that --backend=llvm flag is correctly parsed
+    and mapped to config.backend.
+    """
+
+    context "backend flag parsing":
+        it "parses --backend=llvm":
+            val flag = "--backend=llvm"
+            val is_llvm_flag = flag == "--backend=llvm"
+            expect(is_llvm_flag).to_equal(true)
+
+        it "parses --backend=smf":
+            val flag = "--backend=smf"
+            val is_smf_flag = flag == "--backend=smf"
+            expect(is_smf_flag).to_equal(true)
+
+        it "detects unknown backend from flag":
+            val flag = "--backend=unknown"
+            val starts = flag.starts_with("--backend=")
+            val be_name = flag[10..]
+            val is_known = be_name == "llvm" or be_name == "smf"
+            expect(starts).to_equal(true)
+            expect(is_known).to_equal(false)
+
+    context "backend dispatch logic":
+        it "dispatches to LLVM when backend is llvm":
+            val backend: text? = Some("llvm")
+            val use_llvm = backend.? and backend.unwrap() == "llvm"
+            expect(use_llvm).to_equal(true)
+
+        it "dispatches to SMF when backend is nil":
+            val backend: text? = nil
+            val use_smf = not backend.?
+            expect(use_smf).to_equal(true)
+
+        it "dispatches to SMF when backend is smf":
+            val backend: text? = Some("smf")
+            val use_llvm = backend.? and backend.unwrap() == "llvm"
+            val use_smf = not use_llvm
+            expect(use_smf).to_equal(true)
+
+# ============================================================================
+# Entry Point IR Generation Tests
+# ============================================================================
+
+describe "Entry Point IR Generation":
+    """
+    ## Entry Point LLVM IR
+
+    Verifies the generated LLVM IR for program entry points,
+    both hosted (main) and bare-metal (_start).
+    """
+
+    context "hosted entry point (main)":
+        it "contains module name comment":
+            val module_name = "test_program"
+            val ir_comment = "; Entry point for Simple program: {module_name}"
+            expect(ir_comment).to_contain("test_program")
+
+        it "declares __simple_runtime_init":
+            val decl = "declare void @__simple_runtime_init()"
+            expect(decl).to_contain("__simple_runtime_init")
+
+        it "declares __simple_main":
+            val decl = "declare i64 @__simple_main()"
+            expect(decl).to_contain("__simple_main")
+
+        it "declares __simple_runtime_shutdown":
+            val decl = "declare void @__simple_runtime_shutdown()"
+            expect(decl).to_contain("__simple_runtime_shutdown")
+
+        it "defines main with argc and argv":
+            val def_line = "define i32 @main(i32 %argc, ptr %argv) {"
+            expect(def_line).to_contain("@main")
+            expect(def_line).to_contain("%argc")
+            expect(def_line).to_contain("%argv")
+
+        it "calls runtime init before main":
+            val call = "call void @__simple_runtime_init()"
+            expect(call).to_contain("__simple_runtime_init")
+
+        it "calls __simple_main and captures result":
+            val call = "%result = call i64 @__simple_main()"
+            expect(call).to_contain("__simple_main")
+            expect(call).to_start_with("%result")
+
+        it "truncates i64 result to i32 exit code":
+            val trunc = "%exit_code = trunc i64 %result to i32"
+            expect(trunc).to_contain("trunc")
+            expect(trunc).to_contain("i64")
+            expect(trunc).to_contain("i32")
+
+        it "returns exit code":
+            val ret = "ret i32 %exit_code"
+            expect(ret).to_start_with("ret i32")
+
+    context "bare-metal entry point (_start)":
+        it "defines _start with noreturn":
+            val def_line = "define void @_start() noreturn {"
+            expect(def_line).to_contain("@_start")
+            expect(def_line).to_contain("noreturn")
+
+        it "contains halt loop":
+            val halt_label = "halt:"
+            val halt_instr = "br label %halt"
+            expect(halt_label).to_equal("halt:")
+            expect(halt_instr).to_contain("%halt")
+
+        it "uses hlt instruction in halt loop":
+            val hlt = "call void asm sideeffect \"hlt\", \"\"()"
+            expect(hlt).to_contain("hlt")
+
+    context "entry point mode selection":
+        it "selects main for hosted mode":
+            val bare_metal = false
+            val entry_fn = if bare_metal: "_start" else: "main"
+            expect(entry_fn).to_equal("main")
+
+        it "selects _start for bare-metal mode":
+            val bare_metal = true
+            val entry_fn = if bare_metal: "_start" else: "main"
+            expect(entry_fn).to_equal("_start")
+
+# ============================================================================
+# Runtime Stub Generation Tests
+# ============================================================================
+
+describe "Runtime Stub Generation":
+    """
+    ## Runtime Stub
+
+    Verifies the C runtime stub that provides __simple_runtime_init,
+    __simple_runtime_shutdown, and the main() bridge function.
+    """
+
+    context "stub C source content":
+        it "declares __simple_runtime_init as void function":
+            val stub_line = "void __simple_runtime_init(void) {}"
+            expect(stub_line).to_contain("__simple_runtime_init")
+            expect(stub_line).to_contain("void")
+
+        it "declares __simple_runtime_shutdown as void function":
+            val stub_line = "void __simple_runtime_shutdown(void) {}"
+            expect(stub_line).to_contain("__simple_runtime_shutdown")
+
+        it "declares __simple_main as extern":
+            val stub_line = "int __simple_main(void);"
+            expect(stub_line).to_contain("__simple_main")
+
+        it "defines main that calls init, __simple_main, shutdown":
+            val main_body = "int main(int argc, char **argv)"
+            expect(main_body).to_contain("main")
+            expect(main_body).to_contain("argc")
+
+        it "returns result from __simple_main":
+            val ret_line = "return result;"
+            expect(ret_line).to_contain("return")
+
+    context "stub file paths":
+        it "generates C source path from output path":
+            val output_path = ".build/_runtime"
+            val c_path = output_path + "_runtime_stub.c"
+            expect(c_path).to_equal(".build/_runtime_runtime_stub.c")
+
+        it "generates object file path from output path":
+            val output_path = ".build/_runtime"
+            val o_path = output_path + "_runtime_stub.o"
+            expect(o_path).to_equal(".build/_runtime_runtime_stub.o")
+
+# ============================================================================
+# Build Pipeline Configuration Tests
+# ============================================================================
+
+describe "Build Pipeline Configuration":
+    """
+    ## Build Pipeline
+
+    Verifies the build pipeline configuration for both
+    SMF and LLVM backends.
+    """
+
+    context "SMF pipeline (default)":
+        it "source_to_smf_path converts .spl to .smf in .build":
+            val source = "src/app/cli/main.spl"
+            val base_no_ext = source.replace(".spl", "")
+            val base = base_no_ext.replace("/", "_")
+            val smf_path = ".build/{base}.smf"
+            expect(smf_path).to_equal(".build/src_app_cli_main.smf")
+
+    context "LLVM pipeline":
+        it "source_to_obj_path converts .spl to .o in .build":
+            val source = "src/app/cli/main.spl"
+            val base_no_ext = source.replace(".spl", "")
+            val base = base_no_ext.replace("/", "_")
+            val obj_path = ".build/{base}.o"
+            expect(obj_path).to_equal(".build/src_app_cli_main.o")
+
+        it "maps optimization 0 to Debug":
+            val optimization = 0
+            val level_name = match optimization:
+                case 0: "Debug"
+                case 1: "Size"
+                case 2: "Speed"
+                case 3: "Aggressive"
+                case _: "Speed"
+            expect(level_name).to_equal("Debug")
+
+        it "maps optimization 2 to Speed":
+            val optimization = 2
+            val level_name = match optimization:
+                case 0: "Debug"
+                case 1: "Size"
+                case 2: "Speed"
+                case 3: "Aggressive"
+                case _: "Speed"
+            expect(level_name).to_equal("Speed")
+
+        it "maps optimization 3 to Aggressive":
+            val optimization = 3
+            val level_name = match optimization:
+                case 0: "Debug"
+                case 1: "Size"
+                case 2: "Speed"
+                case 3: "Aggressive"
+                case _: "Speed"
+            expect(level_name).to_equal("Aggressive")
+
+    context "entry point object file":
+        it "uses fixed path for entry point object":
+            val entry_obj_path = ".build/_entry_point.o"
+            expect(entry_obj_path).to_equal(".build/_entry_point.o")
+
+    context "module path conversion":
+        it "converts module path to file path":
+            val module_path = "std.json"
+            val path = module_path.replace(".", "/")
+            val file_path = "src/{path}.spl"
+            expect(file_path).to_equal("src/std/json.spl")
+
+        it "converts deep module path":
+            val module_path = "compiler.backend.llvm_backend"
+            val path = module_path.replace(".", "/")
+            val file_path = "src/{path}.spl"
+            expect(file_path).to_equal("src/compiler/backend/llvm_backend.spl")

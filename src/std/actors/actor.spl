@@ -3,15 +3,18 @@
 # Provides actor-based concurrency with message passing.
 # Actors are lightweight isolated processes that communicate via messages.
 #
+# Actors register named method handlers at spawn time. When a message
+# arrives, the runtime looks up the method name in the handler table
+# and invokes the matching handler with the message arguments.
+#
 # Usage:
-#   use std.actors.actor.{Actor, spawn_actor, ActorRef}
+#   use std.actors.actor.{ActorRef, spawn_actor, make_handlers}
 #
-#   actor Worker:
-#       var count: i64
-#       fn process(data: text):
-#           self.count += 1
-#
-#   val worker = spawn_actor(Worker())
+#   var handlers = make_handlers()
+#   handlers.register("increment", \args: do_increment(args))
+#   handlers.register("get", \args: do_get(args))
+#   val worker = spawn_actor(handlers)
+#   worker.send("increment", [])
 
 # ================================================================
 # Core Types
@@ -38,14 +41,148 @@ impl ActorId:
 struct Message:
     """Message sent to an actor."""
     method: text        # Method name to invoke
-    args: [text]        # Arguments (simplified - would be [Any])
+    args: [text]        # Arguments as text values
     reply_to: ActorId?  # Optional reply address
+
+# ================================================================
+# Dispatch Result
+# ================================================================
+
+enum DispatchStatus:
+    """Result status of dispatching a message to a handler."""
+    Ok
+    MethodNotFound
+    HandlerError
+
+struct DispatchResult:
+    """Result of dispatching a single message."""
+    status: DispatchStatus
+    value: text         # Return value from handler (empty on error)
+    error_msg: text     # Error description (empty on success)
+
+impl DispatchResult:
+    static fn ok(value: text) -> DispatchResult:
+        DispatchResult(
+            status: DispatchStatus.Ok,
+            value: value,
+            error_msg: ""
+        )
+
+    static fn not_found(method: text) -> DispatchResult:
+        DispatchResult(
+            status: DispatchStatus.MethodNotFound,
+            value: "",
+            error_msg: "method not found: {method}"
+        )
+
+    static fn handler_error(msg: text) -> DispatchResult:
+        DispatchResult(
+            status: DispatchStatus.HandlerError,
+            value: "",
+            error_msg: msg
+        )
+
+    fn is_ok() -> bool:
+        self.status == DispatchStatus.Ok
+
+    fn is_error() -> bool:
+        self.status != DispatchStatus.Ok
+
+# ================================================================
+# Handler Table
+# ================================================================
+
+struct HandlerEntry:
+    """A single registered method handler."""
+    name: text
+    handler: fn([text]) -> text
+
+struct HandlerTable:
+    """Method dispatch table for an actor.
+
+    Maps method names to handler functions. Each handler receives
+    a list of text arguments and returns a text result.
+
+    Example:
+        var table = make_handlers()
+        table.register("greet", \args: "Hello, {args[0]}!")
+        val result = table.dispatch("greet", ["World"])
+    """
+    entries: [HandlerEntry]
+
+impl HandlerTable:
+    me register(name: text, handler: fn([text]) -> text):
+        """Register a named method handler.
+
+        If a handler with the same name already exists, it is replaced.
+
+        Args:
+            name: Method name that messages will target
+            handler: Function that processes [text] args and returns text
+        """
+        # Replace existing handler with same name
+        var new_entries: [HandlerEntry] = []
+        var replaced = false
+        for entry in self.entries:
+            if entry.name == name:
+                new_entries.push(HandlerEntry(name: name, handler: handler))
+                replaced = true
+            else:
+                new_entries.push(entry)
+        if not replaced:
+            new_entries.push(HandlerEntry(name: name, handler: handler))
+        self.entries = new_entries
+
+    fn has_method(name: text) -> bool:
+        """Check if a method handler is registered."""
+        for entry in self.entries:
+            if entry.name == name:
+                return true
+        false
+
+    fn method_names() -> [text]:
+        """Return list of all registered method names."""
+        var names: [text] = []
+        for entry in self.entries:
+            names.push(entry.name)
+        names
+
+    fn dispatch(method: text, args: [text]) -> DispatchResult:
+        """Look up method by name and invoke its handler.
+
+        Args:
+            method: Name of the method to invoke
+            args: Arguments to pass to the handler
+
+        Returns:
+            DispatchResult with Ok status and return value on success,
+            or MethodNotFound/HandlerError on failure.
+        """
+        for entry in self.entries:
+            if entry.name == method:
+                val handler_fn = entry.handler
+                val result = handler_fn(args)
+                return DispatchResult.ok(result)
+        DispatchResult.not_found(method)
+
+fn make_handlers() -> HandlerTable:
+    """Create an empty handler table for actor registration.
+
+    Example:
+        var handlers = make_handlers()
+        handlers.register("ping", \args: "pong")
+    """
+    HandlerTable(entries: [])
+
+# ================================================================
+# Actor Ref
+# ================================================================
 
 struct ActorRef:
     """Reference to an actor instance.
 
     ActorRef is a handle that allows sending messages to an actor.
-    It's lightweight (just an ID) and can be copied freely.
+    It's lightweight and can be copied freely.
     """
     actor_id: ActorId
     mailbox: Mailbox
@@ -53,6 +190,9 @@ struct ActorRef:
 impl ActorRef:
     fn send(method: text, args: [text]):
         """Send a fire-and-forget message.
+
+        The message is placed in the actor's mailbox and will be
+        dispatched to the matching handler when processed.
 
         Example:
             worker.send("process", ["data"])
@@ -64,14 +204,15 @@ impl ActorRef:
         )
         self.mailbox.push(msg)
 
-    fn ask(method: text, args: [text]) -> Future<text>:
-        """Send a request and get a future for the response.
+    fn ask(method: text, args: [text]) -> ActorId:
+        """Send a request message and return the reply address.
+
+        The caller can later check the reply mailbox for a response.
+        Returns the reply ActorId that will receive the result.
 
         Example:
-            val result = await worker.ask("compute", ["42"])
+            val reply_id = worker.ask("compute", ["42"])
         """
-        # Request-response pattern: send message with reply channel
-        # Create a one-shot promise for the response
         val reply_id = ActorId.new()
         val msg = Message(
             method: method,
@@ -79,8 +220,11 @@ impl ActorRef:
             reply_to: Some(reply_id)
         )
         self.mailbox.push(msg)
-        # Return a pending future that will be resolved when reply arrives
-        Future.pending()
+        reply_id
+
+    fn get_id() -> i64:
+        """Return the numeric actor ID."""
+        self.actor_id.value
 
 # ================================================================
 # Mailbox
@@ -101,7 +245,7 @@ impl Mailbox:
     static fn default() -> Mailbox:
         Mailbox.new(1000)  # Default capacity
 
-    fn push(msg: Message):
+    me push(msg: Message):
         """Add a message to the mailbox."""
         if self.queue.len() >= self.capacity:
             # Back-pressure: drop oldest message to make room for new one
@@ -130,7 +274,10 @@ struct ActorContext:
     id: ActorId
     mailbox: Mailbox
     state: ActorState
-    actor_instance: Any  # Simplified - would be generic
+    handlers: HandlerTable
+    processed_count: i64
+    error_count: i64
+    last_error: text
 
 enum ActorState:
     """Lifecycle state of an actor."""
@@ -141,26 +288,74 @@ enum ActorState:
     Stopped
 
 # ================================================================
+# Reply Store
+# ================================================================
+
+struct ReplyEntry:
+    """Stores a reply value keyed by reply ActorId."""
+    reply_id: i64
+    value: text
+
+struct ReplyStore:
+    """Collects results from ask-style messages."""
+    entries: [ReplyEntry]
+
+impl ReplyStore:
+    me put(reply_id: i64, value: text):
+        """Store a reply value."""
+        self.entries.push(ReplyEntry(reply_id: reply_id, value: value))
+
+    fn get(reply_id: i64) -> text?:
+        """Retrieve a reply value, or nil if not yet available."""
+        for entry in self.entries:
+            if entry.reply_id == reply_id:
+                return Some(entry.value)
+        nil
+
+    fn has(reply_id: i64) -> bool:
+        """Check if a reply is available."""
+        for entry in self.entries:
+            if entry.reply_id == reply_id:
+                return true
+        false
+
+fn make_reply_store() -> ReplyStore:
+    ReplyStore(entries: [])
+
+# ================================================================
 # Actor Runtime
 # ================================================================
 
 struct ActorRuntime:
-    """Runtime that manages all actors."""
+    """Runtime that manages all actors and dispatches messages.
+
+    The runtime maintains a dict of actor contexts keyed by actor ID,
+    a ready queue of actors with pending messages, and a reply store
+    for ask-style request/response patterns.
+    """
     actors: Dict<i64, ActorContext>
     ready_queue: [i64]  # Actor IDs with messages to process
+    replies: ReplyStore
 
 impl ActorRuntime:
     static fn new() -> ActorRuntime:
         ActorRuntime(
             actors: {},
-            ready_queue: []
+            ready_queue: [],
+            replies: make_reply_store()
         )
 
-    fn spawn_actor(actor_instance: Any) -> ActorRef:
-        """Spawn a new actor instance.
+    me spawn_actor(handlers: HandlerTable) -> ActorRef:
+        """Spawn a new actor with the given method handlers.
+
+        The handler table maps method names to functions. When a message
+        arrives targeting a method name, the runtime invokes the matching
+        handler with the message arguments.
 
         Example:
-            val worker = runtime.spawn_actor(Worker())
+            var h = make_handlers()
+            h.register("greet", \\args: "Hello!")
+            val ref = runtime.spawn_actor(h)
         """
         val actor_id = ActorId.new()
         val mailbox = Mailbox.default()
@@ -169,67 +364,164 @@ impl ActorRuntime:
             id: actor_id,
             mailbox: mailbox,
             state: ActorState.Running,
-            actor_instance: actor_instance
+            handlers: handlers,
+            processed_count: 0,
+            error_count: 0,
+            last_error: ""
         )
 
         self.actors.insert(actor_id.value, context)
+        self.ready_queue.push(actor_id.value)
 
         ActorRef(
             actor_id: actor_id,
             mailbox: mailbox
         )
 
-    fn process_mailbox(actor_id: i64) -> bool:
-        """Process one message from actor's mailbox.
+    me process_mailbox(actor_id: i64) -> bool:
+        """Process one message from an actor's mailbox.
 
-        Returns true if a message was processed.
+        Pops the next message, looks up the method name in the actor's
+        handler table, and invokes the matching handler. If the message
+        has a reply_to address, the result is stored in the reply store.
+
+        Returns true if the mailbox still has more messages after processing.
         """
-        val context = self.actors.get(actor_id) ?? return false
-        val msg = context.mailbox.pop() ?? return false
-
-        # Method invocation on actor_instance requires reflection or generated
-        # dispatch code, which is not yet available in the interpreter.
-        # For now, log the message dispatch for debugging.
-        eprint("Warning: Actor method dispatch not yet implemented - requires reflection or codegen")
-        print "Actor {actor_id} processing message: {msg.method}({msg.args})"
-
-        # If more messages, stay in ready queue
-        not context.mailbox.is_empty()
-
-    fn run_once() -> bool:
-        """Process one actor's messages.
-
-        Returns true if there's more work to do.
-        """
-        if self.ready_queue.is_empty():
+        val context = self.actors.get(actor_id)
+        if context == nil:
             return false
 
-        val actor_id = self.ready_queue.pop_front() ?? return false
-        val has_more = self.process_mailbox(actor_id)
+        val ctx = context
+        val msg = ctx.mailbox.pop()
+        if msg == nil:
+            return false
+
+        val the_msg = msg
+
+        # Guard: do not dispatch to stopped actors
+        val is_stopped = ctx.state == ActorState.Stopped
+        val is_stopping = ctx.state == ActorState.Stopping
+        if is_stopped:
+            return false
+        if is_stopping:
+            return false
+
+        # Dispatch: look up method in handler table and invoke
+        val dispatch_result = ctx.handlers.dispatch(the_msg.method, the_msg.args)
+
+        if dispatch_result.is_ok():
+            ctx.processed_count = ctx.processed_count + 1
+
+            # If the message requested a reply, store the result
+            val has_reply = the_msg.reply_to.?
+            if has_reply:
+                val reply_id = the_msg.reply_to
+                self.replies.put(reply_id.value, dispatch_result.value)
+        else:
+            ctx.error_count = ctx.error_count + 1
+            ctx.last_error = dispatch_result.error_msg
+
+        # Return whether more messages remain
+        val is_empty = ctx.mailbox.is_empty()
+        not is_empty
+
+    me run_once() -> bool:
+        """Process one message from the next ready actor.
+
+        Returns true if there is more work to do (more ready actors).
+        """
+        if self.ready_queue.is_empty():
+            # Scan all actors for non-empty mailboxes and populate ready queue
+            self._refresh_ready_queue()
+            if self.ready_queue.is_empty():
+                return false
+
+        val actor_id = self.ready_queue.pop_front()
+        if actor_id == nil:
+            return false
+
+        val the_id = actor_id
+        val has_more = self.process_mailbox(the_id)
 
         if has_more:
-            self.ready_queue.push(actor_id)
+            self.ready_queue.push(the_id)
 
         not self.ready_queue.is_empty()
 
-    fn run():
+    me _refresh_ready_queue():
+        """Scan all actors and add those with pending messages to the ready queue."""
+        var already_queued: [i64] = []
+        for id in self.ready_queue:
+            already_queued.push(id)
+
+        for key in self.actors.keys():
+            val ctx = self.actors.get(key)
+            if ctx == nil:
+                pass
+            else:
+                val the_ctx = ctx
+                val has_messages = not the_ctx.mailbox.is_empty()
+                if has_messages:
+                    # Check not already in ready queue
+                    var found = false
+                    for queued_id in already_queued:
+                        if queued_id == key:
+                            found = true
+                    if not found:
+                        self.ready_queue.push(key)
+
+    me run():
         """Run the actor system until all mailboxes are empty."""
         var continue_running = true
         while continue_running:
             continue_running = self.run_once()
 
-    fn stop_actor(actor_id: i64):
-        """Stop an actor and remove it from the runtime."""
-        # Set actor state to Stopping before cleanup
+    me stop_actor(actor_id: i64):
+        """Stop an actor gracefully.
+
+        Sets state to Stopping, drains remaining messages, then
+        sets state to Stopped and removes from the runtime.
+        """
         val context = self.actors.get(actor_id)
-        if context.?:
-            val ctx = context.unwrap()
+        if context != nil:
+            val ctx = context
             ctx.state = ActorState.Stopping
             # Drain remaining messages
             while not ctx.mailbox.is_empty():
                 ctx.mailbox.pop()
             ctx.state = ActorState.Stopped
         self.actors.remove(actor_id)
+
+    fn get_reply(reply_id: ActorId) -> text?:
+        """Check for a reply to an ask-style message.
+
+        Args:
+            reply_id: The ActorId returned by ActorRef.ask()
+
+        Returns:
+            Some(value) if the reply has arrived, nil otherwise.
+        """
+        val has_it = self.replies.has(reply_id.value)
+        if has_it:
+            return self.replies.get(reply_id.value)
+        nil
+
+    fn actor_count() -> i64:
+        """Return the number of live actors."""
+        var count = 0
+        for key in self.actors.keys():
+            count = count + 1
+        count
+
+    fn get_actor_stats(actor_id: i64) -> text:
+        """Return stats string for a single actor."""
+        val context = self.actors.get(actor_id)
+        if context == nil:
+            return "Actor {actor_id}: not found"
+        val ctx = context
+        val methods = ctx.handlers.method_names()
+        var method_str = methods.join(", ")
+        "Actor {actor_id}: processed={ctx.processed_count}, errors={ctx.error_count}, pending={ctx.mailbox.len()}, methods=[{method_str}]"
 
 # ================================================================
 # Global Runtime
@@ -243,28 +535,31 @@ fn get_actor_runtime() -> ActorRuntime:
         global_actor_runtime = Some(ActorRuntime.new())
     global_actor_runtime.unwrap()
 
-fn spawn_actor(actor_instance: Any) -> ActorRef:
-    """Spawn an actor on the global runtime.
+fn spawn_actor(handlers: HandlerTable) -> ActorRef:
+    """Spawn an actor on the global runtime with the given handlers.
 
     Example:
-        val worker = spawn_actor(Worker())
+        var h = make_handlers()
+        h.register("process", \\args: do_work(args))
+        val worker = spawn_actor(h)
         worker.send("process", ["data"])
     """
-    get_actor_runtime().spawn_actor(actor_instance)
+    get_actor_runtime().spawn_actor(handlers)
 
 # ================================================================
 # Actor Utilities
 # ================================================================
 
-fn spawn_pool(count: i64, factory: fn() -> Any) -> [ActorRef]:
-    """Spawn N actors using a factory function.
+fn spawn_pool(count: i64, factory: fn() -> HandlerTable) -> [ActorRef]:
+    """Spawn N actors using a handler table factory.
 
     Example:
-        val workers = spawn_pool(10, \: Worker())
+        val workers = spawn_pool(4, \\: make_worker_handlers())
     """
-    var pool = []
+    var pool: [ActorRef] = []
     for i in 0..count:
-        pool.push(spawn_actor(factory()))
+        val handlers = factory()
+        pool.push(spawn_actor(handlers))
     pool
 
 fn broadcast(actors: [ActorRef], method: text, args: [text]):
@@ -273,19 +568,21 @@ fn broadcast(actors: [ActorRef], method: text, args: [text]):
     Example:
         broadcast(workers, "stop", [])
     """
-    for actor in actors:
-        actor.send(method, args)
+    for actor_ref in actors:
+        actor_ref.send(method, args)
 
 fn round_robin(actors: [ActorRef], tasks: [text]):
     """Distribute tasks to actors in round-robin fashion.
 
+    Each task is sent as the first argument to the "process" method.
+
     Example:
-        round_robin(workers, tasks)
+        round_robin(workers, ["task1", "task2", "task3"])
     """
     var index = 0
+    val actor_count = actors.len()
     for task in tasks:
-        actors[index % actors.len()].send("process", [task])
+        val target_idx = index % actor_count
+        val target = actors[target_idx]
+        target.send("process", [task])
         index = index + 1
-
-# Note: Any type is simplified - would use generics in full implementation
-type Any = text
