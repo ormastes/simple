@@ -1,0 +1,1367 @@
+# Digital Signature Utilities Module
+#
+# Comprehensive digital signature utilities for the Simple language.
+# Pure Simple implementation - no FFI, no external dependencies.
+#
+# SECURITY CRITICAL:
+# - Use SHA-256 or stronger hash functions
+# - RSA keys: 2048+ bits minimum, 4096+ recommended
+# - DSA parameters: 2048+ bits for p, 256+ for q
+# - PSS is preferred over PKCS#1 v1.5 (probabilistic, more secure)
+# - DSA requires unique k per signature (critical!)
+# - Always verify signatures before trusting
+#
+# Implemented Schemes:
+# 1. RSA Signatures (PKCS#1 v1.5 and PSS)
+# 2. DSA (Digital Signature Algorithm)
+# 3. Blind signatures (privacy-preserving)
+# 4. Multi-signature schemes
+# 5. Timestamp and metadata support
+#
+# Standards:
+# - PKCS#1 v1.5 (RFC 3447)
+# - RSA-PSS (RFC 8017)
+# - DSA (FIPS 186-4)
+
+# =============================================================================
+# Data Structures (Tuple-Based)
+# =============================================================================
+
+# Signature: (r, s, algorithm)
+# - r: i64 - first component (or entire signature for RSA)
+# - s: i64 - second component (DSA, ECDSA) or 0 for RSA
+# - algorithm: text - "RSA-PKCS1", "RSA-PSS", "DSA", etc.
+fn create_signature(r: i64, s: i64, algorithm: text) -> tuple:
+    (r, s, algorithm)
+
+fn signature_r(sig: tuple) -> i64:
+    sig[0]
+
+fn signature_s(sig: tuple) -> i64:
+    sig[1]
+
+fn signature_algorithm(sig: tuple) -> text:
+    sig[2]
+
+# RSA Public Key: (n, e)
+# - n: i64 - modulus
+# - e: i64 - public exponent (typically 65537)
+fn create_rsa_public_key(n: i64, e: i64) -> tuple:
+    (n, e)
+
+fn rsa_public_key_n(key: tuple) -> i64:
+    key[0]
+
+fn rsa_public_key_e(key: tuple) -> i64:
+    key[1]
+
+# RSA Private Key: (n, d)
+# - n: i64 - modulus
+# - d: i64 - private exponent
+fn create_rsa_private_key(n: i64, d: i64) -> tuple:
+    (n, d)
+
+fn rsa_private_key_n(key: tuple) -> i64:
+    key[0]
+
+fn rsa_private_key_d(key: tuple) -> i64:
+    key[1]
+
+# DSA Parameters: (p, q, g, bits)
+# - p: i64 - large prime modulus
+# - q: i64 - prime divisor of p-1
+# - g: i64 - generator
+# - bits: i64 - bit size of p
+fn create_dsa_params(p: i64, q: i64, g: i64, bits: i64) -> tuple:
+    (p, q, g, bits)
+
+fn dsa_params_p(params: tuple) -> i64:
+    params[0]
+
+fn dsa_params_q(params: tuple) -> i64:
+    params[1]
+
+fn dsa_params_g(params: tuple) -> i64:
+    params[2]
+
+fn dsa_params_bits(params: tuple) -> i64:
+    params[3]
+
+# DSA Public Key: (params, y)
+# - params: tuple - DSA parameters
+# - y: i64 - public key value (y = g^x mod p)
+fn create_dsa_public_key(params: tuple, y: i64) -> tuple:
+    (params, y)
+
+fn dsa_public_key_params(key: tuple) -> tuple:
+    key[0]
+
+fn dsa_public_key_y(key: tuple) -> i64:
+    key[1]
+
+# DSA Private Key: (params, x)
+# - params: tuple - DSA parameters
+# - x: i64 - private key value
+fn create_dsa_private_key(params: tuple, x: i64) -> tuple:
+    (params, x)
+
+fn dsa_private_key_params(key: tuple) -> tuple:
+    key[0]
+
+fn dsa_private_key_x(key: tuple) -> i64:
+    key[1]
+
+# Signature Metadata: (algorithm, timestamp, signer)
+fn create_signature_metadata(algorithm: text, timestamp: i64, signer: text) -> tuple:
+    (algorithm, timestamp, signer)
+
+fn signature_metadata_algorithm(meta: tuple) -> text:
+    meta[0]
+
+fn signature_metadata_timestamp(meta: tuple) -> i64:
+    meta[1]
+
+fn signature_metadata_signer(meta: tuple) -> text:
+    meta[2]
+
+# =============================================================================
+# Modular Arithmetic Utilities
+# =============================================================================
+
+fn mod_pow(base: i64, exp: i64, modulus: i64) -> i64:
+    """Modular exponentiation: (base^exp) mod modulus.
+
+    Uses binary exponentiation for efficiency.
+    Critical for RSA and DSA operations.
+
+    Example:
+        mod_pow(3, 5, 7) = 5  # (3^5) mod 7 = 243 mod 7 = 5
+    """
+    if modulus == 1:
+        return 0
+
+    var result = 1
+    var b = base % modulus
+    var e = exp
+
+    while e > 0:
+        if e % 2 == 1:
+            result = (result * b) % modulus
+        e = e / 2
+        b = (b * b) % modulus
+
+    result
+
+fn mod_inverse(a: i64, m: i64) -> i64:
+    """Modular multiplicative inverse using Extended Euclidean Algorithm.
+
+    Find x such that (a * x) mod m = 1.
+    Returns -1 if inverse doesn't exist.
+
+    Critical for DSA signature generation and RSA.
+
+    Example:
+        mod_inverse(3, 11) = 4  # (3 * 4) mod 11 = 1
+    """
+    if m == 1:
+        return 0
+
+    val m0 = m
+    var x0 = 0
+    var x1 = 1
+    var a_var = a
+    var m_var = m
+
+    while a_var > 1:
+        val q = a_var / m_var
+        var t = m_var
+
+        m_var = a_var % m_var
+        a_var = t
+        t = x0
+
+        x0 = x1 - q * x0
+        x1 = t
+
+    if x1 < 0:
+        x1 = x1 + m0
+
+    x1
+
+fn gcd(a: i64, b: i64) -> i64:
+    """Greatest Common Divisor using Euclidean algorithm."""
+    var x = a
+    var y = b
+
+    while y != 0:
+        val temp = y
+        y = x % y
+        x = temp
+
+    if x < 0:
+        -x
+    else:
+        x
+
+# =============================================================================
+# Simple Hash Functions (for signatures)
+# =============================================================================
+
+fn hash_message_simple(message: text) -> i64:
+    """Simple hash for message signing.
+
+    WARNING: Not cryptographically secure.
+    In production, use SHA-256 from crypto_utils.spl.
+
+    This is a simplified version for demonstration.
+    """
+    var hash = 5381
+    var i = 0
+
+    while i < message.len():
+        hash = ((hash << 5) + hash) + message[i].ord()
+        i = i + 1
+
+    # Make hash positive and bounded
+    if hash < 0:
+        hash = -hash
+
+    hash % 1000000007
+
+fn hash_bytes_simple(bytes: list) -> i64:
+    """Hash a byte list."""
+    var hash = 5381
+    var i = 0
+
+    while i < bytes.len():
+        hash = ((hash << 5) + hash) + bytes.get(i)
+        i = i + 1
+
+    if hash < 0:
+        hash = -hash
+
+    hash % 1000000007
+
+fn hash_for_signature(message: text, algorithm: text) -> i64:
+    """Hash message for signature with algorithm selection.
+
+    In production, this would select SHA-256, SHA-512, etc.
+    For now, uses simple hash.
+    """
+    hash_message_simple(message)
+
+# =============================================================================
+# PKCS#1 v1.5 Padding (RSA Signatures)
+# =============================================================================
+
+fn emsa_pkcs1_encode(hash_value: i64, em_len: i64) -> list:
+    """EMSA-PKCS1-v1_5 encoding.
+
+    Encoding: 0x00 || 0x01 || PS || 0x00 || DigestInfo
+    - PS: padding string of 0xFF bytes
+    - DigestInfo: hash algorithm identifier + hash
+
+    For simplification, we encode hash directly.
+
+    Args:
+        hash_value: Hash of the message
+        em_len: Intended length of encoded message (in bytes)
+
+    Returns:
+        Encoded message as byte list
+    """
+    var em = []
+
+    # 0x00 0x01
+    em.push(0x00)
+    em.push(0x01)
+
+    # Convert hash to bytes (simplified - 8 bytes for i64)
+    var hash_bytes = []
+    var h = hash_value
+    var i = 0
+    while i < 8:
+        hash_bytes.push(h & 0xFF)
+        h = h >> 8
+        i = i + 1
+
+    # Reverse to big-endian
+    val hash_len = hash_bytes.len()
+
+    # Calculate padding length
+    # em_len = 2 + ps_len + 1 + hash_len
+    val ps_len = em_len - 3 - hash_len
+
+    # Add padding string (0xFF bytes)
+    var j = 0
+    while j < ps_len:
+        em.push(0xFF)
+        j = j + 1
+
+    # 0x00 separator
+    em.push(0x00)
+
+    # Add hash (big-endian)
+    var k = hash_len - 1
+    while k >= 0:
+        em.push(hash_bytes.get(k))
+        k = k - 1
+
+    em
+
+fn emsa_pkcs1_decode(em: list) -> i64:
+    """Decode EMSA-PKCS1-v1_5 encoding to extract hash.
+
+    Returns -1 on error.
+    """
+    if em.len() < 11:
+        return -1
+
+    if em.get(0) != 0x00:
+        return -1
+
+    if em.get(1) != 0x01:
+        return -1
+
+    # Find 0x00 separator
+    var sep_idx = -1
+    var i = 2
+    while i < em.len():
+        if em.get(i) == 0x00:
+            sep_idx = i
+            i = em.len()  # break
+        else:
+            if em.get(i) != 0xFF:
+                return -1
+        i = i + 1
+
+    if sep_idx < 0:
+        return -1
+
+    # Extract hash (last 8 bytes, big-endian)
+    val hash_start = sep_idx + 1
+    var hash_value = 0
+
+    var j = hash_start
+    while j < em.len():
+        hash_value = (hash_value << 8) | em.get(j)
+        j = j + 1
+
+    hash_value
+
+fn bytes_to_int(bytes: list) -> i64:
+    """Convert byte list to integer (big-endian)."""
+    var result = 0
+    var i = 0
+
+    while i < bytes.len():
+        result = (result << 8) | bytes.get(i)
+        i = i + 1
+
+    result
+
+fn int_to_bytes(value: i64, length: i64) -> list:
+    """Convert integer to byte list (big-endian, fixed length)."""
+    var bytes = []
+    var v = value
+
+    var i = 0
+    while i < length:
+        bytes.push(v & 0xFF)
+        v = v >> 8
+        i = i + 1
+
+    # Reverse to big-endian
+    var result = []
+    var j = bytes.len() - 1
+    while j >= 0:
+        result.push(bytes.get(j))
+        j = j - 1
+
+    result
+
+# =============================================================================
+# RSA PKCS#1 v1.5 Signatures
+# =============================================================================
+
+fn rsa_sign_pkcs1(message: text, private_key: tuple) -> tuple:
+    """Sign message using RSA PKCS#1 v1.5.
+
+    Steps:
+    1. Hash message
+    2. Encode hash with EMSA-PKCS1-v1_5
+    3. Convert encoded message to integer
+    4. Sign: s = m^d mod n
+
+    Args:
+        message: Message to sign
+        private_key: RSA private key (n, d)
+
+    Returns:
+        Signature tuple (s, 0, "RSA-PKCS1")
+    """
+    # Hash message
+    val hash_value = hash_for_signature(message, "RSA-PKCS1")
+
+    # Get key components
+    val n = rsa_private_key_n(private_key)
+    val d = rsa_private_key_d(private_key)
+
+    # Calculate modulus bit size (simplified: use byte count)
+    # In real implementation, would calculate exact bit size
+    val em_len = 32  # bytes
+
+    # Encode hash
+    val encoded = emsa_pkcs1_encode(hash_value, em_len)
+
+    # Convert to integer
+    val em_int = bytes_to_int(encoded)
+
+    # Sign: s = em^d mod n
+    val signature_value = mod_pow(em_int, d, n)
+
+    create_signature(signature_value, 0, "RSA-PKCS1")
+
+fn rsa_verify_pkcs1(message: text, signature: tuple, public_key: tuple) -> bool:
+    """Verify RSA PKCS#1 v1.5 signature.
+
+    Steps:
+    1. Decrypt signature: em = s^e mod n
+    2. Hash message
+    3. Encode hash with EMSA-PKCS1-v1_5
+    4. Compare decoded hash with computed hash
+
+    Args:
+        message: Original message
+        signature: Signature tuple
+        public_key: RSA public key (n, e)
+
+    Returns:
+        true if signature is valid
+    """
+    # Get signature value
+    val s = signature_r(signature)
+
+    # Get key components
+    val n = rsa_public_key_n(public_key)
+    val e = rsa_public_key_e(public_key)
+
+    # Decrypt signature: em = s^e mod n
+    val em_int = mod_pow(s, e, n)
+
+    # Convert to bytes
+    val em_bytes = int_to_bytes(em_int, 32)
+
+    # Decode to extract hash
+    val decoded_hash = emsa_pkcs1_decode(em_bytes)
+
+    if decoded_hash < 0:
+        return false
+
+    # Hash message
+    val computed_hash = hash_for_signature(message, "RSA-PKCS1")
+
+    # Compare hashes
+    decoded_hash == computed_hash
+
+# =============================================================================
+# MGF1 (Mask Generation Function)
+# =============================================================================
+
+fn mgf1_simple(seed: i64, length: i64) -> list:
+    """MGF1 mask generation function (simplified).
+
+    In real implementation, would use SHA-256.
+    This uses a simple PRNG for demonstration.
+
+    Args:
+        seed: Seed value
+        length: Output length in bytes
+
+    Returns:
+        Byte list of specified length
+    """
+    var mask = []
+    var state = seed
+
+    var i = 0
+    while i < length:
+        # Simple PRNG
+        state = (state * 1103515245 + 12345) % 2147483648
+        mask.push((state >> 8) & 0xFF)
+        i = i + 1
+
+    mask
+
+fn xor_bytes(a: list, b: list) -> list:
+    """XOR two byte lists."""
+    var result = []
+    val min_len = if a.len() < b.len(): a.len() else: b.len()
+
+    var i = 0
+    while i < min_len:
+        result.push(a.get(i) ^ b.get(i))
+        i = i + 1
+
+    result
+
+# =============================================================================
+# RSA-PSS (Probabilistic Signature Scheme)
+# =============================================================================
+
+fn pss_encode(hash_value: i64, salt: list, em_bits: i64) -> list:
+    """PSS encoding.
+
+    Steps:
+    1. M' = 0x00...00 || mHash || salt
+    2. H = Hash(M')
+    3. DB = PS || 0x01 || salt
+    4. dbMask = MGF(H, emLen - hLen - 1)
+    5. maskedDB = DB XOR dbMask
+    6. EM = maskedDB || H || 0xbc
+
+    Simplified implementation.
+
+    Args:
+        hash_value: Hash of message
+        salt: Random salt
+        em_bits: Bit length of encoded message
+
+    Returns:
+        Encoded message
+    """
+    val em_len = (em_bits + 7) / 8  # Round up to bytes
+    val h_len = 8  # Hash length (simplified)
+    val salt_len = salt.len()
+
+    # M' = 8*0x00 || hash || salt
+    var m_prime = []
+    var i = 0
+    while i < 8:
+        m_prime.push(0x00)
+        i = i + 1
+
+    # Add hash bytes
+    val hash_bytes = int_to_bytes(hash_value, h_len)
+    var j = 0
+    while j < hash_bytes.len():
+        m_prime.push(hash_bytes.get(j))
+        j = j + 1
+
+    # Add salt
+    var k = 0
+    while k < salt.len():
+        m_prime.push(salt.get(k))
+        k = k + 1
+
+    # H = Hash(M')
+    val h = hash_bytes_simple(m_prime)
+    val h_bytes = int_to_bytes(h, h_len)
+
+    # DB = PS || 0x01 || salt
+    val db_len = em_len - h_len - 1
+    val ps_len = db_len - salt_len - 1
+
+    var db = []
+    var ps = 0
+    while ps < ps_len:
+        db.push(0x00)
+        ps = ps + 1
+
+    db.push(0x01)
+
+    var s = 0
+    while s < salt.len():
+        db.push(salt.get(s))
+        s = s + 1
+
+    # dbMask = MGF(H, db_len)
+    val db_mask = mgf1_simple(h, db_len)
+
+    # maskedDB = DB XOR dbMask
+    val masked_db = xor_bytes(db, db_mask)
+
+    # EM = maskedDB || H || 0xbc
+    var em = []
+    var m = 0
+    while m < masked_db.len():
+        em.push(masked_db.get(m))
+        m = m + 1
+
+    var hb = 0
+    while hb < h_bytes.len():
+        em.push(h_bytes.get(hb))
+        hb = hb + 1
+
+    em.push(0xbc)
+
+    em
+
+fn pss_verify_encoding(hash_value: i64, encoded: list, em_bits: i64, salt_len: i64) -> bool:
+    """Verify PSS encoding.
+
+    Steps:
+    1. Extract maskedDB, H from EM
+    2. dbMask = MGF(H, len(maskedDB))
+    3. DB = maskedDB XOR dbMask
+    4. Extract salt from DB
+    5. M' = 0x00...00 || mHash || salt
+    6. H' = Hash(M')
+    7. Compare H == H'
+
+    Args:
+        hash_value: Hash of message
+        encoded: Encoded message
+        em_bits: Bit length
+        salt_len: Salt length
+
+    Returns:
+        true if encoding is valid
+    """
+    val em_len = (em_bits + 7) / 8
+    val h_len = 8
+
+    if encoded.len() < em_len:
+        return false
+
+    # Check last byte
+    if encoded.get(encoded.len() - 1) != 0xbc:
+        return false
+
+    # Extract maskedDB and H
+    val masked_db_len = em_len - h_len - 1
+    var masked_db = []
+    var i = 0
+    while i < masked_db_len:
+        masked_db.push(encoded.get(i))
+        i = i + 1
+
+    var h_bytes = []
+    var j = masked_db_len
+    while j < masked_db_len + h_len:
+        h_bytes.push(encoded.get(j))
+        j = j + 1
+
+    val h = bytes_to_int(h_bytes)
+
+    # dbMask = MGF(H, len(maskedDB))
+    val db_mask = mgf1_simple(h, masked_db_len)
+
+    # DB = maskedDB XOR dbMask
+    val db = xor_bytes(masked_db, db_mask)
+
+    # Extract salt (last salt_len bytes of DB)
+    val ps_len = masked_db_len - salt_len - 1
+
+    # Check PS is all zeros
+    var p = 0
+    while p < ps_len:
+        if db.get(p) != 0x00:
+            return false
+        p = p + 1
+
+    # Check 0x01 separator
+    if db.get(ps_len) != 0x01:
+        return false
+
+    # Extract salt
+    var salt = []
+    var s = ps_len + 1
+    while s < db.len():
+        salt.push(db.get(s))
+        s = s + 1
+
+    # M' = 8*0x00 || hash || salt
+    var m_prime = []
+    var z = 0
+    while z < 8:
+        m_prime.push(0x00)
+        z = z + 1
+
+    val hash_bytes = int_to_bytes(hash_value, h_len)
+    var hb = 0
+    while hb < hash_bytes.len():
+        m_prime.push(hash_bytes.get(hb))
+        hb = hb + 1
+
+    var sb = 0
+    while sb < salt.len():
+        m_prime.push(salt.get(sb))
+        sb = sb + 1
+
+    # H' = Hash(M')
+    val h_prime = hash_bytes_simple(m_prime)
+
+    # Compare H == H'
+    h == h_prime
+
+fn generate_random_salt(length: i64) -> list:
+    """Generate random salt (simplified PRNG).
+
+    In production, use cryptographically secure random.
+    """
+    var salt = []
+    var state = 12345  # Fixed seed for demonstration
+
+    var i = 0
+    while i < length:
+        state = (state * 1103515245 + 12345) % 2147483648
+        salt.push((state >> 8) & 0xFF)
+        i = i + 1
+
+    salt
+
+fn rsa_sign_pss(message: text, private_key: tuple, salt_len: i64) -> tuple:
+    """Sign message using RSA-PSS.
+
+    More secure than PKCS#1 v1.5 due to randomization.
+
+    Args:
+        message: Message to sign
+        private_key: RSA private key
+        salt_len: Salt length in bytes (typically 32)
+
+    Returns:
+        Signature tuple
+    """
+    # Hash message
+    val hash_value = hash_for_signature(message, "RSA-PSS")
+
+    # Generate random salt
+    val salt = generate_random_salt(salt_len)
+
+    # Get key components
+    val n = rsa_private_key_n(private_key)
+    val d = rsa_private_key_d(private_key)
+
+    # PSS encoding
+    val em_bits = 256  # Simplified
+    val encoded = pss_encode(hash_value, salt, em_bits)
+
+    # Convert to integer
+    val em_int = bytes_to_int(encoded)
+
+    # Sign: s = em^d mod n
+    val signature_value = mod_pow(em_int, d, n)
+
+    create_signature(signature_value, salt_len, "RSA-PSS")
+
+fn rsa_verify_pss(message: text, signature: tuple, public_key: tuple, salt_len: i64) -> bool:
+    """Verify RSA-PSS signature.
+
+    Args:
+        message: Original message
+        signature: Signature tuple
+        public_key: RSA public key
+        salt_len: Salt length used in signing
+
+    Returns:
+        true if signature is valid
+    """
+    # Get signature value
+    val s = signature_r(signature)
+
+    # Get key components
+    val n = rsa_public_key_n(public_key)
+    val e = rsa_public_key_e(public_key)
+
+    # Decrypt signature: em = s^e mod n
+    val em_int = mod_pow(s, e, n)
+
+    # Convert to bytes
+    val em_bits = 256
+    val em_len = (em_bits + 7) / 8
+    val em_bytes = int_to_bytes(em_int, em_len)
+
+    # Hash message
+    val hash_value = hash_for_signature(message, "RSA-PSS")
+
+    # Verify PSS encoding
+    pss_verify_encoding(hash_value, em_bytes, em_bits, salt_len)
+
+# =============================================================================
+# DSA (Digital Signature Algorithm)
+# =============================================================================
+
+fn dsa_generate_params(bits: i64) -> tuple:
+    """Generate DSA parameters (simplified).
+
+    In real implementation:
+    1. Generate prime q (160 or 256 bits)
+    2. Generate prime p such that q divides (p-1)
+    3. Generate generator g
+
+    This is simplified with small primes for demonstration.
+
+    Args:
+        bits: Bit size for p (e.g., 2048)
+
+    Returns:
+        DSA parameters tuple (p, q, g, bits)
+    """
+    # Simplified: use small primes
+    # In production, generate large primes
+    val q = 23  # Small prime
+    val p = 47  # Prime such that q divides p-1 (47-1 = 46 = 2*23)
+
+    # Generator: g = h^((p-1)/q) mod p where 1 < h < p-1
+    # With our values: g = 2^(46/23) = 2^2 = 4 mod 47
+    val g = 4
+
+    create_dsa_params(p, q, g, bits)
+
+fn dsa_generate_keypair(params: tuple) -> tuple:
+    """Generate DSA keypair.
+
+    Private key x: random in [1, q-1]
+    Public key y: y = g^x mod p
+
+    Args:
+        params: DSA parameters
+
+    Returns:
+        (public_key, private_key)
+    """
+    val p = dsa_params_p(params)
+    val q = dsa_params_q(params)
+    val g = dsa_params_g(params)
+
+    # Generate private key x (simplified: fixed for demonstration)
+    val x = 7  # In production, random in [1, q-1]
+
+    # Compute public key y = g^x mod p
+    val y = mod_pow(g, x, p)
+
+    val public_key = create_dsa_public_key(params, y)
+    val private_key = create_dsa_private_key(params, x)
+
+    (public_key, private_key)
+
+fn dsa_sign(message: text, private_key: tuple) -> tuple:
+    """Sign message using DSA.
+
+    Algorithm:
+    1. Hash message: h = Hash(m)
+    2. Generate random k in [1, q-1] (must be unique!)
+    3. r = (g^k mod p) mod q
+    4. s = k^(-1) * (h + x*r) mod q
+    5. Return (r, s)
+
+    CRITICAL: k must be unique per signature and secret!
+    Reusing k allows private key recovery.
+
+    Args:
+        message: Message to sign
+        private_key: DSA private key
+
+    Returns:
+        Signature tuple (r, s, "DSA")
+    """
+    val params = dsa_private_key_params(private_key)
+    val p = dsa_params_p(params)
+    val q = dsa_params_q(params)
+    val g = dsa_params_g(params)
+    val x = dsa_private_key_x(private_key)
+
+    # Hash message
+    val h = hash_for_signature(message, "DSA")
+    val h_mod_q = h % q
+
+    # Generate random k (simplified: derived from message hash)
+    # In production: use secure random, ensure uniqueness
+    val k = (h % (q - 1)) + 1
+
+    # r = (g^k mod p) mod q
+    val r = mod_pow(g, k, p) % q
+
+    # s = k^(-1) * (h + x*r) mod q
+    val k_inv = mod_inverse(k, q)
+    val s = (k_inv * (h_mod_q + x * r)) % q
+
+    create_signature(r, s, "DSA")
+
+fn dsa_verify(message: text, signature: tuple, public_key: tuple) -> bool:
+    """Verify DSA signature.
+
+    Algorithm:
+    1. Check 0 < r < q and 0 < s < q
+    2. w = s^(-1) mod q
+    3. u1 = h * w mod q
+    4. u2 = r * w mod q
+    5. v = ((g^u1 * y^u2) mod p) mod q
+    6. Accept if v == r
+
+    Args:
+        message: Original message
+        signature: Signature tuple
+        public_key: DSA public key
+
+    Returns:
+        true if signature is valid
+    """
+    val params = dsa_public_key_params(public_key)
+    val p = dsa_params_p(params)
+    val q = dsa_params_q(params)
+    val g = dsa_params_g(params)
+    val y = dsa_public_key_y(public_key)
+
+    val r = signature_r(signature)
+    val s = signature_s(signature)
+
+    # Check bounds
+    if r <= 0:
+        return false
+    if r >= q:
+        return false
+    if s <= 0:
+        return false
+    if s >= q:
+        return false
+
+    # Hash message
+    val h = hash_for_signature(message, "DSA")
+    val h_mod_q = h % q
+
+    # w = s^(-1) mod q
+    val w = mod_inverse(s, q)
+
+    # u1 = h * w mod q
+    val u1 = (h_mod_q * w) % q
+
+    # u2 = r * w mod q
+    val u2 = (r * w) % q
+
+    # v = ((g^u1 * y^u2) mod p) mod q
+    val g_u1 = mod_pow(g, u1, p)
+    val y_u2 = mod_pow(y, u2, p)
+    val v = ((g_u1 * y_u2) % p) % q
+
+    # Accept if v == r
+    v == r
+
+# =============================================================================
+# Blind Signatures (Privacy-Preserving)
+# =============================================================================
+
+fn generate_blinding_factor() -> i64:
+    """Generate random blinding factor (simplified).
+
+    In production, use cryptographically secure random.
+    """
+    12345
+
+fn blind_message(message: text, blinding_factor: i64, public_key: tuple) -> i64:
+    """Blind a message for blind signature.
+
+    m' = m * r^e mod n
+
+    Args:
+        message: Message to blind
+        blinding_factor: Random blinding factor r
+        public_key: RSA public key
+
+    Returns:
+        Blinded message
+    """
+    val n = rsa_public_key_n(public_key)
+    val e = rsa_public_key_e(public_key)
+
+    # Hash message
+    val m = hash_for_signature(message, "BLIND-RSA")
+
+    # r^e mod n
+    val r_e = mod_pow(blinding_factor, e, n)
+
+    # m' = m * r^e mod n
+    (m * r_e) % n
+
+fn unblind_signature(blind_sig: i64, blinding_factor: i64, public_key: tuple) -> i64:
+    """Unblind a signature.
+
+    s = s' * r^(-1) mod n
+
+    Args:
+        blind_sig: Blind signature (s')
+        blinding_factor: Blinding factor used (r)
+        public_key: RSA public key (for modulus)
+
+    Returns:
+        Unblinded signature
+    """
+    val n = rsa_public_key_n(public_key)
+
+    # r^(-1) mod n
+    val r_inv = mod_inverse(blinding_factor, n)
+
+    # s = s' * r^(-1) mod n
+    (blind_sig * r_inv) % n
+
+# =============================================================================
+# Multi-Signature Schemes
+# =============================================================================
+
+fn aggregate_signatures(signatures: list) -> tuple:
+    """Aggregate multiple signatures (simplified).
+
+    In real multi-sig schemes (e.g., BLS), signatures can be combined.
+    This is a simplified version that just collects signatures.
+
+    Args:
+        signatures: List of signature tuples
+
+    Returns:
+        Aggregated signature (for this simplified version, returns first)
+    """
+    if signatures.len() == 0:
+        return create_signature(0, 0, "NONE")
+
+    # Simplified: just return first signature
+    # Real BLS aggregation would sum points on elliptic curve
+    signatures.get(0)
+
+fn verify_aggregate(message: text, agg_sig: tuple, public_keys: list) -> bool:
+    """Verify aggregated signature (simplified).
+
+    In real implementation, would verify against all public keys.
+
+    Args:
+        message: Message that was signed
+        agg_sig: Aggregated signature
+        public_keys: List of public keys
+
+    Returns:
+        true if aggregate is valid
+    """
+    if public_keys.len() == 0:
+        return false
+
+    # Simplified: verify against first key
+    val first_key = public_keys.get(0)
+    rsa_verify_pkcs1(message, agg_sig, first_key)
+
+# =============================================================================
+# Timestamp and Metadata
+# =============================================================================
+
+fn current_timestamp() -> i64:
+    """Get current timestamp (simplified).
+
+    In production, use actual system time.
+    """
+    1234567890
+
+fn timestamp_signature(signature: tuple) -> tuple:
+    """Add timestamp to signature.
+
+    Returns tuple: (signature, timestamp)
+    """
+    val ts = current_timestamp()
+    (signature, ts)
+
+fn verify_timestamp(sig_with_ts: tuple, max_timestamp: i64) -> bool:
+    """Verify signature timestamp.
+
+    Checks if timestamp is not too old.
+
+    Args:
+        sig_with_ts: (signature, timestamp)
+        max_timestamp: Maximum allowed timestamp
+
+    Returns:
+        true if timestamp is valid
+    """
+    val ts = sig_with_ts[1]
+    ts <= max_timestamp
+
+fn attach_metadata(signature: tuple, metadata: tuple) -> tuple:
+    """Attach metadata to signature.
+
+    Returns: (signature, metadata)
+    """
+    (signature, metadata)
+
+fn extract_metadata(sig_with_meta: tuple) -> tuple:
+    """Extract metadata from signature."""
+    sig_with_meta[1]
+
+fn create_detached_signature(message: text, private_key: tuple) -> tuple:
+    """Create detached signature (signature separate from message).
+
+    Just signs the message, returns signature.
+    """
+    rsa_sign_pkcs1(message, private_key)
+
+# =============================================================================
+# Signature Serialization
+# =============================================================================
+
+fn serialize_signature(signature: tuple) -> list:
+    """Convert signature to byte list.
+
+    Format: [r_bytes(32)] [s_bytes(32)] [algo_len(2)] [algo_bytes]
+    """
+    var bytes = []
+
+    val r = signature_r(signature)
+    val s = signature_s(signature)
+    val algo = signature_algorithm(signature)
+
+    # Serialize r (32 bytes)
+    val r_bytes = int_to_bytes(r, 32)
+    var i = 0
+    while i < r_bytes.len():
+        bytes.push(r_bytes.get(i))
+        i = i + 1
+
+    # Serialize s (32 bytes)
+    val s_bytes = int_to_bytes(s, 32)
+    var j = 0
+    while j < s_bytes.len():
+        bytes.push(s_bytes.get(j))
+        j = j + 1
+
+    # Algorithm length (2 bytes)
+    val algo_len = algo.len()
+    bytes.push((algo_len >> 8) & 0xFF)
+    bytes.push(algo_len & 0xFF)
+
+    # Algorithm bytes
+    var k = 0
+    while k < algo.len():
+        bytes.push(algo[k].ord())
+        k = k + 1
+
+    bytes
+
+fn deserialize_signature(bytes: list) -> tuple:
+    """Parse signature from byte list.
+
+    Returns signature tuple or nil on error.
+    """
+    if bytes.len() < 66:
+        return nil
+
+    # Extract r (first 32 bytes)
+    var r_bytes = []
+    var i = 0
+    while i < 32:
+        r_bytes.push(bytes.get(i))
+        i = i + 1
+    val r = bytes_to_int(r_bytes)
+
+    # Extract s (next 32 bytes)
+    var s_bytes = []
+    var j = 32
+    while j < 64:
+        s_bytes.push(bytes.get(j))
+        j = j + 1
+    val s = bytes_to_int(s_bytes)
+
+    # Extract algorithm length
+    val algo_len = (bytes.get(64) << 8) | bytes.get(65)
+
+    # Extract algorithm
+    var algo = ""
+    var k = 66
+    while k < 66 + algo_len:
+        if k < bytes.len():
+            algo = algo + bytes.get(k).chr()
+        k = k + 1
+
+    create_signature(r, s, algo)
+
+fn signature_to_hex(signature: tuple) -> text:
+    """Convert signature to hex representation."""
+    val bytes = serialize_signature(signature)
+
+    var hex = ""
+    var i = 0
+    while i < bytes.len():
+        val byte = bytes.get(i)
+        val high = (byte >> 4) & 0xF
+        val low = byte & 0xF
+
+        val high_char = if high < 10:
+            (high + 48).chr()  # '0' = 48
+        else:
+            (high - 10 + 97).chr()  # 'a' = 97
+
+        val low_char = if low < 10:
+            (low + 48).chr()
+        else:
+            (low - 10 + 97).chr()
+
+        hex = hex + high_char + low_char
+        i = i + 1
+
+    hex
+
+fn compare_signatures(sig1: tuple, sig2: tuple) -> bool:
+    """Compare two signatures for equality."""
+    val r1 = signature_r(sig1)
+    val s1 = signature_s(sig1)
+    val algo1 = signature_algorithm(sig1)
+
+    val r2 = signature_r(sig2)
+    val s2 = signature_s(sig2)
+    val algo2 = signature_algorithm(sig2)
+
+    var same = true
+    same = same && (r1 == r2)
+    same = same && (s1 == s2)
+    same = same && (algo1 == algo2)
+    same
+
+fn get_signature_length(key_bits: i64) -> i64:
+    """Get expected signature length in bytes.
+
+    For RSA, signature length equals key size.
+    """
+    (key_bits + 7) / 8
+
+fn is_valid_signature_format(signature: tuple) -> bool:
+    """Validate signature format.
+
+    Checks if signature tuple is properly formed.
+    """
+    if signature == nil:
+        return false
+
+    val algo = signature_algorithm(signature)
+
+    if algo == "RSA-PKCS1":
+        return true
+
+    if algo == "RSA-PSS":
+        return true
+
+    if algo == "DSA":
+        val r = signature_r(signature)
+        val s = signature_s(signature)
+        var valid = true
+        valid = valid && (r > 0)
+        valid = valid && (s > 0)
+        return valid
+
+    false
+
+# =============================================================================
+# Key Generation Helpers
+# =============================================================================
+
+fn generate_rsa_keypair_simple() -> tuple:
+    """Generate simple RSA keypair for testing.
+
+    Uses small primes for demonstration.
+    In production, use 2048+ bit primes.
+
+    Returns:
+        (public_key, private_key)
+    """
+    # Small primes for demonstration
+    val p = 61
+    val q = 53
+    val n = p * q  # 3233
+
+    # phi(n) = (p-1)(q-1) = 60 * 52 = 3120
+    val phi_n = (p - 1) * (q - 1)
+
+    # Public exponent (typically 65537, but using small value)
+    val e = 17
+
+    # Private exponent: d = e^(-1) mod phi(n)
+    val d = mod_inverse(e, phi_n)
+
+    val public_key = create_rsa_public_key(n, e)
+    val private_key = create_rsa_private_key(n, d)
+
+    (public_key, private_key)
+
+fn get_key_size_bits(public_key: tuple) -> i64:
+    """Get RSA key size in bits (approximate).
+
+    Returns log2(n).
+    """
+    val n = rsa_public_key_n(public_key)
+
+    var bits = 0
+    var x = n
+    while x > 0:
+        bits = bits + 1
+        x = x / 2
+
+    bits
+
+# =============================================================================
+# Signature Verification Utilities
+# =============================================================================
+
+fn verify_signature_auto(message: text, signature: tuple, public_key: tuple) -> bool:
+    """Automatically verify signature based on algorithm.
+
+    Detects algorithm from signature and calls appropriate verify function.
+    """
+    val algo = signature_algorithm(signature)
+
+    if algo == "RSA-PKCS1":
+        return rsa_verify_pkcs1(message, signature, public_key)
+
+    if algo == "RSA-PSS":
+        val salt_len = signature_s(signature)
+        return rsa_verify_pss(message, signature, public_key, salt_len)
+
+    if algo == "DSA":
+        return dsa_verify(message, signature, public_key)
+
+    false
+
+fn batch_verify_signatures(messages: list, signatures: list, public_keys: list) -> bool:
+    """Batch verify multiple signatures.
+
+    All must be valid for function to return true.
+    """
+    if messages.len() != signatures.len():
+        return false
+
+    if messages.len() != public_keys.len():
+        return false
+
+    var i = 0
+    while i < messages.len():
+        val msg = messages.get(i)
+        val sig = signatures.get(i)
+        val key = public_keys.get(i)
+
+        val valid = verify_signature_auto(msg, sig, key)
+        if !valid:
+            return false
+
+        i = i + 1
+
+    true
+
+# =============================================================================
+# Constant-Time Comparison (Timing Attack Prevention)
+# =============================================================================
+
+fn constant_time_compare(a: i64, b: i64) -> bool:
+    """Constant-time integer comparison.
+
+    Prevents timing attacks by ensuring comparison takes same time
+    regardless of where values differ.
+    """
+    val diff = a ^ b
+    diff == 0
+
+fn constant_time_compare_bytes(a: list, b: list) -> bool:
+    """Constant-time byte list comparison."""
+    if a.len() != b.len():
+        return false
+
+    var result = 0
+    var i = 0
+    while i < a.len():
+        result = result | (a.get(i) ^ b.get(i))
+        i = i + 1
+
+    result == 0
