@@ -196,6 +196,13 @@ char*    spl_sprintf(const char* fmt, ...);
 int64_t  spl_shell(const char* cmd);
 char*    spl_shell_output(const char* cmd);  /* capture stdout */
 
+/* ===== Process Async ===== */
+
+int64_t  rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count);
+int64_t  rt_process_wait(int64_t pid, int64_t timeout_ms);
+bool     rt_process_is_running(int64_t pid);
+bool     rt_process_kill(int64_t pid);
+
 /* ===== Environment ===== */
 
 const char* spl_env_get(const char* key);

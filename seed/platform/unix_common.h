@@ -120,4 +120,93 @@ int64_t spl_dlclose(void* handle) {
     return (int64_t)dlclose(handle);
 }
 
+/* ----------------------------------------------------------------
+ * Process Async
+ * ---------------------------------------------------------------- */
+
+int64_t rt_process_spawn_async(const char* cmd, const char** args, int64_t arg_count) {
+    if (!cmd) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        return -1;  /* Fork failed */
+    }
+
+    if (pid == 0) {
+        /* Child process */
+        char** argv = (char**)malloc(sizeof(char*) * (arg_count + 2));
+        if (!argv) _exit(1);
+
+        argv[0] = (char*)cmd;
+        for (int64_t i = 0; i < arg_count; i++) {
+            argv[i + 1] = (char*)args[i];
+        }
+        argv[arg_count + 1] = NULL;
+
+        execvp(cmd, argv);
+        /* If execvp returns, it failed */
+        _exit(127);
+    }
+
+    /* Parent process */
+    return (int64_t)pid;
+}
+
+int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+    if (pid <= 0) return -1;
+
+    int status;
+    if (timeout_ms <= 0) {
+        /* No timeout - blocking wait */
+        if (waitpid((pid_t)pid, &status, 0) < 0) {
+            return -1;
+        }
+        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    }
+
+    /* With timeout - use WNOHANG and poll */
+    int64_t elapsed_ms = 0;
+    while (elapsed_ms < timeout_ms) {
+        pid_t result = waitpid((pid_t)pid, &status, WNOHANG);
+        if (result < 0) {
+            return -1;  /* Error */
+        }
+        if (result > 0) {
+            /* Process exited */
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        }
+        /* Still running - sleep and retry */
+        usleep(10000);  /* 10ms */
+        elapsed_ms += 10;
+    }
+
+    return -2;  /* Timeout */
+}
+
+bool rt_process_is_running(int64_t pid) {
+    if (pid <= 0) return false;
+
+    /* Use kill(pid, 0) to check if process exists */
+    return kill((pid_t)pid, 0) == 0;
+}
+
+bool rt_process_kill(int64_t pid) {
+    if (pid <= 0) return false;
+
+    /* Send SIGTERM first */
+    if (kill((pid_t)pid, SIGTERM) != 0) {
+        return false;
+    }
+
+    /* Give it 100ms to terminate gracefully */
+    usleep(100000);
+
+    /* If still running, send SIGKILL */
+    if (rt_process_is_running(pid)) {
+        kill((pid_t)pid, SIGKILL);
+    }
+
+    return true;
+}
+
 #endif /* SPL_UNIX_COMMON_H */
