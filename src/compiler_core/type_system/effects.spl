@@ -61,13 +61,13 @@ enum TypedAwaitMode:
 
 struct PromiseTypeInfo:
     """Information about Promise type wrapping for a function."""
-    # DESUGARED: inner_type: text?
+    # # DESUGARED: inner_type: text
     has_inner_type: bool
-    inner_type_value: text
+    inner_type: text
     is_wrapped: bool     # Whether return type should be Promise-wrapped
-    # DESUGARED: original_type: text?
+    # # DESUGARED: original_type: text
     has_original_type: bool
-    original_type_value: text
+    original_type: text
 
 
 # ============================================================================
@@ -114,7 +114,8 @@ fn infer_function_effect(func: FunctionInfo, env: Dict<text, Effect>) -> Effect:
     # Calls any async function
     for callee in func.called_functions:
         val callee_effect = env_get(env, callee)
-        if callee_effect.? and callee_effect_value_is_async(callee_effect_value):
+        if callee_effect.?:
+            if callee_effect_value_is_async(callee_effect_value):
             return Effect.Async
 
     Effect.Sync
@@ -289,16 +290,18 @@ fn tarjan_dfs(v: text, graph: Dict<text, [text]>,
 # Validation
 # ============================================================================
 
-fn validate_sync_constraint(func: FunctionInfo) -> Result<(), text>:
+fn validate_sync_constraint(func: FunctionInfo) -> text:
     """Validate that a sync function doesn't contain suspension operators."""
-    if func.is_sync and func.contains_suspension:
+    if func.is_sync:
+        if func.contains_suspension:
         return Err("Sync function '{func.name}' cannot contain suspension operators (~=, await, etc.)")
     Ok(())
 
-fn validate_suspension_context(func: FunctionInfo, env: Dict<text, Effect>) -> Result<(), text>:
+fn validate_suspension_context(func: FunctionInfo, env: Dict<text, Effect>) -> text:
     """Validate that suspension operators are only used in async contexts."""
     val effect = infer_function_effect(func, env)
-    if effect_is_sync(effect) and func.contains_suspension:
+    if effect_is_sync(effect):
+        if func.contains_suspension:
         return Err("Sync function '{func.name}' cannot use suspension operators (~=, if~, while~, for~)")
     Ok(())
 
@@ -328,10 +331,11 @@ fn wrap_in_promise(type_name: text) -> text:
     else:
         "Promise<{type_name}>"
 
-fn unwrap_promise(type_name: text) -> has_text:
+fn unwrap_promise(type_name: text) -> text:
     """Extract inner type from Promise<T>."""
-    if type_name.starts_with("Promise<") and type_name.ends_with(">"):
-        has_field = true, field_value = type_name[8:type_name_len(type_name,  - 1])
+    if type_name.starts_with("Promise<"):
+        if type_name.ends_with(">"):
+        type_name[8:type_name_len(type_name,  - 1])
     else:
         nil
 
@@ -342,7 +346,8 @@ fn unwrap_promise(type_name: text) -> has_text:
 fn needs_await(callee_name: text, env: Dict<text, Effect>) -> AwaitMode:
     """Check if calling a function needs automatic await insertion."""
     val effect = env_get(env, callee_name)
-    if effect.? and effect_value_is_async(effect_value):
+    if effect.?:
+        if effect_value_is_async(effect_value):
         AwaitMode.Implicit
     else:
         AwaitMode.None
@@ -355,7 +360,7 @@ fn needs_await_typed(callee_name: text, env: Dict<text, Effect>, expected_type: 
 
     # Expression is async call - check expected type
     match expected_type:
-        case has_field = true, field_value = expected:
+        case expected:
             if is_promise_type(expected):
                 TypedAwaitMode.KeepPromise
             else:

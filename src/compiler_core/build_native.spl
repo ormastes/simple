@@ -19,6 +19,10 @@ use driver (compile_to_smf)
 # that the bootstrap parser cannot handle)
 # ============================================================================
 
+use app.io.{file_read}
+use app.io.{file_exists as io_file_exists}
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+
 enum OutputFormat:
     Smf
     Native
@@ -87,7 +91,7 @@ fn linker_link(self: Linker, smf_files: [text]) -> LinkResult:
                 )
 
 
-fn link_native(smf_files: [text], output: text, config: LinkConfig) -> Result<text, text>:
+fn link_native(smf_files: [text], output: text, config: LinkConfig) -> text:
     """Link SMF files to a native binary."""
     # For now, use the linker_wrapper's link_native_unix
     var args: [text] = []
@@ -114,7 +118,7 @@ fn link_native(smf_files: [text], output: text, config: LinkConfig) -> Result<te
         val args_str = args.join(" ")
         print "[linker] mold {args_str}"
 
-    extern fn rt_process_run(cmd: text, args: [text]) -> text
+    # MOVED TO MODULE LEVEL: extern fn rt_process_run(cmd: text, args: [text]) -> text
     val result = rt_process_run("mold", args)
     if result.contains("error"):
         Err("Link failed: {result}")
@@ -136,9 +140,9 @@ struct BuildConfig:
     debug: bool
     verbose: bool
     pie: bool
-    # DESUGARED: target_cpu: text?
+    # # DESUGARED: target_cpu: text
     has_target_cpu: bool
-    target_cpu_value: text
+    target_cpu: text
     target_features: [text]     # Target features (e.g., ["+avx2", "+fma"])
     linker_flags: [text]        # Extra linker flags
 
@@ -158,7 +162,7 @@ fn buildconfig_default(entry: text, output: text) -> BuildConfig:
             debug: false,
             verbose: false,
             pie: true,
-            has_target_cpu: false,  # DESUGARED: target_cpu: nil
+            #  # DESUGARED: target_cpu: nil
             target_features: [],
             linker_flags: []
         )
@@ -179,9 +183,8 @@ fn buildconfig_for_simple_cli() -> BuildConfig:
             debug: false,
             verbose: true,
             pie: true,
-            # DESUGARED: target_cpu: Some("x86-64-v3")
-            has_target_cpu: true,
-            target_cpu_value: "x86-64-v3",      # Default to modern CPUs
+            # # DESUGARED: target_cpu: Some("x86-64-v3")
+            target_cpu: "x86-64-v3",      # Default to modern CPUs
             target_features: [],
             linker_flags: []
         )
@@ -305,8 +308,10 @@ fn build_native(config: BuildConfig) -> BuildResult:
             BuildResult.Success(
                 output: output_path,
                 stats: BuildStats(
-                    source_files: source_files_len(source_files) as i32,
-                    smf_files: smf_files_len(smf_files) as i32,
+                    val _as_0 = source_files_len(source_files) as i32
+                    source_files: _as_0,
+                    val _as_1 = smf_files_len(smf_files) as i32
+                    smf_files: _as_1,
                     total_symbols: stats.symbol_count,
                     output_size: stats.output_size,
                     compile_time_ms: compile_time,
@@ -330,8 +335,8 @@ fn discover_dependencies(sources: [text], verbose: bool) -> [text]:
     for source in sources:
         seen[source] = true
 
-    # Implement import scanning (Phase 1B.5 - TODO #75 ✅)
-    use app.io.{file_read}
+    # Implement import scanning (Phase 1B[5] - TODO #75 ✅)
+    # MOVED: use app.io.{file_read}
 
     # Scan each source file for imports
     var to_scan = sources_copy(sources)
@@ -365,7 +370,7 @@ fn extract_imports(source_code: text) -> [text]:
     Parses 'use' and 'import' statements to find module dependencies.
     Returns list of module paths (converted to file paths).
 
-    Phase 1B.5 - TODO #75 ✅
+    Phase 1B[5] - TODO #75 ✅
     """
     var imports = []
     val lines = source_code.split("\n")
@@ -395,7 +400,8 @@ fn extract_imports(source_code: text) -> [text]:
 
             # Convert module path to file path
             # e.g., "std.json" -> "src/std/json.spl"
-            if module_path.len() > 0 and not module_path.contains("("):
+            if module_path.len() > 0:
+                if not module_path.contains("("):
                 val file_path = module_to_file_path(module_path)
                 imports_push(imports, file_path)
 
@@ -414,7 +420,7 @@ fn module_to_file_path(module_path: text) -> text:
 
 fn file_exists(path: text) -> bool:
     """Check if file exists (helper for import scanning)."""
-    use app.io.{file_exists as io_file_exists}
+    # MOVED: use app.io.{file_exists as io_file_exists}
     io_file_exists(path)
 
 fn source_to_smf_path(source: text) -> text:

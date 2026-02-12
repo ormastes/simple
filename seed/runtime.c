@@ -766,6 +766,11 @@ void spl_println(const char* s) {
     putchar('\n');
 }
 
+void spl_eprintln(const char* s) {
+    if (s) fputs(s, stderr);
+    fputc('\n', stderr);
+}
+
 void spl_print_i64(int64_t n) {
     printf("%lld", (long long)n);
 }

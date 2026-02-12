@@ -15,7 +15,7 @@
 # - Auto-loads note.sdn metadata on demand
 # - Reads template bytes directly from mapped memory
 
-use ...monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
+use monomorphize.note_sdn (NoteSdnMetadata, PossibleInstantiationEntry, InstantiationEntry, InstantiationStatus)
 use ..linker.smf_reader (SmfReaderImpl, SmfHeader)
 use ..linker.smf_header (SMF_HEADER_SIZE)
 # mmap functions not yet available in app.io.mod; memory-mapped file support pending
@@ -28,6 +28,8 @@ use std.sdn.value (SdnValue)
 # ============================================================================
 
 # Protection flags (from mmap.spl)
+use ..linker.smf_enums (Platform, Arch, CompressionType)
+use ..linker.smf_reader (SmfHeader, SmfFlags)
 val PROT_READ: i32 = 0x1
 
 # Mapping flags
@@ -47,9 +49,9 @@ struct MappedSmf:
     address: i64                    # Base address of mapped memory
     size: i64                       # Size of mapped region
     header: SmfHeader               # Parsed SMF header
-    # DESUGARED: note_sdn: NoteSdnMetadata?
+    # # DESUGARED: note_sdn: NoteSdnMetadata
     has_note_sdn: bool
-    note_sdn_value: NoteSdnMetadata
+    note_sdn: NoteSdnMetadata
     template_section_offset: i64    # Offset to TemplateCode section
     note_sdn_section_offset: i64    # Offset to note.sdn section
 
@@ -102,9 +104,9 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
     """Parse minimal SMF header (placeholder).
 
     TODO: Implement proper header parsing.
-    For now, creates a minimal v1.1 header.
+    For now, creates a minimal v1[1] header.
     """
-    use ..linker.smf_enums (Platform, Arch, CompressionType)
+    # MOVED: use ..linker.smf_enums (Platform, Arch, CompressionType)
 
     # Read basic fields
     val version_major = if bytes_len(bytes) > 4: bytes[4] else: 1
@@ -112,25 +114,23 @@ fn parse_header_minimal(bytes: [u8]) -> SmfHeader:
     val platform = if bytes_len(bytes) > 6: bytes[6] else: 0
     val arch = if bytes_len(bytes) > 7: bytes[7] else: 0
 
-    use ..linker.smf_reader (SmfHeader as ParsedHeader, SmfFlags)
+    # MOVED: use ..linker.smf_reader (SmfHeader, SmfFlags)
 
     # Create minimal header
     ParsedHeader(
-        version: (version_major, version_minor),
+        val _tv_0 = [version_major, version_minor]
+        version: _tv_0,
         platform: platform_from_u8(platform),
         arch: arch_from_u8(arch),
         flags: SmfFlags(
             executable: false,
             reloadable: false,
             debug_info: false,
-            pic: false,
-            has_stub: false
+            pic: false
         ),
         section_count: 0,
         symbol_count: 0,
         entry_point: 0,
-        has_templates: false,
-        has_note_sdn: false,
         compression: CompressionType.None
     )
 
@@ -144,9 +144,9 @@ fn bytes_to_u32(bytes: [u8]) -> u32:
     val b2 = bytes[2] as u32
     val b3 = bytes[3] as u32
 
-    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    b0 | (bit_shl(b1, 8)) | (bit_shl(b2, 16)) | (bit_shl(b3, 24))
 
-fn parse_note_sdn_from_value(value: SdnValue) -> Result<NoteSdnMetadata, text>:
+fn parse_note_sdn_from_value(value: SdnValue) -> text:
     """Parse NoteSdnMetadata from SdnValue.
 
     Expected format:
@@ -188,7 +188,7 @@ fn parse_note_sdn_from_value(value: SdnValue) -> Result<NoteSdnMetadata, text>:
         case _:
             Err("Expected Dict at root of note.sdn")
 
-fn parse_instantiation_row(row: [SdnValue], cols: [text]) -> Result<InstantiationEntry, text>:
+fn parse_instantiation_row(row: [SdnValue], cols: [text]) -> text:
     """Parse a single instantiation row."""
     if row_len(row) < 7:
         return Err("Instantiation row must have at least 7 columns")
@@ -213,7 +213,7 @@ fn parse_instantiation_row(row: [SdnValue], cols: [text]) -> Result<Instantiatio
         status: status
     ))
 
-fn parse_possible_row(row: [SdnValue], cols: [text]) -> Result<PossibleInstantiationEntry, text>:
+fn parse_possible_row(row: [SdnValue], cols: [text]) -> text:
     """Parse a single possible instantiation row."""
     if row_len(row) < 5:
         return Err("Possible row must have at least 5 columns")
@@ -232,13 +232,13 @@ fn parse_possible_row(row: [SdnValue], cols: [text]) -> Result<PossibleInstantia
         can_defer: can_defer
     ))
 
-fn get_string_from_value(value: SdnValue) -> Result<text, text>:
+fn get_string_from_value(value: SdnValue) -> text:
     """Extract string from SdnValue."""
     match value:
         case sdnvalue_String(s): Ok(s)
         case _: Err("Expected string value")
 
-fn get_bool_from_value(value: SdnValue) -> Result<bool, text>:
+fn get_bool_from_value(value: SdnValue) -> text:
     """Extract boolean from SdnValue."""
     match value:
         case sdnvalue_Bool(b): Ok(b)

@@ -27,8 +27,8 @@ export compile_bitfield, validate_bitfield
 struct BitLayout:
     bit_width: i64          # Number of bits needed
     is_signed: bool         # Whether value is signed
-    min_value: i64          # Minimum representable value
-    max_value: i64          # Maximum representable value
+    min: i64          # Minimum representable value
+    max: i64          # Maximum representable value
 
 
 # ============================================================================
@@ -39,8 +39,8 @@ fn bitlayout_unsigned(bits: i64) -> BitLayout:
         BitLayout(
             bit_width: bits,
             is_signed: false,
-            min_value: 0,
-            max_value: (1 << bits) - 1
+            min: 0,
+            max: (bit_shl(1, bits)) - 1
         )
 
 
@@ -50,8 +50,8 @@ fn bitlayout_signed(bits: i64) -> BitLayout:
         BitLayout(
             bit_width: bits,
             is_signed: true,
-            min_value: min,
-            max_value: max
+            min: min,
+            max: max
         )
 
 
@@ -59,8 +59,8 @@ fn bitlayout_bool_repr() -> BitLayout:
         BitLayout(
             bit_width: 1,
             is_signed: false,
-            min_value: 0,
-            max_value: 1
+            min: 0,
+            max: 1
         )
 
 
@@ -69,8 +69,8 @@ fn bitlayout_enum_repr(num_variants: i64) -> BitLayout:
         BitLayout(
             bit_width: bits,
             is_signed: false,
-            min_value: 0,
-            max_value: num_variants - 1
+            min: 0,
+            max: num_variants - 1
         )
 
 
@@ -82,7 +82,7 @@ fn bits_needed(n: i64) -> i64:
     var value = n - 1
     while value > 0:
         bits = bits + 1
-        value = value >> 1
+        value = bit_shr(value, 1)
     bits
 
 # Bitfield field definition
@@ -134,34 +134,35 @@ fn type_bit_width(type_: HirType) -> has_BitLayout:
         val width = rest_parse_int(rest)
         if has_width:
             val w = width_value
-            if w > 0 and w <= 64:
+            if w > 0:
+                if w <= 64:
                 if name.starts_with("i"):
-                    return has_field = true, field_value = bitlayout_signed(w)
+                    return bitlayout_signed(w)
                 else:
-                    return has_field = true, field_value = bitlayout_unsigned(w)
+                    return bitlayout_unsigned(w)
 
     # Standard types
     match name:
-        case "bool": has_field = true, field_value = BitLayout.bool_repr()
-        case "u8": has_field = true, field_value = BitLayout.unsigned(8)
-        case "u16": has_field = true, field_value = BitLayout.unsigned(16)
-        case "u32": has_field = true, field_value = BitLayout.unsigned(32)
-        case "u64": has_field = true, field_value = BitLayout.unsigned(64)
-        case "i8": has_field = true, field_value = BitLayout.signed(8)
-        case "i16": has_field = true, field_value = BitLayout.signed(16)
-        case "i32": has_field = true, field_value = BitLayout.signed(32)
-        case "i64": has_field = true, field_value = BitLayout.signed(64)
-        case has__: false,  # DESUGARED: _: nil
+        case "bool": BitLayout.bool_repr()
+        case "u8": BitLayout.unsigned(8)
+        case "u16": BitLayout.unsigned(16)
+        case "u32": BitLayout.unsigned(32)
+        case "u64": BitLayout.unsigned(64)
+        case "i8": BitLayout.signed(8)
+        case "i16": BitLayout.signed(16)
+        case "i32": BitLayout.signed(32)
+        case "i64": BitLayout.signed(64)
+        # case  # DESUGARED: _: nil
 
 # Get backing type bit width
 fn backing_type_bits(type_: HirType) -> has_i64:
     val name = type__to_text(type_)
     match name:
-        case "u8": has_field = true, field_value = 8
-        case "u16": has_field = true, field_value = 16
-        case "u32": has_field = true, field_value = 32
-        case "u64": has_field = true, field_value = 64
-        case has__: false,  # DESUGARED: _: nil
+        case "u8": 8
+        case "u16": 16
+        case "u32": 32
+        case "u64": 64
+        # case  # DESUGARED: _: nil
 
 # Compile a bitfield definition
 fn compile_bitfield(
@@ -169,7 +170,7 @@ fn compile_bitfield(
     backing_type: HirType,
     fields: [(text, HirType, Span)],
     span: Span
-) -> Result<Bitfield, BitfieldError>:
+) -> text:
     # Validate backing type
     val bits = backing_type_bits(backing_type)
     if not has_bits:
@@ -181,7 +182,10 @@ fn compile_bitfield(
     var seen_names: Dict<text, bool> = {}
 
     # Process fields
-    for (field_name, field_type, field_span) in fields:
+    for _item_0 in fields:
+        val field_name = _item_0[0]
+        val field_type = _item_0[1]
+        val field_span = _item_0[2]
         # Check for duplicates (except reserved "_")
         if field_name != "_":
             if seen_names_contains_key(seen_names, field_name):
@@ -222,7 +226,7 @@ fn compile_bitfield(
     ))
 
 # Validate a compiled bitfield
-fn validate_bitfield(bitfield: Bitfield) -> Result<(), BitfieldError>:
+fn validate_bitfield(bitfield: Bitfield) -> text:
     if not bitfield_is_valid(bitfield):
         return Err(BitfieldError.OverflowError(
             bitfield.name,
@@ -233,7 +237,7 @@ fn validate_bitfield(bitfield: Bitfield) -> Result<(), BitfieldError>:
     Ok(())
 
 # Generate getter expression for a field
-fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> has_text:
+fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> text:
     val field = bitfield_get_field(bitfield, field_name)
     if not has_field:
         return nil
@@ -242,16 +246,15 @@ fn generate_getter(bitfield: Bitfield, field_name: text, value_expr: text) -> ha
     val mask = f.repr_mask(repr)
     val shift = f.bit_offset
 
-    # (value >> shift) & mask
-    if shift == # DESUGARED: 0: Some("({value_expr} & {mask}"))
-            has_0: true,
-            0_value: "({value_expr} & {mask}")
-    # DESUGARED: else: Some("(({value_expr} >> {shift} & {mask})"))
-            has_else: true,
-            else_value: "(({value_expr} >> {shift} & {mask})")
+    # (bit_shr(value, shift)) & mask
+    # if shift == # DESUGARED: 0: Some("({value_expr} & {mask}"))
+            0: "({value_expr} & {mask}")
+    # # DESUGARED: else: Some("(({value_expr} >> {shift} & {mask})"))
+ 
+            else: "(({value_expr} >> {shift} & {mask})")
 
 # Generate setter expression for a field
-fn generate_setter(bitfield: Bitfield, field_name: text, value_expr: text, new_value: text) -> has_text:
+fn generate_setter(bitfield: Bitfield, field_name: text, value_expr: text, new_value: text) -> text:
     val field = bitfield_get_field(bitfield, field_name)
     if not has_field:
         return nil
@@ -259,12 +262,11 @@ fn generate_setter(bitfield: Bitfield, field_name: text, value_expr: text, new_v
     val f = field_value
     val mask = f.repr_mask(repr)
     val shift = f.bit_offset
-    val clear_mask = ~(mask << shift)
+    val clear_mask = ~(bit_shl(mask, shift))
 
     # (value & clear_mask) | ((new_value & mask) << shift)
-    if shift == # DESUGARED: 0: Some("(({value_expr} & {clear_mask} | ({new_value} & {mask}))"))
-            has_0: true,
-            0_value: "(({value_expr} & {clear_mask} | ({new_value} & {mask}))")
-    # DESUGARED: else: Some("(({value_expr} & {clear_mask} | (({new_value} & {mask}) << {shift}))"))
-            has_else: true,
-            else_value: "(({value_expr} & {clear_mask} | (({new_value} & {mask}) << {shift}))")
+    # if shift == # DESUGARED: 0: Some("(({value_expr} & {clear_mask} | ({new_value} & {mask}))"))
+            0: "(({value_expr} & {clear_mask} | ({new_value} & {mask}))")
+    # # DESUGARED: else: Some("(({value_expr} & {clear_mask} | (({new_value} & {mask}) << {shift}))"))
+ 
+            else: "(({value_expr} & {clear_mask} | (({new_value} & {mask}) << {shift}))")

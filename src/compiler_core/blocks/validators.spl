@@ -46,7 +46,7 @@ fn validate_regex(value: BlockValue) -> [text]:
         case _:
             ["Expected Regex value, got {value.type_name()}"]
 
-fn validate_sql(value: BlockValue, dialect: text = "ansi") -> [text]:
+fn validate_sql(value: BlockValue, dialect: text) -> [text]:
     """Validate SQL query for specific dialect.
 
     Args:
@@ -58,10 +58,8 @@ fn validate_sql(value: BlockValue, dialect: text = "ansi") -> [text]:
 
     Example:
     ```simple
-    val sql = BlockBuilder("sql")
-        .raw_text()
-        .simple_parser(parse_sql_helper)
-        .simple_validator(\v: validate_sql(v, "postgres"))
+    val sql = BlockBuilder("sql").raw_text()
+        .simple_parser(parse_sql_helper).simple_validator(\v: validate_sql(v, "postgres"))
         .build()
     ```
     """
@@ -76,7 +74,7 @@ fn validate_sql(value: BlockValue, dialect: text = "ansi") -> [text]:
 # ============================================================================
 
 fn validate_json_structure(value: JsonValue) -> [text]:
-    """Validate JSON structure for common issues (Phase 2.2 - TODO #64 ✅).
+    """Validate JSON structure for common issues (Phase 2[2] - TODO #64 ✅).
 
     Checks:
     - Object keys are not empty
@@ -98,12 +96,12 @@ fn validate_json_structure(value: JsonValue) -> [text]:
     match value.kind:
         case Object(fields):
             for field in fields:
-                val key = field.0
+                val key = field[0]
                 if key_len(key) == 0:
                     errors.push("JSON object has empty key")
             # Recursively validate nested objects
             for field in fields:
-                val nested_errors = validate_json_structure(field.1)
+                val nested_errors = validate_json_structure(field[1])
                 errors = errors + nested_errors
 
         case Array(elements):
@@ -127,7 +125,7 @@ fn validate_json_structure(value: JsonValue) -> [text]:
     errors
 
 fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
-    """Validate SQL for specific dialect (Phase 2.2 - TODO #65 ✅).
+    """Validate SQL for specific dialect (Phase 2[2] - TODO #65 ✅).
 
     Args:
         query: Parsed SQL query
@@ -152,9 +150,11 @@ fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
     match dialect:
         case "postgres":
             # PostgreSQL-specific checks
-            if raw.contains("limit") and not raw.contains("offset"):
+            if raw.contains("limit"):
+                if not raw.contains("offset"):
                 ()  # LIMIT without OFFSET is ok
-            if raw.contains("returning") and query.kind != SqlKind.Insert and query.kind != SqlKind.Update and query.kind != SqlKind.Delete:
+            if raw.contains("returning"):
+                if query.kind != SqlKind.Insert and query.kind != SqlKind.Update and query.kind != SqlKind.Delete:
                 errors.push("RETURNING clause only valid for INSERT/UPDATE/DELETE in PostgreSQL")
             # Check for PostgreSQL-specific types
             if raw.contains("serial") or raw.contains("bigserial"):
@@ -168,7 +168,8 @@ fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
                 errors.push("SERIAL is PostgreSQL syntax; use AUTO_INCREMENT in MySQL")
             if raw.contains("returning"):
                 errors.push("RETURNING clause not supported in MySQL")
-            if raw.contains("limit") and raw.contains(","):
+            if raw.contains("limit"):
+                if raw.contains(","):
                 ()  # MySQL uses LIMIT offset, count syntax
 
         case "sqlite":
@@ -176,9 +177,10 @@ fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
             if raw.contains("serial"):
                 errors.push("Use INTEGER PRIMARY KEY AUTOINCREMENT in SQLite")
             if raw.contains("returning"):
-                errors.push("RETURNING clause not supported in SQLite (requires version 3.35+)")
+                errors.push("RETURNING clause not supported in SQLite (requires version 3[35]+)")
             # Check for unsupported ALTER TABLE operations
-            if raw.contains("alter table") and (raw.contains("add constraint") or raw.contains("drop column")):
+            if raw.contains("alter table"):
+                if (raw.contains("add constraint") or raw.contains("drop column")):
                 errors.push("Warning: SQLite has limited ALTER TABLE support")
 
         case "ansi":
@@ -193,11 +195,13 @@ fn validate_sql_dialect(query: SqlQuery, dialect: text) -> [text]:
 
     # Check for basic syntax issues
     if query.kind == SqlKind.Select:
-        if not raw.contains("from") and not raw.contains("select"):
+        if not raw.contains("from"):
+            if not raw.contains("select"):
             errors.push("SELECT query should have FROM clause or be SELECT without table")
 
     if query.kind == SqlKind.Insert:
-        if not raw.contains("values") and not raw.contains("select"):
+        if not raw.contains("values"):
+            if not raw.contains("select"):
             errors.push("INSERT should have VALUES or SELECT clause")
 
     errors
@@ -212,7 +216,7 @@ fn json_depth(value: JsonValue, current: i64) -> i64:
         case Object(fields):
             var max_depth = current
             for field in fields:
-                val nested_depth = json_depth(field.1, current + 1)
+                val nested_depth = json_depth(field[1], current + 1)
                 if nested_depth > max_depth:
                     max_depth = nested_depth
             max_depth

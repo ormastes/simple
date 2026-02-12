@@ -233,6 +233,9 @@ int64_t  rt_exec_manager_execute(int64_t handle, const char* name, SplArray* arg
 bool     rt_exec_manager_has_function(int64_t handle, const char* name);
 void     rt_exec_manager_cleanup(int64_t handle);
 
+/* ===== Stderr output ===== */
+void     spl_eprintln(const char* s);
+
 /* ===== Panic / Abort ===== */
 
 #ifdef _MSC_VER

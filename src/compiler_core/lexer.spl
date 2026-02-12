@@ -12,6 +12,7 @@
 
 use lexer_types.*
 
+use blocks.{block_registry}
 struct Lexer:
     """Tokenizer for Simple source code."""
     source: text
@@ -20,32 +21,32 @@ struct Lexer:
     col: i64            # Current column (1-based)
     indent_stack: [i64] # Stack of indentation levels
     pending_dedents: i64 # Number of dedents to emit
-    at_line_start: bool # Are we at the start of a line?
+    at_line_start: bool # Are we at the start of a line
     paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
     in_math_block: bool # Inside m{} math block (enables ^ as power)
     math_brace_depth: i64 # Brace depth within math block
     prev_token_kind: TokenKind  # Previous token kind (for implicit mul)
-    # DESUGARED: pending_token: Token?
+    # # DESUGARED: pending_token: Token
     has_pending_token: bool
-    pending_token_value: Token
-    generic_depth: i64  # Track <> nesting for >> disambiguation
+    pending_token: Token
+    generic_depth: i64  # Track <> nesting bit_shr(for, disambiguation)
 
     # Block system fields
-    # DESUGARED: block_registry: BlockRegistry?
+    # # DESUGARED: block_registry: BlockRegistry
     has_block_registry: bool
-    block_registry_value: BlockRegistry
-    # DESUGARED: current_block_kind: text?
+    block_registry: BlockRegistry
+    # # DESUGARED: current_block_kind: text
     has_current_block_kind: bool
-    current_block_kind_value: text
+    current_block_kind: text
     current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
     in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
     raw_block_start: i64           # Start position of raw block payload
     block_brace_depth: i64         # Brace depth tracking for blocks
 
     # Unified registry (blocks + literals)
-    # DESUGARED: unified_registry: UnifiedRegistry?
+    # # DESUGARED: unified_registry: UnifiedRegistry
     has_unified_registry: bool
-    unified_registry_value: UnifiedRegistry
+    unified_registry: UnifiedRegistry
 
 
 # ============================================================================
@@ -65,19 +66,18 @@ fn lexer_new(source: text) -> Lexer:
             in_math_block: false,
             math_brace_depth: 0,
             prev_token_kind: TokenKind.Eof,
-            has_pending_token: false,  # DESUGARED: pending_token: nil
+            #  # DESUGARED: pending_token: nil
             generic_depth: 0,
             # Block system initialization (lazy-loaded to avoid circular deps)
-            # DESUGARED: block_registry: nil
-            has_block_registry: false,
-            block_registry_value: nil,  # TODO: provide default
-            has_current_block_kind: false,  # DESUGARED: current_block_kind: nil
+            # # DESUGARED: block_registry: nil
+            block_registry: nil,  # TODO: provide default
+            #  # DESUGARED: current_block_kind: nil
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
-            block_brace_depth: 0,
+            block_brace_depth: 0
             # Unified registry (lazy-loaded)
-            has_unified_registry: false,  # DESUGARED: unified_registry: nil
+            ## DESUGARED: unified_registry: nil
         )
 
 
@@ -95,17 +95,16 @@ fn lexer_with_registry(source: text, registry: BlockRegistry) -> Lexer:
             in_math_block: false,
             math_brace_depth: 0,
             prev_token_kind: TokenKind.Eof,
-            has_pending_token: false,  # DESUGARED: pending_token: nil
+            #  # DESUGARED: pending_token: nil
             generic_depth: 0,
-            # DESUGARED: block_registry: Some(registry)
-            has_block_registry: true,
-            block_registry_value: registry,  # Pre-loaded with custom registry
-            has_current_block_kind: false,  # DESUGARED: current_block_kind: nil
+            # # DESUGARED: block_registry: Some(registry)
+            block_registry: registry,  # Pre-loaded with custom registry
+            #  # DESUGARED: current_block_kind: nil
             current_lexer_mode: LexerMode.Normal,
             in_raw_block: false,
             raw_block_start: 0,
-            block_brace_depth: 0,
-            has_unified_registry: false,  # DESUGARED: unified_registry: nil
+            block_brace_depth: 0
+            ## DESUGARED: unified_registry: nil
         )
 
 
@@ -119,8 +118,8 @@ fn lexer_get_block_registry(self: Lexer) -> BlockRegistry:
         """
         if not self.has_block_registry:
             # Import happens at runtime, not module load time
-            use blocks.{block_registry}
-            self.block_registry = has_field = true, field_value = block_registry()
+            # MOVED: use blocks.{block_registry}
+            self.block_registry = block_registry()
         self.block_registry_value
 
 
@@ -139,19 +138,21 @@ fn lexer_maybe_insert_implicit_mul(self: Lexer, token: Token) -> Token:
 
         val needs_implicit_mul = match (self.prev_token_kind, token.kind):
             # number followed by identifier: 2x
-            case (IntLit, Ident) | (FloatLit, Ident): true
+            case (IntLit, Ident): true
+            case (FloatLit, Ident): true
             # number followed by lparen: 2(x+1)
-            case (IntLit, LParen) | (FloatLit, LParen): true
+            case (IntLit, LParen): true
+            case (FloatLit, LParen): true
             # rparen followed by identifier: (x+1)y
-            case (RParen, Ident): true
+            case [RParen, Ident]: true
             # rparen followed by lparen: (a)(b)
-            case (RParen, LParen): true
+            case [RParen, LParen]: true
             # identifier followed by lparen could be function call, skip
             case _: false
 
         if needs_implicit_mul:
             # Store current token, return ImplicitMul
-            self.pending_token = has_field = true, field_value = token
+            self.pending_token = token
             val mul_token = Token.new(
                 TokenKind.ImplicitMul,
                 span_new(token.span.start, token.span.start, token.span.line, token.span.col),
@@ -194,7 +195,8 @@ fn lexer_scan_token(self: Lexer) -> Token:
 
         # Handle raw mode block payload
         # After entering a raw block and seeing {, scan the entire payload
-        if self.in_raw_block and self.block_brace_depth == 1 and self.raw_block_start == -1:
+        if self.in_raw_block:
+            if self.block_brace_depth == 1 and self.raw_block_start == -1:
             # We're inside a raw block after {, scan payload
             self.raw_block_start = 0  # Reset to prevent re-scanning
             return self.scan_raw_block_payload()
@@ -257,7 +259,34 @@ fn lexer_scan_token(self: Lexer) -> Token:
                     return self.scan_string()
 
             # Numbers
-            case '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9':
+            case '0':
+                return self.scan_number()
+
+            case '1':
+                return self.scan_number()
+
+            case '2':
+                return self.scan_number()
+
+            case '3':
+                return self.scan_number()
+
+            case '4':
+                return self.scan_number()
+
+            case '5':
+                return self.scan_number()
+
+            case '6':
+                return self.scan_number()
+
+            case '7':
+                return self.scan_number()
+
+            case '8':
+                return self.scan_number()
+
+            case '9':
                 return self.scan_number()
 
             # Identifiers and keywords
@@ -331,12 +360,14 @@ fn lexer_scan_string(self: Lexer) -> Token:
 
         # Check for raw string (r"...")
         var is_raw = false
-        if start > 0 and self.source[start - 1] == 'r':
+        if start > 0:
+            if self.source[start - 1] == 'r':
             is_raw = true
 
         # Check for triple-quoted string
         var triple = false
-        if self.peek() == quote and self.peek_next() == quote:
+        if self.peek() == quote:
+            if self.peek_next() == quote:
             self.advance()
             self.advance()
             triple = true
@@ -347,7 +378,8 @@ fn lexer_scan_string(self: Lexer) -> Token:
 
             if triple:
                 # Triple-quoted: look for closing """
-                if c == quote and self.peek_next() == quote:
+                if c == quote:
+                    if self.peek_next() == quote:
                     val next2 = if self.pos + 2 < self.source.len(): self.source[self.pos + 2] else: "\0"
                     if next2 == quote:
                         self.advance()
@@ -368,7 +400,8 @@ fn lexer_scan_string(self: Lexer) -> Token:
                         span_new(start, self.pos, line, col),
                         "unterminated string"
                     )
-                if c == '\\' and not is_raw:
+                if c == '\\':
+                    if not is_raw:
                     self.advance()
                     val escaped = self.scan_escape_sequence()
                     content = content + escaped
@@ -411,7 +444,7 @@ fn lexer_scan_escape_sequence(self: Lexer) -> text:
 fn lexer_scan_hex_escape(self: Lexer, digits: i64) -> text:
         """Scan a hex escape sequence."""
         var hex = ""
-        for _ in 0..digits:
+        for _unused in 0..digits:
             if self.is_at_end():
                 break
             val c = self.peek()
@@ -426,12 +459,15 @@ fn lexer_scan_hex_escape(self: Lexer, digits: i64) -> text:
         for ch_str in hex:
             val ch = ch_str[0]
             code_point = code_point * 16
-            if ch >= '0' and ch <= '9':
-                code_point = code_point + (ch as i64 - '0' as i64)
-            elif ch >= 'a' and ch <= 'f':
-                code_point = code_point + (ch as i64 - 'a' as i64 + 10)
-            elif ch >= 'A' and ch <= 'F':
-                code_point = code_point + (ch as i64 - 'A' as i64 + 10)
+            if ch >= '0':
+                if ch <= '9':
+                code_point = code_point + (ch, - '0' as i64)
+            elif ch >= 'a':
+                if ch <= 'f':
+                code_point = code_point + (ch, - 'a' as i64 + 10)
+            elif ch >= 'A':
+                if ch <= 'F':
+                code_point = code_point + (ch, - 'A' as i64 + 10)
         # Convert code point to character string
         char_from_code_point(code_point)
 
@@ -441,7 +477,8 @@ fn lexer_scan_number(self: Lexer) -> Token:
         val start_pos = sourceposition_new(self.pos, self.line, self.col)
 
         # Check for hex, binary, or octal
-        if self.peek() == '0' and not self.is_at_end():
+        if self.peek() == '0':
+            if not self.is_at_end():
             val next = self.peek_next()
             if next == 'x' or next == 'X':
                 return self.scan_hex_number(start_pos)
@@ -462,7 +499,8 @@ fn lexer_scan_decimal_number(self: Lexer, start_pos: SourcePosition) -> Token:
 
         # Check for float
         var is_float = false
-        if self.peek() == '.' and is_digit(self.peek_next()):
+        if self.peek() == '.':
+            if is_digit(self.peek_next()):
             is_float = true
             self.advance()  # Consume '.'
             while not self.is_at_end() and is_digit(self.peek()):
@@ -521,7 +559,8 @@ fn lexer_scan_octal_number(self: Lexer, start_pos: SourcePosition) -> Token:
 
         while not self.is_at_end():
             val c = self.peek()
-            if c >= '0' and c <= '7':
+            if c >= '0':
+                if c <= '7':
                 self.advance()
             else:
                 break
@@ -537,7 +576,8 @@ fn lexer_scan_identifier(self: Lexer) -> Token:
         val col = self.col
 
         # Check for raw string prefix
-        if self.peek() == 'r' and (self.peek_next() == '"' or self.peek_next() == '\''):
+        if self.peek() == 'r':
+            if (self.peek_next() == '"' or self.peek_next() == '\''):
             self.advance()  # Consume 'r'
             return self.scan_string()
 
@@ -677,7 +717,8 @@ fn lexer_scan_operator_or_delimiter(self: Lexer) -> Token:
                     self.generic_depth = self.generic_depth + 1
                 kind = TokenKind.Lt
         elif c == '>':
-            if self.peek() == '>' and self.generic_depth == 0:
+            if self.peek() == '>':
+                if self.generic_depth == 0:
                 self.advance()
                 # Check for >>> (kernel launch end)
                 if self.peek() == '>':
@@ -781,7 +822,8 @@ fn lexer_scan_operator_or_delimiter(self: Lexer) -> Token:
                 self.math_brace_depth = self.math_brace_depth + 1
             if self.has_current_block_kind:
                 self.block_brace_depth = self.block_brace_depth + 1
-                if self.in_raw_block and self.block_brace_depth == 1:
+                if self.in_raw_block:
+                    if self.block_brace_depth == 1:
                     self.raw_block_start = -1
             kind = TokenKind.LBrace
         elif c == '}':
@@ -845,7 +887,8 @@ fn is_ident_char(c: char) -> bool:
 fn char_from_code_point(cp: i64) -> text:
     """Convert a Unicode code point to a character string.
     Handles common ASCII range; higher code points need proper UTF-8 encoding."""
-    if cp >= 0 and cp <= 127:
+    if cp >= 0:
+        if cp <= 127:
         val ch = cp as char
         ch_to_string(ch)
     else:
@@ -968,7 +1011,7 @@ fn lex(source: text, filename: text) -> [Token]:
 
     var tokens = []
     var done = false
-    for _ in 0..10000:
+    for _unused in 0..10000:
         if done:
             break
         val tok = lexer_next_token(lexer)
@@ -996,15 +1039,15 @@ fn create_lexer(src: text) -> Lexer:
         in_math_block: false,
         math_brace_depth: 0,
         prev_token_kind: TokenKind.Eof,
-        has_pending_token: false,  # DESUGARED: pending_token: nil
+        #  # DESUGARED: pending_token: nil
         generic_depth: 0,
-        has_block_registry: false,  # DESUGARED: block_registry: nil
-        has_current_block_kind: false,  # DESUGARED: current_block_kind: nil
+        #  # DESUGARED: block_registry: nil
+        #  # DESUGARED: current_block_kind: nil
         current_lexer_mode: LexerMode.Normal,
         in_raw_block: false,
         raw_block_start: 0,
-        block_brace_depth: 0,
-        has_unified_registry: false,  # DESUGARED: unified_registry: nil
+        block_brace_depth: 0
+        ## DESUGARED: unified_registry: nil
     )
 
 fn create_token_eof(pos: i64, line: i64) -> Token:

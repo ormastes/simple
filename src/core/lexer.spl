@@ -303,6 +303,39 @@ fn lex_scan_string():
     val start_col: i64 = lex_col
     val quote: text = lex_advance()
     var result: text = ""
+
+    # Check for triple-quote string: """ or '''
+    val tq1: text = lex_peek()
+    val tq2: text = lex_peek_next()
+    val is_tq1: bool = tq1 == quote
+    val is_tq2: bool = tq2 == quote
+    val is_triple: bool = is_tq1 and is_tq2
+    if is_triple:
+        lex_advance()
+        lex_advance()
+        # Scan until closing triple-quote
+        for i in 0..1000000:
+            if lex_at_end():
+                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                return
+            val tc: text = lex_peek()
+            val tn1: text = lex_peek_next()
+            val tn2: text = lex_peek_at(2)
+            val close1: bool = tc == quote
+            val close2: bool = tn1 == quote
+            val close3: bool = tn2 == quote
+            val close12: bool = close1 and close2
+            val close_all: bool = close12 and close3
+            if close_all:
+                lex_advance()
+                lex_advance()
+                lex_advance()
+                lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+                return
+            result = result + lex_advance()
+        lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
+        return
+
     var done: bool = false
 
     for i in 0..100000:
@@ -479,6 +512,12 @@ fn lex_scan_token():
     # Handle indentation at line start BEFORE skipping spaces
     # (handle_indentation counts and consumes leading spaces itself)
     if lex_at_line_start:
+        if lex_paren_depth > 0:
+            # Inside parens/brackets: suppress indentation tokens
+            lex_at_line_start = false
+            lex_skip_spaces()
+            lex_scan_token()
+            return
         lex_cur_kind = 0
         lex_handle_indentation()
         if lex_cur_kind != 0:
