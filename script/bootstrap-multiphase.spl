@@ -1,14 +1,17 @@
 #!/usr/bin/env simple
-# Multi-Phase Bootstrap Runner
+# Multi-Phase Bootstrap Runner (Seed Compiler Path)
 #
-# Runs the multi-phase bootstrap pipeline that uses Pure Simple
-# compilation paths (C → GCC/LLVM) to avoid Cranelift hang bugs.
+# Runs the multi-phase bootstrap pipeline that uses the seed C++ transpiler
+# to produce native binaries: seed_cpp → C++ → clang++ → native.
 #
 # Usage:
-#   ./script/bootstrap-multiphase.spl [--no-verify] [--no-llvm] [--keep-artifacts]
+#   bin/release/simple script/bootstrap-multiphase.spl [options]
 #
-# The final binary will include all backends (Cranelift, LLVM, C codegen,
-# interpreter), but bootstrap itself uses only reliable C → GCC path.
+# The bootstrap chain produces verified binaries:
+#   Core1: seed_cpp transpiles compiler_core → C++ → clang++ → native
+#   Core2: Core1 recompiles compiler_core (reproducibility)
+#   Full1: Core2 compiles the full compiler
+#   Full2: Full1 recompiles itself (reproducibility check)
 
 use app.build.bootstrap_multiphase (
     MultiphaseBootstrap,
@@ -24,19 +27,23 @@ fn main():
 
     # Parse command line arguments
     var verify = true
-    var use_llvm = true
     var keep_artifacts = false
+    var seed_cpp_path = "seed/build/seed_cpp"
+    var clang_path = "clang++"
 
     for arg in args:
         match arg:
             case "--no-verify": verify = false
-            case "--no-llvm": use_llvm = false
             case "--keep-artifacts": keep_artifacts = true
             case "--help":
                 print_help()
                 return ()
             case _:
-                if arg.starts_with("--"):
+                if arg.starts_with("--seed-cpp="):
+                    seed_cpp_path = arg.substring(11)
+                elif arg.starts_with("--clang="):
+                    clang_path = arg.substring(8)
+                elif arg.starts_with("--"):
                     print "Unknown option: {arg}"
                     print "Run with --help for usage information"
                     return ()
@@ -45,12 +52,15 @@ fn main():
     val config = MultiphaseConfig(
         profile: BuildProfile.Bootstrap,
         verify_reproducibility: verify,
-        use_llvm_for_final: use_llvm,
         keep_artifacts: keep_artifacts,
         workspace_root: ".",
         output_dir: "build/bootstrap",
-        bootstrap_backend: CompilationBackend.Native,
-        production_backend: CompilationBackend.LLVM
+        seed_cpp_path: seed_cpp_path,
+        clang_path: clang_path,
+        runtime_lib: "seed/build/libspl_runtime.a",
+        crt_lib: "seed/build/startup/libspl_crt_linux_x86_64.a",
+        compiler_core_dir: "src/compiler_core",
+        seed_include_dir: "seed"
     )
 
     # Run multi-phase bootstrap
@@ -58,9 +68,9 @@ fn main():
 
     # Exit with appropriate code
     if result.overall_success:
-        print "╔══════════════════════════════════════════════════════════════════╗"
-        print "║                   ✓ Bootstrap Successful                         ║"
-        print "╚══════════════════════════════════════════════════════════════════╝"
+        print "================================================================"
+        print "               Bootstrap Successful"
+        print "================================================================"
         print ""
 
         # Copy final binary to standard location
@@ -72,58 +82,67 @@ fn main():
         print "Installing final binary to bin/simple..."
         val copy_result = shell("cp {final_binary} bin/simple && chmod +x bin/simple")
         if copy_result.exit_code == 0:
-            print "✓ Installed to bin/simple"
+            print "Installed to bin/simple"
             print ""
             print "You can now use: bin/simple <command>"
         else:
-            print "✗ Failed to install binary"
+            print "Failed to install binary"
 
         return ()
     else:
-        print "╔══════════════════════════════════════════════════════════════════╗"
-        print "║                   ✗ Bootstrap Failed                             ║"
-        print "╚══════════════════════════════════════════════════════════════════╝"
+        print "================================================================"
+        print "               Bootstrap Failed"
+        print "================================================================"
         print ""
         print "Check error messages above for details."
+        print ""
+        print "Common fixes:"
+        print "  1. Build seed: cd seed/build && cmake .. && cmake --build . --parallel"
+        print "  2. Install clang: sudo apt install clang"
+        print "  3. Check paths: --seed-cpp=<path> --clang=<path>"
 
-        # Exit with error code (note: need runtime support for exit codes)
         return ()
 
 fn print_help():
-    print "Multi-Phase Bootstrap Runner"
+    print "Multi-Phase Bootstrap Runner (Seed Compiler Path)"
     print ""
     print "Usage:"
-    print "  ./script/bootstrap-multiphase.spl [options]"
+    print "  bin/release/simple script/bootstrap-multiphase.spl [options]"
     print ""
     print "Options:"
-    print "  --no-verify        Skip Phase2/Phase3 reproducibility check"
-    print "  --no-llvm          Skip Phase4 LLVM optimization"
+    print "  --no-verify        Skip reproducibility checks"
     print "  --keep-artifacts   Keep intermediate binaries after build"
+    print "  --seed-cpp=PATH    Path to seed_cpp binary (default: seed/build/seed_cpp)"
+    print "  --clang=PATH       Path to clang++ (default: clang++)"
     print "  --help             Show this help message"
     print ""
     print "Description:"
-    print "  Builds the Simple compiler using a multi-phase bootstrap process"
-    print "  that uses Pure Simple compilation paths (C → GCC/LLVM) to avoid"
-    print "  Cranelift hang bugs during bootstrap."
+    print "  Builds the Simple compiler from source using the seed C++ transpiler."
+    print "  The seed compiler transpiles Core Simple to C++, which clang++ compiles"
+    print "  to native code. The resulting compiler then recompiles itself."
     print ""
-    print "  Phase 0: Verify pre-built bootstrap binary"
-    print "  Phase 1: Build minimal compiler (C → GCC, fast)"
-    print "  Phase 2: Build full compiler (C → GCC)"
-    print "  Phase 3: Rebuild for reproducibility check"
-    print "  Phase 4: LLVM optimized production binary (optional)"
+    print "  Phase 0: Prerequisites check"
+    print "  Phase 1: Core1 — seed_cpp transpiles compiler_core -> C++ -> clang++ -> native"
+    print "  Phase 2: Core2 — Core1 recompiles compiler_core (reproducibility)"
+    print "  Phase 3: Full1 — Core2 compiles the full compiler"
+    print "  Phase 4: Full2 — Full1 recompiles itself (reproducibility)"
     print ""
-    print "  The final binary includes all backends:"
-    print "    - Interpreter (always available)"
-    print "    - C codegen → GCC (native.spl)"
-    print "    - C codegen → LLVM (llvm_direct.spl)"
-    print "    - Cranelift JIT (available but not used during bootstrap)"
+    print "Prerequisites:"
+    print "  - bin/release/simple (33MB runtime, pre-built)"
+    print "  - seed/build/seed_cpp (build: cd seed/build && cmake .. && cmake --build .)"
+    print "  - clang++ (C++20 support required)"
+    print "  - seed/build/libspl_runtime.a (built with seed)"
+    print "  - seed/build/startup/libspl_crt_linux_x86_64.a (built with seed)"
     print ""
     print "Examples:"
-    print "  # Full bootstrap with all phases:"
-    print "  ./script/bootstrap-multiphase.spl"
+    print "  # Full bootstrap with verification:"
+    print "  bin/release/simple script/bootstrap-multiphase.spl"
     print ""
-    print "  # Quick bootstrap without LLVM optimization:"
-    print "  ./script/bootstrap-multiphase.spl --no-llvm"
+    print "  # Quick bootstrap without verification:"
+    print "  bin/release/simple script/bootstrap-multiphase.spl --no-verify"
     print ""
-    print "  # Debug build keeping all intermediate artifacts:"
-    print "  ./script/bootstrap-multiphase.spl --keep-artifacts"
+    print "  # Keep all intermediate artifacts:"
+    print "  bin/release/simple script/bootstrap-multiphase.spl --keep-artifacts"
+    print ""
+    print "  # Use custom paths:"
+    print "  bin/release/simple script/bootstrap-multiphase.spl --seed-cpp=/usr/local/bin/seed_cpp --clang=/usr/bin/clang++-17"
