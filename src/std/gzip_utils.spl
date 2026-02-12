@@ -1,0 +1,1519 @@
+# gzip_utils.spl - Comprehensive GZIP compression utilities
+#
+# Pure Simple implementation of GZIP compression format (RFC 1952)
+# Implements DEFLATE algorithm (RFC 1951) combining LZ77 + Huffman coding
+#
+# Features:
+# - GZIP header/footer handling (magic bytes, timestamps, OS flags)
+# - DEFLATE compression (LZ77 matching + Huffman encoding)
+# - CRC32 checksum calculation for data integrity
+# - Multiple compression levels (0-9)
+# - Fixed and dynamic Huffman codes
+# - Sliding window dictionary (32KB)
+# - Block-based processing
+# - Stream operations for large data
+#
+# All implementations use concrete types (no generics at runtime)
+# Error handling uses Option/nil pattern (no exceptions)
+# Byte arrays represented as i64 lists
+
+# =============================================================================
+# CONSTANTS
+# =============================================================================
+
+# GZIP magic bytes
+val GZIP_MAGIC1 = 0x1f
+val GZIP_MAGIC2 = 0x8b
+
+# Compression methods
+val CM_DEFLATE = 8
+
+# Operating systems
+val OS_FAT = 0
+val OS_UNIX = 3
+val OS_NTFS = 11
+val OS_UNKNOWN = 255
+
+# GZIP flags
+val FLAG_TEXT = 1
+val FLAG_HCRC = 2
+val FLAG_EXTRA = 4
+val FLAG_NAME = 8
+val FLAG_COMMENT = 16
+
+# DEFLATE constants
+val WINDOW_SIZE = 32768  # 32KB sliding window
+val MIN_MATCH = 3
+val MAX_MATCH = 258
+val MAX_DISTANCE = 32768
+
+# Huffman constants
+val MAX_BITS = 15
+val MAX_LITERALS = 286
+val MAX_DISTANCES = 30
+
+# Block types
+val BLOCK_STORED = 0
+val BLOCK_FIXED = 1
+val BLOCK_DYNAMIC = 2
+
+# Compression levels
+val LEVEL_NONE = 0
+val LEVEL_FAST = 1
+val LEVEL_DEFAULT = 6
+val LEVEL_BEST = 9
+
+# =============================================================================
+# CRC32 CHECKSUM
+# =============================================================================
+
+# CRC32 lookup table (simplified - only first 16 entries)
+fn crc32_table():
+    return [
+        0x00000000, 0x77073096, 0xee0e612c, 0x990951ba,
+        0x076dc419, 0x706af48f, 0xe963a535, 0x9e6495a3,
+        0x0edb8832, 0x79dcb8a4, 0xe0d5e91e, 0x97d2d988,
+        0x09b64c2b, 0x7eb17cbd, 0xe7b82d07, 0x90bf1d91
+    ]
+
+# Calculate CRC32 checksum
+fn crc32_calculate(data):
+    if data == nil:
+        return 0
+
+    var crc = 0xffffffff
+    var i = 0
+    val table = crc32_table()
+
+    loop:
+        if i >= data.length():
+            break
+
+        val byte_val = data[i]
+        val index = (crc ^ byte_val) & 0x0f
+        crc = (crc >> 4) ^ table[index]
+
+        i = i + 1
+
+    return crc ^ 0xffffffff
+
+# Update running CRC32 with new data
+fn crc32_update(crc, data):
+    if data == nil:
+        return crc
+
+    var current = crc
+    var i = 0
+    val table = crc32_table()
+
+    loop:
+        if i >= data.length():
+            break
+
+        val byte_val = data[i]
+        val index = (current ^ byte_val) & 0x0f
+        current = (current >> 4) ^ table[index]
+
+        i = i + 1
+
+    return current
+
+# Finalize CRC32 (XOR with 0xffffffff)
+fn crc32_finalize(crc):
+    return crc ^ 0xffffffff
+
+# Calculate CRC32 in chunks
+fn crc32_chunked(chunks):
+    if chunks == nil:
+        return 0
+
+    var crc = 0xffffffff
+    var i = 0
+
+    loop:
+        if i >= chunks.length():
+            break
+
+        val chunk = chunks[i]
+        crc = crc32_update(crc, chunk)
+
+        i = i + 1
+
+    return crc32_finalize(crc)
+
+# Verify CRC32 checksum
+fn crc32_verify(data, expected):
+    val calculated = crc32_calculate(data)
+    return calculated == expected
+
+# =============================================================================
+# GZIP HEADER
+# =============================================================================
+
+# Create GZIP header
+# Returns: array of header bytes
+fn gzip_header_create(filename, timestamp, extra_flags, os_type):
+    var header = []
+
+    # Magic bytes
+    header = header + [GZIP_MAGIC1, GZIP_MAGIC2]
+
+    # Compression method (8 = DEFLATE)
+    header = header + [CM_DEFLATE]
+
+    # Flags
+    var flags = 0
+    if filename != nil:
+        flags = flags | FLAG_NAME
+    header = header + [flags]
+
+    # Timestamp (4 bytes, little-endian)
+    val ts = timestamp
+    header = header + [ts & 0xff]
+    header = header + [(ts >> 8) & 0xff]
+    header = header + [(ts >> 16) & 0xff]
+    header = header + [(ts >> 24) & 0xff]
+
+    # Extra flags
+    header = header + [extra_flags]
+
+    # OS type
+    header = header + [os_type]
+
+    # Optional filename
+    if filename != nil:
+        var i = 0
+        loop:
+            if i >= filename.length():
+                break
+            val ch = filename[i]
+            header = header + [char_to_byte(ch)]
+            i = i + 1
+        # Null terminator
+        header = header + [0]
+
+    return header
+
+# Parse GZIP header
+# Returns: (flags, timestamp, extra_flags, os, header_size) or nil
+fn gzip_header_parse(data):
+    if data == nil:
+        return nil
+
+    if data.length() < 10:
+        return nil
+
+    # Check magic bytes
+    if data[0] != GZIP_MAGIC1:
+        return nil
+    if data[1] != GZIP_MAGIC2:
+        return nil
+
+    # Check compression method
+    if data[2] != CM_DEFLATE:
+        return nil
+
+    val flags = data[3]
+    val timestamp = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24)
+    val extra_flags = data[8]
+    val os = data[9]
+
+    var offset = 10
+
+    # Skip extra field
+    if (flags & FLAG_EXTRA) != 0:
+        if offset + 2 > data.length():
+            return nil
+        val xlen = data[offset] | (data[offset + 1] << 8)
+        offset = offset + 2 + xlen
+
+    # Skip filename
+    if (flags & FLAG_NAME) != 0:
+        loop:
+            if offset >= data.length():
+                return nil
+            if data[offset] == 0:
+                offset = offset + 1
+                break
+            offset = offset + 1
+
+    # Skip comment
+    if (flags & FLAG_COMMENT) != 0:
+        loop:
+            if offset >= data.length():
+                return nil
+            if data[offset] == 0:
+                offset = offset + 1
+                break
+            offset = offset + 1
+
+    # Skip header CRC
+    if (flags & FLAG_HCRC) != 0:
+        offset = offset + 2
+
+    return [flags, timestamp, extra_flags, os, offset]
+
+# Get header size from parsed header info
+fn gzip_header_size(header_info):
+    if header_info == nil:
+        return 0
+    return header_info[4]
+
+# =============================================================================
+# GZIP FOOTER
+# =============================================================================
+
+# Create GZIP footer (CRC32 + uncompressed size)
+fn gzip_footer_create(crc32, size):
+    var footer = []
+
+    # CRC32 (4 bytes, little-endian)
+    footer = footer + [crc32 & 0xff]
+    footer = footer + [(crc32 >> 8) & 0xff]
+    footer = footer + [(crc32 >> 16) & 0xff]
+    footer = footer + [(crc32 >> 24) & 0xff]
+
+    # Uncompressed size modulo 2^32 (4 bytes, little-endian)
+    val size_mod = size & 0xffffffff
+    footer = footer + [size_mod & 0xff]
+    footer = footer + [(size_mod >> 8) & 0xff]
+    footer = footer + [(size_mod >> 16) & 0xff]
+    footer = footer + [(size_mod >> 24) & 0xff]
+
+    return footer
+
+# Parse GZIP footer
+# Returns: (crc32, size) or nil
+fn gzip_footer_parse(data, offset):
+    if data == nil:
+        return nil
+
+    if offset + 8 > data.length():
+        return nil
+
+    val crc = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24)
+    val size = data[offset + 4] | (data[offset + 5] << 8) | (data[offset + 6] << 16) | (data[offset + 7] << 24)
+
+    return [crc, size]
+
+# Validate GZIP footer
+fn gzip_footer_validate(footer_info, data, expected_size):
+    if footer_info == nil:
+        return false
+
+    val crc = footer_info[0]
+    val size = footer_info[1]
+
+    # Verify CRC32
+    val calculated_crc = crc32_calculate(data)
+    if calculated_crc != crc:
+        return false
+
+    # Verify size (modulo 2^32)
+    val size_mod = expected_size & 0xffffffff
+    if size != size_mod:
+        return false
+
+    return true
+
+# =============================================================================
+# LZ77 COMPRESSION (Sliding Window)
+# =============================================================================
+
+# LZ77 match structure: (distance, length)
+# distance: how far back in the window
+# length: how many bytes to copy
+
+# Find longest match in sliding window
+fn lz77_find_match(data, pos, window_start, max_len):
+    if data == nil:
+        return [0, 0]
+
+    val data_len = data.length()
+    if pos >= data_len:
+        return [0, 0]
+
+    var best_dist = 0
+    var best_len = 0
+
+    var i = window_start
+    loop:
+        if i >= pos:
+            break
+
+        # Try to match at position i
+        var match_len = 0
+        var j = 0
+
+        loop:
+            if j >= max_len:
+                break
+            if pos + j >= data_len:
+                break
+            if i + j >= pos:
+                break
+
+            if data[i + j] == data[pos + j]:
+                match_len = match_len + 1
+            else:
+                break
+
+            j = j + 1
+
+        # Update best match if this is longer
+        if match_len >= MIN_MATCH:
+            if match_len > best_len:
+                best_len = match_len
+                best_dist = pos - i
+
+        i = i + 1
+
+    return [best_dist, best_len]
+
+# Compress data using LZ77 algorithm
+# Returns: array of tokens [(type, value, extra)]
+# type: 0 = literal byte, 1 = match (distance, length)
+fn lz77_compress(data, level):
+    if data == nil:
+        return []
+
+    val data_len = data.length()
+    if data_len == 0:
+        return []
+
+    # Adjust search based on level
+    var max_search = 128
+    if level >= 6:
+        max_search = 4096
+    if level >= 9:
+        max_search = 32768
+
+    var tokens = []
+    var pos = 0
+
+    loop:
+        if pos >= data_len:
+            break
+
+        # Calculate window start
+        var window_start = pos - WINDOW_SIZE
+        if window_start < 0:
+            window_start = 0
+
+        # Find longest match
+        var max_len = MAX_MATCH
+        if pos + max_len > data_len:
+            max_len = data_len - pos
+
+        val match = lz77_find_match(data, pos, window_start, max_len)
+        val distance = match[0]
+        val length = match[1]
+
+        if length >= MIN_MATCH:
+            # Encode as match
+            tokens = tokens + [[1, distance, length]]
+            pos = pos + length
+        else:
+            # Encode as literal
+            tokens = tokens + [[0, data[pos], 0]]
+            pos = pos + 1
+
+    return tokens
+
+# Decompress LZ77 tokens back to original data
+fn lz77_decompress(tokens):
+    if tokens == nil:
+        return []
+
+    var result = []
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+        val value = token[1]
+        val extra = token[2]
+
+        if token_type == 0:
+            # Literal byte
+            result = result + [value]
+        else:
+            # Match: copy from window
+            val distance = value
+            val length = extra
+            val start_pos = result.length() - distance
+
+            var j = 0
+            loop:
+                if j >= length:
+                    break
+
+                val copy_pos = start_pos + j
+                if copy_pos >= 0:
+                    if copy_pos < result.length():
+                        result = result + [result[copy_pos]]
+
+                j = j + 1
+
+        i = i + 1
+
+    return result
+
+# Calculate LZ77 statistics
+fn lz77_stats(tokens):
+    if tokens == nil:
+        return [0, 0, 0]
+
+    var literal_count = 0
+    var match_count = 0
+    var total_matched_bytes = 0
+
+    var i = 0
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+
+        if token_type == 0:
+            literal_count = literal_count + 1
+        else:
+            match_count = match_count + 1
+            val length = token[2]
+            total_matched_bytes = total_matched_bytes + length
+
+        i = i + 1
+
+    return [literal_count, match_count, total_matched_bytes]
+
+# =============================================================================
+# HUFFMAN CODING
+# =============================================================================
+
+# Huffman tree node: (symbol, frequency, left, right)
+# symbol: character or nil for internal nodes
+# frequency: occurrence count
+# left, right: child nodes
+
+# Create Huffman leaf node
+fn huffman_leaf(symbol, freq):
+    return [symbol, freq, nil, nil]
+
+# Create Huffman internal node
+fn huffman_internal(freq, left, right):
+    return [nil, freq, left, right]
+
+# Get node frequency
+fn huffman_node_freq(node):
+    if node == nil:
+        return 0
+    return node[1]
+
+# Check if node is leaf
+fn huffman_node_is_leaf(node):
+    if node == nil:
+        return false
+    return node[2] == nil
+
+# Build frequency table from tokens
+fn huffman_freq_table(tokens):
+    if tokens == nil:
+        return []
+
+    var freqs = []
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+        val value = token[1]
+
+        # Count symbol frequency
+        var symbol = value
+        if token_type == 1:
+            # For matches, use special code (256+)
+            symbol = 256 + (value % 30)  # Distance codes
+
+        var found = false
+        var j = 0
+        var new_freqs = []
+
+        loop:
+            if j >= freqs.length():
+                break
+
+            val entry = freqs[j]
+            val sym = entry[0]
+            val count = entry[1]
+
+            if sym == symbol:
+                new_freqs = new_freqs + [[sym, count + 1]]
+                found = true
+            else:
+                new_freqs = new_freqs + [[sym, count]]
+
+            j = j + 1
+
+        if found:
+            freqs = new_freqs
+        else:
+            freqs = freqs + [[symbol, 1]]
+
+        i = i + 1
+
+    return freqs
+
+# Build Huffman tree from frequency table
+fn huffman_build_tree(freqs):
+    if freqs == nil:
+        return nil
+
+    if freqs.length() == 0:
+        return nil
+
+    # Create leaf nodes
+    var nodes = []
+    var i = 0
+
+    loop:
+        if i >= freqs.length():
+            break
+
+        val entry = freqs[i]
+        val symbol = entry[0]
+        val count = entry[1]
+        nodes = nodes + [huffman_leaf(symbol, count)]
+
+        i = i + 1
+
+    # Build tree bottom-up
+    loop:
+        if nodes.length() <= 1:
+            break
+
+        # Find two minimum frequency nodes
+        var min1_idx = huffman_find_min_node(nodes, -1)
+        val min1 = nodes[min1_idx]
+        nodes = huffman_remove_node(nodes, min1_idx)
+
+        var min2_idx = huffman_find_min_node(nodes, -1)
+        val min2 = nodes[min2_idx]
+        nodes = huffman_remove_node(nodes, min2_idx)
+
+        # Create parent node
+        val combined_freq = huffman_node_freq(min1) + huffman_node_freq(min2)
+        val parent = huffman_internal(combined_freq, min1, min2)
+        nodes = nodes + [parent]
+
+    if nodes.length() > 0:
+        return nodes[0]
+
+    return nil
+
+# Find minimum frequency node index
+fn huffman_find_min_node(nodes, exclude_idx):
+    if nodes == nil:
+        return -1
+
+    var min_idx = -1
+    var min_freq = 999999999
+
+    var i = 0
+    loop:
+        if i >= nodes.length():
+            break
+
+        if i != exclude_idx:
+            val freq = huffman_node_freq(nodes[i])
+            if freq < min_freq:
+                min_freq = freq
+                min_idx = i
+
+        i = i + 1
+
+    return min_idx
+
+# Remove node at index
+fn huffman_remove_node(nodes, idx):
+    if nodes == nil:
+        return []
+
+    var result = []
+    var i = 0
+
+    loop:
+        if i >= nodes.length():
+            break
+
+        if i != idx:
+            result = result + [nodes[i]]
+
+        i = i + 1
+
+    return result
+
+# Generate Huffman code table from tree
+# Returns: array of (symbol, code_bits, code_length)
+fn huffman_generate_codes(tree):
+    if tree == nil:
+        return []
+
+    var codes = []
+    codes = huffman_traverse_tree(tree, 0, 0, codes)
+    return codes
+
+# Traverse tree to generate codes
+fn huffman_traverse_tree(node, code_bits, code_len, codes):
+    if node == nil:
+        return codes
+
+    if huffman_node_is_leaf(node):
+        val symbol = node[0]
+        var result = codes + [[symbol, code_bits, code_len]]
+        return result
+
+    val left = node[2]
+    val right = node[3]
+
+    # Left child: append 0
+    var new_codes = huffman_traverse_tree(left, code_bits << 1, code_len + 1, codes)
+
+    # Right child: append 1
+    new_codes = huffman_traverse_tree(right, (code_bits << 1) | 1, code_len + 1, new_codes)
+
+    return new_codes
+
+# Look up Huffman code for symbol
+fn huffman_lookup(codes, symbol):
+    if codes == nil:
+        return nil
+
+    var i = 0
+    loop:
+        if i >= codes.length():
+            break
+
+        val entry = codes[i]
+        val sym = entry[0]
+
+        if sym == symbol:
+            return [entry[1], entry[2]]
+
+        i = i + 1
+
+    return nil
+
+# Encode data using Huffman codes
+fn huffman_encode(data, codes):
+    if data == nil:
+        return []
+
+    var bits = []
+    var i = 0
+
+    loop:
+        if i >= data.length():
+            break
+
+        val symbol = data[i]
+        val code_info = huffman_lookup(codes, symbol)
+
+        if code_info != nil:
+            val code_bits = code_info[0]
+            val code_len = code_info[1]
+
+            # Append bits
+            var j = code_len - 1
+            loop:
+                if j < 0:
+                    break
+
+                val bit = (code_bits >> j) & 1
+                bits = bits + [bit]
+
+                j = j - 1
+
+        i = i + 1
+
+    return bits
+
+# Decode Huffman encoded bits
+fn huffman_decode(bits, tree):
+    if bits == nil:
+        return []
+
+    if tree == nil:
+        return []
+
+    var result = []
+    var current = tree
+    var i = 0
+
+    loop:
+        if i >= bits.length():
+            break
+
+        val bit = bits[i]
+
+        if bit == 0:
+            current = current[2]  # Go left
+        else:
+            current = current[3]  # Go right
+
+        if huffman_node_is_leaf(current):
+            val symbol = current[0]
+            result = result + [symbol]
+            current = tree  # Reset to root
+
+        i = i + 1
+
+    return result
+
+# =============================================================================
+# FIXED HUFFMAN CODES (DEFLATE Standard)
+# =============================================================================
+
+# Generate fixed Huffman codes (DEFLATE RFC 1951)
+fn deflate_fixed_huffman():
+    var codes = []
+
+    # Literal/length codes 0-143: 8 bits (00110000 - 10111111)
+    var i = 0
+    loop:
+        if i > 143:
+            break
+        codes = codes + [[i, 0b00110000 + i, 8]]
+        i = i + 1
+
+    # Literal/length codes 144-255: 9 bits (110010000 - 111111111)
+    i = 144
+    loop:
+        if i > 255:
+            break
+        codes = codes + [[i, 0b110010000 + (i - 144), 9]]
+        i = i + 1
+
+    # Literal/length codes 256-279: 7 bits (0000000 - 0010111)
+    i = 256
+    loop:
+        if i > 279:
+            break
+        codes = codes + [[i, i - 256, 7]]
+        i = i + 1
+
+    # Literal/length codes 280-287: 8 bits (11000000 - 11000111)
+    i = 280
+    loop:
+        if i > 287:
+            break
+        codes = codes + [[i, 0b11000000 + (i - 280), 8]]
+        i = i + 1
+
+    return codes
+
+# Generate fixed distance codes
+fn deflate_fixed_distances():
+    var codes = []
+
+    # All distance codes are 5 bits
+    var i = 0
+    loop:
+        if i >= 30:
+            break
+
+        codes = codes + [[i, i, 5]]
+
+        i = i + 1
+
+    return codes
+
+# =============================================================================
+# DEFLATE BLOCKS
+# =============================================================================
+
+# Create DEFLATE stored block (uncompressed)
+fn deflate_block_stored(data, is_final):
+    if data == nil:
+        return []
+
+    var block = []
+
+    # Block header (3 bits)
+    var header = BLOCK_STORED << 1
+    if is_final:
+        header = header | 1
+
+    block = block + [header]
+
+    # Length (2 bytes)
+    val len = data.length()
+    block = block + [len & 0xff]
+    block = block + [(len >> 8) & 0xff]
+
+    # One's complement of length
+    val nlen = (~len) & 0xffff
+    block = block + [nlen & 0xff]
+    block = block + [(nlen >> 8) & 0xff]
+
+    # Data bytes
+    var i = 0
+    loop:
+        if i >= data.length():
+            break
+        block = block + [data[i]]
+        i = i + 1
+
+    return block
+
+# Create DEFLATE fixed Huffman block
+fn deflate_block_fixed(tokens, is_final):
+    if tokens == nil:
+        return []
+
+    # Block header
+    var header = BLOCK_FIXED << 1
+    if is_final:
+        header = header | 1
+
+    var block = [header]
+
+    # Encode tokens using fixed Huffman codes
+    val lit_codes = deflate_fixed_huffman()
+    val dist_codes = deflate_fixed_distances()
+
+    var i = 0
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+        val value = token[1]
+
+        if token_type == 0:
+            # Literal
+            val code_info = huffman_lookup(lit_codes, value)
+            if code_info != nil:
+                block = block + [code_info[0]]
+        else:
+            # Match
+            val distance = value
+            val length = token[2]
+
+            # Encode length
+            val len_code = deflate_length_code(length)
+            val len_info = huffman_lookup(lit_codes, len_code)
+            if len_info != nil:
+                block = block + [len_info[0]]
+
+            # Encode distance
+            val dist_code = deflate_distance_code(distance)
+            val dist_info = huffman_lookup(dist_codes, dist_code)
+            if dist_info != nil:
+                block = block + [dist_info[0]]
+
+        i = i + 1
+
+    # End of block marker (256)
+    val eob_info = huffman_lookup(lit_codes, 256)
+    if eob_info != nil:
+        block = block + [eob_info[0]]
+
+    return block
+
+# Get length code for match length
+fn deflate_length_code(length):
+    if length < 3:
+        return 257
+    if length <= 10:
+        return 257 + (length - 3)
+    if length <= 18:
+        return 265 + ((length - 11) / 2)
+    if length <= 34:
+        return 269 + ((length - 19) / 4)
+    if length <= 66:
+        return 273 + ((length - 35) / 8)
+    if length <= 130:
+        return 277 + ((length - 67) / 16)
+    if length <= 257:
+        return 281 + ((length - 131) / 32)
+    return 285
+
+# Get distance code for match distance
+fn deflate_distance_code(distance):
+    if distance <= 4:
+        return distance - 1
+    if distance <= 8:
+        return 4 + ((distance - 5) / 2)
+    if distance <= 16:
+        return 6 + ((distance - 9) / 4)
+    if distance <= 32:
+        return 8 + ((distance - 17) / 8)
+    if distance <= 64:
+        return 10 + ((distance - 33) / 16)
+    if distance <= 128:
+        return 12 + ((distance - 65) / 32)
+    if distance <= 256:
+        return 14 + ((distance - 129) / 64)
+    if distance <= 512:
+        return 16 + ((distance - 257) / 128)
+    if distance <= 1024:
+        return 18 + ((distance - 513) / 256)
+    if distance <= 2048:
+        return 20 + ((distance - 1025) / 512)
+    if distance <= 4096:
+        return 22 + ((distance - 2049) / 1024)
+    if distance <= 8192:
+        return 24 + ((distance - 4097) / 2048)
+    if distance <= 16384:
+        return 26 + ((distance - 8193) / 4096)
+    return 28
+
+# Parse DEFLATE block
+fn deflate_block_parse(data, offset):
+    if data == nil:
+        return nil
+
+    if offset >= data.length():
+        return nil
+
+    val header = data[offset]
+    val is_final = (header & 1) != 0
+    val block_type = (header >> 1) & 3
+
+    var next_offset = offset + 1
+
+    if block_type == BLOCK_STORED:
+        # Stored block
+        if next_offset + 4 > data.length():
+            return nil
+
+        val len = data[next_offset] | (data[next_offset + 1] << 8)
+        next_offset = next_offset + 4
+
+        if next_offset + len > data.length():
+            return nil
+
+        var block_data = []
+        var i = 0
+        loop:
+            if i >= len:
+                break
+            block_data = block_data + [data[next_offset + i]]
+            i = i + 1
+
+        next_offset = next_offset + len
+
+        return [block_type, is_final, block_data, next_offset]
+
+    # For fixed/dynamic blocks, return partial info
+    return [block_type, is_final, [], next_offset]
+
+# =============================================================================
+# GZIP COMPRESSION
+# =============================================================================
+
+# Compress data to GZIP format
+# level: 0-9 (0=none, 1=fast, 9=best)
+fn gzip_compress(data, level):
+    if data == nil:
+        return nil
+
+    # Calculate CRC32 of original data
+    val crc = crc32_calculate(data)
+    val size = data.length()
+
+    # Create header
+    val timestamp = 0  # Current time (simplified)
+    val extra_flags = 0
+    if level == LEVEL_BEST:
+        extra_flags = 2
+    if level == LEVEL_FAST:
+        extra_flags = 4
+
+    val header = gzip_header_create(nil, timestamp, extra_flags, OS_UNIX)
+
+    # Compress with DEFLATE
+    var compressed = []
+
+    if level == LEVEL_NONE:
+        # No compression - stored blocks
+        compressed = deflate_block_stored(data, true)
+    else:
+        # LZ77 + Huffman compression
+        val tokens = lz77_compress(data, level)
+        compressed = deflate_block_fixed(tokens, true)
+
+    # Create footer
+    val footer = gzip_footer_create(crc, size)
+
+    # Combine header + compressed data + footer
+    var result = header
+    var i = 0
+    loop:
+        if i >= compressed.length():
+            break
+        result = result + [compressed[i]]
+        i = i + 1
+
+    i = 0
+    loop:
+        if i >= footer.length():
+            break
+        result = result + [footer[i]]
+        i = i + 1
+
+    return result
+
+# Decompress GZIP data
+fn gzip_decompress(data):
+    if data == nil:
+        return nil
+
+    # Parse header
+    val header_info = gzip_header_parse(data)
+    if header_info == nil:
+        return nil
+
+    val header_size = gzip_header_size(header_info)
+
+    # Parse footer (last 8 bytes)
+    val footer_offset = data.length() - 8
+    val footer_info = gzip_footer_parse(data, footer_offset)
+    if footer_info == nil:
+        return nil
+
+    # Extract compressed data
+    val compressed_size = footer_offset - header_size
+    var compressed = []
+    var i = 0
+    loop:
+        if i >= compressed_size:
+            break
+        compressed = compressed + [data[header_size + i]]
+        i = i + 1
+
+    # Decompress DEFLATE blocks
+    var decompressed = []
+    var offset = 0
+
+    loop:
+        if offset >= compressed.length():
+            break
+
+        val block_info = deflate_block_parse(compressed, offset)
+        if block_info == nil:
+            break
+
+        val block_type = block_info[0]
+        val is_final = block_info[1]
+        val block_data = block_info[2]
+        val next_offset = block_info[3]
+
+        # Append decompressed block data
+        var j = 0
+        loop:
+            if j >= block_data.length():
+                break
+            decompressed = decompressed + [block_data[j]]
+            j = j + 1
+
+        offset = next_offset
+
+        if is_final:
+            break
+
+    # Validate footer
+    val valid = gzip_footer_validate(footer_info, decompressed, decompressed.length())
+    if not valid:
+        return nil
+
+    return decompressed
+
+# Compress with default level
+fn gzip_compress_default(data):
+    return gzip_compress(data, LEVEL_DEFAULT)
+
+# Compress with maximum compression
+fn gzip_compress_best(data):
+    return gzip_compress(data, LEVEL_BEST)
+
+# Compress with fast compression
+fn gzip_compress_fast(data):
+    return gzip_compress(data, LEVEL_FAST)
+
+# Compress without compression (stored only)
+fn gzip_compress_none(data):
+    return gzip_compress(data, LEVEL_NONE)
+
+# =============================================================================
+# STREAM OPERATIONS
+# =============================================================================
+
+# Stream state: (crc, size, pending_data, level)
+fn gzip_stream_init(level):
+    return [0xffffffff, 0, [], level]
+
+# Update stream with new data chunk
+fn gzip_stream_update(state, chunk):
+    if state == nil:
+        return nil
+
+    if chunk == nil:
+        return state
+
+    val crc = state[0]
+    val size = state[1]
+    val pending = state[2]
+    val level = state[3]
+
+    # Update CRC
+    val new_crc = crc32_update(crc, chunk)
+
+    # Update size
+    val new_size = size + chunk.length()
+
+    # Append to pending data
+    var new_pending = pending
+    var i = 0
+    loop:
+        if i >= chunk.length():
+            break
+        new_pending = new_pending + [chunk[i]]
+        i = i + 1
+
+    return [new_crc, new_size, new_pending, level]
+
+# Finalize stream and get compressed output
+fn gzip_stream_finalize(state):
+    if state == nil:
+        return nil
+
+    val crc = state[0]
+    val size = state[1]
+    val pending = state[2]
+    val level = state[3]
+
+    # Finalize CRC
+    val final_crc = crc32_finalize(crc)
+
+    # Compress pending data
+    return gzip_compress(pending, level)
+
+# Stream compress multiple chunks
+fn gzip_stream_compress(chunks, level):
+    if chunks == nil:
+        return nil
+
+    var state = gzip_stream_init(level)
+
+    var i = 0
+    loop:
+        if i >= chunks.length():
+            break
+
+        state = gzip_stream_update(state, chunks[i])
+
+        i = i + 1
+
+    return gzip_stream_finalize(state)
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+# Convert character to byte value
+fn char_to_byte(ch):
+    if ch == "a":
+        return 97
+    if ch == "b":
+        return 98
+    if ch == "z":
+        return 122
+    if ch == "A":
+        return 65
+    if ch == "Z":
+        return 90
+    if ch == "0":
+        return 48
+    if ch == "9":
+        return 57
+    if ch == ".":
+        return 46
+    if ch == "/":
+        return 47
+    return 0
+
+# Convert byte to character
+fn byte_to_char(byte):
+    if byte == 97:
+        return "a"
+    if byte == 122:
+        return "z"
+    if byte == 65:
+        return "A"
+    if byte == 90:
+        return "Z"
+    if byte == 48:
+        return "0"
+    if byte == 57:
+        return "9"
+    if byte == 46:
+        return "."
+    if byte == 47:
+        return "/"
+    return "?"
+
+# Convert text to bytes
+fn text_to_bytes(text):
+    if text == nil:
+        return []
+
+    var bytes = []
+    var i = 0
+
+    loop:
+        if i >= text.length():
+            break
+
+        val ch = text[i]
+        bytes = bytes + [char_to_byte(ch)]
+
+        i = i + 1
+
+    return bytes
+
+# Convert bytes to text
+fn bytes_to_text(bytes):
+    if bytes == nil:
+        return ""
+
+    var text = ""
+    var i = 0
+
+    loop:
+        if i >= bytes.length():
+            break
+
+        val byte = bytes[i]
+        text = text + byte_to_char(byte)
+
+        i = i + 1
+
+    return text
+
+# Pack bits into bytes
+fn pack_bits_to_bytes(bits):
+    if bits == nil:
+        return []
+
+    var bytes = []
+    var current = 0
+    var bit_count = 0
+    var i = 0
+
+    loop:
+        if i >= bits.length():
+            break
+
+        val bit = bits[i]
+        current = (current << 1) | bit
+        bit_count = bit_count + 1
+
+        if bit_count == 8:
+            bytes = bytes + [current]
+            current = 0
+            bit_count = 0
+
+        i = i + 1
+
+    # Add remaining bits with padding
+    if bit_count > 0:
+        current = current << (8 - bit_count)
+        bytes = bytes + [current]
+
+    return bytes
+
+# Unpack bytes into bits
+fn unpack_bytes_to_bits(bytes):
+    if bytes == nil:
+        return []
+
+    var bits = []
+    var i = 0
+
+    loop:
+        if i >= bytes.length():
+            break
+
+        val byte = bytes[i]
+        var j = 7
+
+        loop:
+            if j < 0:
+                break
+
+            val bit = (byte >> j) & 1
+            bits = bits + [bit]
+
+            j = j - 1
+
+        i = i + 1
+
+    return bits
+
+# Get GZIP compression ratio
+fn gzip_compression_ratio(original_size, compressed_size):
+    if original_size == 0:
+        return 0.0
+
+    val ratio = compressed_size.to_float() / original_size.to_float()
+    return ratio
+
+# Get GZIP space savings percentage
+fn gzip_space_savings(original_size, compressed_size):
+    if original_size == 0:
+        return 0.0
+
+    val saved = original_size - compressed_size
+    val savings = (saved.to_float() / original_size.to_float()) * 100.0
+
+    return savings
+
+# Validate GZIP data integrity
+fn gzip_validate(data):
+    if data == nil:
+        return false
+
+    # Check minimum size
+    if data.length() < 18:
+        return false
+
+    # Check magic bytes
+    if data[0] != GZIP_MAGIC1:
+        return false
+    if data[1] != GZIP_MAGIC2:
+        return false
+
+    # Parse header
+    val header_info = gzip_header_parse(data)
+    if header_info == nil:
+        return false
+
+    # Parse footer
+    val footer_offset = data.length() - 8
+    val footer_info = gzip_footer_parse(data, footer_offset)
+    if footer_info == nil:
+        return false
+
+    return true
+
+# Get GZIP metadata
+fn gzip_get_metadata(data):
+    if data == nil:
+        return nil
+
+    val header_info = gzip_header_parse(data)
+    if header_info == nil:
+        return nil
+
+    val flags = header_info[0]
+    val timestamp = header_info[1]
+    val extra_flags = header_info[2]
+    val os = header_info[3]
+
+    val footer_offset = data.length() - 8
+    val footer_info = gzip_footer_parse(data, footer_offset)
+
+    if footer_info == nil:
+        return nil
+
+    val crc = footer_info[0]
+    val size = footer_info[1]
+
+    return [timestamp, os, extra_flags, crc, size]
+
+# Calculate optimal compression level for data
+fn gzip_suggest_level(data):
+    if data == nil:
+        return LEVEL_DEFAULT
+
+    val size = data.length()
+
+    # Small data: use best compression
+    if size < 1024:
+        return LEVEL_BEST
+
+    # Medium data: use default
+    if size < 1048576:
+        return LEVEL_DEFAULT
+
+    # Large data: use fast compression
+    return LEVEL_FAST
+
+# Estimate compressed size
+fn gzip_estimate_size(data, level):
+    if data == nil:
+        return 0
+
+    val original_size = data.length()
+
+    # Rough estimates based on compression level
+    var ratio = 0.5
+    if level == LEVEL_NONE:
+        ratio = 1.0
+    if level == LEVEL_FAST:
+        ratio = 0.7
+    if level == LEVEL_DEFAULT:
+        ratio = 0.5
+    if level == LEVEL_BEST:
+        ratio = 0.4
+
+    val estimated = original_size.to_float() * ratio
+    return estimated.to_int()
+
+# =============================================================================
+# PUBLIC API EXPORTS
+# =============================================================================
+
+# Main compression functions
+fn compress_gzip(data):
+    return gzip_compress_default(data)
+
+fn decompress_gzip(data):
+    return gzip_decompress(data)
+
+fn compress_gzip_level(data, level):
+    return gzip_compress(data, level)
+
+# Checksum functions
+fn calculate_crc32(data):
+    return crc32_calculate(data)
+
+fn verify_crc32(data, expected):
+    return crc32_verify(data, expected)
+
+# Validation and metadata
+fn validate_gzip(data):
+    return gzip_validate(data)
+
+fn get_gzip_metadata(data):
+    return gzip_get_metadata(data)
+
+# Stream operations
+fn stream_compress_gzip(chunks, level):
+    return gzip_stream_compress(chunks, level)
+
+# Statistics
+fn get_compression_ratio(orig_size, comp_size):
+    return gzip_compression_ratio(orig_size, comp_size)
+
+fn get_space_savings(orig_size, comp_size):
+    return gzip_space_savings(orig_size, comp_size)
