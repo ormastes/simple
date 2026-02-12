@@ -1,0 +1,1237 @@
+# Interval Tree Utilities - Efficient interval overlap queries
+# Based on augmented Red-Black tree for O(log n) operations
+#
+# Features:
+# - Self-balancing Red-Black tree structure
+# - Augmented with max endpoint for efficient pruning
+# - Insert, remove, search operations
+# - Multiple overlap query modes (point, interval, range)
+# - Sorted iteration and utility functions
+#
+# Applications:
+# - Scheduling and resource allocation
+# - Computational geometry
+# - Range queries and databases
+# - Time series analysis
+
+# ============================================================================
+# Core Data Structures
+# ============================================================================
+
+# Interval representation: (low, high, data)
+# Closed intervals [low, high] with associated data value
+fn interval_new(low: i64, high: i64, data: i64) -> (i64, i64, i64):
+    (low, high, data)
+
+fn interval_low(interval: (i64, i64, i64)) -> i64:
+    interval.0
+
+fn interval_high(interval: (i64, i64, i64)) -> i64:
+    interval.1
+
+fn interval_data(interval: (i64, i64, i64)) -> i64:
+    interval.2
+
+fn interval_set_data(interval: (i64, i64, i64), data: i64) -> (i64, i64, i64):
+    (interval.0, interval.1, data)
+
+# Node colors for Red-Black tree
+fn color_red() -> i64:
+    0
+
+fn color_black() -> i64:
+    1
+
+# Node structure: (color, interval, max_end, left, right)
+# max_end: maximum high value in subtree (augmentation)
+# nil represents empty tree
+fn node_new(color: i64, interval: (i64, i64, i64)) -> (i64, (i64, i64, i64), i64, any, any):
+    val max_end = interval_high(interval)
+    (color, interval, max_end, nil, nil)
+
+fn node_color(node: (i64, (i64, i64, i64), i64, any, any)) -> i64:
+    node.0
+
+fn node_interval(node: (i64, (i64, i64, i64), i64, any, any)) -> (i64, i64, i64):
+    node.1
+
+fn node_max_end(node: (i64, (i64, i64, i64), i64, any, any)) -> i64:
+    node.2
+
+fn node_left(node: (i64, (i64, i64, i64), i64, any, any)) -> any:
+    node.3
+
+fn node_right(node: (i64, (i64, i64, i64), i64, any, any)) -> any:
+    node.4
+
+fn node_set_color(node: (i64, (i64, i64, i64), i64, any, any), color: i64) -> (i64, (i64, i64, i64), i64, any, any):
+    (color, node.1, node.2, node.3, node.4)
+
+fn node_set_interval(node: (i64, (i64, i64, i64), i64, any, any), interval: (i64, i64, i64)) -> (i64, (i64, i64, i64), i64, any, any):
+    val new_max = compute_max_end(interval, node.3, node.4)
+    (node.0, interval, new_max, node.3, node.4)
+
+fn node_set_max_end(node: (i64, (i64, i64, i64), i64, any, any), max_end: i64) -> (i64, (i64, i64, i64), i64, any, any):
+    (node.0, node.1, max_end, node.3, node.4)
+
+fn node_set_left(node: (i64, (i64, i64, i64), i64, any, any), left: any) -> (i64, (i64, i64, i64), i64, any, any):
+    val new_max = compute_max_end(node.1, left, node.4)
+    (node.0, node.1, new_max, left, node.4)
+
+fn node_set_right(node: (i64, (i64, i64, i64), i64, any, any), right: any) -> (i64, (i64, i64, i64), i64, any, any):
+    val new_max = compute_max_end(node.1, node.3, right)
+    (node.0, node.1, new_max, node.3, right)
+
+fn node_set_children(node: (i64, (i64, i64, i64), i64, any, any), left: any, right: any) -> (i64, (i64, i64, i64), i64, any, any):
+    val new_max = compute_max_end(node.1, left, right)
+    (node.0, node.1, new_max, left, right)
+
+# ============================================================================
+# Interval Comparison and Utility Functions
+# ============================================================================
+
+fn interval_overlaps(i1: (i64, i64, i64), i2: (i64, i64, i64)) -> bool:
+    # Two intervals overlap if: max(low1, low2) <= min(high1, high2)
+    val low1 = interval_low(i1)
+    val high1 = interval_high(i1)
+    val low2 = interval_low(i2)
+    val high2 = interval_high(i2)
+
+    val max_low = if low1 > low2: low1 else: low2
+    val min_high = if high1 < high2: high1 else: high2
+
+    max_low <= min_high
+
+fn interval_contains_point(interval: (i64, i64, i64), point: i64) -> bool:
+    val low = interval_low(interval)
+    val high = interval_high(interval)
+    low <= point and point <= high
+
+fn interval_contains_interval(outer: (i64, i64, i64), inner: (i64, i64, i64)) -> bool:
+    val outer_low = interval_low(outer)
+    val outer_high = interval_high(outer)
+    val inner_low = interval_low(inner)
+    val inner_high = interval_high(inner)
+
+    outer_low <= inner_low and inner_high <= outer_high
+
+fn interval_compare(i1: (i64, i64, i64), i2: (i64, i64, i64)) -> i64:
+    # Compare intervals by low endpoint, then by high endpoint
+    val low1 = interval_low(i1)
+    val low2 = interval_low(i2)
+
+    if low1 < low2:
+        -1
+    else: if low1 > low2:
+        1
+    else:
+        val high1 = interval_high(i1)
+        val high2 = interval_high(i2)
+
+        if high1 < high2:
+            -1
+        else: if high1 > high2:
+            1
+        else:
+            0
+
+fn interval_equals(i1: (i64, i64, i64), i2: (i64, i64, i64)) -> bool:
+    val cmp = interval_compare(i1, i2)
+    cmp == 0
+
+fn interval_merge(i1: (i64, i64, i64), i2: (i64, i64, i64)) -> (i64, i64, i64):
+    # Merge two overlapping intervals
+    val low1 = interval_low(i1)
+    val high1 = interval_high(i1)
+    val low2 = interval_low(i2)
+    val high2 = interval_high(i2)
+
+    val min_low = if low1 < low2: low1 else: low2
+    val max_high = if high1 > high2: high1 else: high2
+    val data = interval_data(i1)
+
+    interval_new(min_low, max_high, data)
+
+fn interval_length(interval: (i64, i64, i64)) -> i64:
+    val low = interval_low(interval)
+    val high = interval_high(interval)
+    high - low + 1
+
+fn interval_valid(interval: (i64, i64, i64)) -> bool:
+    val low = interval_low(interval)
+    val high = interval_high(interval)
+    low <= high
+
+# ============================================================================
+# Max End Computation (Augmentation)
+# ============================================================================
+
+fn compute_max_end(interval: (i64, i64, i64), left: any, right: any) -> i64:
+    val current_high = interval_high(interval)
+    var max_val = current_high
+
+    if left != nil:
+        val left_node = left as (i64, (i64, i64, i64), i64, any, any)
+        val left_max = node_max_end(left_node)
+        if left_max > max_val:
+            max_val = left_max
+        else:
+            ()
+    else:
+        ()
+
+    if right != nil:
+        val right_node = right as (i64, (i64, i64, i64), i64, any, any)
+        val right_max = node_max_end(right_node)
+        if right_max > max_val:
+            max_val = right_max
+        else:
+            ()
+    else:
+        ()
+
+    max_val
+
+fn update_max_end(node: any) -> any:
+    if node == nil:
+        nil
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(n)
+        val left = node_left(n)
+        val right = node_right(n)
+        val new_max = compute_max_end(interval, left, right)
+        node_set_max_end(n, new_max)
+
+# ============================================================================
+# Red-Black Tree Rotations
+# ============================================================================
+
+fn rotate_left(node: any) -> any:
+    if node == nil:
+        nil
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val right = node_right(n)
+
+        if right == nil:
+            node
+        else:
+            val r = right as (i64, (i64, i64, i64), i64, any, any)
+            val right_left = node_left(r)
+
+            # Update node with new right child
+            val new_node = node_set_right(n, right_left)
+            val updated_node = update_max_end(new_node)
+
+            # Update right with new left child
+            val new_right = node_set_left(r, updated_node)
+            val updated_right = update_max_end(new_right)
+
+            updated_right
+
+fn rotate_right(node: any) -> any:
+    if node == nil:
+        nil
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(n)
+
+        if left == nil:
+            node
+        else:
+            val l = left as (i64, (i64, i64, i64), i64, any, any)
+            val left_right = node_right(l)
+
+            # Update node with new left child
+            val new_node = node_set_left(n, left_right)
+            val updated_node = update_max_end(new_node)
+
+            # Update left with new right child
+            val new_left = node_set_right(l, updated_node)
+            val updated_left = update_max_end(new_left)
+
+            updated_left
+
+# ============================================================================
+# Red-Black Tree Color Helpers
+# ============================================================================
+
+fn is_red(node: any) -> bool:
+    if node == nil:
+        false
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val c = node_color(n)
+        c == color_red()
+
+fn is_black(node: any) -> bool:
+    if node == nil:
+        true
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val c = node_color(n)
+        c == color_black()
+
+fn flip_colors(node: any) -> any:
+    if node == nil:
+        nil
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val current_color = node_color(n)
+        val new_color = if current_color == color_red(): color_black() else: color_red()
+        val new_node = node_set_color(n, new_color)
+
+        val left = node_left(n)
+        val right = node_right(n)
+
+        # Flip left child color
+        var new_left = left
+        if left != nil:
+            val l = left as (i64, (i64, i64, i64), i64, any, any)
+            val left_color = node_color(l)
+            val new_left_color = if left_color == color_red(): color_black() else: color_red()
+            new_left = node_set_color(l, new_left_color)
+        else:
+            ()
+
+        # Flip right child color
+        var new_right = right
+        if right != nil:
+            val r = right as (i64, (i64, i64, i64), i64, any, any)
+            val right_color = node_color(r)
+            val new_right_color = if right_color == color_red(): color_black() else: color_red()
+            new_right = node_set_color(r, new_right_color)
+        else:
+            ()
+
+        node_set_children(new_node, new_left, new_right)
+
+# ============================================================================
+# Insertion
+# ============================================================================
+
+fn insert(tree: any, interval: (i64, i64, i64)) -> any:
+    val result = insert_helper(tree, interval)
+
+    # Ensure root is black
+    if result == nil:
+        nil
+    else:
+        val r = result as (i64, (i64, i64, i64), i64, any, any)
+        node_set_color(r, color_black())
+
+fn insert_helper(node: any, interval: (i64, i64, i64)) -> any:
+    if node == nil:
+        node_new(color_red(), interval)
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val node_interval = node_interval(n)
+        val cmp = interval_compare(interval, node_interval)
+
+        var result = n
+        if cmp < 0:
+            val left = node_left(n)
+            val new_left = insert_helper(left, interval)
+            result = node_set_left(n, new_left)
+        else: if cmp > 0:
+            val right = node_right(n)
+            val new_right = insert_helper(right, interval)
+            result = node_set_right(n, new_right)
+        else:
+            # Equal interval, update data
+            val new_interval = interval_set_data(node_interval, interval_data(interval))
+            result = node_set_interval(n, new_interval)
+
+        balance(result)
+
+fn balance(node: any) -> any:
+    if node == nil:
+        nil
+    else:
+        var n = node
+        val node_data = n as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node_data)
+        val right = node_right(node_data)
+
+        # Fix right-leaning red
+        val right_is_red = is_red(right)
+        val left_is_red = is_red(left)
+
+        if right_is_red and not left_is_red:
+            n = rotate_left(n)
+        else:
+            ()
+
+        # Fix two reds in a row on left
+        val updated = n as (i64, (i64, i64, i64), i64, any, any)
+        val new_left = node_left(updated)
+        val left_left = if new_left == nil: nil else: node_left(new_left as (i64, (i64, i64, i64), i64, any, any))
+
+        if is_red(new_left) and is_red(left_left):
+            n = rotate_right(n)
+        else:
+            ()
+
+        # Fix two red children
+        val balanced = n as (i64, (i64, i64, i64), i64, any, any)
+        val final_left = node_left(balanced)
+        val final_right = node_right(balanced)
+
+        if is_red(final_left) and is_red(final_right):
+            n = flip_colors(n)
+        else:
+            ()
+
+        n
+
+# ============================================================================
+# Search Operations
+# ============================================================================
+
+fn search_exact(tree: any, interval: (i64, i64, i64)) -> any:
+    # Search for exact interval match
+    if tree == nil:
+        nil
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val node_interval = node_interval(node)
+        val cmp = interval_compare(interval, node_interval)
+
+        if cmp < 0:
+            search_exact(node_left(node), interval)
+        else: if cmp > 0:
+            search_exact(node_right(node), interval)
+        else:
+            tree
+
+fn search_point(tree: any, point: i64) -> list:
+    # Find all intervals containing the point
+    var result = []
+    search_point_helper(tree, point, result)
+    result
+
+fn search_point_helper(node: any, point: i64, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(n)
+        val left = node_left(n)
+        val right = node_right(n)
+
+        # Check left subtree if it might contain overlapping intervals
+        val should_check_left = if left == nil:
+            false
+        else:
+            val l = left as (i64, (i64, i64, i64), i64, any, any)
+            val left_max = node_max_end(l)
+            left_max >= point
+
+        if should_check_left:
+            search_point_helper(left, point, result)
+        else:
+            ()
+
+        # Check current interval
+        if interval_contains_point(interval, point):
+            result.append(interval)
+        else:
+            ()
+
+        # Check right subtree if point is to the right of interval start
+        val interval_low = interval_low(interval)
+        if point >= interval_low:
+            search_point_helper(right, point, result)
+        else:
+            ()
+
+fn search_overlapping(tree: any, interval: (i64, i64, i64)) -> list:
+    # Find all intervals overlapping with given interval
+    var result = []
+    search_overlapping_helper(tree, interval, result)
+    result
+
+fn search_overlapping_helper(node: any, interval: (i64, i64, i64), result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val node_interval = node_interval(n)
+        val left = node_left(n)
+        val right = node_right(n)
+
+        # Check left subtree if it might contain overlapping intervals
+        val should_check_left = if left == nil:
+            false
+        else:
+            val l = left as (i64, (i64, i64, i64), i64, any, any)
+            val left_max = node_max_end(l)
+            val interval_low = interval_low(interval)
+            left_max >= interval_low
+
+        if should_check_left:
+            search_overlapping_helper(left, interval, result)
+        else:
+            ()
+
+        # Check current interval
+        if interval_overlaps(node_interval, interval):
+            result.append(node_interval)
+        else:
+            ()
+
+        # Check right subtree if interval extends past node start
+        val node_low = interval_low(node_interval)
+        val interval_high = interval_high(interval)
+        if interval_high >= node_low:
+            search_overlapping_helper(right, interval, result)
+        else:
+            ()
+
+fn search_range(tree: any, low: i64, high: i64) -> list:
+    # Find all intervals in range [low, high]
+    val search_interval = interval_new(low, high, 0)
+    search_overlapping(tree, search_interval)
+
+fn find_min(tree: any) -> any:
+    # Find node with minimum interval
+    if tree == nil:
+        nil
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node)
+        if left == nil:
+            tree
+        else:
+            find_min(left)
+
+fn find_max(tree: any) -> any:
+    # Find node with maximum interval
+    if tree == nil:
+        nil
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val right = node_right(node)
+        if right == nil:
+            tree
+        else:
+            find_max(right)
+
+# ============================================================================
+# Deletion
+# ============================================================================
+
+fn remove(tree: any, interval: (i64, i64, i64)) -> any:
+    if tree == nil:
+        nil
+    else:
+        val result = remove_helper(tree, interval)
+
+        # Ensure root is black
+        if result == nil:
+            nil
+        else:
+            val r = result as (i64, (i64, i64, i64), i64, any, any)
+            node_set_color(r, color_black())
+
+fn remove_helper(node: any, interval: (i64, i64, i64)) -> any:
+    if node == nil:
+        nil
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val node_interval = node_interval(n)
+        val cmp = interval_compare(interval, node_interval)
+
+        var result = n
+
+        if cmp < 0:
+            val left = node_left(n)
+            val new_left = remove_helper(left, interval)
+            result = node_set_left(n, new_left)
+        else: if cmp > 0:
+            val right = node_right(n)
+            val new_right = remove_helper(right, interval)
+            result = node_set_right(n, new_right)
+        else:
+            # Found node to remove
+            val left = node_left(n)
+            val right = node_right(n)
+
+            if left == nil:
+                result = right
+            else: if right == nil:
+                result = left
+            else:
+                # Two children: replace with successor
+                val successor = find_min(right)
+                val succ = successor as (i64, (i64, i64, i64), i64, any, any)
+                val succ_interval = node_interval(succ)
+
+                val new_right = remove_helper(right, succ_interval)
+                val updated = node_set_interval(n, succ_interval)
+                result = node_set_right(updated, new_right)
+
+        update_max_end(result)
+
+# ============================================================================
+# Tree Properties
+# ============================================================================
+
+fn size(tree: any) -> i64:
+    if tree == nil:
+        0
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node)
+        val right = node_right(node)
+        1 + size(left) + size(right)
+
+fn height(tree: any) -> i64:
+    if tree == nil:
+        0
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node)
+        val right = node_right(node)
+        val left_height = height(left)
+        val right_height = height(right)
+        val max_height = if left_height > right_height: left_height else: right_height
+        1 + max_height
+
+fn is_empty(tree: any) -> bool:
+    tree == nil
+
+fn contains(tree: any, interval: (i64, i64, i64)) -> bool:
+    val found = search_exact(tree, interval)
+    found != nil
+
+# ============================================================================
+# Traversal and Iteration
+# ============================================================================
+
+fn inorder_traversal(tree: any) -> list:
+    # Return intervals in sorted order by low endpoint
+    var result = []
+    inorder_helper(tree, result)
+    result
+
+fn inorder_helper(node: any, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(n)
+        val right = node_right(n)
+        val interval = node_interval(n)
+
+        inorder_helper(left, result)
+        result.append(interval)
+        inorder_helper(right, result)
+
+fn preorder_traversal(tree: any) -> list:
+    var result = []
+    preorder_helper(tree, result)
+    result
+
+fn preorder_helper(node: any, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(n)
+        val right = node_right(n)
+        val interval = node_interval(n)
+
+        result.append(interval)
+        preorder_helper(left, result)
+        preorder_helper(right, result)
+
+fn postorder_traversal(tree: any) -> list:
+    var result = []
+    postorder_helper(tree, result)
+    result
+
+fn postorder_helper(node: any, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(n)
+        val right = node_right(n)
+        val interval = node_interval(n)
+
+        postorder_helper(left, result)
+        postorder_helper(right, result)
+        result.append(interval)
+
+fn collect_all(tree: any) -> list:
+    inorder_traversal(tree)
+
+# ============================================================================
+# Bulk Operations
+# ============================================================================
+
+fn from_list(intervals: list) -> any:
+    # Build tree from list of intervals
+    var tree = nil
+    var i = 0
+    val n = intervals.len()
+
+    while i < n:
+        val interval = intervals[i]
+        tree = insert(tree, interval)
+        i = i + 1
+
+    tree
+
+fn merge_overlapping_intervals(intervals: list) -> list:
+    # Merge all overlapping intervals in the list
+    if intervals.len() == 0:
+        []
+    else:
+        # Sort intervals by low endpoint
+        val sorted = intervals.copy()
+        sort_intervals(sorted)
+
+        var result = []
+        var current = sorted[0]
+        var i = 1
+        val n = sorted.len()
+
+        while i < n:
+            val next = sorted[i]
+
+            if interval_overlaps(current, next):
+                current = interval_merge(current, next)
+            else:
+                result.append(current)
+                current = next
+
+            i = i + 1
+
+        result.append(current)
+        result
+
+fn sort_intervals(intervals: list):
+    # Bubble sort for intervals (in-place)
+    val n = intervals.len()
+    var i = 0
+
+    while i < n - 1:
+        var j = 0
+        while j < n - i - 1:
+            val cmp = interval_compare(intervals[j], intervals[j + 1])
+            if cmp > 0:
+                val temp = intervals[j]
+                intervals[j] = intervals[j + 1]
+                intervals[j + 1] = temp
+            else:
+                ()
+            j = j + 1
+        i = i + 1
+
+# ============================================================================
+# Advanced Queries
+# ============================================================================
+
+fn find_gaps(tree: any, range_low: i64, range_high: i64) -> list:
+    # Find gaps (non-covered intervals) in a range
+    val intervals = inorder_traversal(tree)
+    val n = intervals.len()
+
+    if n == 0:
+        [interval_new(range_low, range_high, 0)]
+    else:
+        var gaps = []
+        var current_pos = range_low
+        var i = 0
+
+        while i < n:
+            val interval = intervals[i]
+            val low = interval_low(interval)
+            val high = interval_high(interval)
+
+            if low > current_pos:
+                val gap_high = if low - 1 < range_high: low - 1 else: range_high
+                gaps.append(interval_new(current_pos, gap_high, 0))
+            else:
+                ()
+
+            val next_pos = high + 1
+            current_pos = if next_pos > current_pos: next_pos else: current_pos
+            i = i + 1
+
+        if current_pos <= range_high:
+            gaps.append(interval_new(current_pos, range_high, 0))
+        else:
+            ()
+
+        gaps
+
+fn find_maximum_overlap_point(tree: any) -> (i64, i64):
+    # Find point with maximum number of overlapping intervals
+    # Returns (point, count)
+    val intervals = collect_all(tree)
+    val n = intervals.len()
+
+    if n == 0:
+        (0, 0)
+    else:
+        # Collect all endpoints
+        var endpoints = []
+        var i = 0
+
+        while i < n:
+            val interval = intervals[i]
+            endpoints.append(interval_low(interval))
+            endpoints.append(interval_high(interval))
+            i = i + 1
+
+        # Sort endpoints
+        sort_i64_list(endpoints)
+
+        # Find point with max overlap
+        var max_count = 0
+        var max_point = endpoints[0]
+        var j = 0
+        val m = endpoints.len()
+
+        while j < m:
+            val point = endpoints[j]
+            val overlapping = search_point(tree, point)
+            val count = overlapping.len()
+
+            if count > max_count:
+                max_count = count
+                max_point = point
+            else:
+                ()
+
+            j = j + 1
+
+        (max_point, max_count)
+
+fn sort_i64_list(values: list):
+    # Bubble sort for i64 values (in-place)
+    val n = values.len()
+    var i = 0
+
+    while i < n - 1:
+        var j = 0
+        while j < n - i - 1:
+            if values[j] > values[j + 1]:
+                val temp = values[j]
+                values[j] = values[j + 1]
+                values[j + 1] = temp
+            else:
+                ()
+            j = j + 1
+        i = i + 1
+
+fn coverage_length(tree: any, range_low: i64, range_high: i64) -> i64:
+    # Calculate total coverage length in range
+    val intervals = search_range(tree, range_low, range_high)
+
+    if intervals.len() == 0:
+        0
+    else:
+        val merged = merge_overlapping_intervals(intervals)
+        var total = 0
+        var i = 0
+        val n = merged.len()
+
+        while i < n:
+            val interval = merged[i]
+            var low = interval_low(interval)
+            var high = interval_high(interval)
+
+            # Clip to range
+            if low < range_low:
+                low = range_low
+            else:
+                ()
+
+            if high > range_high:
+                high = range_high
+            else:
+                ()
+
+            if low <= high:
+                total = total + (high - low + 1)
+            else:
+                ()
+
+            i = i + 1
+
+        total
+
+# ============================================================================
+# Validation
+# ============================================================================
+
+fn validate_red_black_properties(tree: any) -> bool:
+    # Check if tree maintains Red-Black properties
+    if tree == nil:
+        true
+    else:
+        # Root must be black
+        if is_red(tree):
+            false
+        else:
+            val node = tree as (i64, (i64, i64, i64), i64, any, any)
+            validate_helper(node)
+
+fn validate_helper(node: (i64, (i64, i64, i64), i64, any, any)) -> bool:
+    # Check red node has black children
+    if is_red(node):
+        val left = node_left(node)
+        val right = node_right(node)
+
+        if is_red(left) or is_red(right):
+            false
+        else:
+            val left_valid = if left == nil: true else: validate_helper(left as (i64, (i64, i64, i64), i64, any, any))
+            val right_valid = if right == nil: true else: validate_helper(right as (i64, (i64, i64, i64), i64, any, any))
+            left_valid and right_valid
+    else:
+        val left = node_left(node)
+        val right = node_right(node)
+        val left_valid = if left == nil: true else: validate_helper(left as (i64, (i64, i64, i64), i64, any, any))
+        val right_valid = if right == nil: true else: validate_helper(right as (i64, (i64, i64, i64), i64, any, any))
+        left_valid and right_valid
+
+fn validate_max_end(tree: any) -> bool:
+    # Check if max_end augmentation is correct
+    if tree == nil:
+        true
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(node)
+        val stored_max = node_max_end(node)
+        val left = node_left(node)
+        val right = node_right(node)
+        val computed_max = compute_max_end(interval, left, right)
+
+        if stored_max != computed_max:
+            false
+        else:
+            val left_valid = validate_max_end(left)
+            val right_valid = validate_max_end(right)
+            left_valid and right_valid
+
+fn validate_bst_property(tree: any) -> bool:
+    # Check if BST property holds
+    validate_bst_helper(tree, nil, nil)
+
+fn validate_bst_helper(node: any, min_interval: any, max_interval: any) -> bool:
+    if node == nil:
+        true
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(n)
+
+        # Check bounds
+        var valid = true
+
+        if min_interval != nil:
+            val min_int = min_interval as (i64, i64, i64)
+            val cmp = interval_compare(interval, min_int)
+            if cmp <= 0:
+                valid = false
+            else:
+                ()
+        else:
+            ()
+
+        if max_interval != nil:
+            val max_int = max_interval as (i64, i64, i64)
+            val cmp = interval_compare(interval, max_int)
+            if cmp >= 0:
+                valid = false
+            else:
+                ()
+        else:
+            ()
+
+        if not valid:
+            false
+        else:
+            val left = node_left(n)
+            val right = node_right(n)
+            val left_valid = validate_bst_helper(left, min_interval, interval)
+            val right_valid = validate_bst_helper(right, interval, max_interval)
+            left_valid and right_valid
+
+# ============================================================================
+# Debugging and Visualization
+# ============================================================================
+
+fn to_string(tree: any) -> text:
+    if tree == nil:
+        "nil"
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(node)
+        val low = interval_low(interval)
+        val high = interval_high(interval)
+        val data = interval_data(interval)
+        val max_end = node_max_end(node)
+        val color = if is_red(tree): "R" else: "B"
+
+        "[{low},{high}]:{data} max={max_end} ({color})"
+
+fn print_tree(tree: any):
+    print_tree_helper(tree, 0)
+
+fn print_tree_helper(node: any, depth: i64):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val right = node_right(n)
+        val left = node_left(n)
+
+        print_tree_helper(right, depth + 1)
+
+        var indent = ""
+        var i = 0
+        while i < depth:
+            indent = indent + "  "
+            i = i + 1
+
+        print "{indent}{to_string(node)}"
+
+        print_tree_helper(left, depth + 1)
+
+fn count_red_nodes(tree: any) -> i64:
+    if tree == nil:
+        0
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node)
+        val right = node_right(node)
+        val count = if is_red(tree): 1 else: 0
+        count + count_red_nodes(left) + count_red_nodes(right)
+
+fn count_black_nodes(tree: any) -> i64:
+    if tree == nil:
+        0
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val left = node_left(node)
+        val right = node_right(node)
+        val count = if is_black(tree): 1 else: 0
+        count + count_black_nodes(left) + count_black_nodes(right)
+
+# ============================================================================
+# Additional Utility Functions
+# ============================================================================
+
+fn clear(tree: any) -> any:
+    # Clear the entire tree
+    nil
+
+fn filter_by_data(tree: any, data: i64) -> list:
+    # Find all intervals with specific data value
+    var result = []
+    filter_by_data_helper(tree, data, result)
+    result
+
+fn filter_by_data_helper(node: any, data: i64, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(n)
+        val left = node_left(n)
+        val right = node_right(n)
+
+        filter_by_data_helper(left, data, result)
+
+        if interval_data(interval) == data:
+            result.append(interval)
+        else:
+            ()
+
+        filter_by_data_helper(right, data, result)
+
+fn map_data(tree: any, transform_fn: any) -> any:
+    # Transform data in all intervals (returns new tree)
+    if tree == nil:
+        nil
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(node)
+        val old_data = interval_data(interval)
+
+        # Apply transformation (dummy implementation - would need lambda support)
+        val new_data = old_data * 2
+        val new_interval = interval_set_data(interval, new_data)
+
+        var new_tree = nil
+        val intervals = collect_all(tree)
+        var i = 0
+        val n = intervals.len()
+
+        while i < n:
+            val int = intervals[i]
+            val transformed = interval_set_data(int, interval_data(int) * 2)
+            new_tree = insert(new_tree, transformed)
+            i = i + 1
+
+        new_tree
+
+fn get_all_data(tree: any) -> list:
+    # Extract all data values from tree
+    var result = []
+    get_all_data_helper(tree, result)
+    result
+
+fn get_all_data_helper(node: any, result: list):
+    if node == nil:
+        ()
+    else:
+        val n = node as (i64, (i64, i64, i64), i64, any, any)
+        val interval = node_interval(n)
+        val left = node_left(n)
+        val right = node_right(n)
+
+        get_all_data_helper(left, result)
+        result.append(interval_data(interval))
+        get_all_data_helper(right, result)
+
+fn update_data(tree: any, interval: (i64, i64, i64), new_data: i64) -> any:
+    # Update data for a specific interval
+    if tree == nil:
+        nil
+    else:
+        val node = tree as (i64, (i64, i64, i64), i64, any, any)
+        val node_interval = node_interval(node)
+        val cmp = interval_compare(interval, node_interval)
+
+        if cmp < 0:
+            val left = node_left(node)
+            val new_left = update_data(left, interval, new_data)
+            node_set_left(node, new_left)
+        else: if cmp > 0:
+            val right = node_right(node)
+            val new_right = update_data(right, interval, new_data)
+            node_set_right(node, new_right)
+        else:
+            val updated_interval = interval_set_data(node_interval, new_data)
+            node_set_interval(node, updated_interval)
+
+fn interval_distance(i1: (i64, i64, i64), i2: (i64, i64, i64)) -> i64:
+    # Distance between two intervals (0 if overlapping)
+    if interval_overlaps(i1, i2):
+        0
+    else:
+        val low1 = interval_low(i1)
+        val high1 = interval_high(i1)
+        val low2 = interval_low(i2)
+        val high2 = interval_high(i2)
+
+        if high1 < low2:
+            low2 - high1 - 1
+        else:
+            low1 - high2 - 1
+
+fn find_nearest(tree: any, interval: (i64, i64, i64)) -> any:
+    # Find interval nearest to given interval
+    val all_intervals = collect_all(tree)
+    val n = all_intervals.len()
+
+    if n == 0:
+        nil
+    else:
+        var min_distance = interval_distance(interval, all_intervals[0])
+        var nearest = all_intervals[0]
+        var i = 1
+
+        while i < n:
+            val candidate = all_intervals[i]
+            val dist = interval_distance(interval, candidate)
+
+            if dist < min_distance:
+                min_distance = dist
+                nearest = candidate
+            else:
+                ()
+
+            i = i + 1
+
+        nearest
+
+fn total_coverage(tree: any) -> i64:
+    # Calculate total coverage across all intervals (with merging)
+    val intervals = collect_all(tree)
+    val merged = merge_overlapping_intervals(intervals)
+    var total = 0
+    var i = 0
+    val n = merged.len()
+
+    while i < n:
+        total = total + interval_length(merged[i])
+        i = i + 1
+
+    total
+
+fn average_interval_length(tree: any) -> i64:
+    # Calculate average interval length
+    val intervals = collect_all(tree)
+    val n = intervals.len()
+
+    if n == 0:
+        0
+    else:
+        var total = 0
+        var i = 0
+
+        while i < n:
+            total = total + interval_length(intervals[i])
+            i = i + 1
+
+        total / n
+
+fn min_interval_length(tree: any) -> i64:
+    # Find minimum interval length
+    val intervals = collect_all(tree)
+    val n = intervals.len()
+
+    if n == 0:
+        0
+    else:
+        var min_len = interval_length(intervals[0])
+        var i = 1
+
+        while i < n:
+            val len = interval_length(intervals[i])
+            if len < min_len:
+                min_len = len
+            else:
+                ()
+            i = i + 1
+
+        min_len
+
+fn max_interval_length(tree: any) -> i64:
+    # Find maximum interval length
+    val intervals = collect_all(tree)
+    val n = intervals.len()
+
+    if n == 0:
+        0
+    else:
+        var max_len = interval_length(intervals[0])
+        var i = 1
+
+        while i < n:
+            val len = interval_length(intervals[i])
+            if len > max_len:
+                max_len = len
+            else:
+                ()
+            i = i + 1
+
+        max_len
