@@ -84,9 +84,9 @@ enum CodegenMode:
 struct CodegenError:
     """Codegen error."""
     message: text
-    # DESUGARED: span: Span?
+    # # DESUGARED: span: Span
     has_span: bool
-    span_value: Span
+    span: Span
 
 
 # ============================================================================
@@ -137,7 +137,7 @@ fn codegen_compile_function(self: Codegen, fn_: MirFunction) -> bool:
         # Build signature
         val sig = self.build_signature(fn_.signature)
         if sig == 0:
-            self.error("failed to build signature", has_field = true, field_value = fn_.span)
+            self.error("failed to build signature", fn_.span)
             return false
 
         # Begin function
@@ -148,7 +148,7 @@ fn codegen_compile_function(self: Codegen, fn_: MirFunction) -> bool:
             sig
         )
         if self.current_ctx == 0:
-            self.error("failed to begin function", has_field = true, field_value = fn_.span)
+            self.error("failed to begin function", fn_.span)
             return false
 
         # Create blocks
@@ -180,12 +180,12 @@ fn codegen_compile_function(self: Codegen, fn_: MirFunction) -> bool:
         # End function
         val func_id = cranelift_end_function(self.current_ctx)
         if func_id == 0:
-            self.error("failed to end function", has_field = true, field_value = fn_.span)
+            self.error("failed to end function", fn_.span)
             return false
 
         # Define function in module
         if not cranelift_define_function(self.module_handle, func_id, self.current_ctx):
-            self.error("failed to define function", has_field = true, field_value = fn_.span)
+            self.error("failed to define function", fn_.span)
             return false
 
         self.function_map[fn_.name] = func_id
@@ -226,7 +226,9 @@ fn codegen_mir_type_to_cl(self: Codegen, type_: MirType) -> i64:
             case F32: CL_TYPE_F32
             case F64: CL_TYPE_F64
             case Bool: CL_TYPE_B1
-            case Ptr(_, _) | Ref(_, _) | FuncPtr(_): CL_TYPE_PTR
+            case Ptr(_, _): CL_TYPE_PTR
+            case Ref(_, _): CL_TYPE_PTR
+            case FuncPtr(_): CL_TYPE_PTR
             case _: CL_TYPE_I64  # Default to i64
 
 
@@ -255,7 +257,9 @@ fn codegen_compile_const(self: Codegen, value: MirConstValue, type_: MirType) ->
 fn codegen_compile_operand(self: Codegen, operand: MirOperand) -> i64:
         """Compile an operand to a Cranelift value."""
         match operand.kind:
-            case Copy(local) | Move(local):
+            case Copy(local):
+                self.get_local(local)
+            case Move(local):
                 self.get_local(local)
             case Const(value, type_):
                 # Check if this is a function pointer (symbol ID encoded as int)
@@ -415,24 +419,24 @@ struct CompiledModule:
 # Convenience Functions
 # ============================================================================
 
-pub fn jit_compile(mir: MirModule) -> Result<CompiledModule, CodegenError>:
+fn jit_compile(mir: MirModule) -> text:
     """JIT compile a MIR module."""
     val pipeline = codegenpipeline_jit()
     pipeline_compile_module(pipeline, mir)
 
-pub fn aot_compile(mir: MirModule, target: CodegenTarget) -> Result<CompiledModule, CodegenError>:
+fn aot_compile(mir: MirModule, target: CodegenTarget) -> text:
     """AOT compile a MIR module."""
     val pipeline = codegenpipeline_aot(target)
     pipeline_compile_module(pipeline, mir)
 
-pub fn compile_and_run(mir: MirModule, entry: text, args: [i64]) -> Result<i64, CodegenError>:
+fn compile_and_run(mir: MirModule, entry: text, args: [i64]) -> text:
     """Compile and immediately run a function."""
     val module = jit_compile(mir)?
     val result = module_call(module, entry, args)?
     module_cleanup(module)
     Ok(result)
 
-pub fn aot_compile_to_bytes(mir: MirModule) -> Result<[u8], text>:
+fn aot_compile_to_bytes(mir: MirModule) -> text:
     """AOT compile a MIR module and return object code bytes.
 
     This is a convenience function for backend integration. It compiles the module

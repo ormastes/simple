@@ -52,7 +52,7 @@ enum Terminator:
     Return
     Goto(target: i64)
     SwitchInt(targets: [i64], otherwise: i64)
-    Call(target: i64?, unwind: i64?)
+    Call(target: i64, unwind: i64?)
     Drop(target: i64, unwind: i64?)
     Unreachable
 
@@ -102,7 +102,7 @@ class ControlFlowGraph:
             val block = self.blocks[id]
             for succ_id in block.successors:
                 match self.blocks_get(blocks, succ_id):
-                    case has_field = true, field_value = succ_block:
+                    case succ_block:
                         succ_block.predecessors = succ_block.predecessors_push(predecessors, id)
                         self.blocks[succ_id] = succ_block
                     case nil:
@@ -135,7 +135,7 @@ class ControlFlowGraph:
         visited = visited_push(visited, block_id)
 
         match self.blocks_get(blocks, block_id):
-            case has_field = true, field_value = block:
+            case block:
                 for succ_id in block.successors:
                     self.dfs_postorder(succ_id, visited, order)
             case nil:
@@ -226,7 +226,8 @@ class LivenessAnalysis:
 
                 var new_in = block_uses
                 for var_id in new_out:
-                    if not block_defs_contains(block_defs, var_id) and not new_in_contains(new_in, var_id):
+                    if not block_defs_contains(block_defs, var_id):
+                        if not new_in_contains(new_in, var_id):
                         new_in = new_in_push(new_in, var_id)
 
                 # Check for changes
@@ -253,13 +254,13 @@ struct SpanLabel:
 struct NLLError:
     """NLL borrow checking error."""
     message: text
-    # DESUGARED: primary_span: i64?
+    # # DESUGARED: primary_span: i64
     has_primary_span: bool
-    primary_span_value: i64
+    primary_span: i64
     secondary_spans: [SpanLabel]
-    # DESUGARED: help: text?
+    # # DESUGARED: help: text
     has_help: bool
-    help_value: text
+    help: text
 
 
 # ============================================================================
@@ -269,35 +270,31 @@ struct NLLError:
 fn nllerror_borrow_conflict(borrow1: Borrow, borrow2: Borrow) -> NLLError:
         NLLError(
             message: "cannot borrow `{borrow1.place.to_text()}` as {borrow1.kind.to_text()} because it is also borrowed as {borrow2.kind.to_text()}",
-            # DESUGARED: primary_span: Some(borrow1.borrow_point)
-            has_primary_span: true,
-            primary_span_value: borrow1.borrow_point,
+            # # DESUGARED: primary_span: Some(borrow1.borrow_point)
+            primary_span: borrow1.borrow_point,
             secondary_spans: [SpanLabel(span: borrow2.borrow_point, label: "first borrow here")],
-            # DESUGARED: help: Some("consider restructuring to avoid overlapping borrows")
-            has_help: true,
-            help_value: "consider restructuring to avoid overlapping borrows"
+            # # DESUGARED: help: Some("consider restructuring to avoid overlapping borrows")
+            help: "consider restructuring to avoid overlapping borrows"
         )
 
 
 fn nllerror_use_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
             message: "cannot use `{place.to_text()}` because it was mutably borrowed",
-            # DESUGARED: primary_span: Some(point)
-            has_primary_span: true,
-            primary_span_value: point,
-            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "mutable borrow occurs here")],
-            has_help: false,  # DESUGARED: help: nil
+            # # DESUGARED: primary_span: Some(point)
+            primary_span: point,
+            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "mutable borrow occurs here")]
+            ## DESUGARED: help: nil
         )
 
 
 fn nllerror_move_while_borrowed(place: Place, borrow: Borrow, point: i64) -> NLLError:
         NLLError(
             message: "cannot move out of `{place.to_text()}` because it is borrowed",
-            # DESUGARED: primary_span: Some(point)
-            has_primary_span: true,
-            primary_span_value: point,
-            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place.to_text()}` occurs here")],
-            has_help: false,  # DESUGARED: help: nil
+            # # DESUGARED: primary_span: Some(point)
+            primary_span: point,
+            secondary_spans: [SpanLabel(span: borrow.borrow_point, label: "borrow of `{place.to_text()}` occurs here")]
+            ## DESUGARED: help: nil
         )
 
 
@@ -350,9 +347,8 @@ class NLLChecker:
         for err in self.borrow_graph_get_errors(borrow_graph):
             self.errors = self.errors.push(NLLError(
                 message: err.message,
-                # DESUGARED: primary_span: Some(err.point)
-            has_primary_span: true,
-            primary_span_value: err.point,
+                # # DESUGARED: primary_span: Some(err.point)
+            primary_span: err.point,
                 secondary_spans: [],
                 help: nil
             ))
@@ -362,7 +358,7 @@ class NLLChecker:
     me check_block(block_id: i64, liveness: LivenessResult):
         """Check a single basic block."""
         match self.cfg_get_block(cfg, block_id):
-            case has_field = true, field_value = block:
+            case block:
                 # Propagate borrows from predecessors
                 for pred_id in block.predecessors:
                     self.borrow_graph_propagate_borrows(borrow_graph, pred_id, block_id)
@@ -389,14 +385,12 @@ class NLLChecker:
         # - Borrows being created
         # - Uses of borrowed places
         # - Moves invalidating borrows
-        pass
 
     me check_terminator(term: Terminator, point: i64, liveness: LivenessResult):
         """Check terminator for borrow violations."""
         match term:
             case Return:
                 # Check no borrows escape through return
-                pass
             case Call(target, unwind):
                 # Check borrows during call
                 pass
@@ -409,7 +403,7 @@ class NLLChecker:
     me record_borrow(point: i64, place: Place, kind: BorrowKind) -> bool:
         """Record a borrow and check for conflicts."""
         match self.borrow_graph_record_borrow(borrow_graph, point, place, kind):
-            case has_field = true, field_value = borrow:
+            case borrow:
                 # Add lifetime constraint
                 self.lifetime_inference.env.add_outlives(
                     borrow.lifetime,

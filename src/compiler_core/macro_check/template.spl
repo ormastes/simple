@@ -51,7 +51,7 @@ enum TemplateToken:
     Param(name: text, kind: FragmentKind)
 
     # Repetition
-    Repetition(tokens: [TemplateToken], sep: text?, kind: RepetitionKind)
+    Repetition(tokens: [TemplateToken], sep: text, kind: RepetitionKind)
 
     # Grouping
     Group(delim: text, tokens: [TemplateToken])
@@ -102,9 +102,9 @@ fn templateparam_repeated(name: text, kind: FragmentKind, depth: i64) -> Templat
 struct TemplateError:
     """Error in macro template."""
     message: text
-    # DESUGARED: span: i64?
+    # # DESUGARED: span: i64
     has_span: bool
-    span_value: i64
+    span: i64
 
 
 # ============================================================================
@@ -116,9 +116,8 @@ fn templateerror_create(message: text) -> TemplateError:
 
 
 fn templateerror_at(message: text, pos: i64) -> TemplateError:
-        TemplateError(message: message, # DESUGARED: span: Some(pos))
-            has_span: true,
-            span_value: pos)
+        # TemplateError(message: message, # DESUGARED: span: Some(pos))
+            span: pos)
 
 
 class TemplateValidator:
@@ -150,7 +149,7 @@ class TemplateValidator:
 
     me validate_tokens(tokens: [TemplateToken], is_matcher: bool) -> bool:
         """Validate a sequence of template tokens."""
-        var prev_kind: FragmentKind? = nil
+        var prev_kind: FragmentKind = nil
         var i = 0
 
         for token in tokens:
@@ -170,7 +169,7 @@ class TemplateValidator:
                             i
                         ))
 
-                    prev_kind = has_field = true, field_value = kind
+                    prev_kind = kind
 
                 case Repetition(inner_tokens, sep, rep_kind):
                     self.current_rep_depth = self.current_rep_depth + 1
@@ -192,7 +191,13 @@ class TemplateValidator:
                     self.validate_tokens(inner_tokens, is_matcher)
                     prev_kind = nil
 
-                case Literal(_) | Punct(_) | Keyword(_):
+                case Literal(_):
+                    prev_kind = nil
+
+                case Punct(_):
+                    prev_kind = nil
+
+                case Keyword(_):
                     prev_kind = nil
 
             i = i + 1
@@ -223,9 +228,10 @@ class TemplateValidator:
                     "Undefined parameter '${name}'",
                     pos
                 ))
-            case has_field = true, field_value = param:
+            case param:
                 # Check repetition depth matches
-                if param.repetition_depth > 0 and self.current_rep_depth < param.repetition_depth:
+                if param.repetition_depth > 0:
+                    if self.current_rep_depth < param.repetition_depth:
                     self.errors = self.errors.push(TemplateError.at(
                         "Parameter '${name}' must be used inside repetition",
                         pos
@@ -264,7 +270,9 @@ class TemplateTypeChecker:
             return false
 
         # Build type environment from matcher
-        for name, param in self.validator.params:
+        for _for_item_0 in self.validator.params:
+            val name = _for_item_0[0]
+            val param = _for_item_0[1]
             self.type_env[name] = param.kind_to_text(kind)
 
         # Then validate transcriber
@@ -273,14 +281,14 @@ class TemplateTypeChecker:
 
         true
 
-    me infer_expansion_type(transcriber: [TemplateToken]) -> has_text:
+    me infer_expansion_type(transcriber: [TemplateToken]) -> text:
         """Infer the type produced by the transcriber.
 
         Returns the fragment kind that the transcriber produces.
         """
         # Look at the outermost structure
         if transcriber_is_empty(transcriber):
-            return has_field = true, field_value = "unit"
+            return "unit"
 
         # Simple heuristic: look at first significant token
         for token in transcriber:
@@ -288,20 +296,19 @@ class TemplateTypeChecker:
                 case Param(name, kind):
                     # Single parameter produces its type
                     if transcriber_len(transcriber) == 1:
-                        return has_field = true, field_value = kind_to_text(kind)
+                        return kind_to_text(kind)
                 case Group("{", _):
-                    return has_field = true, field_value = "block"
+                    return "block"
                 case Keyword(kw):
                     match kw:
-                        case "fn": return has_field = true, field_value = "item"
-                        case "struct": return has_field = true, field_value = "item"
-                        case "let": return has_field = true, field_value = "stmt"
-                        case "if": return has_field = true, field_value = "expr"
+                        case "fn": return "item"
+                        case "struct": return "item"
+                        case "let": return "stmt"
+                        case "if": return "expr"
                         case _: pass
                 case _:
-                    pass
 
-        has_field = true, field_value = "tt"  # Default to token tree
+        "tt"  # Default to token tree
 
     fn get_errors() -> [TemplateError]:
         """Get all type checking errors."""

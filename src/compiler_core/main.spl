@@ -29,9 +29,9 @@ fn format_runtime_error_message(msg: text) -> text:
 struct CliArgs:
     mode: CompileMode
     input_files: [text]
-    # DESUGARED: output_file: text?
+    # # DESUGARED: output_file: text
     has_output_file: bool
-    output_file_value: text
+    output_file: text
     optimize: bool
     debug_info: bool
     verbose: bool
@@ -44,7 +44,7 @@ struct CliArgs:
         CliArgs(
             mode: CompileMode.Interpret,
             input_files: [],
-            has_output_file: false,  # DESUGARED: output_file: nil
+            #  # DESUGARED: output_file: nil
             optimize: false,
             debug_info: true,
             verbose: false,
@@ -54,7 +54,7 @@ struct CliArgs:
             version: false
         )
 
-    fn to_options(self) -> CompileOptions:
+    fn to_options() -> CompileOptions:
         CompileOptions(
             mode: self.mode,
             input_files: self.input_files,
@@ -80,19 +80,19 @@ class ArgParser:
     fn has_next() -> bool:
         self.pos < self.args_len(args)
 
-    me next() -> has_text:
+    me next() -> text:
         if self.pos >= self.args_len(args):
             return nil
         val arg = self.args[self.pos]
         self.pos = self.pos + 1
-        has_field = true, field_value = arg
+        arg
 
-    me peek() -> has_text:
+    me peek() -> text:
         if self.pos >= self.args_len(args):
             return nil
-        has_field = true, field_value = self.args[self.pos]
+        self.args[self.pos]
 
-    me parse() -> Result<CliArgs, text>:
+    me parse() -> text:
         var result = cliargs_default()
 
         while self.has_next():
@@ -123,7 +123,7 @@ class ArgParser:
 
         Ok(result)
 
-    me parse_long_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+    me parse_long_option(arg: text, result: CliArgs) -> text:
         val opt = arg_slice(arg, 2, arg.len())
 
         # Options with values (--option=value or --option value)
@@ -135,22 +135,37 @@ class ArgParser:
 
         # Boolean flags
         match opt:
-            case "help" | "h":
+            case "help":
                 result.help = true
                 return Ok(result)
-            case "version" | "V":
+            case "h":
+                result.help = true
+                return Ok(result)
+            case "version":
                 result.version = true
                 return Ok(result)
-            case "optimize" | "O":
+            case "V":
+                result.version = true
+                return Ok(result)
+            case "optimize":
                 result.optimize = true
                 return Ok(result)
-            case "debug" | "g":
+            case "O":
+                result.optimize = true
+                return Ok(result)
+            case "debug":
+                result.debug_info = true
+                return Ok(result)
+            case "g":
                 result.debug_info = true
                 return Ok(result)
             case "no-debug":
                 result.debug_info = false
                 return Ok(result)
-            case "verbose" | "v":
+            case "verbose":
+                result.verbose = true
+                return Ok(result)
+            case "v":
                 result.verbose = true
                 return Ok(result)
             case "check":
@@ -165,7 +180,13 @@ class ArgParser:
             case "jit":
                 result.mode = CompileMode.Jit
                 return Ok(result)
-            case "aot" | "compile" | "native":
+            case "aot":
+                result.mode = CompileMode.Aot
+                return Ok(result)
+            case "compile":
+                result.mode = CompileMode.Aot
+                return Ok(result)
+            case "native":
                 result.mode = CompileMode.Aot
                 return Ok(result)
             case _:
@@ -178,24 +199,42 @@ class ArgParser:
 
         self.apply_option(opt, value_value, result)
 
-    fn apply_option(name: text, value: text, result: CliArgs) -> Result<CliArgs, text>:
+    fn apply_option(name: text, value: text, result: CliArgs) -> text:
         match name:
-            case "mode" | "m":
+            case "mode":
                 val mode = CompileMode__from_text(value)
                 if mode_is_none(mode):
                     return Err("Unknown mode: {value}")
                 result.mode = mode_value
 
-            case "output" | "o":
-                result.output_file = has_field = true, field_value = value
+            case "m":
+                val mode = CompileMode__from_text(value)
+                if mode_is_none(mode):
+                    return Err("Unknown mode: {value}")
+                result.mode = mode_value
 
-            case "log-level" | "l":
+            case "output":
+                result.output_file = value
+
+            case "o":
+                result.output_file = value
+
+            case "log-level":
                 val level = value_parse_int(value)
                 if level_is_none(level):
                     return Err("Invalid log level: {value}")
                 result.log_level = level_value
 
-            case "profile" | "p":
+            case "l":
+                val level = value_parse_int(value)
+                if level_is_none(level):
+                    return Err("Invalid log level: {value}")
+                result.log_level = level_value
+
+            case "profile":
+                result.profile = value
+
+            case "p":
                 result.profile = value
 
             case _:
@@ -203,7 +242,7 @@ class ArgParser:
 
         Ok(result)
 
-    me parse_short_option(arg: text, result: CliArgs) -> Result<CliArgs, text>:
+    me parse_short_option(arg: text, result: CliArgs) -> text:
         val opts = arg_slice(arg, 1, arg.len())
         var i = 0
         while i < opts_len(opts):
@@ -232,12 +271,12 @@ class ArgParser:
                 case 'o':
                     # -o requires a value (rest of arg or next arg)
                     if i + 1 < opts_len(opts):
-                        result.output_file = has_field = true, field_value = opts_slice(opts, i + 1, opts.len())
+                        result.output_file = opts_slice(opts, i + 1, opts.len())
                         return Ok(result)
                     else:
                         match self.next():
-                            case has_field = true, field_value = v:
-                                result.output_file = has_field = true, field_value = v
+                            case v:
+                                result.output_file = v
                                 return Ok(result)
                             case nil:
                                 return Err("Option -o requires a value")
@@ -272,7 +311,7 @@ class ArgParser:
 # ------------------------------------------------------------------------------
 
 fn print_help():
-    print "Simple Compiler v0.3.0"
+    print "Simple Compiler v0[3].0"
     print ""
     print "Usage: simple-compiler [options] <files...>"
     print ""
@@ -305,7 +344,7 @@ fn print_help():
     print "  simple-compiler -s config.sdn        # Parse SDN"
 
 fn print_version():
-    print "simple-compiler 0.3.0 (2026-01)"
+    print "simple-compiler 0[3].0 (2026-01)"
     print "Self-hosting compiler for the Simple programming language"
     print ""
     print "Backends:"

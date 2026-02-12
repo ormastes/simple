@@ -68,7 +68,7 @@ enum PlaceElem:
     Field(idx: i64)            # place.field
     Index(local: i64)          # place[idx]
     ConstantIndex(idx: i64)    # place[constant]
-    Downcast(variant: i64)     # (place as Variant)
+    Downcast(variant: i64)     # (place, )
 
 struct Place:
     """A memory location (lvalue).
@@ -146,7 +146,7 @@ struct Borrow:
     kind: BorrowKind
     lifetime: Lifetime
     borrow_point: i64    # Where borrow was created
-    activated: bool      # Two-phase borrow: activated yet?
+    activated: bool      # Two-phase borrow: activated yet
 
 
 # ============================================================================
@@ -226,8 +226,9 @@ class BorrowSet:
         """Check if there's a conflicting borrow."""
         for id in self.borrows_keys(borrows):
             val borrow = self.borrows[id]
-            if borrow.place_conflicts_with(place, place) and borrow.kind_conflicts_with(kind, kind):
-                return has_field = true, field_value = borrow
+            if borrow.place_conflicts_with(place, place):
+                if borrow.kind_conflicts_with(kind, kind):
+                return borrow
         nil
 
 # ============================================================================
@@ -237,12 +238,12 @@ class BorrowSet:
 struct BorrowError:
     """Borrow checking error."""
     message: text
-    # DESUGARED: borrow: Borrow?
+    # # DESUGARED: borrow: Borrow
     has_borrow: bool
-    borrow_value: Borrow
-    # DESUGARED: conflicting: Borrow?
+    borrow: Borrow
+    # # DESUGARED: conflicting: Borrow
     has_conflicting: bool
-    conflicting_value: Borrow
+    conflicting: Borrow
     point: i64
 
 
@@ -253,12 +254,10 @@ struct BorrowError:
 fn borrowerror_conflict(borrow: Borrow, conflicting: Borrow, point: i64) -> BorrowError:
         BorrowError(
             message: "Conflicting borrows",
-            # DESUGARED: borrow: Some(borrow)
-            has_borrow: true,
-            borrow_value: borrow,
-            # DESUGARED: conflicting: Some(conflicting)
-            has_conflicting: true,
-            conflicting_value: conflicting,
+            # # DESUGARED: borrow: Some(borrow)
+            borrow: borrow,
+            # # DESUGARED: conflicting: Some(conflicting)
+            conflicting: conflicting,
             point: point
         )
 
@@ -266,8 +265,8 @@ fn borrowerror_conflict(borrow: Borrow, conflicting: Borrow, point: i64) -> Borr
 fn borrowerror_use_after_move(place: Place, point: i64) -> BorrowError:
         BorrowError(
             message: "Use of moved value: {place.to_text()}",
-            has_borrow: false,  # DESUGARED: borrow: nil
-            has_conflicting: false,  # DESUGARED: conflicting: nil
+            #  # DESUGARED: borrow: nil
+            #  # DESUGARED: conflicting: nil
             point: point
         )
 
@@ -275,8 +274,8 @@ fn borrowerror_use_after_move(place: Place, point: i64) -> BorrowError:
 fn borrowerror_borrow_of_moved(place: Place, point: i64) -> BorrowError:
         BorrowError(
             message: "Borrow of moved value: {place.to_text()}",
-            has_borrow: false,  # DESUGARED: borrow: nil
-            has_conflicting: false,  # DESUGARED: conflicting: nil
+            #  # DESUGARED: borrow: nil
+            #  # DESUGARED: conflicting: nil
             point: point
         )
 
@@ -309,7 +308,7 @@ class BorrowGraph:
     me get_or_create_borrows(point: i64) -> BorrowSet:
         """Get or create borrow set for a program point."""
         match self.point_borrows_get(point_borrows, point):
-            case has_field = true, field_value = set: set
+            case set: set
             case nil:
                 val set = borrowset_create()
                 self.point_borrows[point] = set
@@ -324,7 +323,7 @@ class BorrowGraph:
 
         # Check for conflicts
         match borrow_set_has_conflicting_borrow(borrow_set, place, kind):
-            case has_field = true, field_value = conflict:
+            case conflict:
                 val new_borrow = borrow_create(0, place, kind, self.lifetimes.fresh_lifetime(), point)
                 self.errors = self.errors_push(errors, BorrowError.conflict(new_borrow, conflict, point))
                 return nil
@@ -343,7 +342,7 @@ class BorrowGraph:
         val borrow = borrow_set_add_borrow(borrow_set, place, kind, lifetime, point)
         self.point_borrows[point] = borrow_set
 
-        has_field = true, field_value = borrow
+        borrow
 
     me record_use(point: i64, place: Place):
         """Record a use of a place.
@@ -375,9 +374,8 @@ class BorrowGraph:
             if borrow.kind_is_mutable(kind):
                 self.errors = self.errors.push(BorrowError(
                     message: "Assignment while mutably borrowed: {place.to_text()}",
-                    # DESUGARED: borrow: Some(borrow)
-            has_borrow: true,
-            borrow_value: borrow,
+                    # # DESUGARED: borrow: Some(borrow)
+            borrow: borrow,
                     conflicting: nil,
                     point: point
                 ))

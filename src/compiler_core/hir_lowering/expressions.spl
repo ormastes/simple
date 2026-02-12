@@ -42,9 +42,9 @@ fn hirlowering_lower_expr(self: HirLowering, e: Expr) -> HirExpr:
                     if self.is_strict_empty_collections():
                         self.error("empty array requires explicit type annotation", e.span)
                         nil
-                    # DESUGARED: else: Some(self.get_empty_array_default())
-            has_else: true,
-            else_value: self.get_empty_array_default()
+                    # # DESUGARED: else: Some(self.get_empty_array_default())
+ 
+            else: self.get_empty_array_default()
                 else:
                     nil  # Type will be inferred from elements
                 hirexprkind_ArrayLit(hir_elements, elem_type)
@@ -132,7 +132,7 @@ fn hirlowering_lower_expr(self: HirLowering, e: Expr) -> HirExpr:
                 var hir_params: [HirParam] = []
                 for p in params:
                     val type_ = p.type__map(type_, \t: self.lower_type(t)) ?? HirType(kind: hirtypekind_Infer(0, 0), span: p.span)
-                    val symbol = self.symbols_define(symbols, p.name, SymbolKind.Parameter, has_field = true, field_value = type_, p.span, false, false, nil)
+                    val symbol = self.symbols_define(symbols, p.name, SymbolKind.Parameter, type_, p.span, false, false, nil)
                     hir_params = hir_params.push(HirParam(
                         symbol: symbol,
                         name: p.name,
@@ -190,7 +190,9 @@ fn hirlowering_lower_expr(self: HirLowering, e: Expr) -> HirExpr:
 
             case StructLit(type_, fields):
                 var hir_fields: [(text, HirExpr)] = []
-                for (name, value) in fields:
+                for _item_0 in fields:
+                    val name = _item_0[0]
+                    val value = _item_0[1]
                     hir_fields = hir_fields_push(hir_fields, (name, self.lower_expr(value)))
                 val symbol = self.symbols_lookup(symbols, type_)
                 val hir_type = if has_symbol:
@@ -213,7 +215,9 @@ fn hirlowering_lower_expr(self: HirLowering, e: Expr) -> HirExpr:
                         hirenumpayload_Tuple(hir_values)
                     case Struct(fields):
                         var hir_fields: [(text, HirExpr)] = []
-                        for (fname, fvalue) in fields:
+                        for _item_1 in fields:
+                            val fname = _item_1[0]
+                            val fvalue = _item_1[1]
                             hir_fields = hir_fields_push(hir_fields, (fname, self.lower_expr(fvalue)))
                         hirenumpayload_Struct(hir_fields)
                 )
@@ -235,8 +239,8 @@ fn hirlowering_lower_expr(self: HirLowering, e: Expr) -> HirExpr:
                 hirexprkind_UnsafeBlock(self.lower_block(body))
 
             # Inline assembly
-            case AsmBlock(asm):
-                hirexprkind_InlineAsm(self.lower_asm(asm))
+            case AsmBlock(asm_code):
+                hirexprkind_InlineAsm(self.lower_asm(asm_code))
 
             case Error:
                 HirExprKind.Error
@@ -321,9 +325,9 @@ fn hirlowering_lower_pattern(self: HirLowering, p: Pattern) -> HirPattern:
                 var hir_elements: [HirPattern] = []
                 for elem in elements:
                     hir_elements = hir_elements_push(hir_elements, self.lower_pattern(elem))
-                var rest_symbol: SymbolId? = nil
+                var rest_symbol: SymbolId = nil
                 if has_rest:
-                    rest_symbol = has_field = true, field_value = self.symbols_define(symbols, rest_value, SymbolKind.Variable, nil, p.span, false, false, nil)
+                    rest_symbol = self.symbols_define(symbols, rest_value, SymbolKind.Variable, nil, p.span, false, false, nil)
                 hirpatternkind_Array(hir_elements, rest_symbol)
 
             case Struct(type_, fields):
@@ -333,7 +337,9 @@ fn hirlowering_lower_pattern(self: HirLowering, p: Pattern) -> HirPattern:
                 else:
                     HirType(kind: HirTypeKind.Error, span: p.span)
                 var hir_fields: [(text, HirPattern)] = []
-                for (fname, fpat) in fields:
+                for _item_2 in fields:
+                    val fname = _item_2[0]
+                    val fpat = _item_2[1]
                     hir_fields = hir_fields_push(hir_fields, (fname, self.lower_pattern(fpat)))
                 hirpatternkind_Struct(hir_type, hir_fields)
 
@@ -351,7 +357,9 @@ fn hirlowering_lower_pattern(self: HirLowering, p: Pattern) -> HirPattern:
                         hirpatternpayload_Tuple(hir_patterns)
                     case Struct(fields):
                         var hir_fields: [(text, HirPattern)] = []
-                        for (fname, fpat) in fields:
+                        for _item_3 in fields:
+                            val fname = _item_3[0]
+                            val fpat = _item_3[1]
                             hir_fields = hir_fields_push(hir_fields, (fname, self.lower_pattern(fpat)))
                         hirpatternpayload_Struct(hir_fields)
                 )
@@ -412,8 +420,8 @@ fn hirlowering_lower_block(self: HirLowering, b: Block) -> HirBlock:
                             syms.scopes[syms.current_scope.id] = scope
                             syms.symbols[symbol_id.id] = Symbol(
                                 id: symbol_id, name: name, kind: SymbolKind.Variable,
-                                type_: nil, scope: syms.current_scope, span: s.span,
-                                is_public: false, is_mutable: false, has_defining_module: false,  # DESUGARED: defining_module: nil
+                                type_: nil, scope: syms.current_scope, span: s.span
+                                # is_public: false, is_mutable: false# DESUGARED: defining_module: nil
                             )
                             self.symbols = syms
                         case _: pass
@@ -442,12 +450,12 @@ fn hirlowering_lower_block(self: HirLowering, b: Block) -> HirBlock:
         self.symbols = symbols_table
 
         # Check if last statement is an expression (for block value)
-        var value: HirExpr? = nil
+        var value: HirExpr = nil
         if stmts_len(stmts) > 0:
             val last = stmts[stmts_len(stmts) - 1]
             match last.kind:
                 case Expr(expr):
-                    value = has_field = true, field_value = expr
+                    value = expr
                     stmts = stmts[0:stmts_len(stmts) - 1]  # Remove last stmt
                 case _:
                     pass
@@ -455,7 +463,7 @@ fn hirlowering_lower_block(self: HirLowering, b: Block) -> HirBlock:
         HirBlock(stmts: stmts, value: value, span: b.span)
 
 
-fn hirlowering_lower_asm(self: HirLowering, asm: AsmExpr) -> HirAsm:
+fn hirlowering_lower_asm(self: HirLowering, asm_code: AsmExpr) -> HirAsm:
         """Lower inline assembly expression to HIR.
 
         Converts AST AsmExpr to HIR HirAsm, lowering all constraint
@@ -463,7 +471,7 @@ fn hirlowering_lower_asm(self: HirLowering, asm: AsmExpr) -> HirAsm:
         """
         # Lower all constraint value expressions
         var hir_constraints: [HirAsmConstraint] = []
-        for constraint in asm.constraints:
+        for constraint in asm_code.constraints:
             val hir_value = self.lower_expr(constraint.value)
             val hir_constraint = HirAsmConstraint(
                 name: constraint.name,
@@ -475,10 +483,10 @@ fn hirlowering_lower_asm(self: HirLowering, asm: AsmExpr) -> HirAsm:
             hir_constraints_push(hir_constraints, hir_constraint)
 
         HirAsm(
-            asm_template: asm.asm_template,
-            is_volatile: asm.is_volatile,
+            asm_template: asm_code.asm_template,
+            is_volatile: asm_code.is_volatile,
             constraints: hir_constraints,
-            clobbers: asm.clobbers,
-            span: asm.span
+            clobbers: asm_code.clobbers,
+            span: asm_code.span
         )
 

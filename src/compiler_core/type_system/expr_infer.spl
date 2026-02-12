@@ -5,6 +5,8 @@
 #
 # This module extends TypeChecker with expression inference capabilities.
 
+use compiler.type_system.stmt_check.{bind_pattern, extract_element_type}
+use compiler.type_system.stmt_check.{bind_pattern}
 from inference.types import {Type, TypeVarId, UnifyError, InferError}
 from inference.infer import {InferenceEngine}
 from ast import {Expr, BinOp, UnaryOp, FStringPart, MacroArg}
@@ -18,7 +20,7 @@ from compiler.type_system.module_check import {ast_type_to_inference_type_engine
 # NOTE: These methods should be added to the TypeChecker class in checker.spl
 # For now, we define them as standalone functions that can be integrated.
 
-fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Result<Type, TypeError>:
+fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> text:
     """Infer type of an expression using Hindley-Milner algorithm.
 
     Port of rust/type/src/checker_infer.rs::infer_expr()
@@ -185,7 +187,8 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             val recv_ty = infer_expr(engine, receiver, env)?
             match engine_resolve(engine, recv_ty):
                 case Tuple(elems):
-                    if index >= 0 and index < elems_len(elems):
+                    if index >= 0:
+                        if index < elems_len(elems):
                         Ok(elems[index])
                     else:
                         Err(TypeError.Other("tuple index out of bounds"))
@@ -216,9 +219,9 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         case Range(start, end, bound):
             # Infer range bounds
             if has_start:
-                val _ = infer_expr(engine, start_value, env)?
+                val _unused_1 = infer_expr(engine, start_value, env)?
             if has_end:
-                val _ = infer_expr(engine, end_value, env)?
+                val _unused_2 = infer_expr(engine, end_value, env)?
 
             # Range type is a fresh variable for now
             # Full implementation needs Range<T> type
@@ -231,8 +234,8 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             # Infer iterable type
             val iterable_ty = infer_expr(engine, iterable, env)?
 
-            # Bind pattern variables (Phase 3.2 - TODO #171 ✅)
-            use compiler.type_system.stmt_check.{bind_pattern, extract_element_type}
+            # Bind pattern variables (Phase 3[2] - TODO #171 ✅)
+            # MOVED: use compiler.type_system.stmt_check.{bind_pattern, extract_element_type}
 
             val elem_ty_iter = extract_element_type(engine, iterable_ty)?
             val comp_env = bind_pattern(pattern, elem_ty_iter, env)
@@ -249,7 +252,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
 
         case DictComprehension(key, value, pattern, iterable, condition):
             # Similar to list comprehension but returns dict
-            val _ = infer_expr(engine, iterable, env)?
+            val _unused_3 = infer_expr(engine, iterable, env)?
 
             if has_condition:
                 val cond_ty = infer_expr(engine, condition_value, env)?
@@ -265,8 +268,10 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         # ====================================================================
         case StructInit(name, fields):
             # Infer each field expression
-            for (field_name, field_expr) in fields:
-                val _ = infer_expr(engine, field_expr, env)?
+            for _item_0 in fields:
+                val field_name = _item_0[0]
+                val field_expr = _item_0[1]
+                val _unused_4 = infer_expr(engine, field_expr, env)?
 
             # Return named type - full resolution needs struct definition
             Ok(type_Named(name))
@@ -289,7 +294,8 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             val expr_ty = infer_expr(engine, expr, env)?
             match engine_resolve(engine, expr_ty):
                 case Generic(base, args):
-                    if base == "Future" and has_args:
+                    if base == "Future":
+                        if has_args:
                         Ok(args[0])
                     else:
                         Ok(engine_fresh_var(engine))
@@ -322,7 +328,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         # ====================================================================
         case Cast(expr, target_type):
             # Type annotation - just return the target type
-            val _ = infer_expr(engine, expr, env)?
+            val _unused_5 = infer_expr(engine, expr, env)?
             Ok(ast_type_to_inference_type_engine(target_type, engine))
 
         # ====================================================================
@@ -342,7 +348,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
 
         case ExistsCheck(expr):
             # .? operator always returns bool
-            val _ = infer_expr(engine, expr, env)?
+            val _unused_6 = infer_expr(engine, expr, env)?
             Ok(Type.Bool)
 
         case UnwrapOr(expr, default):
@@ -358,7 +364,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         case UnwrapElse(expr, fallback_fn):
             # Similar to UnwrapOr but with function
             val expr_ty = infer_expr(engine, expr, env)?
-            val _ = infer_expr(engine, fallback_fn, env)?
+            val _unused_7 = infer_expr(engine, fallback_fn, env)?
 
             match engine_resolve(engine, expr_ty):
                 case Optional(inner):
@@ -386,16 +392,16 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
 
         case OptionalChain(expr, field):
             # expr?.field returns Option<FieldType>
-            val _ = infer_expr(engine, expr, env)?
+            val _unused_8 = infer_expr(engine, expr, env)?
             # Field type lookup needs struct definitions
             val field_ty = engine_fresh_var(engine)
             Ok(type_Optional(inner: field_ty))
 
         case OptionalMethodCall(receiver, method, args):
             # receiver?.method() returns Option<ReturnType>
-            val _ = infer_expr(engine, receiver, env)?
+            val _unused_9 = infer_expr(engine, receiver, env)?
             for arg in args:
-                val _ = infer_expr(engine, arg.value, env)?
+                val _unused_10 = infer_expr(engine, arg.value, env)?
 
             val ret_ty = engine_fresh_var(engine)
             Ok(type_Optional(inner: ret_ty))
@@ -405,17 +411,17 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         # ====================================================================
         case CastOr(expr, target_type, default):
             # Cast with default value
-            val _ = infer_expr(engine, expr, env)?
-            val _ = infer_expr(engine, default, env)?
+            val _unused_11 = infer_expr(engine, expr, env)?
+            val _unused_12 = infer_expr(engine, default, env)?
             Ok(ast_type_to_inference_type_engine(target_type, engine))
 
         case CastElse(expr, target_type, fallback_fn):
-            val _ = infer_expr(engine, expr, env)?
-            val _ = infer_expr(engine, fallback_fn, env)?
+            val _unused_13 = infer_expr(engine, expr, env)?
+            val _unused_14 = infer_expr(engine, fallback_fn, env)?
             Ok(engine_fresh_var(engine))
 
         case CastOrReturn(expr, target_type):
-            val _ = infer_expr(engine, expr, env)?
+            val _unused_15 = infer_expr(engine, expr, env)?
             Ok(engine_fresh_var(engine))
 
         # ====================================================================
@@ -442,7 +448,7 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             # Returns same type as target
             val target_ty = infer_expr(engine, target, env)?
             for arg in args:
-                val _ = infer_expr(engine, arg.value, env)?
+                val _unused_16 = infer_expr(engine, arg.value, env)?
             Ok(target_ty)
 
         # ====================================================================
@@ -457,13 +463,13 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
             infer_expr(engine, expr, env)
 
         case Forall(pattern, range, predicate):
-            val _ = infer_expr(engine, range, env)?
+            val _unused_17 = infer_expr(engine, range, env)?
             val pred_ty = infer_expr(engine, predicate, env)?
             engine_unify(engine, pred_ty, Type.Bool)?
             Ok(Type.Bool)
 
         case Exists(pattern, range, predicate):
-            val _ = infer_expr(engine, range, env)?
+            val _unused_18 = infer_expr(engine, range, env)?
             val pred_ty = infer_expr(engine, predicate, env)?
             engine_unify(engine, pred_ty, Type.Bool)?
             Ok(Type.Bool)
@@ -482,7 +488,8 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
         case GridLiteral(rows, device):
             # Grid literal is a 2D array/tensor
             # Infer element type from first element
-            if rows.? and rows[0].?:
+            if rows.?:
+                if rows[0].?:
                 val first_elem_ty = infer_expr(engine, rows[0][0], env)?
                 Ok(type_Array(elem: Type.Array(elem: first_elem_ty, size: nil), size: nil))
             else:
@@ -521,36 +528,121 @@ fn infer_expr(engine: InferenceEngine, expr: Expr, env: Dict<text, Type>) -> Res
 # ============================================================================
 
 fn infer_binary(engine: InferenceEngine, op: BinOp, left: Expr, right: Expr,
-                env: Dict<text, Type>) -> Result<Type, TypeError>:
+                env: Dict<text, Type>) -> text:
     """Infer type of binary operation."""
     val left_ty = infer_expr(engine, left, env)?
     val right_ty = infer_expr(engine, right, env)?
 
     match op:
         # Arithmetic operators: unify operands, return numeric type
-        case Add | Sub | Mul | Div | Mod | Pow | MatMul:
+        case Add:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Sub:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Mul:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Div:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Mod:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case Pow:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(engine_resolve(engine, left_ty))
+
+        case MatMul:
             engine_unify(engine, left_ty, right_ty)?
             Ok(engine_resolve(engine, left_ty))
 
         # Comparison operators: unify operands, return bool
-        case Eq | NotEq | Lt | Gt | LtEq | GtEq:
+        case Eq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case NotEq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case Lt:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case Gt:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case LtEq:
+            engine_unify(engine, left_ty, right_ty)?
+            Ok(Type.Bool)
+
+        case GtEq:
             engine_unify(engine, left_ty, right_ty)?
             Ok(Type.Bool)
 
         # Logical operators: both operands bool, return bool
-        case And | Or | AndSuspend | OrSuspend:
+        case And:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case Or:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case AndSuspend:
+            engine_unify(engine, left_ty, Type.Bool)?
+            engine_unify(engine, right_ty, Type.Bool)?
+            Ok(Type.Bool)
+
+        case OrSuspend:
             engine_unify(engine, left_ty, Type.Bool)?
             engine_unify(engine, right_ty, Type.Bool)?
             Ok(Type.Bool)
 
         # Bitwise operators: both operands int, return int
-        case BitAnd | BitOr | BitXor | ShiftLeft | ShiftRight:
+        case BitAnd:
+            engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))?
+            engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))?
+            Ok(type_Int(bits: 64, signed: true))
+
+        case BitOr:
+            engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))?
+            engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))?
+            Ok(type_Int(bits: 64, signed: true))
+
+        case BitXor:
+            engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))?
+            engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))?
+            Ok(type_Int(bits: 64, signed: true))
+
+        case ShiftLeft:
+            engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))?
+            engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))?
+            Ok(type_Int(bits: 64, signed: true))
+
+        case ShiftRight:
             engine_unify(engine, left_ty, Type.Int(bits: 64, signed: true))?
             engine_unify(engine, right_ty, Type.Int(bits: 64, signed: true))?
             Ok(type_Int(bits: 64, signed: true))
 
         # Is and In operators: return bool
-        case Is | In | NotIn:
+        case Is:
+            Ok(Type.Bool)
+
+        case In:
+            Ok(Type.Bool)
+
+        case NotIn:
             Ok(Type.Bool)
 
         # Pipe forward: x |> f - return function result type
@@ -575,7 +667,7 @@ fn infer_binary(engine: InferenceEngine, op: BinOp, left: Expr, right: Expr,
 # ============================================================================
 
 fn infer_unary(engine: InferenceEngine, op: UnaryOp, operand: Expr,
-               env: Dict<text, Type>) -> Result<Type, TypeError>:
+               env: Dict<text, Type>) -> text:
     """Infer type of unary operation."""
     val operand_ty = infer_expr(engine, operand, env)?
 
@@ -617,7 +709,8 @@ fn infer_unary(engine: InferenceEngine, op: UnaryOp, operand: Expr,
             # Channel receive: <-chan extracts T from Channel<T>
             match engine_resolve(engine, operand_ty):
                 case Generic(base, args):
-                    if base == "Channel" and has_args:
+                    if base == "Channel":
+                        if has_args:
                         Ok(args[0])
                     else:
                         Ok(engine_fresh_var(engine))
@@ -648,7 +741,7 @@ fn infer_unary(engine: InferenceEngine, op: UnaryOp, operand: Expr,
 # ============================================================================
 
 fn infer_call(engine: InferenceEngine, callee: Expr, args: [Argument],
-              env: Dict<text, Type>) -> Result<Type, TypeError>:
+              env: Dict<text, Type>) -> text:
     """Infer type of function call."""
     val callee_ty = infer_expr(engine, callee, env)?
 
@@ -676,13 +769,13 @@ fn infer_call(engine: InferenceEngine, callee: Expr, args: [Argument],
             Ok(result_ty)
 
 fn infer_method_call(engine: InferenceEngine, receiver: Expr, method: text,
-                     args: [Argument], env: Dict<text, Type>) -> Result<Type, TypeError>:
+                     args: [Argument], env: Dict<text, Type>) -> text:
     """Infer type of method call."""
     val receiver_ty = infer_expr(engine, receiver, env)?
 
     # Infer argument types
     for arg in args:
-        val _ = infer_expr(engine, arg.value, env)?
+        val _unused_19 = infer_expr(engine, arg.value, env)?
 
     # Special handling for .with method (FString template instantiation)
     if method == "with":
@@ -708,7 +801,7 @@ fn infer_method_call(engine: InferenceEngine, receiver: Expr, method: text,
 # ============================================================================
 
 fn infer_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
-                env: Dict<text, Type>) -> Result<Type, TypeError>:
+                env: Dict<text, Type>) -> text:
     """Infer type of lambda expression."""
     # Create fresh variables for parameters
     var param_types: [Type] = []
@@ -734,7 +827,7 @@ fn infer_lambda(engine: InferenceEngine, params: [LambdaParam], body: Expr,
 # ============================================================================
 
 fn infer_if(engine: InferenceEngine, condition: Expr, then_branch: Expr,
-            else_branch: Expr?, env: Dict<text, Type>) -> Result<Type, TypeError>:
+            else_branch: Expr, env: Dict<text, Type>) -> text:
     """Infer type of if expression."""
     # Condition must be bool
     val cond_ty = infer_expr(engine, condition, env)?
@@ -753,7 +846,7 @@ fn infer_if(engine: InferenceEngine, condition: Expr, then_branch: Expr,
         Ok(Type.Unit)
 
 fn infer_match(engine: InferenceEngine, subject: Expr, arms: [MatchArm],
-               env: Dict<text, Type>) -> Result<Type, TypeError>:
+               env: Dict<text, Type>) -> text:
     """Infer type of match expression."""
     # Infer subject type
     val subject_ty = infer_expr(engine, subject, env)?
@@ -763,9 +856,9 @@ fn infer_match(engine: InferenceEngine, subject: Expr, arms: [MatchArm],
 
     # Check each arm
     for arm in arms:
-        # Check pattern against subject type (Phase 3.2 - TODO #173 ✅)
-        # Bind pattern variables (Phase 3.2 - TODO #174 ✅)
-        use compiler.type_system.stmt_check.{bind_pattern}
+        # Check pattern against subject type (Phase 3[2] - TODO #173 ✅)
+        # Bind pattern variables (Phase 3[2] - TODO #174 ✅)
+        # MOVED: use compiler.type_system.stmt_check.{bind_pattern}
 
         val arm_env = bind_pattern(arm.pattern, subject_ty, env)
 
@@ -782,7 +875,7 @@ fn infer_match(engine: InferenceEngine, subject: Expr, arms: [MatchArm],
 # ============================================================================
 
 fn infer_array(engine: InferenceEngine, elements: [Expr],
-               env: Dict<text, Type>) -> Result<Type, TypeError>:
+               env: Dict<text, Type>) -> text:
     """Infer type of array literal."""
     if not has_elements:
         # Empty array - element type unknown
@@ -802,7 +895,7 @@ fn infer_array(engine: InferenceEngine, elements: [Expr],
     Ok(type_Array(elem: engine.resolve(first_ty), size: nil))
 
 fn infer_tuple(engine: InferenceEngine, elements: [Expr],
-               env: Dict<text, Type>) -> Result<Type, TypeError>:
+               env: Dict<text, Type>) -> text:
     """Infer type of tuple literal."""
     var elem_types: [Type] = []
 
@@ -812,7 +905,7 @@ fn infer_tuple(engine: InferenceEngine, elements: [Expr],
     Ok(type_Tuple(elements: elem_types))
 
 fn infer_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
-              env: Dict<text, Type>) -> Result<Type, TypeError>:
+              env: Dict<text, Type>) -> text:
     """Infer type of dictionary literal."""
     if not has_pairs:
         # Empty dict - key and value types unknown
@@ -821,14 +914,18 @@ fn infer_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
         return Ok(type_Dict(key: key_ty, value: value_ty))
 
     # Infer first pair types
-    val (first_key, first_value) = pairs[0]
+    val _destruct_1 = pairs[0]
+    val first_key = _destruct_1[0]
+    val first_value = _destruct_1[1]
     val key_ty = infer_expr(engine, first_key, env)?
     val value_ty = infer_expr(engine, first_value, env)?
 
     # Unify all other pairs
     var i = 1
     while i < pairs_len(pairs):
-        val (k, v) = pairs[i]
+        val _destruct_2 = pairs[i]
+        val k = _destruct_2[0]
+        val v = _destruct_2[1]
         val k_ty = infer_expr(engine, k, env)?
         val v_ty = infer_expr(engine, v, env)?
         engine_unify(engine, key_ty, k_ty)?
@@ -842,7 +939,7 @@ fn infer_dict(engine: InferenceEngine, pairs: [(Expr, Expr)],
 # ============================================================================
 
 fn infer_field_access(engine: InferenceEngine, receiver: Expr, field: text,
-                      env: Dict<text, Type>) -> Result<Type, TypeError>:
+                      env: Dict<text, Type>) -> text:
     """Infer type of field access."""
     val receiver_ty = infer_expr(engine, receiver, env)?
 
@@ -851,7 +948,7 @@ fn infer_field_access(engine: InferenceEngine, receiver: Expr, field: text,
     Ok(engine_fresh_var(engine))
 
 fn infer_index_access(engine: InferenceEngine, receiver: Expr, index: Expr,
-                      env: Dict<text, Type>) -> Result<Type, TypeError>:
+                      env: Dict<text, Type>) -> text:
     """Infer type of index access."""
     val receiver_ty = infer_expr(engine, receiver, env)?
     val index_ty = infer_expr(engine, index, env)?
@@ -885,13 +982,13 @@ fn infer_index_access(engine: InferenceEngine, receiver: Expr, index: Expr,
 # ============================================================================
 
 fn infer_macro(engine: InferenceEngine, name: text, args: [MacroArg],
-               env: Dict<text, Type>) -> Result<Type, TypeError>:
+               env: Dict<text, Type>) -> text:
     """Infer type of macro invocation."""
     # Infer argument types
     for arg in args:
         match arg:
             case Expr(e):
-                val _ = infer_expr(engine, e, env)?
+                val _unused_20 = infer_expr(engine, e, env)?
 
     # Macro return type depends on macro definition
     # For now, return fresh var

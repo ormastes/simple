@@ -37,12 +37,10 @@ fn parser_with_resolved_blocks(source: text, resolved: ResolvedModule) -> Parser
             current: token_eof(0, 1),
             previous: token_eof(0, 1),
             errors: [],
-            # DESUGARED: outline: Some(resolved.outline)
-            has_outline: true,
-            outline_value: resolved.outline,
-            # DESUGARED: resolved_blocks: Some(resolved)
-            has_resolved_blocks: true,
-            resolved_blocks_value: resolved
+            # # DESUGARED: outline: Some(resolved.outline)
+            outline: resolved.outline,
+            # # DESUGARED: resolved_blocks: Some(resolved)
+            resolved_blocks: resolved
         )
         p_advance(p)
         p
@@ -53,7 +51,7 @@ fn parser_parse(self: Parser) -> Module:
         # Pass 1: Get outline (reuse from resolved_blocks if available)
         if not self.has_outline:
             val ts = treesitter_new(self.source)
-            self.outline = has_field = true, field_value = ts_parse_outline(ts)
+            self.outline = ts_parse_outline(ts)
 
         # Pass 2: Fill in bodies
         self.parse_full()
@@ -270,9 +268,9 @@ fn parser_convert_type_param(self: Parser, outline: TypeParamOutline) -> TypePar
 
 
 fn parser_convert_param(self: Parser, outline: ParamOutline) -> Param:
-        var default_expr: Expr? = nil
+        var default_expr: Expr = nil
         if outline.has_default_span:
-            default_expr = has_field = true, field_value = self.parse_expr_at_span(outline.default_span_value)
+            default_expr = self.parse_expr_at_span(outline.default_span_value)
 
         val type_result = outline.type__map(type_, \t: self.convert_type(t))
         Param(
@@ -284,12 +282,12 @@ fn parser_convert_param(self: Parser, outline: ParamOutline) -> Param:
 
 
 fn parser_convert_field(self: Parser, outline: FieldOutline) -> Field:
-        var default_expr: Expr? = nil
+        var default_expr: Expr = nil
         if outline.has_default_span:
-            default_expr = has_field = true, field_value = self.parse_expr_at_span(outline.default_span_value)
+            default_expr = self.parse_expr_at_span(outline.default_span_value)
 
         # Parse fixed address if present
-        var fixed_address: i64? = nil
+        var fixed_address: i64 = nil
         if outline.has_address_span:
             val addr_expr = self.parse_expr_at_span(outline.address_span_value)
             fixed_address = self.extract_address(addr_expr)
@@ -335,9 +333,9 @@ fn parser_convert_enum(self: Parser, outline: EnumOutline) -> Enum:
             val kind = match v.payload:
                 case nil:
                     VariantKind.Unit
-                case has_field = true, field_value = Tuple(types):
+                case Tuple(types):
                     variantkind_Tuple(self.convert_type_list(types))
-                case has_field = true, field_value = Struct(fields):
+                case Struct(fields):
                     variantkind_Struct(self.convert_field_list(fields))
 
             variants = variants.push(Variant(
@@ -523,7 +521,7 @@ fn parser_parse_const_body(self: Parser, outline: ConstOutline) -> Const:
         val value = self.parse_expr_at_span(outline.value_span)
 
         # Parse fixed address if present
-        var fixed_address: i64? = nil
+        var fixed_address: i64 = nil
         if outline.has_address_span:
             val addr_expr = self.parse_expr_at_span(outline.address_span_value)
             fixed_address = self.extract_address(addr_expr)
@@ -577,7 +575,7 @@ fn parser_parse_pipeline_expr(self: Parser) -> Expr:
         """
         var left = self.parse_parallel_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.PipeForward):
                 val right = self.parse_parallel_expr()
                 left = Expr(
@@ -618,8 +616,8 @@ fn parser_parse_composition_expr(self: Parser) -> Expr:
         """Parse composition expression (>>, <<).
 
         Composition operators are right-associative (like Haskell's . operator).
-        - >> : Forward compose, f >> g means g(f(x))
-        - << : Backward compose, f << g means f(g(x))
+        - >> : Forward compose, bit_shr(f, g) means g(f(x))
+        - << : Backward compose, bit_shl(f, g) means f(g(x))
         """
         val left = self.parse_or_expr()
 
@@ -686,7 +684,7 @@ fn parser_parse_equality_expr(self: Parser) -> Expr:
         """Parse equality expression."""
         var left = self.parse_comparison_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.Eq):
                 val right = self.parse_comparison_expr()
                 left = Expr(
@@ -709,7 +707,7 @@ fn parser_parse_comparison_expr(self: Parser) -> Expr:
         """Parse comparison expression."""
         var left = self.parse_range_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.Lt):
                 val right = self.parse_range_expr()
                 left = Expr(
@@ -762,7 +760,7 @@ fn parser_parse_range_expr(self: Parser) -> Expr:
                 inclusive = true
             val right = self.parse_additive_expr()
             return Expr(
-                kind: exprkind_Range(has_field = true, field_value = left, has_field = true, field_value = right, inclusive, nil),
+                kind: exprkind_Range(left, right, inclusive, nil),
                 span: left.span_merge(span, right.span)
             )
 
@@ -773,7 +771,7 @@ fn parser_parse_additive_expr(self: Parser) -> Expr:
         """Parse additive expression (including broadcast .+ and .-)."""
         var left = self.parse_matmul_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.Plus):
                 val right = self.parse_matmul_expr()
                 left = Expr(
@@ -822,7 +820,7 @@ fn parser_parse_multiplicative_expr(self: Parser) -> Expr:
         """Parse multiplicative expression (including broadcast .* and ./)."""
         var left = self.parse_power_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.Star):
                 val right = self.parse_power_expr()
                 left = Expr(
@@ -940,7 +938,7 @@ fn parser_parse_postfix_expr(self: Parser) -> Expr:
         """Parse postfix expression (calls, indexing, field access)."""
         var expr = self.parse_primary_expr()
 
-        loop:
+        while true:
             if self.match_token(TokenKind.TripleLess):
                 # Kernel launch: kernel<<<grid, block>>>(args)
                 val grid_dim = self.parse_expr()
@@ -1064,7 +1062,8 @@ fn parser_parse_primary_expr(self: Parser) -> Expr:
                 self.advance()
 
                 # Check for set literal: s{...}
-                if name == "s" and self.check(TokenKind.LBrace):
+                if name == "s":
+                    if self.check(TokenKind.LBrace):
                     self.parse_set_literal_after_s(start)
                 else:
                     Expr(kind: exprkind_Ident(name), span: start)
@@ -1120,9 +1119,10 @@ fn parser_parse_primary_expr(self: Parser) -> Expr:
 
             case KwReturn:
                 self.advance()
-                var value: Expr? = nil
-                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
-                    value = has_field = true, field_value = self.parse_expr()
+                var value: Expr = nil
+                if not self.check(TokenKind.Newline):
+                    if not self.check(TokenKind.Dedent):
+                    value = self.parse_expr()
                 Expr(kind: exprkind_Return(value), span: start_merge(start, self.previous.span))
 
             case KwBreak:
@@ -1135,9 +1135,10 @@ fn parser_parse_primary_expr(self: Parser) -> Expr:
 
             case KwYield:
                 self.advance()
-                var value: Expr? = nil
-                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
-                    value = has_field = true, field_value = self.parse_expr()
+                var value: Expr = nil
+                if not self.check(TokenKind.Newline):
+                    if not self.check(TokenKind.Dedent):
+                    value = self.parse_expr()
                 Expr(kind: exprkind_Yield(value), span: start_merge(start, self.previous.span))
 
             case KwAwait:
@@ -1372,9 +1373,9 @@ fn parser_parse_lambda_param(self: Parser) -> LambdaParam:
         val start = self.current.span
         val name = self.parse_identifier()
 
-        var type_: Type? = nil
+        var type_: Type = nil
         if self.match_token(TokenKind.Colon):
-            type_ = has_field = true, field_value = self.parse_type()
+            type_ = self.parse_type()
 
         LambdaParam(name: name, type_: type_, span: start_merge(start, self.previous.span))
 
@@ -1388,14 +1389,14 @@ fn parser_parse_if_expr(self: Parser) -> Expr:
         self.expect(TokenKind.Colon, "expected ':' after if condition")
         val then_ = self.parse_block()
 
-        var else_: Block? = nil
+        var else_: Block = nil
         if self.match_token(TokenKind.KwElse):
             self.expect(TokenKind.Colon, "expected ':' after else")
-            else_ = has_field = true, field_value = self.parse_block()
+            else_ = self.parse_block()
         elif self.match_token(TokenKind.KwElif):
             # elif is sugar for else if
             val elif_expr = self.parse_if_expr()
-            else_ = has_field = true, field_value = Block(stmts: [Stmt(kind: stmtkind_Expr(elif_expr, span: elif_expr.span)], span: elif_expr.span))
+            else_ = Block(stmts: [Stmt(kind: stmtkind_Expr(elif_expr, span: elif_expr.span)], span: elif_expr.span))
 
         Expr(kind: exprkind_If(cond, then_, else_), span: start_merge(start, self.previous.span))
 
@@ -1430,9 +1431,9 @@ fn parser_parse_match_expr(self: Parser) -> Expr:
 
             val pattern = self.parse_pattern()
 
-            var guard: Expr? = nil
+            var guard: Expr = nil
             if self.match_token(TokenKind.KwIf):
-                guard = has_field = true, field_value = self.parse_expr()
+                guard = self.parse_expr()
 
             # For `| pattern ->` syntax, expect `->`
             # For `case pattern:` syntax, accept `:` or `->`
@@ -1546,7 +1547,8 @@ fn parser_parse_asm_expr(self: Parser) -> Expr:
             self.advance()  # Consume ','
 
             # Check for clobber_abi("C") special case
-            if self.current.kind == TokenKind.Ident and self.current.text == "clobber_abi":
+            if self.current.kind == TokenKind.Ident:
+                if self.current.text == "clobber_abi":
                 self.advance()  # Consume 'clobber_abi'
                 self.expect(TokenKind.LParen, "expected '(' after 'clobber_abi'")
                 if self.current.kind == TokenKind.StringLit:
@@ -1724,9 +1726,8 @@ fn parser_parse_call_arg(self: Parser) -> CallArg:
                 self.advance()  # consume ident
                 self.advance()  # consume colon
                 val value = self.parse_expr()
-                return CallArg(# DESUGARED: name: Some(name)
-            has_name: true,
-            name_value: name, value: value, span: start_merge(start, value.span))
+                # return CallArg(# DESUGARED: name: Some(name)
+            name: name, value: value, span: start_merge(start, value.span))
 
         # Not a named argument, parse as full expression
         val value = self.parse_expr()
@@ -1772,7 +1773,23 @@ fn parser_parse_pattern(self: Parser) -> Pattern:
                 self.advance()
                 Pattern(kind: PatternKind.Wildcard, span: start)
 
-            case IntLit | FloatLit | StringLit | BoolLit | NilLit:
+            case IntLit:
+                val expr = self.parse_primary_expr()
+                Pattern(kind: patternkind_Literal(expr), span: start_merge(start, expr.span))
+
+            case FloatLit:
+                val expr = self.parse_primary_expr()
+                Pattern(kind: patternkind_Literal(expr), span: start_merge(start, expr.span))
+
+            case StringLit:
+                val expr = self.parse_primary_expr()
+                Pattern(kind: patternkind_Literal(expr), span: start_merge(start, expr.span))
+
+            case BoolLit:
+                val expr = self.parse_primary_expr()
+                Pattern(kind: patternkind_Literal(expr), span: start_merge(start, expr.span))
+
+            case NilLit:
                 val expr = self.parse_primary_expr()
                 Pattern(kind: patternkind_Literal(expr), span: start_merge(start, expr.span))
 
@@ -1829,7 +1846,7 @@ fn parser_parse_enum_pattern(self: Parser, enum_name: text, start: Span) -> Patt
             enum_ = enum_name
             variant = self.parse_identifier()
 
-        var payload: EnumPatternPayload? = nil
+        var payload: EnumPatternPayload = nil
 
         if not self.check(TokenKind.RParen):
             var patterns: [Pattern] = []
@@ -1838,7 +1855,7 @@ fn parser_parse_enum_pattern(self: Parser, enum_name: text, start: Span) -> Patt
                 if self.check(TokenKind.RParen):
                     break
                 patterns = patterns_push(patterns, self.parse_pattern())
-            payload = has_field = true, field_value = enumpatternpayload_Tuple(patterns)
+            payload = enumpatternpayload_Tuple(patterns)
 
         self.expect(TokenKind.RParen, "expected ')' after enum pattern")
 
@@ -1885,11 +1902,11 @@ fn parser_parse_array_pattern(self: Parser, start: Span) -> Pattern:
         self.advance()  # Consume '['
 
         var elements: [Pattern] = []
-        var rest: text? = nil
+        var rest: text = nil
 
         if not self.check(TokenKind.RBracket):
             if self.match_token(TokenKind.DotDot):
-                rest = has_field = true, field_value = self.parse_identifier()
+                rest = self.parse_identifier()
             else:
                 elements = elements_push(elements, self.parse_pattern())
 
@@ -1897,7 +1914,7 @@ fn parser_parse_array_pattern(self: Parser, start: Span) -> Pattern:
                 if self.check(TokenKind.RBracket):
                     break
                 if self.match_token(TokenKind.DotDot):
-                    rest = has_field = true, field_value = self.parse_identifier()
+                    rest = self.parse_identifier()
                     break
                 elements = elements_push(elements, self.parse_pattern())
 
@@ -1955,9 +1972,10 @@ fn parser_parse_stmt(self: Parser) -> Stmt:
                 self.parse_loop_stmt()
             case KwReturn:
                 self.advance()
-                var value: Expr? = nil
-                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
-                    value = has_field = true, field_value = self.parse_expr()
+                var value: Expr = nil
+                if not self.check(TokenKind.Newline):
+                    if not self.check(TokenKind.Dedent):
+                    value = self.parse_expr()
                 self.skip_newlines()
                 Stmt(kind: stmtkind_Return(value), span: start_merge(start, self.previous.span))
             case KwBreak:
@@ -1970,9 +1988,10 @@ fn parser_parse_stmt(self: Parser) -> Stmt:
                 Stmt(kind: stmtkind_Continue(nil), span: start)
             case KwYield:
                 self.advance()
-                var value: Expr? = nil
-                if not self.check(TokenKind.Newline) and not self.check(TokenKind.Dedent):
-                    value = has_field = true, field_value = self.parse_expr()
+                var value: Expr = nil
+                if not self.check(TokenKind.Newline):
+                    if not self.check(TokenKind.Dedent):
+                    value = self.parse_expr()
                 self.skip_newlines()
                 Stmt(kind: stmtkind_Yield(value), span: start_merge(start, self.previous.span))
             case KwThrow:
@@ -1995,9 +2014,9 @@ fn parser_parse_val_stmt(self: Parser) -> Stmt:
 
         val name = self.parse_identifier()
 
-        var type_: Type? = nil
+        var type_: Type = nil
         if self.match_token(TokenKind.Colon):
-            type_ = has_field = true, field_value = self.parse_type()
+            type_ = self.parse_type()
 
         self.expect(TokenKind.Assign, "expected '=' in val declaration")
         # Skip newlines after = to allow continuation on next line
@@ -2025,11 +2044,11 @@ fn parser_parse_var_stmt(self: Parser) -> Stmt:
 
         val name = self.parse_identifier()
 
-        var type_: Type? = nil
+        var type_: Type = nil
         if self.match_token(TokenKind.Colon):
-            type_ = has_field = true, field_value = self.parse_type()
+            type_ = self.parse_type()
 
-        var init: Expr? = nil
+        var init: Expr = nil
         if self.match_token(TokenKind.Assign):
             # Skip newlines after = to allow continuation on next line
             self.skip_newlines()
@@ -2037,7 +2056,7 @@ fn parser_parse_var_stmt(self: Parser) -> Stmt:
             var consumed_indent = false
             if self.match_token(TokenKind.Indent):
                 consumed_indent = true
-            init = has_field = true, field_value = self.parse_expr()
+            init = self.parse_expr()
             # Consume matching dedent if we consumed an indent
             if consumed_indent:
                 self.skip_newlines()
@@ -2063,7 +2082,8 @@ fn parser_parse_shared_stmt(self: Parser) -> Stmt:
         self.advance()  # Consume 'shared'
 
         val is_mutable = self.check(TokenKind.KwVar)
-        if not self.check(TokenKind.KwVal) and not self.check(TokenKind.KwVar):
+        if not self.check(TokenKind.KwVal):
+            if not self.check(TokenKind.KwVar):
             self.error("expected 'val' or 'var' after 'shared'")
             return Stmt(
                 kind: StmtKind.Expr(Expr(kind: ExprKind.Error("expected val/var after shared"), span: start)),
@@ -2078,9 +2098,9 @@ fn parser_parse_shared_stmt(self: Parser) -> Stmt:
         val type_ = self.parse_type()
 
         # Optional size expression for arrays: [Type; size]
-        var size: Expr? = nil
+        var size: Expr = nil
         if self.match_token(TokenKind.Semicolon):
-            size = has_field = true, field_value = self.parse_expr()
+            size = self.parse_expr()
 
         self.skip_newlines()
 
@@ -2150,7 +2170,7 @@ fn parser_parse_with_stmt(self: Parser) -> Stmt:
             val context_expr = self.parse_expr()
 
             # Check for optional 'as' binding
-            var target: text? = nil
+            var target: text = nil
             if self.match_token(TokenKind.KwAs):
                 target = self.parse_identifier()
 
@@ -2194,31 +2214,31 @@ fn parser_parse_expr_or_assign_stmt(self: Parser) -> Stmt:
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: stmtkind_Assign(expr, has_field = true, field_value = AssignOp.Add, value), span: start_merge(start, value.span))
+            return Stmt(kind: stmtkind_Assign(expr, AssignOp.Add, value), span: start_merge(start, value.span))
 
         if self.check(TokenKind.MinusEq):
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: stmtkind_Assign(expr, has_field = true, field_value = AssignOp.Sub, value), span: start_merge(start, value.span))
+            return Stmt(kind: stmtkind_Assign(expr, AssignOp.Sub, value), span: start_merge(start, value.span))
 
         if self.check(TokenKind.StarEq):
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: stmtkind_Assign(expr, has_field = true, field_value = AssignOp.Mul, value), span: start_merge(start, value.span))
+            return Stmt(kind: stmtkind_Assign(expr, AssignOp.Mul, value), span: start_merge(start, value.span))
 
         if self.check(TokenKind.SlashEq):
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: stmtkind_Assign(expr, has_field = true, field_value = AssignOp.Div, value), span: start_merge(start, value.span))
+            return Stmt(kind: stmtkind_Assign(expr, AssignOp.Div, value), span: start_merge(start, value.span))
 
         if self.check(TokenKind.PercentEq):
             self.advance()
             val value = self.parse_expr()
             self.skip_newlines()
-            return Stmt(kind: stmtkind_Assign(expr, has_field = true, field_value = AssignOp.Mod, value), span: start_merge(start, value.span))
+            return Stmt(kind: stmtkind_Assign(expr, AssignOp.Mod, value), span: start_merge(start, value.span))
 
         self.skip_newlines()
         Stmt(kind: stmtkind_Expr(expr), span: expr.span)
@@ -2262,9 +2282,11 @@ fn char_to_digit(ch: text, base: i64) -> i64:
     val code = ch_ord(ch)
     val digit = if code >= 48 and code <= 57:
         code - 48  # '0'-'9'
-    elif code >= 65 and code <= 70:
+    elif code >= 65:
+        if code <= 70:
         code - 55  # 'A'-'F' -> 10-15
-    elif code >= 97 and code <= 102:
+    elif code >= 97:
+        if code <= 102:
         code - 87  # 'a'-'f' -> 10-15
     else:
         -1
@@ -2286,9 +2308,9 @@ fn create_parser(src: text) -> Parser:
         lexer: create_lexer(src),
         current: create_token_eof(0, 1),
         previous: create_token_eof(0, 1),
-        errors: [],
-        has_outline: false,  # DESUGARED: outline: nil
-        has_resolved_blocks: false,  # DESUGARED: resolved_blocks: nil
+        errors: []
+        #  # DESUGARED: outline: nil
+        ## DESUGARED: resolved_blocks: nil
     )
     p_advance(p)
     p

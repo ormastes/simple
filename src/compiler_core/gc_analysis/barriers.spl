@@ -44,9 +44,9 @@ struct WriteSite:
     """A location where a reference write occurs."""
     program_point: i64
     target_type: i64       # Type being written to
-    # DESUGARED: field_index: i64?
+    # # DESUGARED: field_index: i64
     has_field_index: bool
-    field_index_value: i64
+    field_index: i64
     is_array_element: bool # Is array element write
     source_type: i64       # Type of value being written
     required_barrier: BarrierKind
@@ -60,9 +60,8 @@ fn writesite_field_write(point: i64, target_type: i64, field_idx: i64, source_ty
         WriteSite(
             program_point: point,
             target_type: target_type,
-            # DESUGARED: field_index: Some(field_idx)
-            has_field_index: true,
-            field_index_value: field_idx,
+            # # DESUGARED: field_index: Some(field_idx)
+            field_index: field_idx,
             is_array_element: false,
             source_type: source_type,
             required_barrier: BarrierKind.None_  # Determined by analysis
@@ -73,7 +72,7 @@ fn writesite_array_write(point: i64, target_type: i64, source_type: i64) -> Writ
         WriteSite(
             program_point: point,
             target_type: target_type,
-            has_field_index: false,  # DESUGARED: field_index: nil
+            #  # DESUGARED: field_index: nil
             is_array_element: true,
             source_type: source_type,
             required_barrier: BarrierKind.None_
@@ -147,7 +146,7 @@ class BarrierAnalysis:
     requirements: [BarrierRequirement]
     errors: [BarrierError]
     is_gc_type: fn(i64) -> bool
-    is_young_gen: fn(i64) -> bool?  # For generational GC
+    is_young_gen: fn(i64) -> bool  # For generational GC
 
     static fn create(gc_mode: GcMode, is_gc_type: fn(i64) -> bool) -> BarrierAnalysis:
         BarrierAnalysis(
@@ -155,8 +154,8 @@ class BarrierAnalysis:
             write_sites: [],
             requirements: [],
             errors: [],
-            is_gc_type: is_gc_type,
-            has_is_young_gen: false,  # DESUGARED: is_young_gen: nil
+            is_gc_type: is_gc_type
+            ## DESUGARED: is_young_gen: nil
         )
 
     me record_write(site: WriteSite):
@@ -177,7 +176,8 @@ class BarrierAnalysis:
         val source_is_gc = (self.is_gc_type)(site.source_type)
 
         # Non-GC types don't need barriers
-        if not target_is_gc and not source_is_gc:
+        if not target_is_gc:
+            if not source_is_gc:
             return
 
         # Determine required barrier based on GC mode
@@ -192,7 +192,8 @@ class BarrierAnalysis:
                     BarrierKind.None_
 
             case Generational:
-                if target_is_gc and source_is_gc:
+                if target_is_gc:
+                    if source_is_gc:
                     BarrierKind.Generational  # May be old->young
                 else:
                     BarrierKind.None_
@@ -226,7 +227,7 @@ class BarrierAnalysis:
                         req.write_site,
                         req.barrier_kind
                     ))
-                case has_field = true, field_value = emitted:
+                case emitted:
                     if emitted != req.barrier_kind:
                         self.errors = self.errors.push(BarrierError(
                             message: "Wrong barrier kind: expected {req.barrier_kind.to_text()}, got {emitted.to_text()}",

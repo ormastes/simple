@@ -27,9 +27,9 @@ struct MirLowering:
 struct MirError:
     """MIR lowering error."""
     message: text
-    # DESUGARED: span: Span?
+    # # DESUGARED: span: Span
     has_span: bool
-    span_value: Span
+    span: Span
 
 
 # ============================================================================
@@ -108,7 +108,7 @@ fn mirlowering_lower_function(self: MirLowering, fn_: HirFunction) -> MirFunctio
         # Return result (copy-modify-reassign for interpreter)
         var bldr2 = self.builder
         if has_result:
-            bldr2_terminate_return(bldr2, has_field = true, field_value = mir_operand_copy(result_value))
+            bldr2_terminate_return(bldr2, mir_operand_copy(result_value))
         else:
             bldr2_terminate_return(bldr2, nil)
         self.builder = bldr2
@@ -161,7 +161,7 @@ fn mirlowering_lower_type(self: MirLowering, type_: HirType) -> MirType:
             case Ref(inner, mutable):
                 MirType(kind: mirtypekind_Ref(self.lower_type(inner), mutable))
             case Optional(inner):
-                # Optional is enum { nil, has_field = true, field_value = T }
+                # Optional is enum { nil, T }
                 MirType(kind: MirTypeKind.Tuple([
                     MirType(kind: MirTypeKind.Bool),  # has_value
                     self.lower_type(inner)
@@ -215,7 +215,13 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
                 self.builder = b
                 dest
 
-            case NilLit | UnitLit:
+            case NilLit:
+                var b = self.builder
+                val result = b_new_temp(b, MirType.unit())
+                self.builder = b
+                result
+
+            case UnitLit:
                 var b = self.builder
                 val result = b_new_temp(b, MirType.unit())
                 self.builder = b
@@ -226,7 +232,7 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
                 if self.local_map_contains_key(local_map, symbol):
                     self.local_map[symbol]
                 else:
-                    self.error("undefined variable", has_field = true, field_value = expr.span)
+                    self.error("undefined variable", expr.span)
                     var b_err = self.builder
                     val err_tmp = b_err_new_temp(b_err, MirType.i64())
                     self.builder = b_err
@@ -312,7 +318,7 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
                 if has_value:
                     val result = self.lower_expr(value_value)
                     br = self.builder
-                    br_terminate_return(br, has_field = true, field_value = mir_operand_copy(result))
+                    br_terminate_return(br, mir_operand_copy(result))
                 else:
                     br_terminate_return(br, nil)
                 self.builder = br
@@ -323,7 +329,9 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
 
             case Break(break_label, break_value):
                 if self.loop_stack_len(loop_stack) > 0:
-                    val (loop_continue_block, break_block) = self.loop_stack[self.loop_stack_len(loop_stack) - 1]
+                    val _destruct_0 = self.loop_stack[self.loop_stack_len(loop_stack) - 1]
+                    val loop_continue_block = _destruct_0[0]
+                    val break_block = _destruct_0[1]
                     var b = self.builder
                     b_terminate_goto(b, break_block)
                     self.builder = b
@@ -334,7 +342,9 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
 
             case Continue(cont_label):
                 if self.loop_stack_len(loop_stack) > 0:
-                    val (continue_block, loop_break_block) = self.loop_stack[self.loop_stack_len(loop_stack) - 1]
+                    val _destruct_1 = self.loop_stack[self.loop_stack_len(loop_stack) - 1]
+                    val continue_block = _destruct_1[0]
+                    val loop_break_block = _destruct_1[1]
                     var b = self.builder
                     b_terminate_goto(b, continue_block)
                     self.builder = b
@@ -369,8 +379,8 @@ fn mirlowering_lower_expr(self: MirLowering, expr: HirExpr) -> LocalId:
                 self.lower_block(body) ?? self.builder_new_temp(builder, MirType.unit())
 
             # Inline assembly
-            case InlineAsm(asm):
-                self.lower_inline_asm(asm)
+            case InlineAsm(asm_code):
+                self.lower_inline_asm(asm_code)
 
             case _:
                 self.error("unsupported MIR expression: {expr.kind}", nil)
@@ -419,7 +429,17 @@ fn mirlowering_lower_unaryop(self: MirLowering, op: HirUnaryOp) -> MirUnaryOp:
 fn mirlowering_infer_binop_type(self: MirLowering, op: HirBinOp) -> MirType:
         """Infer result type of binary operation."""
         match op:
-            case Eq | NotEq | Lt | LtEq | Gt | GtEq:
+            case Eq:
+                mirtype_bool()
+            case NotEq:
+                mirtype_bool()
+            case Lt:
+                mirtype_bool()
+            case LtEq:
+                mirtype_bool()
+            case Gt:
+                mirtype_bool()
+            case GtEq:
                 mirtype_bool()
             case _:
                 mirtype_i64()  # Default to i64
@@ -430,9 +450,9 @@ fn mirlowering_lower_if(self: MirLowering, cond: HirExpr, then_: HirBlock, else_
         val cond_local = self.lower_expr(cond)
 
         var b = self.builder
-        val then_block = b.new_block(has_field = true, field_value = "then")
-        val else_block = b.new_block(has_field = true, field_value = "else")
-        val merge_block = b.new_block(has_field = true, field_value = "merge")
+        val then_block = b.new_block("then")
+        val else_block = b.new_block("else")
+        val merge_block = b.new_block("merge")
         val result = b_new_temp(b, MirType.i64())
         b_terminate_if(b, mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
@@ -475,8 +495,8 @@ fn mirlowering_lower_if(self: MirLowering, cond: HirExpr, then_: HirBlock, else_
 fn mirlowering_lower_loop(self: MirLowering, body: HirBlock) -> LocalId:
         """Lower loop expression."""
         var b = self.builder
-        val loop_block = b.new_block(has_field = true, field_value = "loop")
-        val exit_block = b.new_block(has_field = true, field_value = "loop_exit")
+        val loop_block = b.new_block("loop")
+        val exit_block = b.new_block("loop_exit")
         self.builder = b
 
         self.loop_stack = self.loop_stack_push(loop_stack, (loop_block, exit_block))
@@ -504,9 +524,9 @@ fn mirlowering_lower_loop(self: MirLowering, body: HirBlock) -> LocalId:
 fn mirlowering_lower_while(self: MirLowering, cond: HirExpr, body: HirBlock) -> LocalId:
         """Lower while expression."""
         var b = self.builder
-        val cond_block = b.new_block(has_field = true, field_value = "while_cond")
-        val body_block = b.new_block(has_field = true, field_value = "while_body")
-        val exit_block = b.new_block(has_field = true, field_value = "while_exit")
+        val cond_block = b.new_block("while_cond")
+        val body_block = b.new_block("while_body")
+        val exit_block = b.new_block("while_exit")
         self.builder = b
 
         self.loop_stack = self.loop_stack_push(loop_stack, (cond_block, exit_block))
@@ -570,9 +590,9 @@ fn mirlowering_lower_for(self: MirLowering, var_: SymbolId, iter: HirExpr, body:
 
         # Step 3: Create loop blocks
         var b2 = self.builder
-        val cond_block = b2.new_block(has_field = true, field_value = "for_cond")
-        val body_block = b2.new_block(has_field = true, field_value = "for_body")
-        val exit_block = b2.new_block(has_field = true, field_value = "for_exit")
+        val cond_block = b2.new_block("for_cond")
+        val body_block = b2.new_block("for_body")
+        val exit_block = b2.new_block("for_exit")
         self.builder = b2
 
         self.loop_stack = self.loop_stack_push(loop_stack, (cond_block, exit_block))
@@ -960,7 +980,7 @@ fn mirlowering_lower_await(self: MirLowering, future_expr: HirExpr) -> LocalId:
         # Emit Await instruction
         self.builder.emit(MirInst(
             kind: mirinstkind_Await(dest: dest, promise: mir_operand_copy(promise_local)),
-            has_span: false,  # DESUGARED: span: nil
+            ## DESUGARED: span: nil
         ))
 
         dest
@@ -977,7 +997,7 @@ fn mirlowering_lower_yield(self: MirLowering, value: HirExpr?) -> LocalId:
         # Lower the optional value
         val value_operand = if has_value:
             val value_local = self.lower_expr(value_value)
-            has_field = true, field_value = mir_operand_copy(value_local)
+            mir_operand_copy(value_local)
         else:
             nil
 
@@ -1055,7 +1075,7 @@ fn mirlowering_lower_receive(self: MirLowering, timeout: HirExpr?) -> LocalId:
         # Lower optional timeout
         val timeout_operand = if has_timeout:
             val timeout_local = self.lower_expr(timeout_value)
-            has_field = true, field_value = mir_operand_copy(timeout_local)
+            mir_operand_copy(timeout_local)
         else:
             nil
 
@@ -1071,7 +1091,7 @@ fn mirlowering_lower_receive(self: MirLowering, timeout: HirExpr?) -> LocalId:
         dest
 
 
-fn mirlowering_lower_range(self: MirLowering, start: HirExpr?, end: HirExpr?, inclusive: bool, step: HirExpr?) -> LocalId:
+fn mirlowering_lower_range(self: MirLowering, start: HirExpr, end: HirExpr, inclusive: bool, step: HirExpr?) -> LocalId:
         """Lower range expression to runtime call.
 
         Generates call to rt_range(start, end) or rt_range_inclusive(start, end).
@@ -1096,7 +1116,7 @@ fn mirlowering_lower_range(self: MirLowering, start: HirExpr?, end: HirExpr?, in
         result ?? self.builder_new_temp(builder, MirType.i64())
 
 
-fn mirlowering_lower_inline_asm(self: MirLowering, asm: HirAsm) -> LocalId:
+fn mirlowering_lower_inline_asm(self: MirLowering, asm_code: HirAsm) -> LocalId:
         """Lower inline assembly from HIR to MIR.
 
         Converts HIR inline assembly constraints to MIR operands.
@@ -1105,7 +1125,7 @@ fn mirlowering_lower_inline_asm(self: MirLowering, asm: HirAsm) -> LocalId:
         var inputs: [MirAsmOperand] = []
         var outputs: [MirAsmOperand] = []
 
-        for constraint in asm.constraints:
+        for constraint in asm_code.constraints:
             # Lower the HIR expression to a local
             val value_local = self.lower_expr(constraint.value)
             val mir_operand = mir_operand_copy(value_local)
@@ -1121,7 +1141,9 @@ fn mirlowering_lower_inline_asm(self: MirLowering, asm: HirAsm) -> LocalId:
             match constraint.kind:
                 case In:
                     inputs_push(inputs, asm_operand)
-                case Out | LateOut:
+                case Out:
+                    outputs_push(outputs, asm_operand)
+                case LateOut:
                     outputs_push(outputs, asm_operand)
                 case InOut:
                     # InOut constraints appear in both lists
@@ -1131,15 +1153,14 @@ fn mirlowering_lower_inline_asm(self: MirLowering, asm: HirAsm) -> LocalId:
         # Emit inline assembly instruction
         self.builder.emit(MirInst(
             kind: MirInstKind.InlineAsm(
-                asm_template: asm.asm_template,
-                is_volatile: asm.is_volatile,
+                asm_template: asm_code.asm_template,
+                is_volatile: asm_code.is_volatile,
                 inputs: inputs,
                 outputs: outputs,
-                clobbers: asm.clobbers
+                clobbers: asm_code.clobbers
             ),
-            # DESUGARED: span: Some(asm.span)
-            has_span: true,
-            span_value: asm.span
+            # # DESUGARED: span: Some(asm_code.span)
+            span: asm_code.span
         ))
 
         # Return a unit value (inline asm doesn't produce a value directly)

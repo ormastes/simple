@@ -30,7 +30,8 @@ fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind
     Select the best backend for a target (legacy API).
     For new code, use select_backend_with_mode().
     """
-    if preferred.? and preferred_value_supports_target(preferred_value, target):
+    if preferred.?:
+        if preferred_value_supports_target(preferred_value, target):
         return preferred_value
 
     # Auto-select based on target only (no build mode consideration)
@@ -48,7 +49,7 @@ fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind
 fn select_backend_with_mode(
     target: CodegenTarget,
     mode: BuildMode,
-    preferred: BackendKind?
+    preferred: BackendKind
 ) -> BackendKind:
     """
     Select the best backend for target and build mode.
@@ -58,7 +59,7 @@ fn select_backend_with_mode(
     2. 32-bit targets -> LLVM (only backend supporting 32-bit)
     3. WebAssembly -> Wasm backend
     4. Test mode -> Interpreter (no compilation overhead)
-    5. Debug mode -> Cranelift (2.5x faster compilation)
+    5. Debug mode -> Cranelift (2[5]x faster compilation)
     6. Release mode -> LLVM (15-30% faster runtime)
     7. Bootstrap mode -> Cranelift (minimal dependencies)
 
@@ -92,7 +93,7 @@ fn select_backend_with_mode(
     # 5. For 64-bit targets, choose based on build mode
     match mode:
         case Debug:
-            BackendKind.Cranelift  # Fast compilation (2.5x vs LLVM)
+            BackendKind.Cranelift  # Fast compilation (2[5]x vs LLVM)
 
         case Release:
             BackendKind.Llvm       # Better optimization (15-30% faster runtime)
@@ -126,15 +127,17 @@ fn gpu_backends() -> [BackendKind]:
 fn backend_for_name(name: text) -> has_BackendKind:
     """Get backend by name."""
     match name:
-        case "cranelift": has_field = true, field_value = BackendKind.Cranelift
-        case "llvm": has_field = true, field_value = BackendKind.Llvm
-        case "native": has_field = true, field_value = BackendKind.Native
-        case "wasm": has_field = true, field_value = BackendKind.Wasm
-        case "lean": has_field = true, field_value = BackendKind.Lean
-        case "interpreter": has_field = true, field_value = BackendKind.Interpreter
-        case "cuda" | "ptx": has_field = true, field_value = BackendKind.Cuda
-        case "vulkan" | "spirv": has_field = true, field_value = BackendKind.Vulkan
-        case has__: false,  # DESUGARED: _: nil
+        case "cranelift": BackendKind.Cranelift
+        case "llvm": BackendKind.Llvm
+        case "native": BackendKind.Native
+        case "wasm": BackendKind.Wasm
+        case "lean": BackendKind.Lean
+        case "interpreter": BackendKind.Interpreter
+        case "cuda": BackendKind.Cuda
+        case "ptx": BackendKind.Cuda
+        case "vulkan": BackendKind.Vulkan
+        case "spirv": BackendKind.Vulkan
+        # case  # DESUGARED: _: nil
 
 # ============================================================================
 # Convenience Functions for Driver Integration
@@ -165,7 +168,8 @@ fn compile_module_with_backend(
     elif backend_name == "native":
         kind = BackendKind.Native
     elif backend_name == "auto":
-        if is_release and llc_available():
+        if is_release:
+            if llc_available():
             kind = BackendKind.Llvm
         else:
             kind = BackendKind.Cranelift
@@ -207,12 +211,11 @@ fn compile_module_with_backend(
             val bytes = result_value
             Ok(CompiledModule(
                 name: module.name,
-                # DESUGARED: object_code: Some(bytes)
-            has_object_code: true,
-            object_code_value: bytes,
-                has_assembly: false,  # DESUGARED: assembly: nil
-                has_llvm_ir: false,  # DESUGARED: llvm_ir: nil
-                has_mir_dump: false,  # DESUGARED: mir_dump: nil
+                # # DESUGARED: object_code: Some(bytes)
+            object_code: bytes,
+                #  # DESUGARED: assembly: nil
+                #  # DESUGARED: llvm_ir: nil
+                #  # DESUGARED: mir_dump: nil
                 symbols: [],
                 compile_time_ms: 0
             ))
@@ -235,7 +238,8 @@ fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     elif backend_name == "native":
         "native"
     elif backend_name == "auto":
-        if is_release and llc_available():
+        if is_release:
+            if llc_available():
             "llvm"
         else:
             "cranelift"

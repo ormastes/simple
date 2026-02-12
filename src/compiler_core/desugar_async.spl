@@ -57,25 +57,28 @@ fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
                 case State2(...): ...
     """
     if not func.is_async:
-        return (func, [], [])
+        return [func, [], []]
 
     # Wrap return type in Future<T>
     val wrapped_return = match func.return_type:
-        case has_field = true, field_value = ret_type:
+        case ret_type:
             # Future<T> where T is original return type
-            has_field = true, field_value = Type(
+            Type(
                 kind: TypeKind.Generic("Future", [ret_type],
                 span: ret_type.span
             ))
         case nil:
             # Future<()>
-            has_field = true, field_value = Type(
+            Type(
                 kind: TypeKind.Generic("Future", [unit_type(]),
                 span: func.span
             ))
 
     # Transform body using state machine generation
-    val (desugared_body, generated_enums, generated_functions) = desugar_async_body(func.body, func)
+    val _destruct_0 = desugar_async_body(func.body, func)
+    val desugared_body = _destruct_0[0]
+    val generated_enums = _destruct_0[1]
+    val generated_functions = _destruct_0[2]
 
     val transformed_func = Function(
         name: func.name,
@@ -94,7 +97,7 @@ fn desugar_async_function(func: Function) -> (Function, [Enum], [Function]):
         span: func.span
     )
 
-    (transformed_func, generated_enums, generated_functions)
+    [transformed_func, generated_enums, generated_functions]
 
 fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]):
     """Transform async function body using state machine generation.
@@ -119,7 +122,7 @@ fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]
     if analysis.suspension_points_len(suspension_points) == 0:
         # No await expressions - use simple Future.ready() wrapper
         val simple_body = desugar_async_body_simple(body)
-        return (simple_body, [], [])
+        return [simple_body, [], []]
 
     # Generate state machine components
     val state_enum = generate_state_enum(func.name, analysis)
@@ -132,7 +135,7 @@ fn desugar_async_body(body: Block, func: Function) -> (Block, [Enum], [Function]
     # Create body that calls Future.from_generator with poll function
     val generator_body = make_generator_call(func.name, func.span)
 
-    (generator_body, [enum_ast], [poll_fn_ast])
+    [generator_body, [enum_ast], [poll_fn_ast]]
 
 fn desugar_async_body_simple(body: Block) -> Block:
     """Simple transformation for async functions with no awaits.
@@ -218,7 +221,7 @@ fn desugar_await_expr(expr: Expr) -> Expr:
         block_on(future_expr)
 
     Full transformation would be:
-        loop:
+        while true:
             match future_expr_poll(future_expr, waker):
                 case Ready(v): return v
                 case Pending: yield_to_runtime()
@@ -300,8 +303,13 @@ fn desugar_module(module: Module) -> Module:
     var generated_enums: Dict<text, Enum> = module.enums  # Start with existing enums
     var generated_helper_functions: Dict<text, Function> = {}
 
-    for (name, func) in module.functions:
-        val (desugared, gen_enums, gen_funcs) = desugar_async_function(func)
+    for _item_1 in module.functions:
+        val name = _item_1[0]
+        val func = _item_1[1]
+        val _destruct_2 = desugar_async_function(func)
+        val desugared = _destruct_2[0]
+        val gen_enums = _destruct_2[1]
+        val gen_funcs = _destruct_2[2]
         val with_await = desugar_function_body(desugared)
         desugared_functions[name] = with_await
 
@@ -314,12 +322,16 @@ fn desugar_module(module: Module) -> Module:
             generated_helper_functions[gen_func.name] = gen_func
 
     # Merge generated functions with desugared functions
-    for (name, func) in generated_helper_functions:
+    for _item_3 in generated_helper_functions:
+        val name = _item_3[0]
+        val func = _item_3[1]
         desugared_functions[name] = func
 
     # Desugar actors to classes
     var classes_with_actors = module.classes
-    for (name, act_def) in module.actors:
+    for _item_4 in module.actors:
+        val name = _item_4[0]
+        val act_def = _item_4[1]
         val as_class = desugar_actor(act_def)
         classes_with_actors[name] = as_class
 

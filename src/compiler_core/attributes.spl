@@ -37,9 +37,9 @@ enum VolatileMode:
 struct VolatileAttr:
     """Volatile attribute configuration."""
     mode: VolatileMode
-    # DESUGARED: address: i64?
+    # # DESUGARED: address: i64
     has_address: bool
-    address_value: i64
+    address: i64
     barriers: bool         # Insert memory barriers around access
 
 # ============================================================================
@@ -58,7 +58,7 @@ fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
     Returns default VolatileAttr if no volatile attributes found.
     """
     var mode = VolatileMode.None
-    var address: i64? = nil
+    var address: i64 = nil
     var barriers = false
 
     for attr in attrs:
@@ -78,14 +78,18 @@ fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
             case "nonvolatile":
                 mode = VolatileMode.Explicit
 
-            case "address" | "addr":
+            case "address":
+                # @address(0x40020000) - fixed memory address
+                if attr.args_len(args) > 0:
+                    address = extract_int_arg(attr.args[0])
+
+            case "addr":
                 # @address(0x40020000) - fixed memory address
                 if attr.args_len(args) > 0:
                     address = extract_int_arg(attr.args[0])
 
             case _:
                 # Ignore other attributes
-                pass
 
     VolatileAttr(
         mode: mode,
@@ -96,19 +100,23 @@ fn parse_volatile_attrs(attrs: [Attribute]) -> VolatileAttr:
 fn is_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile access is required."""
     match attr.mode:
-        case Full | ReadOnly | WriteOnly: true
+        case Full: true
+        case ReadOnly: true
+        case WriteOnly: true
         case _: false
 
 fn is_read_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile reads are required."""
     match attr.mode:
-        case Full | ReadOnly: true
+        case Full: true
+        case ReadOnly: true
         case _: false
 
 fn is_write_volatile(attr: VolatileAttr) -> bool:
     """Check if volatile writes are required."""
     match attr.mode:
-        case Full | WriteOnly: true
+        case Full: true
+        case WriteOnly: true
         case _: false
 
 # ============================================================================
@@ -129,7 +137,7 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
     Returns default LayoutAttr if no layout attributes found.
     """
     var layout_kind = LayoutKind.Simple
-    var explicit_align: i64? = nil
+    var explicit_align: i64 = nil
     var is_packed = false
 
     for attr in attrs:
@@ -159,12 +167,12 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
                 # @align(N) - alignment must be power of 2
                 if attr.args_len(args) > 0:
                     val align_val = extract_int_arg(attr.args[0])
-                    if align_val.? and is_power_of_two(align_val_value):
+                    if align_val.?:
+                        if is_power_of_two(align_val_value):
                         explicit_align = align_val
 
             case _:
                 # Ignore other attributes
-                pass
 
     LayoutAttr(
         layout_kind: layout_kind,
@@ -205,7 +213,7 @@ fn extract_barriers_arg(args: [Expr]) -> bool:
 fn extract_int_arg(expr: Expr) -> has_i64:
     match expr.kind:
         case exprkind_IntLit(value):
-            has_field = true, field_value = value
+            value
         case _:
             nil
 
@@ -218,7 +226,7 @@ fn is_power_of_two(n: i64) -> bool:
     n > 0 and (n & (n - 1)) == 0
 
 # Validate alignment value
-fn validate_alignment(align: i64, span: Span) -> Result<i64, text>:
+fn validate_alignment(align: i64, span: Span) -> text:
     """Validate that alignment is a positive power of 2.
 
     Returns the alignment if valid, or an error message.

@@ -23,18 +23,18 @@ struct TreeSitter:
     current: Token
     previous: Token
     errors: [ParseError]
-    # DESUGARED: doc_comment: text?
+    # # DESUGARED: doc_comment: text
     has_doc_comment: bool
-    doc_comment_value: text
+    doc_comment: text
     inline_blocks: [BlockOutline]  # Blocks found while skipping expressions
-    # DESUGARED: current_context: text?
+    # # DESUGARED: current_context: text
     has_current_context: bool
-    current_context_value: text
+    current_context: text
     fast_mode: bool         # If true, skip Skippable blocks and only outline OutlineRequired
     heuristic_mode: bool    # If true, use line-based error-tolerant parsing instead of lexer
-    # DESUGARED: registry: BlockRegistry?
+    # # DESUGARED: registry: BlockRegistry
     has_registry: bool
-    registry_value: BlockRegistry
+    registry: BlockRegistry
 
 
 # ============================================================================
@@ -71,14 +71,13 @@ fn treesitter_with_fast_mode(fast_mode: bool) -> TreeSitter:
             current: token_eof(0, 1),
             previous: token_eof(0, 1),
             errors: [],
-            has_doc_comment: false,  # DESUGARED: doc_comment: nil
+            #  # DESUGARED: doc_comment: nil
             inline_blocks: [],
-            has_current_context: false,  # DESUGARED: current_context: nil
+            #  # DESUGARED: current_context: nil
             fast_mode: fast_mode,
             heuristic_mode: false,
-            # DESUGARED: registry: Some(block_registry())
-            has_registry: true,
-            registry_value: block_registry()
+            # # DESUGARED: registry: Some(block_registry())
+            registry: block_registry()
         )
 
 
@@ -95,12 +94,12 @@ fn treesitter_with_heuristic_mode(enabled: bool) -> TreeSitter:
             current: token_eof(0, 1),
             previous: token_eof(0, 1),
             errors: [],
-            has_doc_comment: false,  # DESUGARED: doc_comment: nil
+            #  # DESUGARED: doc_comment: nil
             inline_blocks: [],
-            has_current_context: false,  # DESUGARED: current_context: nil
+            #  # DESUGARED: current_context: nil
             fast_mode: false,
-            heuristic_mode: enabled,
-            has_registry: false,  # DESUGARED: registry: nil
+            heuristic_mode: enabled
+            ## DESUGARED: registry: nil
         )
 
 
@@ -127,12 +126,10 @@ fn treesitter_advance(self: TreeSitter) -> Token:
                 break
             val comment = self.current.text[2:].trim()
             self.doc_comment = match self.doc_comment:
-                case has_field = true, field_value = # DESUGARED: dc: Some(dc + "\n" + comment)
-            has_dc: true,
-            dc_value: dc + "\n" + comment
-                case # DESUGARED: nil: Some(comment)
-            has_nil: true,
-            nil_value: comment
+                # case # DESUGARED: dc: Some(dc + "\n" + comment)
+            dc: dc + "\n" + comment
+                # case # DESUGARED: nil: Some(comment)
+            nil: comment
             self.current = lexer_next_token(lexer)
 
         self.lexer = lexer
@@ -184,7 +181,7 @@ fn treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
         self.advance()  # Consume '@' or '#['
 
         val name = self.parse_identifier()
-        var args_span: Span? = nil
+        var args_span: Span = nil
 
         # Check for arguments: @name(arg1, arg2, ...) or #[name(arg1, arg2, ...)]
         if self.match_token(TokenKind.LParen):
@@ -203,7 +200,7 @@ fn treesitter_parse_attribute(self: TreeSitter) -> AttributeOutline:
                     case _:
                         self.advance()
             val args_end = self.current.span.start
-            args_span = has_field = true, field_value = span_new(args_start, args_end, 0, 0)
+            args_span = span_new(args_start, args_end, 0, 0)
             self.expect(TokenKind.RParen, "expected ')' after attribute arguments")
 
         # For #[name] or #[name(args)], expect closing ]
@@ -229,7 +226,7 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
         if self.match_token(TokenKind.KwPub):
             is_public = true
         elif self.match_token(TokenKind.KwPri):
-            # Explicit private marker (same as default)
+            # Explicit private marker (same, )
             is_public = false
 
         val peeked = self.peek()
@@ -248,7 +245,8 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
                     val f = self.parse_function_outline(is_public, false, doc)
                     f.is_static = true
                     toplevelitem_Function(f)
-                elif self.check(TokenKind.Ident) and self.current.text == "assert":
+                elif self.check(TokenKind.Ident):
+                    if self.current.text == "assert":
                     toplevelitem_StaticAssert(self.parse_static_assert_outline())
                 else:
                     self.error("expected 'fn' or 'assert' after 'static'")
@@ -288,7 +286,9 @@ fn treesitter_parse_top_level_item(self: TreeSitter) -> TopLevelItem:
                 toplevelitem_Impl(self.parse_impl_outline())
             case KwType:
                 toplevelitem_TypeAlias(self.parse_type_alias_outline(is_public))
-            case KwVal | KwVar:
+            case KwVal:
+                toplevelitem_Const(self.parse_const_outline(is_public, attrs))
+            case KwVar:
                 toplevelitem_Const(self.parse_const_outline(is_public, attrs))
             case KwExtern:
                 self.advance()
@@ -348,7 +348,7 @@ fn treesitter_parse_import(self: TreeSitter) -> ImportOutline:
 
         val module = self.parse_module_path()
         var items: [text] = []
-        var alias: text? = nil
+        var alias: text = nil
 
         # import foo.bar.baz
         # import foo.bar.{a, b, c}
@@ -367,7 +367,7 @@ fn treesitter_parse_import(self: TreeSitter) -> ImportOutline:
                 items = [id]
 
         if self.match_token(TokenKind.KwAs):
-            alias = has_field = true, field_value = self.parse_identifier()
+            alias = self.parse_identifier()
 
         self.skip_newlines()
 
@@ -440,9 +440,9 @@ fn treesitter_parse_function_outline(self: TreeSitter, is_public: bool, is_mutab
         self.expect(TokenKind.RParen, "expected ')' after parameters")
 
         # Return type
-        var return_type: TypeOutline? = nil
+        var return_type: TypeOutline = nil
         if self.match_token(TokenKind.Arrow):
-            return_type = has_field = true, field_value = self.parse_type_outline()
+            return_type = self.parse_type_outline()
 
         # Body
         self.expect(TokenKind.Colon, "expected ':' before function body")
@@ -450,7 +450,7 @@ fn treesitter_parse_function_outline(self: TreeSitter, is_public: bool, is_mutab
 
         # Set context for block tracking
         val prev_context = self.current_context
-        self.current_context = has_field = true, field_value = name
+        self.current_context = name
 
         val body_start = self.current.span.start
         self.skip_block()
@@ -490,9 +490,9 @@ fn treesitter_parse_extern_function_outline(self: TreeSitter, is_public: bool, d
         self.expect(TokenKind.RParen, "expected ')' after parameters")
 
         # Return type
-        var return_type: TypeOutline? = nil
+        var return_type: TypeOutline = nil
         if self.match_token(TokenKind.Arrow):
-            return_type = has_field = true, field_value = self.parse_type_outline()
+            return_type = self.parse_type_outline()
 
         # Skip optional newline
         self.skip_newlines()
@@ -520,15 +520,15 @@ fn treesitter_parse_param(self: TreeSitter) -> ParamOutline:
         val start = self.current.span
         val name = self.parse_identifier()
 
-        var type_: TypeOutline? = nil
+        var type_: TypeOutline = nil
         if self.match_token(TokenKind.Colon):
-            type_ = has_field = true, field_value = self.parse_type_outline()
+            type_ = self.parse_type_outline()
 
-        var default_span: Span? = nil
+        var default_span: Span = nil
         if self.match_token(TokenKind.Assign):
             val default_start = self.current.span.start
             self.skip_expression()
-            default_span = has_field = true, field_value = span_new(default_start, self.previous.span.end, 0, 0)
+            default_span = span_new(default_start, self.previous.span.end, 0, 0)
 
         ParamOutline(
             name: name,
@@ -549,9 +549,9 @@ fn treesitter_parse_type_param(self: TreeSitter) -> TypeParamOutline:
             while self.match_token(TokenKind.Plus):
                 bounds = bounds_push(bounds, self.parse_type_outline())
 
-        var default: TypeOutline? = nil
+        var default: TypeOutline = nil
         if self.match_token(TokenKind.Assign):
-            default = has_field = true, field_value = self.parse_type_outline()
+            default = self.parse_type_outline()
 
         TypeParamOutline(
             name: name,
@@ -690,7 +690,8 @@ fn treesitter_parse_reference_type(self: TreeSitter) -> TypeOutline:
         self.advance()  # Consume '&'
 
         var mutable = false
-        if self.check(TokenKind.Ident) and self.current.text == "mut":
+        if self.check(TokenKind.Ident):
+            if self.current.text == "mut":
             self.advance()
             mutable = true
 
@@ -714,7 +715,7 @@ fn treesitter_parse_atomic_type(self: TreeSitter) -> TypeOutline:
 
 
 fn treesitter_parse_isolated_type(self: TreeSitter) -> TypeOutline:
-        """Parse isolated type ~T (iso - isolated capability)."""
+        """Parse isolated type bitwise_not(T) (iso - isolated capability)."""
         val start = self.current.span
         self.advance()  # Consume '~'
         val inner = self.parse_type_outline()
@@ -724,7 +725,7 @@ fn treesitter_parse_isolated_type(self: TreeSitter) -> TypeOutline:
         )
 
 
-fn treesitter_parse_class_outline(self: TreeSitter, is_public: bool, doc: text?, attrs: [AttributeOutline]) -> ClassOutline:
+fn treesitter_parse_class_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> ClassOutline:
         """Parse class outline."""
         val start = self.current.span
         self.advance()  # Consume 'class'
@@ -744,9 +745,8 @@ fn treesitter_parse_class_outline(self: TreeSitter, is_public: bool, doc: text?,
         val body_doc = self.try_parse_body_docstring()
         # Use body docstring if no doc was passed, or prefer body doc
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var fields: [FieldOutline] = []
@@ -808,7 +808,7 @@ fn treesitter_parse_class_outline(self: TreeSitter, is_public: bool, doc: text?,
         )
 
 
-fn treesitter_parse_actor_outline(self: TreeSitter, is_public: bool, doc: text?, attrs: [AttributeOutline]) -> ActorOutline:
+fn treesitter_parse_actor_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> ActorOutline:
         """Parse actor outline (same structure as class)."""
         val start = self.current.span
         self.advance()  # Consume 'actor'
@@ -827,9 +827,8 @@ fn treesitter_parse_actor_outline(self: TreeSitter, is_public: bool, doc: text?,
         # Try to parse body docstring
         val body_doc = self.try_parse_body_docstring()
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var fields: [FieldOutline] = []
@@ -891,7 +890,7 @@ fn treesitter_parse_actor_outline(self: TreeSitter, is_public: bool, doc: text?,
         )
 
 
-fn treesitter_parse_struct_outline(self: TreeSitter, is_public: bool, doc: text?, attrs: [AttributeOutline]) -> StructOutline:
+fn treesitter_parse_struct_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> StructOutline:
         """Parse struct outline."""
         val start = self.current.span
         self.advance()  # Consume 'struct'
@@ -910,9 +909,8 @@ fn treesitter_parse_struct_outline(self: TreeSitter, is_public: bool, doc: text?
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var fields: [FieldOutline] = []
@@ -960,7 +958,8 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
         var is_volatile = false
         if self.check(TokenKind.At):
             self.advance()  # consume '@'
-            if self.check(TokenKind.Ident) and self.current.text == "volatile":
+            if self.check(TokenKind.Ident):
+                if self.current.text == "volatile":
                 self.advance()  # consume 'volatile'
                 is_volatile = true
             else:
@@ -973,18 +972,18 @@ fn treesitter_parse_field_outline(self: TreeSitter, is_public: bool) -> FieldOut
         val type_ = self.parse_type_outline()
 
         # Check for @ address syntax: field: Type @ 0x40020000
-        var address_span: Span? = nil
+        var address_span: Span = nil
         if self.check(TokenKind.At):
             self.advance()  # consume '@'
             val addr_start = self.current.span.start
             self.skip_expression()  # Skip the address expression
-            address_span = has_field = true, field_value = span_new(addr_start, self.previous.span.end, 0, 0)
+            address_span = span_new(addr_start, self.previous.span.end, 0, 0)
 
-        var default_span: Span? = nil
+        var default_span: Span = nil
         if self.match_token(TokenKind.Assign):
             val default_start = self.current.span.start
             self.skip_expression()
-            default_span = has_field = true, field_value = span_new(default_start, self.previous.span.end, 0, 0)
+            default_span = span_new(default_start, self.previous.span.end, 0, 0)
 
         self.skip_newlines()
 
@@ -1018,9 +1017,8 @@ fn treesitter_parse_enum_outline(self: TreeSitter, is_public: bool, doc: text?) 
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var variants: [VariantOutline] = []
@@ -1052,7 +1050,7 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
         val start = self.current.span
         val name = self.parse_identifier()
 
-        var payload: VariantPayload? = nil
+        var payload: VariantPayload = nil
 
         if self.match_token(TokenKind.LParen):
             # Tuple variant
@@ -1064,7 +1062,7 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
                         break
                     types = types_push(types, self.parse_type_outline())
             self.expect(TokenKind.RParen, "expected ')' after variant types")
-            payload = has_field = true, field_value = variantpayload_Tuple(types)
+            payload = variantpayload_Tuple(types)
         elif self.match_token(TokenKind.LBrace):
             # Struct variant
             var fields: [FieldOutline] = []
@@ -1075,7 +1073,7 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
                         break
                     fields = fields_push(fields, self.parse_field_outline(false))
             self.expect(TokenKind.RBrace, "expected '}' after variant fields")
-            payload = has_field = true, field_value = variantpayload_Struct(fields)
+            payload = variantpayload_Struct(fields)
 
         self.skip_newlines()
 
@@ -1086,7 +1084,7 @@ fn treesitter_parse_variant_outline(self: TreeSitter) -> VariantOutline:
         )
 
 
-fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: text?, attrs: [AttributeOutline]) -> BitfieldOutline:
+fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: text, attrs: [AttributeOutline]) -> BitfieldOutline:
         """Parse bitfield outline.
 
         Syntax: bitfield Name(BackingType):
@@ -1111,9 +1109,8 @@ fn treesitter_parse_bitfield_outline(self: TreeSitter, is_public: bool, doc: tex
         # Try to parse body docstring
         val body_doc = self.try_parse_body_docstring()
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var fields: [BitfieldFieldOutline] = []
@@ -1158,28 +1155,29 @@ fn treesitter_parse_bitfield_field_outline(self: TreeSitter) -> BitfieldFieldOut
 
         self.expect(TokenKind.Colon, "expected ':' after field name")
 
-        var type_: TypeOutline? = nil
-        var bits: i64? = nil
+        var type_: TypeOutline = nil
+        var bits: i64 = nil
 
         if is_reserved:
             # Reserved field: expect just a number
             if self.check(TokenKind.IntLit):
-                bits = has_field = true, field_value = self.parse_int_literal()
+                bits = self.parse_int_literal()
             else:
                 # Allow type for reserved fields too
-                type_ = has_field = true, field_value = self.parse_type_outline()
+                type_ = self.parse_type_outline()
         else:
             # Regular field: parse type
-            type_ = has_field = true, field_value = self.parse_type_outline()
+            type_ = self.parse_type_outline()
 
             # Check for @bits(N) attribute
             if self.check(TokenKind.At):
                 self.advance()  # consume '@'
-                if self.check(TokenKind.Ident) and self.current.text == "bits":
+                if self.check(TokenKind.Ident):
+                    if self.current.text == "bits":
                     self.advance()  # consume 'bits'
                     self.expect(TokenKind.LParen, "expected '(' after @bits")
                     if self.check(TokenKind.IntLit):
-                        bits = has_field = true, field_value = self.parse_int_literal()
+                        bits = self.parse_int_literal()
                     self.expect(TokenKind.RParen, "expected ')' after bit count")
 
         self.skip_newlines()
@@ -1223,9 +1221,8 @@ fn treesitter_parse_trait_outline(self: TreeSitter, is_public: bool, doc: text?)
         # Try to parse body docstring (triple-quoted string after indent)
         val body_doc = self.try_parse_body_docstring()
         val final_doc = match body_doc:
-            case has_field = true, field_value = # DESUGARED: bd: Some(bd)
-            has_bd: true,
-            bd_value: bd
+            # case # DESUGARED: bd: Some(bd)
+            bd: bd
             case nil: doc
 
         var methods: [FunctionOutline] = []
@@ -1274,11 +1271,12 @@ fn treesitter_parse_impl_outline(self: TreeSitter) -> ImplOutline:
 
         val type_ = self.parse_type_outline()
 
-        var trait_: TypeOutline? = nil
+        var trait_: TypeOutline = nil
         if self.match_token(TokenKind.Colon):
             # impl Type: Trait
-            if not self.check(TokenKind.Indent) and not self.check(TokenKind.Newline):
-                trait_ = has_field = true, field_value = self.parse_type_outline()
+            if not self.check(TokenKind.Indent):
+                if not self.check(TokenKind.Newline):
+                trait_ = self.parse_type_outline()
 
         if trait__is_none(trait_):
             self.expect(TokenKind.Colon, "expected ':' after impl type")
@@ -1379,9 +1377,9 @@ fn treesitter_parse_const_outline(self: TreeSitter, is_public: bool, attrs: [Att
 
         val name = self.parse_identifier()
 
-        var type_: TypeOutline? = nil
+        var type_: TypeOutline = nil
         if self.match_token(TokenKind.Colon):
-            type_ = has_field = true, field_value = self.parse_type_outline()
+            type_ = self.parse_type_outline()
 
         # Check for @volatile in attributes
         var is_volatile = false
@@ -1391,12 +1389,12 @@ fn treesitter_parse_const_outline(self: TreeSitter, is_public: bool, attrs: [Att
                 break
 
         # Check for @ address syntax (memory-mapped variable)
-        var address_span: Span? = nil
+        var address_span: Span = nil
         if self.check(TokenKind.At):
             self.advance()  # consume '@'
             val addr_start = self.current.span.start
             self.skip_expression()
-            address_span = has_field = true, field_value = span_new(addr_start, self.previous.span.end, 0, 0)
+            address_span = span_new(addr_start, self.previous.span.end, 0, 0)
             # Memory-mapped variables are implicitly volatile
             is_volatile = true
 
@@ -1426,7 +1424,7 @@ fn treesitter_parse_static_assert_outline(self: TreeSitter) -> StaticAssertOutli
 
         Syntax:
             static assert <condition>
-            static assert <condition>, "message"
+            static assert <condition>  # message
         """
         val start = self.current.span  # Current token is 'assert'
         self.advance()  # Consume 'assert'
@@ -1437,10 +1435,10 @@ fn treesitter_parse_static_assert_outline(self: TreeSitter) -> StaticAssertOutli
         val condition_span = span_new(condition_start, self.previous.span.end, 0, 0)
 
         # Optional error message after comma
-        var message: text? = nil
+        var message: text = nil
         if self.match_token(TokenKind.Comma):
             if self.check(TokenKind.String):
-                message = has_field = true, field_value = self.current.text
+                message = self.current.text
                 self.advance()
 
         self.skip_newlines()
@@ -1522,9 +1520,9 @@ fn treesitter_parse_block_outline(self: TreeSitter) -> BlockOutline:
             payload: payload,
             payload_span: payload_span,
             span: merge_spans(start, self.previous.span),
-            parent_context: self.current_context,
-            has_pre_lex_info: false,  # DESUGARED: pre_lex_info: nil
-            has_outline_info: false,  # DESUGARED: outline_info: nil
+            parent_context: self.current_context
+            #  # DESUGARED: pre_lex_info: nil
+            ## DESUGARED: outline_info: nil
         )
 
 
@@ -1587,7 +1585,7 @@ fn treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> Blo
         val h = handler_value
         val policy = h_skip_policy(h)
         val pre_lex = match block.pre_lex_info:
-            case has_field = true, field_value = info: info
+            case info: info
             case nil: prelexinfo_empty()
 
         if self.fast_mode:
@@ -1595,20 +1593,20 @@ fn treesitter_apply_outline_policy(self: TreeSitter, block: BlockOutline) -> Blo
                 case BlockSkipPolicy.Skippable:
                     # Store opaque outline, don't analyze
                     var b = block
-                    b.outline_info = has_field = true, field_value = blockoutlineinfo_opaque(block.kind)
+                    b.outline_info = blockoutlineinfo_opaque(block.kind)
                     return b
                 case BlockSkipPolicy.OutlineRequired:
                     var b = block
-                    b.outline_info = has_field = true, field_value = h_treesitter_outline(h, block.payload, pre_lex)
+                    b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
                     return b
                 case BlockSkipPolicy.AlwaysFull:
                     var b = block
-                    b.outline_info = has_field = true, field_value = h_treesitter_outline(h, block.payload, pre_lex)
+                    b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
                     return b
         else:
             # Normal mode: always call treesitter_outline
             var b = block
-            b.outline_info = has_field = true, field_value = h_treesitter_outline(h, block.payload, pre_lex)
+            b.outline_info = h_treesitter_outline(h, block.payload, pre_lex)
             return b
 
         block
