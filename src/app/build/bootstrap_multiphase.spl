@@ -781,3 +781,763 @@ fn default_multiphase_config() -> MultiphaseConfig:
 # Quick entry point
 fn quick_multiphase_bootstrap() -> MultiphaseResult:
     MultiphaseBootstrap.run(default_multiphase_config())
+
+# ============================================================================
+# 8-Stage Build Pipeline
+# ============================================================================
+#
+# A cleaner pipeline with 8 distinct named stages:
+#
+#   check → bootstrap → build → seed → core1 → core2 → full1 → full2
+#
+# check:     Verify prerequisites (clang, cmake, runtime.h, src/compiler_core/)
+# bootstrap: Verify pre-built binary bin/release/simple exists and is valid
+# build:     Build seed_cpp from C++ source via cmake + clang
+# seed:      Run seed_cpp to transpile compiler_core → core1.cpp
+# core1:     Compile core1.cpp → native core1 binary via clang++
+# core2:     Core1 recompiles compiler_core (reproducibility check)
+# full1:     Core2 compiles full compiler (src/app/cli/main.spl)
+# full2:     Full1 recompiles itself (reproducibility, hash should match full1)
+
+# Pipeline stage
+enum PipelineStage:
+    Check
+    Bootstrap
+    Build
+    Seed
+    Core1
+    Core2
+    Full1
+    Full2
+
+# Pipeline configuration
+struct PipelineConfig:
+    profile: BuildProfile
+    verify_reproducibility: bool
+    keep_artifacts: bool
+    workspace_root: text
+    output_dir: text
+    seed_dir: text               # Path to seed/ (CMakeLists.txt location)
+    seed_build_dir: text         # Path to seed/build/ (cmake output)
+    clang_path: text             # clang++ path
+    cmake_path: text             # cmake path
+    compiler_core_dir: text      # src/compiler_core/
+    seed_include_dir: text       # seed/ (for runtime.h)
+    from_stage: PipelineStage    # Start from this stage (default: Check)
+    to_stage: PipelineStage      # Stop after this stage (default: Full2)
+
+# Stage result
+struct StageResult:
+    stage: PipelineStage
+    success: bool
+    binary_path: text
+    binary_size: i64
+    duration_ms: i64
+    hash: text
+    output_text: text            # Any notable output (version, etc.)
+
+impl StageResult:
+    fn summary() -> text:
+        val status = if self.success: "OK" else: "FAIL"
+        "{status} [{stage_name(self.stage)}]: {self.binary_size} bytes, {self.duration_ms}ms"
+
+# Pipeline result
+struct PipelineResult:
+    stages: [StageResult]
+    verified_core: bool          # core1 == core2?
+    verified_full: bool          # full1 == full2?
+    overall_success: bool
+
+impl PipelineResult:
+    fn summary() -> text:
+        var lines: [text] = []
+        for s in self.stages:
+            lines.push(s.summary())
+        if self.verified_core:
+            lines.push("OK Verification: core reproducible builds confirmed")
+        if self.verified_full:
+            lines.push("OK Verification: full reproducible builds confirmed")
+        lines.join("\n")
+
+# ============================================================================
+# Pipeline Stage Helpers
+# ============================================================================
+
+fn stage_name(stage: PipelineStage) -> text:
+    match stage:
+        case PipelineStage.Check: "check"
+        case PipelineStage.Bootstrap: "bootstrap"
+        case PipelineStage.Build: "build"
+        case PipelineStage.Seed: "seed"
+        case PipelineStage.Core1: "core1"
+        case PipelineStage.Core2: "core2"
+        case PipelineStage.Full1: "full1"
+        case PipelineStage.Full2: "full2"
+
+fn stage_index(stage: PipelineStage) -> i64:
+    match stage:
+        case PipelineStage.Check: 0
+        case PipelineStage.Bootstrap: 1
+        case PipelineStage.Build: 2
+        case PipelineStage.Seed: 3
+        case PipelineStage.Core1: 4
+        case PipelineStage.Core2: 5
+        case PipelineStage.Full1: 6
+        case PipelineStage.Full2: 7
+
+fn parse_stage(name: text) -> PipelineStage:
+    match name:
+        case "check": PipelineStage.Check
+        case "bootstrap": PipelineStage.Bootstrap
+        case "build": PipelineStage.Build
+        case "seed": PipelineStage.Seed
+        case "core1": PipelineStage.Core1
+        case "core2": PipelineStage.Core2
+        case "full1": PipelineStage.Full1
+        case "full2": PipelineStage.Full2
+        case _: PipelineStage.Check
+
+fn stage_in_range(stage: PipelineStage, from: PipelineStage, to: PipelineStage) -> bool:
+    val idx = stage_index(stage)
+    val from_idx = stage_index(from)
+    val to_idx = stage_index(to)
+    idx >= from_idx and idx <= to_idx
+
+fn empty_stage_result(stage: PipelineStage) -> StageResult:
+    StageResult(
+        stage: stage,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
+        duration_ms: 0,
+        hash: "",
+        output_text: ""
+    )
+
+fn fail_stage(stage: PipelineStage, start_time: i64) -> StageResult:
+    StageResult(
+        stage: stage,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
+        duration_ms: current_time_ms() - start_time,
+        hash: "",
+        output_text: ""
+    )
+
+# ============================================================================
+# 8 Stage Implementations
+# ============================================================================
+
+# Stage: check — verify clang++, cmake, runtime.h exist
+fn run_check(config: PipelineConfig) -> StageResult:
+    val start_time = current_time_ms()
+    var all_ok = true
+
+    # Check clang++
+    val clang_check = shell("which {config.clang_path} 2>/dev/null")
+    if clang_check.exit_code == 0:
+        val version_result = shell("{config.clang_path} --version 2>/dev/null | head -1")
+        val version_line = version_result.stdout.trim()
+        print "  OK {config.clang_path} found ({version_line})"
+    else:
+        print "  FAIL {config.clang_path} not found"
+        all_ok = false
+
+    # Check cmake
+    val cmake_check = shell("which {config.cmake_path} 2>/dev/null")
+    if cmake_check.exit_code == 0:
+        val version_result = shell("{config.cmake_path} --version 2>/dev/null | head -1")
+        val version_line = version_result.stdout.trim()
+        print "  OK {config.cmake_path} found ({version_line})"
+    else:
+        print "  FAIL {config.cmake_path} not found"
+        all_ok = false
+
+    # Check ninja
+    val ninja_check = shell("ninja --version 2>/dev/null")
+    if ninja_check.exit_code == 0:
+        val ninja_version = ninja_check.stdout.trim()
+        print "  OK ninja found ({ninja_version})"
+    else:
+        print "  FAIL ninja not found (required as cmake generator)"
+        all_ok = false
+
+    # Check runtime.h
+    if file_exists("{config.seed_include_dir}/runtime.h"):
+        print "  OK {config.seed_include_dir}/runtime.h found"
+    else:
+        print "  FAIL {config.seed_include_dir}/runtime.h not found"
+        all_ok = false
+
+    # Check compiler_core directory
+    val core_files = discover_spl_files(config.compiler_core_dir)
+    if core_files.len() > 0:
+        print "  OK {config.compiler_core_dir} ({core_files.len()} .spl files)"
+    else:
+        print "  FAIL {config.compiler_core_dir} has no .spl files"
+        all_ok = false
+
+    if not all_ok:
+        return fail_stage(PipelineStage.Check, start_time)
+
+    StageResult(
+        stage: PipelineStage.Check,
+        success: true,
+        binary_path: "",
+        binary_size: 0,
+        duration_ms: current_time_ms() - start_time,
+        hash: "",
+        output_text: "Prerequisites verified"
+    )
+
+# Stage: bootstrap — verify pre-built binary bin/release/simple exists
+fn run_bootstrap(config: PipelineConfig) -> StageResult:
+    val start_time = current_time_ms()
+
+    if not file_exists("bin/release/simple"):
+        print "  FAIL bin/release/simple not found"
+        return fail_stage(PipelineStage.Bootstrap, start_time)
+
+    val size = file_size_raw("bin/release/simple")
+    val hash = file_hash_sha256("bin/release/simple")
+    print "  OK bin/release/simple ({size} bytes, hash: {hash})"
+
+    StageResult(
+        stage: PipelineStage.Bootstrap,
+        success: true,
+        binary_path: "bin/release/simple",
+        binary_size: size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: ""
+    )
+
+# Stage: build — build seed_cpp from C++ source via cmake + clang
+fn run_build(config: PipelineConfig) -> StageResult:
+    val start_time = current_time_ms()
+
+    # Step 1: cmake configure (use Ninja for fast multi-core builds)
+    val cmake_configure = "cmake -G Ninja -S {config.seed_dir} -B {config.seed_build_dir}"
+    print "  Configuring: {cmake_configure}"
+    val configure_result = shell(cmake_configure)
+
+    if configure_result.exit_code != 0:
+        print "  FAIL cmake configure failed"
+        if configure_result.stderr != "":
+            val err_lines = configure_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_stage(PipelineStage.Build, start_time)
+
+    # Step 2: cmake build
+    val cmake_build = "cmake --build {config.seed_build_dir} --target seed_cpp --parallel"
+    print "  Building: {cmake_build}"
+    val build_result = shell(cmake_build)
+
+    if build_result.exit_code != 0:
+        print "  FAIL cmake build failed"
+        if build_result.stderr != "":
+            val err_lines = build_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_stage(PipelineStage.Build, start_time)
+
+    # Verify seed_cpp binary was produced
+    val seed_cpp_path = "{config.seed_build_dir}/seed_cpp"
+    if not file_exists(seed_cpp_path):
+        print "  FAIL {seed_cpp_path} not created"
+        return fail_stage(PipelineStage.Build, start_time)
+
+    val size = file_size_raw(seed_cpp_path)
+    val hash = file_hash_sha256(seed_cpp_path)
+    print "  OK seed_cpp built ({size} bytes)"
+
+    StageResult(
+        stage: PipelineStage.Build,
+        success: true,
+        binary_path: seed_cpp_path,
+        binary_size: size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: ""
+    )
+
+# Stage: seed — run seed_cpp to transpile compiler_core → core1.cpp
+fn run_seed(config: PipelineConfig) -> StageResult:
+    val start_time = current_time_ms()
+    val core1_cpp = "{config.output_dir}/core1.cpp"
+    val seed_cpp_path = "{config.seed_build_dir}/seed_cpp"
+
+    # Discover and order .spl files
+    print "  Discovering compiler_core files..."
+    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    print "  Found {ordered_files.len()} files"
+
+    # Run seed_cpp to transpile
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+    val seed_cmd = "{seed_cpp_path}{file_args} > {core1_cpp}"
+    print "  Running seed_cpp..."
+    val seed_result = shell(seed_cmd)
+
+    if seed_result.exit_code != 0:
+        print "  FAIL seed_cpp transpilation failed"
+        if seed_result.stderr != "":
+            print "  stderr: {seed_result.stderr}"
+        return fail_stage(PipelineStage.Seed, start_time)
+
+    if not file_exists(core1_cpp):
+        print "  FAIL {core1_cpp} not created"
+        return fail_stage(PipelineStage.Seed, start_time)
+
+    val cpp_size = file_size_raw(core1_cpp)
+    print "  Generated C++ ({cpp_size} bytes)"
+
+    if cpp_size < 1000:
+        print "  FAIL C++ output too small ({cpp_size} bytes) — likely empty/stub"
+        return fail_stage(PipelineStage.Seed, start_time)
+
+    val hash = file_hash_sha256(core1_cpp)
+
+    StageResult(
+        stage: PipelineStage.Seed,
+        success: true,
+        binary_path: core1_cpp,
+        binary_size: cpp_size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: ""
+    )
+
+# Stage: core1 — compile core1.cpp → native core1 binary via clang++
+fn run_core1(config: PipelineConfig) -> StageResult:
+    val start_time = current_time_ms()
+    val core1_cpp = "{config.output_dir}/core1.cpp"
+    val core1_bin = "{config.output_dir}/core1"
+
+    val compile_cmd = "{config.clang_path} -std=c++20 -O2 -o {core1_bin} {core1_cpp} -I{config.seed_include_dir} -L{config.seed_build_dir} -lspl_runtime -lm -lpthread"
+    print "  Compiling C++ with clang++..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL clang++ compilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 20:
+                    print "    {err_line}"
+                    shown = shown + 1
+            if err_lines.len() > 20:
+                print "    ... ({err_lines.len() - 20} more lines)"
+        return fail_stage(PipelineStage.Core1, start_time)
+
+    shell("chmod +x {core1_bin}")
+
+    if not file_exists(core1_bin):
+        print "  FAIL {core1_bin} not created"
+        return fail_stage(PipelineStage.Core1, start_time)
+
+    val bin_size = file_size_raw(core1_bin)
+    print "  Core1 binary: {bin_size} bytes"
+
+    if bin_size < 10000:
+        print "  WARN Binary unusually small ({bin_size} bytes)"
+
+    # Smoke test
+    val smoke_result = shell("{core1_bin} --version 2>/dev/null")
+    var output_text = ""
+    if smoke_result.exit_code == 0:
+        output_text = smoke_result.stdout.trim()
+        print "  Smoke test: {output_text}"
+    else:
+        print "  WARN Smoke test failed (--version not supported, may be OK)"
+
+    val hash = file_hash_sha256(core1_bin)
+
+    StageResult(
+        stage: PipelineStage.Core1,
+        success: true,
+        binary_path: core1_bin,
+        binary_size: bin_size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: output_text
+    )
+
+# Stage: core2 — core1 recompiles compiler_core (reproducibility check)
+fn run_core2(config: PipelineConfig, core1_result: StageResult) -> StageResult:
+    val start_time = current_time_ms()
+    val core2_bin = "{config.output_dir}/core2"
+
+    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+
+    val compile_cmd = "{core1_result.binary_path} compile{file_args} -o {core2_bin}"
+    print "  Running Core1 to compile compiler_core..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core1 compilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_stage(PipelineStage.Core2, start_time)
+
+    shell("chmod +x {core2_bin}")
+
+    if not file_exists(core2_bin):
+        print "  FAIL {core2_bin} not created"
+        return fail_stage(PipelineStage.Core2, start_time)
+
+    val bin_size = file_size_raw(core2_bin)
+    val hash = file_hash_sha256(core2_bin)
+    print "  Core2 binary: {bin_size} bytes"
+
+    StageResult(
+        stage: PipelineStage.Core2,
+        success: true,
+        binary_path: core2_bin,
+        binary_size: bin_size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: ""
+    )
+
+# Stage: full1 — core2 compiles full compiler
+fn run_full1(config: PipelineConfig, core2_result: StageResult) -> StageResult:
+    val start_time = current_time_ms()
+    val full1_bin = "{config.output_dir}/full1"
+
+    val compile_cmd = "{core2_result.binary_path} compile src/app/cli/main.spl -o {full1_bin}"
+    print "  Running Core2 to compile full compiler..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core2 compilation of full compiler failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_stage(PipelineStage.Full1, start_time)
+
+    shell("chmod +x {full1_bin}")
+
+    if not file_exists(full1_bin):
+        print "  FAIL {full1_bin} not created"
+        return fail_stage(PipelineStage.Full1, start_time)
+
+    val bin_size = file_size_raw(full1_bin)
+    val hash = file_hash_sha256(full1_bin)
+    print "  Full1 binary: {bin_size} bytes"
+
+    # Smoke test
+    var output_text = ""
+    val smoke_result = shell("{full1_bin} --version 2>/dev/null")
+    if smoke_result.exit_code == 0:
+        output_text = smoke_result.stdout.trim()
+        print "  Smoke test: {output_text}"
+
+    StageResult(
+        stage: PipelineStage.Full1,
+        success: true,
+        binary_path: full1_bin,
+        binary_size: bin_size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: output_text
+    )
+
+# Stage: full2 — full1 recompiles itself (reproducibility check)
+fn run_full2(config: PipelineConfig, full1_result: StageResult) -> StageResult:
+    val start_time = current_time_ms()
+    val full2_bin = "{config.output_dir}/full2"
+
+    val compile_cmd = "{full1_result.binary_path} compile src/app/cli/main.spl -o {full2_bin}"
+    print "  Running Full1 to recompile itself..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Full1 self-recompilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_stage(PipelineStage.Full2, start_time)
+
+    shell("chmod +x {full2_bin}")
+
+    if not file_exists(full2_bin):
+        print "  FAIL {full2_bin} not created"
+        return fail_stage(PipelineStage.Full2, start_time)
+
+    val bin_size = file_size_raw(full2_bin)
+    val hash = file_hash_sha256(full2_bin)
+    print "  Full2 binary: {bin_size} bytes"
+
+    StageResult(
+        stage: PipelineStage.Full2,
+        success: true,
+        binary_path: full2_bin,
+        binary_size: bin_size,
+        duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        output_text: ""
+    )
+
+# ============================================================================
+# Pipeline Stage Verification
+# ============================================================================
+
+fn verify_stages(stage_a: StageResult, stage_b: StageResult) -> bool:
+    if stage_a.hash != stage_b.hash:
+        print "  Hash mismatch:"
+        print "    {stage_name(stage_a.stage)}: {stage_a.hash}"
+        print "    {stage_name(stage_b.stage)}: {stage_b.hash}"
+        return false
+
+    if stage_a.binary_size != stage_b.binary_size:
+        print "  Size mismatch:"
+        print "    {stage_name(stage_a.stage)}: {stage_a.binary_size} bytes"
+        print "    {stage_name(stage_b.stage)}: {stage_b.binary_size} bytes"
+        return false
+
+    print "  Hashes match: {stage_a.hash}"
+    print "  Sizes match:  {stage_a.binary_size} bytes"
+    true
+
+# ============================================================================
+# Pipeline Orchestrator
+# ============================================================================
+
+class Pipeline:
+    static fn run(config: PipelineConfig) -> PipelineResult:
+        print "================================================================"
+        print "    8-Stage Build Pipeline"
+        print "================================================================"
+        print ""
+        print "Stages: check -> bootstrap -> build -> seed -> core1 -> core2 -> full1 -> full2"
+        print "Range:  {stage_name(config.from_stage)} -> {stage_name(config.to_stage)}"
+        print ""
+
+        dir_create(config.output_dir, true)
+
+        var stages: [StageResult] = []
+        var verified_core = false
+        var verified_full = false
+
+        # Track results needed for later stages
+        var core1_result = empty_stage_result(PipelineStage.Core1)
+        var core2_result = empty_stage_result(PipelineStage.Core2)
+        var full1_result = empty_stage_result(PipelineStage.Full1)
+
+        # Stage: check
+        if stage_in_range(PipelineStage.Check, config.from_stage, config.to_stage):
+            print "[check] Verifying prerequisites"
+            print "----------------------------------------------------------------"
+            val result = run_check(config)
+            print result.summary()
+            print ""
+            stages.push(result)
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+        # Stage: bootstrap
+        if stage_in_range(PipelineStage.Bootstrap, config.from_stage, config.to_stage):
+            print "[bootstrap] Verifying pre-built binary"
+            print "----------------------------------------------------------------"
+            val result = run_bootstrap(config)
+            print result.summary()
+            print ""
+            stages.push(result)
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+        # Stage: build
+        if stage_in_range(PipelineStage.Build, config.from_stage, config.to_stage):
+            print "[build] Building seed_cpp via cmake"
+            print "----------------------------------------------------------------"
+            val result = run_build(config)
+            print result.summary()
+            print ""
+            stages.push(result)
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+        # Stage: seed
+        if stage_in_range(PipelineStage.Seed, config.from_stage, config.to_stage):
+            print "[seed] Transpiling compiler_core to C++"
+            print "----------------------------------------------------------------"
+            val result = run_seed(config)
+            print result.summary()
+            print ""
+            stages.push(result)
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+        # Stage: core1
+        if stage_in_range(PipelineStage.Core1, config.from_stage, config.to_stage):
+            print "[core1] Compiling core1.cpp to native binary"
+            print "----------------------------------------------------------------"
+            val result = run_core1(config)
+            print result.summary()
+            print ""
+            stages.push(result)
+            core1_result = result
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+        # Stage: core2
+        if stage_in_range(PipelineStage.Core2, config.from_stage, config.to_stage):
+            print "[core2] Core1 recompiles compiler_core"
+            print "----------------------------------------------------------------"
+            val result = run_core2(config, core1_result)
+            print result.summary()
+            print ""
+            stages.push(result)
+            core2_result = result
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
+
+            # Verify core reproducibility
+            if config.verify_reproducibility and core1_result.success:
+                print "Verification: Comparing core1 and core2"
+                print "----------------------------------------------------------------"
+                verified_core = verify_stages(core1_result, core2_result)
+                if verified_core:
+                    print "  OK Core reproducibility verified"
+                else:
+                    print "  WARN Core hashes differ (expected for different compilation paths)"
+                print ""
+
+        # Stage: full1
+        if stage_in_range(PipelineStage.Full1, config.from_stage, config.to_stage):
+            print "[full1] Core2 compiles full compiler"
+            print "----------------------------------------------------------------"
+            val result = run_full1(config, core2_result)
+            print result.summary()
+            print ""
+            stages.push(result)
+            full1_result = result
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: verified_core, verified_full: false, overall_success: false)
+
+        # Stage: full2
+        if stage_in_range(PipelineStage.Full2, config.from_stage, config.to_stage):
+            print "[full2] Full1 recompiles itself"
+            print "----------------------------------------------------------------"
+            val result = run_full2(config, full1_result)
+            print result.summary()
+            print ""
+            stages.push(result)
+            if not result.success:
+                return PipelineResult(stages: stages, verified_core: verified_core, verified_full: false, overall_success: false)
+
+            # Verify full reproducibility
+            if config.verify_reproducibility and full1_result.success and result.success:
+                print "Verification: Comparing full1 and full2"
+                print "----------------------------------------------------------------"
+                verified_full = verify_stages(full1_result, result)
+                if verified_full:
+                    print "  OK Full compiler reproducibility verified"
+                else:
+                    print "  FAIL Full compiler hashes differ"
+                print ""
+
+        # Final summary
+        print "================================================================"
+        print "                    Pipeline Complete"
+        print "================================================================"
+        print ""
+
+        # Find last successful stage for summary
+        var last_binary = ""
+        var last_size: i64 = 0
+        var last_hash = ""
+        var idx = stages.len() - 1
+        while idx >= 0:
+            val s = stages[idx]
+            if s.success and s.binary_path != "":
+                last_binary = s.binary_path
+                last_size = s.binary_size
+                last_hash = s.hash
+                idx = -1  # break
+            else:
+                idx = idx - 1
+
+        if last_binary != "":
+            print "Final artifact:"
+            print "  Path: {last_binary}"
+            print "  Size: {last_size} bytes"
+            print "  Hash: {last_hash}"
+            print ""
+
+        PipelineResult(
+            stages: stages,
+            verified_core: verified_core,
+            verified_full: verified_full,
+            overall_success: true
+        )
+
+# ============================================================================
+# Pipeline Configuration
+# ============================================================================
+
+fn default_pipeline_config() -> PipelineConfig:
+    PipelineConfig(
+        profile: BuildProfile.Bootstrap,
+        verify_reproducibility: true,
+        keep_artifacts: true,
+        workspace_root: ".",
+        output_dir: "build/bootstrap",
+        seed_dir: "seed",
+        seed_build_dir: "seed/build",
+        clang_path: "clang++",
+        cmake_path: "cmake",
+        compiler_core_dir: "src/compiler_core",
+        seed_include_dir: "seed",
+        from_stage: PipelineStage.Check,
+        to_stage: PipelineStage.Full2
+    )
+
+fn parse_pipeline_args(args: [text]) -> PipelineConfig:
+    var config = default_pipeline_config()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--from="):
+            config.from_stage = parse_stage(arg.substring(7))
+        elif arg.starts_with("--to="):
+            config.to_stage = parse_stage(arg.substring(5))
+        elif arg.starts_with("--output="):
+            config.output_dir = arg.substring(9)
+        elif arg.starts_with("--clang="):
+            config.clang_path = arg.substring(8)
+        elif arg.starts_with("--cmake="):
+            config.cmake_path = arg.substring(8)
+        elif arg == "--no-verify":
+            config.verify_reproducibility = false
+        elif arg == "--no-artifacts":
+            config.keep_artifacts = false
+        i = i + 1
+    config

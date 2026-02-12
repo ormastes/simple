@@ -92,13 +92,90 @@ static void load_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "Cannot open: %s\n", path); exit(1); }
     char buf[MAX_LINE];
+    bool in_docstring = false;
     while (fgets(buf, sizeof(buf), f) && num_lines < MAX_LINES) {
         int len = strlen(buf);
         if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        /* Skip triple-quote docstrings """...""" and r"""...""" */
+        const char *tb = buf;
+        while (*tb == ' ' || *tb == '\t') tb++;
+        /* Also handle r""" raw docstrings */
+        if (tb[0] == 'r' && strncmp(tb + 1, "\"\"\"", 3) == 0) tb++;
+        if (strncmp(tb, "\"\"\"", 3) == 0) {
+            if (in_docstring) {
+                /* End of multi-line docstring */
+                in_docstring = false;
+                source_lines[num_lines++] = strdup("");
+                continue;
+            }
+            /* Check if docstring opens and closes on same line */
+            const char *after = tb + 3;
+            const char *close = strstr(after, "\"\"\"");
+            if (close) {
+                /* Single-line docstring — skip entirely */
+                source_lines[num_lines++] = strdup("");
+                continue;
+            }
+            /* Multi-line docstring starts */
+            in_docstring = true;
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (in_docstring) {
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
         strip_inline_comment(buf);
         source_lines[num_lines++] = strdup(buf);
     }
     fclose(f);
+
+    /* Post-process: join multi-line continuations (unclosed parens/brackets) */
+    for (int i = 0; i < num_lines; i++) {
+        /* Count open/close parens and brackets */
+        int depth = 0;
+        bool in_str = false;
+        for (const char *c = source_lines[i]; *c; c++) {
+            if (*c == '"' && !in_str) { in_str = true; continue; }
+            if (*c == '"' && in_str) { in_str = false; continue; }
+            if (*c == '\\' && in_str) { c++; continue; }
+            if (in_str) continue;
+            if (*c == '(' || *c == '[') depth++;
+            if (*c == ')' || *c == ']') depth--;
+        }
+        if (depth > 0 && (i + 1) < num_lines) {
+            /* Join with next line(s) until balanced */
+            char joined[MAX_LINE * 4] = "";
+            strncpy(joined, source_lines[i], sizeof(joined) - 1);
+            free(source_lines[i]);
+            int j = i + 1;
+            while (depth > 0 && j < num_lines) {
+                /* Skip leading whitespace manually (trim not yet declared) */
+                const char *cont = source_lines[j];
+                while (*cont == ' ' || *cont == '\t') cont++;
+                /* Append continuation with a space */
+                int jl = strlen(joined);
+                if (jl < (int)sizeof(joined) - 2) {
+                    joined[jl] = ' ';
+                    strncpy(joined + jl + 1, cont, sizeof(joined) - jl - 2);
+                }
+                free(source_lines[j]);
+                source_lines[j] = strdup("");
+                /* Recount depth on joined content */
+                in_str = false;
+                for (const char *c = cont; *c; c++) {
+                    if (*c == '"' && !in_str) { in_str = true; continue; }
+                    if (*c == '"' && in_str) { in_str = false; continue; }
+                    if (*c == '\\' && in_str) { c++; continue; }
+                    if (in_str) continue;
+                    if (*c == '(' || *c == '[') depth++;
+                    if (*c == ')' || *c == ']') depth--;
+                }
+                j++;
+            }
+            source_lines[i] = strdup(joined);
+        }
+    }
 }
 
 /* ===== String Utilities ===== */
@@ -323,6 +400,7 @@ typedef struct {
     char owner_struct[MAX_IDENT]; /* Non-empty if this is a method */
     bool is_mutable;              /* 'me' method (mutable self) */
     bool is_static_method;        /* static fn in impl block */
+    bool emitted;                 /* Already emitted in code gen */
 } FuncInfo;
 
 static FuncInfo funcs[MAX_FUNCS];
@@ -2310,9 +2388,10 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
             continue;
         }
 
-        /* Skip use/export/import */
+        /* Skip use/export/import/mod */
         if (starts_with(trimmed, "use ") || starts_with(trimmed, "export ") ||
-            starts_with(trimmed, "import ")) {
+            starts_with(trimmed, "import ") || starts_with(trimmed, "pub mod ") ||
+            starts_with(trimmed, "mod ") || starts_with(trimmed, "pub ")) {
             (*line_idx)++;
             continue;
         }
@@ -2333,33 +2412,22 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
                 }
                 emit_array_literal_pushes(name, p, c_indent);
             } else if (type_is_option(stype)) {
-                /* Option type: nil → default construct, otherwise C++ implicit conversion */
                 const char *ct = simple_type_to_cpp(stype);
                 const char *rhs = skip_spaces(p);
                 emit_indent(c_indent);
                 if (*rhs == '\0' || strcmp(rhs, "nil") == 0) {
-                    emit("const %s %s = {};\n", ct, name);
+                    emit("%s %s = {};\n", ct, name);
                 } else {
                     char expr_c[MAX_LINE];
                     translate_expr(p, expr_c, sizeof(expr_c));
-                    emit("const %s %s = %s;\n", ct, name, expr_c);
+                    emit("%s %s = %s;\n", ct, name, expr_c);
                 }
             } else {
                 char expr_c[MAX_LINE];
                 translate_expr(p, expr_c, sizeof(expr_c));
                 emit_indent(c_indent);
                 const char *ct = simple_type_to_cpp(stype);
-                /* Structs: value type, no const needed for immutable binding in practice */
-                if (type_is_struct(stype)) {
-                    emit("const %s %s = %s;\n", ct, name, expr_c);
-                } else if (starts_with(ct, "const ")) {
-                    emit("%s %s = %s;\n", ct, name, expr_c);
-                } else if (strcmp(ct, "SplArray*") == 0) {
-                    /* SplArray* val bindings need mutable access for runtime funcs */
-                    emit("%s %s = %s;\n", ct, name, expr_c);
-                } else {
-                    emit("const %s %s = %s;\n", ct, name, expr_c);
-                }
+                emit("%s %s = %s;\n", ct, name, expr_c);
             }
             (*line_idx)++;
             continue;
@@ -2388,7 +2456,6 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
                     emit("%s %s = spl_array_new();\n", simple_type_to_cpp(stype), name);
                 }
             } else if (type_is_option(stype)) {
-                /* Option type: nil → default construct, otherwise C++ implicit conversion */
                 const char *ct = simple_type_to_cpp(stype);
                 const char *rhs = skip_spaces(p);
                 emit_indent(c_indent);
@@ -2813,6 +2880,18 @@ static bool register_func_sig(const char *t, bool is_method, const char *owner, 
         strcpy(fi->ret_type, "void");
     }
 
+    /* Skip spl_* extern functions — they conflict with runtime.h */
+    if (fi->is_extern && starts_with(fi->name, "spl_")) {
+        return false;
+    }
+
+    /* Skip if a function with the same name is already registered */
+    for (int k = 0; k < num_funcs; k++) {
+        if (strcmp(funcs[k].name, fi->name) == 0) {
+            return false;
+        }
+    }
+
     num_funcs++;
     return true;
 }
@@ -2825,16 +2904,17 @@ static void process_file(void) {
         const char *t = trim(line);
         if (t[0] == '\0' || t[0] == '#') continue;
 
-        /* Top-level struct */
-        if (ind == 0 && starts_with(t, "struct ") && ends_with(t, ":")) {
+        /* Top-level struct or class */
+        if (ind == 0 && (starts_with(t, "struct ") || starts_with(t, "class ")) && ends_with(t, ":")) {
+            bool is_class = starts_with(t, "class ");
             StructInfo *si = &structs[num_structs];
             memset(si, 0, sizeof(*si));
-            const char *p = t + 7;
+            const char *p = t + (is_class ? 6 : 7);
             int ni = 0;
             while (*p && *p != ':' && *p != '(' && *p != ' ') si->name[ni++] = *p++;
             si->name[ni] = '\0';
 
-            /* Parse fields (indented lines under struct) */
+            /* Parse fields (and methods for class) under indented lines */
             int j = i + 1;
             while (j < num_lines) {
                 const char *fl = source_lines[j];
@@ -2842,6 +2922,22 @@ static void process_file(void) {
                 if (ft[0] == '\0') { j++; continue; } /* Skip blank lines before indent check */
                 if (indent_level(fl) <= 0) break;
                 if (ft[0] == '#') { j++; continue; }
+
+                /* For class: skip inline methods (fn/me/static fn) — they're handled as impl methods */
+                if (is_class && (starts_with(ft, "fn ") || starts_with(ft, "me ") || starts_with(ft, "static fn "))) {
+                    /* Skip method body */
+                    int method_ind = indent_level(fl);
+                    j++;
+                    while (j < num_lines) {
+                        const char *bl = source_lines[j];
+                        const char *bt = trim(bl);
+                        if (bt[0] == '\0' || bt[0] == '#') { j++; continue; }
+                        if (indent_level(bl) <= method_ind) break;
+                        j++;
+                    }
+                    continue;
+                }
+
                 /* Field: name: type */
                 char fname[MAX_IDENT] = "", ftype[MAX_IDENT] = "";
                 int fni = 0;
@@ -2871,6 +2967,23 @@ static void process_file(void) {
                 j++;
             }
             num_structs++;
+
+            /* For class: also register inline methods (as if impl ClassName:) */
+            if (is_class) {
+                j = i + 1;
+                while (j < num_lines) {
+                    const char *ml = source_lines[j];
+                    const char *mt = trim(ml);
+                    if (mt[0] == '\0' || mt[0] == '#') { j++; continue; }
+                    if (indent_level(ml) <= 0) break;
+
+                    if (starts_with(mt, "fn ") || starts_with(mt, "me ") || starts_with(mt, "static fn ")) {
+                        bool is_mut = starts_with(mt, "me ");
+                        register_func_sig(mt, true, si->name, is_mut);
+                    }
+                    j++;
+                }
+            }
         }
 
         /* Top-level enum */
@@ -3103,6 +3216,9 @@ static void process_file(void) {
     }
     emit("\n");
 
+    /* Save global var count so function scopes can reset to it */
+    int global_vars_count = num_vars;
+
     /* ===== Emit function definitions ===== */
     for (int i = 0; i < num_lines; i++) {
         const char *line = source_lines[i];
@@ -3121,6 +3237,8 @@ static void process_file(void) {
 
             FuncInfo *fi = find_func(fname);
             if (!fi) { continue; }
+            if (fi->emitted) { continue; }  /* Skip duplicate definitions */
+            fi->emitted = true;
 
             for (int j = 0; j < fi->param_count; j++) {
                 add_var(fi->param_names[j], fi->param_stypes[j]);
@@ -3186,16 +3304,22 @@ static void process_file(void) {
 
             int body_idx = i + 1;
             current_func = fi;
+            num_vars = global_vars_count;  /* Reset var table for each function scope */
+            /* Register function params as variables */
+            for (int pk = 0; pk < fi->param_count; pk++) {
+                add_var(fi->param_names[pk], fi->param_stypes[pk]);
+            }
             translate_block(&body_idx, 0, 1);
             current_func = nullptr;
             i = body_idx - 1;
             emit("}\n\n");
         }
 
-        /* impl block: emit methods */
-        if (starts_with(t, "impl ") && ends_with(t, ":")) {
+        /* impl/class block: emit methods */
+        if ((starts_with(t, "impl ") || starts_with(t, "class ")) && ends_with(t, ":")) {
+            bool is_class_block = starts_with(t, "class ");
             char impl_name[MAX_IDENT] = "";
-            const char *p = t + 5;
+            const char *p = t + (is_class_block ? 6 : 5);
             int ni = 0;
             while (*p && *p != ':' && *p != '(' && *p != ' ') impl_name[ni++] = *p++;
             impl_name[ni] = '\0';
@@ -3305,6 +3429,11 @@ static void process_file(void) {
 
                     /* Translate method body */
                     current_func = fi;
+                    num_vars = global_vars_count;  /* Reset var table for each method scope */
+                    /* Register method params as variables */
+                    for (int pk = 0; pk < fi->param_count; pk++) {
+                        add_var(fi->param_names[pk], fi->param_stypes[pk]);
+                    }
                     strncpy(current_impl_struct, impl_name, MAX_IDENT - 1);
                     current_impl_struct[MAX_IDENT - 1] = '\0';
                     translate_block(&body_start, method_ind, 1);
@@ -3322,6 +3451,7 @@ static void process_file(void) {
 
     /* ===== Emit __module_init ===== */
     emit("static void __module_init(void) {\n");
+    num_vars = global_vars_count;  /* Reset to globals only */
     {
         int init_idx = 0;
         while (init_idx < num_lines) {
@@ -3344,16 +3474,21 @@ static void process_file(void) {
                 }
                 continue;
             }
-            if ((starts_with(t, "struct ") || starts_with(t, "enum ") || starts_with(t, "impl ")) &&
+            if ((starts_with(t, "struct ") || starts_with(t, "enum ") || starts_with(t, "impl ") || starts_with(t, "class ")) &&
                 ends_with(t, ":")) {
                 init_idx++;
                 while (init_idx < num_lines) {
-                    if (indent_level(source_lines[init_idx]) == 0) break;
+                    const char *sl = source_lines[init_idx];
+                    const char *st = trim(sl);
+                    /* Skip blank/comment lines inside block */
+                    if (st[0] == '\0' || st[0] == '#') { init_idx++; continue; }
+                    if (indent_level(sl) == 0) break;
                     init_idx++;
                 }
                 continue;
             }
-            if (starts_with(t, "use ") || starts_with(t, "export ") || starts_with(t, "import ")) {
+            if (starts_with(t, "use ") || starts_with(t, "export ") || starts_with(t, "import ") ||
+                starts_with(t, "pub mod ") || starts_with(t, "mod ") || starts_with(t, "pub ")) {
                 init_idx++; continue;
             }
 
@@ -3391,11 +3526,128 @@ static void process_file(void) {
                 continue;
             }
 
-            /* Module-level control flow */
-            if ((starts_with(t, "if ") || starts_with(t, "while ") ||
-                 starts_with(t, "for ") || starts_with(t, "match ")) &&
-                ends_with(t, ":")) {
+            /* Module-level control flow — handle inline (NOT translate_block with base=-1,
+               because that would consume ALL remaining lines since indent is always >= 0) */
+            if (starts_with(t, "if ") && ends_with(t, ":")) {
+                char cond[MAX_LINE], cond_c[MAX_LINE];
+                extract_condition(t, 3, cond, sizeof(cond));
+                translate_expr(cond, cond_c, sizeof(cond_c));
+                emit("    if (%s) {\n", cond_c);
+                init_idx++;
+                translate_block(&init_idx, 0, 2);
+                emit("    }");
+                /* Handle elif/else chains */
+                while (init_idx < num_lines) {
+                    const char *nl = source_lines[init_idx];
+                    const char *nt = trim(nl);
+                    if (nt[0] == '\0' || nt[0] == '#') { init_idx++; continue; }
+                    if (indent_level(nl) != 0) break;
+                    if (starts_with(nt, "elif ") && ends_with(nt, ":")) {
+                        char econd[MAX_LINE], econd_c[MAX_LINE];
+                        extract_condition(nt, 5, econd, sizeof(econd));
+                        translate_expr(econd, econd_c, sizeof(econd_c));
+                        emit(" else if (%s) {\n", econd_c);
+                        init_idx++;
+                        translate_block(&init_idx, 0, 2);
+                        emit("    }");
+                    } else if (strcmp(nt, "else:") == 0) {
+                        emit(" else {\n");
+                        init_idx++;
+                        translate_block(&init_idx, 0, 2);
+                        emit("    }");
+                    } else {
+                        break;
+                    }
+                }
+                emit("\n");
+                continue;
+            }
+            if (starts_with(t, "while ") && ends_with(t, ":")) {
+                char cond[MAX_LINE], cond_c[MAX_LINE];
+                extract_condition(t, 6, cond, sizeof(cond));
+                translate_expr(cond, cond_c, sizeof(cond_c));
+                emit("    while (%s) {\n", cond_c);
+                init_idx++;
+                translate_block(&init_idx, 0, 2);
+                emit("    }\n");
+                continue;
+            }
+            if (starts_with(t, "for ") && ends_with(t, ":")) {
+                /* Let translate_block handle the for-loop parsing */
+                int save_idx = init_idx;
                 translate_block(&init_idx, -1, 1);
+                /* translate_block with base=-1 would consume everything,
+                   so we manually stop after one block: check if init_idx
+                   moved past the for body */
+                /* Actually, re-do: handle for inline */
+                /* Restore and handle manually */
+                init_idx = save_idx;
+                /* Emit the for loop — skip the header, body handled by translate_block */
+                /* We need translate_block for the for-loop syntax parsing,
+                   but limit it to one statement. Use base_indent=0 approach:
+                   increment past the for line, then process body. */
+                {
+                    /* Parse for header: for VAR in EXPR: */
+                    const char *p = t + 4;
+                    char var_name[MAX_IDENT] = "";
+                    int vi = 0;
+                    while (*p && *p != ' ') var_name[vi++] = *p++;
+                    var_name[vi] = '\0';
+                    p = skip_spaces(p);
+                    if (starts_with(p, "in ")) p += 3;
+                    char iter_expr[MAX_LINE];
+                    int ie = 0;
+                    while (*p && *p != ':') iter_expr[ie++] = *p++;
+                    iter_expr[ie] = '\0';
+                    while (ie > 0 && iter_expr[ie-1] == ' ') iter_expr[--ie] = '\0';
+
+                    add_var(var_name, "i64");
+
+                    /* Check for range() pattern */
+                    char *tr_iter = trim(iter_expr);
+                    if (starts_with(tr_iter, "range(")) {
+                        char *args = tr_iter + 6;
+                        char *end_paren = strrchr(args, ')');
+                        if (end_paren) *end_paren = '\0';
+                        char *comma = strchr(args, ',');
+                        if (comma) {
+                            *comma = '\0';
+                            char start_c[MAX_LINE], end_c[MAX_LINE];
+                            translate_expr(trim(args), start_c, sizeof(start_c));
+                            translate_expr(trim(comma + 1), end_c, sizeof(end_c));
+                            emit("    for (int64_t %s = %s; %s < %s; %s++) {\n",
+                                 var_name, start_c, var_name, end_c, var_name);
+                        } else {
+                            char end_c[MAX_LINE];
+                            translate_expr(trim(args), end_c, sizeof(end_c));
+                            emit("    for (int64_t %s = 0; %s < %s; %s++) {\n",
+                                 var_name, var_name, end_c, var_name);
+                        }
+                    } else {
+                        /* Array iteration */
+                        char arr_c[MAX_LINE];
+                        translate_expr(tr_iter, arr_c, sizeof(arr_c));
+                        emit("    for (int64_t __%s_i = 0; __%s_i < spl_array_len(%s); __%s_i++) {\n",
+                             var_name, var_name, arr_c, var_name);
+                        emit("        int64_t %s = spl_array_get(%s, __%s_i).as_int;\n",
+                             var_name, arr_c, var_name);
+                    }
+                    init_idx++;
+                    translate_block(&init_idx, 0, 2);
+                    emit("    }\n");
+                }
+                continue;
+            }
+            if (starts_with(t, "match ") && ends_with(t, ":")) {
+                /* Match blocks are rare at module level; use simple skip for now */
+                init_idx++;
+                while (init_idx < num_lines) {
+                    const char *bl = source_lines[init_idx];
+                    const char *bt = trim(bl);
+                    if (bt[0] == '\0' || bt[0] == '#') { init_idx++; continue; }
+                    if (indent_level(bl) == 0) break;
+                    init_idx++;
+                }
                 continue;
             }
 
