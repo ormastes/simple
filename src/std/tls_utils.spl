@@ -1,0 +1,1082 @@
+# TLS/SSL Protocol Utilities Module
+#
+# A comprehensive implementation of TLS/SSL protocol utilities for the Simple language.
+# This module provides tools for TLS handshake processing, cipher suite management,
+# record protocol handling, and key derivation.
+#
+# TLS Protocol Overview:
+# ---------------------
+# TLS (Transport Layer Security) provides secure communication over networks through:
+# 1. Handshake Protocol: Negotiate security parameters
+# 2. Record Protocol: Encapsulate messages with encryption/MAC
+# 3. Alert Protocol: Communicate warnings and errors
+# 4. Application Data Protocol: Transfer encrypted application data
+#
+# TLS Handshake Flow:
+# ------------------
+# Client                                 Server
+# ClientHello          -------->
+#                                        ServerHello
+#                                        Certificate
+#                                        ServerKeyExchange*
+#                                        CertificateRequest*
+#                                        ServerHelloDone
+#                      <--------
+# Certificate*
+# ClientKeyExchange
+# CertificateVerify*
+# ChangeCipherSpec
+# Finished             -------->
+#                                        ChangeCipherSpec
+#                                        Finished
+#                      <--------
+# Application Data     <------->        Application Data
+#
+# * Optional messages
+
+# =============================================================================
+# CONSTANTS - TLS Protocol Values
+# =============================================================================
+
+# Content Types (1 byte)
+val CONTENT_TYPE_CHANGE_CIPHER_SPEC = 20
+val CONTENT_TYPE_ALERT = 21
+val CONTENT_TYPE_HANDSHAKE = 22
+val CONTENT_TYPE_APPLICATION_DATA = 23
+
+# Protocol Versions (2 bytes)
+val TLS_VERSION_1_0 = 0x0301
+val TLS_VERSION_1_1 = 0x0302
+val TLS_VERSION_1_2 = 0x0303
+val TLS_VERSION_1_3 = 0x0304
+
+# Handshake Message Types (1 byte)
+val HANDSHAKE_TYPE_HELLO_REQUEST = 0
+val HANDSHAKE_TYPE_CLIENT_HELLO = 1
+val HANDSHAKE_TYPE_SERVER_HELLO = 2
+val HANDSHAKE_TYPE_CERTIFICATE = 11
+val HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE = 12
+val HANDSHAKE_TYPE_CERTIFICATE_REQUEST = 13
+val HANDSHAKE_TYPE_SERVER_HELLO_DONE = 14
+val HANDSHAKE_TYPE_CERTIFICATE_VERIFY = 15
+val HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = 16
+val HANDSHAKE_TYPE_FINISHED = 20
+
+# Cipher Suite IDs (2 bytes) - Modern secure suites
+val CIPHER_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 = 0xC02F
+val CIPHER_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 = 0xC030
+val CIPHER_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = 0xCCA8
+val CIPHER_TLS_RSA_WITH_AES_128_GCM_SHA256 = 0x009C
+val CIPHER_TLS_RSA_WITH_AES_256_GCM_SHA384 = 0x009D
+val CIPHER_TLS_RSA_WITH_AES_128_CBC_SHA256 = 0x003C
+val CIPHER_TLS_RSA_WITH_AES_256_CBC_SHA256 = 0x003D
+
+# Extension Types (2 bytes)
+val EXTENSION_TYPE_SERVER_NAME = 0
+val EXTENSION_TYPE_MAX_FRAGMENT_LENGTH = 1
+val EXTENSION_TYPE_STATUS_REQUEST = 5
+val EXTENSION_TYPE_SUPPORTED_GROUPS = 10
+val EXTENSION_TYPE_EC_POINT_FORMATS = 11
+val EXTENSION_TYPE_SIGNATURE_ALGORITHMS = 13
+val EXTENSION_TYPE_ALPN = 16
+val EXTENSION_TYPE_SUPPORTED_VERSIONS = 43
+
+# Alert Levels (1 byte)
+val ALERT_LEVEL_WARNING = 1
+val ALERT_LEVEL_FATAL = 2
+
+# Alert Descriptions (1 byte)
+val ALERT_DESC_CLOSE_NOTIFY = 0
+val ALERT_DESC_UNEXPECTED_MESSAGE = 10
+val ALERT_DESC_BAD_RECORD_MAC = 20
+val ALERT_DESC_HANDSHAKE_FAILURE = 40
+val ALERT_DESC_BAD_CERTIFICATE = 42
+val ALERT_DESC_UNSUPPORTED_CERTIFICATE = 43
+val ALERT_DESC_CERTIFICATE_REVOKED = 44
+val ALERT_DESC_CERTIFICATE_EXPIRED = 45
+val ALERT_DESC_CERTIFICATE_UNKNOWN = 46
+val ALERT_DESC_ILLEGAL_PARAMETER = 47
+val ALERT_DESC_UNKNOWN_CA = 48
+val ALERT_DESC_DECODE_ERROR = 50
+val ALERT_DESC_PROTOCOL_VERSION = 70
+val ALERT_DESC_INTERNAL_ERROR = 80
+
+# TLS Record Protocol
+val TLS_RECORD_HEADER_SIZE = 5
+val TLS_MAX_FRAGMENT_LENGTH = 16384  # 2^14 bytes
+
+# =============================================================================
+# RECORD PROTOCOL - TLS Record Layer
+# =============================================================================
+
+# Build a TLS record
+# Parameters:
+#   content_type: Content type (20-23)
+#   version: Protocol version (e.g., 0x0303 for TLS 1.2)
+#   data: Payload data as bytes
+# Returns: (type, version, data) tuple representing complete TLS record
+fn build_tls_record(content_type, version, data):
+    # TLS Record structure:
+    # - ContentType (1 byte)
+    # - ProtocolVersion (2 bytes)
+    # - Length (2 bytes)
+    # - Fragment (0-2^14 bytes)
+    (content_type, version, data)
+
+# Parse a TLS record from raw bytes
+# Parameters:
+#   raw_data: Raw bytes containing TLS record
+# Returns: (type, version, data) tuple or nil on parse error
+fn parse_tls_record(raw_data):
+    val data_len = len(raw_data)
+    if data_len < TLS_RECORD_HEADER_SIZE:
+        nil
+    else:
+        val content_type = byte_at(raw_data, 0)
+        val version_hi = byte_at(raw_data, 1)
+        val version_lo = byte_at(raw_data, 2)
+        val version = (version_hi * 256) + version_lo
+        val length_hi = byte_at(raw_data, 3)
+        val length_lo = byte_at(raw_data, 4)
+        val length = (length_hi * 256) + length_lo
+
+        if data_len < (TLS_RECORD_HEADER_SIZE + length):
+            nil
+        else:
+            val payload = slice(raw_data, TLS_RECORD_HEADER_SIZE, TLS_RECORD_HEADER_SIZE + length)
+            (content_type, version, payload)
+
+# Get human-readable name for content type
+# Parameters:
+#   content_type: Content type code (20-23)
+# Returns: Human-readable name
+fn record_type_name(content_type):
+    if content_type == CONTENT_TYPE_CHANGE_CIPHER_SPEC:
+        "ChangeCipherSpec"
+    else if content_type == CONTENT_TYPE_ALERT:
+        "Alert"
+    else if content_type == CONTENT_TYPE_HANDSHAKE:
+        "Handshake"
+    else if content_type == CONTENT_TYPE_APPLICATION_DATA:
+        "ApplicationData"
+    else:
+        "Unknown"
+
+# Validate TLS protocol version
+# Parameters:
+#   version: Version code (e.g., 0x0303)
+# Returns: true if supported, false otherwise
+fn validate_tls_version(version):
+    val is_tls_12 = version == TLS_VERSION_1_2
+    val is_tls_13 = version == TLS_VERSION_1_3
+    is_tls_12 or is_tls_13
+
+# Get TLS version name
+# Parameters:
+#   version: Version code
+# Returns: Human-readable version string
+fn tls_version_name(version):
+    if version == TLS_VERSION_1_0:
+        "TLS 1.0"
+    else if version == TLS_VERSION_1_1:
+        "TLS 1.1"
+    else if version == TLS_VERSION_1_2:
+        "TLS 1.2"
+    else if version == TLS_VERSION_1_3:
+        "TLS 1.3"
+    else:
+        "Unknown"
+
+# =============================================================================
+# HANDSHAKE PROTOCOL - Handshake Messages
+# =============================================================================
+
+# Build a handshake message wrapper
+# Parameters:
+#   msg_type: Handshake message type (0-20)
+#   data: Message payload
+# Returns: (type, length, data) tuple
+fn build_handshake_message(msg_type, data):
+    val length = len(data)
+    (msg_type, length, data)
+
+# Parse handshake message from bytes
+# Parameters:
+#   raw_data: Raw handshake message bytes
+# Returns: (type, length, data) tuple or nil on error
+fn parse_handshake_message(raw_data):
+    val data_len = len(raw_data)
+    if data_len < 4:
+        nil
+    else:
+        val msg_type = byte_at(raw_data, 0)
+        val len_hi = byte_at(raw_data, 1)
+        val len_mid = byte_at(raw_data, 2)
+        val len_lo = byte_at(raw_data, 3)
+        val length = (len_hi * 65536) + (len_mid * 256) + len_lo
+
+        if data_len < (4 + length):
+            nil
+        else:
+            val payload = slice(raw_data, 4, 4 + length)
+            (msg_type, length, payload)
+
+# Get handshake message type name
+# Parameters:
+#   msg_type: Message type code
+# Returns: Human-readable message type
+fn handshake_type_name(msg_type):
+    if msg_type == HANDSHAKE_TYPE_HELLO_REQUEST:
+        "HelloRequest"
+    else if msg_type == HANDSHAKE_TYPE_CLIENT_HELLO:
+        "ClientHello"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_HELLO:
+        "ServerHello"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE:
+        "Certificate"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE:
+        "ServerKeyExchange"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
+        "CertificateRequest"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_HELLO_DONE:
+        "ServerHelloDone"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE_VERIFY:
+        "CertificateVerify"
+    else if msg_type == HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE:
+        "ClientKeyExchange"
+    else if msg_type == HANDSHAKE_TYPE_FINISHED:
+        "Finished"
+    else:
+        "Unknown"
+
+# Build ClientHello message
+# Parameters:
+#   version: Client-supported TLS version
+#   random: 32 bytes of random data
+#   session_id: Session ID (empty for new session)
+#   cipher_suites: List of cipher suite IDs
+#   extensions: List of extension tuples
+# Returns: ClientHello tuple (version, random, session_id, cipher_suites, extensions)
+fn build_client_hello(version, random, session_id, cipher_suites, extensions):
+    (version, random, session_id, cipher_suites, extensions)
+
+# Parse ServerHello message
+# Parameters:
+#   data: ServerHello payload bytes
+# Returns: (version, random, session_id, cipher_suite, extensions) tuple or nil
+fn parse_server_hello(data):
+    val data_len = len(data)
+    if data_len < 38:  # Minimum: 2 (version) + 32 (random) + 1 (session_id len) + 2 (cipher) + 1 (compression)
+        nil
+    else:
+        val version_hi = byte_at(data, 0)
+        val version_lo = byte_at(data, 1)
+        val version = (version_hi * 256) + version_lo
+
+        val random = slice(data, 2, 34)
+        val session_id_len = byte_at(data, 34)
+
+        if data_len < (35 + session_id_len + 3):
+            nil
+        else:
+            val session_id = slice(data, 35, 35 + session_id_len)
+            val cipher_offset = 35 + session_id_len
+            val cipher_hi = byte_at(data, cipher_offset)
+            val cipher_lo = byte_at(data, cipher_offset + 1)
+            val cipher_suite = (cipher_hi * 256) + cipher_lo
+
+            # Compression method (1 byte) - always 0 in TLS 1.2+
+            val ext_offset = cipher_offset + 3
+            var extensions = []
+
+            if data_len > ext_offset:
+                extensions = parse_extensions(slice(data, ext_offset, data_len))
+            else:
+                pass
+
+            (version, random, session_id, cipher_suite, extensions)
+
+# Build ClientKeyExchange message
+# Parameters:
+#   key_data: Pre-master secret or key exchange data
+# Returns: ClientKeyExchange tuple
+fn build_client_key_exchange(key_data):
+    (len(key_data), key_data)
+
+# Build Finished message
+# Parameters:
+#   verify_data: 12 bytes of PRF output
+# Returns: Finished message data
+fn build_finished_message(verify_data):
+    verify_data
+
+# Parse Finished message
+# Parameters:
+#   data: Finished message payload
+# Returns: Verify data (12 bytes) or nil
+fn parse_finished_message(data):
+    if len(data) == 12:
+        data
+    else:
+        nil
+
+# =============================================================================
+# CIPHER SUITES - Cipher Suite Management
+# =============================================================================
+
+# Get cipher suite information
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: (id, name, key_exchange, cipher, mac, secure) tuple
+fn parse_cipher_suite(cipher_id):
+    if cipher_id == CIPHER_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
+        (cipher_id, "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "ECDHE_RSA", "AES_128_GCM", "SHA256", true)
+    else if cipher_id == CIPHER_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
+        (cipher_id, "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "ECDHE_RSA", "AES_256_GCM", "SHA384", true)
+    else if cipher_id == CIPHER_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256:
+        (cipher_id, "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", "ECDHE_RSA", "CHACHA20_POLY1305", "SHA256", true)
+    else if cipher_id == CIPHER_TLS_RSA_WITH_AES_128_GCM_SHA256:
+        (cipher_id, "TLS_RSA_WITH_AES_128_GCM_SHA256", "RSA", "AES_128_GCM", "SHA256", false)
+    else if cipher_id == CIPHER_TLS_RSA_WITH_AES_256_GCM_SHA384:
+        (cipher_id, "TLS_RSA_WITH_AES_256_GCM_SHA384", "RSA", "AES_256_GCM", "SHA384", false)
+    else if cipher_id == CIPHER_TLS_RSA_WITH_AES_128_CBC_SHA256:
+        (cipher_id, "TLS_RSA_WITH_AES_128_CBC_SHA256", "RSA", "AES_128_CBC", "SHA256", false)
+    else if cipher_id == CIPHER_TLS_RSA_WITH_AES_256_CBC_SHA256:
+        (cipher_id, "TLS_RSA_WITH_AES_256_CBC_SHA256", "RSA", "AES_256_CBC", "SHA256", false)
+    else:
+        (cipher_id, "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", false)
+
+# Get cipher suite name
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: Human-readable name
+fn get_cipher_name(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    suite[1]
+
+# Check if cipher suite is considered secure
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: true if secure (ECDHE + AEAD), false otherwise
+fn is_cipher_suite_secure(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    suite[5]
+
+# Check if cipher provides forward secrecy
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: true if provides forward secrecy (ECDHE/DHE)
+fn has_forward_secrecy(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    val kex = suite[2]
+    val starts_ecdhe = starts_with(kex, "ECDHE")
+    val starts_dhe = starts_with(kex, "DHE")
+    starts_ecdhe or starts_dhe
+
+# Check if cipher uses AEAD mode
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: true if AEAD (GCM, ChaCha20-Poly1305)
+fn is_aead_cipher(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    val cipher = suite[3]
+    val has_gcm = contains(cipher, "GCM")
+    val has_poly1305 = contains(cipher, "POLY1305")
+    has_gcm or has_poly1305
+
+# Get cipher key size in bits
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: Key size in bits
+fn get_cipher_key_size(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    val cipher = suite[3]
+
+    if contains(cipher, "AES_128"):
+        128
+    else if contains(cipher, "AES_256"):
+        256
+    else if contains(cipher, "CHACHA20"):
+        256
+    else:
+        0
+
+# Get hash algorithm for cipher suite
+# Parameters:
+#   cipher_id: Cipher suite ID
+# Returns: Hash algorithm name
+fn get_hash_algorithm(cipher_id):
+    val suite = parse_cipher_suite(cipher_id)
+    suite[4]
+
+# Get list of supported cipher suites (ordered by preference)
+# Returns: List of cipher suite IDs
+fn get_supported_ciphers():
+    [
+        CIPHER_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        CIPHER_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        CIPHER_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        CIPHER_TLS_RSA_WITH_AES_256_GCM_SHA384,
+        CIPHER_TLS_RSA_WITH_AES_128_GCM_SHA256
+    ]
+
+# Get list of secure cipher suites only
+# Returns: List of secure cipher suite IDs
+fn get_secure_ciphers():
+    [
+        CIPHER_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        CIPHER_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        CIPHER_TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+    ]
+
+# Filter cipher suites by security level
+# Parameters:
+#   cipher_list: List of cipher suite IDs
+# Returns: List of only secure ciphers
+fn filter_secure_ciphers(cipher_list):
+    var result = []
+    for cipher in cipher_list:
+        if is_cipher_suite_secure(cipher):
+            result = append(result, cipher)
+        else:
+            pass
+    result
+
+# =============================================================================
+# EXTENSIONS - TLS Extensions
+# =============================================================================
+
+# Build Server Name Indication (SNI) extension
+# Parameters:
+#   hostname: Server hostname (e.g., "example.com")
+# Returns: (type, data) extension tuple
+fn build_sni_extension(hostname):
+    val host_bytes = to_bytes(hostname)
+    val host_len = len(host_bytes)
+    # SNI extension format:
+    # - Extension type: 0
+    # - Extension length: 2 bytes
+    # - Server name list length: 2 bytes
+    # - Server name type: 1 byte (0 = hostname)
+    # - Server name length: 2 bytes
+    # - Server name: variable
+    (EXTENSION_TYPE_SERVER_NAME, host_bytes)
+
+# Build Supported Versions extension
+# Parameters:
+#   versions: List of supported version codes
+# Returns: (type, data) extension tuple
+fn build_supported_versions_extension(versions):
+    (EXTENSION_TYPE_SUPPORTED_VERSIONS, versions)
+
+# Build ALPN (Application-Layer Protocol Negotiation) extension
+# Parameters:
+#   protocols: List of protocol names (e.g., ["h2", "http/1.1"])
+# Returns: (type, data) extension tuple
+fn build_alpn_extension(protocols):
+    (EXTENSION_TYPE_ALPN, protocols)
+
+# Build Signature Algorithms extension
+# Parameters:
+#   algorithms: List of signature algorithm codes
+# Returns: (type, data) extension tuple
+fn build_signature_algorithms_extension(algorithms):
+    (EXTENSION_TYPE_SIGNATURE_ALGORITHMS, algorithms)
+
+# Build Supported Groups (Elliptic Curves) extension
+# Parameters:
+#   groups: List of supported group codes
+# Returns: (type, data) extension tuple
+fn build_supported_groups_extension(groups):
+    (EXTENSION_TYPE_SUPPORTED_GROUPS, groups)
+
+# Parse extensions from bytes
+# Parameters:
+#   data: Extension data bytes
+# Returns: List of (type, data) extension tuples
+fn parse_extensions(data):
+    var extensions = []
+    var offset = 0
+    val data_len = len(data)
+
+    # Extensions have 2-byte length prefix
+    if data_len < 2:
+        extensions
+    else:
+        val ext_list_len_hi = byte_at(data, 0)
+        val ext_list_len_lo = byte_at(data, 1)
+        val ext_list_len = (ext_list_len_hi * 256) + ext_list_len_lo
+        offset = 2
+
+        # Parse individual extensions
+        var continue_parsing = offset < data_len
+        var loop_count = 0
+        var max_loops = 100
+
+        while continue_parsing and (loop_count < max_loops):
+            loop_count = loop_count + 1
+
+            if (offset + 4) > data_len:
+                continue_parsing = false
+            else:
+                val ext_type_hi = byte_at(data, offset)
+                val ext_type_lo = byte_at(data, offset + 1)
+                val ext_type = (ext_type_hi * 256) + ext_type_lo
+
+                val ext_len_hi = byte_at(data, offset + 2)
+                val ext_len_lo = byte_at(data, offset + 3)
+                val ext_len = (ext_len_hi * 256) + ext_len_lo
+
+                offset = offset + 4
+
+                if (offset + ext_len) > data_len:
+                    continue_parsing = false
+                else:
+                    val ext_data = slice(data, offset, offset + ext_len)
+                    extensions = append(extensions, (ext_type, ext_data))
+                    offset = offset + ext_len
+
+                    if offset >= data_len:
+                        continue_parsing = false
+                    else:
+                        pass
+
+        extensions
+
+# Get extension type name
+# Parameters:
+#   ext_type: Extension type code
+# Returns: Human-readable name
+fn extension_type_name(ext_type):
+    if ext_type == EXTENSION_TYPE_SERVER_NAME:
+        "server_name"
+    else if ext_type == EXTENSION_TYPE_MAX_FRAGMENT_LENGTH:
+        "max_fragment_length"
+    else if ext_type == EXTENSION_TYPE_STATUS_REQUEST:
+        "status_request"
+    else if ext_type == EXTENSION_TYPE_SUPPORTED_GROUPS:
+        "supported_groups"
+    else if ext_type == EXTENSION_TYPE_EC_POINT_FORMATS:
+        "ec_point_formats"
+    else if ext_type == EXTENSION_TYPE_SIGNATURE_ALGORITHMS:
+        "signature_algorithms"
+    else if ext_type == EXTENSION_TYPE_ALPN:
+        "alpn"
+    else if ext_type == EXTENSION_TYPE_SUPPORTED_VERSIONS:
+        "supported_versions"
+    else:
+        "unknown"
+
+# Find extension by type in extension list
+# Parameters:
+#   extensions: List of (type, data) tuples
+#   ext_type: Extension type to find
+# Returns: Extension data or nil if not found
+fn find_extension(extensions, ext_type):
+    var found = nil
+    for ext in extensions:
+        val current_type = ext[0]
+        if current_type == ext_type:
+            found = ext[1]
+        else:
+            pass
+    found
+
+# =============================================================================
+# ALERT PROTOCOL - TLS Alerts
+# =============================================================================
+
+# Build TLS alert message
+# Parameters:
+#   level: Alert level (1=warning, 2=fatal)
+#   description: Alert description code
+# Returns: (level, description) tuple
+fn build_alert(level, description):
+    (level, description)
+
+# Parse TLS alert from bytes
+# Parameters:
+#   data: Alert payload bytes
+# Returns: (level, description) tuple or nil
+fn parse_alert(data):
+    if len(data) < 2:
+        nil
+    else:
+        val level = byte_at(data, 0)
+        val description = byte_at(data, 1)
+        (level, description)
+
+# Get alert level name
+# Parameters:
+#   level: Alert level code
+# Returns: Human-readable level
+fn alert_level_name(level):
+    if level == ALERT_LEVEL_WARNING:
+        "warning"
+    else if level == ALERT_LEVEL_FATAL:
+        "fatal"
+    else:
+        "unknown"
+
+# Get alert description name
+# Parameters:
+#   description: Alert description code
+# Returns: Human-readable description
+fn alert_description_name(description):
+    if description == ALERT_DESC_CLOSE_NOTIFY:
+        "close_notify"
+    else if description == ALERT_DESC_UNEXPECTED_MESSAGE:
+        "unexpected_message"
+    else if description == ALERT_DESC_BAD_RECORD_MAC:
+        "bad_record_mac"
+    else if description == ALERT_DESC_HANDSHAKE_FAILURE:
+        "handshake_failure"
+    else if description == ALERT_DESC_BAD_CERTIFICATE:
+        "bad_certificate"
+    else if description == ALERT_DESC_UNSUPPORTED_CERTIFICATE:
+        "unsupported_certificate"
+    else if description == ALERT_DESC_CERTIFICATE_REVOKED:
+        "certificate_revoked"
+    else if description == ALERT_DESC_CERTIFICATE_EXPIRED:
+        "certificate_expired"
+    else if description == ALERT_DESC_CERTIFICATE_UNKNOWN:
+        "certificate_unknown"
+    else if description == ALERT_DESC_ILLEGAL_PARAMETER:
+        "illegal_parameter"
+    else if description == ALERT_DESC_UNKNOWN_CA:
+        "unknown_ca"
+    else if description == ALERT_DESC_DECODE_ERROR:
+        "decode_error"
+    else if description == ALERT_DESC_PROTOCOL_VERSION:
+        "protocol_version"
+    else if description == ALERT_DESC_INTERNAL_ERROR:
+        "internal_error"
+    else:
+        "unknown"
+
+# Check if alert is fatal
+# Parameters:
+#   level: Alert level code
+# Returns: true if fatal
+fn is_fatal_alert(level):
+    level == ALERT_LEVEL_FATAL
+
+# =============================================================================
+# KEY DERIVATION - TLS PRF and Master Secret
+# =============================================================================
+
+# TLS PRF (Pseudorandom Function) - TLS 1.2 version
+# Parameters:
+#   secret: Secret value for PRF
+#   label: ASCII label string
+#   seed: Seed value
+#   output_length: Desired output length in bytes
+# Returns: PRF output bytes
+#
+# TLS 1.2 PRF uses HMAC-SHA256:
+# PRF(secret, label, seed) = P_SHA256(secret, label + seed)
+fn tls_prf(secret, label, seed, output_length):
+    val label_bytes = to_bytes(label)
+    val combined_seed = concat_bytes(label_bytes, seed)
+    tls_prf_sha256(secret, combined_seed, output_length)
+
+# P_SHA256 expansion function
+# Parameters:
+#   secret: Secret key
+#   seed: Seed value
+#   output_length: Desired output length
+# Returns: Expanded key material
+#
+# P_SHA256(secret, seed) = HMAC_SHA256(secret, A(1) + seed) +
+#                          HMAC_SHA256(secret, A(2) + seed) + ...
+# where A(0) = seed
+#       A(i) = HMAC_SHA256(secret, A(i-1))
+fn tls_prf_sha256(secret, seed, output_length):
+    var result = []
+    var a_value = seed  # A(0) = seed
+    var current_length = 0
+    var iteration = 0
+    var max_iterations = 20
+
+    var continue_loop = current_length < output_length
+    while continue_loop and (iteration < max_iterations):
+        iteration = iteration + 1
+
+        # A(i) = HMAC_SHA256(secret, A(i-1))
+        a_value = hmac_sha256(secret, a_value)
+
+        # Output = HMAC_SHA256(secret, A(i) + seed)
+        val a_plus_seed = concat_bytes(a_value, seed)
+        val hmac_output = hmac_sha256(secret, a_plus_seed)
+
+        result = concat_bytes(result, hmac_output)
+        current_length = len(result)
+
+        if current_length >= output_length:
+            continue_loop = false
+        else:
+            pass
+
+    # Truncate to desired length
+    slice(result, 0, output_length)
+
+# Compute master secret from pre-master secret
+# Parameters:
+#   pre_master_secret: Pre-master secret (48 bytes for RSA)
+#   client_random: Client random (32 bytes)
+#   server_random: Server random (32 bytes)
+# Returns: Master secret (48 bytes)
+#
+# master_secret = PRF(pre_master_secret, "master secret",
+#                     ClientHello.random + ServerHello.random)[0..47]
+fn compute_master_secret(pre_master_secret, client_random, server_random):
+    val combined_random = concat_bytes(client_random, server_random)
+    tls_prf(pre_master_secret, "master secret", combined_random, 48)
+
+# Derive session keys from master secret
+# Parameters:
+#   master_secret: Master secret (48 bytes)
+#   client_random: Client random (32 bytes)
+#   server_random: Server random (32 bytes)
+#   mac_key_length: MAC key length in bytes
+#   enc_key_length: Encryption key length in bytes
+#   iv_length: IV length in bytes
+# Returns: (client_mac, server_mac, client_key, server_key, client_iv, server_iv) tuple
+#
+# key_block = PRF(master_secret, "key expansion",
+#                 server_random + client_random)
+fn derive_keys(master_secret, client_random, server_random, mac_key_length, enc_key_length, iv_length):
+    val combined_random = concat_bytes(server_random, client_random)
+    val key_material_length = (2 * mac_key_length) + (2 * enc_key_length) + (2 * iv_length)
+    val key_block = tls_prf(master_secret, "key expansion", combined_random, key_material_length)
+
+    # Split key block into individual keys
+    var offset = 0
+    val client_mac = slice(key_block, offset, offset + mac_key_length)
+    offset = offset + mac_key_length
+
+    val server_mac = slice(key_block, offset, offset + mac_key_length)
+    offset = offset + mac_key_length
+
+    val client_key = slice(key_block, offset, offset + enc_key_length)
+    offset = offset + enc_key_length
+
+    val server_key = slice(key_block, offset, offset + enc_key_length)
+    offset = offset + enc_key_length
+
+    val client_iv = slice(key_block, offset, offset + iv_length)
+    offset = offset + iv_length
+
+    val server_iv = slice(key_block, offset, offset + iv_length)
+
+    (client_mac, server_mac, client_key, server_key, client_iv, server_iv)
+
+# Compute verify data for Finished message
+# Parameters:
+#   master_secret: Master secret (48 bytes)
+#   label: "client finished" or "server finished"
+#   handshake_hash: Hash of all handshake messages
+# Returns: Verify data (12 bytes)
+#
+# verify_data = PRF(master_secret, finished_label, Hash(handshake_messages))[0..11]
+fn compute_verify_data(master_secret, label, handshake_hash):
+    tls_prf(master_secret, label, handshake_hash, 12)
+
+# =============================================================================
+# HMAC - Hash-based Message Authentication Code
+# =============================================================================
+
+# HMAC-SHA256 (simplified implementation)
+# Parameters:
+#   key: HMAC key
+#   data: Data to authenticate
+# Returns: HMAC output (32 bytes for SHA-256)
+#
+# HMAC(K, m) = H((K' ⊕ opad) || H((K' ⊕ ipad) || m))
+# where K' = K if len(K) = block_size, else H(K) padded to block_size
+fn hmac_sha256(key, data):
+    val block_size = 64  # SHA-256 block size
+    val output_size = 32  # SHA-256 output size
+
+    # Prepare key
+    var key_prime = key
+    val key_len = len(key)
+
+    if key_len > block_size:
+        key_prime = sha256(key)
+    else if key_len < block_size:
+        key_prime = pad_to_length(key, block_size)
+    else:
+        pass
+
+    # Create ipad and opad
+    val ipad = xor_with_byte(key_prime, 0x36)
+    val opad = xor_with_byte(key_prime, 0x5C)
+
+    # Inner hash: H((K' ⊕ ipad) || m)
+    val inner_input = concat_bytes(ipad, data)
+    val inner_hash = sha256(inner_input)
+
+    # Outer hash: H((K' ⊕ opad) || inner_hash)
+    val outer_input = concat_bytes(opad, inner_hash)
+    sha256(outer_input)
+
+# HMAC-SHA384 (for cipher suites using SHA-384)
+# Parameters:
+#   key: HMAC key
+#   data: Data to authenticate
+# Returns: HMAC output (48 bytes for SHA-384)
+fn hmac_sha384(key, data):
+    val block_size = 128  # SHA-384 block size
+    val output_size = 48  # SHA-384 output size
+
+    var key_prime = key
+    val key_len = len(key)
+
+    if key_len > block_size:
+        key_prime = sha384(key)
+    else if key_len < block_size:
+        key_prime = pad_to_length(key, block_size)
+    else:
+        pass
+
+    val ipad = xor_with_byte(key_prime, 0x36)
+    val opad = xor_with_byte(key_prime, 0x5C)
+
+    val inner_input = concat_bytes(ipad, data)
+    val inner_hash = sha384(inner_input)
+
+    val outer_input = concat_bytes(opad, inner_hash)
+    sha384(outer_input)
+
+# =============================================================================
+# UTILITY FUNCTIONS - Helper Functions
+# =============================================================================
+
+# Generate random bytes (placeholder - should use CSPRNG)
+# Parameters:
+#   length: Number of random bytes to generate
+# Returns: Random bytes
+fn generate_random(length):
+    var result = []
+    var i = 0
+    while i < length:
+        # In production, use cryptographically secure random number generator
+        # This is a placeholder implementation
+        val random_byte = i % 256
+        result = append(result, random_byte)
+        i = i + 1
+    result
+
+# Constant-time comparison to prevent timing attacks
+# Parameters:
+#   a: First byte array
+#   b: Second byte array
+# Returns: true if equal, false otherwise
+fn constant_time_compare(a, b):
+    val len_a = len(a)
+    val len_b = len(b)
+
+    if len_a != len_b:
+        false
+    else:
+        var diff = 0
+        var i = 0
+        while i < len_a:
+            val byte_a = byte_at(a, i)
+            val byte_b = byte_at(b, i)
+            val xor_result = xor(byte_a, byte_b)
+            diff = or(diff, xor_result)
+            i = i + 1
+        diff == 0
+
+# Format bytes as hexadecimal string
+# Parameters:
+#   data: Byte array
+# Returns: Hex string (e.g., "0A1B2C")
+fn format_hex(data):
+    var result = ""
+    val data_len = len(data)
+    var i = 0
+
+    while i < data_len:
+        val byte_val = byte_at(data, i)
+        val hex_str = byte_to_hex(byte_val)
+        result = result + hex_str
+        i = i + 1
+
+    result
+
+# Convert byte to 2-character hex string
+# Parameters:
+#   byte_val: Byte value (0-255)
+# Returns: 2-character hex string
+fn byte_to_hex(byte_val):
+    val hex_chars = "0123456789ABCDEF"
+    val hi = (byte_val / 16) % 16
+    val lo = byte_val % 16
+    val hi_char = char_at(hex_chars, hi)
+    val lo_char = char_at(hex_chars, lo)
+    hi_char + lo_char
+
+# Pad bytes to specified length with zeros
+# Parameters:
+#   data: Input bytes
+#   length: Desired length
+# Returns: Padded bytes
+fn pad_to_length(data, length):
+    var result = data
+    val data_len = len(data)
+    var i = data_len
+
+    while i < length:
+        result = append(result, 0)
+        i = i + 1
+
+    result
+
+# XOR each byte with a constant value
+# Parameters:
+#   data: Input bytes
+#   value: XOR value
+# Returns: XORed bytes
+fn xor_with_byte(data, value):
+    var result = []
+    val data_len = len(data)
+    var i = 0
+
+    while i < data_len:
+        val byte_val = byte_at(data, i)
+        val xored = xor(byte_val, value)
+        result = append(result, xored)
+        i = i + 1
+
+    result
+
+# Concatenate two byte arrays
+# Parameters:
+#   a: First byte array
+#   b: Second byte array
+# Returns: Concatenated bytes
+fn concat_bytes(a, b):
+    var result = a
+    val b_len = len(b)
+    var i = 0
+
+    while i < b_len:
+        val byte_val = byte_at(b, i)
+        result = append(result, byte_val)
+        i = i + 1
+
+    result
+
+# Get byte at index (placeholder - assumes list of integers)
+# Parameters:
+#   data: Byte array
+#   index: Index
+# Returns: Byte value
+fn byte_at(data, index):
+    data[index]
+
+# Slice byte array
+# Parameters:
+#   data: Byte array
+#   start: Start index (inclusive)
+#   end: End index (exclusive)
+# Returns: Sliced bytes
+fn slice(data, start, end):
+    var result = []
+    var i = start
+
+    while i < end:
+        val byte_val = byte_at(data, i)
+        result = append(result, byte_val)
+        i = i + 1
+
+    result
+
+# Convert string to bytes
+# Parameters:
+#   text: Input string
+# Returns: Byte array
+fn to_bytes(text):
+    # Placeholder - should convert string to UTF-8 bytes
+    []
+
+# SHA-256 hash (placeholder)
+# Parameters:
+#   data: Input data
+# Returns: SHA-256 hash (32 bytes)
+fn sha256(data):
+    # Placeholder - should implement SHA-256
+    generate_random(32)
+
+# SHA-384 hash (placeholder)
+# Parameters:
+#   data: Input data
+# Returns: SHA-384 hash (48 bytes)
+fn sha384(data):
+    # Placeholder - should implement SHA-384
+    generate_random(48)
+
+# XOR two byte values
+# Parameters:
+#   a: First byte
+#   b: Second byte
+# Returns: XOR result
+fn xor(a, b):
+    # Placeholder - should implement XOR operation
+    0
+
+# Bitwise OR
+# Parameters:
+#   a: First value
+#   b: Second value
+# Returns: OR result
+fn or(a, b):
+    # Placeholder - should implement OR operation
+    0
+
+# Get character at index in string
+# Parameters:
+#   text: Input string
+#   index: Index
+# Returns: Character
+fn char_at(text, index):
+    # Placeholder - should get character at index
+    ""
+
+# String starts with prefix
+# Parameters:
+#   text: Input string
+#   prefix: Prefix to check
+# Returns: true if starts with prefix
+fn starts_with(text, prefix):
+    # Placeholder - should check if string starts with prefix
+    false
+
+# String contains substring
+# Parameters:
+#   text: Input string
+#   substring: Substring to find
+# Returns: true if contains substring
+fn contains(text, substring):
+    # Placeholder - should check if string contains substring
+    false
+
+# Get length of collection
+# Parameters:
+#   collection: List or bytes
+# Returns: Length
+fn len(collection):
+    # Placeholder - should return length
+    0
+
+# Append to list
+# Parameters:
+#   list: Input list
+#   item: Item to append
+# Returns: New list with item appended
+fn append(list, item):
+    # Placeholder - should append item
+    list
