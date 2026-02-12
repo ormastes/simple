@@ -4,6 +4,8 @@
 # Runs the multi-phase bootstrap pipeline that uses the seed C++ transpiler
 # to produce native binaries: seed_cpp → C++ → clang++ → native.
 #
+# Supports QEMU FreeBSD builds via --qemu-freebsd option.
+#
 # Usage:
 #   bin/release/simple script/bootstrap-multiphase.spl [options]
 #
@@ -12,6 +14,11 @@
 #   Core2: Core1 recompiles compiler_core (reproducibility)
 #   Full1: Core2 compiles the full compiler
 #   Full2: Full1 recompiles itself (reproducibility check)
+#
+# QEMU FreeBSD mode:
+#   --qemu-freebsd: Build in FreeBSD QEMU VM (auto-detects VM)
+#   --qemu-vm=PATH: Path to FreeBSD QEMU VM image
+#   --qemu-port=N:  SSH port for QEMU VM (default: 10022)
 
 use app.build.bootstrap_multiphase (
     MultiphaseBootstrap,
@@ -30,11 +37,15 @@ fn main():
     var keep_artifacts = false
     var seed_cpp_path = "seed/build/seed_cpp"
     var clang_path = "clang++"
+    var qemu_freebsd = false
+    var qemu_vm_path = ""
+    var qemu_port = 10022
 
     for arg in args:
         match arg:
             case "--no-verify": verify = false
             case "--keep-artifacts": keep_artifacts = true
+            case "--qemu-freebsd": qemu_freebsd = true
             case "--help":
                 print_help()
                 return ()
@@ -43,10 +54,18 @@ fn main():
                     seed_cpp_path = arg.substring(11)
                 elif arg.starts_with("--clang="):
                     clang_path = arg.substring(8)
+                elif arg.starts_with("--qemu-vm="):
+                    qemu_vm_path = arg.substring(10)
+                elif arg.starts_with("--qemu-port="):
+                    qemu_port = arg.substring(12).to_i64() ?? 10022
                 elif arg.starts_with("--"):
                     print "Unknown option: {arg}"
                     print "Run with --help for usage information"
                     return ()
+
+    # Handle QEMU FreeBSD mode
+    if qemu_freebsd:
+        return run_qemu_freebsd_bootstrap(verify, keep_artifacts, qemu_vm_path, qemu_port)
 
     # Create configuration
     val config = MultiphaseConfig(
@@ -103,6 +122,122 @@ fn main():
 
         return ()
 
+fn run_qemu_freebsd_bootstrap(verify: bool, keep_artifacts: bool, vm_path: text, port: i64) -> ():
+    print "================================================================"
+    print "  FreeBSD Bootstrap (QEMU VM Mode)"
+    print "================================================================"
+    print ""
+
+    # Auto-detect VM if not specified
+    var vm = vm_path
+    if vm == "":
+        val vm_locations = [
+            "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2",
+            "{env_get("HOME")}/.qemu/freebsd.qcow2",
+            "/opt/qemu/freebsd.qcow2"
+        ]
+        for loc in vm_locations:
+            if file_exists(loc):
+                vm = loc
+                print "Found FreeBSD VM: {vm}"
+                break
+
+        if vm == "":
+            print "ERROR: No FreeBSD VM found."
+            print "Use --qemu-vm=PATH to specify VM image."
+            print "Or run: bin/simple script/download_qemu.spl freebsd"
+            return ()
+
+    print "FreeBSD VM: {vm}"
+    print "SSH port: {port}"
+    print ""
+
+    # Check if VM is already running
+    val check_ssh = shell("ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p {port} freebsd@localhost 'echo VM alive' 2>/dev/null")
+    val vm_running = check_ssh.exit_code == 0
+
+    if not vm_running:
+        print "Starting FreeBSD QEMU VM..."
+
+        # Check for qemu-system-x86_64
+        val qemu_check = shell("which qemu-system-x86_64 2>/dev/null")
+        if qemu_check.exit_code != 0:
+            print "ERROR: qemu-system-x86_64 not found"
+            print "Install: apt install qemu-system-x86"
+            return ()
+
+        # Start VM
+        val vm_pid_file = "build/freebsd/vm/qemu.pid"
+        shell("mkdir -p build/freebsd/vm")
+        val start_vm = shell("qemu-system-x86_64 -machine accel=kvm:tcg -cpu host -m 4G -smp 4 -drive file={vm},format=qcow2,if=virtio -net nic,model=virtio -net user,hostfwd=tcp::{port}-:22 -nographic -daemonize -pidfile {vm_pid_file}")
+
+        if start_vm.exit_code != 0:
+            print "ERROR: Failed to start QEMU VM"
+            return ()
+
+        # Wait for SSH
+        print "Waiting for SSH..."
+        var retries = 30
+        var ssh_ready = false
+        while retries > 0:
+            val ssh_test = shell("ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p {port} freebsd@localhost 'echo SSH ready' 2>/dev/null")
+            if ssh_test.exit_code == 0:
+                ssh_ready = true
+                break
+            shell("sleep 2")
+            retries = retries - 1
+
+        if not ssh_ready:
+            print "ERROR: Timeout waiting for SSH connection"
+            return ()
+
+        print "SSH connection established"
+        print ""
+
+    # Sync project to VM
+    print "Syncing project to FreeBSD VM..."
+    val rsync_cmd = "rsync -az --delete -e 'ssh -p {port} -o StrictHostKeyChecking=no' --exclude='.git' --exclude='build' --exclude='target' --exclude='.jj' . freebsd@localhost:~/simple/"
+    val sync_result = shell(rsync_cmd)
+    if sync_result.exit_code != 0:
+        print "ERROR: Failed to sync project to VM"
+        return ()
+    print "Sync complete"
+    print ""
+
+    # Run FreeBSD bootstrap script
+    print "Running FreeBSD bootstrap in VM..."
+    var vm_opts = ""
+    if not verify:
+        vm_opts = "--skip-verify"
+    if keep_artifacts:
+        vm_opts = vm_opts + " --keep-artifacts"
+
+    val bootstrap_cmd = "ssh -o StrictHostKeyChecking=no -p {port} freebsd@localhost 'cd ~/simple && script/bootstrap-from-scratch-freebsd.sh {vm_opts}'"
+    val bootstrap_result = shell(bootstrap_cmd)
+    if bootstrap_result.exit_code != 0:
+        print "ERROR: FreeBSD VM bootstrap failed"
+        return ()
+
+    print ""
+    print "Retrieving built binary from VM..."
+    shell("mkdir -p bin")
+    val scp_cmd = "scp -P {port} -o StrictHostKeyChecking=no freebsd@localhost:~/simple/bin/simple bin/simple"
+    val scp_result = shell(scp_cmd)
+    if scp_result.exit_code != 0:
+        print "ERROR: Failed to retrieve binary from VM"
+        return ()
+
+    shell("chmod +x bin/simple")
+
+    print ""
+    print "================================================================"
+    print "  FreeBSD Bootstrap Complete"
+    print "================================================================"
+    print ""
+    print "Binary: bin/simple"
+    print "Platform: FreeBSD (built in QEMU VM)"
+    print ""
+
 fn print_help():
     print "Multi-Phase Bootstrap Runner (Seed Compiler Path)"
     print ""
@@ -114,6 +249,9 @@ fn print_help():
     print "  --keep-artifacts   Keep intermediate binaries after build"
     print "  --seed-cpp=PATH    Path to seed_cpp binary (default: seed/build/seed_cpp)"
     print "  --clang=PATH       Path to clang++ (default: clang++)"
+    print "  --qemu-freebsd     Build in FreeBSD QEMU VM (auto-detects VM)"
+    print "  --qemu-vm=PATH     Path to FreeBSD QEMU VM image"
+    print "  --qemu-port=N      SSH port for QEMU VM (default: 10022)"
     print "  --help             Show this help message"
     print ""
     print "Description:"

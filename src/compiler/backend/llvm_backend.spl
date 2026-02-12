@@ -17,9 +17,10 @@
 
 use compiler.mir_data.*
 use compiler.backend.backend_api.*
+use compiler.backend.backend_types.{CompiledModule, CompiledSymbol, CodegenTarget, OptimizationLevel}
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
 use compiler.backend.llvm_ir_builder.{LlvmPass, passes_for_level, LlvmIRBuilder, MirToLlvm, LlvmIRBuilder__create, MirToLlvm__create, MirToLlvm__create_baremetal}
-use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
+use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
 
 # FFI for reading binary files (object code)
 extern fn rt_file_read_bytes(path: text) -> [u8]
@@ -159,19 +160,42 @@ class LlvmBackend:
 
     fn compile_module(module: MirModule):
         """Compile a MIR module using LLVM."""
+        val start_time = time_now_unix_micros()
+
         # Get target configuration (includes CPU selection)
-        val config = self.get_target_config()
+        val config = if self.bare_metal:
+            LlvmTargetConfig__for_target_baremetal(self.target, self.cpu_override)
+        else:
+            LlvmTargetConfig__for_target(self.target, self.cpu_override)
 
         # Translate MIR to LLVM IR
-        var translator = MirToLlvm__create(module.name, self.target, self.cpu_override)
-        val llvm_ir = translator.translate_module(module)
+        var translator = if self.bare_metal:
+            MirToLlvm__create_baremetal(module.name, self.target, self.cpu_override)
+        else:
+            MirToLlvm__create(module.name, self.target, self.cpu_override)
+
+        # Add runtime FFI declarations
+        val runtime_decls = generate_runtime_declarations()
+        var llvm_ir = runtime_decls + "\n\n"
+        llvm_ir = llvm_ir + translator.translate_module(module)
+
+        # Compile IR to object code
+        var object_code: [u8]? = nil
+        if not self.emit_llvm_ir:  # Skip object generation if only IR requested
+            val obj_result = compile_ir_to_object(llvm_ir, config, self.opt_level)
+            if obj_result.is_err():
+                return Err(obj_result.unwrap_err())
+            object_code = Some(obj_result.unwrap())
+
+        val end_time = time_now_unix_micros()
+        val compile_time = (end_time - start_time) / 1000  # Convert to ms
 
         Ok(LlvmCompileResult(
             module_name: module.name,
             llvm_ir: if self.emit_llvm_ir: Some(llvm_ir) else: nil,
             assembly: if self.emit_assembly: Some("; LLVM generated assembly") else: nil,
-            object_code: nil,
-            compile_time_ms: 0
+            object_code: object_code,
+            compile_time_ms: compile_time
         ))
 
 struct LlvmCompileResult:
@@ -186,21 +210,160 @@ impl LlvmCompileResult:
     fn has_object_code() -> bool:
         self.object_code.?
 
+    fn to_compiled_module() -> CompiledModule:
+        """Convert LLVM compile result to standard CompiledModule format."""
+        CompiledModule(
+            name: self.module_name,
+            object_code: self.object_code,
+            assembly: self.assembly,
+            llvm_ir: self.llvm_ir,
+            mir_dump: nil,
+            symbols: [],  # TODO: Extract symbols from object code
+            compile_time_ms: self.compile_time_ms
+        )
+
+# ============================================================================
+# Runtime FFI Declarations
+# ============================================================================
+
+fn generate_runtime_declarations() -> text:
+    """
+    Generate LLVM IR declarations for runtime functions.
+
+    These declarations allow compiled code to call runtime functions
+    for I/O, memory management, strings, collections, etc.
+    """
+    var decls = "; Runtime function declarations\n"
+
+    # File I/O
+    decls = decls + "declare ptr @rt_file_open(ptr, ptr)\n"
+    decls = decls + "declare void @rt_file_close(ptr)\n"
+    decls = decls + "declare ptr @rt_file_read_text(ptr)\n"
+    decls = decls + "declare i1 @rt_file_write(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_file_read_bytes(ptr)\n"
+    decls = decls + "declare i1 @rt_file_write_bytes(ptr, ptr, i64)\n"
+    decls = decls + "declare i1 @rt_file_exists(ptr)\n"
+    decls = decls + "declare i1 @rt_file_delete(ptr)\n"
+    decls = decls + "declare i1 @rt_file_copy(ptr, ptr)\n"
+    decls = decls + "declare i1 @rt_file_move(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_file_size(ptr)\n"
+    decls = decls + "declare i1 @rt_file_lock(ptr)\n"
+    decls = decls + "declare i1 @rt_file_unlock(ptr)\n"
+
+    # Directory operations
+    decls = decls + "declare i1 @rt_dir_create(ptr)\n"
+    decls = decls + "declare i1 @rt_dir_delete(ptr)\n"
+    decls = decls + "declare i1 @rt_dir_exists(ptr)\n"
+    decls = decls + "declare ptr @rt_dir_list(ptr)\n"
+
+    # Process operations
+    decls = decls + "declare ptr @rt_process_spawn(ptr, ptr, i64)\n"
+    decls = decls + "declare i64 @rt_process_wait(ptr)\n"
+    decls = decls + "declare ptr @rt_getenv(ptr)\n"
+    decls = decls + "declare i1 @rt_setenv(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_getpid()\n"
+    decls = decls + "declare void @rt_exit(i64)\n"
+
+    # Memory operations
+    decls = decls + "declare ptr @rt_alloc(i64)\n"
+    decls = decls + "declare ptr @rt_realloc(ptr, i64)\n"
+    decls = decls + "declare void @rt_free(ptr)\n"
+    decls = decls + "declare ptr @rt_memcpy(ptr, ptr, i64)\n"
+    decls = decls + "declare ptr @rt_memset(ptr, i8, i64)\n"
+    decls = decls + "declare i64 @rt_memcmp(ptr, ptr, i64)\n"
+
+    # String operations
+    decls = decls + "declare i64 @rt_strlen(ptr)\n"
+    decls = decls + "declare ptr @rt_strcat(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_substr(ptr, i64, i64)\n"
+    decls = decls + "declare i64 @rt_strfind(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_strreplace(ptr, ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_strsplit(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_strcmp(ptr, ptr)\n"
+
+    # Array/Collection operations
+    decls = decls + "declare ptr @rt_array_new(i64)\n"
+    decls = decls + "declare i64 @rt_array_len(ptr)\n"
+    decls = decls + "declare ptr @rt_array_get(ptr, i64)\n"
+    decls = decls + "declare void @rt_array_set(ptr, i64, ptr)\n"
+    decls = decls + "declare ptr @rt_array_push(ptr, ptr)\n"
+    decls = decls + "declare ptr @rt_array_pop(ptr)\n"
+
+    # Dict/Map operations
+    decls = decls + "declare ptr @rt_dict_new()\n"
+    decls = decls + "declare ptr @rt_dict_get(ptr, ptr)\n"
+    decls = decls + "declare void @rt_dict_set(ptr, ptr, ptr)\n"
+    decls = decls + "declare i1 @rt_dict_contains(ptr, ptr)\n"
+    decls = decls + "declare i64 @rt_dict_len(ptr)\n"
+
+    # I/O operations
+    decls = decls + "declare void @rt_print(ptr)\n"
+    decls = decls + "declare void @rt_println(ptr)\n"
+    decls = decls + "declare ptr @rt_readline()\n"
+
+    # Time operations
+    decls = decls + "declare i64 @rt_time_now_unix()\n"
+    decls = decls + "declare i64 @rt_time_now_unix_micros()\n"
+    decls = decls + "declare void @rt_sleep_ms(i64)\n"
+
+    # Error handling
+    decls = decls + "declare void @rt_panic(ptr)\n"
+    decls = decls + "declare void @abort()\n"
+
+    # Math operations
+    decls = decls + "declare double @rt_sin(double)\n"
+    decls = decls + "declare double @rt_cos(double)\n"
+    decls = decls + "declare double @rt_sqrt(double)\n"
+    decls = decls + "declare double @rt_pow(double, double)\n"
+
+    # LLVM intrinsics
+    decls = decls + "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
+    decls = decls + "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)\n"
+    decls = decls + "declare i64 @llvm.powi.i64.i64(i64, i64)\n"
+
+    decls
+
 # ============================================================================
 # LLVM IR → Object Code Compilation (via llc CLI)
 # ============================================================================
 
+fn find_llc() -> text?:
+    """
+    Find llc binary with fallback chain: llc-18 → llc-17 → llc.
+
+    Returns the command name if found, otherwise nil.
+    """
+    val candidates = ["llc-18", "llc-17", "llc-16", "llc"]
+    for candidate in candidates:
+        val result = shell("command -v {candidate} >/dev/null 2>&1")
+        if result.exit_code == 0:
+            return Some(candidate)
+    nil
+
 fn llc_available() -> bool:
     """Check if llc (LLVM static compiler) is available on PATH."""
-    val result = shell("command -v llc >/dev/null 2>&1")
-    result.exit_code == 0
+    find_llc().?
 
 fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel):
     """Compile LLVM IR text to object code bytes via llc CLI.
 
     Writes IR to a temp file, invokes llc, reads back the object bytes.
     Requires llc to be installed (apt install llvm / brew install llvm).
+
+    Tries llc-18, llc-17, llc-16, llc in order (newer versions preferred).
     """
+    # Find llc binary
+    val llc_cmd = find_llc()
+    if not llc_cmd.?:
+        return Err(
+            "llc not found. Please install LLVM:\n" +
+            "  Ubuntu/Debian: apt install llvm\n" +
+            "  macOS: brew install llvm\n" +
+            "  Arch: pacman -S llvm\n" +
+            "  Windows: choco install llvm"
+        )
+
+    val llc = llc_cmd.unwrap()
     val pid = getpid()
     val ir_path = "/tmp/simple_llvm_{pid}.ll"
     val obj_path = "/tmp/simple_llvm_{pid}.o"
@@ -223,7 +386,7 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     # Build llc command
     val triple = config.triple.to_text()
     val cpu = config.to_cpu_string()
-    val cmd = "llc --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+    val cmd = "{llc} --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
     val result = shell(cmd)
 
     # Clean up IR file
@@ -231,7 +394,7 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
 
     if result.exit_code != 0:
         file_delete(obj_path)
-        return Err("llc failed (exit {result.exit_code}): {result.stdout}")
+        return Err("llc failed (exit {result.exit_code}):\n{result.stdout}\n\nCommand: {cmd}")
 
     # Read object bytes
     val bytes = rt_file_read_bytes(obj_path)
@@ -276,5 +439,5 @@ export MirToLlvm__create, MirToLlvm__create_baremetal
 
 # This module's exports
 export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, llc_available
+export compile_ir_to_object, llc_available, find_llc, generate_runtime_declarations
 export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__compatibility_build, LlvmBackend__default_backend
