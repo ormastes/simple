@@ -173,6 +173,11 @@ bool     rt_dir_remove_all(const char* path);
 int64_t  rt_file_lock(const char* path, int64_t timeout_secs);
 bool     rt_file_unlock(int64_t handle);
 
+/* ===== Offset-based File I/O ===== */
+
+const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size);
+int64_t     rt_file_write_text_at(const char* path, int64_t offset, const char* data);
+
 /* ===== High-Resolution Time ===== */
 
 int64_t  rt_time_now_nanos(void);   /* Nanosecond precision monotonic time */
