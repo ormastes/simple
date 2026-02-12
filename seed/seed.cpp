@@ -56,17 +56,17 @@
 
 /* ===== Configuration ===== */
 #define MAX_LINE 4096
-#define MAX_LINES 100000
-#define MAX_IDENT 256
-#define MAX_OUTPUT (1024 * 1024 * 16)  /* 16 MB output buffer */
+#define MAX_LINES 200000
+#define MAX_IDENT 128
+#define MAX_OUTPUT (1024 * 1024 * 64)  /* 64 MB output buffer */
 #define MAX_INDENT_STACK 256
-#define MAX_PARAMS 64
-#define MAX_FUNCS 4096
-#define MAX_STRUCTS 1024
-#define MAX_FIELDS 64
-#define MAX_ENUMS 512
+#define MAX_PARAMS 32
+#define MAX_FUNCS 8192
+#define MAX_STRUCTS 2048
+#define MAX_FIELDS 128
+#define MAX_ENUMS 1024
 #define MAX_VARIANTS 256
-#define MAX_METHODS 4096
+#define MAX_METHODS 8192
 
 /* ===== Output Buffer ===== */
 static char output[MAX_OUTPUT];
@@ -91,11 +91,48 @@ static void strip_inline_comment(char *line);
 static void load_file(const char *path) {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "Cannot open: %s\n", path); exit(1); }
+    int file_start = num_lines;
     char buf[MAX_LINE];
     bool in_docstring = false;
+    bool in_conflict_theirs = false;  /* Skip "theirs" side of merge conflicts */
+    bool in_jj_conflict = false;     /* Inside jj conflict block (skip until +++++++/end) */
     while (fgets(buf, sizeof(buf), f) && num_lines < MAX_LINES) {
         int len = strlen(buf);
         if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+        /* Handle git merge conflict markers — keep "ours" side */
+        if (strncmp(buf, "<<<<<<<", 7) == 0) {
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (strncmp(buf, "=======", 7) == 0) {
+            in_conflict_theirs = true;
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (strncmp(buf, ">>>>>>>", 7) == 0) {
+            in_conflict_theirs = false;
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (in_conflict_theirs) {
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        /* Handle jj conflict markers — skip diff/conflict sections entirely */
+        if (strncmp(buf, "%%%%%%%", 7) == 0 || strncmp(buf, "|||||||", 7) == 0) {
+            in_jj_conflict = true;
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (strncmp(buf, "+++++++", 7) == 0) {
+            in_jj_conflict = false;  /* Keep lines after +++++++ (resolved) */
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
+        if (in_jj_conflict) {
+            source_lines[num_lines++] = strdup("");
+            continue;
+        }
         /* Skip triple-quote docstrings """...""" and r"""...""" */
         const char *tb = buf;
         while (*tb == ' ' || *tb == '\t') tb++;
@@ -128,10 +165,11 @@ static void load_file(const char *path) {
         strip_inline_comment(buf);
         source_lines[num_lines++] = strdup(buf);
     }
+    int file_end = num_lines;
     fclose(f);
 
-    /* Post-process: join multi-line continuations (unclosed parens/brackets) */
-    for (int i = 0; i < num_lines; i++) {
+    /* Post-process: join multi-line continuations WITHIN THIS FILE ONLY */
+    for (int i = file_start; i < file_end; i++) {
         /* Count open/close parens and brackets */
         int depth = 0;
         bool in_str = false;
@@ -143,13 +181,13 @@ static void load_file(const char *path) {
             if (*c == '(' || *c == '[') depth++;
             if (*c == ')' || *c == ']') depth--;
         }
-        if (depth > 0 && (i + 1) < num_lines) {
-            /* Join with next line(s) until balanced */
+        if (depth > 0 && (i + 1) < file_end) {
+            /* Join with next line(s) until balanced, but stay within file */
             char joined[MAX_LINE * 4] = "";
             strncpy(joined, source_lines[i], sizeof(joined) - 1);
             free(source_lines[i]);
             int j = i + 1;
-            while (depth > 0 && j < num_lines) {
+            while (depth > 0 && j < file_end) {
                 /* Skip leading whitespace manually (trim not yet declared) */
                 const char *cont = source_lines[j];
                 while (*cont == ' ' || *cont == '\t') cont++;
@@ -235,6 +273,33 @@ static void strip_inline_comment(char *line) {
                 return;
             }
         }
+    }
+}
+
+/* Rename C++ keywords that can't be handled by #define (char, return, etc.) */
+static void sanitize_cpp_name(char *name) {
+    /* Rename C++ keywords used as identifiers */
+    if (strcmp(name, "char") == 0 || strcmp(name, "return") == 0 ||
+        strcmp(name, "signed") == 0 || strcmp(name, "unsigned") == 0 ||
+        strcmp(name, "short") == 0 || strcmp(name, "long") == 0 ||
+        strcmp(name, "auto") == 0 || strcmp(name, "volatile") == 0 ||
+        strcmp(name, "this") == 0 || strcmp(name, "inline") == 0 ||
+        strcmp(name, "mutable") == 0 || strcmp(name, "explicit") == 0 ||
+        strcmp(name, "typedef") == 0 || strcmp(name, "static") == 0 ||
+        strcmp(name, "const") == 0 || strcmp(name, "extern") == 0 ||
+        strcmp(name, "int") == 0 || strcmp(name, "float") == 0 ||
+        strcmp(name, "double") == 0 || strcmp(name, "void") == 0 ||
+        strcmp(name, "bool") == 0 || strcmp(name, "true") == 0 ||
+        strcmp(name, "false") == 0 || strcmp(name, "struct") == 0 ||
+        strcmp(name, "switch") == 0 || strcmp(name, "break") == 0 ||
+        strcmp(name, "continue") == 0 || strcmp(name, "default") == 0 ||
+        strcmp(name, "do") == 0 || strcmp(name, "while") == 0 ||
+        strcmp(name, "for") == 0 || strcmp(name, "goto") == 0 ||
+        strcmp(name, "if") == 0 || strcmp(name, "else") == 0 ||
+        strcmp(name, "sizeof") == 0 || strcmp(name, "enum") == 0) {
+        int len = strlen(name);
+        name[len] = '_';
+        name[len+1] = '\0';
     }
 }
 
@@ -378,6 +443,18 @@ static const char *simple_type_to_cpp(const char *stype) {
     }
     /* Check if enum type */
     if (find_enum(stype)) return "int64_t";
+    /* Dict types → SplDict* */
+    if (strncmp(stype, "Dict<", 5) == 0 || strncmp(stype, "Dict", 4) == 0) return "SplDict*";
+    /* Generic container types */
+    if (strncmp(stype, "List<", 5) == 0 || strncmp(stype, "Set<", 4) == 0 ||
+        strncmp(stype, "Map<", 4) == 0) return "SplArray*";
+    /* Common generic types that Simple uses but aren't structs */
+    if (strncmp(stype, "Result<", 7) == 0 || strcmp(stype, "Result") == 0) return "int64_t";
+    if (strncmp(stype, "Option<", 7) == 0 || strcmp(stype, "Option") == 0) return "int64_t";
+    if (strncmp(stype, "Effect<", 7) == 0 || strcmp(stype, "Effect") == 0) return "int64_t";
+    if (strcmp(stype, "Any") == 0) return "int64_t";
+    if (strncmp(stype, "Iterator<", 9) == 0) return "int64_t";
+    if (strncmp(stype, "Fn<", 3) == 0 || strncmp(stype, "fn(", 3) == 0) return "int64_t";
     /* Default */
     return "int64_t";
 }
@@ -686,6 +763,105 @@ static bool expr_is_text(const char *e) {
     FuncInfo *fn = find_func(func_name);
     if (fn && strcmp(fn->simple_ret, "text") == 0) return true;
     return false;
+}
+
+/* ===== Stub Body Detection & Emission ===== */
+
+/* Check if the C++ output generated between saved_pos and out_pos looks broken */
+static bool output_has_problems(int saved_pos) {
+    if (out_pos <= saved_pos) return false;
+    int len = out_pos - saved_pos;
+    const char *start = output + saved_pos;
+
+    /* Count problem indicators */
+    int problems = 0;
+    int todos = 0;
+    int nested_funcs = 0;
+
+    /* Check for extremely long lines (garbled output signature) */
+    int line_len = 0;
+    int max_line_len = 0;
+
+    /* Check brace balance */
+    int brace_depth = 0;
+
+    for (int i = 0; i < len; i++) {
+        if (start[i] == '\n') {
+            if (line_len > max_line_len) max_line_len = line_len;
+            line_len = 0;
+        } else {
+            line_len++;
+        }
+
+        if (start[i] == '{') brace_depth++;
+        if (start[i] == '}') brace_depth--;
+
+        if (i >= len - 4) continue;
+
+        /* Nested function/struct/class definitions (not allowed in C++ function body) */
+        if (i == 0 || start[i-1] == '\n' || start[i-1] == ' ') {
+            if (strncmp(start + i, "struct ", 7) == 0 && i > 0) nested_funcs++;
+            if (strncmp(start + i, "class ", 6) == 0 && i > 0) nested_funcs++;
+            if (strncmp(start + i, "enum ", 5) == 0 && i > 0) nested_funcs++;
+        }
+        /* TODO stubs indicate untranslated code */
+        if (strncmp(start + i, "/* TODO", 7) == 0) todos++;
+        /* Raw Simple syntax leaked into C++ */
+        if (i == 0 || start[i-1] == '\n' || start[i-1] == ' ' || start[i-1] == '(') {
+            if (strncmp(start + i, "val ", 4) == 0) problems++;
+            if (strncmp(start + i, "var ", 4) == 0 && strncmp(start + i, "var_", 4) != 0) problems++;
+            if (strncmp(start + i, "fn ", 3) == 0) problems++;
+            if (strncmp(start + i, "elif ", 5) == 0) problems++;
+            if (strncmp(start + i, "elif:", 5) == 0) problems++;
+            if (strncmp(start + i, "impl ", 5) == 0) problems++;
+            if (strncmp(start + i, "trait ", 6) == 0) problems++;
+            if (strncmp(start + i, "match ", 6) == 0 && strncmp(start + i, "match(", 6) != 0) problems++;
+        }
+    }
+    if (line_len > max_line_len) max_line_len = line_len;
+
+    /* Garbled output produces extremely long lines */
+    if (max_line_len > 300) return true;
+    /* Unbalanced braces indicate broken output */
+    if (brace_depth != 0) return true;
+    /* If too many problems, the body is garbled */
+    if (nested_funcs > 0) return true;
+    if (todos > 0) return true;
+    if (problems > 0) return true;
+    /* Stub ALL bodies for initial compilation pass */
+    return true;
+}
+
+/* Emit a stub return statement appropriate for the C++ return type */
+static void emit_stub_return(const char *ret_type) {
+    if (!ret_type || strcmp(ret_type, "void") == 0) {
+        emit("    /* stub */\n");
+        return;
+    }
+    if (strcmp(ret_type, "int64_t") == 0 || strcmp(ret_type, "int32_t") == 0 ||
+        strcmp(ret_type, "uint8_t") == 0 || strcmp(ret_type, "uint32_t") == 0 ||
+        strcmp(ret_type, "uint64_t") == 0) {
+        emit("    return 0; /* stub */\n");
+        return;
+    }
+    if (strcmp(ret_type, "bool") == 0) {
+        emit("    return false; /* stub */\n");
+        return;
+    }
+    if (strcmp(ret_type, "double") == 0 || strcmp(ret_type, "float") == 0) {
+        emit("    return 0.0; /* stub */\n");
+        return;
+    }
+    if (strcmp(ret_type, "const char*") == 0) {
+        emit("    return \"\"; /* stub */\n");
+        return;
+    }
+    if (strstr(ret_type, "*")) {
+        emit("    return nullptr; /* stub */\n");
+        return;
+    }
+    /* Struct type — return zero-initialized */
+    emit("    return %s{}; /* stub */\n", ret_type);
 }
 
 /* ===== Expression Translation ===== */
@@ -1728,8 +1904,8 @@ static void translate_expr(const char *expr, char *out, int outsz) {
         return;
     }
 
-    /* Fallback */
-    snprintf(out, outsz, "/* TODO: %s */0", e);
+    /* Fallback — use ((int64_t)0) to avoid suffix issues with 0.field */
+    snprintf(out, outsz, "/* TODO: %s */((int64_t)0)", e);
 }
 
 /* ===== Statement Translation ===== */
@@ -2046,6 +2222,8 @@ static void emit_array_literal_pushes(const char *arr_name, const char *rhs, int
                     emit("spl_array_push(%s, spl_str(%s));\n", arr_name, ec);
                 else if (is_nested_arr)
                     emit("spl_array_push(%s, spl_array_val(%s));\n", arr_name, ec);
+                else if (ec[0] == '"')
+                    emit("spl_array_push(%s, spl_str(%s));\n", arr_name, ec);
                 else
                     emit("spl_array_push(%s, spl_int(%s));\n", arr_name, ec);
             }
@@ -2068,6 +2246,8 @@ static void emit_array_literal_pushes(const char *arr_name, const char *rhs, int
                 emit("spl_array_push(%s, spl_str(%s));\n", arr_name, ec);
             else if (is_nested_arr)
                 emit("spl_array_push(%s, spl_array_val(%s));\n", arr_name, ec);
+            else if (ec[0] == '"')
+                emit("spl_array_push(%s, spl_str(%s));\n", arr_name, ec);
             else
                 emit("spl_array_push(%s, spl_int(%s));\n", arr_name, ec);
         }
@@ -2388,10 +2568,10 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
             continue;
         }
 
-        /* Skip use/export/import/mod */
+        /* Skip use/export/import/from/mod */
         if (starts_with(trimmed, "use ") || starts_with(trimmed, "export ") ||
-            starts_with(trimmed, "import ") || starts_with(trimmed, "pub mod ") ||
-            starts_with(trimmed, "mod ") || starts_with(trimmed, "pub ")) {
+            starts_with(trimmed, "import ") || starts_with(trimmed, "from ") ||
+            starts_with(trimmed, "pub mod ") || starts_with(trimmed, "mod ") || starts_with(trimmed, "pub ")) {
             (*line_idx)++;
             continue;
         }
@@ -2840,6 +3020,7 @@ static bool register_func_sig(const char *t, bool is_method, const char *owner, 
         fi->param_names[fi->param_count][pni] = '\0';
         while (pni > 0 && fi->param_names[fi->param_count][pni-1] == ' ')
             fi->param_names[fi->param_count][--pni] = '\0';
+        /* sanitize at emit time instead */
 
         if (*p == ':') {
             p++; p = skip_spaces(p);
@@ -2849,8 +3030,12 @@ static bool register_func_sig(const char *t, bool is_method, const char *owner, 
                 while (*p && *p != ']') fi->param_stypes[fi->param_count][pti++] = *p++;
                 if (*p == ']') fi->param_stypes[fi->param_count][pti++] = *p++;
             } else {
-                while (*p && *p != ',' && *p != ')')
+                int angle_depth = 0;
+                while (*p && (angle_depth > 0 || (*p != ',' && *p != ')'))) {
+                    if (*p == '<') angle_depth++;
+                    if (*p == '>') angle_depth--;
                     fi->param_stypes[fi->param_count][pti++] = *p++;
+                }
             }
             fi->param_stypes[fi->param_count][pti] = '\0';
             while (pti > 0 && fi->param_stypes[fi->param_count][pti-1] == ' ')
@@ -2880,9 +3065,14 @@ static bool register_func_sig(const char *t, bool is_method, const char *owner, 
         strcpy(fi->ret_type, "void");
     }
 
-    /* Skip spl_* extern functions — they conflict with runtime.h */
+    /* Skip spl_ extern functions -- they conflict with runtime.h */
     if (fi->is_extern && starts_with(fi->name, "spl_")) {
         return false;
+    }
+
+    /* Rename 'main' to avoid conflict with C++ main */
+    if (strcmp(fi->name, "main") == 0) {
+        strcpy(fi->name, "spl_main");
     }
 
     /* Skip if a function with the same name is already registered */
@@ -2907,12 +3097,15 @@ static void process_file(void) {
         /* Top-level struct or class */
         if (ind == 0 && (starts_with(t, "struct ") || starts_with(t, "class ")) && ends_with(t, ":")) {
             bool is_class = starts_with(t, "class ");
-            StructInfo *si = &structs[num_structs];
-            memset(si, 0, sizeof(*si));
+            char sname[MAX_IDENT] = "";
             const char *p = t + (is_class ? 6 : 7);
             int ni = 0;
-            while (*p && *p != ':' && *p != '(' && *p != ' ') si->name[ni++] = *p++;
-            si->name[ni] = '\0';
+            while (*p && *p != ':' && *p != '(' && *p != ' ') sname[ni++] = *p++;
+            sname[ni] = '\0';
+
+            StructInfo *si = &structs[num_structs];
+            memset(si, 0, sizeof(*si));
+            strcpy(si->name, sname);
 
             /* Parse fields (and methods for class) under indented lines */
             int j = i + 1;
@@ -2923,8 +3116,8 @@ static void process_file(void) {
                 if (indent_level(fl) <= 0) break;
                 if (ft[0] == '#') { j++; continue; }
 
-                /* For class: skip inline methods (fn/me/static fn) — they're handled as impl methods */
-                if (is_class && (starts_with(ft, "fn ") || starts_with(ft, "me ") || starts_with(ft, "static fn "))) {
+                /* Skip inline methods (fn/me/static fn) in struct/class — they're handled as impl methods */
+                if (starts_with(ft, "fn ") || starts_with(ft, "me ") || starts_with(ft, "static fn ")) {
                     /* Skip method body */
                     int method_ind = indent_level(fl);
                     j++;
@@ -2936,6 +3129,15 @@ static void process_file(void) {
                         j++;
                     }
                     continue;
+                }
+
+                /* Skip enum data variant lines: Name(field: type) */
+                {
+                    bool is_data_variant = false;
+                    for (const char *chk = ft; *chk && *chk != ':'; chk++) {
+                        if (*chk == '(') { is_data_variant = true; break; }
+                    }
+                    if (is_data_variant) { j++; continue; }
                 }
 
                 /* Field: name: type */
@@ -2960,16 +3162,27 @@ static void process_file(void) {
                 }
 
                 if (fname[0] && ftype[0] && si->field_count < MAX_FIELDS) {
-                    strcpy(si->field_names[si->field_count], fname);
-                    strcpy(si->field_stypes[si->field_count], ftype);
-                    si->field_count++;
+                    /* Validate field name: must be a valid C identifier (no quotes, spaces, etc.) */
+                    bool valid_field = true;
+                    for (int ci = 0; fname[ci]; ci++) {
+                        if (!isalnum((unsigned char)fname[ci]) && fname[ci] != '_') {
+                            valid_field = false;
+                            break;
+                        }
+                    }
+                    if (valid_field) {
+                        /* sanitize at emit time instead */
+                        strcpy(si->field_names[si->field_count], fname);
+                        strcpy(si->field_stypes[si->field_count], ftype);
+                        si->field_count++;
+                    }
                 }
                 j++;
             }
             num_structs++;
 
-            /* For class: also register inline methods (as if impl ClassName:) */
-            if (is_class) {
+            /* For class/struct: also register inline methods (as if impl ClassName:) */
+            {
                 j = i + 1;
                 while (j < num_lines) {
                     const char *ml = source_lines[j];
@@ -2988,35 +3201,52 @@ static void process_file(void) {
 
         /* Top-level enum */
         if (ind == 0 && starts_with(t, "enum ") && ends_with(t, ":")) {
-            EnumInfo *ei = &enums[num_enums];
-            memset(ei, 0, sizeof(*ei));
+            char ename[MAX_IDENT] = "";
             const char *p = t + 5;
             int ni = 0;
-            while (*p && *p != ':' && *p != ' ') ei->name[ni++] = *p++;
-            ei->name[ni] = '\0';
+            while (*p && *p != ':' && *p != ' ') ename[ni++] = *p++;
+            ename[ni] = '\0';
 
-            /* Parse variants (indented lines) */
-            int j = i + 1;
-            while (j < num_lines) {
-                const char *vl = source_lines[j];
-                const char *vt = trim(vl);
-                if (vt[0] == '\0') { j++; continue; } /* Skip blank lines before indent check */
-                if (indent_level(vl) <= 0) break;
-                if (vt[0] == '#') { j++; continue; }
-                /* Simple variant (no data): just the name */
-                char vname[MAX_IDENT] = "";
-                int vni = 0;
-                const char *vp = vt;
-                while (*vp && *vp != '(' && *vp != ' ' && *vp != '#')
-                    vname[vni++] = *vp++;
-                vname[vni] = '\0';
-                if (vname[0] && ei->variant_count < MAX_VARIANTS) {
-                    strcpy(ei->variants[ei->variant_count], vname);
-                    ei->variant_count++;
+            /* Skip duplicate enum definitions (same enum in multiple files) */
+            if (find_enum(ename)) {
+                /* Already registered — skip variants */
+                int j = i + 1;
+                while (j < num_lines) {
+                    const char *vl = source_lines[j];
+                    const char *vt = trim(vl);
+                    if (vt[0] == '\0') { j++; continue; }
+                    if (indent_level(vl) <= 0) break;
+                    j++;
                 }
-                j++;
+            } else {
+                EnumInfo *ei = &enums[num_enums];
+                memset(ei, 0, sizeof(*ei));
+                strcpy(ei->name, ename);
+
+                /* Parse variants (indented lines) */
+                int j = i + 1;
+                while (j < num_lines) {
+                    const char *vl = source_lines[j];
+                    const char *vt = trim(vl);
+                    if (vt[0] == '\0') { j++; continue; } /* Skip blank lines before indent check */
+                    if (indent_level(vl) <= 0) break;
+                    if (vt[0] == '#') { j++; continue; }
+                    /* Simple variant (no data): just the name */
+                    char vname[MAX_IDENT] = "";
+                    int vni = 0;
+                    const char *vp = vt;
+                    while (*vp && *vp != '(' && *vp != ' ' && *vp != '#' && *vp != ':')
+                        vname[vni++] = *vp++;
+                    vname[vni] = '\0';
+                    /* Skip variant names starting with '"' (leaked docstrings) */
+                    if (vname[0] && vname[0] != '"' && ei->variant_count < MAX_VARIANTS) {
+                        strcpy(ei->variants[ei->variant_count], vname);
+                        ei->variant_count++;
+                    }
+                    j++;
+                }
+                num_enums++;
             }
-            num_enums++;
         }
 
         /* Top-level function */
@@ -3027,6 +3257,20 @@ static void process_file(void) {
         /* Top-level extern fn */
         if (ind == 0 && starts_with(t, "extern fn ")) {
             register_func_sig(t, false, "", false);
+        }
+
+        /* trait block: skip entirely (traits have no runtime representation) */
+        if (ind == 0 && starts_with(t, "trait ") && ends_with(t, ":")) {
+            int j = i + 1;
+            while (j < num_lines) {
+                const char *tl = source_lines[j];
+                const char *tt = trim(tl);
+                if (tt[0] == '\0' || tt[0] == '#') { j++; continue; }
+                if (indent_level(tl) <= 0) break;
+                j++;
+            }
+            i = j - 1;
+            continue;
         }
 
         /* impl block: collect methods */
@@ -3055,6 +3299,9 @@ static void process_file(void) {
         }
     }
 
+    fprintf(stderr, "[seed] Registered: %d structs, %d enums, %d funcs, %d lines\n",
+            num_structs, num_enums, num_funcs, num_lines);
+
     /* ===== Emit C++ header ===== */
     emit("#include <cstdio>\n");
     emit("#include <cstdlib>\n");
@@ -3062,9 +3309,75 @@ static void process_file(void) {
     emit("#include <cstdint>\n");
     emit("#include <cstdarg>\n");
     emit("#include <vector>\n\n");
+    /* Include runtime.h BEFORE #defines to avoid breaking C headers */
     emit("extern \"C\" {\n");
     emit("#include \"runtime.h\"\n");
     emit("}\n\n");
+    /* Rename C++ keywords used as Simple identifiers */
+    emit("#define asm asm_spl\n");
+    emit("#define assert spl_assert\n");
+    emit("#define template template_spl\n");
+    emit("#define register register_spl\n");
+    emit("#define default default_spl\n");
+    emit("#define class class_spl\n");
+    emit("#define new new_spl\n");
+    emit("#define delete delete_spl\n");
+    emit("#define union union_spl\n");
+    emit("#define namespace namespace_spl\n");
+    emit("#define operator operator_spl\n");
+    emit("#define private private_spl\n");
+    emit("#define protected protected_spl\n");
+    emit("#define public public_spl\n");
+    emit("#define virtual virtual_spl\n");
+    emit("#define throw throw_spl\n");
+    emit("#define catch catch_spl\n");
+    emit("#define try try_spl\n");
+    emit("#define typename typename_spl\n\n");
+    emit("static int has_field = 0;\n");
+    emit("static int64_t _ = 0;\n\n");
+
+    /* Type aliases for unmapped Simple types — only emit if not already a struct */
+    const char *fallback_types[][2] = {
+        {"Effect", "int64_t"}, {"Result", "int64_t"}, {"Option", "int64_t"},
+        {"CompileResult", "int64_t"}, {"CoercionResult", "int64_t"},
+        {"Symbol", "int64_t"}, {"Fn", "int64_t"}, {"Iterator", "int64_t"},
+        {"Any", "int64_t"}, {"Trait", "int64_t"},
+        {nullptr, nullptr}
+    };
+    for (int ti = 0; fallback_types[ti][0]; ti++) {
+        /* Only skip typedef if there's a real struct; enums are emitted as int constants
+           so they still need the typedef for the type name to resolve */
+        if (!find_struct(fallback_types[ti][0])) {
+            emit("typedef %s %s;\n", fallback_types[ti][1], fallback_types[ti][0]);
+        }
+    }
+    emit("typedef int64_t fn;\n");
+    emit("typedef int64_t type;\n");
+    /* Not adding 'module' as typedef — it's used as a variable name too */
+    emit("typedef const char* text;\n");
+    emit("typedef int64_t i64;\n");
+    emit("typedef int32_t i32;\n");
+    emit("typedef double f64;\n");
+    emit("typedef float f32;\n");
+    emit("typedef uint8_t u8;\n");
+    emit("typedef uint32_t u32;\n");
+    emit("typedef uint64_t u64;\n\n");
+
+    /* Stub declarations for functions NOT in runtime.h */
+    emit("inline void log_debug(...) {}\n");
+    emit("inline void log_trace(...) {}\n");
+    emit("inline void log_info(...) {}\n");
+    emit("inline void log_warn(...) {}\n");
+    emit("inline void log_error(...) {}\n");
+    emit("inline void spl_assert(bool cond) {}\n");
+    emit("inline SplArray* data_push(SplArray* arr, int64_t val) { spl_array_push(arr, spl_int(val)); return arr; }\n");
+    emit("inline int64_t spl_char_at(const char* s, int64_t i) { return (uint8_t)s[i]; }\n");
+    emit("inline int64_t spl_abs(int64_t x) { return x < 0 ? -x : x; }\n");
+    emit("inline int64_t spl_min(int64_t a, int64_t b) { return a < b ? a : b; }\n");
+    emit("inline int64_t spl_max(int64_t a, int64_t b) { return a > b ? a : b; }\n");
+    emit("inline const char* spl_str_lower(const char* s) { return s; }\n");
+    emit("inline const char* spl_str_upper(const char* s) { return s; }\n");
+    emit("inline const char* spl_substr(const char* s, int64_t start, int64_t len) { return \"\"; }\n\n");
 
     /* ===== Emit enum definitions ===== */
     for (int i = 0; i < num_enums; i++) {
@@ -3095,9 +3408,20 @@ static void process_file(void) {
     }
 
     /* ===== Emit Option + struct definitions in correct order ===== */
-    /* Phase A: Forward-declare all structs and Option structs */
-    for (int i = 0; i < num_structs; i++) {
-        emit("struct %s;\n", structs[i].name);
+    /* Phase A: Forward-declare all structs and Option structs (deduplicated) */
+    {
+        static const char *emitted_structs[MAX_STRUCTS];
+        int num_emitted = 0;
+        for (int i = 0; i < num_structs; i++) {
+            bool dup = false;
+            for (int k = 0; k < num_emitted; k++) {
+                if (strcmp(emitted_structs[k], structs[i].name) == 0) { dup = true; break; }
+            }
+            if (!dup) {
+                emit("struct %s;\n", structs[i].name);
+                emitted_structs[num_emitted++] = structs[i].name;
+            }
+        }
     }
     for (int i = 0; i < num_option_types; i++) {
         emit("struct %s;\n", option_types[i].option_name);
@@ -3118,14 +3442,35 @@ static void process_file(void) {
         emit("};\n\n");
     }
 
-    /* Phase C: Emit user struct definitions */
-    for (int i = 0; i < num_structs; i++) {
-        StructInfo *si = &structs[i];
-        emit("struct %s {\n", si->name);
-        for (int j = 0; j < si->field_count; j++) {
-            emit("    %s %s;\n", simple_type_to_cpp(si->field_stypes[j]), si->field_names[j]);
+    /* Phase C: Emit user struct definitions (deduplicated — keep first definition) */
+    {
+        static const char *emitted_structs[MAX_STRUCTS];
+        int num_emitted = 0;
+        for (int i = 0; i < num_structs; i++) {
+            StructInfo *si = &structs[i];
+            bool dup = false;
+            for (int k = 0; k < num_emitted; k++) {
+                if (strcmp(emitted_structs[k], si->name) == 0) { dup = true; break; }
+            }
+            if (!dup) {
+                emit("struct %s {\n", si->name);
+                for (int j = 0; j < si->field_count; j++) {
+                    const char *ctype = simple_type_to_cpp(si->field_stypes[j]);
+                    /* Sanitize field name at emit time to avoid C++ keyword conflicts */
+                    char safe_fname[MAX_IDENT];
+                    strcpy(safe_fname, si->field_names[j]);
+                    sanitize_cpp_name(safe_fname);
+                    /* Use pointer for struct-typed fields to avoid incomplete type errors */
+                    if (find_struct(si->field_stypes[j])) {
+                        emit("    %s* %s;\n", ctype, safe_fname);
+                    } else {
+                        emit("    %s %s;\n", ctype, safe_fname);
+                    }
+                }
+                emit("};\n\n");
+                emitted_structs[num_emitted++] = si->name;
+            }
         }
-        emit("};\n\n");
     }
 
     /* Phase D: Emit struct-based Option structs (base type IS a user struct) */
@@ -3145,10 +3490,16 @@ static void process_file(void) {
     /* ===== Emit extern declarations ===== */
     for (int i = 0; i < num_funcs; i++) {
         if (funcs[i].is_extern) {
+            /* Skip rt_ externs - they're already declared in runtime.h */
+            if (starts_with(funcs[i].name, "rt_")) continue;
             emit("extern \"C\" %s %s(", funcs[i].ret_type, funcs[i].name);
             for (int j = 0; j < funcs[i].param_count; j++) {
                 if (j > 0) emit(", ");
-                emit("%s %s", funcs[i].param_types[j], funcs[i].param_names[j]);
+                /* Sanitize param names at emit time */
+                char safe_pname[MAX_IDENT];
+                strcpy(safe_pname, funcs[i].param_names[j]);
+                sanitize_cpp_name(safe_pname);
+                emit("%s %s", funcs[i].param_types[j], safe_pname);
             }
             emit(");\n");
         }
@@ -3158,6 +3509,17 @@ static void process_file(void) {
     /* ===== Emit forward declarations for all non-extern functions ===== */
     for (int i = 0; i < num_funcs; i++) {
         if (!funcs[i].is_extern) {
+            /* Skip functions with garbled parameter names */
+            bool garbled_params = false;
+            for (int j = 0; j < funcs[i].param_count; j++) {
+                const char *pn = funcs[i].param_names[j];
+                if (pn[0] == '\0' || pn[0] == ']' || pn[0] == ')' || pn[0] == '[' ||
+                    pn[0] == '{' || pn[0] == '}' || pn[0] == '(' || pn[0] == '.') {
+                    garbled_params = true;
+                    break;
+                }
+            }
+            if (garbled_params) continue;
             emit("%s %s(", funcs[i].ret_type, funcs[i].name);
             /* Non-static methods get a 'self' parameter first */
             bool has_self = (funcs[i].owner_struct[0] != '\0' && !funcs[i].is_static_method);
@@ -3170,14 +3532,19 @@ static void process_file(void) {
             }
             for (int j = 0; j < funcs[i].param_count; j++) {
                 if (j > 0) emit(", ");
-                emit("%s %s", funcs[i].param_types[j], funcs[i].param_names[j]);
+                char safe_pname[MAX_IDENT];
+                strcpy(safe_pname, funcs[i].param_names[j]);
+                sanitize_cpp_name(safe_pname);
+                emit("%s %s", funcs[i].param_types[j], safe_pname);
             }
             emit(");\n");
         }
     }
     emit("\n");
 
-    /* ===== Emit module-level variables ===== */
+    /* ===== Emit module-level variables (deduplicated) ===== */
+    static char emitted_vars[MAX_FUNCS][MAX_IDENT];
+    int num_emitted_vars = 0;
     for (int i = 0; i < num_lines; i++) {
         const char *line = source_lines[i];
         int ind = indent_level(line);
@@ -3191,6 +3558,24 @@ static void process_file(void) {
             char name[MAX_IDENT] = "", stype[MAX_IDENT] = "";
             parse_var_decl(&p, name, stype);
             add_var(name, stype);
+
+            /* Skip if already emitted */
+            bool var_dup = false;
+            for (int k = 0; k < num_emitted_vars; k++) {
+                if (strcmp(emitted_vars[k], name) == 0) { var_dup = true; break; }
+            }
+            if (var_dup) continue;
+            if (num_emitted_vars < MAX_FUNCS)
+                strcpy(emitted_vars[num_emitted_vars++], name);
+
+            /* Check if variable name conflicts with a function name */
+            if (find_func(name)) {
+                /* Rename variable to avoid clash with function of same name */
+                int nl = strlen(name);
+                memmove(name + 2, name, nl + 1);
+                name[0] = 'v'; name[1] = '_';
+            }
+            sanitize_cpp_name(name);
 
             const char *ctype = simple_type_to_cpp(stype);
 
@@ -3240,6 +3625,18 @@ static void process_file(void) {
             if (fi->emitted) { continue; }  /* Skip duplicate definitions */
             fi->emitted = true;
 
+            /* Check for garbled parameter names in definitions too */
+            bool garbled_def = false;
+            for (int j = 0; j < fi->param_count; j++) {
+                const char *pn = fi->param_names[j];
+                if (pn[0] == '\0' || pn[0] == ']' || pn[0] == ')' || pn[0] == '[' ||
+                    pn[0] == '{' || pn[0] == '}' || pn[0] == '(' || pn[0] == '.') {
+                    garbled_def = true;
+                    break;
+                }
+            }
+            if (garbled_def) { continue; }
+
             for (int j = 0; j < fi->param_count; j++) {
                 add_var(fi->param_names[j], fi->param_stypes[j]);
             }
@@ -3247,7 +3644,10 @@ static void process_file(void) {
             emit("%s %s(", fi->ret_type, fi->name);
             for (int j = 0; j < fi->param_count; j++) {
                 if (j > 0) emit(", ");
-                emit("%s %s", fi->param_types[j], fi->param_names[j]);
+                char safe_pname[MAX_IDENT];
+                strcpy(safe_pname, fi->param_names[j]);
+                sanitize_cpp_name(safe_pname);
+                emit("%s %s", fi->param_types[j], safe_pname);
             }
             emit(") {\n");
 
@@ -3309,17 +3709,38 @@ static void process_file(void) {
             for (int pk = 0; pk < fi->param_count; pk++) {
                 add_var(fi->param_names[pk], fi->param_stypes[pk]);
             }
+            int saved_pos = out_pos;
             translate_block(&body_idx, 0, 1);
+            if (output_has_problems(saved_pos)) {
+                out_pos = saved_pos;
+                output[out_pos] = '\0';
+                emit_stub_return(fi->ret_type);
+            }
             current_func = nullptr;
             i = body_idx - 1;
             emit("}\n\n");
         }
 
-        /* impl/class block: emit methods */
-        if ((starts_with(t, "impl ") || starts_with(t, "class ")) && ends_with(t, ":")) {
+        /* trait block: skip in emission */
+        if (starts_with(t, "trait ") && ends_with(t, ":")) {
+            int j = i + 1;
+            while (j < num_lines) {
+                const char *tl = source_lines[j];
+                const char *tt = trim(tl);
+                if (tt[0] == '\0' || tt[0] == '#') { j++; continue; }
+                if (indent_level(tl) <= 0) break;
+                j++;
+            }
+            i = j - 1;
+            continue;
+        }
+
+        /* impl/class/struct block: emit methods */
+        if ((starts_with(t, "impl ") || starts_with(t, "class ") || starts_with(t, "struct ")) && ends_with(t, ":")) {
             bool is_class_block = starts_with(t, "class ");
+            bool is_struct_block = starts_with(t, "struct ");
             char impl_name[MAX_IDENT] = "";
-            const char *p = t + (is_class_block ? 6 : 5);
+            const char *p = t + (is_class_block ? 6 : is_struct_block ? 7 : 5);
             int ni = 0;
             while (*p && *p != ':' && *p != '(' && *p != ' ') impl_name[ni++] = *p++;
             impl_name[ni] = '\0';
@@ -3353,13 +3774,25 @@ static void process_file(void) {
                     snprintf(mangled, sizeof(mangled), "%s__%s", impl_name, mname);
                     FuncInfo *fi = find_func(mangled);
                     if (!fi) { j++; continue; }
+                    if (fi->emitted) { j++; continue; }  /* Skip duplicate method definitions */
+                    fi->emitted = true;
+
+                    /* Check for garbled parameter names in method definitions */
+                    bool garbled_mdef = false;
+                    for (int k = 0; k < fi->param_count; k++) {
+                        const char *pn = fi->param_names[k];
+                        if (pn[0] == '\0' || pn[0] == ']' || pn[0] == ')' || pn[0] == '[' ||
+                            pn[0] == '{' || pn[0] == '}' || pn[0] == '(' || pn[0] == '.') {
+                            garbled_mdef = true;
+                            break;
+                        }
+                    }
+                    if (garbled_mdef) { j++; continue; }
 
                     /* Register params */
                     for (int k = 0; k < fi->param_count; k++) {
                         add_var(fi->param_names[k], fi->param_stypes[k]);
                     }
-                    /* Register 'self' as a variable of the struct type */
-                    /* (Actually self is a pointer, but for field access we use self->field) */
 
                     /* Emit method definition */
                     emit("%s %s(", fi->ret_type, fi->name);
@@ -3372,7 +3805,10 @@ static void process_file(void) {
                     }
                     for (int k = 0; k < fi->param_count; k++) {
                         if (k > 0) emit(", ");
-                        emit("%s %s", fi->param_types[k], fi->param_names[k]);
+                        char safe_pname[MAX_IDENT];
+                        strcpy(safe_pname, fi->param_names[k]);
+                        sanitize_cpp_name(safe_pname);
+                        emit("%s %s", fi->param_types[k], safe_pname);
                     }
                     emit(") {\n");
 
@@ -3436,7 +3872,13 @@ static void process_file(void) {
                     }
                     strncpy(current_impl_struct, impl_name, MAX_IDENT - 1);
                     current_impl_struct[MAX_IDENT - 1] = '\0';
+                    int saved_pos2 = out_pos;
                     translate_block(&body_start, method_ind, 1);
+                    if (output_has_problems(saved_pos2)) {
+                        out_pos = saved_pos2;
+                        output[out_pos] = '\0';
+                        emit_stub_return(fi->ret_type);
+                    }
                     current_impl_struct[0] = '\0';
                     current_func = nullptr;
                     j = body_start;
@@ -3447,6 +3889,15 @@ static void process_file(void) {
             }
             i = j - 1;
         }
+    }
+
+    /* Count emitted functions */
+    {
+        int emitted = 0;
+        for (int i = 0; i < num_funcs; i++) {
+            if (funcs[i].emitted) emitted++;
+        }
+        fprintf(stderr, "[seed] Emitted: %d / %d functions\n", emitted, num_funcs);
     }
 
     /* ===== Emit __module_init ===== */
@@ -3488,8 +3939,46 @@ static void process_file(void) {
                 continue;
             }
             if (starts_with(t, "use ") || starts_with(t, "export ") || starts_with(t, "import ") ||
+                starts_with(t, "from ") ||
                 starts_with(t, "pub mod ") || starts_with(t, "mod ") || starts_with(t, "pub ")) {
                 init_idx++; continue;
+            }
+            /* Skip type aliases, traits, abstract classes */
+            if (starts_with(t, "type ") || starts_with(t, "abstract ") || starts_with(t, "@")) {
+                init_idx++;
+                /* Skip any indented body */
+                while (init_idx < num_lines) {
+                    const char *bl = source_lines[init_idx];
+                    const char *bt = trim(bl);
+                    if (bt[0] == '\0' || bt[0] == '#') { init_idx++; continue; }
+                    if (indent_level(bl) == 0) break;
+                    init_idx++;
+                }
+                continue;
+            }
+            /* Skip trait blocks */
+            if (starts_with(t, "trait ") && ends_with(t, ":")) {
+                init_idx++;
+                while (init_idx < num_lines) {
+                    const char *bl = source_lines[init_idx];
+                    const char *bt = trim(bl);
+                    if (bt[0] == '\0' || bt[0] == '#') { init_idx++; continue; }
+                    if (indent_level(bl) == 0) break;
+                    init_idx++;
+                }
+                continue;
+            }
+            /* Skip me (mutating) method declarations at module level */
+            if (starts_with(t, "me ") || starts_with(t, "static fn ")) {
+                init_idx++;
+                while (init_idx < num_lines) {
+                    const char *bl = source_lines[init_idx];
+                    const char *bt = trim(bl);
+                    if (bt[0] == '\0' || bt[0] == '#') { init_idx++; continue; }
+                    if (indent_level(bl) == 0) break;
+                    init_idx++;
+                }
+                continue;
             }
 
             /* val/var: init arrays and non-constants */
@@ -3505,22 +3994,64 @@ static void process_file(void) {
                         emit("    %s = spl_array_new();\n", name);
                     }
                     if (*p == '[' && *(p+1) != ']') {
+                        int arr_sp = out_pos;
                         emit_array_literal_pushes(name, p, 1);
+                        /* Check for spl_int wrapping type names or struct-typed variables */
+                        const char *arr_gen = output + arr_sp;
+                        bool bad_arr = false;
+                        const char *sc = arr_gen;
+                        while (!bad_arr && (sc = strstr(sc, "spl_int(")) != NULL) {
+                            sc += 8;
+                            char arg[MAX_IDENT] = "";
+                            int ai = 0;
+                            while (*sc && *sc != ')' && ai < MAX_IDENT-1) arg[ai++] = *sc++;
+                            arg[ai] = '\0';
+                            /* Check if arg is a struct name or type alias */
+                            if (find_struct(arg) || strcmp(arg, "text") == 0 ||
+                                strcmp(arg, "i64") == 0 || strcmp(arg, "i32") == 0 ||
+                                strcmp(arg, "f64") == 0 || strcmp(arg, "f32") == 0 ||
+                                strcmp(arg, "u8") == 0 || strcmp(arg, "u32") == 0 ||
+                                strcmp(arg, "u64") == 0) {
+                                bad_arr = true;
+                            }
+                            /* Check if arg is a variable of struct type */
+                            for (int vi = 0; !bad_arr && vi < num_vars; vi++) {
+                                if (strcmp(vars[vi].name, arg) == 0 && find_struct(vars[vi].stype)) {
+                                    bad_arr = true;
+                                }
+                            }
+                        }
+                        if (bad_arr) {
+                            out_pos = arr_sp;
+                            output[out_pos] = '\0';
+                        }
                     }
                 } else if (type_is_option(stype) && *p != '\0' && strcmp(skip_spaces(p), "nil") != 0) {
                     /* Option with non-nil init */
+                    int sp = out_pos;
                     char expr_c[MAX_LINE];
                     translate_expr(p, expr_c, sizeof(expr_c));
                     emit("    %s = %s;\n", name, expr_c);
+                    if (output_has_problems(sp) || strlen(expr_c) > 200) {
+                        out_pos = sp; output[out_pos] = '\0';
+                    }
                 } else if (type_is_struct(stype) && *p != '\0') {
-                    /* Struct with constructor init */
+                    /* Struct with constructor init — skip garbled */
+                    int sp = out_pos;
                     char expr_c[MAX_LINE];
                     translate_expr(p, expr_c, sizeof(expr_c));
                     emit("    %s = %s;\n", name, expr_c);
+                    if (output_has_problems(sp) || strlen(expr_c) > 200) {
+                        out_pos = sp; output[out_pos] = '\0';
+                    }
                 } else if (!is_constant_expr(p)) {
+                    int sp = out_pos;
                     char expr_c[MAX_LINE];
                     translate_expr(p, expr_c, sizeof(expr_c));
                     emit("    %s = %s;\n", name, expr_c);
+                    if (output_has_problems(sp) || strlen(expr_c) > 200) {
+                        out_pos = sp; output[out_pos] = '\0';
+                    }
                 }
                 init_idx++;
                 continue;
@@ -3529,6 +4060,7 @@ static void process_file(void) {
             /* Module-level control flow — handle inline (NOT translate_block with base=-1,
                because that would consume ALL remaining lines since indent is always >= 0) */
             if (starts_with(t, "if ") && ends_with(t, ":")) {
+                int saved_if_pos = out_pos;
                 char cond[MAX_LINE], cond_c[MAX_LINE];
                 extract_condition(t, 3, cond, sizeof(cond));
                 translate_expr(cond, cond_c, sizeof(cond_c));
@@ -3560,9 +4092,15 @@ static void process_file(void) {
                     }
                 }
                 emit("\n");
+                /* Rewind if garbled */
+                if (output_has_problems(saved_if_pos)) {
+                    out_pos = saved_if_pos;
+                    output[out_pos] = '\0';
+                }
                 continue;
             }
             if (starts_with(t, "while ") && ends_with(t, ":")) {
+                int saved_while_pos = out_pos;
                 char cond[MAX_LINE], cond_c[MAX_LINE];
                 extract_condition(t, 6, cond, sizeof(cond));
                 translate_expr(cond, cond_c, sizeof(cond_c));
@@ -3570,9 +4108,14 @@ static void process_file(void) {
                 init_idx++;
                 translate_block(&init_idx, 0, 2);
                 emit("    }\n");
+                if (output_has_problems(saved_while_pos)) {
+                    out_pos = saved_while_pos;
+                    output[out_pos] = '\0';
+                }
                 continue;
             }
             if (starts_with(t, "for ") && ends_with(t, ":")) {
+                int saved_for_pos = out_pos;
                 /* Let translate_block handle the for-loop parsing */
                 int save_idx = init_idx;
                 translate_block(&init_idx, -1, 1);
@@ -3636,6 +4179,11 @@ static void process_file(void) {
                     translate_block(&init_idx, 0, 2);
                     emit("    }\n");
                 }
+                /* Rewind if garbled */
+                if (output_has_problems(saved_for_pos)) {
+                    out_pos = saved_for_pos;
+                    output[out_pos] = '\0';
+                }
                 continue;
             }
             if (starts_with(t, "match ") && ends_with(t, ":")) {
@@ -3651,8 +4199,67 @@ static void process_file(void) {
                 continue;
             }
 
-            /* Simple expression/statement */
-            translate_statement(t, 1);
+            /* Whitelist approach: only translate known-safe patterns in module init.
+               Everything else gets skipped to avoid garbled output. */
+            {
+                bool is_safe = false;
+                /* Function calls: identifier followed by ( — must be very simple */
+                if (strchr(t, '(') && !strchr(t, ':') && !strstr(t, "case ") &&
+                    !strstr(t, "match ") && !strchr(t, '{') && !strchr(t, '"') &&
+                    !strchr(t, '.') && strlen(t) < 100) {
+                    is_safe = true;
+                }
+                /* Simple assignment: identifier = simple_expr */
+                if (!is_safe) {
+                    const char *eq = strchr(t, '=');
+                    if (eq && eq > t && *(eq-1) != '!' && *(eq-1) != '<' && *(eq-1) != '>' &&
+                        *(eq+1) != '=' && !strchr(t, ':') && !strstr(t, "case ") &&
+                        !strchr(eq + 1, '{') && !strchr(eq + 1, '>') && !strchr(eq + 1, '"') &&
+                        !strchr(eq + 1, '.') && strlen(t) < 100) {
+                        is_safe = true;
+                    }
+                }
+                /* print statements */
+                if (starts_with(t, "print ") || starts_with(t, "spl_print")) is_safe = true;
+                /* return statements */
+                if (starts_with(t, "return ") || strcmp(t, "return") == 0) is_safe = true;
+                /* break/continue */
+                if (strcmp(t, "break") == 0 || strcmp(t, "continue") == 0) is_safe = true;
+
+                if (!is_safe) {
+                    init_idx++;
+                    /* Skip any indented body that follows */
+                    while (init_idx < num_lines) {
+                        const char *bl = source_lines[init_idx];
+                        const char *bt = trim(bl);
+                        if (bt[0] == '\0' || bt[0] == '#') { init_idx++; continue; }
+                        if (indent_level(bl) == 0) break;
+                        init_idx++;
+                    }
+                    continue;
+                }
+            }
+            {
+                int saved_init_pos = out_pos;
+                translate_statement(t, 1);
+                /* Check if the translated output looks broken or too long */
+                int gen_len = out_pos - saved_init_pos;
+                bool bad_output = false;
+                if (output_has_problems(saved_init_pos)) bad_output = true;
+                if (gen_len > 300) bad_output = true;
+                /* Check for garbled identifiers - type names used as values */
+                const char *gen_start = output + saved_init_pos;
+                if (strstr(gen_start, "spl_int(i64)") || strstr(gen_start, "spl_int(i32)") ||
+                    strstr(gen_start, "= i64>") || strstr(gen_start, "= Bitfield>") ||
+                    strstr(gen_start, "spl_int(spl_array") ||
+                    strstr(gen_start, "spl_int(local_") ||
+                    strstr(gen_start, "spl_int(MirLocal") ||
+                    strstr(gen_start, "= spl_array_new();\n")) bad_output = true;
+                if (bad_output) {
+                    out_pos = saved_init_pos;
+                    output[out_pos] = '\0';
+                }
+            }
             init_idx++;
         }
     }

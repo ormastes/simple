@@ -16,6 +16,10 @@
 #ifndef SPL_RUNTIME_H
 #define SPL_RUNTIME_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -266,6 +270,10 @@ void     spl_eprintln(const char* s);
 __declspec(noreturn) void spl_panic(const char* msg);
 #else
 void     spl_panic(const char* msg) __attribute__((noreturn));
+#endif
+
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* SPL_RUNTIME_H */
