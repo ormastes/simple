@@ -1771,3 +1771,470 @@ fn json_validate_schema(value: any, schema: any) -> (bool, text):
                     if not result.0:
                         return (false, "Item {i}: {result.1}")
     (true, "")
+
+# ============================================================================
+# Additional Array Operations
+# ============================================================================
+
+fn json_array_reduce(arr: any, initial: any, reducer: fn(any, any) -> any) -> any:
+    """Reduce array to single value.
+
+    Args:
+        arr: JSON array
+        initial: Initial accumulator value
+        reducer: Function (accumulator, element) -> new_accumulator
+
+    Returns:
+        Final accumulator value
+
+    Example:
+        json_array_reduce(arr, json_number(0), \acc, x: json_number(json_to_number(acc) + json_to_number(x)))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return initial
+    var acc = initial
+    for elem in list:
+        acc = reducer(acc, elem)
+    acc
+
+fn json_array_flatten(arr: any) -> any:
+    """Flatten nested JSON arrays (one level).
+
+    Args:
+        arr: JSON array possibly containing nested arrays
+
+    Returns:
+        Flattened JSON array
+
+    Example:
+        json_array_flatten(json_array([json_array([json_number(1)]), json_number(2)]))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var result: [any] = []
+    for elem in list:
+        if json_is_array(elem):
+            val nested = json_to_array(elem)
+            for item in nested:
+                result = result + [item]
+        else:
+            result = result + [elem]
+    json_array(result)
+
+fn json_array_unique(arr: any) -> any:
+    """Remove duplicate values from array.
+
+    Args:
+        arr: JSON array
+
+    Returns:
+        JSON array with unique values
+
+    Example:
+        json_array_unique(arr)
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var result: [any] = []
+    for elem in list:
+        var found = false
+        for existing in result:
+            if json_deep_equals(elem, existing):
+                found = true
+                break
+        if not found:
+            result = result + [elem]
+    json_array(result)
+
+fn json_array_sort_by(arr: any, key_fn: fn(any) -> f64) -> any:
+    """Sort array by numeric key function.
+
+    Args:
+        arr: JSON array
+        key_fn: Function to extract numeric sort key
+
+    Returns:
+        Sorted JSON array
+
+    Example:
+        json_array_sort_by(arr, \x: json_to_number(json_object_get(x, "age")))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_array([])
+    var sorted_list = list
+    for i in 0..sorted_list.len():
+        for j in i + 1..sorted_list.len():
+            val key_i = key_fn(sorted_list[i])
+            val key_j = key_fn(sorted_list[j])
+            if key_i > key_j:
+                val temp = sorted_list[i]
+                sorted_list = json_array_set(json_array(sorted_list), i, sorted_list[j])
+                val temp_arr = json_to_array(sorted_list)
+                sorted_list = json_array_set(json_array(temp_arr), j, temp)
+                sorted_list = json_to_array(sorted_list)
+    json_array(sorted_list)
+
+fn json_array_group_by(arr: any, key_fn: fn(any) -> text) -> any:
+    """Group array elements by key function.
+
+    Args:
+        arr: JSON array
+        key_fn: Function to extract grouping key
+
+    Returns:
+        JSON object with grouped arrays
+
+    Example:
+        json_array_group_by(arr, \x: json_to_string(json_object_get(x, "category")))
+    """
+    val list = json_to_array(arr)
+    if list == nil:
+        return json_object({})
+    var groups: {text: [any]} = {}
+    for elem in list:
+        val key = key_fn(elem)
+        if not groups.has_key(key):
+            groups[key] = []
+        groups[key] = groups[key] + [elem]
+    var result: {text: any} = {}
+    for key in groups.keys():
+        result[key] = json_array(groups[key])
+    json_object(result)
+
+# ============================================================================
+# Additional Object Operations
+# ============================================================================
+
+fn json_object_map_values(obj: any, mapper: fn(any) -> any) -> any:
+    """Map function over object values.
+
+    Args:
+        obj: JSON object
+        mapper: Function to transform values
+
+    Returns:
+        New JSON object with mapped values
+
+    Example:
+        json_object_map_values(obj, \v: json_number(json_to_number(v) * 2))
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return json_object({})
+    var result: {text: any} = {}
+    for key in map.keys():
+        result[key] = mapper(map[key])
+    json_object(result)
+
+fn json_object_filter(obj: any, predicate: fn(text, any) -> bool) -> any:
+    """Filter object entries by predicate.
+
+    Args:
+        obj: JSON object
+        predicate: Function (key, value) -> bool
+
+    Returns:
+        New JSON object with filtered entries
+
+    Example:
+        json_object_filter(obj, \k, v: json_to_number(v) > 0)
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return json_object({})
+    var result: {text: any} = {}
+    for key in map.keys():
+        if predicate(key, map[key]):
+            result[key] = map[key]
+    json_object(result)
+
+fn json_object_find(obj: any, predicate: fn(text, any) -> bool) -> any:
+    """Find first entry matching predicate.
+
+    Args:
+        obj: JSON object
+        predicate: Function (key, value) -> bool
+
+    Returns:
+        (key, value) tuple or nil if not found
+
+    Example:
+        json_object_find(obj, \k, v: json_to_number(v) > 100)
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return nil
+    for key in map.keys():
+        if predicate(key, map[key]):
+            return (key, map[key])
+    nil
+
+fn json_object_without(obj: any, keys: [text]) -> any:
+    """Create object without specified keys.
+
+    Args:
+        obj: JSON object
+        keys: Keys to exclude
+
+    Returns:
+        New JSON object without the keys
+
+    Example:
+        json_object_without(obj, ["temp", "internal"])
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return json_object({})
+    var result: {text: any} = {}
+    for key in map.keys():
+        var exclude = false
+        for exclude_key in keys:
+            if key == exclude_key:
+                exclude = true
+                break
+        if not exclude:
+            result[key] = map[key]
+    json_object(result)
+
+fn json_object_pick(obj: any, keys: [text]) -> any:
+    """Create object with only specified keys.
+
+    Args:
+        obj: JSON object
+        keys: Keys to include
+
+    Returns:
+        New JSON object with only the specified keys
+
+    Example:
+        json_object_pick(obj, ["name", "age"])
+    """
+    val map = json_to_object(obj)
+    if map == nil:
+        return json_object({})
+    var result: {text: any} = {}
+    for key in keys:
+        if map.has_key(key):
+            result[key] = map[key]
+    json_object(result)
+
+# ============================================================================
+# Convenience Functions
+# ============================================================================
+
+fn json_stringify(value: any) -> text:
+    """Alias for json_serialize.
+
+    Args:
+        value: JSON value
+
+    Returns:
+        JSON string
+
+    Example:
+        json_stringify(data)
+    """
+    json_serialize(value)
+
+fn json_minify(text: text) -> text:
+    """Remove whitespace from JSON text.
+
+    Args:
+        text: JSON text
+
+    Returns:
+        Minified JSON text
+
+    Example:
+        json_minify("{ \"key\": 42 }")  # "{\"key\":42}"
+    """
+    val value = json_parse(text)
+    if value == nil:
+        return text
+    json_serialize(value)
+
+fn json_beautify(text: text) -> text:
+    """Pretty-print JSON text.
+
+    Args:
+        text: JSON text
+
+    Returns:
+        Formatted JSON text
+
+    Example:
+        json_beautify("{\"key\":42}")
+    """
+    val value = json_parse(text)
+    if value == nil:
+        return text
+    json_pretty(value)
+
+# ============================================================================
+# Advanced Operations
+# ============================================================================
+
+fn json_merge_deep(obj1: any, obj2: any) -> any:
+    """Deep merge two JSON objects.
+
+    Args:
+        obj1: First JSON object
+        obj2: Second JSON object (takes precedence)
+
+    Returns:
+        Merged JSON object
+
+    Example:
+        json_merge_deep(base, overrides)
+    """
+    if not json_is_object(obj1):
+        return obj2
+    if not json_is_object(obj2):
+        return obj1
+    val map1 = json_to_object(obj1)
+    val map2 = json_to_object(obj2)
+    var result: {text: any} = {}
+    for key in map1.keys():
+        result[key] = map1[key]
+    for key in map2.keys():
+        if result.has_key(key):
+            val v1 = result[key]
+            val v2 = map2[key]
+            if json_is_object(v1) and json_is_object(v2):
+                result[key] = json_merge_deep(v1, v2)
+            else:
+                result[key] = v2
+        else:
+            result[key] = map2[key]
+    json_object(result)
+
+fn json_diff(obj1: any, obj2: any) -> any:
+    """Find differences between two JSON objects.
+
+    Args:
+        obj1: First JSON object
+        obj2: Second JSON object
+
+    Returns:
+        Object containing changed/added/removed keys
+
+    Example:
+        json_diff(old_data, new_data)
+    """
+    var changes: {text: any} = {}
+    if json_is_object(obj1) and json_is_object(obj2):
+        val map1 = json_to_object(obj1)
+        val map2 = json_to_object(obj2)
+        for key in map1.keys():
+            if not map2.has_key(key):
+                changes[key] = json_object({"_op": json_string("removed"), "_old": map1[key]})
+            else:
+                if not json_deep_equals(map1[key], map2[key]):
+                    changes[key] = json_object({"_op": json_string("changed"), "_old": map1[key], "_new": map2[key]})
+        for key in map2.keys():
+            if not map1.has_key(key):
+                changes[key] = json_object({"_op": json_string("added"), "_new": map2[key]})
+    json_object(changes)
+
+fn json_patch(obj: any, patch: any) -> any:
+    """Apply patch to JSON object.
+
+    Args:
+        obj: JSON object
+        patch: Patch object (from json_diff)
+
+    Returns:
+        Patched JSON object
+
+    Example:
+        json_patch(data, changes)
+    """
+    if not json_is_object(obj) or not json_is_object(patch):
+        return obj
+    var result = json_deep_clone(obj)
+    val patch_map = json_to_object(patch)
+    for key in patch_map.keys():
+        val change = patch_map[key]
+        val op = json_object_get(change, "_op")
+        val op_str = json_to_string(op)
+        if op_str == "removed":
+            result = json_object_remove(result, key)
+        else:
+            if op_str == "added":
+                val new_val = json_object_get(change, "_new")
+                result = json_object_set(result, key, new_val)
+            else:
+                if op_str == "changed":
+                    val new_val = json_object_get(change, "_new")
+                    result = json_object_set(result, key, new_val)
+    result
+
+fn json_from_entries(entries: [(text, any)]) -> any:
+    """Create JSON object from key-value pairs.
+
+    Args:
+        entries: Array of (key, value) tuples
+
+    Returns:
+        JSON object
+
+    Example:
+        json_from_entries([("a", json_number(1)), ("b", json_number(2))])
+    """
+    var map: {text: any} = {}
+    for entry in entries:
+        val key = entry.0
+        val value = entry.1
+        map[key] = value
+    json_object(map)
+
+fn json_flatten_object(obj: any) -> any:
+    """Flatten nested object to flat key-value pairs.
+
+    Args:
+        obj: Nested JSON object
+
+    Returns:
+        Flat JSON object with dotted keys
+
+    Example:
+        json_flatten_object({"a": {"b": 1}})  # {"a.b": 1}
+    """
+    if not json_is_object(obj):
+        return obj
+    var result: {text: any} = {}
+    val map = json_to_object(obj)
+    for key in map.keys():
+        val value = map[key]
+        if json_is_object(value):
+            val nested = json_flatten_object(value)
+            val nested_map = json_to_object(nested)
+            for nested_key in nested_map.keys():
+                result["{key}.{nested_key}"] = nested_map[nested_key]
+        else:
+            result[key] = value
+    json_object(result)
+
+fn json_unflatten_object(obj: any) -> any:
+    """Unflatten object with dotted keys to nested structure.
+
+    Args:
+        obj: Flat JSON object with dotted keys
+
+    Returns:
+        Nested JSON object
+
+    Example:
+        json_unflatten_object({"a.b": 1})  # {"a": {"b": 1}}
+    """
+    if not json_is_object(obj):
+        return obj
+    var result = json_object({})
+    val map = json_to_object(obj)
+    for key in map.keys():
+        result = json_path_set(result, key, map[key])
+    result
