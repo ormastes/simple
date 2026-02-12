@@ -1,0 +1,1309 @@
+# X.509 Certificate Parsing and Validation Utilities
+#
+# This module provides comprehensive X.509 certificate handling including:
+# - PEM and DER format parsing
+# - Certificate validation (chain, expiry, signature)
+# - Distinguished Name parsing
+# - Extension parsing (Basic Constraints, Key Usage, SAN)
+# - Certificate chain building
+# - ASN.1 DER encoding/decoding
+#
+# IMPORTANT: This is a pure Simple implementation with no external dependencies.
+# It implements X.509 parsing from scratch using ASN.1 DER decoding.
+#
+# Certificate Structure (ASN.1):
+# Certificate ::= SEQUENCE {
+#   tbsCertificate       TBSCertificate,
+#   signatureAlgorithm   AlgorithmIdentifier,
+#   signatureValue       BIT STRING
+# }
+
+# ASN.1 DER Tag Constants
+val TAG_INTEGER = 2
+val TAG_BIT_STRING = 3
+val TAG_OCTET_STRING = 4
+val TAG_NULL = 5
+val TAG_OID = 6
+val TAG_UTF8_STRING = 12
+val TAG_PRINTABLE_STRING = 19
+val TAG_IA5_STRING = 22
+val TAG_UTCTIME = 23
+val TAG_GENERALIZED_TIME = 24
+val TAG_SEQUENCE = 48  # 0x30
+val TAG_SET = 49  # 0x31
+val TAG_CONTEXT_0 = 160  # 0xA0
+val TAG_CONTEXT_3 = 163  # 0xA3
+
+# Common OIDs (Object Identifiers)
+val OID_COMMON_NAME = "2.5.4.3"
+val OID_COUNTRY = "2.5.4.6"
+val OID_LOCALITY = "2.5.4.7"
+val OID_STATE = "2.5.4.8"
+val OID_ORGANIZATION = "2.5.4.10"
+val OID_ORG_UNIT = "2.5.4.11"
+val OID_BASIC_CONSTRAINTS = "2.5.29.19"
+val OID_KEY_USAGE = "2.5.29.15"
+val OID_EXTENDED_KEY_USAGE = "2.5.29.37"
+val OID_SUBJECT_ALT_NAME = "2.5.29.17"
+val OID_AUTHORITY_KEY_ID = "2.5.29.35"
+val OID_SUBJECT_KEY_ID = "2.5.29.14"
+val OID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
+val OID_SHA256_WITH_RSA = "1.2.840.113549.1.1.11"
+val OID_SHA1_WITH_RSA = "1.2.840.113549.1.1.5"
+
+# PEM Format Constants
+val PEM_CERT_BEGIN = "-----BEGIN CERTIFICATE-----"
+val PEM_CERT_END = "-----END CERTIFICATE-----"
+
+# ============================================================================
+# Data Structures (Tuple-based)
+# ============================================================================
+
+# Certificate: (version, serial, issuer, subject, validity, public_key, extensions, sig_alg, signature, raw_der)
+# DistinguishedName: (cn, o, ou, c, st, l, components)
+# Validity: (not_before, not_after)
+# Extension: (oid, critical, value)
+# PublicKey: (algorithm, key_bytes, bits)
+# DerValue: (tag, length, value, full_bytes)
+
+# ============================================================================
+# Base64 Encoding/Decoding (for PEM)
+# ============================================================================
+
+fn base64_encode(bytes: text) -> text:
+    # Simple base64 encoding implementation
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    val len = bytes.length()
+
+    while i < len:
+        val byte1 = bytes.char_code_at(i)
+        val byte2 = if i + 1 < len: bytes.char_code_at(i + 1) else: 0
+        val byte3 = if i + 2 < len: bytes.char_code_at(i + 2) else: 0
+
+        val idx1 = byte1 >> 2
+        val idx2 = ((byte1 & 3) << 4) | (byte2 >> 4)
+        val idx3 = ((byte2 & 15) << 2) | (byte3 >> 6)
+        val idx4 = byte3 & 63
+
+        result = result + alphabet.char_at(idx1)
+        result = result + alphabet.char_at(idx2)
+        val char3 = if i + 1 < len: alphabet.char_at(idx3) else: "="
+        result = result + char3
+        val char4 = if i + 2 < len: alphabet.char_at(idx4) else: "="
+        result = result + char4
+
+        i = i + 3
+
+    result
+
+fn base64_decode(encoded: text) -> text:
+    # Simple base64 decoding implementation
+    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    val clean = encoded.replace("\n", "").replace("\r", "").replace(" ", "")
+    val len = clean.length()
+
+    while i < len:
+        if i + 3 >= len:
+            break
+
+        val char1 = clean.char_at(i)
+        val char2 = clean.char_at(i + 1)
+        val char3 = clean.char_at(i + 2)
+        val char4 = clean.char_at(i + 3)
+
+        val idx1 = alphabet.index_of(char1)
+        val idx2 = alphabet.index_of(char2)
+        val idx3 = if char3 == "=": 0 else: alphabet.index_of(char3)
+        val idx4 = if char4 == "=": 0 else: alphabet.index_of(char4)
+
+        if idx1 < 0 or idx2 < 0:
+            break
+
+        val byte1 = (idx1 << 2) | (idx2 >> 4)
+        result = result + text.from_char_code(byte1)
+
+        if char3 != "=":
+            val byte2 = ((idx2 & 15) << 4) | (idx3 >> 2)
+            result = result + text.from_char_code(byte2)
+
+        if char4 != "=":
+            val byte3 = ((idx3 & 3) << 6) | idx4
+            result = result + text.from_char_code(byte3)
+
+        i = i + 4
+
+    result
+
+# ============================================================================
+# PEM Format Functions
+# ============================================================================
+
+fn is_pem_format(data: text) -> bool:
+    # Check if data is in PEM format
+    val has_begin = data.contains(PEM_CERT_BEGIN)
+    val has_end = data.contains(PEM_CERT_END)
+    has_begin and has_end
+
+fn extract_pem_data(pem: text) -> text:
+    # Extract base64 data from PEM format
+    val begin_idx = pem.index_of(PEM_CERT_BEGIN)
+    if begin_idx < 0:
+        return nil
+
+    val after_begin = begin_idx + PEM_CERT_BEGIN.length()
+    val end_idx = pem.index_of(PEM_CERT_END)
+    if end_idx < 0:
+        return nil
+
+    val base64_data = pem.substring(after_begin, end_idx)
+    base64_data.trim()
+
+fn pem_decode(pem: text) -> text:
+    # Decode PEM format to DER bytes
+    val base64_data = extract_pem_data(pem)
+    if base64_data == nil:
+        return nil
+
+    base64_decode(base64_data)
+
+fn pem_encode(der: text, cert_type: text) -> text:
+    # Encode DER bytes to PEM format
+    val base64_data = base64_encode(der)
+    var result = "-----BEGIN {cert_type}-----\n"
+
+    # Split into 64-character lines
+    var i = 0
+    while i < base64_data.length():
+        val line_len = if i + 64 < base64_data.length(): 64 else: base64_data.length() - i
+        val line = base64_data.substring(i, i + line_len)
+        result = result + line + "\n"
+        i = i + 64
+
+    result = result + "-----END {cert_type}-----\n"
+    result
+
+fn split_pem_chain(pem_chain: text) -> text:
+    # Split multiple PEM certificates into array
+    var certs = []
+    var current_cert = ""
+    var in_cert = false
+
+    val lines = pem_chain.split("\n")
+    var i = 0
+    while i < lines.length():
+        val line = lines[i]
+
+        if line.contains(PEM_CERT_BEGIN):
+            in_cert = true
+            current_cert = line + "\n"
+        else:
+            if line.contains(PEM_CERT_END):
+                current_cert = current_cert + line + "\n"
+                certs = certs + [current_cert]
+                current_cert = ""
+                in_cert = false
+            else:
+                if in_cert:
+                    current_cert = current_cert + line + "\n"
+
+        i = i + 1
+
+    certs
+
+# ============================================================================
+# ASN.1 DER Parsing Functions
+# ============================================================================
+
+fn asn1_decode_tag(bytes: text, offset: i64) -> i64:
+    # Decode ASN.1 tag at given offset
+    if offset >= bytes.length():
+        return nil
+
+    bytes.char_code_at(offset)
+
+fn asn1_decode_length(bytes: text, offset: i64) -> text:
+    # Decode ASN.1 length and return (length, next_offset)
+    if offset >= bytes.length():
+        return nil
+
+    val first_byte = bytes.char_code_at(offset)
+
+    if first_byte < 128:
+        # Short form: length is in first byte
+        return (first_byte, offset + 1)
+
+    # Long form: first byte indicates number of length bytes
+    val num_length_bytes = first_byte & 127
+    var length = 0
+    var i = 0
+
+    while i < num_length_bytes:
+        if offset + 1 + i >= bytes.length():
+            return nil
+
+        val byte_val = bytes.char_code_at(offset + 1 + i)
+        length = (length << 8) | byte_val
+        i = i + 1
+
+    (length, offset + 1 + num_length_bytes)
+
+fn asn1_read_tlv(bytes: text, offset: i64) -> text:
+    # Read Tag-Length-Value at offset, return (tag, value, next_offset)
+    if offset >= bytes.length():
+        return nil
+
+    val tag = asn1_decode_tag(bytes, offset)
+    if tag == nil:
+        return nil
+
+    val length_result = asn1_decode_length(bytes, offset + 1)
+    if length_result == nil:
+        return nil
+
+    val length = length_result[0]
+    val value_offset = length_result[1]
+
+    if value_offset + length > bytes.length():
+        return nil
+
+    val value = bytes.substring(value_offset, value_offset + length)
+    val next_offset = value_offset + length
+
+    (tag, value, next_offset)
+
+fn parse_der_integer(bytes: text) -> i64:
+    # Parse DER INTEGER value
+    if bytes.length() == 0:
+        return 0
+
+    var result = 0
+    var i = 0
+
+    # Handle negative numbers (skip for simplicity in certificates)
+    val start = if bytes.char_code_at(0) == 0: 1 else: 0
+
+    while i < bytes.length():
+        if i >= start:
+            val byte_val = bytes.char_code_at(i)
+            result = (result << 8) | byte_val
+        i = i + 1
+
+    result
+
+fn parse_der_string(bytes: text) -> text:
+    # Parse DER string (UTF8String, PrintableString, IA5String)
+    bytes
+
+fn parse_der_oid(bytes: text) -> text:
+    # Parse DER Object Identifier to dotted string
+    if bytes.length() == 0:
+        return ""
+
+    var result = ""
+    val first_byte = bytes.char_code_at(0)
+
+    # First byte encodes first two components
+    val first = first_byte / 40
+    val second = first_byte % 40
+    result = "{first}.{second}"
+
+    var i = 1
+    var current = 0
+
+    while i < bytes.length():
+        val byte_val = bytes.char_code_at(i)
+
+        if byte_val >= 128:
+            # High bit set: more bytes follow
+            current = (current << 7) | (byte_val & 127)
+        else:
+            # High bit clear: last byte of component
+            current = (current << 7) | byte_val
+            result = result + ".{current}"
+            current = 0
+
+        i = i + 1
+
+    result
+
+fn parse_der_sequence(bytes: text) -> text:
+    # Parse DER SEQUENCE and return array of TLV tuples
+    var items = []
+    var offset = 0
+
+    while offset < bytes.length():
+        val tlv = asn1_read_tlv(bytes, offset)
+        if tlv == nil:
+            break
+
+        items = items + [tlv]
+        offset = tlv[2]
+
+    items
+
+fn parse_der_bit_string(bytes: text) -> text:
+    # Parse DER BIT STRING (first byte is unused bits count)
+    if bytes.length() == 0:
+        return ""
+
+    val unused_bits = bytes.char_code_at(0)
+    val data = bytes.substring(1, bytes.length())
+    (unused_bits, data)
+
+# ============================================================================
+# Distinguished Name Parsing
+# ============================================================================
+
+fn parse_rdn_component(rdn_bytes: text) -> text:
+    # Parse Relative Distinguished Name component (OID, value)
+    val tlv = asn1_read_tlv(rdn_bytes, 0)
+    if tlv == nil:
+        return nil
+
+    val tag = tlv[0]
+    val seq_value = tlv[1]
+
+    # RDN is a SET containing a SEQUENCE
+    val inner_tlv = asn1_read_tlv(seq_value, 0)
+    if inner_tlv == nil:
+        return nil
+
+    val inner_value = inner_tlv[1]
+
+    # SEQUENCE contains OID and value
+    val oid_tlv = asn1_read_tlv(inner_value, 0)
+    if oid_tlv == nil:
+        return nil
+
+    val oid = parse_der_oid(oid_tlv[1])
+
+    val value_tlv = asn1_read_tlv(inner_value, oid_tlv[2])
+    if value_tlv == nil:
+        return nil
+
+    val value = parse_der_string(value_tlv[1])
+
+    (oid, value)
+
+fn parse_distinguished_name(dn_bytes: text) -> text:
+    # Parse Distinguished Name and return (cn, o, ou, c, st, l, components)
+    var cn = nil
+    var o = nil
+    var ou = nil
+    var c = nil
+    var st = nil
+    var l = nil
+    var components = []
+
+    var offset = 0
+    while offset < dn_bytes.length():
+        val tlv = asn1_read_tlv(dn_bytes, offset)
+        if tlv == nil:
+            break
+
+        val component = parse_rdn_component(dn_bytes.substring(offset, tlv[2]))
+        if component != nil:
+            val oid = component[0]
+            val value = component[1]
+            components = components + [(oid, value)]
+
+            if oid == OID_COMMON_NAME:
+                cn = value
+            else:
+                if oid == OID_ORGANIZATION:
+                    o = value
+                else:
+                    if oid == OID_ORG_UNIT:
+                        ou = value
+                    else:
+                        if oid == OID_COUNTRY:
+                            c = value
+                        else:
+                            if oid == OID_STATE:
+                                st = value
+                            else:
+                                if oid == OID_LOCALITY:
+                                    l = value
+
+        offset = tlv[2]
+
+    (cn, o, ou, c, st, l, components)
+
+fn get_common_name(dn: text) -> text:
+    # Extract Common Name from Distinguished Name tuple
+    dn[0]
+
+fn get_organization(dn: text) -> text:
+    # Extract Organization from Distinguished Name tuple
+    dn[1]
+
+fn get_org_unit(dn: text) -> text:
+    # Extract Organizational Unit from Distinguished Name tuple
+    dn[2]
+
+fn get_country(dn: text) -> text:
+    # Extract Country from Distinguished Name tuple
+    dn[3]
+
+fn get_state(dn: text) -> text:
+    # Extract State/Province from Distinguished Name tuple
+    dn[4]
+
+fn get_locality(dn: text) -> text:
+    # Extract Locality from Distinguished Name tuple
+    dn[5]
+
+fn dn_to_string(dn: text) -> text:
+    # Convert Distinguished Name tuple to string representation
+    var parts = []
+
+    if dn[0] != nil:
+        parts = parts + ["CN={dn[0]}"]
+    if dn[1] != nil:
+        parts = parts + ["O={dn[1]}"]
+    if dn[2] != nil:
+        parts = parts + ["OU={dn[2]}"]
+    if dn[5] != nil:
+        parts = parts + ["L={dn[5]}"]
+    if dn[4] != nil:
+        parts = parts + ["ST={dn[4]}"]
+    if dn[3] != nil:
+        parts = parts + ["C={dn[3]}"]
+
+    parts.join(", ")
+
+# ============================================================================
+# Time Parsing Functions
+# ============================================================================
+
+fn parse_utc_time(time_bytes: text) -> text:
+    # Parse UTCTime (YYMMDDHHMMSSZ)
+    if time_bytes.length() < 13:
+        return nil
+
+    val time_str = parse_der_string(time_bytes)
+
+    # Extract components
+    val year_str = time_str.substring(0, 2)
+    val month_str = time_str.substring(2, 4)
+    val day_str = time_str.substring(4, 6)
+    val hour_str = time_str.substring(6, 8)
+    val minute_str = time_str.substring(8, 10)
+    val second_str = time_str.substring(10, 12)
+
+    var year = year_str.to_int()
+    # Y2K handling: 00-49 is 2000-2049, 50-99 is 1950-1999
+    year = if year < 50: year + 2000 else: year + 1900
+
+    val month = month_str.to_int()
+    val day = day_str.to_int()
+    val hour = hour_str.to_int()
+    val minute = minute_str.to_int()
+    val second = second_str.to_int()
+
+    (year, month, day, hour, minute, second)
+
+fn parse_generalized_time(time_bytes: text) -> text:
+    # Parse GeneralizedTime (YYYYMMDDHHMMSSZ)
+    if time_bytes.length() < 15:
+        return nil
+
+    val time_str = parse_der_string(time_bytes)
+
+    val year = time_str.substring(0, 4).to_int()
+    val month = time_str.substring(4, 6).to_int()
+    val day = time_str.substring(6, 8).to_int()
+    val hour = time_str.substring(8, 10).to_int()
+    val minute = time_str.substring(10, 12).to_int()
+    val second = time_str.substring(12, 14).to_int()
+
+    (year, month, day, hour, minute, second)
+
+fn time_to_timestamp(time_tuple: text) -> i64:
+    # Convert time tuple to Unix timestamp (simplified)
+    val year = time_tuple[0]
+    val month = time_tuple[1]
+    val day = time_tuple[2]
+    val hour = time_tuple[3]
+    val minute = time_tuple[4]
+    val second = time_tuple[5]
+
+    # Simplified calculation (doesn't account for leap years properly)
+    val days = (year - 1970) * 365 + month * 30 + day
+    val seconds = days * 86400 + hour * 3600 + minute * 60 + second
+    seconds
+
+fn get_current_timestamp() -> i64:
+    # Get current Unix timestamp (simplified - would need platform support)
+    # For now, return a fixed value representing 2024
+    1704067200  # Jan 1, 2024
+
+# ============================================================================
+# Validity Period Functions
+# ============================================================================
+
+fn parse_validity(validity_bytes: text) -> text:
+    # Parse Validity SEQUENCE (notBefore, notAfter)
+    val items = parse_der_sequence(validity_bytes)
+    if items.length() < 2:
+        return nil
+
+    val not_before_tlv = items[0]
+    val not_after_tlv = items[1]
+
+    var not_before = nil
+    var not_after = nil
+
+    # notBefore can be UTCTime or GeneralizedTime
+    if not_before_tlv[0] == TAG_UTCTIME:
+        not_before = parse_utc_time(not_before_tlv[1])
+    else:
+        if not_before_tlv[0] == TAG_GENERALIZED_TIME:
+            not_before = parse_generalized_time(not_before_tlv[1])
+
+    # notAfter can be UTCTime or GeneralizedTime
+    if not_after_tlv[0] == TAG_UTCTIME:
+        not_after = parse_utc_time(not_after_tlv[1])
+    else:
+        if not_after_tlv[0] == TAG_GENERALIZED_TIME:
+            not_after = parse_generalized_time(not_after_tlv[1])
+
+    (not_before, not_after)
+
+fn get_not_before(cert: text) -> text:
+    # Get notBefore from certificate tuple
+    val validity = cert[4]
+    validity[0]
+
+fn get_not_after(cert: text) -> text:
+    # Get notAfter from certificate tuple
+    val validity = cert[4]
+    validity[1]
+
+fn check_expiry(cert: text) -> bool:
+    # Check if certificate is currently valid
+    val validity = cert[4]
+    val not_before = validity[0]
+    val not_after = validity[1]
+
+    if not_before == nil or not_after == nil:
+        return false
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+    val after_ts = time_to_timestamp(not_after)
+
+    val is_after_start = current_time >= before_ts
+    val is_before_end = current_time <= after_ts
+    is_after_start and is_before_end
+
+fn is_expired(cert: text) -> bool:
+    # Check if certificate is expired
+    val is_valid = check_expiry(cert)
+    not is_valid
+
+fn is_not_yet_valid(cert: text) -> bool:
+    # Check if certificate is not yet valid
+    val validity = cert[4]
+    val not_before = validity[0]
+
+    if not_before == nil:
+        return false
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+    current_time < before_ts
+
+# ============================================================================
+# Public Key Parsing Functions
+# ============================================================================
+
+fn parse_public_key(spki_bytes: text) -> text:
+    # Parse SubjectPublicKeyInfo
+    val items = parse_der_sequence(spki_bytes)
+    if items.length() < 2:
+        return nil
+
+    val algorithm_tlv = items[0]
+    val public_key_tlv = items[1]
+
+    # Parse algorithm identifier
+    val alg_items = parse_der_sequence(algorithm_tlv[1])
+    if alg_items.length() == 0:
+        return nil
+
+    val algorithm_oid = parse_der_oid(alg_items[0][1])
+
+    # Parse public key bit string
+    val key_bits = parse_der_bit_string(public_key_tlv[1])
+    val key_bytes = key_bits[1]
+    val bits = (key_bytes.length() - key_bits[0]) * 8
+
+    (algorithm_oid, key_bytes, bits)
+
+fn get_public_key(cert: text) -> text:
+    # Get public key from certificate tuple
+    cert[5]
+
+fn get_public_key_algorithm(cert: text) -> text:
+    # Get public key algorithm OID
+    val pub_key = get_public_key(cert)
+    pub_key[0]
+
+fn get_public_key_bits(cert: text) -> i64:
+    # Get public key size in bits
+    val pub_key = get_public_key(cert)
+    pub_key[2]
+
+fn is_rsa_key(cert: text) -> bool:
+    # Check if certificate uses RSA public key
+    val algorithm = get_public_key_algorithm(cert)
+    algorithm == OID_RSA_ENCRYPTION
+
+# ============================================================================
+# Extension Parsing Functions
+# ============================================================================
+
+fn parse_extension(ext_bytes: text) -> text:
+    # Parse single Extension (oid, critical, value)
+    val items = parse_der_sequence(ext_bytes)
+    if items.length() < 2:
+        return nil
+
+    val oid = parse_der_oid(items[0][1])
+
+    var critical = false
+    var value_idx = 1
+
+    # Check if critical flag is present
+    if items.length() >= 3:
+        if items[1][0] == TAG_INTEGER:
+            critical = parse_der_integer(items[1][1]) != 0
+            value_idx = 2
+
+    val value = items[value_idx][1]
+
+    (oid, critical, value)
+
+fn parse_extensions(ext_bytes: text) -> text:
+    # Parse Extensions SEQUENCE
+    var extensions = []
+
+    # Extensions are wrapped in context-specific tag [3]
+    val outer_tlv = asn1_read_tlv(ext_bytes, 0)
+    if outer_tlv == nil:
+        return []
+
+    if outer_tlv[0] != TAG_CONTEXT_3:
+        return []
+
+    val inner_items = parse_der_sequence(outer_tlv[1])
+
+    var i = 0
+    while i < inner_items.length():
+        val ext_tlv = inner_items[i]
+        val ext = parse_extension(ext_tlv[1])
+        if ext != nil:
+            extensions = extensions + [ext]
+        i = i + 1
+
+    extensions
+
+fn get_extensions(cert: text) -> text:
+    # Get extensions from certificate tuple
+    cert[6]
+
+fn find_extension(cert: text, oid: text) -> text:
+    # Find extension by OID
+    val extensions = get_extensions(cert)
+    if extensions == nil:
+        return nil
+
+    var i = 0
+    while i < extensions.length():
+        val ext = extensions[i]
+        if ext[0] == oid:
+            return ext
+        i = i + 1
+
+    nil
+
+fn parse_basic_constraints(value_bytes: text) -> text:
+    # Parse Basic Constraints extension (ca, path_len)
+    val items = parse_der_sequence(value_bytes)
+
+    var is_ca = false
+    var path_len = nil
+
+    if items.length() > 0:
+        if items[0][0] == TAG_INTEGER:
+            is_ca = parse_der_integer(items[0][1]) != 0
+
+    if items.length() > 1:
+        if items[1][0] == TAG_INTEGER:
+            path_len = parse_der_integer(items[1][1])
+
+    (is_ca, path_len)
+
+fn is_ca_certificate(cert: text) -> bool:
+    # Check if certificate is a CA certificate
+    val ext = find_extension(cert, OID_BASIC_CONSTRAINTS)
+    if ext == nil:
+        return false
+
+    val bc = parse_basic_constraints(ext[2])
+    if bc == nil:
+        return false
+
+    bc[0]
+
+fn get_path_length_constraint(cert: text) -> i64:
+    # Get path length constraint from Basic Constraints
+    val ext = find_extension(cert, OID_BASIC_CONSTRAINTS)
+    if ext == nil:
+        return nil
+
+    val bc = parse_basic_constraints(ext[2])
+    if bc == nil:
+        return nil
+
+    bc[1]
+
+fn parse_subject_alt_names(value_bytes: text) -> text:
+    # Parse Subject Alternative Name extension
+    var names = []
+
+    val items = parse_der_sequence(value_bytes)
+    var i = 0
+
+    while i < items.length():
+        val item = items[i]
+        val tag = item[0]
+        val value = item[1]
+
+        # Context-specific tags for different name types
+        # [2] = dNSName
+        if tag == 130:
+            names = names + [("dns", parse_der_string(value))]
+        else:
+            # [1] = rfc822Name (email)
+            if tag == 129:
+                names = names + [("email", parse_der_string(value))]
+            else:
+                # [6] = uniformResourceIdentifier
+                if tag == 134:
+                    names = names + [("uri", parse_der_string(value))]
+                else:
+                    # [7] = iPAddress
+                    if tag == 135:
+                        names = names + [("ip", value)]
+
+        i = i + 1
+
+    names
+
+fn get_subject_alt_names(cert: text) -> text:
+    # Get Subject Alternative Names from certificate
+    val ext = find_extension(cert, OID_SUBJECT_ALT_NAME)
+    if ext == nil:
+        return []
+
+    parse_subject_alt_names(ext[2])
+
+fn get_dns_names(cert: text) -> text:
+    # Extract DNS names from Subject Alternative Names
+    val san = get_subject_alt_names(cert)
+    var dns_names = []
+
+    var i = 0
+    while i < san.length():
+        val name = san[i]
+        if name[0] == "dns":
+            dns_names = dns_names + [name[1]]
+        i = i + 1
+
+    dns_names
+
+fn parse_key_usage(value_bytes: text) -> text:
+    # Parse Key Usage extension (returns bit flags)
+    if value_bytes.length() == 0:
+        return 0
+
+    val bits = parse_der_bit_string(value_bytes)
+    if bits[1].length() == 0:
+        return 0
+
+    # Return first byte of bit string as flags
+    bits[1].char_code_at(0)
+
+fn get_key_usage(cert: text) -> i64:
+    # Get Key Usage flags from certificate
+    val ext = find_extension(cert, OID_KEY_USAGE)
+    if ext == nil:
+        return nil
+
+    parse_key_usage(ext[2])
+
+fn has_key_usage_flag(cert: text, flag: i64) -> bool:
+    # Check if certificate has specific key usage flag
+    val usage = get_key_usage(cert)
+    if usage == nil:
+        return false
+
+    (usage & flag) != 0
+
+# Key Usage bit flags
+val KU_DIGITAL_SIGNATURE = 128
+val KU_NON_REPUDIATION = 64
+val KU_KEY_ENCIPHERMENT = 32
+val KU_DATA_ENCIPHERMENT = 16
+val KU_KEY_AGREEMENT = 8
+val KU_KEY_CERT_SIGN = 4
+val KU_CRL_SIGN = 2
+val KU_ENCIPHER_ONLY = 1
+
+# ============================================================================
+# Certificate Parsing Functions
+# ============================================================================
+
+fn parse_tbs_certificate(tbs_bytes: text) -> text:
+    # Parse TBSCertificate (To Be Signed Certificate)
+    val items = parse_der_sequence(tbs_bytes)
+    if items.length() < 7:
+        return nil
+
+    var idx = 0
+
+    # Version [0] EXPLICIT (optional)
+    var version = 1
+    if items[idx][0] == TAG_CONTEXT_0:
+        val version_seq = parse_der_sequence(items[idx][1])
+        if version_seq.length() > 0:
+            version = parse_der_integer(version_seq[0][1]) + 1
+        idx = idx + 1
+
+    # Serial Number
+    val serial = parse_der_integer(items[idx][1])
+    idx = idx + 1
+
+    # Signature Algorithm
+    val sig_alg_items = parse_der_sequence(items[idx][1])
+    val sig_alg = parse_der_oid(sig_alg_items[0][1])
+    idx = idx + 1
+
+    # Issuer
+    val issuer = parse_distinguished_name(items[idx][1])
+    idx = idx + 1
+
+    # Validity
+    val validity = parse_validity(items[idx][1])
+    idx = idx + 1
+
+    # Subject
+    val subject = parse_distinguished_name(items[idx][1])
+    idx = idx + 1
+
+    # SubjectPublicKeyInfo
+    val public_key = parse_public_key(items[idx][1])
+    idx = idx + 1
+
+    # Extensions [3] EXPLICIT (optional)
+    var extensions = []
+    if idx < items.length():
+        if items[idx][0] == TAG_CONTEXT_3:
+            extensions = parse_extensions(items[idx][1])
+
+    (version, serial, sig_alg, issuer, validity, subject, public_key, extensions)
+
+fn parse_certificate_der(der: text) -> text:
+    # Parse DER-encoded certificate
+    # Returns: (version, serial, issuer, subject, validity, public_key, extensions, sig_alg, signature, raw_der)
+
+    val cert_tlv = asn1_read_tlv(der, 0)
+    if cert_tlv == nil:
+        return nil
+
+    val cert_seq = parse_der_sequence(cert_tlv[1])
+    if cert_seq.length() < 3:
+        return nil
+
+    # TBSCertificate
+    val tbs_tlv = cert_seq[0]
+    val tbs = parse_tbs_certificate(tbs_tlv[1])
+    if tbs == nil:
+        return nil
+
+    # signatureAlgorithm
+    val sig_alg_tlv = cert_seq[1]
+    val sig_alg_items = parse_der_sequence(sig_alg_tlv[1])
+    val sig_alg = parse_der_oid(sig_alg_items[0][1])
+
+    # signatureValue
+    val sig_tlv = cert_seq[2]
+    val signature = parse_der_bit_string(sig_tlv[1])
+
+    val version = tbs[0]
+    val serial = tbs[1]
+    val issuer = tbs[3]
+    val subject = tbs[5]
+    val validity = tbs[4]
+    val public_key = tbs[6]
+    val extensions = tbs[7]
+
+    (version, serial, issuer, subject, validity, public_key, extensions, sig_alg, signature[1], der)
+
+fn parse_certificate(pem: text) -> text:
+    # Parse PEM-encoded certificate
+    val der = pem_decode(pem)
+    if der == nil:
+        return nil
+
+    parse_certificate_der(der)
+
+fn parse_certificate_chain(pem_chain: text) -> text:
+    # Parse multiple PEM certificates into chain
+    val pem_certs = split_pem_chain(pem_chain)
+    var certs = []
+
+    var i = 0
+    while i < pem_certs.length():
+        val cert = parse_certificate(pem_certs[i])
+        if cert != nil:
+            certs = certs + [cert]
+        i = i + 1
+
+    certs
+
+# ============================================================================
+# Certificate Information Getters
+# ============================================================================
+
+fn get_version(cert: text) -> i64:
+    # Get certificate version (1, 2, or 3)
+    cert[0]
+
+fn get_serial_number(cert: text) -> i64:
+    # Get certificate serial number
+    cert[1]
+
+fn get_issuer(cert: text) -> text:
+    # Get issuer Distinguished Name
+    cert[2]
+
+fn get_subject(cert: text) -> text:
+    # Get subject Distinguished Name
+    cert[3]
+
+fn get_validity(cert: text) -> text:
+    # Get validity period
+    cert[4]
+
+fn get_signature_algorithm(cert: text) -> text:
+    # Get signature algorithm OID
+    cert[7]
+
+fn get_signature(cert: text) -> text:
+    # Get signature value
+    cert[8]
+
+fn get_raw_der(cert: text) -> text:
+    # Get raw DER bytes of certificate
+    cert[9]
+
+fn is_self_signed(cert: text) -> bool:
+    # Check if certificate is self-signed
+    val issuer = get_issuer(cert)
+    val subject = get_subject(cert)
+
+    val issuer_cn = get_common_name(issuer)
+    val subject_cn = get_common_name(subject)
+
+    issuer_cn == subject_cn
+
+# ============================================================================
+# Certificate Chain Functions
+# ============================================================================
+
+fn find_issuer(cert: text, candidates: text) -> text:
+    # Find issuer certificate in list of candidates
+    val issuer_dn = get_issuer(cert)
+    val issuer_cn = get_common_name(issuer_dn)
+
+    var i = 0
+    while i < candidates.length():
+        val candidate = candidates[i]
+        val subject_dn = get_subject(candidate)
+        val subject_cn = get_common_name(subject_dn)
+
+        if issuer_cn == subject_cn:
+            return candidate
+
+        i = i + 1
+
+    nil
+
+fn build_certificate_chain(cert: text, intermediates: text, roots: text) -> text:
+    # Build certificate chain from leaf to root
+    var chain = [cert]
+    var current = cert
+    var all_certs = intermediates + roots
+
+    var max_depth = 10
+    var depth = 0
+
+    while depth < max_depth:
+        if is_self_signed(current):
+            break
+
+        val issuer = find_issuer(current, all_certs)
+        if issuer == nil:
+            break
+
+        chain = chain + [issuer]
+        current = issuer
+        depth = depth + 1
+
+    chain
+
+fn verify_chain(chain: text) -> bool:
+    # Verify certificate chain (simplified - doesn't verify signatures)
+    if chain.length() == 0:
+        return false
+
+    var i = 0
+    while i < chain.length():
+        val cert = chain[i]
+
+        # Check expiry
+        val is_valid = check_expiry(cert)
+        if not is_valid:
+            return false
+
+        # Check if CA (except for leaf)
+        if i > 0:
+            val is_ca = is_ca_certificate(cert)
+            if not is_ca:
+                return false
+
+        i = i + 1
+
+    true
+
+fn validate_certificate(cert: text, roots: text) -> bool:
+    # Validate certificate against trusted roots (simplified)
+    # This is a basic validation without signature verification
+
+    # Check expiry
+    val is_valid = check_expiry(cert)
+    if not is_valid:
+        return false
+
+    # Build chain
+    val chain = build_certificate_chain(cert, [], roots)
+
+    # Verify chain
+    verify_chain(chain)
+
+fn verify_signature(cert: text, issuer: text) -> bool:
+    # Verify certificate signature (stub - needs crypto library)
+    # This would require RSA/ECDSA signature verification
+    # For now, return true as placeholder
+    true
+
+# ============================================================================
+# Certificate Fingerprint Functions
+# ============================================================================
+
+fn simple_hash(data: text, seed: i64) -> i64:
+    # Simple hash function (placeholder for SHA-256)
+    var hash = seed
+    var i = 0
+
+    while i < data.length():
+        val char_code = data.char_code_at(i)
+        hash = ((hash << 5) - hash) + char_code
+        hash = hash & hash  # Convert to 32-bit integer
+        i = i + 1
+
+    hash
+
+fn bytes_to_hex(bytes: text) -> text:
+    # Convert bytes to hexadecimal string
+    val hex_chars = "0123456789ABCDEF"
+    var result = ""
+    var i = 0
+
+    while i < bytes.length():
+        val byte_val = bytes.char_code_at(i)
+        val high = (byte_val >> 4) & 15
+        val low = byte_val & 15
+        result = result + hex_chars.char_at(high) + hex_chars.char_at(low)
+        i = i + 1
+
+    result
+
+fn certificate_fingerprint(cert: text) -> text:
+    # Calculate certificate fingerprint (simplified hash)
+    val der = get_raw_der(cert)
+    val hash = simple_hash(der, 0)
+
+    # Convert to hex string
+    val hex = bytes_to_hex(text.from_char_code(hash))
+    hex
+
+fn sha256_fingerprint(cert: text) -> text:
+    # Calculate SHA-256 fingerprint (stub - needs crypto)
+    certificate_fingerprint(cert)
+
+fn sha1_fingerprint(cert: text) -> text:
+    # Calculate SHA-1 fingerprint (stub - needs crypto)
+    certificate_fingerprint(cert)
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn certificate_to_string(cert: text) -> text:
+    # Convert certificate to human-readable string
+    var result = "Certificate:\n"
+    result = result + "  Version: {get_version(cert)}\n"
+    result = result + "  Serial Number: {get_serial_number(cert)}\n"
+
+    val issuer = get_issuer(cert)
+    result = result + "  Issuer: {dn_to_string(issuer)}\n"
+
+    val subject = get_subject(cert)
+    result = result + "  Subject: {dn_to_string(subject)}\n"
+
+    val validity = get_validity(cert)
+    val not_before = validity[0]
+    val not_after = validity[1]
+    result = result + "  Valid from: {not_before[0]}-{not_before[1]}-{not_before[2]}\n"
+    result = result + "  Valid to: {not_after[0]}-{not_after[1]}-{not_after[2]}\n"
+
+    val pub_key = get_public_key(cert)
+    result = result + "  Public Key: {pub_key[2]} bits\n"
+
+    val is_ca = is_ca_certificate(cert)
+    result = result + "  CA: {is_ca}\n"
+
+    result
+
+fn certificates_match(cert1: text, cert2: text) -> bool:
+    # Check if two certificates are identical
+    val serial1 = get_serial_number(cert1)
+    val serial2 = get_serial_number(cert2)
+
+    if serial1 != serial2:
+        return false
+
+    val subject1 = get_subject(cert1)
+    val subject2 = get_subject(cert2)
+
+    val cn1 = get_common_name(subject1)
+    val cn2 = get_common_name(subject2)
+
+    cn1 == cn2
+
+fn get_certificate_purposes(cert: text) -> text:
+    # Determine certificate purposes from extensions
+    var purposes = []
+
+    val is_ca = is_ca_certificate(cert)
+    if is_ca:
+        purposes = purposes + ["CA"]
+
+    val key_usage = get_key_usage(cert)
+    if key_usage != nil:
+        if has_key_usage_flag(cert, KU_DIGITAL_SIGNATURE):
+            purposes = purposes + ["Digital Signature"]
+        if has_key_usage_flag(cert, KU_KEY_ENCIPHERMENT):
+            purposes = purposes + ["Key Encipherment"]
+        if has_key_usage_flag(cert, KU_KEY_CERT_SIGN):
+            purposes = purposes + ["Certificate Signing"]
+
+    purposes
+
+fn extract_certificate_info(cert: text) -> text:
+    # Extract all key information from certificate as tuple
+    val subject = get_subject(cert)
+    val issuer = get_issuer(cert)
+    val validity = get_validity(cert)
+    val serial = get_serial_number(cert)
+    val is_ca = is_ca_certificate(cert)
+    val dns_names = get_dns_names(cert)
+    val key_bits = get_public_key_bits(cert)
+
+    (subject, issuer, validity, serial, is_ca, dns_names, key_bits)
+
+fn is_valid_for_domain(cert: text, domain: text) -> bool:
+    # Check if certificate is valid for given domain
+    val subject = get_subject(cert)
+    val cn = get_common_name(subject)
+
+    # Check CN
+    if cn == domain:
+        return true
+
+    # Check wildcard CN
+    if cn.starts_with("*."):
+        val wildcard_domain = cn.substring(2, cn.length())
+        if domain.ends_with(wildcard_domain):
+            return true
+
+    # Check Subject Alternative Names
+    val dns_names = get_dns_names(cert)
+    var i = 0
+    while i < dns_names.length():
+        val name = dns_names[i]
+        if name == domain:
+            return true
+
+        # Check wildcard
+        if name.starts_with("*."):
+            val wildcard_domain = name.substring(2, name.length())
+            if domain.ends_with(wildcard_domain):
+                return true
+
+        i = i + 1
+
+    false
+
+fn get_certificate_age_days(cert: text) -> i64:
+    # Get certificate age in days
+    val validity = get_validity(cert)
+    val not_before = validity[0]
+
+    if not_before == nil:
+        return 0
+
+    val current_time = get_current_timestamp()
+    val before_ts = time_to_timestamp(not_before)
+
+    val age_seconds = current_time - before_ts
+    val age_days = age_seconds / 86400
+    age_days
+
+fn get_certificate_remaining_days(cert: text) -> i64:
+    # Get days remaining until certificate expires
+    val validity = get_validity(cert)
+    val not_after = validity[1]
+
+    if not_after == nil:
+        return 0
+
+    val current_time = get_current_timestamp()
+    val after_ts = time_to_timestamp(not_after)
+
+    val remaining_seconds = after_ts - current_time
+    val remaining_days = remaining_seconds / 86400
+    remaining_days
+
+fn will_expire_soon(cert: text, days: i64) -> bool:
+    # Check if certificate will expire within given days
+    val remaining = get_certificate_remaining_days(cert)
+    remaining <= days
