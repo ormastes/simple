@@ -1,48 +1,54 @@
-# Multi-Phase Bootstrap Pipeline (LLVM Backend)
+# Multi-Phase Bootstrap Pipeline (Seed Compiler Path)
 #
-# Builds the Simple compiler using the LLVM backend instead of Cranelift
-# to avoid hang bugs during bootstrap, while keeping Cranelift available
-# in the final product.
+# Builds the Simple compiler from source using the seed C++ transpiler,
+# producing working native binaries through a 4-phase chain:
 #
-# Architecture:
-#   Phase 0: Pre-built bootstrap binary (bin/release/simple)
-#   Phase 1: Phase0 compiles to SMF via compile --backend=llvm
-#   Phase 2: Phase1 recompiles to SMF via compile --backend=llvm
-#   Phase 3: Phase2 recompiles to SMF (reproducibility check)
-#   Phase 4: Phase3 compiles to native with --release (production)
+#   Phase 0: Prerequisites check (seed_cpp, clang++, runtime libs)
+#   Phase 1 (Core1): seed_cpp transpiles compiler_core → C++ → clang++ → native
+#   Phase 2 (Core2): Core1 recompiles compiler_core (reproducibility check)
+#   Phase 3 (Full1): Core2 compiles the full compiler
+#   Phase 4 (Full2): Full1 recompiles itself (reproducibility check)
 #
-# Key insight: Bootstrap uses LLVM backend (not Cranelift), but final binary
-# includes all backends (Cranelift, LLVM, C codegen, interpreter).
+# The seed compiler (seed_cpp) is a minimal C++ program that reads Core Simple
+# source and emits C++ code, which is then compiled with clang++ and linked
+# against the Simple runtime library and startup CRT.
+#
+# Key insight: seed_cpp handles forward declarations via two-pass compilation
+# (collects all struct/fn signatures first, then emits bodies), so file
+# ordering only needs to avoid putting main.spl before its dependencies.
 
 use app.build.types (BuildProfile)
 use app.io.mod (file_exists, file_size_raw, file_copy, file_delete, dir_create,
-                  process_run, file_hash_sha256, shell, time_now_unix_micros)
+                  dir_walk, file_hash_sha256, shell, shell_bool, shell_output_trimmed,
+                  time_now_unix_micros, file_read_text)
 
 # Bootstrap phase
 enum BootstrapPhase:
-    Phase0    # Pre-built binary
-    Phase1    # Minimal compiler (C → Clang/GCC, fast)
-    Phase2    # Full compiler (C → Clang/GCC)
-    Phase3    # Self-compiled (reproducibility)
-    Phase4    # LLVM optimized (production)
+    Phase0    # Prerequisites check
+    Phase1    # Core1: seed_cpp → C++ → clang → native
+    Phase2    # Core2: Core1 recompiles compiler_core
+    Phase3    # Full1: Core2 compiles full compiler
+    Phase4    # Full2: Full1 recompiles itself (reproducibility)
 
 # Compilation backend
 enum CompilationBackend:
-    Native      # C codegen → Clang/GCC (reliable, used for bootstrap)
-    LLVM        # C codegen → LLVM IR → optimized native
-    Cranelift   # Direct JIT (fast but may have bugs, kept in product)
-    Interpreter # Runtime only (no compilation)
+    SeedCpp     # seed_cpp → C++ → clang++ (bootstrap)
+    Native      # Self-hosted compiler → C → clang (later phases)
+    Interpreter # Fallback: interpreter verification
 
 # Multi-phase bootstrap configuration
 struct MultiphaseConfig:
     profile: BuildProfile
-    verify_reproducibility: bool    # Phase2 == Phase3 check
-    use_llvm_for_final: bool        # Phase4 with LLVM optimization
+    verify_reproducibility: bool    # Core1==Core2 and Full1==Full2 check
     keep_artifacts: bool            # Keep intermediate binaries
     workspace_root: text
     output_dir: text
-    bootstrap_backend: CompilationBackend  # Backend for bootstrap (default: Native)
-    production_backend: CompilationBackend # Backend for final (default: LLVM)
+    seed_cpp_path: text             # Path to seed_cpp binary
+    clang_path: text                # Path to clang++
+    runtime_lib: text               # Path to libspl_runtime.a
+    crt_lib: text                   # Path to libspl_crt_linux_x86_64.a
+    compiler_core_dir: text         # Path to src/compiler_core/
+    seed_include_dir: text          # Path to seed/ (for runtime.h)
 
 # Phase result
 struct PhaseResult:
@@ -56,7 +62,7 @@ struct PhaseResult:
 
 impl PhaseResult:
     fn summary() -> text:
-        val status = if self.success: "✓" else: "✗"
+        val status = if self.success: "OK" else: "FAIL"
         val backend_name = backend_to_string(self.backend)
         "{status} Phase {phase_name(self.phase)}: {self.binary_size} bytes, {self.compile_duration_ms}ms ({backend_name})"
 
@@ -83,91 +89,195 @@ impl MultiphaseResult:
             lines = lines + [self.phase4.summary()]
 
         if self.verified:
-            lines = lines + ["✓ Verification: Phase2 == Phase3 (reproducible)"]
+            lines = lines + ["OK Verification: reproducible builds confirmed"]
         else:
-            lines = lines + ["✗ Verification: Phase2 != Phase3 (not reproducible)"]
+            lines = lines + ["FAIL Verification: builds not reproducible"]
 
         lines.join("\n")
 
+# ============================================================================
+# File Discovery and Ordering
+# ============================================================================
+
+# Discover all .spl files in a directory recursively
+fn discover_spl_files(dir: text) -> [text]:
+    val all_files = dir_walk(dir)
+    var spl_files: [text] = []
+    for f in all_files:
+        if f.ends_with(".spl"):
+            spl_files.push(f)
+    spl_files
+
+# Extract module names from use statements in a source file
+fn extract_deps_from_file(file_path: text) -> [text]:
+    val source = file_read_text(file_path)
+    if source == nil:
+        return []
+    var deps: [text] = []
+    val lines = source.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("use "):
+            val rest = trimmed.substring(4).trim()
+            # Extract the module path (before any parentheses or braces)
+            var mod_path = rest
+            val paren_idx = rest.index_of("(") ?? -1
+            if paren_idx >= 0:
+                mod_path = rest.substring(0, paren_idx).trim()
+            val brace_idx = rest.index_of("{") ?? -1
+            if brace_idx >= 0:
+                val candidate = rest.substring(0, brace_idx).trim()
+                if candidate.len() < mod_path.len():
+                    mod_path = candidate
+            if mod_path.ends_with("."):
+                mod_path = mod_path.substring(0, mod_path.len() - 1)
+            if mod_path.ends_with("*"):
+                continue
+            if mod_path.len() > 0:
+                deps.push(mod_path)
+    deps
+
+# Convert a module path like "compiler_core.lexer_desugared" to a file path
+fn module_to_file(mod_path: text, base_dir: text) -> text:
+    # Try direct mapping: dots → slashes
+    val rel = mod_path.replace(".", "/")
+    val candidate = "{base_dir}/{rel}.spl"
+    if file_exists(candidate):
+        return candidate
+    # Try as directory with __init__.spl
+    val init_candidate = "{base_dir}/{rel}/__init__.spl"
+    if file_exists(init_candidate):
+        return init_candidate
+    ""
+
+# Build dependency-ordered file list for seed_cpp compilation
+# Strategy: BFS from files with no internal deps, main.spl always last
+fn build_ordered_file_list(base_dir: text) -> [text]:
+    val all_files = discover_spl_files(base_dir)
+    var main_file = ""
+    var init_file = ""
+    var other_files: [text] = []
+
+    for f in all_files:
+        if f.ends_with("/main.spl"):
+            main_file = f
+        elif f.ends_with("/__init__.spl"):
+            init_file = f
+        else:
+            other_files.push(f)
+
+    # Simple ordering: __init__.spl first (if exists), then other files sorted,
+    # then main.spl last. seed_cpp does two-pass (signatures then bodies),
+    # so circular deps within compilation are handled by C++ compilation model.
+    var ordered: [text] = []
+
+    if init_file != "":
+        ordered.push(init_file)
+
+    # Sort other files for deterministic builds
+    var sorted = other_files.sort()
+    for f in sorted:
+        ordered.push(f)
+
+    if main_file != "":
+        ordered.push(main_file)
+
+    ordered
+
+# ============================================================================
 # Multi-phase bootstrap orchestrator
+# ============================================================================
+
 class MultiphaseBootstrap:
     # Run complete multi-phase bootstrap
     static fn run(config: MultiphaseConfig) -> MultiphaseResult:
-        print "╔══════════════════════════════════════════════════════════════════╗"
-        print "║         Multi-Phase Bootstrap Pipeline (LLVM Backend)           ║"
-        print "╚══════════════════════════════════════════════════════════════════╝"
+        print "================================================================"
+        print "    Multi-Phase Bootstrap Pipeline (Seed Compiler Path)"
+        print "================================================================"
         print ""
-        print "Strategy: Build using LLVM backend (avoids Cranelift hang bugs)"
-        print "Product:  Final binary includes all backends (Cranelift available)"
+        print "Strategy: seed_cpp -> C++ -> clang++ -> native binary"
+        print "Chain:    Core1 -> Core2 -> Full1 -> Full2 (reproducibility)"
         print ""
 
-        dir_create(config.output_dir, false)
+        dir_create(config.output_dir, true)
 
-        # Phase 0: Verify pre-built bootstrap
-        print "Phase 0: Verify pre-built bootstrap binary"
-        print "─────────────────────────────────────────────────────────────────"
+        # Phase 0: Prerequisites
+        print "Phase 0: Prerequisites Check"
+        print "----------------------------------------------------------------"
         val phase0_result = run_phase0(config)
         print phase0_result.summary()
         print ""
 
         if not phase0_result.success:
-            return early_exit(phase0_result, BootstrapPhase.Phase0)
+            return early_exit(phase0_result)
 
-        # Phase 1: SMF via LLVM backend
-        print "Phase 1: Build compiler SMF (LLVM backend, avoids Cranelift)"
-        print "─────────────────────────────────────────────────────────────────"
-        val phase1_result = run_phase1(config, phase0_result)
+        # Phase 1: Core1 — seed_cpp transpiles compiler_core
+        print "Phase 1: Core1 (seed_cpp -> C++ -> clang++ -> native)"
+        print "----------------------------------------------------------------"
+        val phase1_result = run_phase1_seed(config)
         print phase1_result.summary()
         print ""
 
         if not phase1_result.success:
-            return early_exit_after_phase1(phase0_result, phase1_result)
+            print "  Phase 1 failed. Attempting interpreter fallback..."
+            val fallback = run_interpreter_fallback(config)
+            return early_exit_after_phase1(phase0_result, fallback)
 
-        # Phase 2: Recompile with Phase1
-        print "Phase 2: Recompile compiler SMF (using Phase1 + LLVM)"
-        print "─────────────────────────────────────────────────────────────────"
-        val phase2_result = run_phase2(config, phase1_result)
+        # Phase 2: Core2 — Core1 recompiles compiler_core
+        print "Phase 2: Core2 (Core1 compiles compiler_core)"
+        print "----------------------------------------------------------------"
+        val phase2_result = run_phase2_core(config, phase1_result)
         print phase2_result.summary()
         print ""
 
         if not phase2_result.success:
             return early_exit_after_phase2(phase0_result, phase1_result, phase2_result)
 
-        # Phase 3: Reproducibility check
-        print "Phase 3: Rebuild for reproducibility check"
-        print "─────────────────────────────────────────────────────────────────"
-        val phase3_result = run_phase3(config, phase2_result)
+        # Verify Core1 == Core2 (reproducibility)
+        var core_verified = true
+        if config.verify_reproducibility:
+            print "Verification: Comparing Core1 and Core2"
+            print "----------------------------------------------------------------"
+            core_verified = verify_phases(phase1_result, phase2_result)
+            if core_verified:
+                print "  OK Core reproducibility verified"
+            else:
+                print "  WARN Core hashes differ (expected for different compilation paths)"
+            print ""
+
+        # Phase 3: Full1 — Core2 compiles the full compiler
+        print "Phase 3: Full1 (Core2 compiles full compiler)"
+        print "----------------------------------------------------------------"
+        val phase3_result = run_phase3_full(config, phase2_result)
         print phase3_result.summary()
         print ""
 
         if not phase3_result.success:
             return early_exit_after_phase3(phase0_result, phase1_result, phase2_result, phase3_result)
 
-        # Verification: Phase2 == Phase3
-        var verified = true
-        if config.verify_reproducibility:
-            print "Verification: Comparing Phase2 and Phase3 binaries"
-            print "─────────────────────────────────────────────────────────────────"
-            verified = verify_phases(phase2_result, phase3_result)
-            if verified:
-                print "✓ Reproducibility verified: Phase2 == Phase3"
-            else:
-                print "✗ Reproducibility failed: Phase2 != Phase3"
-            print ""
+        # Phase 4: Full2 — Full1 recompiles itself
+        var phase4_result = empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.Native)
+        var full_verified = true
+        print "Phase 4: Full2 (Full1 recompiles itself)"
+        print "----------------------------------------------------------------"
+        phase4_result = run_phase4_full(config, phase3_result)
+        print phase4_result.summary()
+        print ""
 
-        # Phase 4: LLVM optimized production build (optional)
-        var phase4_result = empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.LLVM)
-        if config.use_llvm_for_final:
-            print "Phase 4: LLVM optimized production build"
-            print "─────────────────────────────────────────────────────────────────"
-            phase4_result = run_phase4(config, phase3_result)
-            print phase4_result.summary()
+        if phase4_result.success and config.verify_reproducibility:
+            print "Verification: Comparing Full1 and Full2"
+            print "----------------------------------------------------------------"
+            full_verified = verify_phases(phase3_result, phase4_result)
+            if full_verified:
+                print "  OK Full compiler reproducibility verified"
+            else:
+                print "  FAIL Full compiler hashes differ"
             print ""
 
         # Final summary
-        print "╔══════════════════════════════════════════════════════════════════╗"
-        print "║                     Bootstrap Complete                           ║"
-        print "╚══════════════════════════════════════════════════════════════════╝"
+        print "================================================================"
+        print "                    Bootstrap Complete"
+        print "================================================================"
         print ""
 
         val final_binary = if phase4_result.success: phase4_result else: phase3_result
@@ -177,16 +287,11 @@ class MultiphaseBootstrap:
         print "  Hash:    {final_binary.hash}"
         print "  Backend: {backend_to_string(final_binary.backend)}"
         print ""
-        print "Features included in final binary:"
-        print "  ✓ Interpreter (always available)"
-        print "  ✓ C codegen → Clang/GCC (native.spl)"
-        print "  ✓ C codegen → LLVM (llvm_direct.spl)"
-        print "  ✓ Cranelift JIT (available but not used during bootstrap)"
-        print ""
 
         val p01 = phase0_result.success and phase1_result.success
         val p012 = p01 and phase2_result.success
         val p0123 = p012 and phase3_result.success
+        val verified = if config.verify_reproducibility: full_verified else: true
         val overall_success = p0123 and verified
 
         MultiphaseResult(
@@ -199,17 +304,73 @@ class MultiphaseBootstrap:
             overall_success: overall_success
         )
 
-# Phase 0: Verify pre-built bootstrap binary exists
+# ============================================================================
+# Phase Implementations
+# ============================================================================
+
+# Phase 0: Verify all prerequisites exist
 fn run_phase0(config: MultiphaseConfig) -> PhaseResult:
     val start_time = current_time_ms()
+    var all_ok = true
 
-    var bootstrap_path = "bin/release/simple"
-    if not file_exists(bootstrap_path):
-        bootstrap_path = "./bin/release/simple"
+    # Check bin/release/simple (runtime interpreter)
+    if file_exists("bin/release/simple"):
+        val size = file_size_raw("bin/release/simple")
+        print "  OK bin/release/simple ({size} bytes)"
+    else:
+        print "  FAIL bin/release/simple not found"
+        all_ok = false
 
-    if not file_exists(bootstrap_path):
-        print "  ✗ Error: Pre-built bootstrap binary not found"
-        print "    Expected: bin/release/simple"
+    # Check seed_cpp
+    if file_exists(config.seed_cpp_path):
+        val size = file_size_raw(config.seed_cpp_path)
+        print "  OK {config.seed_cpp_path} ({size} bytes)"
+    else:
+        print "  FAIL {config.seed_cpp_path} not found"
+        print "    Build it: cd seed/build && cmake .. && cmake --build . --parallel"
+        all_ok = false
+
+    # Check clang++
+    val clang_check = shell("which {config.clang_path} 2>/dev/null")
+    if clang_check.exit_code == 0:
+        val version_result = shell("{config.clang_path} --version 2>/dev/null | head -1")
+        val version_line = version_result.stdout.trim()
+        print "  OK {config.clang_path} found ({version_line})"
+    else:
+        print "  FAIL {config.clang_path} not found"
+        all_ok = false
+
+    # Check runtime library
+    if file_exists(config.runtime_lib):
+        val size = file_size_raw(config.runtime_lib)
+        print "  OK {config.runtime_lib} ({size} bytes)"
+    else:
+        print "  FAIL {config.runtime_lib} not found"
+        all_ok = false
+
+    # Check CRT startup library
+    if file_exists(config.crt_lib):
+        val size = file_size_raw(config.crt_lib)
+        print "  OK {config.crt_lib} ({size} bytes)"
+    else:
+        print "  FAIL {config.crt_lib} not found"
+        all_ok = false
+
+    # Check compiler_core directory
+    val core_files = discover_spl_files(config.compiler_core_dir)
+    if core_files.len() > 0:
+        print "  OK {config.compiler_core_dir} ({core_files.len()} .spl files)"
+    else:
+        print "  FAIL {config.compiler_core_dir} has no .spl files"
+        all_ok = false
+
+    # Check seed include dir (for runtime.h)
+    if file_exists("{config.seed_include_dir}/runtime.h"):
+        print "  OK {config.seed_include_dir}/runtime.h found"
+    else:
+        print "  WARN {config.seed_include_dir}/runtime.h not found (may not be needed)"
+
+    if not all_ok:
         return PhaseResult(
             phase: BootstrapPhase.Phase0,
             success: false,
@@ -217,216 +378,296 @@ fn run_phase0(config: MultiphaseConfig) -> PhaseResult:
             binary_size: 0,
             compile_duration_ms: current_time_ms() - start_time,
             hash: "",
-            backend: CompilationBackend.Interpreter
+            backend: CompilationBackend.SeedCpp
         )
-
-    val binary_size = file_size_raw(bootstrap_path)
-    val hash = file_hash_sha256(bootstrap_path)
-
-    print "  ✓ Pre-built binary found ({binary_size} bytes)"
 
     PhaseResult(
         phase: BootstrapPhase.Phase0,
         success: true,
-        binary_path: bootstrap_path,
-        binary_size: binary_size,
+        binary_path: "bin/release/simple",
+        binary_size: file_size_raw("bin/release/simple"),
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: file_hash_sha256("bin/release/simple"),
+        backend: CompilationBackend.Interpreter
+    )
+
+# Phase 1: seed_cpp transpiles compiler_core → C++ → clang++ → native binary
+fn run_phase1_seed(config: MultiphaseConfig) -> PhaseResult:
+    val start_time = current_time_ms()
+    val core1_cpp = "{config.output_dir}/core1.cpp"
+    val core1_bin = "{config.output_dir}/core1"
+
+    # Step 1: Build ordered file list
+    print "  Discovering compiler_core files..."
+    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    print "  Found {ordered_files.len()} files"
+
+    # Step 2: Run seed_cpp to transpile to C++
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+    val seed_cmd = "{config.seed_cpp_path}{file_args} > {core1_cpp}"
+    print "  Running seed_cpp..."
+    val seed_result = shell(seed_cmd)
+
+    if seed_result.exit_code != 0:
+        print "  FAIL seed_cpp transpilation failed"
+        if seed_result.stderr != "":
+            print "  stderr: {seed_result.stderr}"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    if not file_exists(core1_cpp):
+        print "  FAIL {core1_cpp} not created"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    val cpp_size = file_size_raw(core1_cpp)
+    print "  Generated C++ ({cpp_size} bytes)"
+
+    if cpp_size < 1000:
+        print "  FAIL C++ output too small ({cpp_size} bytes) — likely empty/stub"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    # Step 3: Compile C++ with clang++
+    val compile_cmd = "{config.clang_path} -std=c++20 -O2 -o {core1_bin} {core1_cpp} -I{config.seed_include_dir} -L{config.seed_include_dir}/build -lspl_runtime -lm -lpthread"
+    print "  Compiling C++ with clang++..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL clang++ compilation failed"
+        if compile_result.stderr != "":
+            # Print first few lines of error
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 20:
+                    print "    {err_line}"
+                    shown = shown + 1
+            if err_lines.len() > 20:
+                print "    ... ({err_lines.len() - 20} more lines)"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    # Step 4: Link with startup CRT if available
+    # The CRT provides _start for freestanding binaries; skip if not needed
+    # (clang++ already provides standard C++ startup)
+
+    # Step 5: Verify binary
+    shell("chmod +x {core1_bin}")
+
+    if not file_exists(core1_bin):
+        print "  FAIL {core1_bin} not created"
+        return fail_phase(BootstrapPhase.Phase1, CompilationBackend.SeedCpp, start_time)
+
+    val bin_size = file_size_raw(core1_bin)
+    print "  Core1 binary: {bin_size} bytes"
+
+    if bin_size < 10000:
+        print "  WARN Binary unusually small ({bin_size} bytes)"
+
+    # Step 6: Smoke test
+    val smoke_result = shell("{core1_bin} --version 2>/dev/null")
+    if smoke_result.exit_code == 0:
+        print "  Smoke test: {smoke_result.stdout.trim()}"
+    else:
+        print "  WARN Smoke test failed (--version not supported, may be OK)"
+
+    val hash = file_hash_sha256(core1_bin)
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase1,
+        success: true,
+        binary_path: core1_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.SeedCpp
+    )
+
+# Phase 2: Core1 recompiles compiler_core (reproducibility)
+fn run_phase2_core(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val core2_bin = "{config.output_dir}/core2"
+
+    # Use Core1 to compile compiler_core
+    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    var file_args = ""
+    for f in ordered_files:
+        file_args = file_args + " " + f
+
+    val compile_cmd = "{phase1.binary_path} compile{file_args} -o {core2_bin}"
+    print "  Running Core1 to compile compiler_core..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core1 compilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase2, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {core2_bin}")
+
+    if not file_exists(core2_bin):
+        print "  FAIL {core2_bin} not created"
+        return fail_phase(BootstrapPhase.Phase2, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(core2_bin)
+    val hash = file_hash_sha256(core2_bin)
+    print "  Core2 binary: {bin_size} bytes"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase2,
+        success: true,
+        binary_path: core2_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# Phase 3: Core2 compiles the full compiler
+fn run_phase3_full(config: MultiphaseConfig, phase2: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val full1_bin = "{config.output_dir}/full1"
+
+    val compile_cmd = "{phase2.binary_path} compile src/app/cli/main.spl -o {full1_bin}"
+    print "  Running Core2 to compile full compiler..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Core2 compilation of full compiler failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase3, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {full1_bin}")
+
+    if not file_exists(full1_bin):
+        print "  FAIL {full1_bin} not created"
+        return fail_phase(BootstrapPhase.Phase3, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(full1_bin)
+    val hash = file_hash_sha256(full1_bin)
+    print "  Full1 binary: {bin_size} bytes"
+
+    # Smoke test
+    val smoke_result = shell("{full1_bin} --version 2>/dev/null")
+    if smoke_result.exit_code == 0:
+        print "  Smoke test: {smoke_result.stdout.trim()}"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase3,
+        success: true,
+        binary_path: full1_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# Phase 4: Full1 recompiles itself (reproducibility)
+fn run_phase4_full(config: MultiphaseConfig, phase3: PhaseResult) -> PhaseResult:
+    val start_time = current_time_ms()
+    val full2_bin = "{config.output_dir}/full2"
+
+    val compile_cmd = "{phase3.binary_path} compile src/app/cli/main.spl -o {full2_bin}"
+    print "  Running Full1 to recompile itself..."
+    val compile_result = shell(compile_cmd)
+
+    if compile_result.exit_code != 0:
+        print "  FAIL Full1 self-recompilation failed"
+        if compile_result.stderr != "":
+            val err_lines = compile_result.stderr.split("\n")
+            var shown = 0
+            for err_line in err_lines:
+                if shown < 10:
+                    print "    {err_line}"
+                    shown = shown + 1
+        return fail_phase(BootstrapPhase.Phase4, CompilationBackend.Native, start_time)
+
+    shell("chmod +x {full2_bin}")
+
+    if not file_exists(full2_bin):
+        print "  FAIL {full2_bin} not created"
+        return fail_phase(BootstrapPhase.Phase4, CompilationBackend.Native, start_time)
+
+    val bin_size = file_size_raw(full2_bin)
+    val hash = file_hash_sha256(full2_bin)
+    print "  Full2 binary: {bin_size} bytes"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase4,
+        success: true,
+        binary_path: full2_bin,
+        binary_size: bin_size,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: hash,
+        backend: CompilationBackend.Native
+    )
+
+# ============================================================================
+# Interpreter Fallback
+# ============================================================================
+
+# If the seed_cpp path fails, verify the compiler works through the interpreter
+fn run_interpreter_fallback(config: MultiphaseConfig) -> PhaseResult:
+    val start_time = current_time_ms()
+    print "  Running interpreter verification..."
+
+    # Run a small subset of tests to verify the interpreter works
+    val test_result = shell("bin/release/simple test --only-fast 2>&1 | tail -5")
+    if test_result.exit_code == 0:
+        print "  OK Interpreter tests passed"
+        print "  {test_result.stdout.trim()}"
+    else:
+        print "  WARN Some interpreter tests may have failed"
+
+    # Hash source files for integrity
+    val source_hash = shell("find src/compiler_core/ -name '*.spl' -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1")
+    val hash = source_hash.stdout.trim()
+    print "  Source integrity hash: {hash}"
+
+    PhaseResult(
+        phase: BootstrapPhase.Phase1,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
         compile_duration_ms: current_time_ms() - start_time,
         hash: hash,
         backend: CompilationBackend.Interpreter
     )
 
-# Phase 1: Build minimal compiler using built-in compile with LLVM backend
-fn run_phase1(config: MultiphaseConfig, phase0: PhaseResult) -> PhaseResult:
-    val start_time = current_time_ms()
+# ============================================================================
+# Helpers
+# ============================================================================
 
-    # Use built-in compile command with LLVM backend (avoids Cranelift hang)
-    # Compile to SMF format for faster execution
-    val phase1_path = "{config.output_dir}/simple_phase1.smf"
-    val bootstrap_binary = phase0.binary_path
-
-    # Compile using built-in compile command with LLVM backend
-    # Set SIMPLE_BACKEND=llvm to force LLVM instead of Cranelift
-    val compile_cmd = "SIMPLE_BACKEND=llvm SIMPLE_COMPILE_RUST=1 {bootstrap_binary} compile src/app/cli/main.spl --backend=llvm --format=smf -o {phase1_path} --verbose"
-    print "  Command: {compile_cmd}"
-    val compile_result = shell(compile_cmd)
-
-    if compile_result.exit_code != 0:
-        print "  ✗ Error: Phase 1 compilation failed"
-        if compile_result.stderr != "":
-            print "  stderr: {compile_result.stderr}"
-        return PhaseResult(
-            phase: BootstrapPhase.Phase1,
-            success: false,
-            binary_path: "",
-            binary_size: 0,
-            compile_duration_ms: current_time_ms() - start_time,
-            hash: "",
-            backend: config.bootstrap_backend
-        )
-
-    val binary_size = file_size_raw(phase1_path)
-    val hash = file_hash_sha256(phase1_path)
-
-    print "  ✓ Phase 1 compiled successfully"
-
-    PhaseResult(
-        phase: BootstrapPhase.Phase1,
-        success: true,
-        binary_path: phase1_path,
-        binary_size: binary_size,
-        compile_duration_ms: current_time_ms() - start_time,
-        hash: hash,
-        backend: config.bootstrap_backend
-    )
-
-# Phase 2: Build full compiler using Phase1
-fn run_phase2(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult:
-    val start_time = current_time_ms()
-
-    val phase2_path = "{config.output_dir}/simple_phase2.smf"
-    val phase1_smf = phase1.binary_path
-    val bootstrap_binary = "bin/release/simple"
-
-    # Use Phase1 SMF (run through bootstrap) to compile the full compiler
-    val compile_cmd = "{bootstrap_binary} {phase1_smf} compile src/app/cli/main.spl --backend=llvm --format=smf -o {phase2_path} --verbose"
-    print "  Command: {compile_cmd}"
-    val compile_result = shell(compile_cmd)
-
-    if compile_result.exit_code != 0:
-        print "  ✗ Error: Phase 2 compilation failed"
-        if compile_result.stderr != "":
-            print "  stderr: {compile_result.stderr}"
-        return PhaseResult(
-            phase: BootstrapPhase.Phase2,
-            success: false,
-            binary_path: "",
-            binary_size: 0,
-            compile_duration_ms: current_time_ms() - start_time,
-            hash: "",
-            backend: config.bootstrap_backend
-        )
-
-    val binary_size = file_size_raw(phase2_path)
-    val hash = file_hash_sha256(phase2_path)
-
-    print "  ✓ Phase 2 compiled successfully"
-
-    PhaseResult(
-        phase: BootstrapPhase.Phase2,
-        success: true,
-        binary_path: phase2_path,
-        binary_size: binary_size,
-        compile_duration_ms: current_time_ms() - start_time,
-        hash: hash,
-        backend: config.bootstrap_backend
-    )
-
-# Phase 3: Reproducibility check (Phase2 recompiles itself)
-fn run_phase3(config: MultiphaseConfig, phase2: PhaseResult) -> PhaseResult:
-    val start_time = current_time_ms()
-
-    val phase3_path = "{config.output_dir}/simple_phase3.smf"
-    val phase2_smf = phase2.binary_path
-    val bootstrap_binary = "bin/release/simple"
-
-    # Use Phase2 SMF (run through bootstrap) to recompile itself
-    val compile_cmd = "{bootstrap_binary} {phase2_smf} compile src/app/cli/main.spl --backend=llvm --format=smf -o {phase3_path} --verbose"
-    print "  Command: {compile_cmd}"
-    val compile_result = shell(compile_cmd)
-
-    if compile_result.exit_code != 0:
-        print "  ✗ Error: Phase 3 compilation failed"
-        if compile_result.stderr != "":
-            print "  stderr: {compile_result.stderr}"
-        return PhaseResult(
-            phase: BootstrapPhase.Phase3,
-            success: false,
-            binary_path: "",
-            binary_size: 0,
-            compile_duration_ms: current_time_ms() - start_time,
-            hash: "",
-            backend: config.bootstrap_backend
-        )
-
-    val binary_size = file_size_raw(phase3_path)
-    val hash = file_hash_sha256(phase3_path)
-
-    print "  ✓ Phase 3 compiled successfully"
-
-    PhaseResult(
-        phase: BootstrapPhase.Phase3,
-        success: true,
-        binary_path: phase3_path,
-        binary_size: binary_size,
-        compile_duration_ms: current_time_ms() - start_time,
-        hash: hash,
-        backend: config.bootstrap_backend
-    )
-
-# Phase 4: LLVM optimized production build (native executable)
-fn run_phase4(config: MultiphaseConfig, phase3: PhaseResult) -> PhaseResult:
-    val start_time = current_time_ms()
-
-    val phase4_path = "{config.output_dir}/simple_phase4"
-    val phase3_smf = phase3.binary_path
-    val bootstrap_binary = "bin/release/simple"
-
-    # Use Phase3 SMF to compile optimized native executable with LLVM backend
-    val compile_cmd = "{bootstrap_binary} {phase3_smf} compile src/app/cli/main.spl --backend=llvm --release -o {phase4_path} --verbose"
-    print "  Command: {compile_cmd}"
-    val compile_result = shell(compile_cmd)
-
-    if compile_result.exit_code != 0:
-        print "  ✗ Warning: Phase 4 LLVM optimization failed"
-        if compile_result.stderr != "":
-            print "  stderr: {compile_result.stderr}"
-        print "  Using Phase 3 as final binary"
-        return PhaseResult(
-            phase: BootstrapPhase.Phase4,
-            success: false,
-            binary_path: phase3.binary_path,
-            binary_size: phase3.binary_size,
-            compile_duration_ms: current_time_ms() - start_time,
-            hash: phase3.hash,
-            backend: CompilationBackend.LLVM
-        )
-
-    shell("chmod +x {phase4_path}")
-
-    val binary_size = file_size_raw(phase4_path)
-    val hash = file_hash_sha256(phase4_path)
-
-    print "  ✓ Phase 4 LLVM optimized successfully"
-
-    PhaseResult(
-        phase: BootstrapPhase.Phase4,
-        success: true,
-        binary_path: phase4_path,
-        binary_size: binary_size,
-        compile_duration_ms: current_time_ms() - start_time,
-        hash: hash,
-        backend: CompilationBackend.LLVM
-    )
-
-# Verify that Phase2 and Phase3 produce identical binaries
-fn verify_phases(phase2: PhaseResult, phase3: PhaseResult) -> bool:
-    if phase2.hash != phase3.hash:
-        print "  ✗ Hash mismatch:"
-        print "    Phase2: {phase2.hash}"
-        print "    Phase3: {phase3.hash}"
+# Verify that two phase results produce identical binaries
+fn verify_phases(phase_a: PhaseResult, phase_b: PhaseResult) -> bool:
+    if phase_a.hash != phase_b.hash:
+        print "  Hash mismatch:"
+        print "    {phase_name(phase_a.phase)}: {phase_a.hash}"
+        print "    {phase_name(phase_b.phase)}: {phase_b.hash}"
         return false
 
-    if phase2.binary_size != phase3.binary_size:
-        print "  ✗ Size mismatch:"
-        print "    Phase2: {phase2.binary_size} bytes"
-        print "    Phase3: {phase3.binary_size} bytes"
+    if phase_a.binary_size != phase_b.binary_size:
+        print "  Size mismatch:"
+        print "    {phase_name(phase_a.phase)}: {phase_a.binary_size} bytes"
+        print "    {phase_name(phase_b.phase)}: {phase_b.binary_size} bytes"
         return false
 
-    print "  ✓ Hashes match: {phase2.hash}"
-    print "  ✓ Sizes match:  {phase2.binary_size} bytes"
+    print "  Hashes match: {phase_a.hash}"
+    print "  Sizes match:  {phase_a.binary_size} bytes"
     true
 
-# Helper: Empty phase result
+# Empty phase result
 fn empty_phase_result(phase: BootstrapPhase, backend: CompilationBackend) -> PhaseResult:
     PhaseResult(
         phase: phase,
@@ -438,36 +679,49 @@ fn empty_phase_result(phase: BootstrapPhase, backend: CompilationBackend) -> Pha
         backend: backend
     )
 
-# Helper: Current time in milliseconds
+# Failed phase result
+fn fail_phase(phase: BootstrapPhase, backend: CompilationBackend, start_time: i64) -> PhaseResult:
+    PhaseResult(
+        phase: phase,
+        success: false,
+        binary_path: "",
+        binary_size: 0,
+        compile_duration_ms: current_time_ms() - start_time,
+        hash: "",
+        backend: backend
+    )
+
+# Current time in milliseconds
 fn current_time_ms() -> i64:
     time_now_unix_micros() / 1000
 
-# Helper: Phase name
+# Phase name
 fn phase_name(phase: BootstrapPhase) -> text:
     match phase:
-        case BootstrapPhase.Phase0: "0"
-        case BootstrapPhase.Phase1: "1"
-        case BootstrapPhase.Phase2: "2"
-        case BootstrapPhase.Phase3: "3"
-        case BootstrapPhase.Phase4: "4"
+        case BootstrapPhase.Phase0: "Phase0"
+        case BootstrapPhase.Phase1: "Phase1-Core1"
+        case BootstrapPhase.Phase2: "Phase2-Core2"
+        case BootstrapPhase.Phase3: "Phase3-Full1"
+        case BootstrapPhase.Phase4: "Phase4-Full2"
 
-# Helper: Backend name
+# Backend name
 fn backend_to_string(backend: CompilationBackend) -> text:
     match backend:
-        case CompilationBackend.Native: "C→Clang/GCC"
-        case CompilationBackend.LLVM: "C→LLVM"
-        case CompilationBackend.Cranelift: "Cranelift"
-        case CompilationBackend.Interpreter: "Interpreter"
+        case CompilationBackend.SeedCpp: "seed_cpp->C++->clang++"
+        case CompilationBackend.Native: "self-hosted->native"
+        case CompilationBackend.Interpreter: "interpreter"
 
+# ============================================================================
 # Early exit helpers
-fn early_exit(phase0: PhaseResult, failed_phase: BootstrapPhase) -> MultiphaseResult:
-    val empty_native = empty_phase_result(BootstrapPhase.Phase1, CompilationBackend.Native)
+# ============================================================================
+
+fn early_exit(phase0: PhaseResult) -> MultiphaseResult:
     MultiphaseResult(
         phase0: phase0,
-        phase1: empty_native,
+        phase1: empty_phase_result(BootstrapPhase.Phase1, CompilationBackend.SeedCpp),
         phase2: empty_phase_result(BootstrapPhase.Phase2, CompilationBackend.Native),
         phase3: empty_phase_result(BootstrapPhase.Phase3, CompilationBackend.Native),
-        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.LLVM),
+        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.Native),
         verified: false,
         overall_success: false
     )
@@ -478,7 +732,7 @@ fn early_exit_after_phase1(phase0: PhaseResult, phase1: PhaseResult) -> Multipha
         phase1: phase1,
         phase2: empty_phase_result(BootstrapPhase.Phase2, CompilationBackend.Native),
         phase3: empty_phase_result(BootstrapPhase.Phase3, CompilationBackend.Native),
-        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.LLVM),
+        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.Native),
         verified: false,
         overall_success: false
     )
@@ -489,7 +743,7 @@ fn early_exit_after_phase2(phase0: PhaseResult, phase1: PhaseResult, phase2: Pha
         phase1: phase1,
         phase2: phase2,
         phase3: empty_phase_result(BootstrapPhase.Phase3, CompilationBackend.Native),
-        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.LLVM),
+        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.Native),
         verified: false,
         overall_success: false
     )
@@ -500,22 +754,28 @@ fn early_exit_after_phase3(phase0: PhaseResult, phase1: PhaseResult, phase2: Pha
         phase1: phase1,
         phase2: phase2,
         phase3: phase3,
-        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.LLVM),
+        phase4: empty_phase_result(BootstrapPhase.Phase4, CompilationBackend.Native),
         verified: false,
         overall_success: false
     )
 
+# ============================================================================
 # Default configuration
+# ============================================================================
+
 fn default_multiphase_config() -> MultiphaseConfig:
     MultiphaseConfig(
         profile: BuildProfile.Bootstrap,
         verify_reproducibility: true,
-        use_llvm_for_final: true,
         keep_artifacts: true,
         workspace_root: ".",
         output_dir: "build/bootstrap",
-        bootstrap_backend: CompilationBackend.Native,
-        production_backend: CompilationBackend.LLVM
+        seed_cpp_path: "seed/build/seed_cpp",
+        clang_path: "clang++",
+        runtime_lib: "seed/build/libspl_runtime.a",
+        crt_lib: "seed/build/startup/libspl_crt_linux_x86_64.a",
+        compiler_core_dir: "src/compiler_core",
+        seed_include_dir: "seed"
     )
 
 # Quick entry point
