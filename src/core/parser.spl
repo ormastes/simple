@@ -399,6 +399,134 @@ fn parse_unary() -> i64:
         return expr_unary(TOK_NOT, operand, 0)
     parse_postfix()
 
+fn parse_binary_from(base: i64) -> i64:
+    # Continue binary expression parsing from an already-parsed base.
+    # Used by parse_call_arg when ident is already consumed.
+    # Handles: *, /, %, **, +, -, .., ..=, ??, comparisons, and, or
+    var left = base
+    # Multiplication level
+    for i in 0..1000:
+        if par_kind == TOK_STAR:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(TOK_STAR, left, right, 0)
+        elif par_kind == TOK_SLASH:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(TOK_SLASH, left, right, 0)
+        elif par_kind == TOK_PERCENT:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(TOK_PERCENT, left, right, 0)
+        elif par_kind == TOK_DOUBLE_STAR:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(TOK_DOUBLE_STAR, left, right, 0)
+        elif par_kind == TOK_PIPE:
+            parser_advance()
+            val right = parse_unary()
+            left = expr_binary(TOK_PIPE, left, right, 0)
+        else:
+            break
+    # Addition level
+    var add_left = left
+    for i in 0..1000:
+        if par_kind == TOK_PLUS:
+            parser_advance()
+            val right = parse_multiplication()
+            add_left = expr_binary(TOK_PLUS, add_left, right, 0)
+        elif par_kind == TOK_MINUS:
+            parser_advance()
+            val right = parse_multiplication()
+            add_left = expr_binary(TOK_MINUS, add_left, right, 0)
+        else:
+            break
+    left = add_left
+    # Range
+    if par_kind == TOK_DOTDOT:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_range(left, right, 0, 0)
+    if par_kind == TOK_DOTDOT_EQ:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_range(left, right, 1, 0)
+    # Null coalesce
+    for i in 0..100:
+        if par_kind == TOK_DOUBLE_QUESTION:
+            parser_advance()
+            val right = parse_range()
+            left = expr_null_coalesce(left, right, 0)
+        else:
+            break
+    # Comparisons
+    for i in 0..100:
+        if par_kind == TOK_EQ:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(TOK_EQ, left, right, 0)
+        elif par_kind == TOK_NEQ:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(TOK_NEQ, left, right, 0)
+        elif par_kind == TOK_LT:
+            parser_advance()
+            if par_kind == TOK_LT:
+                parser_advance()
+                val lshift_right = parse_null_coalesce()
+                left = expr_binary(TOK_LT, left, lshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(TOK_LT, left, right, 0)
+        elif par_kind == TOK_GT:
+            parser_advance()
+            if par_kind == TOK_GT:
+                parser_advance()
+                val rshift_right = parse_null_coalesce()
+                left = expr_binary(TOK_GT, left, rshift_right, 0)
+            else:
+                val right = parse_null_coalesce()
+                left = expr_binary(TOK_GT, left, right, 0)
+        elif par_kind == TOK_LEQ:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(TOK_LEQ, left, right, 0)
+        elif par_kind == TOK_GEQ:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_binary(TOK_GEQ, left, right, 0)
+        elif par_kind == TOK_KW_IN:
+            parser_advance()
+            val right = parse_null_coalesce()
+            left = expr_method_call(right, "contains", [], 0)
+        elif par_kind == TOK_KW_IS:
+            parser_advance()
+            val cast_type = parser_parse_type()
+            val dummy_bf = cast_type
+        else:
+            break
+    # And
+    for i in 0..1000:
+        val is_and = par_kind == TOK_KW_AND
+        val is_and2 = par_kind == TOK_AND
+        val match_and = is_and or is_and2
+        if not match_and:
+            break
+        parser_advance()
+        val right = parse_not()
+        left = expr_binary(TOK_AND, left, right, 0)
+    # Or
+    for i in 0..1000:
+        val is_or = par_kind == TOK_KW_OR
+        val is_or2 = par_kind == TOK_OR
+        val match_or = is_or or is_or2
+        if not match_or:
+            break
+        parser_advance()
+        val right = parse_and()
+        left = expr_binary(TOK_OR, left, right, 0)
+    left
+
 fn parse_call_arg() -> i64:
     # Check for bool-suffixed identifiers: true_abs, false_mut
     if par_kind == TOK_IDENT:
@@ -416,6 +544,15 @@ fn parse_call_arg() -> i64:
                 val suffix = ident[6:]
                 parser_advance()
                 return expr_suffixed_bool(0, suffix, 0)
+        # Named argument: ident COLON expr -> strip name, return value
+        parser_advance()
+        if par_kind == TOK_COLON:
+            parser_advance()
+            return parse_expr()
+        # Not a named arg: already consumed ident, continue with postfix+binary
+        val ident_node = expr_ident(ident, 0)
+        val postfix_result = parse_postfix_on(ident_node)
+        return parse_binary_from(postfix_result)
     parse_expr()
 
 fn parse_postfix_on(base_expr: i64) -> i64:
@@ -1423,7 +1560,7 @@ export parser_parse_type
 export parse_expr, parse_assignment, parse_or, parse_and, parse_not
 export parse_comparison, parse_null_coalesce, parse_range
 export parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary
-export parse_call_arg, parse_postfix_on
+export parse_call_arg, parse_postfix_on, parse_binary_from
 export parse_block, parse_statement
 export parse_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
