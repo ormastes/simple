@@ -6,5 +6,5 @@ CXX_DEFINES =
 
 CXX_INCLUDES = -I/home/ormastes/dev/pub/simple/seed
 
-CXX_FLAGS = -std=gnu++20 -Wall -Wextra -Wno-unused-parameter
+CXX_FLAGS = -O3 -DNDEBUG -std=gnu++20 -Wall -Wextra -Wno-unused-parameter
 

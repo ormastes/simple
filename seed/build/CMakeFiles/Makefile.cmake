@@ -12,6 +12,7 @@ set(CMAKE_MAKEFILE_DEPENDS
   "CMakeFiles/4.1.2/CMakeCCompiler.cmake"
   "CMakeFiles/4.1.2/CMakeCXXCompiler.cmake"
   "CMakeFiles/4.1.2/CMakeSystem.cmake"
+  "/home/ormastes/dev/pub/simple/seed/cmake/toolchains/linux-x86_64.cmake"
   "/home/ormastes/dev/pub/simple/seed/startup/CMakeLists.txt"
   "/usr/share/cmake-4.1/Modules/CMakeASMCompiler.cmake.in"
   "/usr/share/cmake-4.1/Modules/CMakeASMInformation.cmake"
