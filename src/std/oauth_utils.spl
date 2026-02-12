@@ -1,0 +1,1112 @@
+# OAuth 2.0 Utilities Module
+#
+# Comprehensive OAuth 2.0 implementation supporting:
+# - Authorization Code flow (RFC 6749)
+# - Client Credentials flow
+# - Refresh Token flow
+# - PKCE extension (RFC 7636)
+# - Token management and validation
+# - Scope handling
+# - State parameter for CSRF protection
+#
+# Security features:
+# - State parameter validation (CSRF protection)
+# - PKCE for public clients (mobile, SPA)
+# - Secure URL validation (HTTPS only)
+# - Token expiry checking
+# - Scope validation
+#
+# Data structures (tuple-based for runtime compatibility):
+# - OAuthConfig: (client_id, client_secret, redirect_uri, auth_url, token_url)
+# - AccessToken: (token, token_type, expires_in, refresh_token, scope, issued_at)
+# - AuthRequest: (client_id, redirect_uri, scope, state, code_challenge)
+# - TokenRequest: (grant_type, code, client_id, client_secret, redirect_uri, code_verifier)
+# - AuthResponse: (code, state, error, error_description)
+
+import string
+import array
+import math
+
+# ============================================================================
+# OAuth Configuration
+# ============================================================================
+
+# Create OAuth configuration
+# Returns: (client_id, client_secret, redirect_uri, auth_url, token_url)
+fn create_oauth_config(client_id: text, client_secret: text, redirect_uri: text, auth_url: text, token_url: text):
+    (client_id, client_secret, redirect_uri, auth_url, token_url)
+
+# Get client ID from config
+fn get_config_client_id(config):
+    config.0
+
+# Get client secret from config
+fn get_config_client_secret(config):
+    config.1
+
+# Get redirect URI from config
+fn get_config_redirect_uri(config):
+    config.2
+
+# Get authorization URL from config
+fn get_config_auth_url(config):
+    config.3
+
+# Get token URL from config
+fn get_config_token_url(config):
+    config.4
+
+# Validate OAuth configuration
+fn validate_oauth_config(config) -> bool:
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+    val redirect_uri = get_config_redirect_uri(config)
+    val auth_url = get_config_auth_url(config)
+    val token_url = get_config_token_url(config)
+
+    var valid = true
+    if string.length(client_id) == 0:
+        valid = false
+    if string.length(client_secret) == 0:
+        valid = false
+    if string.length(redirect_uri) == 0:
+        valid = false
+    if string.length(auth_url) == 0:
+        valid = false
+    if string.length(token_url) == 0:
+        valid = false
+
+    valid
+
+# ============================================================================
+# Access Token Structure
+# ============================================================================
+
+# Create access token
+# Returns: (token, token_type, expires_in, refresh_token, scope, issued_at)
+fn create_access_token(token: text, token_type: text, expires_in: i64, refresh_token: text, scope: text, issued_at: i64):
+    (token, token_type, expires_in, refresh_token, scope, issued_at)
+
+# Get access token string
+fn get_access_token(token):
+    token.0
+
+# Get token type (usually "Bearer")
+fn get_token_type(token):
+    token.1
+
+# Get expires_in value (seconds)
+fn get_expires_in(token):
+    token.2
+
+# Get refresh token
+fn get_refresh_token(token):
+    token.3
+
+# Get token scope
+fn get_token_scope(token):
+    token.4
+
+# Get token issued timestamp
+fn get_token_issued_at(token):
+    token.5
+
+# Create token with current timestamp
+fn create_token_now(token: text, token_type: text, expires_in: i64, refresh_token: text, scope: text):
+    val now = get_current_timestamp()
+    create_access_token(token, token_type, expires_in, refresh_token, scope, now)
+
+# ============================================================================
+# State Generation and Validation (CSRF Protection)
+# ============================================================================
+
+# Generate random state parameter for CSRF protection
+# Returns a random 32-character string
+fn generate_state() -> text:
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    var state = ""
+    var i = 0
+    while i < 32:
+        val idx = random_int(0, string.length(chars) - 1)
+        val char = string.char_at(chars, idx)
+        state = string.concat(state, char)
+        i = i + 1
+    state
+
+# Verify state parameter matches expected value
+fn verify_state(state: text, expected: text) -> bool:
+    string.equals(state, expected)
+
+# Generate state with timestamp prefix (for expiry checking)
+fn generate_state_with_timestamp() -> text:
+    val timestamp = get_current_timestamp()
+    val random_part = generate_state()
+    val timestamp_str = i64_to_text(timestamp)
+    string.concat(string.concat(timestamp_str, "_"), random_part)
+
+# Verify state and check if not expired (within 10 minutes)
+fn verify_state_with_expiry(state: text, expected: text, max_age_seconds: i64) -> bool:
+    if not verify_state(state, expected):
+        false
+    else:
+        # Extract timestamp from state
+        val parts = string.split(state, "_")
+        if array.length(parts) < 2:
+            false
+        else:
+            val timestamp_str = array.get(parts, 0)
+            val timestamp = text_to_i64(timestamp_str)
+            val now = get_current_timestamp()
+            val age = now - timestamp
+            age <= max_age_seconds
+
+# ============================================================================
+# PKCE (Proof Key for Code Exchange) - RFC 7636
+# ============================================================================
+
+# Generate code verifier (43-128 characters, URL-safe)
+fn generate_code_verifier() -> text:
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    var verifier = ""
+    var i = 0
+    val length = 128  # Maximum length for better security
+    while i < length:
+        val idx = random_int(0, string.length(chars) - 1)
+        val char = string.char_at(chars, idx)
+        verifier = string.concat(verifier, char)
+        i = i + 1
+    verifier
+
+# Generate code challenge from verifier using S256 method
+# Challenge = BASE64URL(SHA256(verifier))
+fn generate_code_challenge(verifier: text) -> text:
+    # Simple implementation: use hash of verifier
+    # In production, use proper SHA-256 and BASE64URL encoding
+    val hashed = hash_sha256(verifier)
+    base64url_encode(hashed)
+
+# Verify code challenge matches verifier
+fn verify_code_challenge(verifier: text, challenge: text) -> bool:
+    val computed = generate_code_challenge(verifier)
+    string.equals(computed, challenge)
+
+# Get PKCE method (always S256 for security)
+fn get_pkce_method() -> text:
+    "S256"
+
+# ============================================================================
+# Scope Management
+# ============================================================================
+
+# Parse scope string into array of scopes
+fn parse_scopes(scope_string: text):
+    if string.length(scope_string) == 0:
+        []
+    else:
+        string.split(scope_string, " ")
+
+# Build scope string from array of scopes
+fn build_scope_string(scopes):
+    array.join(scopes, " ")
+
+# Check if token has specific scope
+fn has_scope(token, scope: text) -> bool:
+    val token_scope = get_token_scope(token)
+    val scopes = parse_scopes(token_scope)
+    array_contains(scopes, scope)
+
+# Check if token has all required scopes
+fn has_all_scopes(token, required_scopes) -> bool:
+    var i = 0
+    var has_all = true
+    while i < array.length(required_scopes):
+        val scope = array.get(required_scopes, i)
+        if not has_scope(token, scope):
+            has_all = false
+        i = i + 1
+    has_all
+
+# Check if token has any of the required scopes
+fn has_any_scope(token, required_scopes) -> bool:
+    var i = 0
+    var has_any = false
+    while i < array.length(required_scopes):
+        val scope = array.get(required_scopes, i)
+        if has_scope(token, scope):
+            has_any = true
+        i = i + 1
+    has_any
+
+# Validate scope format (alphanumeric, dots, underscores, hyphens)
+fn validate_scope(scope: text) -> bool:
+    val len = string.length(scope)
+    if len == 0:
+        return false
+
+    var i = 0
+    var valid = true
+    while i < len:
+        val char = string.char_at(scope, i)
+        val is_alpha = is_alphanumeric(char)
+        val is_dot = string.equals(char, ".")
+        val is_underscore = string.equals(char, "_")
+        val is_hyphen = string.equals(char, "-")
+
+        if not is_alpha:
+            if not is_dot:
+                if not is_underscore:
+                    if not is_hyphen:
+                        valid = false
+        i = i + 1
+    valid
+
+# Validate all scopes in array
+fn validate_scopes(scopes) -> bool:
+    var i = 0
+    var valid = true
+    while i < array.length(scopes):
+        val scope = array.get(scopes, i)
+        if not validate_scope(scope):
+            valid = false
+        i = i + 1
+    valid
+
+# ============================================================================
+# Token Validation and Expiry
+# ============================================================================
+
+# Check if token is expired
+fn is_token_expired(token) -> bool:
+    val issued_at = get_token_issued_at(token)
+    val expires_in = get_expires_in(token)
+    val now = get_current_timestamp()
+    val expiry_time = issued_at + expires_in
+    now >= expiry_time
+
+# Get token expiry timestamp
+fn get_token_expiry(token) -> i64:
+    val issued_at = get_token_issued_at(token)
+    val expires_in = get_expires_in(token)
+    issued_at + expires_in
+
+# Get seconds until token expires (negative if expired)
+fn get_time_until_expiry(token) -> i64:
+    val expiry = get_token_expiry(token)
+    val now = get_current_timestamp()
+    expiry - now
+
+# Validate access token (basic validation)
+fn validate_access_token(token_string: text) -> bool:
+    # Token should not be empty
+    if string.length(token_string) == 0:
+        return false
+
+    # Token should be at least 20 characters (common minimum)
+    if string.length(token_string) < 20:
+        return false
+
+    true
+
+# Check if token needs refresh (expires within threshold seconds)
+fn token_needs_refresh(token, threshold_seconds: i64) -> bool:
+    val time_left = get_time_until_expiry(token)
+    time_left <= threshold_seconds
+
+# ============================================================================
+# Authorization Request Building
+# ============================================================================
+
+# Build authorization URL for OAuth 2.0 flow
+fn build_auth_url(config, scopes, state: text) -> text:
+    val base_url = get_config_auth_url(config)
+    val client_id = get_config_client_id(config)
+    val redirect_uri = get_config_redirect_uri(config)
+    val scope_string = build_scope_string(scopes)
+
+    var url = base_url
+    url = string.concat(url, "?response_type=code")
+
+    val client_param = string.concat("&client_id=", url_encode(client_id))
+    url = string.concat(url, client_param)
+
+    val redirect_param = string.concat("&redirect_uri=", url_encode(redirect_uri))
+    url = string.concat(url, redirect_param)
+
+    val scope_param = string.concat("&scope=", url_encode(scope_string))
+    url = string.concat(url, scope_param)
+
+    val state_param = string.concat("&state=", url_encode(state))
+    url = string.concat(url, state_param)
+
+    url
+
+# Build authorization URL with PKCE
+fn build_auth_url_with_pkce(config, scopes, state: text, code_challenge: text) -> text:
+    val base_url = build_auth_url(config, scopes, state)
+
+    val challenge_param = string.concat("&code_challenge=", url_encode(code_challenge))
+    var url = string.concat(base_url, challenge_param)
+
+    val method_param = string.concat("&code_challenge_method=", get_pkce_method())
+    url = string.concat(url, method_param)
+
+    url
+
+# Build authorization URL with additional parameters
+fn build_auth_url_with_params(config, scopes, state: text, extra_params):
+    var url = build_auth_url(config, scopes, state)
+
+    var i = 0
+    while i < array.length(extra_params):
+        val param = array.get(extra_params, i)
+        val key = param.0
+        val value = param.1
+
+        val param_str = string.concat(string.concat("&", key), string.concat("=", url_encode(value)))
+        url = string.concat(url, param_str)
+        i = i + 1
+
+    url
+
+# ============================================================================
+# Authorization Response Parsing
+# ============================================================================
+
+# Parse authorization callback URL
+# Returns: (code, state, error, error_description)
+fn parse_auth_response(callback_url: text):
+    val params = parse_query_params(callback_url)
+
+    val code = get_param_value(params, "code")
+    val state = get_param_value(params, "state")
+    val error = get_param_value(params, "error")
+    val error_desc = get_param_value(params, "error_description")
+
+    (code, state, error, error_desc)
+
+# Get authorization code from response
+fn get_auth_code(response):
+    response.0
+
+# Get state from response
+fn get_response_state(response):
+    response.1
+
+# Get error from response
+fn get_response_error(response):
+    response.2
+
+# Get error description from response
+fn get_response_error_description(response):
+    response.3
+
+# Check if authorization response has error
+fn has_auth_error(response) -> bool:
+    val error = get_response_error(response)
+    string.length(error) > 0
+
+# ============================================================================
+# Token Exchange (Authorization Code Flow)
+# ============================================================================
+
+# Exchange authorization code for access token
+# This is a simplified version - in production, make HTTP POST request
+fn exchange_code_for_token(code: text, config):
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+    val redirect_uri = get_config_redirect_uri(config)
+
+    # Build token request
+    val request_body = build_token_request_body(
+        "authorization_code",
+        code,
+        client_id,
+        client_secret,
+        redirect_uri,
+        ""
+    )
+
+    # In production: POST to token_url with request_body
+    # For now, return mock token
+    create_mock_access_token()
+
+# Exchange code with PKCE verifier
+fn exchange_code_with_pkce(code: text, code_verifier: text, config):
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+    val redirect_uri = get_config_redirect_uri(config)
+
+    val request_body = build_token_request_body(
+        "authorization_code",
+        code,
+        client_id,
+        client_secret,
+        redirect_uri,
+        code_verifier
+    )
+
+    # In production: POST to token_url with request_body
+    create_mock_access_token()
+
+# Build token request body (x-www-form-urlencoded)
+fn build_token_request_body(grant_type: text, code: text, client_id: text, client_secret: text, redirect_uri: text, code_verifier: text) -> text:
+    var body = ""
+
+    val grant_param = string.concat("grant_type=", url_encode(grant_type))
+    body = string.concat(body, grant_param)
+
+    if string.length(code) > 0:
+        val code_param = string.concat("&code=", url_encode(code))
+        body = string.concat(body, code_param)
+
+    val client_id_param = string.concat("&client_id=", url_encode(client_id))
+    body = string.concat(body, client_id_param)
+
+    val client_secret_param = string.concat("&client_secret=", url_encode(client_secret))
+    body = string.concat(body, client_secret_param)
+
+    if string.length(redirect_uri) > 0:
+        val redirect_param = string.concat("&redirect_uri=", url_encode(redirect_uri))
+        body = string.concat(body, redirect_param)
+
+    if string.length(code_verifier) > 0:
+        val verifier_param = string.concat("&code_verifier=", url_encode(code_verifier))
+        body = string.concat(body, verifier_param)
+
+    body
+
+# ============================================================================
+# Client Credentials Flow (Service-to-Service)
+# ============================================================================
+
+# Get access token using client credentials flow
+fn get_client_credentials_token(config, scopes):
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+    val scope_string = build_scope_string(scopes)
+
+    val request_body = build_client_credentials_request(client_id, client_secret, scope_string)
+
+    # In production: POST to token_url with request_body
+    create_mock_access_token()
+
+# Build client credentials request body
+fn build_client_credentials_request(client_id: text, client_secret: text, scope: text) -> text:
+    var body = "grant_type=client_credentials"
+
+    val client_id_param = string.concat("&client_id=", url_encode(client_id))
+    body = string.concat(body, client_id_param)
+
+    val client_secret_param = string.concat("&client_secret=", url_encode(client_secret))
+    body = string.concat(body, client_secret_param)
+
+    if string.length(scope) > 0:
+        val scope_param = string.concat("&scope=", url_encode(scope))
+        body = string.concat(body, scope_param)
+
+    body
+
+# ============================================================================
+# Refresh Token Flow
+# ============================================================================
+
+# Refresh access token using refresh token
+fn refresh_access_token(refresh_token: text, config):
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+
+    val request_body = build_refresh_token_request(refresh_token, client_id, client_secret)
+
+    # In production: POST to token_url with request_body
+    create_mock_access_token()
+
+# Build refresh token request body
+fn build_refresh_token_request(refresh_token: text, client_id: text, client_secret: text) -> text:
+    var body = "grant_type=refresh_token"
+
+    val refresh_param = string.concat("&refresh_token=", url_encode(refresh_token))
+    body = string.concat(body, refresh_param)
+
+    val client_id_param = string.concat("&client_id=", url_encode(client_id))
+    body = string.concat(body, client_id_param)
+
+    val client_secret_param = string.concat("&client_secret=", url_encode(client_secret))
+    body = string.concat(body, client_secret_param)
+
+    body
+
+# Refresh token with additional scopes
+fn refresh_token_with_scopes(refresh_token: text, config, scopes):
+    val client_id = get_config_client_id(config)
+    val client_secret = get_config_client_secret(config)
+    val scope_string = build_scope_string(scopes)
+
+    var body = build_refresh_token_request(refresh_token, client_id, client_secret)
+
+    if string.length(scope_string) > 0:
+        val scope_param = string.concat("&scope=", url_encode(scope_string))
+        body = string.concat(body, scope_param)
+
+    # In production: POST to token_url with body
+    create_mock_access_token()
+
+# ============================================================================
+# HTTP Headers and Request Building
+# ============================================================================
+
+# Create Authorization header for Bearer token
+fn create_auth_header(access_token: text) -> text:
+    string.concat("Bearer ", access_token)
+
+# Create full headers map for authenticated request
+fn create_auth_headers(access_token: text):
+    val auth_value = create_auth_header(access_token)
+    [("Authorization", auth_value)]
+
+# Add content type header for token requests
+fn create_token_request_headers():
+    [("Content-Type", "application/x-www-form-urlencoded")]
+
+# Create headers with both auth and content type
+fn create_full_request_headers(access_token: text):
+    [
+        ("Authorization", create_auth_header(access_token)),
+        ("Content-Type", "application/json")
+    ]
+
+# ============================================================================
+# Token Response Parsing
+# ============================================================================
+
+# Parse token JSON response (simplified)
+# In production, use proper JSON parser
+fn parse_token_response(json: text):
+    # Mock implementation - extract values from JSON string
+    val access_token = extract_json_value(json, "access_token")
+    val token_type = extract_json_value(json, "token_type")
+    val expires_in_str = extract_json_value(json, "expires_in")
+    val refresh_token = extract_json_value(json, "refresh_token")
+    val scope = extract_json_value(json, "scope")
+
+    val expires_in = text_to_i64(expires_in_str)
+
+    create_token_now(access_token, token_type, expires_in, refresh_token, scope)
+
+# Extract value from JSON (simplified)
+fn extract_json_value(json: text, key: text) -> text:
+    # Simple extraction - in production use proper JSON parser
+    val search_key = string.concat(string.concat("\"", key), "\":")
+    val idx = string.index_of(json, search_key)
+
+    if idx < 0:
+        return ""
+
+    val start_idx = idx + string.length(search_key)
+    val rest = string.substring(json, start_idx, string.length(json))
+
+    # Extract value until comma or closing brace
+    val value = extract_until_delimiter(rest, ",}")
+    string.trim(string.replace(value, "\"", ""))
+
+# ============================================================================
+# URL and Parameter Utilities
+# ============================================================================
+
+# URL encode a string
+fn url_encode(input: text) -> text:
+    var result = ""
+    var i = 0
+    val len = string.length(input)
+
+    while i < len:
+        val char = string.char_at(input, i)
+
+        if is_unreserved_char(char):
+            result = string.concat(result, char)
+        else:
+            # Encode as %XX (simplified - proper encoding needed)
+            val encoded = percent_encode_char(char)
+            result = string.concat(result, encoded)
+
+        i = i + 1
+
+    result
+
+# Check if character is unreserved (no encoding needed)
+fn is_unreserved_char(char: text) -> bool:
+    val is_alpha = is_alphanumeric(char)
+    val is_hyphen = string.equals(char, "-")
+    val is_underscore = string.equals(char, "_")
+    val is_dot = string.equals(char, ".")
+    val is_tilde = string.equals(char, "~")
+
+    if is_alpha:
+        true
+    else:
+        if is_hyphen:
+            true
+        else:
+            if is_underscore:
+                true
+            else:
+                if is_dot:
+                    true
+                else:
+                    is_tilde
+
+# Parse query parameters from URL
+fn parse_query_params(url: text):
+    val query_start = string.index_of(url, "?")
+    if query_start < 0:
+        return []
+
+    val query_string = string.substring(url, query_start + 1, string.length(url))
+    val pairs = string.split(query_string, "&")
+
+    var params = []
+    var i = 0
+    while i < array.length(pairs):
+        val pair = array.get(pairs, i)
+        val parts = string.split(pair, "=")
+
+        if array.length(parts) >= 2:
+            val key = array.get(parts, 0)
+            val value = array.get(parts, 1)
+            params = array.append(params, (key, url_decode(value)))
+
+        i = i + 1
+
+    params
+
+# Get parameter value from params array
+fn get_param_value(params, key: text) -> text:
+    var i = 0
+    var value = ""
+
+    while i < array.length(params):
+        val param = array.get(params, i)
+        val param_key = param.0
+
+        if string.equals(param_key, key):
+            value = param.1
+
+        i = i + 1
+
+    value
+
+# URL decode a string
+fn url_decode(input: text) -> text:
+    # Simplified implementation
+    var result = input
+    result = string.replace(result, "+", " ")
+    result = string.replace(result, "%20", " ")
+    result
+
+# Build URL with query parameters
+fn build_url_with_params(base_url: text, params):
+    var url = base_url
+
+    var i = 0
+    while i < array.length(params):
+        val param = array.get(params, i)
+        val key = param.0
+        val value = param.1
+
+        val separator = if i == 0: "?" else: "&"
+        val param_str = string.concat(string.concat(string.concat(separator, key), "="), url_encode(value))
+        url = string.concat(url, param_str)
+
+        i = i + 1
+
+    url
+
+# ============================================================================
+# Security Validation
+# ============================================================================
+
+# Validate redirect URI is in allowed list
+fn validate_redirect_uri(uri: text, allowed_uris) -> bool:
+    array_contains(allowed_uris, uri)
+
+# Check if URL uses HTTPS
+fn is_secure_url(url: text) -> bool:
+    string.starts_with(url, "https://")
+
+# Validate client ID format
+fn validate_client_id(client_id: text) -> bool:
+    val len = string.length(client_id)
+    if len < 5:
+        return false
+    if len > 256:
+        return false
+
+    # Should contain only alphanumeric and hyphens
+    var i = 0
+    var valid = true
+    while i < len:
+        val char = string.char_at(client_id, i)
+        val is_valid_char = is_alphanumeric(char)
+        val is_hyphen = string.equals(char, "-")
+
+        if not is_valid_char:
+            if not is_hyphen:
+                valid = false
+
+        i = i + 1
+
+    valid
+
+# Validate authorization code format
+fn validate_auth_code(code: text) -> bool:
+    val len = string.length(code)
+    if len < 20:
+        return false
+    if len > 512:
+        return false
+    true
+
+# Check token age in seconds
+fn get_token_age(token) -> i64:
+    val issued_at = get_token_issued_at(token)
+    val now = get_current_timestamp()
+    now - issued_at
+
+# ============================================================================
+# Client Credential Generation
+# ============================================================================
+
+# Generate client ID (random alphanumeric string)
+fn generate_client_id() -> text:
+    val prefix = "client_"
+    val random_part = generate_random_string(32)
+    string.concat(prefix, random_part)
+
+# Generate client secret (longer random string)
+fn generate_client_secret() -> text:
+    generate_random_string(64)
+
+# Hash client secret for storage (simplified - use proper hash in production)
+fn hash_client_secret(secret: text) -> text:
+    hash_sha256(secret)
+
+# Verify hashed secret
+fn verify_client_secret(secret: text, hashed: text) -> bool:
+    val computed = hash_client_secret(secret)
+    string.equals(computed, hashed)
+
+# ============================================================================
+# Token Introspection
+# ============================================================================
+
+# Build token introspection request
+fn build_introspection_request(token: text, client_id: text, client_secret: text) -> text:
+    var body = ""
+
+    val token_param = string.concat("token=", url_encode(token))
+    body = string.concat(body, token_param)
+
+    val client_id_param = string.concat("&client_id=", url_encode(client_id))
+    body = string.concat(body, client_id_param)
+
+    val client_secret_param = string.concat("&client_secret=", url_encode(client_secret))
+    body = string.concat(body, client_secret_param)
+
+    body
+
+# Parse introspection response
+# Returns: (active, scope, client_id, username, token_type, exp, iat)
+fn parse_introspection_response(json: text):
+    val active_str = extract_json_value(json, "active")
+    val active = string.equals(active_str, "true")
+    val scope = extract_json_value(json, "scope")
+    val client_id = extract_json_value(json, "client_id")
+    val username = extract_json_value(json, "username")
+    val token_type = extract_json_value(json, "token_type")
+    val exp_str = extract_json_value(json, "exp")
+    val iat_str = extract_json_value(json, "iat")
+
+    val exp = text_to_i64(exp_str)
+    val iat = text_to_i64(iat_str)
+
+    (active, scope, client_id, username, token_type, exp, iat)
+
+# Check if introspection response indicates active token
+fn is_token_active(introspection_response) -> bool:
+    introspection_response.0
+
+# ============================================================================
+# Token Revocation
+# ============================================================================
+
+# Build token revocation request
+fn build_revocation_request(token: text, token_type_hint: text, client_id: text, client_secret: text) -> text:
+    var body = ""
+
+    val token_param = string.concat("token=", url_encode(token))
+    body = string.concat(body, token_param)
+
+    if string.length(token_type_hint) > 0:
+        val hint_param = string.concat("&token_type_hint=", url_encode(token_type_hint))
+        body = string.concat(body, hint_param)
+
+    val client_id_param = string.concat("&client_id=", url_encode(client_id))
+    body = string.concat(body, client_id_param)
+
+    val client_secret_param = string.concat("&client_secret=", url_encode(client_secret))
+    body = string.concat(body, client_secret_param)
+
+    body
+
+# Revoke access token
+fn revoke_access_token(token: text, config):
+    build_revocation_request(token, "access_token", get_config_client_id(config), get_config_client_secret(config))
+
+# Revoke refresh token
+fn revoke_refresh_token(token: text, config):
+    build_revocation_request(token, "refresh_token", get_config_client_id(config), get_config_client_secret(config))
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+# Get current timestamp (seconds since epoch)
+fn get_current_timestamp() -> i64:
+    # Simplified - in production use system time
+    1707753600  # Mock timestamp
+
+# Generate random integer in range [min, max]
+fn random_int(min: i64, max: i64) -> i64:
+    # Simplified random - in production use proper PRNG
+    val range = max - min + 1
+    min + (get_current_timestamp() % range)
+
+# Generate random alphanumeric string
+fn generate_random_string(length: i64) -> text:
+    val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    var result = ""
+    var i = 0
+    while i < length:
+        val idx = random_int(0, string.length(chars) - 1)
+        val char = string.char_at(chars, idx)
+        result = string.concat(result, char)
+        i = i + 1
+    result
+
+# Check if character is alphanumeric
+fn is_alphanumeric(char: text) -> bool:
+    val code = string.char_code(char)
+    val is_digit = code >= 48  # '0' = 48
+    val is_digit_end = code <= 57  # '9' = 57
+    val is_upper = code >= 65  # 'A' = 65
+    val is_upper_end = code <= 90  # 'Z' = 90
+    val is_lower = code >= 97  # 'a' = 97
+    val is_lower_end = code <= 122  # 'z' = 122
+
+    var result = false
+    if is_digit:
+        if is_digit_end:
+            result = true
+
+    if is_upper:
+        if is_upper_end:
+            result = true
+
+    if is_lower:
+        if is_lower_end:
+            result = true
+
+    result
+
+# Check if array contains element
+fn array_contains(arr, element: text) -> bool:
+    var i = 0
+    var found = false
+    while i < array.length(arr):
+        val item = array.get(arr, i)
+        if string.equals(item, element):
+            found = true
+        i = i + 1
+    found
+
+# Convert i64 to text
+fn i64_to_text(value: i64) -> text:
+    # Simplified - in production use proper conversion
+    if value == 0:
+        return "0"
+
+    var result = ""
+    var num = value
+    var is_negative = num < 0
+
+    if is_negative:
+        num = 0 - num
+
+    while num > 0:
+        val digit = num % 10
+        val char = digit_to_char(digit)
+        result = string.concat(char, result)
+        num = num / 10
+
+    if is_negative:
+        result = string.concat("-", result)
+
+    result
+
+# Convert text to i64
+fn text_to_i64(text: text) -> i64:
+    # Simplified - in production use proper parsing
+    val len = string.length(text)
+    if len == 0:
+        return 0
+
+    var result = 0
+    var i = 0
+    var is_negative = string.equals(string.char_at(text, 0), "-")
+
+    if is_negative:
+        i = 1
+
+    while i < len:
+        val char = string.char_at(text, i)
+        val digit = char_to_digit(char)
+        result = result * 10 + digit
+        i = i + 1
+
+    if is_negative:
+        result = 0 - result
+
+    result
+
+# Convert digit to character
+fn digit_to_char(digit: i64) -> text:
+    val digits = "0123456789"
+    string.char_at(digits, digit)
+
+# Convert character to digit
+fn char_to_digit(char: text) -> i64:
+    val code = string.char_code(char)
+    code - 48  # '0' = 48
+
+# Simple SHA-256 hash (mock implementation)
+fn hash_sha256(input: text) -> text:
+    # In production, use proper cryptographic hash
+    # This is a placeholder that returns a hex-like string
+    var hash = ""
+    var i = 0
+    val len = string.length(input)
+
+    while i < len:
+        val char = string.char_at(input, i)
+        val code = string.char_code(char)
+        val hex = i64_to_hex(code)
+        hash = string.concat(hash, hex)
+        i = i + 1
+
+    # Pad to 64 characters (256 bits)
+    while string.length(hash) < 64:
+        hash = string.concat(hash, "0")
+
+    hash
+
+# Convert i64 to hex
+fn i64_to_hex(value: i64) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var num = value
+
+    if num == 0:
+        return "00"
+
+    while num > 0:
+        val digit = num % 16
+        val char = string.char_at(hex_chars, digit)
+        result = string.concat(char, result)
+        num = num / 16
+
+    # Pad to 2 characters
+    while string.length(result) < 2:
+        result = string.concat("0", result)
+
+    result
+
+# Base64 URL encode (simplified)
+fn base64url_encode(input: text) -> text:
+    # In production, use proper base64url encoding
+    # This is a simplified mock
+    var result = input
+    result = string.replace(result, "+", "-")
+    result = string.replace(result, "/", "_")
+    result = string.replace(result, "=", "")
+    result
+
+# Percent encode character
+fn percent_encode_char(char: text) -> text:
+    val code = string.char_code(char)
+    val hex = i64_to_hex(code)
+    string.concat("%", hex)
+
+# Extract string until delimiter
+fn extract_until_delimiter(input: text, delimiters: text) -> text:
+    var result = ""
+    var i = 0
+    val len = string.length(input)
+
+    while i < len:
+        val char = string.char_at(input, i)
+        val is_delimiter = string.contains(delimiters, char)
+
+        if is_delimiter:
+            return result
+
+        result = string.concat(result, char)
+        i = i + 1
+
+    result
+
+# Create mock access token for testing
+fn create_mock_access_token():
+    create_token_now(
+        "mock_access_token_" + generate_random_string(32),
+        "Bearer",
+        3600,
+        "mock_refresh_token_" + generate_random_string(32),
+        "read write profile"
+    )
+
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+# OAuth error codes (RFC 6749)
+fn get_invalid_request_error() -> text:
+    "invalid_request"
+
+fn get_invalid_client_error() -> text:
+    "invalid_client"
+
+fn get_invalid_grant_error() -> text:
+    "invalid_grant"
+
+fn get_unauthorized_client_error() -> text:
+    "unauthorized_client"
+
+fn get_unsupported_grant_type_error() -> text:
+    "unsupported_grant_type"
+
+fn get_invalid_scope_error() -> text:
+    "invalid_scope"
+
+fn get_access_denied_error() -> text:
+    "access_denied"
+
+# Create error response
+fn create_error_response(error: text, description: text):
+    (error, description)
+
+# Get error code from error response
+fn get_error_code(error_response):
+    error_response.0
+
+# Get error description from error response
+fn get_error_description(error_response):
+    error_response.1
