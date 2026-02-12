@@ -962,3 +962,214 @@ fn calculate_frame_size(payload_length: i64, is_masked: i64) -> i64:
         size = size + 4
 
     size + payload_length
+
+# ==============================================================================
+# Additional Utility Functions
+# ==============================================================================
+
+# Create empty close frame (no status code)
+fn create_empty_close_frame(is_masked: i64) -> List<i64>:
+    val payload = []
+    val mask_key = if is_masked == 1: generate_masking_key() else: []
+    create_frame(1, OPCODE_CLOSE, is_masked, payload, mask_key)
+
+# Create text frame from payload bytes
+fn create_text_frame_from_bytes(payload: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
+    val mask_key = if is_masked == 1: generate_masking_key() else: []
+    create_frame(is_final, OPCODE_TEXT, is_masked, payload, mask_key)
+
+# Get payload as text
+fn payload_to_text(payload: List<i64>) -> text:
+    bytes_to_text(payload)
+
+# Get text payload length
+fn text_payload_length(text_data: text) -> i64:
+    text_data.length()
+
+# Check if payload length requires extended format
+fn requires_extended_length(payload_length: i64) -> i64:
+    if payload_length >= PAYLOAD_LEN_EXTENDED_16: 1 else: 0
+
+# Check if payload length requires 64-bit format
+fn requires_64bit_length(payload_length: i64) -> i64:
+    if payload_length >= 65536: 1 else: 0
+
+# Get header size for payload length
+fn get_header_size(payload_length: i64, is_masked: i64) -> i64:
+    var size = 2
+
+    if payload_length < PAYLOAD_LEN_EXTENDED_16:
+        size = size + 0
+    else:
+        if payload_length < 65536:
+            size = size + 2
+        else:
+            size = size + 8
+
+    if is_masked == 1:
+        size = size + 4
+
+    size
+
+# Check if frame is final
+fn is_final_frame(fin: i64) -> i64:
+    if fin == 1: 1 else: 0
+
+# Check if frame is fragmented
+fn is_fragmented_frame(fin: i64) -> i64:
+    if fin == 0: 1 else: 0
+
+# Create ping with text payload
+fn create_ping_text(text_data: text, is_masked: i64) -> List<i64>:
+    val payload = text_to_bytes(text_data)
+    create_ping_frame(payload, is_masked)
+
+# Create pong with text payload
+fn create_pong_text(text_data: text, is_masked: i64) -> List<i64>:
+    val payload = text_to_bytes(text_data)
+    create_pong_frame(payload, is_masked)
+
+# Respond to ping with pong
+fn create_pong_response(ping_payload: List<i64>, is_masked: i64) -> List<i64>:
+    create_pong_frame(ping_payload, is_masked)
+
+# Validate payload length for control frame
+fn is_valid_control_payload_length(payload_length: i64) -> i64:
+    if payload_length <= 125: 1 else: 0
+
+# Get maximum control frame payload size
+fn max_control_payload_size() -> i64:
+    125
+
+# Check if close status is valid
+fn is_valid_close_status(code: i64) -> i64:
+    if code >= 1000:
+        if code <= 1011:
+            1
+        else:
+            0
+    else:
+        0
+
+# Create close frame with only status code
+fn create_close_with_status(status_code: i64, is_masked: i64) -> List<i64>:
+    create_close_frame(status_code, "", is_masked)
+
+# Extract frame metadata
+fn get_frame_metadata(data: List<i64>) -> List<i64>:
+    parse_frame_header(data)
+
+# Check if enough data for complete frame
+fn has_complete_frame(data: List<i64>) -> i64:
+    val header = parse_frame_header(data)
+    if header.length() == 0:
+        return 0
+
+    val payload_length = header.at(3)
+    val header_size = header.at(4)
+    val required_size = header_size + payload_length
+
+    if data.length() >= required_size: 1 else: 0
+
+# Get required bytes for complete frame
+fn required_bytes_for_frame(data: List<i64>) -> i64:
+    val header = parse_frame_header(data)
+    if header.length() == 0:
+        return 2
+
+    val payload_length = header.at(3)
+    val header_size = header.at(4)
+    val required_size = header_size + payload_length
+    val current_size = data.length()
+
+    if current_size >= required_size:
+        0
+    else:
+        required_size - current_size
+
+# Validate frame structure
+fn validate_frame_structure(fin: i64, opcode: i64, payload_length: i64) -> i64:
+    val valid_opcode = is_valid_opcode(opcode)
+    if valid_opcode == 0:
+        return 0
+
+    val valid_control = is_valid_control_frame(opcode, payload_length)
+    if valid_control == 0:
+        return 0
+
+    1
+
+# Check if opcode is data frame
+fn is_data_frame(opcode: i64) -> i64:
+    if opcode == OPCODE_TEXT: return 1
+    if opcode == OPCODE_BINARY: return 1
+    if opcode == OPCODE_CONTINUATION: return 1
+    0
+
+# Get frame type category
+fn frame_type_category(opcode: i64) -> text:
+    if is_data_frame(opcode) == 1:
+        "Data"
+    else:
+        if is_control_frame(opcode) == 1:
+            "Control"
+        else:
+            "Unknown"
+
+# Concatenate multiple frames
+fn concatenate_frames(frames: List<List<i64>>) -> List<i64>:
+    val result = []
+    val num_frames = frames.length()
+
+    var i = 0
+    while i < num_frames:
+        val frame = frames.at(i)
+        val len = frame.length()
+        var j = 0
+        while j < len:
+            result.push(frame.at(j))
+            j = j + 1
+        i = i + 1
+
+    result
+
+# Extract all payloads from frames
+fn extract_all_payloads(frames: List<List<i64>>) -> List<List<i64>>:
+    val result = []
+    val num_frames = frames.length()
+
+    var i = 0
+    while i < num_frames:
+        val frame = frames.at(i)
+        val parsed = parse_frame(frame)
+        if parsed.length() > 0:
+            val header_size = parsed.at(4)
+            val payload_length = parsed.at(3)
+            val masked = parsed.at(2)
+            val mask_key = extract_mask_key(frame, header_size, masked)
+            val payload = extract_payload(frame, header_size, payload_length, mask_key)
+            result.push(payload)
+        i = i + 1
+
+    result
+
+# Merge payloads into single payload
+fn merge_payloads(payloads: List<List<i64>>) -> List<i64>:
+    reassemble_fragments(payloads)
+
+# Check if RSV bits are set
+fn has_rsv_bits(byte1: i64) -> i64:
+    val rsv = byte1 & (RSV1_BIT | RSV2_BIT | RSV3_BIT)
+    if rsv != 0: 1 else: 0
+
+# Extract RSV1 bit
+fn get_rsv1(byte1: i64) -> i64:
+    if (byte1 & RSV1_BIT) != 0: 1 else: 0
+
+# Extract RSV2 bit
+fn get_rsv2(byte1: i64) -> i64:
+    if (byte1 & RSV2_BIT) != 0: 1 else: 0
+
+# Extract RSV3 bit
+fn get_rsv3(byte1: i64) -> i64:
+    if (byte1 & RSV3_BIT) != 0: 1 else: 0
