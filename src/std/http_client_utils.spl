@@ -1,0 +1,1117 @@
+# HTTP Client Utilities Module
+# Comprehensive HTTP/1.1 client for making HTTP requests
+# Pure Simple implementation with tuple-based structures
+
+# ============================================================================
+# HTTP Constants
+# ============================================================================
+
+val HTTP_VERSION = "HTTP/1.1"
+
+# HTTP Methods
+val METHOD_GET = "GET"
+val METHOD_POST = "POST"
+val METHOD_PUT = "PUT"
+val METHOD_DELETE = "DELETE"
+val METHOD_PATCH = "PATCH"
+val METHOD_HEAD = "HEAD"
+val METHOD_OPTIONS = "OPTIONS"
+
+# Content Types
+val CONTENT_TYPE_JSON = "application/json"
+val CONTENT_TYPE_FORM = "application/x-www-form-urlencoded"
+val CONTENT_TYPE_MULTIPART = "multipart/form-data"
+val CONTENT_TYPE_TEXT = "text/plain"
+val CONTENT_TYPE_HTML = "text/html"
+val CONTENT_TYPE_XML = "application/xml"
+val CONTENT_TYPE_OCTET_STREAM = "application/octet-stream"
+
+# HTTP Status Codes
+val STATUS_OK = 200
+val STATUS_CREATED = 201
+val STATUS_ACCEPTED = 202
+val STATUS_NO_CONTENT = 204
+val STATUS_MOVED_PERMANENTLY = 301
+val STATUS_FOUND = 302
+val STATUS_SEE_OTHER = 303
+val STATUS_NOT_MODIFIED = 304
+val STATUS_TEMPORARY_REDIRECT = 307
+val STATUS_PERMANENT_REDIRECT = 308
+val STATUS_BAD_REQUEST = 400
+val STATUS_UNAUTHORIZED = 401
+val STATUS_FORBIDDEN = 403
+val STATUS_NOT_FOUND = 404
+val STATUS_METHOD_NOT_ALLOWED = 405
+val STATUS_CONFLICT = 409
+val STATUS_INTERNAL_SERVER_ERROR = 500
+val STATUS_NOT_IMPLEMENTED = 501
+val STATUS_BAD_GATEWAY = 502
+val STATUS_SERVICE_UNAVAILABLE = 503
+
+# Default Headers
+val USER_AGENT_DEFAULT = "SimpleHTTP/1.0"
+val ACCEPT_DEFAULT = "*/*"
+
+# ============================================================================
+# URL Encoding/Decoding
+# ============================================================================
+
+fn url_encode(text: text) -> text:
+    # URL percent-encoding for query strings and form data
+    var result = ""
+    var i = 0
+    var len = text.length()
+    while i < len:
+        var ch = text.char_at(i)
+        var code = text.char_code_at(i)
+
+        # Unreserved characters (don't encode)
+        var is_alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        var is_digit = code >= 48 and code <= 57
+        var is_unreserved = is_alpha or is_digit or ch == "-" or ch == "_" or ch == "." or ch == "~"
+
+        if is_unreserved:
+            result = result + ch
+        else:
+            # Percent-encode
+            var hex = code.to_string(16).to_upper()
+            if hex.length() == 1:
+                hex = "0" + hex
+            result = result + "%" + hex
+
+        i = i + 1
+    result
+
+fn url_decode(text: text) -> text:
+    # Decode percent-encoded URL strings
+    var result = ""
+    var i = 0
+    var len = text.length()
+    while i < len:
+        var ch = text.char_at(i)
+        if ch == "%":
+            if i + 2 < len:
+                var hex = text.substring(i + 1, i + 3)
+                var code = hex.parse_int(16)
+                result = result + code.to_char()
+                i = i + 3
+            else:
+                result = result + ch
+                i = i + 1
+        else:
+            if ch == "+":
+                result = result + " "
+            else:
+                result = result + ch
+            i = i + 1
+    result
+
+fn url_encode_component(component: text) -> text:
+    # Encode a single URL component (more aggressive than url_encode)
+    url_encode(component)
+
+fn url_decode_component(component: text) -> text:
+    # Decode a single URL component
+    url_decode(component)
+
+# ============================================================================
+# URL Parsing and Building
+# ============================================================================
+
+# URL structure: (scheme, host, port, path, query, fragment)
+fn parse_url(url: text) -> (text, text, i64, text, text, text):
+    # Parse URL into components
+    var scheme = ""
+    var host = ""
+    var port = 80
+    var path = "/"
+    var query = ""
+    var fragment = ""
+
+    var remaining = url
+
+    # Extract scheme
+    var scheme_end = remaining.index_of("://")
+    if scheme_end >= 0:
+        scheme = remaining.substring(0, scheme_end)
+        remaining = remaining.substring(scheme_end + 3, remaining.length())
+        if scheme == "https":
+            port = 443
+    else:
+        scheme = "http"
+
+    # Extract fragment
+    var fragment_start = remaining.index_of("#")
+    if fragment_start >= 0:
+        fragment = remaining.substring(fragment_start + 1, remaining.length())
+        remaining = remaining.substring(0, fragment_start)
+
+    # Extract query
+    var query_start = remaining.index_of("?")
+    if query_start >= 0:
+        query = remaining.substring(query_start + 1, remaining.length())
+        remaining = remaining.substring(0, query_start)
+
+    # Extract path
+    var path_start = remaining.index_of("/")
+    if path_start >= 0:
+        path = remaining.substring(path_start, remaining.length())
+        remaining = remaining.substring(0, path_start)
+
+    # Extract host and port
+    var port_start = remaining.index_of(":")
+    if port_start >= 0:
+        host = remaining.substring(0, port_start)
+        var port_str = remaining.substring(port_start + 1, remaining.length())
+        port = port_str.parse_int()
+    else:
+        host = remaining
+
+    (scheme, host, port, path, query, fragment)
+
+fn build_url(scheme: text, host: text, port: i64, path: text, query: text, fragment: text) -> text:
+    # Build URL from components
+    var url = scheme + "://" + host
+
+    # Add port if non-standard
+    var default_port = 80
+    if scheme == "https":
+        default_port = 443
+
+    if port != default_port:
+        url = url + ":" + port.to_string()
+
+    url = url + path
+
+    if query.length() > 0:
+        url = url + "?" + query
+
+    if fragment.length() > 0:
+        url = url + "#" + fragment
+
+    url
+
+fn url_join(base: text, relative: text) -> text:
+    # Join base URL with relative path
+    if relative.starts_with("http://") or relative.starts_with("https://"):
+        relative
+    else:
+        var parsed = parse_url(base)
+        var scheme = parsed.0
+        var host = parsed.1
+        var port = parsed.2
+        var base_path = parsed.3
+
+        var new_path = relative
+        if relative.starts_with("/"):
+            new_path = relative
+        else:
+            # Relative to current path
+            var last_slash = base_path.last_index_of("/")
+            if last_slash >= 0:
+                var dir = base_path.substring(0, last_slash + 1)
+                new_path = dir + relative
+            else:
+                new_path = "/" + relative
+
+        build_url(scheme, host, port, new_path, "", "")
+
+# ============================================================================
+# Query String Handling
+# ============================================================================
+
+# Query parameters: list of (key, value) tuples
+fn parse_query_string(query: text) -> list:
+    # Parse query string into list of (key, value) tuples
+    var params = []
+    if query.length() == 0:
+        return params
+
+    var pairs = query.split("&")
+    var i = 0
+    while i < pairs.length():
+        var pair = pairs[i]
+        var eq_pos = pair.index_of("=")
+        if eq_pos >= 0:
+            var key = pair.substring(0, eq_pos)
+            var value = pair.substring(eq_pos + 1, pair.length())
+            key = url_decode(key)
+            value = url_decode(value)
+            params.append((key, value))
+        else:
+            var key = url_decode(pair)
+            params.append((key, ""))
+        i = i + 1
+    params
+
+fn build_query_string(params: list) -> text:
+    # Build query string from list of (key, value) tuples
+    var result = ""
+    var i = 0
+    while i < params.length():
+        var param = params[i]
+        var key = param.0
+        var value = param.1
+
+        if i > 0:
+            result = result + "&"
+
+        result = result + url_encode(key)
+        if value.length() > 0:
+            result = result + "=" + url_encode(value)
+
+        i = i + 1
+    result
+
+fn add_query_param(url: text, key: text, value: text) -> text:
+    # Add a query parameter to URL
+    var parsed = parse_url(url)
+    var scheme = parsed.0
+    var host = parsed.1
+    var port = parsed.2
+    var path = parsed.3
+    var query = parsed.4
+    var fragment = parsed.5
+
+    var params = parse_query_string(query)
+    params.append((key, value))
+    var new_query = build_query_string(params)
+
+    build_url(scheme, host, port, path, new_query, fragment)
+
+fn remove_query_param(url: text, key: text) -> text:
+    # Remove a query parameter from URL
+    var parsed = parse_url(url)
+    var scheme = parsed.0
+    var host = parsed.1
+    var port = parsed.2
+    var path = parsed.3
+    var query = parsed.4
+    var fragment = parsed.5
+
+    var params = parse_query_string(query)
+    var filtered = []
+    var i = 0
+    while i < params.length():
+        var param = params[i]
+        if param.0 != key:
+            filtered.append(param)
+        i = i + 1
+
+    var new_query = build_query_string(filtered)
+    build_url(scheme, host, port, path, new_query, fragment)
+
+# ============================================================================
+# Headers Management
+# ============================================================================
+
+# Headers: list of (name, value) tuples
+fn create_headers() -> list:
+    # Create empty headers list
+    []
+
+fn add_header(headers: list, name: text, value: text) -> list:
+    # Add header to headers list (returns new list)
+    var new_headers = []
+    var i = 0
+    while i < headers.length():
+        new_headers.append(headers[i])
+        i = i + 1
+    new_headers.append((name, value))
+    new_headers
+
+fn get_header(headers: list, name: text) -> text:
+    # Get header value by name (case-insensitive), returns nil if not found
+    var name_lower = name.to_lower()
+    var i = 0
+    while i < headers.length():
+        var header = headers[i]
+        var header_name = header.0
+        if header_name.to_lower() == name_lower:
+            return header.1
+        i = i + 1
+    nil
+
+fn has_header(headers: list, name: text) -> bool:
+    # Check if header exists (case-insensitive)
+    var value = get_header(headers, name)
+    value != nil
+
+fn remove_header(headers: list, name: text) -> list:
+    # Remove header from headers list (case-insensitive)
+    var name_lower = name.to_lower()
+    var new_headers = []
+    var i = 0
+    while i < headers.length():
+        var header = headers[i]
+        var header_name = header.0
+        if header_name.to_lower() != name_lower:
+            new_headers.append(header)
+        i = i + 1
+    new_headers
+
+fn set_header(headers: list, name: text, value: text) -> list:
+    # Set header value (replaces existing)
+    var removed = remove_header(headers, name)
+    add_header(removed, name, value)
+
+fn parse_headers(header_text: text) -> list:
+    # Parse HTTP headers from text
+    var headers = []
+    var lines = header_text.split("\n")
+    var i = 0
+    while i < lines.length():
+        var line = lines[i].trim()
+        if line.length() > 0:
+            var colon = line.index_of(":")
+            if colon >= 0:
+                var name = line.substring(0, colon).trim()
+                var value = line.substring(colon + 1, line.length()).trim()
+                headers.append((name, value))
+        i = i + 1
+    headers
+
+fn serialize_headers(headers: list) -> text:
+    # Serialize headers to HTTP format
+    var result = ""
+    var i = 0
+    while i < headers.length():
+        var header = headers[i]
+        result = result + header.0 + ": " + header.1 + "\r\n"
+        i = i + 1
+    result
+
+# ============================================================================
+# Cookie Handling
+# ============================================================================
+
+# Cookie: (name, value, path, domain, expires, max_age, secure, http_only)
+fn parse_cookie_header(cookie_text: text) -> list:
+    # Parse Cookie header into list of (name, value) tuples
+    var cookies = []
+    var pairs = cookie_text.split(";")
+    var i = 0
+    while i < pairs.length():
+        var pair = pairs[i].trim()
+        var eq = pair.index_of("=")
+        if eq >= 0:
+            var name = pair.substring(0, eq).trim()
+            var value = pair.substring(eq + 1, pair.length()).trim()
+            cookies.append((name, value))
+        i = i + 1
+    cookies
+
+fn parse_set_cookie_header(set_cookie: text) -> (text, text, text, text, text, text, bool, bool):
+    # Parse Set-Cookie header into cookie tuple
+    var name = ""
+    var value = ""
+    var path = "/"
+    var domain = ""
+    var expires = ""
+    var max_age = ""
+    var secure = false
+    var http_only = false
+
+    var parts = set_cookie.split(";")
+    var i = 0
+    while i < parts.length():
+        var part = parts[i].trim()
+        if i == 0:
+            # First part is name=value
+            var eq = part.index_of("=")
+            if eq >= 0:
+                name = part.substring(0, eq).trim()
+                value = part.substring(eq + 1, part.length()).trim()
+        else:
+            # Attributes
+            var eq = part.index_of("=")
+            if eq >= 0:
+                var attr_name = part.substring(0, eq).trim().to_lower()
+                var attr_value = part.substring(eq + 1, part.length()).trim()
+                if attr_name == "path":
+                    path = attr_value
+                else:
+                    if attr_name == "domain":
+                        domain = attr_value
+                    else:
+                        if attr_name == "expires":
+                            expires = attr_value
+                        else:
+                            if attr_name == "max-age":
+                                max_age = attr_value
+            else:
+                var attr_name = part.to_lower()
+                if attr_name == "secure":
+                    secure = true
+                else:
+                    if attr_name == "httponly":
+                        http_only = true
+        i = i + 1
+
+    (name, value, path, domain, expires, max_age, secure, http_only)
+
+fn build_cookie_header(cookies: list) -> text:
+    # Build Cookie header from list of (name, value) tuples
+    var result = ""
+    var i = 0
+    while i < cookies.length():
+        var cookie = cookies[i]
+        if i > 0:
+            result = result + "; "
+        result = result + cookie.0 + "=" + cookie.1
+        i = i + 1
+    result
+
+# ============================================================================
+# Request Building
+# ============================================================================
+
+# Request: (method, url, headers, body)
+fn create_request(method: text, url: text) -> (text, text, list, text):
+    # Create basic HTTP request
+    var headers = create_headers()
+    var body = ""
+    (method, url, headers, body)
+
+fn request_add_header(request: (text, text, list, text), name: text, value: text) -> (text, text, list, text):
+    # Add header to request
+    var method = request.0
+    var url = request.1
+    var headers = request.2
+    var body = request.3
+    var new_headers = add_header(headers, name, value)
+    (method, url, new_headers, body)
+
+fn request_set_body(request: (text, text, list, text), body: text) -> (text, text, list, text):
+    # Set request body
+    var method = request.0
+    var url = request.1
+    var headers = request.2
+    (method, url, headers, body)
+
+fn request_set_json_body(request: (text, text, list, text), json: text) -> (text, text, list, text):
+    # Set JSON body and content type
+    var with_body = request_set_body(request, json)
+    request_add_header(with_body, "Content-Type", CONTENT_TYPE_JSON)
+
+fn request_set_form_body(request: (text, text, list, text), params: list) -> (text, text, list, text):
+    # Set form-encoded body from params list
+    var form_data = build_query_string(params)
+    var with_body = request_set_body(request, form_data)
+    request_add_header(with_body, "Content-Type", CONTENT_TYPE_FORM)
+
+fn request_add_query_param(request: (text, text, list, text), key: text, value: text) -> (text, text, list, text):
+    # Add query parameter to request URL
+    var method = request.0
+    var url = request.1
+    var headers = request.2
+    var body = request.3
+    var new_url = add_query_param(url, key, value)
+    (method, new_url, headers, body)
+
+fn request_set_user_agent(request: (text, text, list, text), user_agent: text) -> (text, text, list, text):
+    # Set User-Agent header
+    request_add_header(request, "User-Agent", user_agent)
+
+fn request_set_accept(request: (text, text, list, text), accept: text) -> (text, text, list, text):
+    # Set Accept header
+    request_add_header(request, "Accept", accept)
+
+fn request_set_basic_auth(request: (text, text, list, text), username: text, password: text) -> (text, text, list, text):
+    # Set Basic Authentication header
+    var credentials = username + ":" + password
+    var encoded = base64_encode(credentials)
+    request_add_header(request, "Authorization", "Basic " + encoded)
+
+fn request_set_bearer_token(request: (text, text, list, text), token: text) -> (text, text, list, text):
+    # Set Bearer token authentication
+    request_add_header(request, "Authorization", "Bearer " + token)
+
+fn request_set_cookies(request: (text, text, list, text), cookies: list) -> (text, text, list, text):
+    # Set Cookie header from cookie list
+    var cookie_header = build_cookie_header(cookies)
+    request_add_header(request, "Cookie", cookie_header)
+
+# ============================================================================
+# HTTP Method Convenience Functions
+# ============================================================================
+
+fn http_get(url: text) -> (text, text, list, text):
+    # Create GET request
+    create_request(METHOD_GET, url)
+
+fn http_post(url: text, body: text) -> (text, text, list, text):
+    # Create POST request with body
+    var req = create_request(METHOD_POST, url)
+    request_set_body(req, body)
+
+fn http_put(url: text, body: text) -> (text, text, list, text):
+    # Create PUT request with body
+    var req = create_request(METHOD_PUT, url)
+    request_set_body(req, body)
+
+fn http_delete(url: text) -> (text, text, list, text):
+    # Create DELETE request
+    create_request(METHOD_DELETE, url)
+
+fn http_patch(url: text, body: text) -> (text, text, list, text):
+    # Create PATCH request with body
+    var req = create_request(METHOD_PATCH, url)
+    request_set_body(req, body)
+
+fn http_head(url: text) -> (text, text, list, text):
+    # Create HEAD request
+    create_request(METHOD_HEAD, url)
+
+fn http_options(url: text) -> (text, text, list, text):
+    # Create OPTIONS request
+    create_request(METHOD_OPTIONS, url)
+
+fn http_post_json(url: text, json: text) -> (text, text, list, text):
+    # Create POST request with JSON body
+    var req = create_request(METHOD_POST, url)
+    request_set_json_body(req, json)
+
+fn http_post_form(url: text, params: list) -> (text, text, list, text):
+    # Create POST request with form data
+    var req = create_request(METHOD_POST, url)
+    request_set_form_body(req, params)
+
+# ============================================================================
+# Response Handling
+# ============================================================================
+
+# Response: (status_code, status_text, headers, body)
+fn create_response(status_code: i64, status_text: text, headers: list, body: text) -> (i64, text, list, text):
+    # Create HTTP response
+    (status_code, status_text, headers, body)
+
+fn response_get_status_code(response: (i64, text, list, text)) -> i64:
+    # Get response status code
+    response.0
+
+fn response_get_status_text(response: (i64, text, list, text)) -> text:
+    # Get response status text
+    response.1
+
+fn response_get_headers(response: (i64, text, list, text)) -> list:
+    # Get response headers
+    response.2
+
+fn response_get_body(response: (i64, text, list, text)) -> text:
+    # Get response body
+    response.3
+
+fn response_get_header(response: (i64, text, list, text), name: text) -> text:
+    # Get response header value
+    var headers = response_get_headers(response)
+    get_header(headers, name)
+
+fn response_is_success(response: (i64, text, list, text)) -> bool:
+    # Check if response is successful (2xx)
+    var code = response_get_status_code(response)
+    code >= 200 and code < 300
+
+fn response_is_redirect(response: (i64, text, list, text)) -> bool:
+    # Check if response is redirect (3xx)
+    var code = response_get_status_code(response)
+    code >= 300 and code < 400
+
+fn response_is_client_error(response: (i64, text, list, text)) -> bool:
+    # Check if response is client error (4xx)
+    var code = response_get_status_code(response)
+    code >= 400 and code < 500
+
+fn response_is_server_error(response: (i64, text, list, text)) -> bool:
+    # Check if response is server error (5xx)
+    var code = response_get_status_code(response)
+    code >= 500 and code < 600
+
+fn response_get_content_type(response: (i64, text, list, text)) -> text:
+    # Get Content-Type header value
+    response_get_header(response, "Content-Type")
+
+fn response_get_content_length(response: (i64, text, list, text)) -> i64:
+    # Get Content-Length as integer
+    var length_str = response_get_header(response, "Content-Length")
+    if length_str == nil:
+        return 0
+    length_str.parse_int()
+
+fn response_get_location(response: (i64, text, list, text)) -> text:
+    # Get Location header (for redirects)
+    response_get_header(response, "Location")
+
+fn response_get_cookies(response: (i64, text, list, text)) -> list:
+    # Extract Set-Cookie headers as cookie tuples
+    var headers = response_get_headers(response)
+    var cookies = []
+    var i = 0
+    while i < headers.length():
+        var header = headers[i]
+        var name = header.0
+        if name.to_lower() == "set-cookie":
+            var cookie = parse_set_cookie_header(header.1)
+            cookies.append(cookie)
+        i = i + 1
+    cookies
+
+# ============================================================================
+# Status Code Utilities
+# ============================================================================
+
+fn status_code_to_text(code: i64) -> text:
+    # Convert status code to standard text
+    if code == 200:
+        return "OK"
+    if code == 201:
+        return "Created"
+    if code == 202:
+        return "Accepted"
+    if code == 204:
+        return "No Content"
+    if code == 301:
+        return "Moved Permanently"
+    if code == 302:
+        return "Found"
+    if code == 303:
+        return "See Other"
+    if code == 304:
+        return "Not Modified"
+    if code == 307:
+        return "Temporary Redirect"
+    if code == 308:
+        return "Permanent Redirect"
+    if code == 400:
+        return "Bad Request"
+    if code == 401:
+        return "Unauthorized"
+    if code == 403:
+        return "Forbidden"
+    if code == 404:
+        return "Not Found"
+    if code == 405:
+        return "Method Not Allowed"
+    if code == 409:
+        return "Conflict"
+    if code == 500:
+        return "Internal Server Error"
+    if code == 501:
+        return "Not Implemented"
+    if code == 502:
+        return "Bad Gateway"
+    if code == 503:
+        return "Service Unavailable"
+    "Unknown"
+
+fn is_informational_status(code: i64) -> bool:
+    # Check if status is informational (1xx)
+    code >= 100 and code < 200
+
+fn is_success_status(code: i64) -> bool:
+    # Check if status is success (2xx)
+    code >= 200 and code < 300
+
+fn is_redirect_status(code: i64) -> bool:
+    # Check if status is redirect (3xx)
+    code >= 300 and code < 400
+
+fn is_client_error_status(code: i64) -> bool:
+    # Check if status is client error (4xx)
+    code >= 400 and code < 500
+
+fn is_server_error_status(code: i64) -> bool:
+    # Check if status is server error (5xx)
+    code >= 500 and code < 600
+
+# ============================================================================
+# Content Encoding/Decoding
+# ============================================================================
+
+fn base64_encode(text: text) -> text:
+    # Base64 encode text (simplified mock implementation)
+    var charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    var len = text.length()
+
+    while i < len:
+        var b1 = text.char_code_at(i)
+        var b2 = 0
+        var b3 = 0
+
+        if i + 1 < len:
+            b2 = text.char_code_at(i + 1)
+        if i + 2 < len:
+            b3 = text.char_code_at(i + 2)
+
+        var e1 = b1 >> 2
+        var e2 = ((b1 & 3) << 4) | (b2 >> 4)
+        var e3 = ((b2 & 15) << 2) | (b3 >> 6)
+        var e4 = b3 & 63
+
+        result = result + charset.char_at(e1)
+        result = result + charset.char_at(e2)
+
+        if i + 1 < len:
+            result = result + charset.char_at(e3)
+        else:
+            result = result + "="
+
+        if i + 2 < len:
+            result = result + charset.char_at(e4)
+        else:
+            result = result + "="
+
+        i = i + 3
+
+    result
+
+fn base64_decode(encoded: text) -> text:
+    # Base64 decode text (simplified mock implementation)
+    var charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    var result = ""
+    var i = 0
+    var len = encoded.length()
+
+    while i < len:
+        if i + 3 >= len:
+            break
+
+        var c1 = charset.index_of(encoded.char_at(i))
+        var c2 = charset.index_of(encoded.char_at(i + 1))
+        var c3 = charset.index_of(encoded.char_at(i + 2))
+        var c4 = charset.index_of(encoded.char_at(i + 3))
+
+        var b1 = (c1 << 2) | (c2 >> 4)
+        result = result + b1.to_char()
+
+        if c3 != -1:
+            var b2 = ((c2 & 15) << 4) | (c3 >> 2)
+            result = result + b2.to_char()
+
+        if c4 != -1:
+            var b3 = ((c3 & 3) << 6) | c4
+            result = result + b3.to_char()
+
+        i = i + 4
+
+    result
+
+# ============================================================================
+# Multipart Form Data
+# ============================================================================
+
+fn create_multipart_boundary() -> text:
+    # Generate boundary string for multipart/form-data
+    "----SimpleFormBoundary" + (1000000000 + 999999999).to_string()
+
+fn build_multipart_form_data(fields: list, boundary: text) -> text:
+    # Build multipart/form-data body from list of (name, value, filename, content_type) tuples
+    var body = ""
+    var i = 0
+
+    while i < fields.length():
+        var field = fields[i]
+        var name = field.0
+        var value = field.1
+        var filename = ""
+        var content_type = ""
+
+        # Extract optional filename and content type
+        if field.length() > 2:
+            filename = field.2
+        if field.length() > 3:
+            content_type = field.3
+
+        body = body + "--" + boundary + "\r\n"
+        body = body + "Content-Disposition: form-data; name=\"" + name + "\""
+
+        if filename.length() > 0:
+            body = body + "; filename=\"" + filename + "\""
+
+        body = body + "\r\n"
+
+        if content_type.length() > 0:
+            body = body + "Content-Type: " + content_type + "\r\n"
+
+        body = body + "\r\n"
+        body = body + value + "\r\n"
+
+        i = i + 1
+
+    body = body + "--" + boundary + "--\r\n"
+    body
+
+fn request_set_multipart_body(request: (text, text, list, text), fields: list) -> (text, text, list, text):
+    # Set multipart/form-data body
+    var boundary = create_multipart_boundary()
+    var body = build_multipart_form_data(fields, boundary)
+    var content_type = CONTENT_TYPE_MULTIPART + "; boundary=" + boundary
+
+    var with_body = request_set_body(request, body)
+    request_add_header(with_body, "Content-Type", content_type)
+
+# ============================================================================
+# Chunked Transfer Encoding
+# ============================================================================
+
+fn encode_chunked(data: text) -> text:
+    # Encode data with chunked transfer encoding
+    var chunk_size = 1024
+    var result = ""
+    var i = 0
+    var len = data.length()
+
+    while i < len:
+        var remaining = len - i
+        var current_chunk_size = chunk_size
+        if remaining < chunk_size:
+            current_chunk_size = remaining
+
+        var chunk = data.substring(i, i + current_chunk_size)
+        result = result + current_chunk_size.to_string(16) + "\r\n"
+        result = result + chunk + "\r\n"
+
+        i = i + current_chunk_size
+
+    result = result + "0\r\n\r\n"
+    result
+
+fn decode_chunked(encoded: text) -> text:
+    # Decode chunked transfer encoding
+    var result = ""
+    var i = 0
+    var len = encoded.length()
+
+    while i < len:
+        # Find chunk size line
+        var crlf = encoded.index_of("\r\n", i)
+        if crlf == -1:
+            break
+
+        var size_line = encoded.substring(i, crlf)
+        var chunk_size = size_line.parse_int(16)
+
+        if chunk_size == 0:
+            break
+
+        # Extract chunk data
+        var chunk_start = crlf + 2
+        var chunk_end = chunk_start + chunk_size
+        if chunk_end > len:
+            break
+
+        var chunk = encoded.substring(chunk_start, chunk_end)
+        result = result + chunk
+
+        i = chunk_end + 2
+
+    result
+
+# ============================================================================
+# Request Serialization (for protocol-level operations)
+# ============================================================================
+
+fn serialize_request(request: (text, text, list, text)) -> text:
+    # Serialize request to HTTP/1.1 format
+    var method = request.0
+    var url = request.1
+    var headers = request.2
+    var body = request.3
+
+    var parsed = parse_url(url)
+    var path = parsed.3
+    var query = parsed.4
+
+    var request_line = method + " " + path
+    if query.length() > 0:
+        request_line = request_line + "?" + query
+    request_line = request_line + " " + HTTP_VERSION + "\r\n"
+
+    var header_text = serialize_headers(headers)
+
+    var result = request_line + header_text + "\r\n"
+    if body.length() > 0:
+        result = result + body
+
+    result
+
+fn parse_response(response_text: text) -> (i64, text, list, text):
+    # Parse HTTP/1.1 response text
+    var lines = response_text.split("\r\n")
+
+    # Parse status line
+    var status_line = lines[0]
+    var parts = status_line.split(" ")
+    var status_code = parts[1].parse_int()
+    var status_text = parts[2]
+
+    # Parse headers
+    var headers = []
+    var i = 1
+    var header_end = i
+    while i < lines.length():
+        var line = lines[i]
+        if line.length() == 0:
+            header_end = i
+            break
+
+        var colon = line.index_of(":")
+        if colon >= 0:
+            var name = line.substring(0, colon).trim()
+            var value = line.substring(colon + 1, line.length()).trim()
+            headers.append((name, value))
+
+        i = i + 1
+
+    # Parse body
+    var body = ""
+    if header_end + 1 < lines.length():
+        var j = header_end + 1
+        while j < lines.length():
+            body = body + lines[j]
+            if j < lines.length() - 1:
+                body = body + "\r\n"
+            j = j + 1
+
+    (status_code, status_text, headers, body)
+
+# ============================================================================
+# Timeout Configuration
+# ============================================================================
+
+# Timeout config: (connect_timeout, read_timeout, write_timeout)
+fn create_timeout_config(connect_ms: i64, read_ms: i64, write_ms: i64) -> (i64, i64, i64):
+    # Create timeout configuration tuple
+    (connect_ms, read_ms, write_ms)
+
+fn default_timeout_config() -> (i64, i64, i64):
+    # Default timeout configuration (30s connect, 60s read/write)
+    (30000, 60000, 60000)
+
+fn timeout_config_get_connect(config: (i64, i64, i64)) -> i64:
+    # Get connect timeout in milliseconds
+    config.0
+
+fn timeout_config_get_read(config: (i64, i64, i64)) -> i64:
+    # Get read timeout in milliseconds
+    config.1
+
+fn timeout_config_get_write(config: (i64, i64, i64)) -> i64:
+    # Get write timeout in milliseconds
+    config.2
+
+# ============================================================================
+# Mock HTTP Client (for testing protocol logic)
+# ============================================================================
+
+fn mock_http_execute(request: (text, text, list, text)) -> (i64, text, list, text):
+    # Mock HTTP request execution (returns mock response)
+    var method = request.0
+    var url = request.1
+    var headers = request.2
+    var body = request.3
+
+    # Create mock response
+    var status_code = 200
+    var status_text = "OK"
+    var response_headers = []
+    response_headers = add_header(response_headers, "Content-Type", "text/plain")
+    response_headers = add_header(response_headers, "Content-Length", "13")
+    var response_body = "Hello, World!"
+
+    (status_code, status_text, response_headers, response_body)
+
+fn mock_http_execute_with_redirect(request: (text, text, list, text), redirect_url: text) -> (i64, text, list, text):
+    # Mock HTTP request with redirect
+    var status_code = 302
+    var status_text = "Found"
+    var response_headers = []
+    response_headers = add_header(response_headers, "Location", redirect_url)
+    var response_body = ""
+
+    (status_code, status_text, response_headers, response_body)
+
+fn mock_http_execute_with_error(request: (text, text, list, text), error_code: i64) -> (i64, text, list, text):
+    # Mock HTTP request with error response
+    var status_text = status_code_to_text(error_code)
+    var response_headers = []
+    response_headers = add_header(response_headers, "Content-Type", "text/plain")
+    var response_body = "Error occurred"
+
+    (error_code, status_text, response_headers, response_body)
+
+# ============================================================================
+# Redirect Following
+# ============================================================================
+
+fn follow_redirects(request: (text, text, list, text), max_redirects: i64) -> (i64, text, list, text):
+    # Follow redirects up to max_redirects times
+    var current_request = request
+    var redirect_count = 0
+
+    while redirect_count < max_redirects:
+        var response = mock_http_execute(current_request)
+
+        if not response_is_redirect(response):
+            return response
+
+        var location = response_get_location(response)
+        if location == nil or location.length() == 0:
+            return response
+
+        # Update request with new URL
+        var method = current_request.0
+        var headers = current_request.2
+        var body = current_request.3
+        current_request = (method, location, headers, body)
+
+        redirect_count = redirect_count + 1
+
+    # Return last response if max redirects reached
+    mock_http_execute(current_request)
+
+# ============================================================================
+# Helper Utilities
+# ============================================================================
+
+fn is_valid_http_method(method: text) -> bool:
+    # Check if method is valid HTTP method
+    var upper = method.to_upper()
+    upper == "GET" or upper == "POST" or upper == "PUT" or upper == "DELETE" or upper == "PATCH" or upper == "HEAD" or upper == "OPTIONS"
+
+fn is_absolute_url(url: text) -> bool:
+    # Check if URL is absolute (has scheme)
+    url.starts_with("http://") or url.starts_with("https://")
+
+fn normalize_url(url: text) -> text:
+    # Normalize URL (ensure proper format)
+    if not is_absolute_url(url):
+        return "http://" + url
+    url
+
+fn get_default_port(scheme: text) -> i64:
+    # Get default port for scheme
+    if scheme == "https":
+        return 443
+    80
+
+fn content_type_is_json(content_type: text) -> bool:
+    # Check if content type is JSON
+    if content_type == nil:
+        return false
+    content_type.to_lower().contains("application/json")
+
+fn content_type_is_form(content_type: text) -> bool:
+    # Check if content type is form-encoded
+    if content_type == nil:
+        return false
+    content_type.to_lower().contains("application/x-www-form-urlencoded")
+
+fn content_type_is_text(content_type: text) -> bool:
+    # Check if content type is text
+    if content_type == nil:
+        return false
+    var lower = content_type.to_lower()
+    lower.starts_with("text/") or lower.contains("application/json") or lower.contains("application/xml")
