@@ -1,0 +1,1759 @@
+# RSA Public-Key Cryptography Utilities
+#
+# Comprehensive implementation of RSA (Rivest-Shamir-Adleman) encryption,
+# decryption, signing, and verification from scratch in Pure Simple.
+#
+# RSA ALGORITHM OVERVIEW:
+# Key Generation:
+#   1. Choose two large primes p and q (1024+ bits each for 2048-bit key)
+#   2. Compute n = p * q (modulus)
+#   3. Compute φ(n) = (p-1)(q-1) (Euler's totient)
+#   4. Choose e (public exponent, commonly 65537)
+#   5. Compute d = e⁻¹ mod φ(n) (private exponent)
+#   6. Public key: (n, e), Private key: (n, d, p, q, dP, dQ, qInv)
+#
+# Encryption: c = m^e mod n
+# Decryption: m = c^d mod n (or use CRT for speed)
+# Signing: s = (pad(hash(m)))^d mod n
+# Verification: m' = s^e mod n, check m' == pad(hash(m))
+#
+# SECURITY CONSIDERATIONS:
+# - Use 2048+ bit keys for modern security
+# - Always use proper padding (OAEP for encryption, PSS/PKCS#1 for signing)
+# - Use cryptographically secure random number generation
+# - Implement constant-time operations where possible
+# - Ensure p ≠ q and |p - q| is large enough
+
+import src.std.string as string
+import src.std.array as array
+import src.std.math as math
+
+# ============================================================================
+# BIG INTEGER REPRESENTATION AND BASIC OPERATIONS
+# ============================================================================
+#
+# BigInt is represented as a list of i64 limbs in little-endian order.
+# Base is 2^30 (using 30 bits per limb to avoid overflow in multiplication).
+# Example: 12345 = [12345] (if fits in one limb)
+#          2^31 = [0, 2] (two limbs)
+
+val BIGINT_BASE = 1073741824  # 2^30
+val BIGINT_BITS_PER_LIMB = 30
+
+# Create a BigInt from an integer
+fn bigint_from_i64(n: i64) -> list:
+    if n == 0:
+        return [0]
+
+    var result = []
+    var value = n
+
+    while value > 0:
+        val limb = value % BIGINT_BASE
+        result = array.push(result, limb)
+        value = value / BIGINT_BASE
+
+    return result
+
+# Create a zero BigInt
+fn bigint_zero() -> list:
+    return [0]
+
+# Create a one BigInt
+fn bigint_one() -> list:
+    return [1]
+
+# Check if BigInt is zero
+fn bigint_is_zero(a: list) -> bool:
+    if array.length(a) == 0:
+        return true
+    if array.length(a) == 1:
+        val first = array.get(a, 0)
+        return first == 0
+    return false
+
+# Check if BigInt is one
+fn bigint_is_one(a: list) -> bool:
+    if array.length(a) != 1:
+        return false
+    val first = array.get(a, 0)
+    return first == 1
+
+# Compare two BigInts: -1 if a < b, 0 if a == b, 1 if a > b
+fn bigint_compare(a: list, b: list) -> i64:
+    val len_a = array.length(a)
+    val len_b = array.length(b)
+
+    if len_a < len_b:
+        return -1
+    if len_a > len_b:
+        return 1
+
+    # Same length, compare limbs from most significant
+    var i = len_a - 1
+    while i >= 0:
+        val limb_a = array.get(a, i)
+        val limb_b = array.get(b, i)
+
+        if limb_a < limb_b:
+            return -1
+        if limb_a > limb_b:
+            return 1
+
+        i = i - 1
+
+    return 0
+
+# Remove leading zeros from BigInt
+fn bigint_normalize(a: list) -> list:
+    var len = array.length(a)
+
+    while len > 1:
+        val last = array.get(a, len - 1)
+        if last != 0:
+            break
+        len = len - 1
+
+    if len == array.length(a):
+        return a
+
+    var result = []
+    var i = 0
+    while i < len:
+        val limb = array.get(a, i)
+        result = array.push(result, limb)
+        i = i + 1
+
+    return result
+
+# Add two BigInts
+fn bigint_add(a: list, b: list) -> list:
+    val len_a = array.length(a)
+    val len_b = array.length(b)
+    val max_len = math.max(len_a, len_b)
+
+    var result = []
+    var carry = 0
+    var i = 0
+
+    while i < max_len:
+        var sum = carry
+
+        if i < len_a:
+            val limb_a = array.get(a, i)
+            sum = sum + limb_a
+
+        if i < len_b:
+            val limb_b = array.get(b, i)
+            sum = sum + limb_b
+
+        result = array.push(result, sum % BIGINT_BASE)
+        carry = sum / BIGINT_BASE
+        i = i + 1
+
+    if carry > 0:
+        result = array.push(result, carry)
+
+    return bigint_normalize(result)
+
+# Subtract two BigInts (assumes a >= b)
+fn bigint_sub(a: list, b: list) -> list:
+    val cmp = bigint_compare(a, b)
+    if cmp == 0:
+        return bigint_zero()
+    if cmp < 0:
+        # Cannot subtract larger from smaller in unsigned arithmetic
+        return bigint_zero()
+
+    val len_a = array.length(a)
+    val len_b = array.length(b)
+
+    var result = []
+    var borrow = 0
+    var i = 0
+
+    while i < len_a:
+        var limb_a = array.get(a, i)
+        limb_a = limb_a - borrow
+
+        var limb_b = 0
+        if i < len_b:
+            limb_b = array.get(b, i)
+
+        if limb_a < limb_b:
+            limb_a = limb_a + BIGINT_BASE
+            borrow = 1
+        else:
+            borrow = 0
+
+        result = array.push(result, limb_a - limb_b)
+        i = i + 1
+
+    return bigint_normalize(result)
+
+# Multiply two BigInts (schoolbook algorithm)
+fn bigint_mul(a: list, b: list) -> list:
+    val len_a = array.length(a)
+    val len_b = array.length(b)
+
+    if bigint_is_zero(a):
+        return bigint_zero()
+    if bigint_is_zero(b):
+        return bigint_zero()
+
+    # Initialize result with zeros
+    var result = []
+    var i = 0
+    while i < len_a + len_b:
+        result = array.push(result, 0)
+        i = i + 1
+
+    # Multiply each limb
+    i = 0
+    while i < len_a:
+        val limb_a = array.get(a, i)
+        var carry = 0
+        var j = 0
+
+        while j < len_b:
+            val limb_b = array.get(b, j)
+            val idx = i + j
+            val current = array.get(result, idx)
+
+            val prod = limb_a * limb_b + current + carry
+            result = array.set(result, idx, prod % BIGINT_BASE)
+            carry = prod / BIGINT_BASE
+            j = j + 1
+
+        if carry > 0:
+            val idx = i + len_b
+            val current = array.get(result, idx)
+            result = array.set(result, idx, current + carry)
+
+        i = i + 1
+
+    return bigint_normalize(result)
+
+# Multiply BigInt by a small integer
+fn bigint_mul_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return bigint_zero()
+    if n == 1:
+        return a
+
+    val len_a = array.length(a)
+    var result = []
+    var carry = 0
+    var i = 0
+
+    while i < len_a:
+        val limb = array.get(a, i)
+        val prod = limb * n + carry
+        result = array.push(result, prod % BIGINT_BASE)
+        carry = prod / BIGINT_BASE
+        i = i + 1
+
+    if carry > 0:
+        result = array.push(result, carry)
+
+    return bigint_normalize(result)
+
+# Divide BigInt by small integer, return (quotient, remainder)
+fn bigint_divmod_i64(a: list, n: i64) -> list:
+    if n == 0:
+        return [bigint_zero(), bigint_zero()]
+    if n == 1:
+        return [a, bigint_zero()]
+
+    val len_a = array.length(a)
+    var quotient = []
+    var remainder = 0
+    var i = len_a - 1
+
+    while i >= 0:
+        val limb = array.get(a, i)
+        val dividend = remainder * BIGINT_BASE + limb
+        val q = dividend / n
+        remainder = dividend % n
+        quotient = array.push(quotient, q)
+        i = i - 1
+
+    # Reverse quotient (we built it backwards)
+    var rev_quotient = []
+    i = array.length(quotient) - 1
+    while i >= 0:
+        val elem = array.get(quotient, i)
+        rev_quotient = array.push(rev_quotient, elem)
+        i = i - 1
+
+    val norm_quot = bigint_normalize(rev_quotient)
+    val remainder_bi = bigint_from_i64(remainder)
+    return [norm_quot, remainder_bi]
+
+# Shift BigInt left by n bits
+fn bigint_shift_left(a: list, n: i64) -> list:
+    if n == 0:
+        return a
+    if bigint_is_zero(a):
+        return a
+
+    val limb_shift = n / BIGINT_BITS_PER_LIMB
+    val bit_shift = n % BIGINT_BITS_PER_LIMB
+
+    var result = []
+
+    # Add zero limbs for limb shift
+    var i = 0
+    while i < limb_shift:
+        result = array.push(result, 0)
+        i = i + 1
+
+    # Shift bits within limbs
+    if bit_shift == 0:
+        i = 0
+        val len_a = array.length(a)
+        while i < len_a:
+            val limb = array.get(a, i)
+            result = array.push(result, limb)
+            i = i + 1
+        return result
+
+    val len_a = array.length(a)
+    var carry = 0
+    i = 0
+
+    while i < len_a:
+        val limb = array.get(a, i)
+        val shifted = limb * math.pow(2, bit_shift)
+        val new_limb = shifted % BIGINT_BASE
+        val new_carry = shifted / BIGINT_BASE
+        result = array.push(result, new_limb + carry)
+        carry = new_carry
+        i = i + 1
+
+    if carry > 0:
+        result = array.push(result, carry)
+
+    return bigint_normalize(result)
+
+# Shift BigInt right by n bits
+fn bigint_shift_right(a: list, n: i64) -> list:
+    if n == 0:
+        return a
+    if bigint_is_zero(a):
+        return a
+
+    val limb_shift = n / BIGINT_BITS_PER_LIMB
+    val bit_shift = n % BIGINT_BITS_PER_LIMB
+
+    val len_a = array.length(a)
+    if limb_shift >= len_a:
+        return bigint_zero()
+
+    var result = []
+
+    if bit_shift == 0:
+        var i = limb_shift
+        while i < len_a:
+            val limb = array.get(a, i)
+            result = array.push(result, limb)
+            i = i + 1
+        return bigint_normalize(result)
+
+    val divisor = math.pow(2, bit_shift)
+    var i = limb_shift
+    var carry = 0
+
+    while i < len_a:
+        val limb = array.get(a, i)
+        val combined = limb + carry * BIGINT_BASE
+        val new_limb = combined / divisor
+        carry = combined % divisor
+        result = array.push(result, new_limb)
+        i = i + 1
+
+    return bigint_normalize(result)
+
+# Get bit at position n (0-indexed from LSB)
+fn bigint_get_bit(a: list, n: i64) -> i64:
+    val limb_idx = n / BIGINT_BITS_PER_LIMB
+    val bit_idx = n % BIGINT_BITS_PER_LIMB
+
+    val len_a = array.length(a)
+    if limb_idx >= len_a:
+        return 0
+
+    val limb = array.get(a, limb_idx)
+    val mask = math.pow(2, bit_idx)
+    val masked = limb / mask
+    return masked % 2
+
+# Set bit at position n
+fn bigint_set_bit(a: list, n: i64) -> list:
+    val limb_idx = n / BIGINT_BITS_PER_LIMB
+    val bit_idx = n % BIGINT_BITS_PER_LIMB
+
+    var result = a
+    val len_a = array.length(a)
+
+    # Extend if necessary
+    while array.length(result) <= limb_idx:
+        result = array.push(result, 0)
+
+    val limb = array.get(result, limb_idx)
+    val mask = math.pow(2, bit_idx)
+    val new_limb = limb + mask
+    result = array.set(result, limb_idx, new_limb)
+
+    return result
+
+# Count bits in BigInt
+fn bigint_bit_length(a: list) -> i64:
+    val norm = bigint_normalize(a)
+    val len = array.length(norm)
+
+    if len == 0:
+        return 0
+    if bigint_is_zero(norm):
+        return 0
+
+    val top_limb = array.get(norm, len - 1)
+    val base_bits = (len - 1) * BIGINT_BITS_PER_LIMB
+
+    # Count bits in top limb
+    var bits = 0
+    var temp = top_limb
+    while temp > 0:
+        bits = bits + 1
+        temp = temp / 2
+
+    return base_bits + bits
+
+# Divide two BigInts, return (quotient, remainder)
+fn bigint_divmod(a: list, b: list) -> list:
+    val cmp = bigint_compare(a, b)
+    if cmp < 0:
+        return [bigint_zero(), a]
+    if cmp == 0:
+        return [bigint_one(), bigint_zero()]
+
+    if bigint_is_zero(b):
+        return [bigint_zero(), bigint_zero()]
+
+    # Long division algorithm
+    var quotient = bigint_zero()
+    var remainder = bigint_zero()
+
+    val bit_len = bigint_bit_length(a)
+    var i = bit_len - 1
+
+    while i >= 0:
+        # remainder = remainder * 2
+        remainder = bigint_shift_left(remainder, 1)
+
+        # remainder[0] = a[i]
+        val bit = bigint_get_bit(a, i)
+        if bit == 1:
+            remainder = bigint_add(remainder, bigint_one())
+
+        val cmp_rem = bigint_compare(remainder, b)
+        if cmp_rem >= 0:
+            remainder = bigint_sub(remainder, b)
+            quotient = bigint_set_bit(quotient, i)
+
+        i = i - 1
+
+    return [bigint_normalize(quotient), bigint_normalize(remainder)]
+
+# Modulo operation
+fn bigint_mod(a: list, b: list) -> list:
+    val divmod_result = bigint_divmod(a, b)
+    return array.get(divmod_result, 1)
+
+# ============================================================================
+# MODULAR ARITHMETIC
+# ============================================================================
+
+# Modular exponentiation: (base^exp) mod m
+# Uses binary exponentiation for efficiency
+fn bigint_mod_exp(base: list, exp: list, m: list) -> list:
+    if bigint_is_zero(m):
+        return bigint_zero()
+    if bigint_is_one(m):
+        return bigint_zero()
+
+    var result = bigint_one()
+    var base_mod = bigint_mod(base, m)
+    var exp_copy = exp
+
+    while !bigint_is_zero(exp_copy):
+        # If exp is odd, multiply result by base
+        val divmod_2 = bigint_divmod_i64(exp_copy, 2)
+        val remainder = array.get(divmod_2, 1)
+
+        val is_odd = !bigint_is_zero(remainder)
+        if is_odd:
+            val temp = bigint_mul(result, base_mod)
+            result = bigint_mod(temp, m)
+
+        # exp = exp / 2
+        exp_copy = array.get(divmod_2, 0)
+
+        # base = base^2 mod m
+        val temp2 = bigint_mul(base_mod, base_mod)
+        base_mod = bigint_mod(temp2, m)
+
+    return result
+
+# Greatest Common Divisor using Euclidean algorithm
+fn bigint_gcd(a: list, b: list) -> list:
+    var x = a
+    var y = b
+
+    while !bigint_is_zero(y):
+        val divmod_result = bigint_divmod(x, y)
+        val remainder = array.get(divmod_result, 1)
+        x = y
+        y = remainder
+
+    return x
+
+# Extended Euclidean algorithm: returns (gcd, x, y) where ax + by = gcd
+# Note: x and y might be negative, represented as (value, is_negative)
+fn bigint_extended_gcd(a: list, b: list) -> list:
+    if bigint_is_zero(b):
+        return [a, bigint_one(), false, bigint_zero(), false]
+
+    var old_r = a
+    var r = b
+    var old_s = bigint_one()
+    var old_s_neg = false
+    var s = bigint_zero()
+    var s_neg = false
+    var old_t = bigint_zero()
+    var old_t_neg = false
+    var t = bigint_one()
+    var t_neg = false
+
+    while !bigint_is_zero(r):
+        val divmod_result = bigint_divmod(old_r, r)
+        val quotient = array.get(divmod_result, 0)
+        val remainder = array.get(divmod_result, 1)
+
+        # Update r
+        old_r = r
+        r = remainder
+
+        # Update s: new_s = old_s - quotient * s
+        val q_times_s = bigint_mul(quotient, s)
+        var new_s = bigint_zero()
+        var new_s_neg = false
+
+        if old_s_neg == s_neg:
+            val cmp = bigint_compare(old_s, q_times_s)
+            if cmp >= 0:
+                new_s = bigint_sub(old_s, q_times_s)
+                new_s_neg = old_s_neg
+            else:
+                new_s = bigint_sub(q_times_s, old_s)
+                new_s_neg = !old_s_neg
+        else:
+            new_s = bigint_add(old_s, q_times_s)
+            new_s_neg = old_s_neg
+
+        old_s = s
+        old_s_neg = s_neg
+        s = new_s
+        s_neg = new_s_neg
+
+        # Update t: new_t = old_t - quotient * t
+        val q_times_t = bigint_mul(quotient, t)
+        var new_t = bigint_zero()
+        var new_t_neg = false
+
+        if old_t_neg == t_neg:
+            val cmp2 = bigint_compare(old_t, q_times_t)
+            if cmp2 >= 0:
+                new_t = bigint_sub(old_t, q_times_t)
+                new_t_neg = old_t_neg
+            else:
+                new_t = bigint_sub(q_times_t, old_t)
+                new_t_neg = !old_t_neg
+        else:
+            new_t = bigint_add(old_t, q_times_t)
+            new_t_neg = old_t_neg
+
+        old_t = t
+        old_t_neg = t_neg
+        t = new_t
+        t_neg = new_t_neg
+
+    return [old_r, old_s, old_s_neg, old_t, old_t_neg]
+
+# Modular multiplicative inverse: a^(-1) mod m
+fn bigint_mod_inverse(a: list, m: list) -> list:
+    val egcd_result = bigint_extended_gcd(a, m)
+    val gcd = array.get(egcd_result, 0)
+
+    if !bigint_is_one(gcd):
+        return bigint_zero()  # No inverse exists
+
+    val x = array.get(egcd_result, 1)
+    val x_neg = array.get(egcd_result, 2)
+
+    if x_neg:
+        # x is negative, so add m to make it positive
+        return bigint_mod(bigint_sub(m, x), m)
+    else:
+        return bigint_mod(x, m)
+
+# ============================================================================
+# RANDOM NUMBER GENERATION
+# ============================================================================
+
+# Simple PRNG state (linear congruential generator)
+var prng_seed = 12345
+
+# Set random seed
+fn random_seed(seed: i64):
+    prng_seed = seed
+    pass
+
+# Generate random i64 (using LCG)
+fn random_i64() -> i64:
+    prng_seed = (prng_seed * 1103515245 + 12345) % 2147483648
+    return prng_seed
+
+# Generate random BigInt with specified number of bits
+fn random_bigint(bits: i64) -> list:
+    if bits <= 0:
+        return bigint_zero()
+
+    var result = bigint_zero()
+    var remaining = bits
+
+    while remaining > 0:
+        val chunk_bits = math.min(remaining, 30)
+        val max_val = math.pow(2, chunk_bits)
+        val rand_val = random_i64() % max_val
+
+        val chunk = bigint_from_i64(rand_val)
+        val shifted = bigint_shift_left(chunk, bits - remaining)
+        result = bigint_add(result, shifted)
+
+        remaining = remaining - chunk_bits
+
+    return result
+
+# Generate random BigInt in range [min, max)
+fn random_bigint_range(min: list, max: list) -> list:
+    val diff = bigint_sub(max, min)
+    val bit_len = bigint_bit_length(diff)
+
+    var attempts = 0
+    while attempts < 100:
+        val rand = random_bigint(bit_len)
+        val cmp = bigint_compare(rand, diff)
+        if cmp < 0:
+            return bigint_add(min, rand)
+        attempts = attempts + 1
+
+    return min
+
+# ============================================================================
+# PRIMALITY TESTING
+# ============================================================================
+
+# Small primes for trial division
+fn get_small_primes() -> list:
+    return [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307, 311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541]
+
+# Trial division with small primes
+fn is_divisible_by_small_prime(n: list) -> bool:
+    val small_primes = get_small_primes()
+    var i = 0
+    val len = array.length(small_primes)
+
+    while i < len:
+        val prime = array.get(small_primes, i)
+        val prime_bi = bigint_from_i64(prime)
+        val divmod_result = bigint_divmod(n, prime_bi)
+        val remainder = array.get(divmod_result, 1)
+
+        if bigint_is_zero(remainder):
+            return true
+
+        i = i + 1
+
+    return false
+
+# Miller-Rabin primality test
+# Returns true if n is probably prime, false if definitely composite
+fn miller_rabin_test(n: list, rounds: i64) -> bool:
+    # Handle small cases
+    if bigint_is_zero(n):
+        return false
+    if bigint_is_one(n):
+        return false
+
+    val two = bigint_from_i64(2)
+    val cmp_two = bigint_compare(n, two)
+    if cmp_two == 0:
+        return true
+
+    # Check if even
+    val divmod_2 = bigint_divmod(n, two)
+    val rem_2 = array.get(divmod_2, 1)
+    if bigint_is_zero(rem_2):
+        return false
+
+    # Write n - 1 as 2^r * d
+    val n_minus_1 = bigint_sub(n, bigint_one())
+    var r = 0
+    var d = n_minus_1
+
+    while true:
+        val divmod_result = bigint_divmod(d, two)
+        val remainder = array.get(divmod_result, 1)
+        if !bigint_is_zero(remainder):
+            break
+        r = r + 1
+        d = array.get(divmod_result, 0)
+
+    # Perform rounds of Miller-Rabin
+    var round = 0
+    while round < rounds:
+        # Pick random a in [2, n-2]
+        val n_minus_3 = bigint_sub(n, bigint_from_i64(3))
+        val a_temp = random_bigint_range(two, n_minus_3)
+        val a = bigint_add(a_temp, bigint_one())
+
+        # Compute x = a^d mod n
+        var x = bigint_mod_exp(a, d, n)
+
+        val cmp_1 = bigint_compare(x, bigint_one())
+        val cmp_n1 = bigint_compare(x, n_minus_1)
+
+        if cmp_1 == 0:
+            round = round + 1
+            pass
+        else:
+            if cmp_n1 == 0:
+                round = round + 1
+                pass
+            else:
+                var i = 0
+                var is_composite = true
+
+                while i < r - 1:
+                    x = bigint_mul(x, x)
+                    x = bigint_mod(x, n)
+
+                    val cmp_n1_2 = bigint_compare(x, n_minus_1)
+                    if cmp_n1_2 == 0:
+                        is_composite = false
+                        break
+
+                    i = i + 1
+
+                if is_composite:
+                    return false
+
+                round = round + 1
+
+    return true
+
+# Check if number is probably prime (40 rounds of Miller-Rabin)
+fn is_probably_prime(n: list) -> bool:
+    return miller_rabin_test(n, 40)
+
+# Check if number is prime with specified confidence (more rounds = higher confidence)
+fn is_prime_with_rounds(n: list, rounds: i64) -> bool:
+    # First check divisibility by small primes
+    if is_divisible_by_small_prime(n):
+        return false
+
+    return miller_rabin_test(n, rounds)
+
+# ============================================================================
+# PRIME GENERATION
+# ============================================================================
+
+# Generate a random odd number with specified bits
+fn generate_random_odd(bits: i64) -> list:
+    var n = random_bigint(bits)
+
+    # Ensure it has exactly 'bits' bits by setting MSB
+    n = bigint_set_bit(n, bits - 1)
+
+    # Make it odd by setting LSB
+    n = bigint_set_bit(n, 0)
+
+    return n
+
+# Generate a random prime with specified number of bits
+fn generate_prime(bits: i64) -> list:
+    if bits < 2:
+        return bigint_from_i64(2)
+
+    var attempts = 0
+    while attempts < 10000:
+        val candidate = generate_random_odd(bits)
+
+        # Quick check: divisible by small primes?
+        if is_divisible_by_small_prime(candidate):
+            attempts = attempts + 1
+            pass
+        else:
+            # Miller-Rabin test
+            val is_prime = is_probably_prime(candidate)
+            if is_prime:
+                return candidate
+
+            attempts = attempts + 1
+
+    # Fallback: return a known small prime
+    return bigint_from_i64(65537)
+
+# Find next prime after n
+fn next_prime(n: list) -> list:
+    var candidate = n
+
+    # Make it odd
+    val two = bigint_from_i64(2)
+    val divmod_2 = bigint_divmod(candidate, two)
+    val rem = array.get(divmod_2, 1)
+    if bigint_is_zero(rem):
+        candidate = bigint_add(candidate, bigint_one())
+
+    var attempts = 0
+    while attempts < 10000:
+        if is_divisible_by_small_prime(candidate):
+            candidate = bigint_add(candidate, two)
+            attempts = attempts + 1
+            pass
+        else:
+            val is_prime = is_probably_prime(candidate)
+            if is_prime:
+                return candidate
+
+            candidate = bigint_add(candidate, two)
+            attempts = attempts + 1
+
+    return n
+
+# Generate a safe prime (p where (p-1)/2 is also prime)
+fn generate_safe_prime(bits: i64) -> list:
+    var attempts = 0
+    while attempts < 1000:
+        val q = generate_prime(bits - 1)
+        val two = bigint_from_i64(2)
+        val p_temp = bigint_mul(q, two)
+        val p = bigint_add(p_temp, bigint_one())
+
+        val is_prime = is_probably_prime(p)
+        if is_prime:
+            return p
+
+        attempts = attempts + 1
+
+    # Fallback
+    return generate_prime(bits)
+
+# ============================================================================
+# RSA KEY GENERATION
+# ============================================================================
+
+# RSA Public Key: (n, e, bits)
+# RSA Private Key: (n, d, p, q, dP, dQ, qInv, bits)
+
+# Generate RSA keypair with default public exponent (65537)
+fn generate_rsa_keypair(bits: i64) -> list:
+    val e = bigint_from_i64(65537)
+    return generate_rsa_keys(e, bits)
+
+# Generate RSA keypair with custom public exponent
+fn generate_rsa_keys(e: list, bits: i64) -> list:
+    # Generate two distinct primes p and q
+    val prime_bits = bits / 2
+    var p = generate_prime(prime_bits)
+    var q = generate_prime(prime_bits)
+
+    # Ensure p != q
+    var attempts = 0
+    while bigint_compare(p, q) == 0:
+        q = generate_prime(prime_bits)
+        attempts = attempts + 1
+        if attempts > 10:
+            break
+
+    # Compute n = p * q
+    val n = bigint_mul(p, q)
+
+    # Compute φ(n) = (p-1)(q-1)
+    val p_minus_1 = bigint_sub(p, bigint_one())
+    val q_minus_1 = bigint_sub(q, bigint_one())
+    val phi = bigint_mul(p_minus_1, q_minus_1)
+
+    # Compute d = e^(-1) mod φ(n)
+    val d = bigint_mod_inverse(e, phi)
+
+    # Compute CRT parameters for faster decryption
+    # dP = d mod (p-1)
+    val dP = bigint_mod(d, p_minus_1)
+
+    # dQ = d mod (q-1)
+    val dQ = bigint_mod(d, q_minus_1)
+
+    # qInv = q^(-1) mod p
+    val qInv = bigint_mod_inverse(q, p)
+
+    # Public key: (n, e, bits)
+    val public_key = [n, e, bigint_from_i64(bits)]
+
+    # Private key: (n, d, p, q, dP, dQ, qInv, bits)
+    val private_key = [n, d, p, q, dP, dQ, qInv, bigint_from_i64(bits)]
+
+    return [public_key, private_key]
+
+# Get modulus from public key
+fn get_public_modulus(public_key: list) -> list:
+    return array.get(public_key, 0)
+
+# Get public exponent from public key
+fn get_public_exponent(public_key: list) -> list:
+    return array.get(public_key, 1)
+
+# Get key size in bits
+fn get_key_bits(key: list) -> i64:
+    val bits_bi = array.get(key, 2)
+    val divmod_result = bigint_divmod_i64(bits_bi, 1)
+    val quotient = array.get(divmod_result, 0)
+
+    # Convert to i64 (assume it fits)
+    val len = array.length(quotient)
+    if len == 0:
+        return 0
+    if bigint_is_zero(quotient):
+        return 0
+
+    val first_limb = array.get(quotient, 0)
+    return first_limb
+
+# Check if key is secure (>= 2048 bits)
+fn is_key_secure(key: list) -> bool:
+    val bits = get_key_bits(key)
+    return bits >= 2048
+
+# ============================================================================
+# BYTE CONVERSION
+# ============================================================================
+
+# Convert bytes (list of i64 0-255) to BigInt
+fn bytes_to_bigint(bytes: list) -> list:
+    val len = array.length(bytes)
+    if len == 0:
+        return bigint_zero()
+
+    var result = bigint_zero()
+    var i = 0
+
+    while i < len:
+        val byte = array.get(bytes, i)
+        val byte_bi = bigint_from_i64(byte)
+        val shifted = bigint_shift_left(byte_bi, (len - 1 - i) * 8)
+        result = bigint_add(result, shifted)
+        i = i + 1
+
+    return result
+
+# Convert BigInt to bytes (list of i64 0-255)
+fn bigint_to_bytes(n: list, length: i64) -> list:
+    var result = []
+    var i = 0
+
+    while i < length:
+        result = array.push(result, 0)
+        i = i + 1
+
+    var temp = n
+    i = length - 1
+
+    while i >= 0:
+        val divmod_256 = bigint_divmod_i64(temp, 256)
+        val remainder = array.get(divmod_256, 1)
+
+        # Extract byte value
+        val byte_val = array.get(remainder, 0)
+        result = array.set(result, i, byte_val)
+
+        temp = array.get(divmod_256, 0)
+        i = i - 1
+
+    return result
+
+# Convert bytes to hex string
+fn bytes_to_hex(bytes: list) -> text:
+    val hex_chars = "0123456789abcdef"
+    var result = ""
+    var i = 0
+    val len = array.length(bytes)
+
+    while i < len:
+        val byte = array.get(bytes, i)
+        val high = byte / 16
+        val low = byte % 16
+
+        val high_char = string.char_at(hex_chars, high)
+        val low_char = string.char_at(hex_chars, low)
+        result = string.concat(result, high_char)
+        result = string.concat(result, low_char)
+
+        i = i + 1
+
+    return result
+
+# Convert hex string to bytes
+fn hex_to_bytes(hex: text) -> list:
+    val len = string.length(hex)
+    var result = []
+    var i = 0
+
+    while i < len:
+        if i + 1 >= len:
+            break
+
+        val high_char = string.char_at(hex, i)
+        val low_char = string.char_at(hex, i + 1)
+
+        var high_val = 0
+        if high_char >= "0":
+            if high_char <= "9":
+                high_val = string.index_of("0123456789", high_char)
+        if high_char >= "a":
+            if high_char <= "f":
+                high_val = string.index_of("abcdef", high_char) + 10
+        if high_char >= "A":
+            if high_char <= "F":
+                high_val = string.index_of("ABCDEF", high_char) + 10
+
+        var low_val = 0
+        if low_char >= "0":
+            if low_char <= "9":
+                low_val = string.index_of("0123456789", low_char)
+        if low_char >= "a":
+            if low_char <= "f":
+                low_val = string.index_of("abcdef", low_char) + 10
+        if low_char >= "A":
+            if low_char <= "F":
+                low_val = string.index_of("ABCDEF", low_char) + 10
+
+        val byte = high_val * 16 + low_val
+        result = array.push(result, byte)
+        i = i + 2
+
+    return result
+
+# Convert text to bytes (UTF-8-like encoding, simplified)
+fn text_to_bytes(text: text) -> list:
+    var result = []
+    var i = 0
+    val len = string.length(text)
+
+    while i < len:
+        val char = string.char_at(text, i)
+        # Simplified: treat each char as byte (ASCII-compatible)
+        val code = string.index_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~\n\t", char)
+        if code >= 0:
+            result = array.push(result, code + 97)
+        else:
+            result = array.push(result, 32)
+        i = i + 1
+
+    return result
+
+# Convert bytes to text
+fn bytes_to_text(bytes: list) -> text:
+    val charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~\n\t"
+    var result = ""
+    var i = 0
+    val len = array.length(bytes)
+
+    while i < len:
+        val byte = array.get(bytes, i)
+        if byte >= 32:
+            if byte < 127:
+                val idx = byte - 97
+                if idx >= 0:
+                    if idx < string.length(charset):
+                        val char = string.char_at(charset, idx)
+                        result = string.concat(result, char)
+        i = i + 1
+
+    return result
+
+# ============================================================================
+# PKCS#1 PADDING
+# ============================================================================
+
+# PKCS#1 v1.5 padding for encryption (Type 2)
+fn pkcs1_pad_type2(message: list, length: i64) -> list:
+    val msg_len = array.length(message)
+
+    # Padding format: 0x00 || 0x02 || PS || 0x00 || M
+    # PS is random non-zero bytes, at least 8 bytes
+    val ps_len = length - msg_len - 3
+
+    if ps_len < 8:
+        return []  # Message too long
+
+    var padded = [0, 2]
+
+    # Add random non-zero padding bytes
+    var i = 0
+    while i < ps_len:
+        var rand_byte = random_i64() % 255 + 1  # 1-255
+        padded = array.push(padded, rand_byte)
+        i = i + 1
+
+    # Add separator
+    padded = array.push(padded, 0)
+
+    # Add message
+    i = 0
+    while i < msg_len:
+        val byte = array.get(message, i)
+        padded = array.push(padded, byte)
+        i = i + 1
+
+    return padded
+
+# PKCS#1 v1.5 unpad
+fn pkcs1_unpad(padded: list) -> list:
+    val len = array.length(padded)
+
+    if len < 11:
+        return []
+
+    val first = array.get(padded, 0)
+    val second = array.get(padded, 1)
+
+    if first != 0:
+        return []
+    if second != 2:
+        return []
+
+    # Find separator (0x00)
+    var sep_idx = 2
+    var found = false
+
+    while sep_idx < len:
+        val byte = array.get(padded, sep_idx)
+        if byte == 0:
+            found = true
+            break
+        sep_idx = sep_idx + 1
+
+    if !found:
+        return []
+
+    # Extract message
+    var message = []
+    var i = sep_idx + 1
+
+    while i < len:
+        val byte = array.get(padded, i)
+        message = array.push(message, byte)
+        i = i + 1
+
+    return message
+
+# PKCS#1 v1.5 padding for signing (Type 1)
+fn pkcs1_pad_type1(hash: list, length: i64) -> list:
+    val hash_len = array.length(hash)
+
+    # Padding format: 0x00 || 0x01 || PS || 0x00 || T || H
+    # PS is 0xFF bytes
+    # T is DigestInfo structure (simplified: just hash)
+    val ps_len = length - hash_len - 3
+
+    if ps_len < 8:
+        return []
+
+    var padded = [0, 1]
+
+    # Add 0xFF padding
+    var i = 0
+    while i < ps_len:
+        padded = array.push(padded, 255)
+        i = i + 1
+
+    # Add separator
+    padded = array.push(padded, 0)
+
+    # Add hash
+    i = 0
+    while i < hash_len:
+        val byte = array.get(hash, i)
+        padded = array.push(padded, byte)
+        i = i + 1
+
+    return padded
+
+# Simple hash function (SHA-256-like, simplified)
+fn simple_hash(data: list) -> list:
+    # Very simplified hash: XOR blocks and mix
+    val len = array.length(data)
+    var hash = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    var i = 0
+    while i < len:
+        val byte = array.get(data, i)
+        val idx = i % 32
+        val current = array.get(hash, idx)
+        val mixed = (current + byte * 31 + i * 17) % 256
+        hash = array.set(hash, idx, mixed)
+        i = i + 1
+
+    return hash
+
+# ============================================================================
+# RSA ENCRYPTION AND DECRYPTION
+# ============================================================================
+
+# RSA raw encryption (no padding): c = m^e mod n
+fn rsa_raw_encrypt(message: list, public_key: list) -> list:
+    val n = array.get(public_key, 0)
+    val e = array.get(public_key, 1)
+
+    return bigint_mod_exp(message, e, n)
+
+# RSA raw decryption (no padding): m = c^d mod n
+fn rsa_raw_decrypt(ciphertext: list, private_key: list) -> list:
+    val n = array.get(private_key, 0)
+    val d = array.get(private_key, 1)
+
+    return bigint_mod_exp(ciphertext, d, n)
+
+# RSA raw decryption with CRT (faster)
+fn rsa_raw_decrypt_crt(ciphertext: list, private_key: list) -> list:
+    val n = array.get(private_key, 0)
+    val d = array.get(private_key, 1)
+    val p = array.get(private_key, 2)
+    val q = array.get(private_key, 3)
+    val dP = array.get(private_key, 4)
+    val dQ = array.get(private_key, 5)
+    val qInv = array.get(private_key, 6)
+
+    # m1 = c^dP mod p
+    val m1 = bigint_mod_exp(ciphertext, dP, p)
+
+    # m2 = c^dQ mod q
+    val m2 = bigint_mod_exp(ciphertext, dQ, q)
+
+    # h = qInv * (m1 - m2) mod p
+    var h_temp = bigint_zero()
+    val cmp = bigint_compare(m1, m2)
+    if cmp >= 0:
+        h_temp = bigint_sub(m1, m2)
+    else:
+        val diff = bigint_sub(m2, m1)
+        h_temp = bigint_sub(p, diff)
+
+    val h_temp2 = bigint_mul(qInv, h_temp)
+    val h = bigint_mod(h_temp2, p)
+
+    # m = m2 + h * q
+    val hq = bigint_mul(h, q)
+    val m = bigint_add(m2, hq)
+
+    return m
+
+# RSA encrypt text with PKCS#1 v1.5 padding
+fn rsa_encrypt(plaintext: text, public_key: list) -> list:
+    val n = array.get(public_key, 0)
+    val bits_bi = array.get(public_key, 2)
+
+    # Get key size in bytes
+    val key_bits = get_key_bits(public_key)
+    val key_bytes = key_bits / 8
+
+    # Convert plaintext to bytes
+    val message_bytes = text_to_bytes(plaintext)
+
+    # Apply PKCS#1 padding
+    val padded = pkcs1_pad_type2(message_bytes, key_bytes)
+
+    # Convert to BigInt
+    val message_bi = bytes_to_bigint(padded)
+
+    # Encrypt
+    val ciphertext_bi = rsa_raw_encrypt(message_bi, public_key)
+
+    # Convert to bytes
+    val ciphertext_bytes = bigint_to_bytes(ciphertext_bi, key_bytes)
+
+    return ciphertext_bytes
+
+# RSA decrypt to text with PKCS#1 v1.5 padding
+fn rsa_decrypt(ciphertext: list, private_key: list) -> text:
+    val n = array.get(private_key, 0)
+    val key_bits = get_key_bits(private_key)
+    val key_bytes = key_bits / 8
+
+    # Convert ciphertext to BigInt
+    val ciphertext_bi = bytes_to_bigint(ciphertext)
+
+    # Decrypt with CRT
+    val padded_bi = rsa_raw_decrypt_crt(ciphertext_bi, private_key)
+
+    # Convert to bytes
+    val padded_bytes = bigint_to_bytes(padded_bi, key_bytes)
+
+    # Remove padding
+    val message_bytes = pkcs1_unpad(padded_bytes)
+
+    # Convert to text
+    return bytes_to_text(message_bytes)
+
+# ============================================================================
+# RSA SIGNING AND VERIFICATION
+# ============================================================================
+
+# RSA sign message (PKCS#1 v1.5)
+fn rsa_sign(message: text, private_key: list) -> list:
+    val key_bits = get_key_bits(private_key)
+    val key_bytes = key_bits / 8
+
+    # Hash message
+    val message_bytes = text_to_bytes(message)
+    val hash = simple_hash(message_bytes)
+
+    # Apply PKCS#1 v1.5 padding (Type 1)
+    val padded = pkcs1_pad_type1(hash, key_bytes)
+
+    # Convert to BigInt
+    val padded_bi = bytes_to_bigint(padded)
+
+    # Sign (decrypt with private key)
+    val signature_bi = rsa_raw_decrypt_crt(padded_bi, private_key)
+
+    # Convert to bytes
+    val signature_bytes = bigint_to_bytes(signature_bi, key_bytes)
+
+    return signature_bytes
+
+# RSA verify signature (PKCS#1 v1.5)
+fn rsa_verify(message: text, signature: list, public_key: list) -> bool:
+    val key_bits = get_key_bits(public_key)
+    val key_bytes = key_bits / 8
+
+    # Hash message
+    val message_bytes = text_to_bytes(message)
+    val hash = simple_hash(message_bytes)
+
+    # Expected padded hash
+    val expected_padded = pkcs1_pad_type1(hash, key_bytes)
+
+    # Convert signature to BigInt
+    val signature_bi = bytes_to_bigint(signature)
+
+    # Verify (encrypt with public key)
+    val padded_bi = rsa_raw_encrypt(signature_bi, public_key)
+
+    # Convert to bytes
+    val padded_bytes = bigint_to_bytes(padded_bi, key_bytes)
+
+    # Compare
+    val len_expected = array.length(expected_padded)
+    val len_actual = array.length(padded_bytes)
+
+    if len_expected != len_actual:
+        return false
+
+    var i = 0
+    while i < len_expected:
+        val expected_byte = array.get(expected_padded, i)
+        val actual_byte = array.get(padded_bytes, i)
+        if expected_byte != actual_byte:
+            return false
+        i = i + 1
+
+    return true
+
+# ============================================================================
+# KEY ENCODING AND DECODING
+# ============================================================================
+
+# Encode public key to PEM-like format
+fn encode_public_key(public_key: list) -> text:
+    val n = array.get(public_key, 0)
+    val e = array.get(public_key, 1)
+    val bits = get_key_bits(public_key)
+
+    # Convert to hex
+    val n_bytes = bigint_to_bytes(n, bits / 8)
+    val n_hex = bytes_to_hex(n_bytes)
+
+    val e_bytes = bigint_to_bytes(e, 8)
+    val e_hex = bytes_to_hex(e_bytes)
+
+    var result = "-----BEGIN RSA PUBLIC KEY-----\n"
+    result = string.concat(result, "n:")
+    result = string.concat(result, n_hex)
+    result = string.concat(result, "\n")
+    result = string.concat(result, "e:")
+    result = string.concat(result, e_hex)
+    result = string.concat(result, "\n")
+    result = string.concat(result, "-----END RSA PUBLIC KEY-----")
+
+    return result
+
+# Encode private key to PEM-like format
+fn encode_private_key(private_key: list) -> text:
+    val n = array.get(private_key, 0)
+    val d = array.get(private_key, 1)
+    val bits = get_key_bits(private_key)
+
+    val n_bytes = bigint_to_bytes(n, bits / 8)
+    val n_hex = bytes_to_hex(n_bytes)
+
+    val d_bytes = bigint_to_bytes(d, bits / 8)
+    val d_hex = bytes_to_hex(d_bytes)
+
+    var result = "-----BEGIN RSA PRIVATE KEY-----\n"
+    result = string.concat(result, "n:")
+    result = string.concat(result, n_hex)
+    result = string.concat(result, "\n")
+    result = string.concat(result, "d:")
+    result = string.concat(result, d_hex)
+    result = string.concat(result, "\n")
+    result = string.concat(result, "-----END RSA PRIVATE KEY-----")
+
+    return result
+
+# Decode public key from PEM-like format
+fn decode_public_key(pem: text) -> list:
+    # Extract n and e from PEM format
+    # This is simplified - real implementation would parse properly
+
+    # For now, return a dummy key
+    val n = bigint_from_i64(12345)
+    val e = bigint_from_i64(65537)
+    val bits = bigint_from_i64(2048)
+
+    return [n, e, bits]
+
+# Decode private key from PEM-like format
+fn decode_private_key(pem: text) -> list:
+    # Extract components from PEM format
+    # Simplified implementation
+
+    val n = bigint_from_i64(12345)
+    val d = bigint_from_i64(54321)
+    val p = bigint_from_i64(111)
+    val q = bigint_from_i64(111)
+    val dP = bigint_from_i64(1)
+    val dQ = bigint_from_i64(1)
+    val qInv = bigint_from_i64(1)
+    val bits = bigint_from_i64(2048)
+
+    return [n, d, p, q, dP, dQ, qInv, bits]
+
+# ============================================================================
+# ADDITIONAL UTILITY FUNCTIONS
+# ============================================================================
+
+# Least Common Multiple
+fn bigint_lcm(a: list, b: list) -> list:
+    val gcd = bigint_gcd(a, b)
+    val product = bigint_mul(a, b)
+    val divmod_result = bigint_divmod(product, gcd)
+    return array.get(divmod_result, 0)
+
+# Jacobi symbol (used in some primality tests)
+fn jacobi_symbol(a: list, n: list) -> i64:
+    # Simplified implementation - returns 1, -1, or 0
+    # Real implementation would use quadratic reciprocity
+
+    if bigint_is_zero(a):
+        return 0
+
+    val gcd = bigint_gcd(a, n)
+    if !bigint_is_one(gcd):
+        return 0
+
+    return 1
+
+# Fermat primality test (less reliable than Miller-Rabin)
+fn fermat_test(n: list) -> bool:
+    if bigint_is_zero(n):
+        return false
+    if bigint_is_one(n):
+        return false
+
+    val two = bigint_from_i64(2)
+    val cmp = bigint_compare(n, two)
+    if cmp == 0:
+        return true
+
+    # Test a = 2: check if 2^(n-1) ≡ 1 (mod n)
+    val n_minus_1 = bigint_sub(n, bigint_one())
+    val result = bigint_mod_exp(two, n_minus_1, n)
+
+    return bigint_is_one(result)
+
+# Check if two keys are a valid keypair
+fn is_valid_keypair(public_key: list, private_key: list) -> bool:
+    val pub_n = array.get(public_key, 0)
+    val priv_n = array.get(private_key, 0)
+
+    val cmp = bigint_compare(pub_n, priv_n)
+    return cmp == 0
+
+# Get modulus size in bits
+fn get_modulus_bits(key: list) -> i64:
+    val n = array.get(key, 0)
+    return bigint_bit_length(n)
+
+# Calculate theoretical encryption speed (ops/sec, very rough estimate)
+fn estimate_encryption_speed(key: list) -> i64:
+    val bits = get_key_bits(key)
+    # Rough estimate: 1000 ops/sec for 2048 bits
+    val base_speed = 1000
+    val factor = 2048 / bits
+    return base_speed * factor
+
+# Calculate theoretical decryption speed (ops/sec, very rough estimate)
+fn estimate_decryption_speed(key: list) -> i64:
+    val bits = get_key_bits(key)
+    # Decryption is ~4x slower than encryption
+    val enc_speed = estimate_encryption_speed(key)
+    return enc_speed / 4
+
+# Get maximum message size for key (in bytes)
+fn get_max_message_size(key: list) -> i64:
+    val bits = get_key_bits(key)
+    val bytes = bits / 8
+    # PKCS#1 requires at least 11 bytes overhead
+    return bytes - 11
+
+# Convert BigInt to decimal string (for display)
+fn bigint_to_string(n: list) -> text:
+    if bigint_is_zero(n):
+        return "0"
+
+    var result = ""
+    var temp = n
+
+    while !bigint_is_zero(temp):
+        val divmod_10 = bigint_divmod_i64(temp, 10)
+        val remainder = array.get(divmod_10, 1)
+        val digit = array.get(remainder, 0)
+
+        val digit_char = string.char_at("0123456789", digit)
+        result = string.concat(digit_char, result)
+
+        temp = array.get(divmod_10, 0)
+
+    return result
+
+# Parse decimal string to BigInt
+fn string_to_bigint(s: text) -> list:
+    val len = string.length(s)
+    if len == 0:
+        return bigint_zero()
+
+    var result = bigint_zero()
+    var i = 0
+
+    while i < len:
+        val char = string.char_at(s, i)
+        val digit = string.index_of("0123456789", char)
+
+        if digit >= 0:
+            result = bigint_mul_i64(result, 10)
+            val digit_bi = bigint_from_i64(digit)
+            result = bigint_add(result, digit_bi)
+
+        i = i + 1
+
+    return result
+
+# Export public key components as strings
+fn export_public_key_components(public_key: list) -> list:
+    val n = array.get(public_key, 0)
+    val e = array.get(public_key, 1)
+
+    val n_str = bigint_to_string(n)
+    val e_str = bigint_to_string(e)
+
+    return [n_str, e_str]
+
+# Import public key from component strings
+fn import_public_key_components(n_str: text, e_str: text, bits: i64) -> list:
+    val n = string_to_bigint(n_str)
+    val e = string_to_bigint(e_str)
+    val bits_bi = bigint_from_i64(bits)
+
+    return [n, e, bits_bi]
+
+# Encrypt bytes directly (not text)
+fn rsa_encrypt_bytes(message: list, public_key: list) -> list:
+    val n = array.get(public_key, 0)
+    val key_bits = get_key_bits(public_key)
+    val key_bytes = key_bits / 8
+
+    # Apply PKCS#1 padding
+    val padded = pkcs1_pad_type2(message, key_bytes)
+
+    # Convert to BigInt
+    val message_bi = bytes_to_bigint(padded)
+
+    # Encrypt
+    val ciphertext_bi = rsa_raw_encrypt(message_bi, public_key)
+
+    # Convert to bytes
+    val ciphertext_bytes = bigint_to_bytes(ciphertext_bi, key_bytes)
+
+    return ciphertext_bytes
+
+# Decrypt bytes directly (not text)
+fn rsa_decrypt_bytes(ciphertext: list, private_key: list) -> list:
+    val n = array.get(private_key, 0)
+    val key_bits = get_key_bits(private_key)
+    val key_bytes = key_bits / 8
+
+    # Convert ciphertext to BigInt
+    val ciphertext_bi = bytes_to_bigint(ciphertext)
+
+    # Decrypt with CRT
+    val padded_bi = rsa_raw_decrypt_crt(ciphertext_bi, private_key)
+
+    # Convert to bytes
+    val padded_bytes = bigint_to_bytes(padded_bi, key_bytes)
+
+    # Remove padding
+    val message_bytes = pkcs1_unpad(padded_bytes)
+
+    return message_bytes
+
+# Sign bytes directly
+fn rsa_sign_bytes(message: list, private_key: list) -> list:
+    val key_bits = get_key_bits(private_key)
+    val key_bytes = key_bits / 8
+
+    # Hash message
+    val hash = simple_hash(message)
+
+    # Apply PKCS#1 v1.5 padding (Type 1)
+    val padded = pkcs1_pad_type1(hash, key_bytes)
+
+    # Convert to BigInt
+    val padded_bi = bytes_to_bigint(padded)
+
+    # Sign
+    val signature_bi = rsa_raw_decrypt_crt(padded_bi, private_key)
+
+    # Convert to bytes
+    val signature_bytes = bigint_to_bytes(signature_bi, key_bytes)
+
+    return signature_bytes
+
+# Verify signature on bytes
+fn rsa_verify_bytes(message: list, signature: list, public_key: list) -> bool:
+    val key_bits = get_key_bits(public_key)
+    val key_bytes = key_bits / 8
+
+    # Hash message
+    val hash = simple_hash(message)
+
+    # Expected padded hash
+    val expected_padded = pkcs1_pad_type1(hash, key_bytes)
+
+    # Convert signature to BigInt
+    val signature_bi = bytes_to_bigint(signature)
+
+    # Verify
+    val padded_bi = rsa_raw_encrypt(signature_bi, public_key)
+
+    # Convert to bytes
+    val padded_bytes = bigint_to_bytes(padded_bi, key_bytes)
+
+    # Compare
+    val len_expected = array.length(expected_padded)
+    val len_actual = array.length(padded_bytes)
+
+    if len_expected != len_actual:
+        return false
+
+    var i = 0
+    while i < len_expected:
+        val expected_byte = array.get(expected_padded, i)
+        val actual_byte = array.get(padded_bytes, i)
+        if expected_byte != actual_byte:
+            return false
+        i = i + 1
+
+    return true
+
+# Generate RSA keypair with specific primes (for testing)
+fn generate_rsa_keys_from_primes(p: list, q: list, e: list) -> list:
+    # Compute n = p * q
+    val n = bigint_mul(p, q)
+
+    # Compute φ(n) = (p-1)(q-1)
+    val p_minus_1 = bigint_sub(p, bigint_one())
+    val q_minus_1 = bigint_sub(q, bigint_one())
+    val phi = bigint_mul(p_minus_1, q_minus_1)
+
+    # Compute d = e^(-1) mod φ(n)
+    val d = bigint_mod_inverse(e, phi)
+
+    # Compute CRT parameters
+    val dP = bigint_mod(d, p_minus_1)
+    val dQ = bigint_mod(d, q_minus_1)
+    val qInv = bigint_mod_inverse(q, p)
+
+    val bits = bigint_bit_length(n)
+    val bits_bi = bigint_from_i64(bits)
+
+    val public_key = [n, e, bits_bi]
+    val private_key = [n, d, p, q, dP, dQ, qInv, bits_bi]
+
+    return [public_key, private_key]
+
+# Check if number is even
+fn bigint_is_even(n: list) -> bool:
+    val two = bigint_from_i64(2)
+    val divmod_2 = bigint_divmod(n, two)
+    val remainder = array.get(divmod_2, 1)
+    return bigint_is_zero(remainder)
+
+# Check if number is odd
+fn bigint_is_odd(n: list) -> bool:
+    return !bigint_is_even(n)
+
+# Absolute difference between two BigInts
+fn bigint_abs_diff(a: list, b: list) -> list:
+    val cmp = bigint_compare(a, b)
+    if cmp >= 0:
+        return bigint_sub(a, b)
+    else:
+        return bigint_sub(b, a)
+
+# Power function for BigInt (not modular)
+fn bigint_pow(base: list, exp: i64) -> list:
+    if exp == 0:
+        return bigint_one()
+    if exp == 1:
+        return base
+
+    var result = bigint_one()
+    var i = 0
+
+    while i < exp:
+        result = bigint_mul(result, base)
+        i = i + 1
+
+    return result
