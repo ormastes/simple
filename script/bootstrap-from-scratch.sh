@@ -12,6 +12,11 @@
 #   5. Core2 compiles full compiler → Full1
 #   6. Full1 recompiles itself → Full2 (reproducibility check)
 #
+# QEMU FreeBSD Support:
+#   --qemu-freebsd    Build in FreeBSD QEMU VM (auto-detects VM)
+#   --qemu-vm=PATH    Path to FreeBSD QEMU VM image
+#   --qemu-port=N     SSH port for QEMU VM (default: 10022)
+#
 # Usage:
 #   ./script/bootstrap-from-scratch.sh [options]
 #
@@ -22,6 +27,9 @@
 #   --output=PATH     Final binary location (default: bin/simple)
 #   --keep-artifacts  Keep build/bootstrap/ directory
 #   --verbose         Show detailed command output
+#   --qemu-freebsd    Build in FreeBSD QEMU VM
+#   --qemu-vm=PATH    FreeBSD QEMU VM image path
+#   --qemu-port=N     QEMU VM SSH port (default: 10022)
 #   --help            Show this help
 
 set -euo pipefail
@@ -40,6 +48,12 @@ BUILD_DIR="build/bootstrap"
 SEED_DIR="seed"
 COMPILER_CORE_DIR="src/compiler_core"
 
+# QEMU FreeBSD support
+QEMU_FREEBSD=false
+QEMU_VM_PATH=""
+QEMU_PORT=10022
+QEMU_USER="freebsd"
+
 # ============================================================================
 # Argument parsing
 # ============================================================================
@@ -49,11 +63,14 @@ for arg in "$@"; do
         --skip-verify)    SKIP_VERIFY=true ;;
         --keep-artifacts) KEEP_ARTIFACTS=true ;;
         --verbose)        VERBOSE=true ;;
+        --qemu-freebsd)   QEMU_FREEBSD=true ;;
         --jobs=*)         JOBS="${arg#--jobs=}" ;;
         --cc=*)           CXX="${arg#--cc=}" ;;
         --output=*)       OUTPUT="${arg#--output=}" ;;
+        --qemu-vm=*)      QEMU_VM_PATH="${arg#--qemu-vm=}" ;;
+        --qemu-port=*)    QEMU_PORT="${arg#--qemu-port=}" ;;
         --help)
-            head -27 "$0" | tail -20
+            head -36 "$0" | tail -29
             exit 0
             ;;
         *)
@@ -99,6 +116,125 @@ check_tool() {
 
 file_hash() {
     sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1
+}
+
+# ============================================================================
+# QEMU FreeBSD Support
+# ============================================================================
+
+detect_qemu_vm() {
+    # Auto-detect FreeBSD QEMU VM
+    local vm_locations=(
+        "build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
+        "$HOME/.qemu/freebsd.qcow2"
+        "/opt/qemu/freebsd.qcow2"
+    )
+
+    for vm in "${vm_locations[@]}"; do
+        if [ -f "$vm" ]; then
+            QEMU_VM_PATH="$vm"
+            log "Found FreeBSD VM: $vm"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+start_qemu_vm() {
+    log "Starting FreeBSD QEMU VM..."
+
+    if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+        err "qemu-system-x86_64 not found. Install: apt install qemu-system-x86"
+        return 1
+    fi
+
+    # Check if VM is already running
+    if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p "$QEMU_PORT" \
+           "$QEMU_USER@localhost" "echo 'VM alive'" >/dev/null 2>&1; then
+        log "FreeBSD VM already running on port $QEMU_PORT"
+        return 0
+    fi
+
+    # Start VM in background
+    qemu-system-x86_64 \
+        -machine accel=kvm:tcg \
+        -cpu host \
+        -m 4G \
+        -smp 4 \
+        -drive file="$QEMU_VM_PATH",format=qcow2,if=virtio \
+        -net nic,model=virtio \
+        -net user,hostfwd=tcp::${QEMU_PORT}-:22 \
+        -nographic \
+        -daemonize \
+        -pidfile build/freebsd/vm/qemu.pid
+
+    # Wait for SSH
+    log "Waiting for SSH on port $QEMU_PORT..."
+    local retries=30
+    while [ $retries -gt 0 ]; do
+        if ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p "$QEMU_PORT" \
+               "$QEMU_USER@localhost" "echo 'SSH ready'" >/dev/null 2>&1; then
+            log "SSH connection established"
+            return 0
+        fi
+        sleep 2
+        retries=$((retries - 1))
+    done
+
+    err "Timeout waiting for SSH connection"
+    return 1
+}
+
+run_in_freebsd_vm() {
+    local cmd="$1"
+    ssh -o StrictHostKeyChecking=no -p "$QEMU_PORT" "$QEMU_USER@localhost" "$cmd"
+}
+
+sync_to_freebsd_vm() {
+    log "Syncing project to FreeBSD VM..."
+    rsync -az --delete -e "ssh -p $QEMU_PORT -o StrictHostKeyChecking=no" \
+        --exclude='.git' \
+        --exclude='build' \
+        --exclude='target' \
+        --exclude='.jj' \
+        . "$QEMU_USER@localhost:~/simple/"
+}
+
+sync_from_freebsd_vm() {
+    local remote_path="$1"
+    local local_path="$2"
+    log "Syncing $remote_path from FreeBSD VM..."
+    rsync -az -e "ssh -p $QEMU_PORT -o StrictHostKeyChecking=no" \
+        "$QEMU_USER@localhost:$remote_path" "$local_path"
+}
+
+bootstrap_in_freebsd_vm() {
+    log "================================================================"
+    log "Running bootstrap in FreeBSD QEMU VM"
+    log "================================================================"
+    echo ""
+
+    # Sync project files
+    sync_to_freebsd_vm
+
+    # Run FreeBSD-specific bootstrap script
+    log "Executing FreeBSD bootstrap script..."
+    run_in_freebsd_vm "cd ~/simple && script/bootstrap-from-scratch-freebsd.sh ${SKIP_VERIFY:+--skip-verify} ${KEEP_ARTIFACTS:+--keep-artifacts} ${VERBOSE:+--verbose}"
+    local result=$?
+
+    if [ $result -ne 0 ]; then
+        err "FreeBSD VM bootstrap failed"
+        return 1
+    fi
+
+    # Sync back the built binary
+    mkdir -p "$(dirname "$OUTPUT")"
+    sync_from_freebsd_vm "~/simple/bin/simple" "$OUTPUT"
+
+    log "FreeBSD bootstrap completed successfully"
+    log "Binary retrieved: $OUTPUT"
+    echo ""
 }
 
 # ============================================================================
@@ -495,6 +631,34 @@ main() {
     echo "================================================================"
     echo ""
 
+    # Handle QEMU FreeBSD bootstrap
+    if [ "$QEMU_FREEBSD" = true ]; then
+        if [ -z "$QEMU_VM_PATH" ]; then
+            detect_qemu_vm || {
+                err "No FreeBSD VM found. Use --qemu-vm=PATH to specify VM image."
+                err "Or run: bin/simple script/download_qemu.spl freebsd"
+                exit 1
+            }
+        fi
+
+        start_qemu_vm || exit 1
+        bootstrap_in_freebsd_vm || exit 1
+
+        local end_time elapsed
+        end_time=$(date +%s)
+        elapsed=$((end_time - start_time))
+
+        echo "================================================================"
+        echo "  FreeBSD Bootstrap Complete (${elapsed}s)"
+        echo "================================================================"
+        echo ""
+        echo "  Binary: $OUTPUT"
+        echo "  Platform: FreeBSD (built in QEMU VM)"
+        echo ""
+        return 0
+    fi
+
+    # Normal local bootstrap
     step0_prerequisites
     step1_build_seed
     step2_core1

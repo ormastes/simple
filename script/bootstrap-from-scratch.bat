@@ -12,6 +12,11 @@ REM   4. Core1 compiles compiler_core -> Core2 (self-hosting check)
 REM   5. Core2 compiles full compiler -> Full1
 REM   6. Full1 recompiles itself -> Full2 (reproducibility check)
 REM
+REM QEMU FreeBSD Support:
+REM   --qemu-freebsd    Build in FreeBSD QEMU VM (requires qemu-system-x86_64)
+REM   --qemu-vm=PATH    Path to FreeBSD QEMU VM image
+REM   --qemu-port=N     SSH port for QEMU VM (default: 10022)
+REM
 REM Usage:
 REM   script\bootstrap-from-scratch.bat [options]
 REM
@@ -22,6 +27,9 @@ REM   --cc=PATH         C++ compiler path (default: auto-detect)
 REM   --output=PATH     Final binary location (default: bin\simple.exe)
 REM   --keep-artifacts  Keep build\bootstrap\ directory
 REM   --verbose         Show detailed command output
+REM   --qemu-freebsd    Build in FreeBSD QEMU VM
+REM   --qemu-vm=PATH    FreeBSD QEMU VM image path
+REM   --qemu-port=N     QEMU VM SSH port (default: 10022)
 REM   --help            Show this help
 
 setlocal enabledelayedexpansion
@@ -40,6 +48,12 @@ set "BUILD_DIR=build\bootstrap"
 set "SEED_DIR=seed"
 set "COMPILER_CORE_DIR=src\compiler_core"
 
+REM QEMU FreeBSD support
+set "QEMU_FREEBSD=false"
+set "QEMU_VM_PATH="
+set "QEMU_PORT=10022"
+set "QEMU_USER=freebsd"
+
 REM ============================================================================
 REM Argument parsing
 REM ============================================================================
@@ -49,6 +63,7 @@ if "%~1"=="" goto :args_done
 if "%~1"=="--skip-verify"    set "SKIP_VERIFY=true" & shift & goto :parse_args
 if "%~1"=="--keep-artifacts" set "KEEP_ARTIFACTS=true" & shift & goto :parse_args
 if "%~1"=="--verbose"        set "VERBOSE=true" & shift & goto :parse_args
+if "%~1"=="--qemu-freebsd"   set "QEMU_FREEBSD=true" & shift & goto :parse_args
 if "%~1"=="--help" (
     echo Simple Compiler — Bootstrap From Scratch (Windows)
     echo.
@@ -61,6 +76,9 @@ if "%~1"=="--help" (
     echo   --output=PATH     Final binary location (default: bin\simple.exe)
     echo   --keep-artifacts  Keep build\bootstrap\ directory
     echo   --verbose         Show detailed command output
+    echo   --qemu-freebsd    Build in FreeBSD QEMU VM
+    echo   --qemu-vm=PATH    FreeBSD QEMU VM image path
+    echo   --qemu-port=N     QEMU VM SSH port (default: 10022)
     echo   --help            Show this help
     exit /b 0
 )
@@ -69,6 +87,8 @@ set "ARG=%~1"
 if "!ARG:~0,7!"=="--jobs=" set "JOBS=!ARG:~7!" & shift & goto :parse_args
 if "!ARG:~0,5!"=="--cc="   set "CXX=!ARG:~5!" & shift & goto :parse_args
 if "!ARG:~0,9!"=="--output=" set "OUTPUT=!ARG:~9!" & shift & goto :parse_args
+if "!ARG:~0,11!"=="--qemu-vm=" set "QEMU_VM_PATH=!ARG:~11!" & shift & goto :parse_args
+if "!ARG:~0,13!"=="--qemu-port=" set "QEMU_PORT=!ARG:~13!" & shift & goto :parse_args
 
 echo Unknown option: %~1
 echo Run with --help for usage
@@ -77,8 +97,118 @@ exit /b 1
 :args_done
 
 REM ============================================================================
+REM QEMU FreeBSD Support Functions
+REM ============================================================================
+
+:check_qemu_freebsd
+if "!QEMU_FREEBSD!"=="false" goto :qemu_done
+
+echo [bootstrap] QEMU FreeBSD mode enabled
+echo.
+
+REM Check for QEMU
+where qemu-system-x86_64 >nul 2>&1
+if errorlevel 1 (
+    echo [bootstrap] ERROR: qemu-system-x86_64 not found
+    echo [bootstrap] Install QEMU for Windows from https://www.qemu.org/download/
+    exit /b 1
+)
+
+REM Auto-detect VM if not specified
+if "!QEMU_VM_PATH!"=="" (
+    if exist "build\freebsd\vm\FreeBSD-14.3-RELEASE-amd64.qcow2" (
+        set "QEMU_VM_PATH=build\freebsd\vm\FreeBSD-14.3-RELEASE-amd64.qcow2"
+    ) else if exist "%USERPROFILE%\.qemu\freebsd.qcow2" (
+        set "QEMU_VM_PATH=%USERPROFILE%\.qemu\freebsd.qcow2"
+    ) else (
+        echo [bootstrap] ERROR: No FreeBSD VM found. Use --qemu-vm=PATH
+        echo [bootstrap] Or run: bin\simple script\download_qemu.spl freebsd
+        exit /b 1
+    )
+)
+
+echo [bootstrap] Using FreeBSD VM: !QEMU_VM_PATH!
+echo [bootstrap] SSH port: !QEMU_PORT!
+echo.
+
+REM Check if VM is already running
+ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p !QEMU_PORT! !QEMU_USER!@localhost "echo VM alive" >nul 2>&1
+if not errorlevel 1 (
+    echo [bootstrap] FreeBSD VM already running
+    goto :run_freebsd_bootstrap
+)
+
+REM Start QEMU VM
+echo [bootstrap] Starting FreeBSD QEMU VM...
+if not exist "build\freebsd\vm" mkdir "build\freebsd\vm"
+
+start /b qemu-system-x86_64 -machine accel=whpx:tcg -cpu max -m 4G -smp 4 -drive file="!QEMU_VM_PATH!",format=qcow2,if=virtio -net nic,model=virtio -net user,hostfwd=tcp::!QEMU_PORT!-:22 -nographic
+
+REM Wait for SSH
+echo [bootstrap] Waiting for SSH on port !QEMU_PORT!...
+set RETRIES=30
+:wait_ssh
+ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no -p !QEMU_PORT! !QEMU_USER!@localhost "echo SSH ready" >nul 2>&1
+if not errorlevel 1 goto :ssh_ready
+timeout /t 2 /nobreak >nul
+set /a RETRIES-=1
+if !RETRIES! gtr 0 goto :wait_ssh
+
+echo [bootstrap] ERROR: Timeout waiting for SSH
+exit /b 1
+
+:ssh_ready
+echo [bootstrap] SSH connection established
+echo.
+
+:run_freebsd_bootstrap
+REM Sync project to VM (requires rsync or alternative)
+echo [bootstrap] Syncing project to FreeBSD VM...
+echo [bootstrap] NOTE: Install rsync on Windows or use WinSCP for file sync
+echo [bootstrap] For now, assuming project is already synced or using shared folder
+echo.
+
+REM Run FreeBSD bootstrap in VM
+echo [bootstrap] Running bootstrap in FreeBSD VM...
+set "VM_OPTS="
+if "!SKIP_VERIFY!"=="true" set "VM_OPTS=--skip-verify"
+if "!KEEP_ARTIFACTS!"=="true" set "VM_OPTS=!VM_OPTS! --keep-artifacts"
+if "!VERBOSE!"=="true" set "VM_OPTS=!VM_OPTS! --verbose"
+
+ssh -o StrictHostKeyChecking=no -p !QEMU_PORT! !QEMU_USER!@localhost "cd ~/simple && script/bootstrap-from-scratch-freebsd.sh !VM_OPTS!"
+if errorlevel 1 (
+    echo [bootstrap] ERROR: FreeBSD VM bootstrap failed
+    exit /b 1
+)
+
+REM Retrieve binary (requires scp)
+echo [bootstrap] Retrieving built binary from FreeBSD VM...
+if not exist "bin" mkdir "bin"
+scp -P !QEMU_PORT! -o StrictHostKeyChecking=no !QEMU_USER!@localhost:~/simple/bin/simple !OUTPUT!
+if errorlevel 1 (
+    echo [bootstrap] ERROR: Failed to retrieve binary from VM
+    exit /b 1
+)
+
+echo.
+echo ================================================================
+echo   FreeBSD Bootstrap Complete (via QEMU)
+echo ================================================================
+echo.
+echo   Binary: !OUTPUT!
+echo   Platform: FreeBSD (built in QEMU VM)
+echo.
+exit /b 0
+
+:qemu_done
+
+REM ============================================================================
 REM Step 0: Prerequisites
 REM ============================================================================
+
+REM Check if QEMU FreeBSD mode is enabled
+call :check_qemu_freebsd
+if errorlevel 1 exit /b 1
 
 echo ================================================================
 echo   Simple Compiler — Bootstrap From Scratch (Windows)

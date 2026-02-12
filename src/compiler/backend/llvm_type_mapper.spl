@@ -7,6 +7,40 @@ use compiler.mir_data.*
 use compiler.backend.common.type_mapper.*
 
 # ============================================================================
+# LLVM Context - Type Caching
+# ============================================================================
+
+struct LlvmContext:
+    """
+    Context for caching type definitions and managing LLVM type system state.
+
+    Caches named struct types to avoid duplicate definitions and enable
+    recursive types.
+    """
+    named_structs: Dict<text, text>     # name -> llvm type string
+    struct_counter: i64                  # for generating unique names
+
+    static fn empty() -> LlvmContext:
+        LlvmContext(named_structs: {}, struct_counter: 0)
+
+    me register_struct(name: text, llvm_type: text):
+        """Register a named struct type."""
+        self.named_structs[name] = llvm_type
+
+    fn get_struct(name: text) -> text?:
+        """Get a previously registered struct type."""
+        if self.named_structs.contains_key(name):
+            Some(self.named_structs[name])
+        else:
+            nil
+
+    me next_struct_name() -> text:
+        """Generate a unique struct name."""
+        val name = "%struct.anon.{self.struct_counter}"
+        self.struct_counter = self.struct_counter + 1
+        name
+
+# ============================================================================
 # LLVM Type Mapper
 # ============================================================================
 
@@ -25,19 +59,20 @@ class LlvmTypeMapper:
         [I64 x 10] → "[10 x i64]"
     """
 
-    target_bits: i64  # 32 or 64 for pointer size
+    target_bits: i64      # 32 or 64 for pointer size
+    context: LlvmContext  # Type caching context
 
     static fn create() -> LlvmTypeMapper:
         """Create mapper for default 64-bit target."""
-        LlvmTypeMapper(target_bits: 64)
+        LlvmTypeMapper(target_bits: 64, context: LlvmContext.empty())
 
     static fn create_32bit() -> LlvmTypeMapper:
         """Create mapper for 32-bit targets."""
-        LlvmTypeMapper(target_bits: 32)
+        LlvmTypeMapper(target_bits: 32, context: LlvmContext.empty())
 
     static fn create_64bit() -> LlvmTypeMapper:
         """Create mapper for 64-bit targets."""
-        LlvmTypeMapper(target_bits: 64)
+        LlvmTypeMapper(target_bits: 64, context: LlvmContext.empty())
 
     static fn create_for_target(target: CodegenTarget) -> LlvmTypeMapper:
         """Create mapper for specific target."""
@@ -82,6 +117,42 @@ impl TypeMapper for LlvmTypeMapper:
         "LLVM"
 
 impl LlvmTypeMapper:
+    # === Override map_type to handle generics ===
+
+    fn map_type(ty: MirType) -> text:
+        """
+        Map MIR type to LLVM IR type string.
+        Overrides default to add generic checking.
+        """
+        # Check for unmonomorphized generics
+        if ty.kind == Generic(_):
+            error("LLVM backend cannot handle unmonomorphized generic types. " +
+                  "Type must be monomorphized before lowering to LLVM IR.")
+
+        # Delegate to default implementation
+        match ty.kind:
+            case I64, I32, I16, I8, F64, F32, Bool, Unit:
+                self.map_primitive(ty.kind)
+
+            case Ptr(inner, mutability):
+                val inner_ty = self.map_type(inner)
+                self.map_pointer(inner_ty, mutability)
+
+            case Struct(fields):
+                self.map_struct(fields)
+
+            case Array(element, size):
+                self.map_array(element, size)
+
+            case Tuple(elements):
+                self.map_tuple(elements)
+
+            case Function(params, ret):
+                self.map_function(params, ret)
+
+            case _:
+                error("Unsupported type in LLVM backend: {ty}")
+
     # === Custom LLVM-specific methods ===
 
     fn map_struct(fields: [(text, MirType)]) -> text:
@@ -229,5 +300,5 @@ fn LlvmTypeMapper__create_64bit() -> LlvmTypeMapper:
 fn LlvmTypeMapper__create_for_target(target: CodegenTarget) -> LlvmTypeMapper:
     LlvmTypeMapper.create_for_target(target)
 
-export LlvmTypeMapper
+export LlvmContext, LlvmTypeMapper
 export LlvmTypeMapper__create, LlvmTypeMapper__create_32bit, LlvmTypeMapper__create_64bit, LlvmTypeMapper__create_for_target

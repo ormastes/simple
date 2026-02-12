@@ -3,14 +3,14 @@
 # Produces native object files (.o) directly from MIR without external toolchains.
 # No gcc, clang, llc, or any external tool needed.
 #
-# Pipeline: MIR -> ISel -> RegAlloc -> Encode -> ELF
+# Pipeline: MIR -> ISel -> RegAlloc -> Encode -> Layout -> ELF
 #
 # Supported architectures:
 # - x86_64 (Linux ELF)
 # - AArch64 (Linux ELF) - Phase 8
 # - RISC-V 64 (Linux ELF) - Phase 9
 
-use compiler.mir_data.{MirModule, MirFunction}
+use compiler.mir_data.{MirModule, MirFunction, LayoutPhase}
 use compiler.backend.backend_types.{CodegenTarget, CompiledModule, CompiledSymbol, CompiledSymbolKind, CompileError, BackendKind}
 use compiler.backend.native.mach_inst.{MachModule, MachFunction, EncodedFunction, new_encoded_function}
 use compiler.backend.native.isel_x86_64.{isel_module}
@@ -21,6 +21,7 @@ use compiler.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.native.encode_aarch64.{encode_module_aarch64}
 use compiler.backend.native.encode_riscv64.{encode_module_riscv64}
 use compiler.backend.native.elf_writer.{ElfWriter, ElfSection, ElfSectionKind, ElfSymbol, ElfSymbolBind, ElfSymbolType, ElfReloc, ElfRelocType, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64, elf_add_section, elf_add_symbol, new_text_section, new_data_section, new_rodata_section, section_add_reloc, new_func_symbol, new_extern_symbol, write_elf64}
+use compiler.backend.native.layout_solver.{solve_layout, HotnessProfile, LayoutPlan}
 
 # ============================================================================
 # Native Backend Entry Point
@@ -47,8 +48,8 @@ fn compile_native_x86_64(module: MirModule) -> [i64]:
     # Phase 3: Instruction Encoding (MachInst -> bytes)
     val encoded_funcs = encode_module(allocated)
 
-    # Phase 4: Emit ELF object file
-    emit_elf_x86_64(encoded_funcs, allocated)
+    # Phase 4: Layout Optimization & ELF Emission
+    emit_elf_x86_64(encoded_funcs, allocated, module)
 
 fn compile_native_aarch64(module: MirModule) -> [i64]:
     # Phase 1: Instruction Selection (MIR -> MachInst)
@@ -60,7 +61,8 @@ fn compile_native_aarch64(module: MirModule) -> [i64]:
     # Phase 3: Instruction Encoding (MachInst -> bytes)
     val encoded_funcs = encode_module_aarch64(allocated)
 
-    # Phase 4: Emit ELF object file
+    # Phase 4: Layout Optimization & ELF Emission
+    # TODO: Add layout optimization support (same as x86_64)
     emit_elf_aarch64(encoded_funcs, allocated)
 
 fn compile_native_riscv64(module: MirModule) -> [i64]:
@@ -73,7 +75,8 @@ fn compile_native_riscv64(module: MirModule) -> [i64]:
     # Phase 3: Instruction Encoding (MachInst -> bytes)
     val encoded_funcs = encode_module_riscv64(allocated)
 
-    # Phase 4: Emit ELF object file
+    # Phase 4: Layout Optimization & ELF Emission
+    # TODO: Add layout optimization support (same as x86_64)
     emit_elf_riscv64(encoded_funcs, allocated)
 
 fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
@@ -84,11 +87,57 @@ fn compile_native_stub(module: MirModule, arch: text) -> [i64]:
     write_elf64(writer)
 
 # ============================================================================
+# Layout Optimization Helpers
+# ============================================================================
+
+fn reorder_by_layout(
+    encoded_funcs: [EncodedFunction],
+    layout_plan: LayoutPlan
+) -> [EncodedFunction]:
+    """Reorder encoded functions according to layout plan."""
+    var ordered: [EncodedFunction] = []
+
+    # Process each phase group in order
+    for group in layout_plan.groups:
+        for func_info in group.functions:
+            # Find matching encoded function
+            for enc_func in encoded_funcs:
+                if enc_func.name == func_info.name:
+                    ordered.push(enc_func)
+                    break
+
+    # Add any functions not in the plan (shouldn't happen)
+    for enc_func in encoded_funcs:
+        var found = false
+        for ordered_func in ordered:
+            if ordered_func.name == enc_func.name:
+                found = true
+                break
+        if not found:
+            ordered.push(enc_func)
+
+    ordered
+
+# ============================================================================
 # ELF Emission
 # ============================================================================
 
-fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64]:
+fn emit_elf_x86_64(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule
+) -> [i64]:
     var writer = elf_writer_x86_64()
+
+    # Phase 4a: Generate layout plan and reorder functions
+    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
+
+    # Track phase boundaries for padding
+    var phase_boundaries: Dict<text, i64> = {}
+    for group in layout_plan.groups:
+        if group.functions.len() > 0:
+            phase_boundaries[group.functions[0].name] = 4096  # 4KB padding
 
     # Combine all function code into a single .text section
     var all_code: [i64] = []
@@ -119,8 +168,8 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
             sym_names = sym_names + [ext_sym]
             sym_name_to_idx[ext_sym] = idx
 
-    # Then collect function names
-    for func in encoded_funcs:
+    # Then collect function names (using ordered functions)
+    for func in ordered_funcs:
         if not sym_name_to_idx.contains(func.name):
             val idx = sym_names.len()
             sym_names = sym_names + [func.name]
@@ -142,14 +191,25 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
         num_content_sections = num_content_sections + 1
     val sym_base = 1 + num_content_sections
 
-    # Concatenate function code and track offsets
-    for func in encoded_funcs:
-        # Align to 16 bytes
-        var padding = all_code.len() % 16
-        if padding != 0:
-            padding = 16 - padding
-        for i in 0..padding:
-            all_code = all_code + [0xcc]  # int3 padding
+    # Concatenate function code and track offsets (using layout-ordered functions)
+    for func in ordered_funcs:
+        # Check if this function starts a new phase (needs 4KB alignment)
+        if phase_boundaries.contains_key(func.name):
+            val page_size = 4096
+            val current_pos = all_code.len()
+            val remainder = current_pos % page_size
+            if remainder != 0:
+                val padding_needed = page_size - remainder
+                for i in 0..padding_needed:
+                    all_code = all_code + [0xcc]  # int3 padding
+        else:
+            # Regular 16-byte alignment within phase
+            var padding = all_code.len() % 16
+            if padding != 0:
+                padding = 16 - padding
+            for i in 0..padding:
+                all_code = all_code + [0xcc]  # int3 padding
+
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
@@ -218,8 +278,8 @@ fn emit_elf_x86_64(encoded_funcs: [EncodedFunction], module: MachModule) -> [i64
             added_extern_syms[ext_sym] = true
             writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
 
-    # Add function symbols (defined, global)
-    for func in encoded_funcs:
+    # Add function symbols (defined, global) - use ordered functions
+    for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
