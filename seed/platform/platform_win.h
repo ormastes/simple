@@ -38,6 +38,28 @@ bool rt_file_unlock(int64_t handle) {
 }
 
 /* ----------------------------------------------------------------
+ * High-Resolution Time
+ * ---------------------------------------------------------------- */
+
+int64_t rt_time_now_nanos(void) {
+    LARGE_INTEGER freq, count;
+    if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
+        return 0;
+    }
+    /* Convert to nanoseconds: (count * 1e9) / freq */
+    return (int64_t)((count.QuadPart * 1000000000LL) / freq.QuadPart);
+}
+
+int64_t rt_time_now_micros(void) {
+    LARGE_INTEGER freq, count;
+    if (!QueryPerformanceFrequency(&freq) || !QueryPerformanceCounter(&count)) {
+        return 0;
+    }
+    /* Convert to microseconds: (count * 1e6) / freq */
+    return (int64_t)((count.QuadPart * 1000000LL) / freq.QuadPart);
+}
+
+/* ----------------------------------------------------------------
  * Environment
  * ---------------------------------------------------------------- */
 
