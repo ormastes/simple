@@ -1135,10 +1135,226 @@ fn mqtt_get_shared_subscription_filter(filter):
 
     result_parts.join("/")
 
+fn mqtt_extract_shared_filter_parts(filter):
+    """Extract (group, actual_filter) from shared subscription filter.
+    Returns nil if not a shared subscription."""
+    if not mqtt_is_shared_subscription(filter):
+        return nil
+
+    val group = mqtt_get_shared_subscription_group(filter)
+    val actual = mqtt_get_shared_subscription_filter(filter)
+    (group, actual)
+
+fn mqtt_create_shared_subscription_filter(group, filter):
+    """Create a shared subscription filter from group and topic filter."""
+    "$share/" + group + "/" + filter
+
+fn mqtt_packet_requires_packet_id(packet_type):
+    """Check if packet type requires a packet ID."""
+    var needs_id = packet_type == PACKET_TYPE_PUBLISH
+    needs_id = needs_id or packet_type == PACKET_TYPE_PUBACK
+    needs_id = needs_id or packet_type == PACKET_TYPE_PUBREC
+    needs_id = needs_id or packet_type == PACKET_TYPE_PUBREL
+    needs_id = needs_id or packet_type == PACKET_TYPE_PUBCOMP
+    needs_id = needs_id or packet_type == PACKET_TYPE_SUBSCRIBE
+    needs_id = needs_id or packet_type == PACKET_TYPE_SUBACK
+    needs_id = needs_id or packet_type == PACKET_TYPE_UNSUBSCRIBE
+    needs_id = needs_id or packet_type == PACKET_TYPE_UNSUBACK
+    needs_id
+
+fn mqtt_packet_has_payload(packet_type):
+    """Check if packet type typically has a payload."""
+    var has_payload = packet_type == PACKET_TYPE_CONNECT
+    has_payload = has_payload or packet_type == PACKET_TYPE_PUBLISH
+    has_payload = has_payload or packet_type == PACKET_TYPE_SUBSCRIBE
+    has_payload = has_payload or packet_type == PACKET_TYPE_SUBACK
+    has_payload = has_payload or packet_type == PACKET_TYPE_UNSUBSCRIBE
+    has_payload
+
+fn mqtt_version_to_string(version):
+    """Convert MQTT protocol version to string."""
+    if version == MQTT_VERSION_3_1_1:
+        return "MQTT 3.1.1"
+
+    if version == MQTT_VERSION_5_0:
+        return "MQTT 5.0"
+
+    "Unknown version"
+
+fn mqtt_is_valid_version(version):
+    """Check if MQTT version is supported."""
+    version == MQTT_VERSION_3_1_1 or version == MQTT_VERSION_5_0
+
+fn mqtt_get_default_flags_for_packet_type(packet_type):
+    """Get default flags for a given packet type."""
+    if packet_type == PACKET_TYPE_PUBREL:
+        return 2
+
+    if packet_type == PACKET_TYPE_SUBSCRIBE:
+        return 2
+
+    if packet_type == PACKET_TYPE_UNSUBSCRIBE:
+        return 2
+
+    0
+
+fn mqtt_validate_flags_for_packet_type(packet_type, flags):
+    """Validate flags for a given packet type."""
+    val expected = mqtt_get_default_flags_for_packet_type(packet_type)
+
+    # PUBLISH can have various flags
+    if packet_type == PACKET_TYPE_PUBLISH:
+        return true
+
+    # Other packets must match expected flags
+    flags == expected
+
+fn mqtt_create_property_list():
+    """Create an empty MQTT v5.0 property list."""
+    []
+
+fn mqtt_add_property(properties, property_id, value):
+    """Add a property to MQTT v5.0 property list."""
+    val prop = (property_id, value)
+    properties + [prop]
+
+fn mqtt_get_property(properties, property_id):
+    """Get a property value from MQTT v5.0 property list.
+    Returns nil if not found."""
+    if properties == nil:
+        return nil
+
+    var i = 0
+    while i < properties.length():
+        val prop = properties[i]
+        val parts = prop
+        val pid = parts[0]
+        val value = parts[1]
+
+        if pid == property_id:
+            return value
+
+        i = i + 1
+
+    nil
+
+fn mqtt_has_property(properties, property_id):
+    """Check if property exists in MQTT v5.0 property list."""
+    val value = mqtt_get_property(properties, property_id)
+    value != nil
+
+fn mqtt_remove_property(properties, property_id):
+    """Remove a property from MQTT v5.0 property list."""
+    if properties == nil:
+        return []
+
+    var result = []
+    var i = 0
+    while i < properties.length():
+        val prop = properties[i]
+        val parts = prop
+        val pid = parts[0]
+        val value = parts[1]
+
+        if pid != property_id:
+            result = result + [prop]
+
+        i = i + 1
+
+    result
+
+fn mqtt_property_id_to_string(property_id):
+    """Convert property ID to string."""
+    if property_id == PROPERTY_PAYLOAD_FORMAT:
+        return "Payload Format Indicator"
+    if property_id == PROPERTY_MESSAGE_EXPIRY:
+        return "Message Expiry Interval"
+    if property_id == PROPERTY_CONTENT_TYPE:
+        return "Content Type"
+    if property_id == PROPERTY_RESPONSE_TOPIC:
+        return "Response Topic"
+    if property_id == PROPERTY_CORRELATION_DATA:
+        return "Correlation Data"
+    if property_id == PROPERTY_SUBSCRIPTION_ID:
+        return "Subscription Identifier"
+    if property_id == PROPERTY_SESSION_EXPIRY:
+        return "Session Expiry Interval"
+    if property_id == PROPERTY_ASSIGNED_CLIENT_ID:
+        return "Assigned Client Identifier"
+    if property_id == PROPERTY_SERVER_KEEP_ALIVE:
+        return "Server Keep Alive"
+    if property_id == PROPERTY_AUTH_METHOD:
+        return "Authentication Method"
+    if property_id == PROPERTY_AUTH_DATA:
+        return "Authentication Data"
+    if property_id == PROPERTY_REQUEST_PROBLEM_INFO:
+        return "Request Problem Information"
+    if property_id == PROPERTY_WILL_DELAY:
+        return "Will Delay Interval"
+    if property_id == PROPERTY_REQUEST_RESPONSE_INFO:
+        return "Request Response Information"
+    if property_id == PROPERTY_RESPONSE_INFO:
+        return "Response Information"
+    if property_id == PROPERTY_SERVER_REFERENCE:
+        return "Server Reference"
+    if property_id == PROPERTY_REASON_STRING:
+        return "Reason String"
+    if property_id == PROPERTY_RECEIVE_MAXIMUM:
+        return "Receive Maximum"
+    if property_id == PROPERTY_TOPIC_ALIAS_MAXIMUM:
+        return "Topic Alias Maximum"
+    if property_id == PROPERTY_TOPIC_ALIAS:
+        return "Topic Alias"
+    if property_id == PROPERTY_MAXIMUM_QOS:
+        return "Maximum QoS"
+    if property_id == PROPERTY_RETAIN_AVAILABLE:
+        return "Retain Available"
+    if property_id == PROPERTY_USER_PROPERTY:
+        return "User Property"
+    if property_id == PROPERTY_MAXIMUM_PACKET_SIZE:
+        return "Maximum Packet Size"
+    if property_id == PROPERTY_WILDCARD_SUB_AVAILABLE:
+        return "Wildcard Subscription Available"
+    if property_id == PROPERTY_SUB_ID_AVAILABLE:
+        return "Subscription Identifier Available"
+    if property_id == PROPERTY_SHARED_SUB_AVAILABLE:
+        return "Shared Subscription Available"
+
+    "Unknown Property"
+
+fn mqtt_connack_return_code_to_string(return_code):
+    """Convert CONNACK return code (v3.1.1) to string."""
+    if return_code == CONNACK_ACCEPTED:
+        return "Connection Accepted"
+    if return_code == CONNACK_REFUSED_PROTOCOL:
+        return "Connection Refused: unacceptable protocol version"
+    if return_code == CONNACK_REFUSED_IDENTIFIER:
+        return "Connection Refused: identifier rejected"
+    if return_code == CONNACK_REFUSED_SERVER_UNAVAILABLE:
+        return "Connection Refused: server unavailable"
+    if return_code == CONNACK_REFUSED_BAD_CREDENTIALS:
+        return "Connection Refused: bad user name or password"
+    if return_code == CONNACK_REFUSED_NOT_AUTHORIZED:
+        return "Connection Refused: not authorized"
+
+    "Unknown return code"
+
+fn mqtt_max_packet_size():
+    """Get maximum packet size."""
+    MAX_PAYLOAD_SIZE
+
+fn mqtt_max_topic_length():
+    """Get maximum topic length."""
+    MAX_TOPIC_LENGTH
+
+fn mqtt_max_client_id_length():
+    """Get maximum client ID length."""
+    MAX_CLIENT_ID_LENGTH
+
 # ============================================================================
 # Module Exports
 # ============================================================================
 
 # This module provides comprehensive MQTT protocol utilities
 # Supporting both MQTT v3.1.1 and v5.0
-# Total functions: 150+
+# Total functions: 120+
