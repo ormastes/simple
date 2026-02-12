@@ -67,6 +67,14 @@ target_include_directories(c_runtime_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_executable(seed_test seed_test.cpp)
 target_include_directories(seed_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Runtime branch coverage test
+add_executable(runtime_branch_test runtime_branch_test.c runtime.c)
+target_include_directories(runtime_branch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Seed compiler branch coverage test
+add_executable(seed_branch_test seed_branch_test.cpp)
+target_include_directories(seed_branch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 # Install targets
 install(TARGETS seed seed_cpp spl_runtime
     RUNTIME DESTINATION bin
