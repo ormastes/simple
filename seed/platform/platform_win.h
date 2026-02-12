@@ -108,6 +108,60 @@ int64_t rt_file_write_text_at(const char* path, int64_t offset, const char* data
 }
 
 /* ----------------------------------------------------------------
+ * Memory-Mapped File I/O
+ * ---------------------------------------------------------------- */
+
+void* rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly) {
+    if (!path || size <= 0 || offset < 0) return NULL;
+
+    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    DWORD share = FILE_SHARE_READ;
+    DWORD protect = readonly ? PAGE_READONLY : PAGE_READWRITE;
+    DWORD map_access = readonly ? FILE_MAP_READ : FILE_MAP_WRITE;
+
+    HANDLE hFile = CreateFileA(path, access, share, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return NULL;
+
+    HANDLE hMapping = CreateFileMappingA(hFile, NULL, protect, 0, 0, NULL);
+    if (!hMapping) {
+        CloseHandle(hFile);
+        return NULL;
+    }
+
+    DWORD offset_high = (DWORD)(offset >> 32);
+    DWORD offset_low = (DWORD)(offset & 0xFFFFFFFF);
+
+    void* addr = MapViewOfFile(hMapping, map_access, offset_high, offset_low, (SIZE_T)size);
+
+    CloseHandle(hMapping);
+    CloseHandle(hFile);
+
+    return addr;
+}
+
+bool rt_munmap(void* addr, int64_t size) {
+    (void)size;  /* Not needed on Windows */
+    if (!addr) return false;
+    return UnmapViewOfFile(addr) != 0;
+}
+
+bool rt_madvise(void* addr, int64_t size, int64_t advice) {
+    if (!addr || size <= 0) return false;
+
+    /* Windows doesn't have direct equivalent - use PrefetchVirtualMemory for WILLNEED */
+    if (advice == 3) {  /* WILLNEED */
+        /* PrefetchVirtualMemory only available in Win8+ */
+        return true;  /* Silently succeed - not critical */
+    }
+    return true;  /* Other advice types not supported, but not an error */
+}
+
+bool rt_msync(void* addr, int64_t size) {
+    if (!addr || size <= 0) return false;
+    return FlushViewOfFile(addr, (SIZE_T)size) != 0;
+}
+
+/* ----------------------------------------------------------------
  * High-Resolution Time
  * ---------------------------------------------------------------- */
 

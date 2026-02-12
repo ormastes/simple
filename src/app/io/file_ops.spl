@@ -11,6 +11,10 @@ extern fn rt_file_lock(path: text, timeout_secs: i64) -> i64
 extern fn rt_file_unlock(handle: i64) -> bool
 extern fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+extern fn rt_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64
+extern fn rt_munmap(addr: i64, size: i64) -> bool
+extern fn rt_madvise(addr: i64, size: i64, advice: i64) -> bool
+extern fn rt_msync(addr: i64, size: i64) -> bool
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 # --- Shell helpers (local copies to avoid circular imports) ---
@@ -126,6 +130,78 @@ fn file_mmap_read_text(path: text) -> text:
 fn file_mmap_read_bytes(path: text) -> [i64]:
     rt_file_mmap_read_bytes(path)
 
+# --- Offset-based File I/O ---
+
+fn file_read_text_at(path: text, offset: i64, size: i64) -> text:
+    """Read text from file at specific offset without changing file position."""
+    rt_file_read_text_at(path, offset, size)
+
+fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
+    """Write text to file at specific offset without changing file position."""
+    rt_file_write_text_at(path, offset, data)
+
+# --- Memory-Mapped File I/O ---
+
+fn file_mmap(path: text, size: i64, offset: i64, readonly: bool) -> i64:
+    """
+    Memory-map a file into process address space.
+
+    Args:
+        path: File path to map
+        size: Number of bytes to map
+        offset: Byte offset in file to start mapping
+        readonly: true for read-only, false for read-write
+
+    Returns:
+        Memory address as i64, or 0 on error
+
+    Example:
+        val addr = file_mmap("data.bin", 1024, 0, true)  # Map 1KB read-only
+        # ... use memory directly ...
+        file_munmap(addr, 1024)  # Unmap when done
+    """
+    rt_mmap(path, size, offset, readonly)
+
+fn file_munmap(addr: i64, size: i64) -> bool:
+    """
+    Unmap a memory-mapped file region.
+
+    Args:
+        addr: Memory address returned by file_mmap
+        size: Size that was mapped
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_munmap(addr, size)
+
+fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
+    """
+    Give advice about memory access patterns.
+
+    Args:
+        addr: Memory address
+        size: Size of region
+        advice: 0=NORMAL, 1=RANDOM, 2=SEQUENTIAL, 3=WILLNEED, 4=DONTNEED
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_madvise(addr, size, advice)
+
+fn file_msync(addr: i64, size: i64) -> bool:
+    """
+    Synchronize mapped memory with file on disk.
+
+    Args:
+        addr: Memory address
+        size: Size of region
+
+    Returns:
+        true on success, false on failure
+    """
+    rt_msync(addr, size)
+
 # --- Additional File Functions ---
 
 fn rt_file_rename(src: text, dst: text) -> bool:
@@ -147,4 +223,6 @@ export file_exists, file_read, file_write, file_copy, file_delete, file_atomic_w
 export file_append, file_modified_time, file_remove, file_hash_sha256, file_read_lines
 export file_lock, file_unlock, file_size, file_size_raw
 export file_read_text, file_read_bytes, file_mmap_read_text, file_mmap_read_bytes
+export file_read_text_at, file_write_text_at
+export file_mmap, file_munmap, file_madvise, file_msync
 export rt_file_rename
