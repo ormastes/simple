@@ -1269,6 +1269,40 @@ static void translate_expr(const char *expr, char *out, int outsz) {
             char obj_c[MAX_LINE];
             translate_expr(trim(obj), obj_c, sizeof(obj_c));
 
+            /* .? operator: Optional chaining / has-value check */
+            if (strcmp(rest, "?") == 0 || starts_with(rest, "?.")) {
+                if (strcmp(rest, "?") == 0) {
+                    /* Simple boolean check: x.? → x.has_value (for Option) or !x.empty() (for arrays) */
+                    if (var_is_option(trim(obj)) || dot_expr_is_option(trim(obj)) || expr_is_option(trim(obj))) {
+                        snprintf(out, outsz, "%s.has_value", obj_c);
+                    } else if (var_is_array(trim(obj)) || var_is_struct_array(trim(obj))) {
+                        snprintf(out, outsz, "(spl_array_len(%s) > 0)", obj_c);
+                    } else {
+                        /* For other types, treat as truthiness check */
+                        snprintf(out, outsz, "(%s != 0)", obj_c);
+                    }
+                    return;
+                } else {
+                    /* Optional chaining: x.?.field or x.?.method() */
+                    const char *after_q = rest + 2; /* Skip "?." */
+                    char chained_expr[MAX_LINE];
+                    snprintf(chained_expr, sizeof(chained_expr), "%s.%s", obj, after_q);
+
+                    /* Translate the chained part */
+                    char chained_c[MAX_LINE];
+                    translate_expr(chained_expr, chained_c, sizeof(chained_c));
+
+                    /* Wrap in ternary: (x.has_value ? x.value.field : default) */
+                    if (var_is_option(trim(obj)) || dot_expr_is_option(trim(obj)) || expr_is_option(trim(obj))) {
+                        snprintf(out, outsz, "(%s.has_value ? %s.value.%s : 0)", obj_c, obj_c, after_q);
+                    } else {
+                        /* For non-option types, just emit the chained expression */
+                        snprintf(out, outsz, "%s", chained_c);
+                    }
+                    return;
+                }
+            }
+
             /* Option type methods: .unwrap(), .is_some(), .is_none() */
             if (var_is_option(trim(obj)) || dot_expr_is_option(trim(obj)) || expr_is_option(trim(obj))) {
                 if (strcmp(rest, "unwrap()") == 0) {
@@ -2530,13 +2564,23 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
                                 emit_indent(c_indent + 1);
                                 emit("default:\n");
                             } else {
-                                /* Check if it's an enum variant */
-                                const char *ev_enum = find_variant_enum(tv);
-                                emit_indent(c_indent + 1);
-                                if (ev_enum)
-                                    emit("case %s_%s:\n", ev_enum, tv);
-                                else
-                                    emit("case %s:\n", tv);
+                                /* Handle EnumName.Variant notation */
+                                char *dot = strchr(tv, '.');
+                                if (dot) {
+                                    *dot = '\0';
+                                    const char *enum_name = tv;
+                                    const char *variant = dot + 1;
+                                    emit_indent(c_indent + 1);
+                                    emit("case %s_%s:\n", enum_name, variant);
+                                } else {
+                                    /* Check if it's an enum variant */
+                                    const char *ev_enum = find_variant_enum(tv);
+                                    emit_indent(c_indent + 1);
+                                    if (ev_enum)
+                                        emit("case %s_%s:\n", ev_enum, tv);
+                                    else
+                                        emit("case %s:\n", tv);
+                                }
                             }
                             tok = next_pipe ? next_pipe + 1 : nullptr;
                         }
@@ -2545,12 +2589,22 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
                         emit("default:\n");
                     } else {
                         char *cv = trim(case_val);
-                        const char *ev_enum = find_variant_enum(cv);
-                        emit_indent(c_indent + 1);
-                        if (ev_enum)
-                            emit("case %s_%s:\n", ev_enum, cv);
-                        else
-                            emit("case %s:\n", cv);
+                        /* Handle EnumName.Variant notation */
+                        char *dot = strchr(cv, '.');
+                        if (dot) {
+                            *dot = '\0';
+                            const char *enum_name = cv;
+                            const char *variant = dot + 1;
+                            emit_indent(c_indent + 1);
+                            emit("case %s_%s:\n", enum_name, variant);
+                        } else {
+                            const char *ev_enum = find_variant_enum(cv);
+                            emit_indent(c_indent + 1);
+                            if (ev_enum)
+                                emit("case %s_%s:\n", ev_enum, cv);
+                            else
+                                emit("case %s:\n", cv);
+                        }
                     }
                     (*line_idx)++;
                     emit_indent(c_indent + 1);
@@ -2815,8 +2869,32 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
         {
             char expr_c[MAX_LINE];
             translate_expr(trimmed, expr_c, sizeof(expr_c));
+
+            /* Check if this is an implicit return (last expression in function body) */
+            bool is_implicit_return = false;
+            if (current_func && strcmp(current_func->ret_type, "void") != 0) {
+                /* Peek ahead to see if next line exits the block */
+                int next_idx = *line_idx + 1;
+                if (next_idx >= num_lines) {
+                    /* End of file - this is last line */
+                    is_implicit_return = true;
+                } else {
+                    const char *next_line = source_lines[next_idx];
+                    const char *next_trimmed = trim(next_line);
+                    int next_ind = indent_level(next_line);
+                    /* If next line is less indented or is closing syntax, this is last expr */
+                    if (next_ind <= base_indent || next_trimmed[0] == '\0' || next_trimmed[0] == '#') {
+                        is_implicit_return = true;
+                    }
+                }
+            }
+
             emit_indent(c_indent);
-            emit("%s;\n", expr_c);
+            if (is_implicit_return) {
+                emit("return %s;\n", expr_c);
+            } else {
+                emit("%s;\n", expr_c);
+            }
         }
         (*line_idx)++;
     }

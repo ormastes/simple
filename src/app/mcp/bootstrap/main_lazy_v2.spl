@@ -1,0 +1,284 @@
+# Lazy-Loading MCP Bootstrap (v2)
+#
+# Simplified lazy loading that works within runtime constraints
+# Categories are loaded on first use, handlers dispatched directly
+
+use app.io.mod (get_args, exit)
+use app.mcp.session.{McpState}
+use mcp_lib.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_error_response}
+use mcp_lib.schema.{get_all_tool_schemas, init_core_schemas}
+use mcp_lib.lazy_registry_v2.{init_registry, register_handler_metadata, get_tool_category, is_category_loaded, get_registry_stats}
+use mcp_lib.category_loaders_v2.{load_category, is_fileio_loaded, is_edit_loaded, is_vcs_loaded, is_debug_loaded, is_debug_log_loaded}
+use std.string.{NL}
+
+# Pre-computed initialize response
+const INIT_RESULT = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp-lazy","version":"2.1.0","instructions":"Lazy-loading MCP server"}}"""
+
+fn main():
+    val args = get_clean_args(get_args())
+    if args.len() < 1 or args[0] != "server":
+        print_usage()
+        exit(1)
+    start_server(false)
+
+fn print_usage():
+    print("simple mcp server (lazy v2)")
+
+fn start_server(debug_mode: bool):
+    init_core_schemas()
+    init_registry()
+    register_all_handlers()
+
+    var mcp_state = McpState.create()
+    var running = true
+
+    if debug_mode:
+        print("Lazy MCP server v2 started")
+        print(get_registry_stats())
+
+    while running:
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+
+            if method == "initialize":
+                val client_protocol = extract_nested_string(line, "params", "protocolVersion")
+                response = make_initialize_response(id, client_protocol)
+
+            elif method == "tools/list":
+                response = make_tools_list_response(id)
+
+            elif method == "tools/call":
+                val tool_name = extract_nested_string(line, "params", "name")
+                response = dispatch_tool_lazy(id, tool_name, line)
+
+            elif method == "resources/list":
+                response = make_resources_list_response(id)
+
+            elif method == "prompts/list":
+                response = make_prompts_list_response(id)
+
+            else:
+                response = make_error_response(id, -32601, "Method not found: " + method)
+
+            if response != "":
+                write_stdout_message(response)
+
+# Register all handler metadata
+fn register_all_handlers():
+    # Fileio (6 tools with aliases)
+    register_handler_metadata("simple_read", "fileio")
+    register_handler_metadata("read_code", "fileio")
+    register_handler_metadata("simple_check", "fileio")
+    register_handler_metadata("file_info", "fileio")
+    register_handler_metadata("simple_symbols", "fileio")
+    register_handler_metadata("simple_status", "fileio")
+
+    # Edit (3 tools)
+    register_handler_metadata("simple_edit", "edit")
+    register_handler_metadata("simple_multi_edit", "edit")
+    register_handler_metadata("simple_run", "edit")
+
+    # VCS (4 tools)
+    register_handler_metadata("simple_diff", "vcs")
+    register_handler_metadata("simple_log", "vcs")
+    register_handler_metadata("simple_squash", "vcs")
+    register_handler_metadata("simple_new", "vcs")
+
+    # Debug (10 tools)
+    register_handler_metadata("debug_create_session", "debug")
+    register_handler_metadata("debug_list_sessions", "debug")
+    register_handler_metadata("debug_close_session", "debug")
+    register_handler_metadata("debug_set_breakpoint", "debug")
+    register_handler_metadata("debug_remove_breakpoint", "debug")
+    register_handler_metadata("debug_continue", "debug")
+    register_handler_metadata("debug_step", "debug")
+    register_handler_metadata("debug_get_variables", "debug")
+    register_handler_metadata("debug_stack_trace", "debug")
+    register_handler_metadata("debug_evaluate", "debug")
+
+    # Debug log (6 tools)
+    register_handler_metadata("debug_log_enable", "debug_log")
+    register_handler_metadata("debug_log_disable", "debug_log")
+    register_handler_metadata("debug_log_clear", "debug_log")
+    register_handler_metadata("debug_log_query", "debug_log")
+    register_handler_metadata("debug_log_tree", "debug_log")
+    register_handler_metadata("debug_log_status", "debug_log")
+
+# Lazy dispatch - load category on first use, then dispatch
+fn dispatch_tool_lazy(id: text, tool_name: text, body: text) -> text:
+    val category = get_tool_category(tool_name)
+
+    if category == "unknown":
+        return make_error_response(id, -32601, "Unknown tool: " + tool_name)
+
+    # Load category if not loaded
+    if not is_category_loaded(category):
+        load_category(category)
+
+    # Dispatch to category handler
+    if category == "fileio":
+        return dispatch_fileio(id, tool_name, body)
+    elif category == "edit":
+        return dispatch_edit(id, tool_name, body)
+    elif category == "vcs":
+        return dispatch_vcs(id, tool_name, body)
+    elif category == "debug":
+        return dispatch_debug(id, tool_name, body)
+    elif category == "debug_log":
+        return dispatch_debug_log(id, tool_name, body)
+    else:
+        make_error_response(id, -32601, "Unknown category: " + category)
+
+# Category dispatchers with conditional imports
+
+fn dispatch_fileio(id: text, tool_name: text, body: text) -> text:
+    # Import handlers (only happens once per category)
+    use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status}
+
+    if tool_name == "simple_read" or tool_name == "read_code":
+        return handle_simple_read(id, body)
+    elif tool_name == "simple_check" or tool_name == "file_info":
+        return handle_simple_check(id, body)
+    elif tool_name == "simple_symbols":
+        return handle_simple_symbols(id, body)
+    elif tool_name == "simple_status":
+        return handle_simple_status(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown fileio tool: " + tool_name)
+
+fn dispatch_edit(id: text, tool_name: text, body: text) -> text:
+    use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handle_simple_run}
+
+    if tool_name == "simple_edit":
+        return handle_simple_edit(id, body)
+    elif tool_name == "simple_multi_edit":
+        return handle_simple_multi_edit(id, body)
+    elif tool_name == "simple_run":
+        return handle_simple_run(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown edit tool: " + tool_name)
+
+fn dispatch_vcs(id: text, tool_name: text, body: text) -> text:
+    use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new}
+
+    if tool_name == "simple_diff":
+        return handle_simple_diff(id, body)
+    elif tool_name == "simple_log":
+        return handle_simple_log(id, body)
+    elif tool_name == "simple_squash":
+        return handle_simple_squash(id, body)
+    elif tool_name == "simple_new":
+        return handle_simple_new(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown vcs tool: " + tool_name)
+
+fn dispatch_debug(id: text, tool_name: text, body: text) -> text:
+    use app.mcp.debug_tools.{
+        handle_debug_create_session,
+        handle_debug_list_sessions,
+        handle_debug_close_session,
+        handle_debug_set_breakpoint,
+        handle_debug_remove_breakpoint,
+        handle_debug_continue,
+        handle_debug_step,
+        handle_debug_get_variables,
+        handle_debug_stack_trace,
+        handle_debug_evaluate
+    }
+
+    if tool_name == "debug_create_session":
+        return handle_debug_create_session(id, body)
+    elif tool_name == "debug_list_sessions":
+        return handle_debug_list_sessions(id, body)
+    elif tool_name == "debug_close_session":
+        return handle_debug_close_session(id, body)
+    elif tool_name == "debug_set_breakpoint":
+        return handle_debug_set_breakpoint(id, body)
+    elif tool_name == "debug_remove_breakpoint":
+        return handle_debug_remove_breakpoint(id, body)
+    elif tool_name == "debug_continue":
+        return handle_debug_continue(id, body)
+    elif tool_name == "debug_step":
+        return handle_debug_step(id, body)
+    elif tool_name == "debug_get_variables":
+        return handle_debug_get_variables(id, body)
+    elif tool_name == "debug_stack_trace":
+        return handle_debug_stack_trace(id, body)
+    elif tool_name == "debug_evaluate":
+        return handle_debug_evaluate(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown debug tool: " + tool_name)
+
+fn dispatch_debug_log(id: text, tool_name: text, body: text) -> text:
+    use app.mcp.debug_log_tools.{
+        handle_debug_log_enable,
+        handle_debug_log_disable,
+        handle_debug_log_clear,
+        handle_debug_log_query,
+        handle_debug_log_tree,
+        handle_debug_log_status
+    }
+
+    if tool_name == "debug_log_enable":
+        return handle_debug_log_enable(id, body)
+    elif tool_name == "debug_log_disable":
+        return handle_debug_log_disable(id, body)
+    elif tool_name == "debug_log_clear":
+        return handle_debug_log_clear(id, body)
+    elif tool_name == "debug_log_query":
+        return handle_debug_log_query(id, body)
+    elif tool_name == "debug_log_tree":
+        return handle_debug_log_tree(id, body)
+    elif tool_name == "debug_log_status":
+        return handle_debug_log_status(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown debug_log tool: " + tool_name)
+
+# --- Message I/O ---
+
+fn read_stdin_message() -> text:
+    var header = input()
+    if header == "":
+        return ""
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int() ?? 0
+
+    if content_length == 0:
+        return ""
+
+    input()  # blank line
+    val body = input()
+    body
+
+fn write_stdout_message(body: text):
+    var header = "Content-Length: " + body.len().to_string() + "\r{NL}\r{NL}"
+    print_raw(header)
+    print_raw(body)
+
+# --- Response builders ---
+
+fn make_initialize_response(id: text, client_protocol: text) -> text:
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", INIT_RESULT))
+
+fn make_tools_list_response(id: text) -> text:
+    val tools = get_all_tool_schemas()
+    var result = LB() + jp("tools", tools) + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_resources_list_response(id: text) -> text:
+    val result = LB() + jp("resources", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_prompts_list_response(id: text) -> text:
+    val result = LB() + jp("prompts", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))

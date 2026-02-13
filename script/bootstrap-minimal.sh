@@ -30,6 +30,8 @@ find src/compiler_core -name '*.spl' -type f | \
     grep -v '/test' | \
     grep -v '_test\.spl$' | \
     grep -v '_spec\.spl$' | \
+    grep -v '_phase[0-9]' | \
+    grep -v 'associated_types' | \
     grep -v '^src/compiler_core/aop' | \
     grep -v '^src/compiler_core/arch_rules' | \
     grep -v '^src/compiler_core/async_integration' | \
