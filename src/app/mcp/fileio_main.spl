@@ -4,13 +4,15 @@
 
 use app.mcp.fileio_protection (ProtectionEngine, RuleType, RuleAction, ProtectionResult, create_engine)
 use app.mcp.fileio_temp (TempManager, create_temp_manager)
-use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi}
+use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, min_int}
 use app.io.mod (cli_get_args, env_get, shell, exit)
 use lib.json.builder.{escape_json}
 
 # Cache tool schemas to avoid rebuilding on every tools/list request
 var FILEIO_TOOLS_CACHE: [String] = []
 var FILEIO_TOOLS_CACHE_BUILT: Bool = false
+var FILEIO_TOOLS_PAGE_CACHE: Dict<String, String> = {}
+var FILEIO_INIT_CACHE: Option<String> = nil
 
 # MCP Server state
 class FileIOServer:
@@ -545,6 +547,14 @@ fn make_prop(name: String, desc: String) -> String:
     jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))
 
 fn make_initialize_response(id: String) -> String:
+    val result = make_initialize_result()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_initialize_result() -> String:
+    match FILEIO_INIT_CACHE:
+        case Some(r): return r
+        case nil: ()
+
     val server_protocol = "2025-06-18"
 
     var server_info = LB()
@@ -560,7 +570,8 @@ fn make_initialize_response(id: String) -> String:
     var caps = jo1(jp("tools", tools_cap))
 
     val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+    FILEIO_INIT_CACHE = Some(result)
+    result
 
 fn handle_tools_list(id: String) -> String:
     val tools = get_tools_page_cached(0, 100)  # all tools fit in one page
@@ -599,6 +610,28 @@ fn get_all_tools_cached() -> [String]:
     FILEIO_TOOLS_CACHE = get_all_tools()
     FILEIO_TOOLS_CACHE_BUILT = true
     FILEIO_TOOLS_CACHE
+
+fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
+    val key = offset.to_string() + ":" + page_size.to_string()
+    match FILEIO_TOOLS_PAGE_CACHE.get(key):
+        case Some(page): return page
+        case nil: ()
+
+    val all_tools = get_all_tools_cached()
+    val total = all_tools.len()
+    val end = min_int(offset + page_size, total)
+
+    var tools = "["
+    var first = true
+    for i in offset..end:
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + all_tools[i]
+    tools = tools + "]"
+
+    FILEIO_TOOLS_PAGE_CACHE[key] = tools
+    tools
 
 fn schema_safe_read() -> String:
     val props = LB() + make_prop("path", "Path to read") + RB()
