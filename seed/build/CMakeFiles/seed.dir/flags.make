@@ -6,5 +6,5 @@ C_DEFINES =
 
 C_INCLUDES = 
 
-C_FLAGS = -std=gnu11 -Wall -Wextra -Wno-unused-parameter
+C_FLAGS = -std=gnu11 -Wall -Wextra -Wno-unused-parameter -mcmodel=large
 

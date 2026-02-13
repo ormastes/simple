@@ -30,6 +30,7 @@ use app.mcp.debug_log_tools.{handle_debug_log_enable, handle_debug_log_disable, 
 use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status, schema_simple_read, schema_simple_check, schema_simple_symbols, schema_simple_status}
 use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handle_simple_run, schema_simple_edit, schema_simple_multi_edit, schema_simple_run}
 use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new, schema_simple_diff, schema_simple_log, schema_simple_squash, schema_simple_new}
+use std.string.{NL}
 
 # Global cache to avoid rebuilding the large MCP tool schema list on every tools/list call
 var MCP_TOOLS_CACHE: [String] = []
@@ -102,6 +103,9 @@ fn main():
 
     elif command == "json":
         handle_json(args)
+
+    elif command == "--delegate":
+        handle_delegate_once()
 
     else:
         handle_default_read(args)
@@ -628,7 +632,7 @@ fn read_stdin_message() -> String:
 fn write_stdout_message(body: String):
     var header = "Content-Length: "
     header = header + body.len().to_string()
-    header = header + "\r\n\r\n"
+    header = header + "\r{NL}\r{NL}"
     print_raw(header)
     print_raw(body)
 
@@ -1294,7 +1298,7 @@ fn search_files(query: String) -> String:
     if output.trim() == "":
         return "[]"  # Empty array - no matches
 
-    val match_lines = output.split("\n")
+    val match_lines = output.split(NL)
     var matches_json = "["
     var first = true
 
@@ -1360,7 +1364,7 @@ fn parse_check_output(output: text, exit_code: i64) -> text:
     if exit_code == 0:
         return "[]"
 
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     var arr = "["
     var first = true
     var cur_sev = "error"
@@ -1448,7 +1452,7 @@ fn get_file_info(path: String) -> String:
         error = error + RB()
         return error
 
-    val lines = content.split("\n")
+    val lines = content.split(NL)
     var line_count = lines.len()
     var fn_count = 0
     var class_count = 0
@@ -1476,7 +1480,7 @@ fn get_file_info_structured(path: String) -> String:
     if content == "":
         return ""
 
-    val lines = content.split("\n")
+    val lines = content.split(NL)
     var line_count = lines.len()
     var fn_count = 0
     var class_count = 0
@@ -1895,7 +1899,7 @@ fn handle_expand(args: [String]):
     val symbol_name = args[2]
     val content = read_file_or_exit(file_path)
     # Find symbol in content (basic search)
-    val lines = content.split("\n")
+    val lines = content.split(NL)
     var found = false
     var line_num = 0
     for line in lines:
@@ -1932,6 +1936,21 @@ fn handle_default_read(args: [String]):
     val file_path = args[0]  # After clean_args, first element is the command/file
     val content = read_file_or_exit(file_path)
     print(content)
+
+# Process a single JSON-RPC request from stdin and exit (used by bootstrap delegate)
+fn handle_delegate_once():
+    val body = read_stdin_message()
+    if body == "":
+        return
+
+    # Minimal init: rely on lazy globals just like stdio server
+    GLOBAL_PROJECT_ROOT = get_current_dir()
+    var session_mgr = SessionManager.empty()
+    var mcp_state = McpState.create()
+
+    val response = handle_jsonrpc(body, false, session_mgr, mcp_state)
+    if response != "":
+        write_stdout_message(response)
 
 
 # Entry point

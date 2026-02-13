@@ -1,0 +1,95 @@
+# Platform Config Tests
+
+use std.platform.config.{PlatformConfig, host_config, make_config, network_config, needs_swap, same_platform}
+use std.common.target.{TargetArch, TargetOS, Endian}
+
+describe "PlatformConfig":
+    it "host_config() auto-detects platform":
+        val cfg = host_config()
+        expect(cfg.arch).to_equal(TargetArch__host())
+        expect(cfg.os).to_equal(TargetOS__host())
+        expect(cfg.pointer_bytes > 0).to_equal(true)
+        expect(cfg.newline.len() > 0).to_equal(true)
+
+    it "host_config() returns consistent arch/endian":
+        val cfg = host_config()
+        expect(cfg.endian).to_equal(cfg.arch.endianness())
+
+    it "host_config() returns consistent arch/pointer_bytes":
+        val cfg = host_config()
+        expect(cfg.pointer_bytes).to_equal(cfg.arch.pointer_bytes())
+
+    it "host_config() uses CRLF on Windows, LF on Unix":
+        val cfg = host_config()
+        if cfg.os.name() == "windows":
+            expect(cfg.newline).to_equal("\r\n")
+        else:
+            expect(cfg.newline).to_equal("\n")
+
+    it "make_config() creates config for x86_64 Linux":
+        val cfg = make_config(TargetArch.X86_64, TargetOS.Linux)
+        expect(cfg.arch).to_equal(TargetArch.X86_64)
+        expect(cfg.os).to_equal(TargetOS.Linux)
+        expect(cfg.endian).to_equal(Endian.Little)
+        expect(cfg.pointer_bytes).to_equal(8)
+        expect(cfg.newline).to_equal("\n")
+
+    it "make_config() creates config for ARM Windows":
+        val cfg = make_config(TargetArch.Arm, TargetOS.Windows)
+        expect(cfg.arch).to_equal(TargetArch.Arm)
+        expect(cfg.os).to_equal(TargetOS.Windows)
+        expect(cfg.endian).to_equal(Endian.Little)
+        expect(cfg.pointer_bytes).to_equal(4)
+        expect(cfg.newline).to_equal("\r\n")
+
+    it "make_config() creates config for MCS51 (big-endian)":
+        val cfg = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        expect(cfg.arch).to_equal(TargetArch.MCS51)
+        expect(cfg.os).to_equal(TargetOS.BareMetal)
+        expect(cfg.endian).to_equal(Endian.Big)
+        expect(cfg.pointer_bytes).to_equal(2)
+        expect(cfg.newline).to_equal("\n")
+
+    it "network_config() is big-endian with LF":
+        val cfg = network_config()
+        expect(cfg.endian).to_equal(Endian.Big)
+        expect(cfg.newline).to_equal("\n")
+        expect(cfg.pointer_bytes).to_equal(8)
+
+    it "needs_swap() detects same-endian platforms":
+        val le1 = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val le2 = make_config(TargetArch.Arm, TargetOS.Windows)
+        expect(needs_swap(le1, le2)).to_equal(false)
+
+    it "needs_swap() detects cross-endian platforms":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        expect(needs_swap(le, be)).to_equal(true)
+        expect(needs_swap(be, le)).to_equal(true)
+
+    it "same_platform() returns true for identical configs":
+        val cfg1 = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val cfg2 = make_config(TargetArch.X86_64, TargetOS.Linux)
+        expect(same_platform(cfg1, cfg2)).to_equal(true)
+
+    it "same_platform() returns false for different endianness":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        expect(same_platform(le, be)).to_equal(false)
+
+    it "same_platform() returns false for different newlines":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        expect(same_platform(unix, win)).to_equal(false)
+
+    it "same_platform() returns false for different pointer sizes":
+        val x64 = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val arm32 = make_config(TargetArch.Arm, TargetOS.Linux)
+        expect(same_platform(x64, arm32)).to_equal(false)
+
+    it "to_text() formats config info":
+        val cfg = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val txt = cfg.to_text()
+        expect(txt.contains("x86_64")).to_equal(true)
+        expect(txt.contains("linux")).to_equal(true)
+        expect(txt.contains("little")).to_equal(true)

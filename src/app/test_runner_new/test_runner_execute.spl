@@ -6,6 +6,7 @@ use test_runner_types.*
 use test_runner_files.{strip_ansi, read_file_content}
 use test_runner_coverage.{record_coverage_sdn}
 use app.io.mod (file_exists, env_get, time_now_unix_micros, process_run_timeout, process_run_with_limits, file_write, file_delete)
+use std.string.{NL}
 
 # =========================================================================
 # Binary Location Discovery
@@ -61,7 +62,7 @@ fn find_simple_binary() -> text:
 
 fn extract_error_message(output: text) -> text:
     # Extract first meaningful error message from test output
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     var error_lines: [text] = []
 
     for line in lines:
@@ -92,7 +93,7 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
     var total_failed = 0
     var total_skipped = 0
     var total_pending = 0
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     for line in lines:
         val clean = strip_ansi(line)
         if clean.contains("examples") and clean.contains("failure"):
@@ -209,12 +210,12 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
     lines.push("")
     lines.push("__simple_cov_dump()")
 
-    val wrapped = lines.join("\n")
+    val wrapped = lines.join(NL)
     file_write(tmp_path, wrapped)
     (tmp_path, tmp_path)
 
 fn extract_coverage_sdn(output: text) -> text:
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     var in_block = false
     var sdn_lines: [text] = []
     for line in lines:
@@ -227,10 +228,10 @@ fn extract_coverage_sdn(output: text) -> text:
             continue
         if in_block:
             sdn_lines.push(line)
-    sdn_lines.join("\n")
+    sdn_lines.join(NL)
 
 fn strip_coverage_blocks(output: text) -> text:
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     var in_block = false
     var kept: [text] = []
     for line in lines:
@@ -243,14 +244,14 @@ fn strip_coverage_blocks(output: text) -> text:
             continue
         if not in_block:
             kept.push(line)
-    kept.join("\n")
+    kept.join(NL)
 
 fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64) -> TestFileResult:
     # Check for timeout
     if exit_code == -1:
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0, duration_ms: duration_ms, error: "TIMEOUT after {timeout_secs}s", timed_out: true)
 
-    val combined = stdout + "\n" + stderr
+    val combined = stdout + NL + stderr
     val (passed, failed, skipped, pending) = parse_test_output(combined)
 
     if passed == 0 and failed == 0:
@@ -284,7 +285,7 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
     if options.coverage:
-        val combined = stdout + "\n" + stderr
+        val combined = stdout + NL + stderr
         val sdn = extract_coverage_sdn(combined)
         record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
@@ -317,7 +318,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         if options.coverage:
-            val combined = stdout + "\n" + stderr
+            val combined = stdout + NL + stderr
             val sdn = extract_coverage_sdn(combined)
             record_coverage_sdn(sdn)
             stdout = strip_coverage_blocks(stdout)
@@ -341,7 +342,7 @@ fn run_test_file_smf(file_path: text, options: TestOptions) -> TestFileResult:
     val duration_ms = (end - start) / 1000
 
     if options.coverage:
-        val combined = stdout + "\n" + stderr
+        val combined = stdout + NL + stderr
         val sdn = extract_coverage_sdn(combined)
         record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
@@ -377,7 +378,7 @@ fn preprocess_sspec_file(file_path: text) -> text:
         return file_path
 
     # Split into imports/top-level-defs and body, wrap body in fn main():
-    val lines = content.split("\n")
+    val lines = content.split(NL)
     var imports = ""
     var top_level = ""
     var body = ""
@@ -396,28 +397,28 @@ fn preprocess_sspec_file(file_path: text) -> text:
             if in_docstring:
                 in_docstring = false
                 if in_top_fn:
-                    top_level = top_level + line + "\n"
+                    top_level = top_level + line + NL
                 else:
-                    body = body + "    " + line + "\n"
+                    body = body + "    " + line + NL
                 continue
             else:
                 in_docstring = true
                 if in_top_fn:
-                    top_level = top_level + line + "\n"
+                    top_level = top_level + line + NL
                 else:
-                    body = body + "    " + line + "\n"
+                    body = body + "    " + line + NL
                 continue
 
         if in_docstring:
             if in_top_fn:
-                top_level = top_level + line + "\n"
+                top_level = top_level + line + NL
             else:
-                body = body + "    " + line + "\n"
+                body = body + "    " + line + NL
             continue
 
         # Import/use statements go before fn main()
         if trimmed.starts_with("import ") or trimmed.starts_with("use "):
-            imports = imports + line + "\n"
+            imports = imports + line + NL
             continue
 
         # Top-level function definitions (at column 0 only) stay outside main
@@ -427,18 +428,18 @@ fn preprocess_sspec_file(file_path: text) -> text:
                 if trimmed.starts_with("fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("static fn "):
                     in_top_fn = true
                     top_fn_indent = 0
-                    top_level = top_level + line + "\n"
+                    top_level = top_level + line + NL
                     continue
 
         # If we're inside a top-level function definition, keep collecting
         # lines until we see a line at the same or lesser indentation (not blank)
         if in_top_fn:
             if trimmed.len() == 0:
-                top_level = top_level + "\n"
+                top_level = top_level + NL
                 continue
             val current_indent = line.len() - trimmed.len()
             if current_indent > top_fn_indent:
-                top_level = top_level + line + "\n"
+                top_level = top_level + line + NL
                 continue
             else:
                 # This line is at same/lesser indent — end of function
@@ -447,11 +448,11 @@ fn preprocess_sspec_file(file_path: text) -> text:
 
         # Everything else goes into fn main() body
         if trimmed.len() > 0:
-            body = body + "    " + line + "\n"
+            body = body + "    " + line + NL
         else:
-            body = body + "\n"
+            body = body + NL
 
-    val wrapped = imports + "\n" + top_level + "\nfn main():\n" + body
+    val wrapped = imports + NL + top_level + "{NL}fn main():{NL}" + body
     val tmp_path = "/tmp/sspec_wrapped_" + file_path.replace("/", "_")
     file_write(tmp_path, wrapped)
     tmp_path
@@ -515,7 +516,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             file_delete(cleanup_path)
 
     if options.coverage:
-        val combined = stdout + "\n" + stderr
+        val combined = stdout + NL + stderr
         val sdn = extract_coverage_sdn(combined)
         record_coverage_sdn(sdn)
         stdout = strip_coverage_blocks(stdout)
@@ -560,7 +561,7 @@ fn list_tests_static(files: [text]) -> [text]:
         val content = read_file_content(file_path)
         if content == "":
             continue
-        val lines = content.split("\n")
+        val lines = content.split(NL)
         for line in lines:
             val trimmed = line.trim()
             # Match: it "...", slow_it "...", test "..."

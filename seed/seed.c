@@ -161,6 +161,7 @@ typedef struct {
 
 static FuncInfo funcs[MAX_FUNCS];
 static int num_funcs = 0;
+static bool has_main_func = false;
 
 static FuncInfo *find_func(const char *name) {
     for (int i = 0; i < num_funcs; i++) {
@@ -377,6 +378,16 @@ static void translate_expr(const char *expr, char *out, int outsz) {
     if (strcmp(e, "true") == 0) { snprintf(out, outsz, "1"); return; }
     if (strcmp(e, "false") == 0) { snprintf(out, outsz, "0"); return; }
     if (strcmp(e, "nil") == 0) { snprintf(out, outsz, "spl_nil()"); return; }
+
+    /* Pass variants (all evaluate to nil) */
+    if (strcmp(e, "pass") == 0) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (strcmp(e, "pass_todo") == 0) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (strcmp(e, "pass_do_nothing") == 0) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (strcmp(e, "pass_dn") == 0) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (starts_with(e, "pass(")) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (starts_with(e, "pass_todo(")) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (starts_with(e, "pass_do_nothing(")) { snprintf(out, outsz, "spl_nil()"); return; }
+    if (starts_with(e, "pass_dn(")) { snprintf(out, outsz, "spl_nil()"); return; }
 
     /* 'not' prefix */
     if (starts_with(e, "not ")) {
@@ -1312,6 +1323,35 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
             continue;
         }
 
+        /* Walrus operator: name := value (desugar to val name = value) */
+        {
+            char *walrus_pos = strstr(trimmed, ":=");
+            if (walrus_pos != NULL && walrus_pos > trimmed) {
+                /* Extract name and value */
+                char name[MAX_IDENT] = "";
+                char value[MAX_LINE] = "";
+                int name_len = walrus_pos - trimmed;
+                strncpy(name, trimmed, name_len);
+                name[name_len] = '\0';
+                /* Trim spaces from name */
+                while (name_len > 0 && name[name_len-1] == ' ') name[--name_len] = '\0';
+                /* Value starts after := */
+                const char *value_start = walrus_pos + 2;
+                while (*value_start == ' ') value_start++;
+                strncpy(value, value_start, sizeof(value)-1);
+                value[sizeof(value)-1] = '\0';
+                /* Emit as const declaration (like val) */
+                char expr_c[MAX_LINE];
+                translate_expr(value, expr_c, sizeof(expr_c));
+                char stype[MAX_IDENT] = "i64";
+                add_var(name, stype);
+                emit_indent(c_indent);
+                emit("const int64_t %s = %s;\n", name, expr_c);
+                (*line_idx)++;
+                continue;
+            }
+        }
+
         /* val declaration */
         if (starts_with(trimmed, "val ")) {
             const char *p = trimmed + 4;
@@ -1529,6 +1569,34 @@ static void translate_statement(const char *trimmed, int c_indent) {
     /* Skip use/export/import */
     if (starts_with(trimmed, "use ") || starts_with(trimmed, "export ") ||
         starts_with(trimmed, "import ")) return;
+
+    /* Walrus operator: name := value (desugar to val name = value) */
+    {
+        char *walrus_pos = strstr(trimmed, ":=");
+        if (walrus_pos != NULL && walrus_pos > trimmed) {
+            /* Extract name and value */
+            char name[MAX_IDENT] = "";
+            char value[MAX_LINE] = "";
+            int name_len = walrus_pos - trimmed;
+            strncpy(name, trimmed, name_len);
+            name[name_len] = '\0';
+            /* Trim spaces from name */
+            while (name_len > 0 && name[name_len-1] == ' ') name[--name_len] = '\0';
+            /* Value starts after := */
+            const char *value_start = walrus_pos + 2;
+            while (*value_start == ' ') value_start++;
+            strncpy(value, value_start, sizeof(value)-1);
+            value[sizeof(value)-1] = '\0';
+            /* Emit as const declaration (like val) */
+            char expr_c[MAX_LINE];
+            translate_expr(value, expr_c, sizeof(expr_c));
+            char stype[MAX_IDENT] = "i64";
+            add_var(name, stype);
+            emit_indent(c_indent);
+            emit("const int64_t %s = %s;\n", name, expr_c);
+            return;
+        }
+    }
 
     /* val declaration */
     if (starts_with(trimmed, "val ")) {
@@ -1768,6 +1836,11 @@ static void process_file(void) {
             } else {
                 strcpy(fi->simple_ret, "void");
                 strcpy(fi->ret_type, "void");
+            }
+
+            /* Track if main function exists */
+            if (strcmp(fi->name, "main") == 0) {
+                has_main_func = true;
             }
 
             num_funcs++;
@@ -2088,7 +2161,13 @@ static void process_file(void) {
     emit("int main(int argc, char** argv) {\n");
     emit("    spl_init_args(argc, argv);\n");
     emit("    __module_init();\n");
-    emit("    return 0;\n");
+    if (has_main_func) {
+        /* Call Simple main function and return its result */
+        emit("    return (int)spl_main();\n");
+    } else {
+        /* No main function - just return 0 */
+        emit("    return 0;\n");
+    }
     emit("}\n");
 }
 

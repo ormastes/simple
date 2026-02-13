@@ -17,8 +17,9 @@
 
 use compiler.mir_data.*
 use compiler.backend.backend_api.*
-use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
+use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build, llvmtargettriple_to_text, llvmtargetconfig_to_cpu_string}
 use compiler.backend.llvm_ir_builder.{LlvmPass, passes_for_level, LlvmIRBuilder, MirToLlvm, LlvmIRBuilder__create, MirToLlvm__create, MirToLlvm__create_baremetal}
+use llvm_shared.tools (find_llc, find_opt, llc_available, opt_available)
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid)
 
 # FFI for reading binary files (object code)
@@ -166,7 +167,7 @@ class LlvmBackend:
 
         # Translate MIR to LLVM IR
         var translator = MirToLlvm__create(module.name, self.target, self.cpu_override)
-        val llvm_ir = translator_translate_module(translator, module)
+        val llvm_ir = translator.translate_module(module)
 
         Ok(LlvmCompileResult(
             module_name: module.name,
@@ -199,17 +200,25 @@ struct LlvmCompileResult:
 # LLVM IR → Object Code Compilation (via llc CLI)
 # ============================================================================
 
-fn llc_available() -> bool:
-    """Check if llc (LLVM static compiler) is available on PATH."""
-    val result = shell("command -v llc >/dev/null 2>bitwise_and_imm(1)")
-    result.exit_code == 0
-
 fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel):
     """Compile LLVM IR text to object code bytes via llc CLI.
 
     Writes IR to a temp file, invokes llc, reads back the object bytes.
     Requires llc to be installed (apt install llvm / brew install llvm).
+
+    Uses shared llvm_shared.tools for llc discovery (tries llc-18, llc-17, llc-16, llc).
     """
+    # Find llc binary
+    val llc = find_llc()
+    if llc == "":
+        return Err(
+            "llc not found. Please install LLVM:\n" +
+            "  Ubuntu/Debian: apt install llvm\n" +
+            "  macOS: brew install llvm\n" +
+            "  Arch: pacman -S llvm\n" +
+            "  Windows: choco install llvm"
+        )
+
     val pid = getpid()
     val ir_path = "/tmp/simple_llvm_{pid}.ll"
     val obj_path = "/tmp/simple_llvm_{pid}.o"
@@ -230,9 +239,9 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
         opt_flag = "-O0"
 
     # Build llc command
-    val triple = config.triple_to_text(triple)
-    val cpu = config_to_cpu_string(config)
-    val cmd = "llc --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>bitwise_and_imm(1)"
+    val triple = llvmtargettriple_to_text(config.triple)
+    val cpu = llvmtargetconfig_to_cpu_string(config)
+    val cmd = "{llc} --filetype=obj --relocation-model=pic -mtriple={triple} -mcpu={cpu} {opt_flag} -o {obj_path} {ir_path} 2>&1"
     val result = shell(cmd)
 
     # Clean up IR file
@@ -283,7 +292,10 @@ export LlvmIRBuilder, MirToLlvm
 export LlvmIRBuilder__create
 export MirToLlvm__create, MirToLlvm__create_baremetal
 
+# Re-export from llvm_shared.tools
+export llc_available, opt_available, find_llc, find_opt
+
 # This module's exports
 export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, llc_available
+export compile_ir_to_object
 export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__compatibility_build, LlvmBackend__default_backend

@@ -1,0 +1,81 @@
+# MCP Server Startup Benchmark (Simple implementation)
+# Provides precise timing for initialize, tools/list, and first tool call
+
+use app.io.mod (shell, file_write, file_read, exit)
+use std.string.{NL}
+
+fn main():
+    print("=== MCP Server Startup Benchmark ===")
+    print("Testing: Initialize + Tools/List + First Tool Call")
+    print("")
+
+    val test_input = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"benchmark","version":"1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_code","arguments":{"path":"README.md"}}}"""
+
+    # Write test input to temp file
+    file_write("/tmp/mcp_bench_input.txt", test_input)
+
+    # Create wrapper script to inject proper MCP framing
+    val wrapper = """#!/bin/bash
+cat /tmp/mcp_bench_input.txt | while IFS= read -r line; do
+    echo "Content-Length: \${#line}"
+    echo ""
+    echo "\$line"
+done | bin/simple_mcp_server 2>/dev/null
+"""
+    file_write("/tmp/mcp_bench_wrapper.sh", wrapper)
+    shell("chmod +x /tmp/mcp_bench_wrapper.sh")
+
+    print("Starting benchmark...")
+    val start = current_time_millis()
+
+    # Run server with test input
+    val result = shell("timeout 10 /tmp/mcp_bench_wrapper.sh")
+
+    val end = current_time_millis()
+    val total = end - start
+
+    print("")
+    print("=== Results ===")
+    print("Total time: {total}ms")
+    print("")
+    print("Expected breakdown:")
+    print("  - Initialize: ~1150ms")
+    print("  - Tools/list: ~50ms")
+    print("  - First tool: ~1500ms")
+    print("  - TOTAL:      ~2700ms")
+    print("")
+
+    if total < 1000:
+        print("✅ Target achieved: <1 second")
+    elif total < 2000:
+        print("⚠️  Good progress: <2 seconds")
+    else:
+        print("❌ Needs optimization: >{total}ms")
+
+    # Count responses
+    val output = result.stdout ?? ""
+    val response_count = count_occurrences(output, "\"jsonrpc\":\"2.0\"")
+    print("")
+    print("Responses received: {response_count}/3")
+
+    # Cleanup
+    shell("rm -f /tmp/mcp_bench_input.txt /tmp/mcp_bench_wrapper.sh")
+
+fn current_time_millis() -> i64:
+    # Use date command for portability
+    val result = shell("date +%s%3N")
+    val time_str = result.stdout ?? "0"
+    time_str.trim().to_int() ?? 0
+
+fn count_occurrences(text: text, pattern: text) -> i64:
+    var count = 0
+    var pos = 0
+    while true:
+        val idx = text.index_of(pattern, pos)
+        if idx == -1:
+            break
+        count = count + 1
+        pos = idx + pattern.len()
+    count

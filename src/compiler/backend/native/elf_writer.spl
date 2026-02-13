@@ -395,6 +395,26 @@ fn new_bss_section(size: i64) -> ElfSection:
         relocations: []
     )
 
+fn new_got_section(data: [i64]) -> ElfSection:
+    """Create .got section for Global Offset Table."""
+    ElfSection(
+        name: ".got",
+        kind: ElfSectionKind.Data,  # GOT is writable data
+        data: data,
+        alignment: 8,
+        relocations: []
+    )
+
+fn new_plt_section(data: [i64]) -> ElfSection:
+    """Create .plt section for Procedure Linkage Table."""
+    ElfSection(
+        name: ".plt",
+        kind: ElfSectionKind.Text,  # PLT is executable code
+        data: data,
+        alignment: 16,
+        relocations: []
+    )
+
 fn section_add_reloc(section: ElfSection, reloc: ElfReloc) -> ElfSection:
     var new_relocs = section.relocations
     new_relocs = new_relocs + [reloc]
@@ -445,6 +465,41 @@ fn new_extern_symbol(name: text) -> ElfSymbol:
         value: 0,
         size: 0
     )
+
+# ============================================================================
+# GOT/PLT Section Builders
+# ============================================================================
+
+fn create_got_data(got_size: i64) -> [i64]:
+    """Create GOT section data (all zeros initially, filled by dynamic linker)."""
+    var data: [i64] = []
+    for i in 0..got_size:
+        data = data + [0]
+    data
+
+fn create_plt_data(plt_entries: [[i64]]) -> [i64]:
+    """Create PLT section data from PLT entries."""
+    var data: [i64] = []
+
+    # PLT[0] is special resolver entry (created separately)
+    data = data + create_plt0_entry()
+
+    # Add all PLT entries
+    for entry_code in plt_entries:
+        data = data + entry_code
+
+    data
+
+fn create_plt0_entry() -> [i64]:
+    """Create PLT[0] resolver entry (16 bytes)."""
+    [
+        # pushq GOT[1]      # 6 bytes
+        0xFF, 0x35, 0x00, 0x00, 0x00, 0x00,
+        # jmpq *GOT[2]      # 6 bytes
+        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00,
+        # nop padding       # 4 bytes
+        0x0F, 0x1F, 0x40, 0x00
+    ]
 
 # ============================================================================
 # ELF64 Writing
@@ -772,19 +827,19 @@ fn write_elf_sym(buf: ByteBuffer, sym: ElfSymbol, strtab: StringTable) -> ByteBu
     val name_offset = strtab_get_offset(strtab, sym.name)
     var bind_val = 0
     match sym.sym_bind:
-        case Local: bind_val = STB_LOCAL
-        case Global: bind_val = STB_GLOBAL
+        case Local: bind_val = 0  # STB_LOCAL
+        case Global: bind_val = 1  # STB_GLOBAL
     var type_val = 0
     match sym.sym_type:
-        case NoType: type_val = STT_NOTYPE
-        case Func: type_val = STT_FUNC
-        case Object: type_val = STT_OBJECT
-        case Section: type_val = STT_SECTION
+        case NoType: type_val = 0  # STT_NOTYPE
+        case Func: type_val = 2  # STT_FUNC
+        case Object: type_val = 1  # STT_OBJECT
+        case Section: type_val = 3  # STT_SECTION
     val info = elf_sym_info(bind_val, type_val)
     var b = buf
     b = buf_write_u32_le(b, name_offset)    # st_name
     b = buf_write_u8(b, info)               # st_info
-    b = buf_write_u8(b, STV_DEFAULT)        # st_other
+    b = buf_write_u8(b, 0)                  # st_other (STV_DEFAULT = 0)
     b = buf_write_u16_le(b, sym.section_index) # st_shndx
     b = buf_write_u64_le(b, sym.value)      # st_value
     b = buf_write_u64_le(b, sym.size)       # st_size
@@ -835,6 +890,7 @@ export ByteBuffer, StringTable
 export new_elf_writer, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64
 export elf_add_section, elf_add_symbol
 export new_text_section, new_data_section, new_rodata_section, new_bss_section
+export new_got_section, new_plt_section
 export section_add_reloc
 export new_func_symbol, new_local_func_symbol, new_data_symbol, new_extern_symbol
 export write_elf64, elf_write_object
@@ -860,3 +916,6 @@ export STV_DEFAULT
 export R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_64, R_X86_64_32S
 export R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21
 export R_RISCV_CALL_PLT, R_RISCV_PCREL_HI20
+
+# GOT/PLT section builders (already defined at lines 449-483)
+export create_got_data, create_plt_data, create_plt0_entry

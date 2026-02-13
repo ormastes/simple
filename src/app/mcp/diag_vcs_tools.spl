@@ -7,8 +7,10 @@
 #   simple_new    - jj new with baseline diagnostic snapshot
 
 use app.io.mod (file_read, shell, cwd)
-use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, parse_int, min_int, make_tool_result, make_error_response, make_tool_schema_multi}
+use mcp_lib.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, parse_int, min_int, extract_arg, make_tool_result, make_error_response, make_tool_schema_multi}
+use app.mcp.helpers.{escape_json}
 use app.mcp.diag_core.{DiagEntry, DiagResult, run_diagnostics, severity_tag, diag_entries_to_json}
+use std.string.{NL}
 
 # ============================================================================
 # Tool Schemas
@@ -105,18 +107,18 @@ fn handle_simple_diff(id: text, body: text) -> text:
                 file_diag_entries.push(fpath + ":" + entry.line_num.to_string() + " " + tag + " " + entry.message)
 
     # Annotate diff output with diagnostics
-    var output = "-- simple_diff -r " + rev + " --\n"
+    var output = "-- simple_diff -r " + rev + " --{NL}"
     output = output + diff_output
 
     if file_diags.len() > 0:
-        output = output + "\n-- diagnostics on changed files --\n"
+        output = output + "{NL}-- diagnostics on changed files --{NL}"
         for fd in file_diags:
-            output = output + "  " + fd + "\n"
+            output = output + "  " + fd + NL
 
     if file_diag_entries.len() > 0:
-        output = output + "\n-- inline diagnostics --\n"
+        output = output + "{NL}-- inline diagnostics --{NL}"
         for fde in file_diag_entries:
-            output = output + "  " + fde + "\n"
+            output = output + "  " + fde + NL
 
     make_tool_result(id, output)
 
@@ -151,15 +153,15 @@ fn handle_simple_log(id: text, body: text) -> text:
         if diag.error_count > 0 or diag.warning_count > 0:
             file_summaries.push("  " + fpath + " " + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W")
 
-    var output = "-- simple_log --\n"
+    var output = "-- simple_log --{NL}"
     output = output + log_output
 
     if file_summaries.len() > 0:
-        output = output + "\n-- working copy diagnostics [" + total_errors.to_string() + "E " + total_warnings.to_string() + "W] --\n"
+        output = output + "{NL}-- working copy diagnostics [" + total_errors.to_string() + "E " + total_warnings.to_string() + "W] --{NL}"
         for fs in file_summaries:
-            output = output + fs + "\n"
+            output = output + fs + NL
     else:
-        output = output + "\n-- working copy: clean --\n"
+        output = output + "{NL}-- working copy: clean --{NL}"
 
     make_tool_result(id, output)
 
@@ -188,20 +190,20 @@ fn handle_simple_squash(id: text, body: text) -> text:
     val squash_output = jj_cmd(squash_cmd)
     val squash_exit = jj_cmd_exit(squash_cmd)
 
-    var output = "-- simple_squash --\n"
+    var output = "-- simple_squash --{NL}"
 
     if total_errors > 0:
-        output = output + "WARNING: " + total_errors.to_string() + " error(s) in changed files:\n"
+        output = output + "WARNING: " + total_errors.to_string() + " error(s) in changed files:{NL}"
         for fw in file_warnings:
-            output = output + "  " + fw + "\n"
-        output = output + "\n"
+            output = output + "  " + fw + NL
+        output = output + NL
 
     output = output + squash_output
 
     if squash_exit == 0:
-        output = output + "\nSquash completed successfully."
+        output = output + "{NL}Squash completed successfully."
     else:
-        output = output + "\nSquash failed (exit code " + squash_exit.to_string() + ")."
+        output = output + "{NL}Squash failed (exit code " + squash_exit.to_string() + ")."
 
     make_tool_result(id, output)
 
@@ -235,16 +237,16 @@ fn handle_simple_new(id: text, body: text) -> text:
     # Get revision info
     val rev_info = jj_cmd("log -r @ --limit 1")
 
-    var output = "-- simple_new --\n"
-    output = output + new_output + "\n"
+    var output = "-- simple_new --{NL}"
+    output = output + new_output + NL
     output = output + rev_info
 
     if baseline_entries.len() > 0:
-        output = output + "\n-- baseline diagnostics [" + total_errors.to_string() + "E " + total_warnings.to_string() + "W] --\n"
+        output = output + "{NL}-- baseline diagnostics [" + total_errors.to_string() + "E " + total_warnings.to_string() + "W] --{NL}"
         for be in baseline_entries:
-            output = output + be + "\n"
+            output = output + be + NL
     else:
-        output = output + "\n-- baseline: clean --\n"
+        output = output + "{NL}-- baseline: clean --{NL}"
 
     make_tool_result(id, output)
 
@@ -254,7 +256,7 @@ fn handle_simple_new(id: text, body: text) -> text:
 
 fn extract_spl_files_from_stat(stat_output: text) -> [text]:
     var files: [text] = []
-    val lines = stat_output.split("\n")
+    val lines = stat_output.split(NL)
     for line in lines:
         val t = line.trim()
         # Format: "path/file.spl | N +++---"
@@ -267,20 +269,7 @@ fn extract_spl_files_from_stat(stat_output: text) -> [text]:
             files.push(t)
     files
 
-fn extract_arg(body: text, key: text) -> text:
-    val search = "\"" + key + "\":"
-    val idx = body.index_of(search) ?? -1
-    if idx < 0:
-        return ""
-    val start = idx + search.len()
-    val rest = body.substring(start).trim()
-    if not rest.starts_with("\""):
-        return ""
-    val after_quote = rest.substring(1)
-    val end_idx = after_quote.index_of("\"") ?? -1
-    if end_idx < 0:
-        return ""
-    after_quote.substring(0, end_idx)
+# extract_arg now imported from lib.mcp
 
 # ============================================================================
 # Exports

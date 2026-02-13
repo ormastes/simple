@@ -26,6 +26,8 @@ if(MSVC)
     add_compile_options(/W3)
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+    # Use large code model for seed_cpp to handle massive static arrays
+    add_compile_options(-mcmodel=large)
 endif()
 
 # Coverage option: -DCOVERAGE=ON (requires Clang)

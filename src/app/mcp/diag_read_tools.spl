@@ -7,8 +7,10 @@
 #   simple_status  - Project diagnostic overview
 
 use app.io.mod (file_read, shell, cwd)
-use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, parse_int, min_int, make_tool_result, make_error_response, make_tool_schema_multi, register_tool}
+use mcp_lib.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, parse_int, min_int, extract_arg, make_tool_result, make_error_response, make_tool_schema_multi}
+use app.mcp.helpers.{escape_json, register_tool}
 use app.mcp.diag_core.{DiagEntry, DiagResult, run_diagnostics, overlay_virtual_text, diag_result_to_json, severity_tag, diag_entries_to_json}
+use std.string.{NL}
 
 # ============================================================================
 # Tool Schemas
@@ -92,7 +94,7 @@ fn handle_simple_read(id: text, body: text) -> text:
     val diag = run_diagnostics(path)
 
     # Apply offset/limit to source
-    val all_lines = source.split("\n")
+    val all_lines = source.split(NL)
     var display_source = source
     if offset > 1 or limit > 0:
         var selected_lines: [text] = []
@@ -109,7 +111,7 @@ fn handle_simple_read(id: text, body: text) -> text:
         var first_sel = true
         for sel in selected_lines:
             if not first_sel:
-                display_source = display_source + "\n"
+                display_source = display_source + NL
             first_sel = false
             display_source = display_source + sel
 
@@ -122,7 +124,7 @@ fn handle_simple_read(id: text, body: text) -> text:
         header = header + " [" + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W]"
     else:
         header = header + " [clean]"
-    header = header + " --\n"
+    header = header + " --{NL}"
 
     # Build footer
     var footer = "-- " + diag.error_count.to_string() + " error(s), " + diag.warning_count.to_string() + " warning(s) --"
@@ -148,7 +150,7 @@ fn handle_simple_symbols(id: text, body: text) -> text:
     if content == "":
         return make_error_response(id, -32602, "Could not read file: " + path)
 
-    val lines = content.split("\n")
+    val lines = content.split(NL)
     var symbols = "["
     var first = true
     var line_num = 0
@@ -233,7 +235,7 @@ fn handle_simple_status(id: text, body: text) -> text:
         val jj_result = shell("jj --no-pager --color never diff -r @ --stat 2>/dev/null")
         val jj_out = jj_result.stdout ?? ""
         if jj_out.trim() != "":
-            val jj_lines = jj_out.split("\n")
+            val jj_lines = jj_out.split(NL)
             for jl in jj_lines:
                 val jt = jl.trim()
                 if jt.ends_with(".spl") or jt.contains(".spl "):
@@ -253,14 +255,14 @@ fn handle_simple_status(id: text, body: text) -> text:
             val find_result = shell("find " + scan_dir + " -name '*.spl' -type f | sort | head -50")
             val find_out = find_result.stdout ?? ""
             if find_out.trim() != "":
-                val find_lines = find_out.split("\n")
+                val find_lines = find_out.split(NL)
                 for fl in find_lines:
                     val ft = fl.trim()
                     if ft != "":
                         file_list.push(ft)
 
     # Run diagnostics on each file
-    var output = "-- Project Diagnostics --\n"
+    var output = "-- Project Diagnostics --{NL}"
     var total_errors = 0
     var total_warnings = 0
     var file_count = 0
@@ -273,9 +275,9 @@ fn handle_simple_status(id: text, body: text) -> text:
 
         var status_str = ""
         if diag.error_count == 0 and diag.warning_count == 0:
-            status_str = "  " + fpath + "  0E 0W  clean\n"
+            status_str = "  " + fpath + "  0E 0W  clean{NL}"
         else:
-            status_str = "  " + fpath + "  " + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W\n"
+            status_str = "  " + fpath + "  " + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W{NL}"
         output = output + status_str
 
     output = output + "-- total: " + total_errors.to_string() + " error(s), " + total_warnings.to_string() + " warning(s) across " + file_count.to_string() + " file(s) --"
@@ -307,21 +309,7 @@ fn extract_signature(line: text) -> text:
 # Argument extraction helper
 # ============================================================================
 
-fn extract_arg(body: text, key: text) -> text:
-    # Extract string argument from MCP request body
-    val search = "\"" + key + "\":"
-    val idx = body.index_of(search) ?? -1
-    if idx < 0:
-        return ""
-    val start = idx + search.len()
-    val rest = body.substring(start).trim()
-    if not rest.starts_with("\""):
-        return ""
-    val after_quote = rest.substring(1)
-    val end_idx = after_quote.index_of("\"") ?? -1
-    if end_idx < 0:
-        return ""
-    after_quote.substring(0, end_idx)
+# extract_arg now imported from lib.mcp
 
 # ============================================================================
 # Exports

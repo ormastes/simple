@@ -6,8 +6,10 @@
 #   simple_run        - Execute file and capture errors with source annotation
 
 use app.io.mod (file_read, file_write, shell, cwd)
-use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, parse_int, min_int, make_tool_result, make_error_response, make_tool_schema_multi}
+use mcp_lib.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, parse_int, min_int, extract_arg, make_tool_result, make_error_response, make_tool_schema_multi}
+use app.mcp.helpers.{escape_json}
 use app.mcp.diag_core.{DiagEntry, DiagResult, DiagDelta, run_diagnostics, overlay_virtual_text, compute_delta, format_delta_text, diag_result_to_json, diag_delta_to_json, severity_tag}
+use std.string.{NL}
 
 # ============================================================================
 # Tool Schemas
@@ -94,16 +96,16 @@ fn handle_simple_edit(id: text, body: text) -> text:
     val delta = compute_delta(baseline.entries, current.entries)
 
     # 6. Find edit line number
-    val before_lines = before.split("\n")
+    val before_lines = before.split(NL)
     val edit_line = before_lines.len()
 
     # 7. Format output
-    var output = "-- edit " + path + ":" + edit_line.to_string() + " --\n"
+    var output = "-- edit " + path + ":" + edit_line.to_string() + " --{NL}"
 
     # Show a few lines around the edit with virtual text
-    val new_lines = new_content.split("\n")
+    val new_lines = new_content.split(NL)
     val context_start = edit_line - 2
-    val context_end = edit_line + new_string.split("\n").len() + 2
+    val context_end = edit_line + new_string.split(NL).len() + 2
     var li = 0
     for nl in new_lines:
         li = li + 1
@@ -121,9 +123,9 @@ fn handle_simple_edit(id: text, body: text) -> text:
                 break
 
         val line_prefix = li.to_string() + " | "
-        output = output + line_prefix + nl + line_diag + "\n"
+        output = output + line_prefix + nl + line_diag + NL
 
-    output = output + "\n"
+    output = output + NL
     output = output + format_delta_text(delta)
 
     make_tool_result(id, output)
@@ -175,8 +177,8 @@ fn handle_simple_multi_edit(id: text, body: text) -> text:
     val delta = compute_delta(baseline.entries, current.entries)
 
     # 6. Format output
-    var output = "-- multi-edit " + path + " (" + edit_count.to_string() + " edits applied) --\n"
-    output = output + "\n"
+    var output = "-- multi-edit " + path + " (" + edit_count.to_string() + " edits applied) --{NL}"
+    output = output + NL
     output = output + format_delta_text(delta)
 
     make_tool_result(id, output)
@@ -205,13 +207,13 @@ fn handle_simple_run(id: text, body: text) -> text:
     val exit_code = result.exit_code ?? 1
     val output = result.stdout ?? ""
 
-    var response = "-- run " + path + " --\n"
-    response = response + "exit_code: " + exit_code.to_string() + "\n"
+    var response = "-- run " + path + " --{NL}"
+    response = response + "exit_code: " + exit_code.to_string() + NL
 
     if exit_code == 124:
-        response = response + "TIMEOUT: process killed after " + timeout.to_string() + "s\n"
+        response = response + "TIMEOUT: process killed after " + timeout.to_string() + "s{NL}"
 
-    response = response + "\n-- output --\n"
+    response = response + "{NL}-- output --{NL}"
     response = response + output
 
     # If error, try to find crash line and annotate source
@@ -220,8 +222,8 @@ fn handle_simple_run(id: text, body: text) -> text:
         if error_line > 0:
             val source = file_read(path)
             if source != "":
-                val src_lines = source.split("\n")
-                response = response + "\n-- source context --\n"
+                val src_lines = source.split(NL)
+                response = response + "{NL}-- source context --{NL}"
                 val ctx_start = error_line - 3
                 val ctx_end = error_line + 3
                 var li = 0
@@ -234,7 +236,7 @@ fn handle_simple_run(id: text, body: text) -> text:
                     var marker = "  "
                     if li == error_line:
                         marker = "> "
-                    response = response + marker + li.to_string() + " | " + sl + "\n"
+                    response = response + marker + li.to_string() + " | " + sl + NL
 
     make_tool_result(id, response)
 
@@ -325,7 +327,7 @@ fn extract_quoted_value(s: text, start: i64) -> text:
 
 fn extract_error_line(output: text) -> i64:
     # Try to find "line N" or ":N:" patterns in error output
-    val lines = output.split("\n")
+    val lines = output.split(NL)
     for line in lines:
         val t = line.trim()
         # Pattern: "at line N"
@@ -368,20 +370,7 @@ fn extract_error_line(output: text) -> i64:
 # Argument extraction helper (same as in diag_read_tools)
 # ============================================================================
 
-fn extract_arg(body: text, key: text) -> text:
-    val search = "\"" + key + "\":"
-    val idx = body.index_of(search) ?? -1
-    if idx < 0:
-        return ""
-    val start = idx + search.len()
-    val rest = body.substring(start).trim()
-    if not rest.starts_with("\""):
-        return ""
-    val after_quote = rest.substring(1)
-    val end_idx = after_quote.index_of("\"") ?? -1
-    if end_idx < 0:
-        return ""
-    after_quote.substring(0, end_idx)
+# extract_arg now imported from lib.mcp
 
 # ============================================================================
 # Exports

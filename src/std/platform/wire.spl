@@ -1,0 +1,84 @@
+# Wire Format with PlatformConfig
+#
+# WireWriter/WireReader for serializing data in a specific platform's format.
+# Supports network byte order, little-endian wire formats (Cap'n Proto style),
+# and custom remote platform configurations.
+
+use std.platform.config.{PlatformConfig, host_config, network_config}
+use std.platform.convert.{send_bytes_u32, recv_bytes_u32, send_text, recv_text}
+use std.common.target.{Endian}
+
+export WireWriter, WireReader
+export wire_writer_new, wire_writer_network, wire_writer_le
+export wire_reader_new
+
+# WireWriter sends data in a remote platform's format
+struct WireWriter:
+    buffer: [i64]
+    host: PlatformConfig
+    remote: PlatformConfig
+
+fn wire_writer_new(remote: PlatformConfig) -> WireWriter:
+    WireWriter(buffer: [], host: host_config(), remote: remote)
+
+# Convenience: network byte order writer
+fn wire_writer_network() -> WireWriter:
+    wire_writer_new(network_config())
+
+# Convenience: little-endian wire format (Cap'n Proto style)
+fn wire_writer_le() -> WireWriter:
+    var cfg = host_config()
+    # Override endian to LE for wire format
+    val le_cfg = PlatformConfig(
+        arch: cfg.arch,
+        os: cfg.os,
+        endian: Endian.Little,
+        pointer_bytes: cfg.pointer_bytes,
+        newline: cfg.newline
+    )
+    wire_writer_new(le_cfg)
+
+impl WireWriter:
+    me write_u32(value: i64):
+        val bytes = send_bytes_u32(self.host, self.remote, value)
+        for b in bytes:
+            self.buffer = self.buffer.push(b)
+
+    me write_text(s: text):
+        val converted = send_text(self.host, self.remote, s)
+        self.write_u32(converted.len())
+        for i in 0..converted.len():
+            val char_val = char_code(converted[i:i+1])
+            self.buffer = self.buffer.push(char_val)
+
+    fn to_bytes() -> [i64]:
+        self.buffer
+
+# WireReader receives data from a remote platform's format
+struct WireReader:
+    buffer: [i64]
+    pos: i64
+    host: PlatformConfig
+    remote: PlatformConfig
+
+fn wire_reader_new(data: [i64], remote: PlatformConfig) -> WireReader:
+    WireReader(buffer: data, pos: 0, host: host_config(), remote: remote)
+
+impl WireReader:
+    me read_u32() -> i64:
+        val b0 = self.buffer[self.pos]
+        val b1 = self.buffer[self.pos + 1]
+        val b2 = self.buffer[self.pos + 2]
+        val b3 = self.buffer[self.pos + 3]
+        val bytes = [b0, b1, b2, b3]
+        self.pos = self.pos + 4
+        recv_bytes_u32(self.host, self.remote, bytes)
+
+    me read_text() -> text:
+        val len = self.read_u32()
+        var chars = ""
+        for i in 0..len:
+            val byte_val = self.buffer[self.pos]
+            self.pos = self.pos + 1
+            chars = chars + from_char_code(byte_val)
+        recv_text(self.host, self.remote, chars)

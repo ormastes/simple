@@ -12,6 +12,7 @@
 
 use app.ffi_gen.types*
 use app.ffi_gen.module_gen (ModuleBuilder)
+use std.string.{NL}
 
 # ============================================================================
 # Module Specification
@@ -19,7 +20,7 @@ use app.ffi_gen.module_gen (ModuleBuilder)
 
 fn cranelift_module() -> ModuleSpec:
     var builder = ModuleBuilder__start("cranelift_ffi")
-        .doc("Cranelift FFI for Self-Hosting Simple Compiler\n\nThis module provides FFI functions that expose Cranelift code generation\ncapabilities to Simple code. This enables the self-hosting compiler\n(simple/compiler/*.spl) to generate native code.")
+        .doc("Cranelift FFI for Self-Hosting Simple Compiler{NL}{NL}This module provides FFI functions that expose Cranelift code generation{NL}capabilities to Simple code. This enables the self-hosting compiler{NL}(simple/compiler/*.spl) to generate native code.")
 
     # Imports
     builder = add_cranelift_imports(builder)
@@ -74,159 +75,159 @@ fn add_cranelift_imports(builder: ModuleBuilder) -> ModuleBuilder:
 # ============================================================================
 
 fn generate_constants_and_helpers() -> text:
-    "// ============================================================================\n" +
-    "// Handle Management\n" +
-    "// ============================================================================\n" +
-    "\n" +
-    "/// Unique handle counter for resources\n" +
-    "static HANDLE_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);\n" +
-    "\n" +
-    "fn next_handle() -> i64 {\n" +
-    "    HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)\n" +
-    "}\n" +
-    "\n" +
-    "lazy_static! {\n" +
-    "    /// Global registry of JIT modules\n" +
-    "    static ref JIT_MODULES: Mutex<HashMap<i64, JITModuleContext>> = Mutex::new(HashMap::new());\n" +
-    "\n" +
-    "    /// Global registry of AOT modules\n" +
-    "    static ref AOT_MODULES: Mutex<HashMap<i64, ObjectModuleContext>> = Mutex::new(HashMap::new());\n" +
-    "\n" +
-    "    /// Global registry of function builder contexts\n" +
-    "    static ref FUNC_CONTEXTS: Mutex<HashMap<i64, FuncBuildContext>> = Mutex::new(HashMap::new());\n" +
-    "\n" +
-    "    /// Global registry of signatures\n" +
-    "    static ref SIGNATURES: Mutex<HashMap<i64, Signature>> = Mutex::new(HashMap::new());\n" +
-    "}\n" +
-    "\n" +
-    "// ============================================================================\n" +
-    "// Module Context Types\n" +
-    "// ============================================================================\n" +
-    "\n" +
-    "/// Context for JIT compilation\n" +
-    "struct JITModuleContext {\n" +
-    "    module: JITModule,\n" +
-    "    func_ids: HashMap<String, cranelift_module::FuncId>,\n" +
-    "}\n" +
-    "\n" +
-    "/// Context for AOT compilation\n" +
-    "struct ObjectModuleContext {\n" +
-    "    module: ObjectModule,\n" +
-    "    func_ids: HashMap<String, cranelift_module::FuncId>,\n" +
-    "}\n" +
-    "\n" +
-    "/// Context for building a single function\n" +
-    "struct FuncBuildContext {\n" +
-    "    module_handle: i64,\n" +
-    "    is_jit: bool,\n" +
-    "    ctx: Context,\n" +
-    "    func_builder_ctx: FunctionBuilderContext,\n" +
-    "    blocks: HashMap<i64, Block>,\n" +
-    "    values: HashMap<i64, Value>,\n" +
-    "    next_block_id: i64,\n" +
-    "    next_value_id: i64,\n" +
-    "}\n" +
-    "\n" +
-    "// ============================================================================\n" +
-    "// Type Constants\n" +
-    "// ============================================================================\n" +
-    "\n" +
-    "const CL_TYPE_I8: i64 = 1;\n" +
-    "const CL_TYPE_I16: i64 = 2;\n" +
-    "const CL_TYPE_I32: i64 = 3;\n" +
-    "const CL_TYPE_I64: i64 = 4;\n" +
-    "const CL_TYPE_F32: i64 = 5;\n" +
-    "const CL_TYPE_F64: i64 = 6;\n" +
-    "const CL_TYPE_B1: i64 = 7;\n" +
-    "const CL_TYPE_PTR: i64 = 8;\n" +
-    "\n" +
-    "const CL_TARGET_X86_64: i64 = 0;\n" +
-    "const CL_TARGET_AARCH64: i64 = 1;\n" +
-    "const CL_TARGET_RISCV64: i64 = 2;\n" +
-    "\n" +
-    "const CL_CMP_EQ: i64 = 0;\n" +
-    "const CL_CMP_NE: i64 = 1;\n" +
-    "const CL_CMP_SLT: i64 = 2;\n" +
-    "const CL_CMP_SLE: i64 = 3;\n" +
-    "const CL_CMP_SGT: i64 = 4;\n" +
-    "const CL_CMP_SGE: i64 = 5;\n" +
-    "const CL_CMP_ULT: i64 = 6;\n" +
-    "const CL_CMP_ULE: i64 = 7;\n" +
-    "const CL_CMP_UGT: i64 = 8;\n" +
-    "const CL_CMP_UGE: i64 = 9;\n" +
-    "\n" +
-    "fn type_from_code(code: i64) -> types::Type {\n" +
-    "    match code {\n" +
-    "        CL_TYPE_I8 => types::I8,\n" +
-    "        CL_TYPE_I16 => types::I16,\n" +
-    "        CL_TYPE_I32 => types::I32,\n" +
-    "        CL_TYPE_I64 => types::I64,\n" +
-    "        CL_TYPE_F32 => types::F32,\n" +
-    "        CL_TYPE_F64 => types::F64,\n" +
-    "        CL_TYPE_B1 => types::I8,   // Booleans as i8\n" +
-    "        CL_TYPE_PTR => types::I64, // Pointers as i64\n" +
-    "        _ => types::I64,\n" +
-    "    }\n" +
-    "}\n" +
-    "\n" +
-    "fn int_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::IntCC {\n" +
-    "    use cranelift_codegen::ir::condcodes::IntCC;\n" +
-    "    match code {\n" +
-    "        CL_CMP_EQ => IntCC::Equal,\n" +
-    "        CL_CMP_NE => IntCC::NotEqual,\n" +
-    "        CL_CMP_SLT => IntCC::SignedLessThan,\n" +
-    "        CL_CMP_SLE => IntCC::SignedLessThanOrEqual,\n" +
-    "        CL_CMP_SGT => IntCC::SignedGreaterThan,\n" +
-    "        CL_CMP_SGE => IntCC::SignedGreaterThanOrEqual,\n" +
-    "        CL_CMP_ULT => IntCC::UnsignedLessThan,\n" +
-    "        CL_CMP_ULE => IntCC::UnsignedLessThanOrEqual,\n" +
-    "        CL_CMP_UGT => IntCC::UnsignedGreaterThan,\n" +
-    "        CL_CMP_UGE => IntCC::UnsignedGreaterThanOrEqual,\n" +
-    "        _ => IntCC::Equal,\n" +
-    "    }\n" +
-    "}\n" +
-    "\n" +
-    "fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {\n" +
-    "    use cranelift_codegen::ir::condcodes::FloatCC;\n" +
-    "    match code {\n" +
-    "        0 => FloatCC::Equal,\n" +
-    "        1 => FloatCC::NotEqual,\n" +
-    "        2 => FloatCC::LessThan,\n" +
-    "        3 => FloatCC::LessThanOrEqual,\n" +
-    "        4 => FloatCC::GreaterThan,\n" +
-    "        5 => FloatCC::GreaterThanOrEqual,\n" +
-    "        _ => FloatCC::Equal,\n" +
-    "    }\n" +
-    "}\n" +
-    "\n" +
-    "// ============================================================================\n" +
-    "// Helper Functions\n" +
-    "// ============================================================================\n" +
-    "\n" +
-    "unsafe fn string_from_ptr(ptr: i64, len: i64) -> String {\n" +
-    "    if ptr == 0 || len <= 0 {\n" +
-    "        return String::new();\n" +
-    "    }\n" +
-    "    let slice = std::slice::from_raw_parts(ptr as *const u8, len as usize);\n" +
-    "    String::from_utf8_lossy(slice).to_string()\n" +
-    "}\n" +
-    "\n" +
-    "/// Extract string from RuntimeValue\n" +
-    "fn extract_string(val: RuntimeValue) -> Option<String> {\n" +
-    "    let len = rt_string_len(val);\n" +
-    "    if len <= 0 {\n" +
-    "        return None;\n" +
-    "    }\n" +
-    "    let data = rt_string_data(val);\n" +
-    "    if data.is_null() {\n" +
-    "        return None;\n" +
-    "    }\n" +
-    "    unsafe {\n" +
-    "        let slice = std::slice::from_raw_parts(data, len as usize);\n" +
-    "        Some(String::from_utf8_lossy(slice).to_string())\n" +
-    "    }\n" +
-    "}\n" +
-    "\n"
+    "// ============================================================================{NL}" +
+    "// Handle Management{NL}" +
+    "// ============================================================================{NL}" +
+    "{NL}" +
+    "/// Unique handle counter for resources{NL}" +
+    "static HANDLE_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);{NL}" +
+    "{NL}" +
+    "fn next_handle() -> i64 {{NL}" +
+    "    HANDLE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed){NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "lazy_static! {{NL}" +
+    "    /// Global registry of JIT modules{NL}" +
+    "    static ref JIT_MODULES: Mutex<HashMap<i64, JITModuleContext>> = Mutex::new(HashMap::new());{NL}" +
+    "{NL}" +
+    "    /// Global registry of AOT modules{NL}" +
+    "    static ref AOT_MODULES: Mutex<HashMap<i64, ObjectModuleContext>> = Mutex::new(HashMap::new());{NL}" +
+    "{NL}" +
+    "    /// Global registry of function builder contexts{NL}" +
+    "    static ref FUNC_CONTEXTS: Mutex<HashMap<i64, FuncBuildContext>> = Mutex::new(HashMap::new());{NL}" +
+    "{NL}" +
+    "    /// Global registry of signatures{NL}" +
+    "    static ref SIGNATURES: Mutex<HashMap<i64, Signature>> = Mutex::new(HashMap::new());{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "// ============================================================================{NL}" +
+    "// Module Context Types{NL}" +
+    "// ============================================================================{NL}" +
+    "{NL}" +
+    "/// Context for JIT compilation{NL}" +
+    "struct JITModuleContext {{NL}" +
+    "    module: JITModule,{NL}" +
+    "    func_ids: HashMap<String, cranelift_module::FuncId>,{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "/// Context for AOT compilation{NL}" +
+    "struct ObjectModuleContext {{NL}" +
+    "    module: ObjectModule,{NL}" +
+    "    func_ids: HashMap<String, cranelift_module::FuncId>,{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "/// Context for building a single function{NL}" +
+    "struct FuncBuildContext {{NL}" +
+    "    module_handle: i64,{NL}" +
+    "    is_jit: bool,{NL}" +
+    "    ctx: Context,{NL}" +
+    "    func_builder_ctx: FunctionBuilderContext,{NL}" +
+    "    blocks: HashMap<i64, Block>,{NL}" +
+    "    values: HashMap<i64, Value>,{NL}" +
+    "    next_block_id: i64,{NL}" +
+    "    next_value_id: i64,{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "// ============================================================================{NL}" +
+    "// Type Constants{NL}" +
+    "// ============================================================================{NL}" +
+    "{NL}" +
+    "const CL_TYPE_I8: i64 = 1;{NL}" +
+    "const CL_TYPE_I16: i64 = 2;{NL}" +
+    "const CL_TYPE_I32: i64 = 3;{NL}" +
+    "const CL_TYPE_I64: i64 = 4;{NL}" +
+    "const CL_TYPE_F32: i64 = 5;{NL}" +
+    "const CL_TYPE_F64: i64 = 6;{NL}" +
+    "const CL_TYPE_B1: i64 = 7;{NL}" +
+    "const CL_TYPE_PTR: i64 = 8;{NL}" +
+    "{NL}" +
+    "const CL_TARGET_X86_64: i64 = 0;{NL}" +
+    "const CL_TARGET_AARCH64: i64 = 1;{NL}" +
+    "const CL_TARGET_RISCV64: i64 = 2;{NL}" +
+    "{NL}" +
+    "const CL_CMP_EQ: i64 = 0;{NL}" +
+    "const CL_CMP_NE: i64 = 1;{NL}" +
+    "const CL_CMP_SLT: i64 = 2;{NL}" +
+    "const CL_CMP_SLE: i64 = 3;{NL}" +
+    "const CL_CMP_SGT: i64 = 4;{NL}" +
+    "const CL_CMP_SGE: i64 = 5;{NL}" +
+    "const CL_CMP_ULT: i64 = 6;{NL}" +
+    "const CL_CMP_ULE: i64 = 7;{NL}" +
+    "const CL_CMP_UGT: i64 = 8;{NL}" +
+    "const CL_CMP_UGE: i64 = 9;{NL}" +
+    "{NL}" +
+    "fn type_from_code(code: i64) -> types::Type {{NL}" +
+    "    match code {{NL}" +
+    "        CL_TYPE_I8 => types::I8,{NL}" +
+    "        CL_TYPE_I16 => types::I16,{NL}" +
+    "        CL_TYPE_I32 => types::I32,{NL}" +
+    "        CL_TYPE_I64 => types::I64,{NL}" +
+    "        CL_TYPE_F32 => types::F32,{NL}" +
+    "        CL_TYPE_F64 => types::F64,{NL}" +
+    "        CL_TYPE_B1 => types::I8,   // Booleans as i8{NL}" +
+    "        CL_TYPE_PTR => types::I64, // Pointers as i64{NL}" +
+    "        _ => types::I64,{NL}" +
+    "    }{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "fn int_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::IntCC {{NL}" +
+    "    use cranelift_codegen::ir::condcodes::IntCC;{NL}" +
+    "    match code {{NL}" +
+    "        CL_CMP_EQ => IntCC::Equal,{NL}" +
+    "        CL_CMP_NE => IntCC::NotEqual,{NL}" +
+    "        CL_CMP_SLT => IntCC::SignedLessThan,{NL}" +
+    "        CL_CMP_SLE => IntCC::SignedLessThanOrEqual,{NL}" +
+    "        CL_CMP_SGT => IntCC::SignedGreaterThan,{NL}" +
+    "        CL_CMP_SGE => IntCC::SignedGreaterThanOrEqual,{NL}" +
+    "        CL_CMP_ULT => IntCC::UnsignedLessThan,{NL}" +
+    "        CL_CMP_ULE => IntCC::UnsignedLessThanOrEqual,{NL}" +
+    "        CL_CMP_UGT => IntCC::UnsignedGreaterThan,{NL}" +
+    "        CL_CMP_UGE => IntCC::UnsignedGreaterThanOrEqual,{NL}" +
+    "        _ => IntCC::Equal,{NL}" +
+    "    }{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "fn float_cc_from_code(code: i64) -> cranelift_codegen::ir::condcodes::FloatCC {{NL}" +
+    "    use cranelift_codegen::ir::condcodes::FloatCC;{NL}" +
+    "    match code {{NL}" +
+    "        0 => FloatCC::Equal,{NL}" +
+    "        1 => FloatCC::NotEqual,{NL}" +
+    "        2 => FloatCC::LessThan,{NL}" +
+    "        3 => FloatCC::LessThanOrEqual,{NL}" +
+    "        4 => FloatCC::GreaterThan,{NL}" +
+    "        5 => FloatCC::GreaterThanOrEqual,{NL}" +
+    "        _ => FloatCC::Equal,{NL}" +
+    "    }{NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "// ============================================================================{NL}" +
+    "// Helper Functions{NL}" +
+    "// ============================================================================{NL}" +
+    "{NL}" +
+    "unsafe fn string_from_ptr(ptr: i64, len: i64) -> String {{NL}" +
+    "    if ptr == 0 || len <= 0 {{NL}" +
+    "        return String::new();{NL}" +
+    "    }{NL}" +
+    "    let slice = std::slice::from_raw_parts(ptr as *const u8, len as usize);{NL}" +
+    "    String::from_utf8_lossy(slice).to_string(){NL}" +
+    "}{NL}" +
+    "{NL}" +
+    "/// Extract string from RuntimeValue{NL}" +
+    "fn extract_string(val: RuntimeValue) -> Option<String> {{NL}" +
+    "    let len = rt_string_len(val);{NL}" +
+    "    if len <= 0 {{NL}" +
+    "        return None;{NL}" +
+    "    }{NL}" +
+    "    let data = rt_string_data(val);{NL}" +
+    "    if data.is_null() {{NL}" +
+    "        return None;{NL}" +
+    "    }{NL}" +
+    "    unsafe {{NL}" +
+    "        let slice = std::slice::from_raw_parts(data, len as usize);{NL}" +
+    "        Some(String::from_utf8_lossy(slice).to_string()){NL}" +
+    "    }{NL}" +
+    "}{NL}" +
+    "{NL}"
 
 # ============================================================================
 # Module Management Functions
@@ -245,7 +246,7 @@ fn fn_rt_cranelift_new_module() -> FFIFnSpec:
          FFIParamSpec__simple("name_len", "i64"),
          FFIParamSpec__simple("target", "i64")],
         "i64",
-        "let name = string_from_ptr(name_ptr, name_len);\n" +
+        "let name = string_from_ptr(name_ptr, name_len);{NL}" +
         "rt_cranelift_new_module_impl(&name, target)"
     )
     spec.doc = "Create a new JIT or AOT module (low-level with raw pointers). Returns module handle, or 0 on failure."
@@ -259,10 +260,10 @@ fn fn_rt_cranelift_module_new() -> FFIFnSpec:
         no_mangle: true,
         params: [FFIParamSpec__simple("name", "RuntimeValue"), FFIParamSpec__simple("target", "i64")],
         return_type: "i64",
-        body: "let name_str = match extract_string(name) {\n" +
-              "    Some(s) => s,\n" +
-              "    None => return 0,\n" +
-              "};\n" +
+        body: "let name_str = match extract_string(name) {{NL}" +
+              "    Some(s) => s,{NL}" +
+              "    None => return 0,{NL}" +
+              "};{NL}" +
               "unsafe { rt_cranelift_new_module_impl(&name_str, target) }",
         visibility: "pub",
         generics: [],
@@ -275,23 +276,23 @@ fn fn_rt_cranelift_finalize_module() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_finalize_module",
         [FFIParamSpec__simple("module", "i64")],
         "i64",
-        "// Try JIT modules first\n" +
-        "{\n" +
-        "    let mut modules = JIT_MODULES.lock().unwrap();\n" +
-        "    if let Some(ctx) = modules.get_mut(&module) {\n" +
-        "        ctx.module.finalize_definitions().unwrap();\n" +
-        "        return module;\n" +
-        "    }\n" +
-        "}\n" +
-        "\n" +
-        "// For AOT modules, check if exists (no finalize needed - done in emit_object)\n" +
-        "{\n" +
-        "    let modules = AOT_MODULES.lock().unwrap();\n" +
-        "    if modules.contains_key(&module) {\n" +
-        "        return module;\n" +
-        "    }\n" +
-        "}\n" +
-        "\n" +
+        "// Try JIT modules first{NL}" +
+        "{{NL}" +
+        "    let mut modules = JIT_MODULES.lock().unwrap();{NL}" +
+        "    if let Some(ctx) = modules.get_mut(&module) {{NL}" +
+        "        ctx.module.finalize_definitions().unwrap();{NL}" +
+        "        return module;{NL}" +
+        "    }{NL}" +
+        "}{NL}" +
+        "{NL}" +
+        "// For AOT modules, check if exists (no finalize needed - done in emit_object){NL}" +
+        "{{NL}" +
+        "    let modules = AOT_MODULES.lock().unwrap();{NL}" +
+        "    if modules.contains_key(&module) {{NL}" +
+        "        return module;{NL}" +
+        "    }{NL}" +
+        "}{NL}" +
+        "{NL}" +
         "0"
     )
     spec.doc = "Finalize the module after all functions are defined. Returns the module handle on success, 0 on failure."
@@ -301,7 +302,7 @@ fn fn_rt_cranelift_free_module() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_free_module",
         [FFIParamSpec__simple("module", "i64")],
         "",
-        "JIT_MODULES.lock().unwrap().remove(&module);\n" +
+        "JIT_MODULES.lock().unwrap().remove(&module);{NL}" +
         "AOT_MODULES.lock().unwrap().remove(&module);"
     )
     spec.doc = "Free module resources."
@@ -321,13 +322,13 @@ fn fn_rt_cranelift_new_signature() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_new_signature",
         [FFIParamSpec__simple("call_conv", "i64")],
         "i64",
-        "let conv = match call_conv {\n" +
-        "    0 => CallConv::SystemV,\n" +
-        "    _ => CallConv::Fast,\n" +
-        "};\n" +
-        "let sig = Signature::new(conv);\n" +
-        "let handle = next_handle();\n" +
-        "SIGNATURES.lock().unwrap().insert(handle, sig);\n" +
+        "let conv = match call_conv {{NL}" +
+        "    0 => CallConv::SystemV,{NL}" +
+        "    _ => CallConv::Fast,{NL}" +
+        "};{NL}" +
+        "let sig = Signature::new(conv);{NL}" +
+        "let handle = next_handle();{NL}" +
+        "SIGNATURES.lock().unwrap().insert(handle, sig);{NL}" +
         "handle"
     )
     spec.doc = "Create a new function signature. Returns signature handle."
@@ -337,10 +338,10 @@ fn fn_rt_cranelift_sig_add_param() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_sig_add_param",
         [FFIParamSpec__simple("sig", "i64"), FFIParamSpec__simple("type_", "i64")],
         "",
-        "let mut sigs = SIGNATURES.lock().unwrap();\n" +
-        "if let Some(signature) = sigs.get_mut(&sig) {\n" +
-        "    let ty = type_from_code(type_);\n" +
-        "    signature.params.push(AbiParam::new(ty));\n" +
+        "let mut sigs = SIGNATURES.lock().unwrap();{NL}" +
+        "if let Some(signature) = sigs.get_mut(&sig) {{NL}" +
+        "    let ty = type_from_code(type_);{NL}" +
+        "    signature.params.push(AbiParam::new(ty));{NL}" +
         "}"
     )
     spec.doc = "Add a parameter to a signature."
@@ -350,10 +351,10 @@ fn fn_rt_cranelift_sig_set_return() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_sig_set_return",
         [FFIParamSpec__simple("sig", "i64"), FFIParamSpec__simple("type_", "i64")],
         "",
-        "let mut sigs = SIGNATURES.lock().unwrap();\n" +
-        "if let Some(signature) = sigs.get_mut(&sig) {\n" +
-        "    let ty = type_from_code(type_);\n" +
-        "    signature.returns.push(AbiParam::new(ty));\n" +
+        "let mut sigs = SIGNATURES.lock().unwrap();{NL}" +
+        "if let Some(signature) = sigs.get_mut(&sig) {{NL}" +
+        "    let ty = type_from_code(type_);{NL}" +
+        "    signature.returns.push(AbiParam::new(ty));{NL}" +
         "}"
     )
     spec.doc = "Set the return type of a signature."
@@ -377,21 +378,21 @@ fn fn_rt_cranelift_begin_function() -> FFIFnSpec:
          FFIParamSpec__simple("name_len", "i64"),
          FFIParamSpec__simple("sig", "i64")],
         "i64",
-        "let name = string_from_ptr(name_ptr, name_len);\n" +
-        "let handle = next_handle();\n" +
-        "let ctx = Context::new();\n" +
-        "let func_builder_ctx = FunctionBuilderContext::new();\n" +
-        "let fctx = FuncBuildContext {\n" +
-        "    module_handle: module,\n" +
-        "    is_jit: true,\n" +
-        "    ctx,\n" +
-        "    func_builder_ctx,\n" +
-        "    blocks: HashMap::new(),\n" +
-        "    values: HashMap::new(),\n" +
-        "    next_block_id: 0,\n" +
-        "    next_value_id: 0,\n" +
-        "};\n" +
-        "FUNC_CONTEXTS.lock().unwrap().insert(handle, fctx);\n" +
+        "let name = string_from_ptr(name_ptr, name_len);{NL}" +
+        "let handle = next_handle();{NL}" +
+        "let ctx = Context::new();{NL}" +
+        "let func_builder_ctx = FunctionBuilderContext::new();{NL}" +
+        "let fctx = FuncBuildContext {{NL}" +
+        "    module_handle: module,{NL}" +
+        "    is_jit: true,{NL}" +
+        "    ctx,{NL}" +
+        "    func_builder_ctx,{NL}" +
+        "    blocks: HashMap::new(),{NL}" +
+        "    values: HashMap::new(),{NL}" +
+        "    next_block_id: 0,{NL}" +
+        "    next_value_id: 0,{NL}" +
+        "};{NL}" +
+        "FUNC_CONTEXTS.lock().unwrap().insert(handle, fctx);{NL}" +
         "handle"
     )
     spec.doc = "Begin defining a function. Returns function context handle."
@@ -401,11 +402,11 @@ fn fn_rt_cranelift_end_function() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_end_function",
         [FFIParamSpec__simple("ctx", "i64")],
         "i64",
-        "let contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
-        "if contexts.contains_key(&ctx) {\n" +
-        "    ctx\n" +
-        "} else {\n" +
-        "    0\n" +
+        "let contexts = FUNC_CONTEXTS.lock().unwrap();{NL}" +
+        "if contexts.contains_key(&ctx) {{NL}" +
+        "    ctx{NL}" +
+        "} else {{NL}" +
+        "    0{NL}" +
         "}"
     )
     spec.doc = "End function definition. Returns function ID."
@@ -447,13 +448,13 @@ fn fn_rt_cranelift_create_block() -> FFIFnSpec:
     var spec = FFIFnSpec__unsafe_extern_c("rt_cranelift_create_block",
         [FFIParamSpec__simple("ctx", "i64")],
         "i64",
-        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
-        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
-        "    let block_id = fctx.next_block_id;\n" +
-        "    fctx.next_block_id += 1;\n" +
-        "    block_id\n" +
-        "} else {\n" +
-        "    0\n" +
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();{NL}" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {{NL}" +
+        "    let block_id = fctx.next_block_id;{NL}" +
+        "    fctx.next_block_id += 1;{NL}" +
+        "    block_id{NL}" +
+        "} else {{NL}" +
+        "    0{NL}" +
         "}"
     )
     spec.doc = "Create a new basic block. Returns block handle."
@@ -503,17 +504,17 @@ fn fn_rt_cranelift_iconst() -> FFIFnSpec:
          FFIParamSpec__simple("type_", "i64"),
          FFIParamSpec__simple("value", "i64")],
         "i64",
-        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();\n" +
-        "if let Some(fctx) = contexts.get_mut(&ctx) {\n" +
-        "    fctx.ctx.func.dfg.constants\n" +
-        "        .insert(cranelift_codegen::ir::ConstantData::from(\n" +
-        "            value.to_le_bytes().as_slice(),\n" +
-        "        ));\n" +
-        "    let value_id = fctx.next_value_id;\n" +
-        "    fctx.next_value_id += 1;\n" +
-        "    value_id\n" +
-        "} else {\n" +
-        "    0\n" +
+        "let mut contexts = FUNC_CONTEXTS.lock().unwrap();{NL}" +
+        "if let Some(fctx) = contexts.get_mut(&ctx) {{NL}" +
+        "    fctx.ctx.func.dfg.constants{NL}" +
+        "        .insert(cranelift_codegen::ir::ConstantData::from({NL}" +
+        "            value.to_le_bytes().as_slice(),{NL}" +
+        "        ));{NL}" +
+        "    let value_id = fctx.next_value_id;{NL}" +
+        "    fctx.next_value_id += 1;{NL}" +
+        "    value_id{NL}" +
+        "} else {{NL}" +
+        "    0{NL}" +
         "}"
     )
     spec.doc = "Create an integer constant. Returns value handle."
@@ -843,13 +844,13 @@ fn fn_rt_cranelift_get_function_ptr() -> FFIFnSpec:
          FFIParamSpec__simple("name_ptr", "i64"),
          FFIParamSpec__simple("name_len", "i64")],
         "i64",
-        "let name = string_from_ptr(name_ptr, name_len);\n" +
-        "let mut modules = JIT_MODULES.lock().unwrap();\n" +
-        "if let Some(ctx) = modules.get_mut(&module) {\n" +
-        "    if let Some(func_id) = ctx.func_ids.get(&name) {\n" +
-        "        return ctx.module.get_finalized_function(*func_id) as i64;\n" +
-        "    }\n" +
-        "}\n" +
+        "let name = string_from_ptr(name_ptr, name_len);{NL}" +
+        "let mut modules = JIT_MODULES.lock().unwrap();{NL}" +
+        "if let Some(ctx) = modules.get_mut(&module) {{NL}" +
+        "    if let Some(func_id) = ctx.func_ids.get(&name) {{NL}" +
+        "        return ctx.module.get_finalized_function(*func_id) as i64;{NL}" +
+        "    }{NL}" +
+        "}{NL}" +
         "0"
     )
     spec.doc = "Get function pointer for JIT-compiled function"
@@ -871,11 +872,11 @@ fn fn_rt_cranelift_new_aot_module() -> FFIFnSpec:
          FFIParamSpec__simple("name_len", "i64"),
          FFIParamSpec__simple("target", "i64")],
         "i64",
-        "let name = string_from_ptr(name_ptr, name_len);\n" +
-        "if name.is_empty() {\n" +
-        "    return 0;\n" +
-        "}\n" +
-        "let handle = next_handle();\n" +
+        "let name = string_from_ptr(name_ptr, name_len);{NL}" +
+        "if name.is_empty() {{NL}" +
+        "    return 0;{NL}" +
+        "}{NL}" +
+        "let handle = next_handle();{NL}" +
         "handle"
     )
     spec.doc = "Create a new AOT module for object file generation"
@@ -898,8 +899,8 @@ fn fn_rt_cranelift_emit_object() -> FFIFnSpec:
          FFIParamSpec__simple("path_ptr", "i64"),
          FFIParamSpec__simple("path_len", "i64")],
         "bool",
-        "let _path = string_from_ptr(path_ptr, path_len);\n" +
-        "let modules = AOT_MODULES.lock().unwrap();\n" +
+        "let _path = string_from_ptr(path_ptr, path_len);{NL}" +
+        "let modules = AOT_MODULES.lock().unwrap();{NL}" +
         "modules.contains_key(&module)"
     )
     spec.doc = "Emit object file from AOT module"
@@ -912,60 +913,60 @@ fn fn_rt_cranelift_emit_object() -> FFIFnSpec:
 fn add_impl_helpers(builder: ModuleBuilder) -> ModuleBuilder:
     # Add the implementation helper function that new_module uses
     builder.add_raw(
-        "unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {\n" +
-        "    if name.is_empty() {\n" +
-        "        return 0;\n" +
-        "    }\n" +
-        "\n" +
-        "    // Build settings and ISA\n" +
-        "    let mut flag_builder = settings::builder();\n" +
-        "    if flag_builder.set(\"opt_level\", \"speed\").is_err() {\n" +
-        "        return 0;\n" +
-        "    }\n" +
-        "    if flag_builder.set(\"is_pic\", \"true\").is_err() {\n" +
-        "        return 0;\n" +
-        "    }\n" +
-        "\n" +
-        "    // Select target triple based on target code\n" +
-        "    let triple = match target {\n" +
-        "        CL_TARGET_X86_64 => \"x86_64-unknown-linux-gnu\"\n" +
-        "            .parse::<Triple>()\n" +
-        "            .unwrap_or_else(|_| Triple::host()),\n" +
-        "        CL_TARGET_AARCH64 => \"aarch64-unknown-linux-gnu\"\n" +
-        "            .parse::<Triple>()\n" +
-        "            .unwrap_or_else(|_| Triple::host()),\n" +
-        "        CL_TARGET_RISCV64 => \"riscv64gc-unknown-linux-gnu\"\n" +
-        "            .parse::<Triple>()\n" +
-        "            .unwrap_or_else(|_| Triple::host()),\n" +
-        "        _ => Triple::host(),\n" +
-        "    };\n" +
-        "\n" +
-        "    let flags = settings::Flags::new(flag_builder);\n" +
-        "\n" +
-        "    // Create ISA from triple\n" +
-        "    let isa_builder = match cranelift_codegen::isa::lookup(triple) {\n" +
-        "        Ok(b) => b,\n" +
-        "        Err(_) => return 0,\n" +
-        "    };\n" +
-        "\n" +
-        "    let isa = match isa_builder.finish(flags) {\n" +
-        "        Ok(isa) => isa,\n" +
-        "        Err(_) => return 0,\n" +
-        "    };\n" +
-        "\n" +
-        "    // Create JIT module\n" +
-        "    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());\n" +
-        "\n" +
-        "    let module = JITModule::new(builder);\n" +
-        "    let handle = next_handle();\n" +
-        "\n" +
-        "    let ctx = JITModuleContext {\n" +
-        "        module,\n" +
-        "        func_ids: HashMap::new(),\n" +
-        "    };\n" +
-        "\n" +
-        "    JIT_MODULES.lock().unwrap().insert(handle, ctx);\n" +
-        "    handle\n" +
-        "}\n"
+        "unsafe fn rt_cranelift_new_module_impl(name: &str, target: i64) -> i64 {{NL}" +
+        "    if name.is_empty() {{NL}" +
+        "        return 0;{NL}" +
+        "    }{NL}" +
+        "{NL}" +
+        "    // Build settings and ISA{NL}" +
+        "    let mut flag_builder = settings::builder();{NL}" +
+        "    if flag_builder.set(\"opt_level\", \"speed\").is_err() {{NL}" +
+        "        return 0;{NL}" +
+        "    }{NL}" +
+        "    if flag_builder.set(\"is_pic\", \"true\").is_err() {{NL}" +
+        "        return 0;{NL}" +
+        "    }{NL}" +
+        "{NL}" +
+        "    // Select target triple based on target code{NL}" +
+        "    let triple = match target {{NL}" +
+        "        CL_TARGET_X86_64 => \"x86_64-unknown-linux-gnu\"{NL}" +
+        "            .parse::<Triple>(){NL}" +
+        "            .unwrap_or_else(|_| Triple::host()),{NL}" +
+        "        CL_TARGET_AARCH64 => \"aarch64-unknown-linux-gnu\"{NL}" +
+        "            .parse::<Triple>(){NL}" +
+        "            .unwrap_or_else(|_| Triple::host()),{NL}" +
+        "        CL_TARGET_RISCV64 => \"riscv64gc-unknown-linux-gnu\"{NL}" +
+        "            .parse::<Triple>(){NL}" +
+        "            .unwrap_or_else(|_| Triple::host()),{NL}" +
+        "        _ => Triple::host(),{NL}" +
+        "    };{NL}" +
+        "{NL}" +
+        "    let flags = settings::Flags::new(flag_builder);{NL}" +
+        "{NL}" +
+        "    // Create ISA from triple{NL}" +
+        "    let isa_builder = match cranelift_codegen::isa::lookup(triple) {{NL}" +
+        "        Ok(b) => b,{NL}" +
+        "        Err(_) => return 0,{NL}" +
+        "    };{NL}" +
+        "{NL}" +
+        "    let isa = match isa_builder.finish(flags) {{NL}" +
+        "        Ok(isa) => isa,{NL}" +
+        "        Err(_) => return 0,{NL}" +
+        "    };{NL}" +
+        "{NL}" +
+        "    // Create JIT module{NL}" +
+        "    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());{NL}" +
+        "{NL}" +
+        "    let module = JITModule::new(builder);{NL}" +
+        "    let handle = next_handle();{NL}" +
+        "{NL}" +
+        "    let ctx = JITModuleContext {{NL}" +
+        "        module,{NL}" +
+        "        func_ids: HashMap::new(),{NL}" +
+        "    };{NL}" +
+        "{NL}" +
+        "    JIT_MODULES.lock().unwrap().insert(handle, ctx);{NL}" +
+        "    handle{NL}" +
+        "}{NL}"
     )
 export cranelift_module

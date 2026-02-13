@@ -1,0 +1,99 @@
+# Minimal MCP bootstrap: responds to initialize/tools.list fast, delegates others.
+
+use app.io.mod (file_read, get_args, exit)
+use app.mcp.session.{McpState}
+use app.mcp.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_error_response, make_result_response}
+use std.string.{NL}
+
+# Prebaked responses (static strings)
+const INIT_RESULT = """
+{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp","version":"2.1.0","instructions":"Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), task management (tasks/create, tasks/list, tasks/get, tasks/cancel), and debug tools (debug_create_session, debug_list_sessions, debug_close_session, debug_set_breakpoint, debug_remove_breakpoint, debug_continue, debug_step, debug_get_variables, debug_stack_trace, debug_evaluate)."}}"""
+
+const TOOLS_PAGE_0 = """
+[{"name":"read_code","description":"Read a Simple language source file","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path"}},"required":["path"]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"list_files","description":"List Simple language files in a directory","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Directory path"}},"required":[]},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"search_code","description":"Search for code patterns","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"Search query"}},"required":["query"]},"outputSchema":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"integer"},"content":{"type":"string"}}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"file_info","description":"Get file information","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"File path"}},"required":["path"]},"outputSchema":{"type":"object","properties":{"path":{"type":"string"},"lines":{"type":"integer"},"functions":{"type":"integer"},"classes":{"type":"integer"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"bugdb_get","description":"Get bug by ID","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Bug ID"}},"required":["id"]},"outputSchema":{"type":"object","properties":{"id":{"type":"string"},"severity":{"type":"string"},"status":{"type":"string"},"title":{"type":"string"},"description":{"type":"string"}}},"annotations":{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"bugdb_add","description":"Add new bug","inputSchema":{"type":"object","properties":{"bug":{"type":"string","description":"Bug JSON"}},"required":["bug"]},"outputSchema":{"type":"object","properties":{"id":{"type":"string"},"status":{"type":"string"}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}},
+{"name":"bugdb_update","description":"Update existing bug","inputSchema":{"type":"object","properties":{"id":{"type":"string","description":"Bug ID"}},"required":["id"]},"outputSchema":{"type":"object","properties":{"id":{"type":"string"},"updated":{"type":"boolean"}}},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}},
+{"name":"debug_create_session","description":"Create debug session","inputSchema":{"type":"object","properties":{},"required":[]},"annotations":{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}
+]"""
+
+fn main():
+    val args = get_clean_args(get_args())
+    if args.len() < 1 or args[0] != "server":
+        print_usage()
+        exit(1)
+    start_server(false)
+
+fn print_usage():
+    print("simple mcp server (bootstrap)")
+
+fn start_server(debug_mode: Bool):
+    var mcp_state = McpState.create()
+    var running = true
+    while running:
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+            if method == "initialize":
+                val client_protocol = extract_nested_string(line, "params", "protocolVersion")
+                response = make_initialize_response(id, client_protocol)
+            elif method == "tools/list":
+                val cursor = extract_nested_string(line, "params", "cursor")
+                response = make_tools_list_response(id, cursor)
+            else:
+                response = delegate(line, debug_mode, mcp_state)
+            if response != "":
+                write_stdout_message(response)
+
+fn read_stdin_message() -> String:
+    var header = input()
+    if header == "":
+        return ""
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int()
+    if content_length == 0:
+        return ""
+    input()  # blank line
+    val body = input()
+    body
+
+fn write_stdout_message(body: String):
+    var header = "Content-Length: " + body.len().to_string() + "\r{NL}\r{NL}"
+    print_raw(header)
+    print_raw(body)
+
+fn make_initialize_response(id: String, client_protocol: String) -> String:
+    val wrapped = jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", INIT_RESULT))
+    wrapped
+
+fn make_tools_list_response(id: String, cursor: String) -> String:
+    var tools = TOOLS_PAGE_0
+    var result = LB() + jp("tools", tools) + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn delegate(body: String, debug_mode: Bool, mcp_state: McpState) -> String:
+    val full = "src/app/mcp/main.spl"
+    val cmd = "bin/release/simple " + full + " --delegate"
+    val header = "Content-Length: " + body.len().to_string() + "\\r\{NL}\\r\{NL}"
+    val escaped_header = shell_escape_single(header)
+    val escaped_body = shell_escape_single(body)
+    # Use printf with %s placeholders to avoid interpreting % in payload
+    val p = shell("printf '%s%s' '" + escaped_header + "' '" + escaped_body + "' | " + cmd)
+    val out = p.stdout ?? ""
+    if out.trim() == "":
+        return make_error_response("null", -32603, "delegate failed")
+    out
+
+fn shell_escape_single(text: String) -> String:
+    text.replace("'", "'\\''")
