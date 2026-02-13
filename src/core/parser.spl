@@ -20,12 +20,12 @@ use core.tokens.{TOK_KW_EXTERN, TOK_KW_USE, TOK_KW_EXPORT, TOK_KW_IMPORT, TOK_KW
 use core.tokens.{TOK_KW_TYPE, TOK_KW_ASM}
 use core.tokens.{TOK_KW_AND, TOK_KW_OR, TOK_KW_NOT}
 use core.tokens.{TOK_KW_TRUE, TOK_KW_FALSE, TOK_KW_NIL}
-use core.tokens.{TOK_KW_PASS, TOK_KW_IS}
+use core.tokens.{TOK_KW_PASS, TOK_KW_PASS_TODO, TOK_KW_PASS_DO_NOTHING, TOK_KW_PASS_DN, TOK_KW_IS}
 use core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_STATIC, TOK_KW_ME}
 use core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
 use core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT}
 use core.tokens.{TOK_EQ, TOK_NEQ, TOK_LT, TOK_GT, TOK_LEQ, TOK_GEQ}
-use core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN}
+use core.tokens.{TOK_ASSIGN, TOK_PLUS_ASSIGN, TOK_MINUS_ASSIGN, TOK_WALRUS}
 use core.tokens.{TOK_STAR_ASSIGN, TOK_SLASH_ASSIGN}
 use core.tokens.{TOK_AND, TOK_OR, TOK_NOT}
 use core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
@@ -44,7 +44,7 @@ use core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_INDEX}
 use core.ast.{EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
 use core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE}
 use core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
-use core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_UNIT, EXPR_PASS}
+use core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN}
 use core.ast.{EXPR_NULL_COALESCE, EXPR_SLICE, EXPR_INTERPOLATED_STRING}
 use core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN}
 use core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
@@ -54,7 +54,7 @@ use core.ast.{expr_field_access, expr_method_call, expr_array_lit}
 use core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use core.ast.{expr_range, expr_assign, expr_compound_assign}
-use core.ast.{expr_unit, expr_pass, expr_null_coalesce, expr_slice}
+use core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn, expr_null_coalesce, expr_slice}
 use core.ast.{expr_dict_lit}
 use core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use core.ast.{expr_match_expr, expr_block}
@@ -294,6 +294,12 @@ fn parse_expr() -> i64:
 
 fn parse_assignment() -> i64:
     val left = parse_or()
+    if par_kind == TOK_WALRUS:
+        parser_advance()
+        val right = parse_assignment()
+        # Walrus is treated as assignment for now
+        # Semantically it means "val" instead of reassignment
+        return expr_assign(left, right, 0)
     if par_kind == TOK_ASSIGN:
         parser_advance()
         val right = parse_assignment()
@@ -891,7 +897,49 @@ fn parse_primary() -> i64:
 
     if par_kind == TOK_KW_PASS:
         parser_advance()
-        return expr_pass(0)
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        if msg == "":
+            return expr_pass(0)
+        return expr_pass_with_msg(msg, 0)
+
+    if par_kind == TOK_KW_PASS_TODO:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return expr_pass_todo(msg, 0)
+
+    if par_kind == TOK_KW_PASS_DO_NOTHING:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return expr_pass_do_nothing(msg, 0)
+
+    if par_kind == TOK_KW_PASS_DN:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return expr_pass_dn(msg, 0)
 
     if par_kind == TOK_KW_NOT:
         parser_advance()
@@ -1037,7 +1085,49 @@ fn parse_statement() -> i64:
 
     if par_kind == TOK_KW_PASS:
         parser_advance()
-        return stmt_expr_stmt(expr_pass(0), 0)
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        if msg == "":
+            return stmt_expr_stmt(expr_pass(0), 0)
+        return stmt_expr_stmt(expr_pass_with_msg(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_TODO:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_todo(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_DO_NOTHING:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_do_nothing(msg, 0), 0)
+
+    if par_kind == TOK_KW_PASS_DN:
+        parser_advance()
+        var msg = ""
+        if par_kind == TOK_LPAREN:
+            parser_advance()
+            if par_kind == TOK_STRING_LIT:
+                msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+        return stmt_expr_stmt(expr_pass_dn(msg, 0), 0)
 
     # Handle bare 'print' keyword (print expr — no parens)
     if par_kind == TOK_IDENT:
@@ -1060,7 +1150,8 @@ fn parse_statement() -> i64:
             val call1 = expr_call(callee1, args1, 0)
             return stmt_expr_stmt(call1, 0)
 
-    # Expression statement (including assignment)
+    # Expression statement (including assignment and walrus)
+    # Note: Walrus operator handled inline during expression parsing
     val expression = parse_expr()
     stmt_expr_stmt(expression, 0)
 
