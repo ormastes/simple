@@ -1,0 +1,97 @@
+# Platform Text I/O Tests
+
+use std.platform.text_io.{text_file_write, text_file_write_local, text_file_read, text_file_read_local}
+use std.platform.config.{make_config}
+use std.common.target.{TargetArch, TargetOS}
+use app.io.mod.{file_read_text, file_delete}
+
+describe "Platform Text I/O":
+    it "text_file_write_local writes with host newlines":
+        val path = "/tmp/test_platform_local.txt"
+        val content = "line1\nline2\nline3\n"
+        text_file_write_local(path, content)
+        val raw = file_read_text(path)
+        file_delete(path)
+        # Should contain the content (may have CRLF on Windows, LF on Unix)
+        expect(raw.contains("line1")).to_equal(true)
+        expect(raw.contains("line2")).to_equal(true)
+        expect(raw.contains("line3")).to_equal(true)
+
+    it "text_file_read_local reads and normalizes":
+        val path = "/tmp/test_platform_read.txt"
+        # Write with mixed newlines
+        use app.io.mod.{file_write}
+        file_write(path, "line1\r\nline2\nline3\r")
+        val content = text_file_read_local(path)
+        file_delete(path)
+        # Should normalize to LF
+        expect(content).to_equal("line1\nline2\nline3\n")
+
+    it "text_file_write with Windows config uses CRLF":
+        val path = "/tmp/test_platform_win.txt"
+        val win_cfg = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "line1\nline2\n"
+        text_file_write(path, content, win_cfg)
+        val raw = file_read_text(path)
+        file_delete(path)
+        # Should have CRLF
+        expect(raw).to_equal("line1\r\nline2\r\n")
+
+    it "text_file_write with Unix config uses LF":
+        val path = "/tmp/test_platform_unix.txt"
+        val unix_cfg = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val content = "line1\nline2\n"
+        text_file_write(path, content, unix_cfg)
+        val raw = file_read_text(path)
+        file_delete(path)
+        # Should have LF only
+        expect(raw).to_equal("line1\nline2\n")
+
+    it "text_file_read with Windows config normalizes CRLF":
+        val path = "/tmp/test_platform_read_win.txt"
+        use app.io.mod.{file_write}
+        file_write(path, "line1\r\nline2\r\n")
+        val win_cfg = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = text_file_read(path, win_cfg)
+        file_delete(path)
+        # Should normalize to host (LF on Unix, CRLF on Windows)
+        expect(content.contains("line1")).to_equal(true)
+        expect(content.contains("line2")).to_equal(true)
+
+    it "write/read round-trip preserves content":
+        val path = "/tmp/test_platform_roundtrip.txt"
+        val content = "Hello\nWorld\nTest\n"
+        text_file_write_local(path, content)
+        val read_back = text_file_read_local(path)
+        file_delete(path)
+        expect(read_back).to_equal(content)
+
+    it "write Windows / read Unix normalizes":
+        val path = "/tmp/test_platform_cross.txt"
+        val win_cfg = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val unix_cfg = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val content = "line1\nline2\n"
+
+        # Write as Windows (CRLF)
+        text_file_write(path, content, win_cfg)
+
+        # Read as Unix (should normalize to LF)
+        val read_back = text_file_read(path, unix_cfg)
+        file_delete(path)
+
+        expect(read_back).to_equal(content)
+
+    it "handles empty file":
+        val path = "/tmp/test_platform_empty.txt"
+        text_file_write_local(path, "")
+        val content = text_file_read_local(path)
+        file_delete(path)
+        expect(content).to_equal("")
+
+    it "handles single line without trailing newline":
+        val path = "/tmp/test_platform_single.txt"
+        val content = "single line"
+        text_file_write_local(path, content)
+        val read_back = text_file_read_local(path)
+        file_delete(path)
+        expect(read_back).to_equal(content)

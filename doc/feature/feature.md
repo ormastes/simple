@@ -10,4 +10,4 @@
 | [Infrastructure](category/Infrastructure.md) | 1 | 1 | 0 | 0 | 0 |
 | [Types](category/Types.md) | 1 | 1 | 0 | 0 | 0 |
 | [Concurrency](category/Concurrency.md) | 3 | 3 | 0 | 0 | 0 |
-| [Uncategorized](category/Uncategorized.md) | 1 | 0 | 1 | 0 | 0 |
+| [Uncategorized](category/Uncategorized.md) | 1 | 1 | 0 | 0 | 0 |

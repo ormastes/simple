@@ -4,42 +4,31 @@
 
 ## Summary
 
-**Completion: 85%** (17/20 features)
+**Completion: 90%** (18/20 features)
 
 | Status | Count | Priority |
 |--------|-------|----------|
-| Failed | 1 | Critical |
-| In Progress | 1 | High |
-| Planned | 1 | Medium |
+| Failed | 0 | Critical |
+| In Progress | 2 | High |
+| Planned | 0 | Medium |
 | Ignored | 0 | Low |
-| **Total Pending** | **3** | |
+| **Total Pending** | **2** | |
 
 ## Progress by Category
 
 | Category | Complete | Failed | In Progress | Planned | Total | % |
 |----------|----------|--------|-------------|---------|-------|---|
-| Codegen | 3 | 0 | 1 | 1 | 5 | 60% |
+| Codegen | 3 | 0 | 2 | 0 | 5 | 60% |
 | Language | 2 | 0 | 0 | 0 | 2 | 100% |
 | Testing Framework | 7 | 0 | 0 | 0 | 7 | 100% |
 | Infrastructure | 1 | 0 | 0 | 0 | 1 | 100% |
 | Types | 1 | 0 | 0 | 0 | 1 | 100% |
 | Concurrency | 3 | 0 | 0 | 0 | 3 | 100% |
-| Uncategorized | 0 | 1 | 0 | 0 | 1 | 0% |
-
-## Failed Features
-
-### Uncategorized
-
-- **700** Database SDN table import/export ([spec](test/system/db_sdn_spec.spl))
+| Uncategorized | 1 | 0 | 0 | 0 | 1 | 100% |
 
 ## In Progress Features
 
 ### Codegen
 
 - **101** Native Binary Compilation ([spec](doc/research/binary_locality.md))
-
-## Planned Features
-
-### Codegen
-
-- **97** LLVM Backend ([spec](doc/codegen_technical.md))
+- **97** LLVM Backend ([spec](LLVM_BACKEND_UNIFICATION_PLAN.md))

@@ -115,6 +115,7 @@ bin/simple bug-gen                  # Generate bug report
 
 ```simple
 val name = "Alice"                    # Immutable (preferred)
+name := "Alice"                       # Walrus operator (:= is val synonym)
 var count = 0                         # Mutable
 
 print "Hello, {name}!"               # String interpolation (default)
@@ -134,7 +135,12 @@ class Point:
 
 match value:
     Some(x): process(x)
-    nil: ()                           # Unit value (or `pass`)
+    nil: ()                           # Unit value
+
+pass_todo                             # TODO marker (not yet implemented)
+pass_do_nothing                       # Intentional no-op
+pass_dn                              # Alias for pass_do_nothing
+pass                                  # Generic no-op (use specific variants)
 
 user?.name ?? "Anonymous"             # Optional chaining + coalescing
 items.map(\x: x * 2)                 # Lambda
@@ -205,4 +211,4 @@ See MEMORY.md and code agent for full list. Key issues:
 - **Closure capture broken** - can READ outer vars, CANNOT MODIFY
 - **Module closures broken** - imported fns can't access module state
 - **Chained methods broken** - use intermediate `var`
-- **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`
+- **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`

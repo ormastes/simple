@@ -9,6 +9,7 @@
 #   - Block closing and function building
 
 use app.compile.c_helpers.{find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_field_text, is_struct_field_str_array, is_struct_field_int_array, simple_type_to_c, translate_params, get_c_indent, get_indent_level, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, is_enum_variant, resolve_enum_variant, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
+use std.string.{NL}
 
 # --- Translation Functions ---
 # Functions that only READ types receive `types: text` parameter.
@@ -849,7 +850,7 @@ fn translate_interpolated_print(inner: text, types: text) -> text:
     var args_str = ""
     for current_arg in interp_args:
         args_str = args_str + ", " + current_arg
-    "printf(\"{fmt}\\n\"{args_str});"
+    "printf(\"{fmt}\{NL}\"{args_str});"
 
 # Translate print statement
 fn translate_print(arg: text, types: text) -> text:
@@ -860,7 +861,7 @@ fn translate_print(arg: text, types: text) -> text:
         val has_concat = arg.contains("\" + ") or arg.contains(" + \"")
         if has_concat:
             val c_arg = translate_expr(arg, types)
-            return "printf(\"%s\\n\", {c_arg});"
+            return "printf(\"%s\{NL}\", {c_arg});"
         # Check for interpolation: {expr} inside the string
         if arg.contains("{"):
             # Extract inner text between quotes for interpolation
@@ -869,12 +870,12 @@ fn translate_print(arg: text, types: text) -> text:
                 inner = inner.substring(0, inner.len() - 1)
             return translate_interpolated_print(inner, types)
         # Simple string literal - use arg directly (already has quotes)
-        # Emit as puts(arg) with \n via puts
+        # Emit as puts(arg) with {NL} via puts
         # Use printf to append newline properly
         return "puts({arg});"
     # Print a variable
     if is_text_var(arg, types):
-        return "printf(\"%s\\n\", {arg});"
+        return "printf(\"%s\{NL}\", {arg});"
     # Translate expression and check if it's a string result
     val c_arg = translate_expr(arg, types)
     val c_is_str = c_arg.contains("simple_str_concat") or c_arg.contains("simple_substring")
@@ -882,8 +883,8 @@ fn translate_print(arg: text, types: text) -> text:
     val c_is_str3 = c_arg.contains("simple_char_at") or c_arg.contains("simple_string_join")
     val c_is_str4 = c_arg.contains("simple_dict_get") or c_arg.contains("simple_option_unwrap_str")
     if c_is_str or c_is_str2 or c_is_str3 or c_is_str4:
-        return "printf(\"%s\\n\", {c_arg});"
-    "printf(\"%lld\\n\", (long long){c_arg});"
+        return "printf(\"%s\{NL}\", {c_arg});"
+    "printf(\"%lld\{NL}\", (long long){c_arg});"
 
 # Translate array declaration
 # Returns "code|||;arr:name;" if a string array is declared
@@ -1366,8 +1367,8 @@ fn translate_statement(trimmed: text, types: text) -> text:
                 # Reuse print interpolation logic but redirect to stderr
                 val print_code = translate_interpolated_print(inner, types)
                 return print_code.replace("printf(", "fprintf(stderr, ")
-            return "fprintf(stderr, \"{inner}\\n\");"
-        return "fprintf(stderr, \"%s\\n\", {translate_expr(rest, types)});"
+            return "fprintf(stderr, \"{inner}\{NL}\");"
+        return "fprintf(stderr, \"%s\{NL}\", {translate_expr(rest, types)});"
 
     # Tuple destructuring: val (a, b) = expr
     if trimmed.starts_with("val (") or trimmed.starts_with("var ("):
@@ -1843,7 +1844,7 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
         else:
             deduped_lines.push(dl)
 
-    var result = "{sig} {\n"
+    var result = "{sig} {{NL}"
     for line_idx in range(0, deduped_lines.len()):
         val body_line = deduped_lines[line_idx]
         if line_idx == last_stmt_idx:
@@ -1858,9 +1859,9 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
                 if stmt.ends_with(";"):
                     stmt = stmt.substring(0, stmt.len() - 1)
                 val indent = body_line.substring(0, body_line.len() - bl_trimmed.len())
-                result = result + "{indent}return {stmt};\n"
+                result = result + "{indent}return {stmt};{NL}"
                 continue
-        result = result + body_line + "\n"
+        result = result + body_line + NL
     result = result + "}"
     result
 

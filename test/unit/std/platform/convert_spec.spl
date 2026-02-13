@@ -1,0 +1,169 @@
+# Platform Conversion Tests
+
+use std.platform.config.{host_config, make_config, network_config}
+use std.platform.convert.{send_u16, send_u32, send_u64, recv_u16, recv_u32, recv_u64, send_text, recv_text, send_bytes_u32, recv_bytes_u32}
+use std.common.target.{TargetArch, TargetOS}
+
+describe "Platform Conversion - Endianness":
+    it "send_u32 same platform is no-op":
+        val host = host_config()
+        val value = 0x12345678
+        val result = send_u32(host, host, value)
+        expect(result).to_equal(value)
+
+    it "send_u16 same platform is no-op":
+        val host = host_config()
+        val value = 0x1234
+        val result = send_u16(host, host, value)
+        expect(result).to_equal(value)
+
+    it "send_u64 same platform is no-op":
+        val host = host_config()
+        val value = 0x123456789ABCDEF0
+        val result = send_u64(host, host, value)
+        expect(result).to_equal(value)
+
+    it "send_u32 cross-endian swaps bytes":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val swapped = send_u32(le, be, value)
+        expect(swapped).to_equal(0x78563412)
+
+    it "send_u16 cross-endian swaps bytes":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x1234
+        val swapped = send_u16(le, be, value)
+        expect(swapped).to_equal(0x3412)
+
+    it "recv_u32 cross-endian swaps bytes":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val swapped = recv_u32(le, be, value)
+        expect(swapped).to_equal(0x78563412)
+
+    it "send/recv u32 round-trip preserves value":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val sent = send_u32(le, be, value)
+        val received = recv_u32(le, be, sent)
+        expect(received).to_equal(value)
+
+    it "send/recv u16 round-trip preserves value":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x1234
+        val sent = send_u16(le, be, value)
+        val received = recv_u16(le, be, sent)
+        expect(received).to_equal(value)
+
+    it "send/recv u64 round-trip preserves value":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 305419896
+        val sent = send_u64(le, be, value)
+        val received = recv_u64(le, be, sent)
+        expect(received).to_equal(value)
+
+    it "network byte order (big-endian) from little-endian host":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val net = network_config()
+        val value = 0x12345678
+        val network_val = send_u32(le, net, value)
+        expect(network_val).to_equal(0x78563412)
+
+describe "Platform Conversion - Newlines":
+    it "send_text same platform is no-op":
+        val host = host_config()
+        val content = "line1\nline2\n"
+        val result = send_text(host, host, content)
+        expect(result).to_equal(content)
+
+    it "send_text Unix to Windows converts LF to CRLF":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "line1\nline2\n"
+        val result = send_text(unix, win, content)
+        expect(result).to_equal("line1\r\nline2\r\n")
+
+    it "send_text Windows to Unix converts CRLF to LF":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "line1\r\nline2\r\n"
+        val result = send_text(win, unix, content)
+        expect(result).to_equal("line1\nline2\n")
+
+    it "send_text normalizes mixed newlines":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "line1\r\nline2\nline3\r"
+        val result = send_text(unix, win, content)
+        expect(result).to_equal("line1\r\nline2\r\nline3\r\n")
+
+    it "recv_text is inverse of send_text":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "line1\nline2\n"
+        val sent = send_text(unix, win, content)
+        val received = recv_text(unix, win, sent)
+        expect(received).to_equal(content)
+
+    it "send/recv text round-trip preserves content":
+        val unix = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val win = make_config(TargetArch.X86_64, TargetOS.Windows)
+        val content = "Hello\nWorld\nTest\n"
+        val sent = send_text(unix, win, content)
+        val received = recv_text(unix, win, sent)
+        expect(received).to_equal(content)
+
+describe "Platform Conversion - Byte Arrays":
+    it "send_bytes_u32 little-endian format":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val value = 0x12345678
+        val bytes = send_bytes_u32(le, le, value)
+        expect(bytes[0]).to_equal(0x78)
+        expect(bytes[1]).to_equal(0x56)
+        expect(bytes[2]).to_equal(0x34)
+        expect(bytes[3]).to_equal(0x12)
+
+    it "send_bytes_u32 big-endian format":
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val bytes = send_bytes_u32(be, be, value)
+        expect(bytes[0]).to_equal(0x12)
+        expect(bytes[1]).to_equal(0x34)
+        expect(bytes[2]).to_equal(0x56)
+        expect(bytes[3]).to_equal(0x78)
+
+    it "send_bytes_u32 cross-endian swaps and formats":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val bytes = send_bytes_u32(le, be, value)
+        expect(bytes[0]).to_equal(0x12)
+        expect(bytes[1]).to_equal(0x34)
+        expect(bytes[2]).to_equal(0x56)
+        expect(bytes[3]).to_equal(0x78)
+
+    it "recv_bytes_u32 reads little-endian":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val bytes = [0x78, 0x56, 0x34, 0x12]
+        val value = recv_bytes_u32(le, le, bytes)
+        expect(value).to_equal(0x12345678)
+
+    it "recv_bytes_u32 reads big-endian":
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val bytes = [0x12, 0x34, 0x56, 0x78]
+        val value = recv_bytes_u32(be, be, bytes)
+        expect(value).to_equal(0x12345678)
+
+    it "send_bytes_u32 / recv_bytes_u32 round-trip":
+        val le = make_config(TargetArch.X86_64, TargetOS.Linux)
+        val be = make_config(TargetArch.MCS51, TargetOS.BareMetal)
+        val value = 0x12345678
+        val bytes = send_bytes_u32(le, be, value)
+        val result = recv_bytes_u32(le, be, bytes)
+        expect(result).to_equal(value)

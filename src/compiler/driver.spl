@@ -7,6 +7,7 @@
 #
 # Type definitions are in driver_types.spl
 
+use std.string.{NL}
 use compiler.hir.*
 use compiler.mir.*
 use compiler.lexer.*
@@ -25,7 +26,7 @@ use compiler.const_eval.{eval_static_assert, ConstEvalError}
 use blocks.*
 use config.*
 use driver_types.*
-use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default}
+use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
 use compiler.smf_writer.{generate_smf_with_templates, Target}
 
 class CheckBackendImpl(Backend):
@@ -514,12 +515,13 @@ class CompilerDriver:
 
             val module = compiled.unwrap()
             if module.object_code.?:
-                # Write object bytes to file for linking
+                # Write object bytes to file for linking (Phase 2.1: Direct ELF writing)
                 val obj_path = "{output}.{name}.o"
-                if rt_file_write_bytes(obj_path, module.object_code.unwrap()):
-                    object_files = object_files.push(obj_path)
-                else:
-                    return CompileResult.CodegenError("Failed to write object file: {obj_path}")
+                match write_elf_bytes_to_file(obj_path, module.object_code.unwrap()):
+                    case Ok(_):
+                        object_files = object_files.push(obj_path)
+                    case Err(e):
+                        return CompileResult.CodegenError("Failed to write object file {obj_path}: {e}")
             else:
                 return CompileResult.CodegenError("Backend produced no object code for {name}")
 
@@ -670,7 +672,7 @@ class CompilerDriver:
         """Format a borrow error for display."""
         var msg = "error[E0502]: {err.message}"
         if err.help.?:
-            msg = "{msg}\n  = help: {err.help.unwrap()}"
+            msg = "{msg}" + NL + "  = help: {err.help.unwrap()}"
         msg
 
     # --------------------------------------------------------------------------
@@ -825,7 +827,6 @@ fn compile_to_smf(path: text, output: text) -> Result<text, text>:
 extern fn sys_get_args() -> [text]
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_shell(cmd: text) -> text
 
 # ============================================================================

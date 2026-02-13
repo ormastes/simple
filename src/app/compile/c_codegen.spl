@@ -28,6 +28,7 @@
 use app.compile.c_helpers.{get_indent_level, get_c_indent, simple_type_to_c, translate_params, parse_fn_signature, find_close_paren, is_string_array_var, is_int_array_var, is_str_arr_arr_var, is_int_arr_arr_var, is_text_var, is_fn_returning_text, is_fn_returning_struct, is_struct_type_var, is_known_struct, is_known_method, is_me_method, is_static_fn, is_dict_var, is_option_var, parse_method_signature, parse_generic_type, is_struct_array_var, is_struct_field_struct_array, is_fn_returning_struct_arr, is_fn_returning_int_arr, is_fn_returning_str_arr}
 use app.compile.c_translate.{translate_condition, translate_method_expr, translate_expr, translate_interpolated_print, translate_print, translate_array_decl, translate_var_decl, translate_for_loop, translate_case, translate_statement, close_blocks, build_function}
 use app.compile.c_runtime.{generate_c_runtime, parse_struct_fields, split_result}
+use std.string.{NL}
 
 # Generate C code from Simple source
 fn generate_c_code(source_text: text) -> text:
@@ -39,7 +40,7 @@ fn generate_c_code(source_text: text) -> text:
     types = types + "text:par_text;text:par_current;text:lex_cur_text;text:lex_cur_suffix;"
     types = types + "text:g_log_filter_pattern;"
 
-    val raw_lines = source_text.split("\n")
+    val raw_lines = source_text.split(NL)
     # Pre-process: join multi-line expressions (unclosed parentheses)
     var lines_arr: [text] = []
     var pending_line = ""
@@ -588,8 +589,8 @@ fn generate_c_code(source_text: text) -> text:
             types = types + "struct:" + struct_name + ";"
             val field_result = parse_struct_fields(lines_arr, line_idx)
             val field_body = field_result[1]
-            var sdef = "typedef struct {\n"
-            sdef = sdef + field_body + "\n"
+            var sdef = "typedef struct {{NL}"
+            sdef = sdef + field_body + NL
             sdef = sdef + "} {struct_name};"
             struct_defs.push(sdef)
             # Track field types
@@ -667,7 +668,7 @@ fn generate_c_code(source_text: text) -> text:
                     var dv_fields_str = ""
                     if dv_close > dv_paren + 1:
                         dv_fields_str = dv.substring(dv_paren + 1, dv_close).trim()
-                    tag_defines = tag_defines + "#define {enum_name}_TAG_{dv_name} {tag_idx}\n"
+                    tag_defines = tag_defines + "#define {enum_name}_TAG_{dv_name} {tag_idx}{NL}"
                     types = types + "enum_variant:" + enum_name + "." + dv_name + ";"
                     # Parse fields
                     var struct_fields = ""
@@ -683,38 +684,38 @@ fn generate_c_code(source_text: text) -> text:
                                 val fname = dvf.substring(0, dvf_colon).trim()
                                 val ftype = dvf.substring(dvf_colon + 1).trim()
                                 val ctype = simple_type_to_c(ftype)
-                                struct_fields = struct_fields + "            {ctype} {fname};\n"
+                                struct_fields = struct_fields + "            {ctype} {fname};{NL}"
                                 if fi > 0:
                                     ctor_params = ctor_params + ", "
                                 ctor_params = ctor_params + "{ctype} {fname}"
-                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{fname} = {fname};\n"
+                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{fname} = {fname};{NL}"
                             else:
                                 # Positional: _0, _1, etc
                                 val ctype = simple_type_to_c(dvf)
                                 val pname = "_{fi}"
-                                struct_fields = struct_fields + "            {ctype} {pname};\n"
+                                struct_fields = struct_fields + "            {ctype} {pname};{NL}"
                                 if fi > 0:
                                     ctor_params = ctor_params + ", "
                                 ctor_params = ctor_params + "{ctype} {pname}"
-                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{pname} = {pname};\n"
+                                ctor_assigns = ctor_assigns + "    r.data.{dv_name}.{pname} = {pname};{NL}"
                             fi = fi + 1
-                    union_fields = union_fields + "        struct {{\n{struct_fields}        }} {dv_name};\n"
-                    constructors = constructors + "static {enum_name} {enum_name}__{dv_name}({ctor_params}) {{\n"
-                    constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{dv_name};\n"
+                    union_fields = union_fields + "        struct {{{NL}{struct_fields}        }} {dv_name};{NL}"
+                    constructors = constructors + "static {enum_name} {enum_name}__{dv_name}({ctor_params}) {{{NL}"
+                    constructors = constructors + "    {enum_name} r;{NL}    r.tag = {enum_name}_TAG_{dv_name};{NL}"
                     constructors = constructors + ctor_assigns
-                    constructors = constructors + "    return r;\n}}\n"
+                    constructors = constructors + "    return r;{NL}}}{NL}"
                     tag_idx = tag_idx + 1
                 # Also add simple variants as tags
                 for sv in simple_variants:
-                    tag_defines = tag_defines + "#define {enum_name}_TAG_{sv} {tag_idx}\n"
-                    constructors = constructors + "static {enum_name} {enum_name}__{sv}(void) {{\n"
-                    constructors = constructors + "    {enum_name} r;\n    r.tag = {enum_name}_TAG_{sv};\n"
-                    constructors = constructors + "    return r;\n}}\n"
+                    tag_defines = tag_defines + "#define {enum_name}_TAG_{sv} {tag_idx}{NL}"
+                    constructors = constructors + "static {enum_name} {enum_name}__{sv}(void) {{{NL}"
+                    constructors = constructors + "    {enum_name} r;{NL}    r.tag = {enum_name}_TAG_{sv};{NL}"
+                    constructors = constructors + "    return r;{NL}}}{NL}"
                     tag_idx = tag_idx + 1
-                var edef = tag_defines + "\n"
-                edef = edef + "typedef struct {{\n    int tag;\n    union {{\n"
+                var edef = tag_defines + NL
+                edef = edef + "typedef struct {{{NL}    int tag;{NL}    union {{{NL}"
                 edef = edef + union_fields
-                edef = edef + "    }} data;\n}} {enum_name};\n\n"
+                edef = edef + "    }} data;{NL}}} {enum_name};{NL}{NL}"
                 edef = edef + constructors
                 enum_defs.push(edef)
                 types = types + "struct:" + enum_name + ";"
@@ -735,8 +736,8 @@ fn generate_c_code(source_text: text) -> text:
             types = types + "struct:" + class_name + ";"
             val field_result = parse_struct_fields(lines_arr, line_idx)
             val field_body = field_result[1]
-            var cdef = "typedef struct {\n"
-            cdef = cdef + field_body + "\n"
+            var cdef = "typedef struct {{NL}"
+            cdef = cdef + field_body + NL
             cdef = cdef + "} {class_name};"
             struct_defs.push(cdef)
             # Track field types
@@ -1068,48 +1069,48 @@ fn generate_c_code(source_text: text) -> text:
     main_body = close_blocks(main_body)
 
     # Build final C code
-    var c_code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
-    c_code = c_code + "#include <stdint.h>\n"
-    c_code = c_code + "#ifdef _MSC_VER\n#define strdup _strdup\n#endif\n"
+    var c_code = "#include <stdio.h>{NL}#include <stdlib.h>{NL}#include <string.h>{NL}"
+    c_code = c_code + "#include <stdint.h>{NL}"
+    c_code = c_code + "#ifdef _MSC_VER{NL}#define strdup _strdup{NL}#endif{NL}"
 
     # Add C runtime helpers
     c_code = c_code + generate_c_runtime()
 
     # Add enum definitions first (structs may reference enum types)
     if enum_defs.len() > 0:
-        c_code = c_code + "\n// --- Enum Definitions ---\n"
+        c_code = c_code + "{NL}// --- Enum Definitions ---{NL}"
         for edef in enum_defs:
-            c_code = c_code + edef + "\n\n"
+            c_code = c_code + edef + "{NL}{NL}"
 
     # Add struct definitions
     if struct_defs.len() > 0:
-        c_code = c_code + "\n// --- Struct Definitions ---\n"
+        c_code = c_code + "{NL}// --- Struct Definitions ---{NL}"
         for sdef in struct_defs:
-            c_code = c_code + sdef + "\n\n"
+            c_code = c_code + sdef + "{NL}{NL}"
 
     # Add global variable definitions
     if global_defs.len() > 0:
-        c_code = c_code + "\n// --- Global Variables ---\n"
+        c_code = c_code + "{NL}// --- Global Variables ---{NL}"
         for gdef in global_defs:
-            c_code = c_code + gdef + "\n"
-        c_code = c_code + "\n"
+            c_code = c_code + gdef + NL
+        c_code = c_code + NL
 
     # Add forward declarations
     if forward_decls.len() > 0:
-        c_code = c_code + "\n// --- Forward Declarations ---\n"
+        c_code = c_code + "{NL}// --- Forward Declarations ---{NL}"
         for fwd in forward_decls:
-            c_code = c_code + fwd + "\n"
-        c_code = c_code + "\n"
+            c_code = c_code + fwd + NL
+        c_code = c_code + NL
 
     # Add function definitions
     for func in func_defs:
-        c_code = c_code + func + "\n\n"
+        c_code = c_code + func + "{NL}{NL}"
 
     # Add main
-    c_code = c_code + "int main(void) {\n"
+    c_code = c_code + "int main(void) {{NL}"
     for body_line in main_body:
-        c_code = c_code + body_line + "\n"
-    c_code = c_code + "    return 0;\n}\n"
+        c_code = c_code + body_line + NL
+    c_code = c_code + "    return 0;{NL}}{NL}"
     c_code
 
 export generate_c_code, close_blocks, translate_statement, translate_print

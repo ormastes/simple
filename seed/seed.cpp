@@ -56,20 +56,20 @@
 
 /* ===== Configuration ===== */
 #define MAX_LINE 4096
-#define MAX_LINES 200000
-#define MAX_IDENT 128
-#define MAX_OUTPUT (1024 * 1024 * 64)  /* 64 MB output buffer */
-#define MAX_INDENT_STACK 256
-#define MAX_PARAMS 32
-#define MAX_FUNCS 8192
-#define MAX_STRUCTS 2048
-#define MAX_FIELDS 128
-#define MAX_ENUMS 1024
-#define MAX_VARIANTS 256
-#define MAX_METHODS 8192
+#define MAX_LINES 300000        /* Increased for large compiler_core (439 files) - conservative */
+#define MAX_IDENT 256          /* Increased for longer identifiers */
+#define MAX_OUTPUT (1024 * 1024 * 128)  /* 128 MB output buffer (2x increase) */
+#define MAX_INDENT_STACK 512   /* Increased for deeper nesting */
+#define MAX_PARAMS 64          /* Increased for functions with many params */
+#define MAX_FUNCS 16384        /* Increased for large codebases (2x) */
+#define MAX_STRUCTS 4096       /* Increased for large codebases (2x) */
+#define MAX_FIELDS 256         /* Increased for structs with many fields */
+#define MAX_ENUMS 2048         /* Increased for large codebases (2x) */
+#define MAX_VARIANTS 512       /* Increased for enums with many variants */
+#define MAX_METHODS 16384      /* Increased for large codebases (2x) */
 
 /* ===== Output Buffer ===== */
-static char output[MAX_OUTPUT];
+static char *output = nullptr;  /* Dynamically allocated to avoid .bss overflow */
 static int out_pos = 0;
 
 static void emit(const char *fmt, ...) {
@@ -482,6 +482,7 @@ typedef struct {
 
 static FuncInfo funcs[MAX_FUNCS];
 static int num_funcs = 0;
+static bool has_main_func = false;
 
 static FuncInfo *find_func(const char *name) {
     for (int i = 0; i < num_funcs; i++) {
@@ -828,8 +829,8 @@ static bool output_has_problems(int saved_pos) {
     if (nested_funcs > 0) return true;
     if (todos > 0) return true;
     if (problems > 0) return true;
-    /* Stub ALL bodies for initial compilation pass */
-    return true;
+    /* No problems detected - body is good! */
+    return false;
 }
 
 /* Emit a stub return statement appropriate for the C++ return type */
@@ -3072,26 +3073,38 @@ static bool register_func_sig(const char *t, bool is_method, const char *owner, 
 
     /* Rename 'main' to avoid conflict with C++ main */
     if (strcmp(fi->name, "main") == 0) {
+        has_main_func = true;
+        fprintf(stderr, "[seed_cpp] DEBUG: Found main() function, setting has_main_func=true\n");
         strcpy(fi->name, "spl_main");
     }
 
     /* Skip if a function with the same name is already registered */
     for (int k = 0; k < num_funcs; k++) {
         if (strcmp(funcs[k].name, fi->name) == 0) {
+            if (strcmp(fi->name, "spl_main") == 0) {
+                fprintf(stderr, "[seed_cpp] DEBUG: Skipping duplicate spl_main (already registered at func #%d)\n", k);
+            }
             return false;
         }
     }
 
     num_funcs++;
+    if (strcmp(fi->name, "spl_main") == 0) {
+        fprintf(stderr, "[seed_cpp] DEBUG: Registered spl_main as function #%d\n", num_funcs - 1);
+    }
     return true;
 }
 
 static void process_file(void) {
     /* ===== First pass: collect struct/enum/function signatures ===== */
+    fprintf(stderr, "[seed_cpp] DEBUG: Starting first pass, num_lines=%d\n", num_lines);
     for (int i = 0; i < num_lines; i++) {
         const char *line = source_lines[i];
         int ind = indent_level(line);
         const char *t = trim(line);
+        if (i >= 365 && i <= 375) {
+            fprintf(stderr, "[seed_cpp] DEBUG: Line %d, ind=%d, raw: %.60s | trimmed: %.60s\n", i, ind, line, t);
+        }
         if (t[0] == '\0' || t[0] == '#') continue;
 
         /* Top-level struct or class */
@@ -3251,7 +3264,17 @@ static void process_file(void) {
 
         /* Top-level function */
         if (ind == 0 && starts_with(t, "fn ") && ends_with(t, ":")) {
+            // Debug: log which file we're in when processing functions
+            static int last_logged_line = -1;
+            if (i > last_logged_line + 1000 || strstr(t, "main") != NULL) {
+                fprintf(stderr, "[seed_cpp] DEBUG: Processing fn at line %d: %.60s\n", i, t);
+                last_logged_line = i;
+            }
             register_func_sig(t, false, "", false);
+        } else if (starts_with(t, "fn main() ")) {
+            // Debug: Why isn't main() being detected?
+            fprintf(stderr, "[seed_cpp] DEBUG: Found 'fn main()' but not registering! Line %d, ind=%d, ends_with_colon=%d, text: %.80s\n",
+                    i, ind, ends_with(t, ":"), t);
         }
 
         /* Top-level extern fn */
@@ -3362,6 +3385,8 @@ static void process_file(void) {
     emit("typedef uint8_t u8;\n");
     emit("typedef uint32_t u32;\n");
     emit("typedef uint64_t u64;\n\n");
+    emit("/* Common constants from stdlib */\n");
+    emit("static const char* NL = \"\\n\";\n\n");
 
     /* Stub declarations for functions NOT in runtime.h */
     emit("inline void log_debug(...) {}\n");
@@ -3620,7 +3645,9 @@ static void process_file(void) {
             while (*p && *p != '(') fname[ni++] = *p++;
             fname[ni] = '\0';
 
-            FuncInfo *fi = find_func(fname);
+            /* If function is "main", look for "spl_main" (renamed in first pass) */
+            const char *lookup_name = (strcmp(fname, "main") == 0) ? "spl_main" : fname;
+            FuncInfo *fi = find_func(lookup_name);
             if (!fi) { continue; }
             if (fi->emitted) { continue; }  /* Skip duplicate definitions */
             fi->emitted = true;
@@ -3712,9 +3739,12 @@ static void process_file(void) {
             int saved_pos = out_pos;
             translate_block(&body_idx, 0, 1);
             if (output_has_problems(saved_pos)) {
+                fprintf(stderr, "[seed_cpp] DEBUG: Function %s body has problems, emitting stub\n", fi->name);
                 out_pos = saved_pos;
                 output[out_pos] = '\0';
                 emit_stub_return(fi->ret_type);
+            } else if (strcmp(fi->name, "spl_main") == 0) {
+                fprintf(stderr, "[seed_cpp] DEBUG: Function spl_main body OK, %d bytes generated\n", out_pos - saved_pos);
             }
             current_func = nullptr;
             i = body_idx - 1;
@@ -4269,7 +4299,13 @@ static void process_file(void) {
     emit("int main(int argc, char** argv) {\n");
     emit("    spl_init_args(argc, argv);\n");
     emit("    __module_init();\n");
-    emit("    return 0;\n");
+    if (has_main_func) {
+        /* Call Simple main function and return its result */
+        emit("    return (int)spl_main();\n");
+    } else {
+        /* No main function - just return 0 */
+        emit("    return 0;\n");
+    }
     emit("}\n");
 }
 
@@ -4280,17 +4316,32 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* Allocate output buffer dynamically to avoid .bss section overflow */
+    output = (char*)calloc(MAX_OUTPUT, 1);
+    if (!output) {
+        fprintf(stderr, "ERROR: Failed to allocate %zu MB output buffer\n", MAX_OUTPUT / (1024*1024));
+        return 1;
+    }
+
+    fprintf(stderr, "[seed_cpp] Processing %d files...\n", argc - 1);
+
     /* Load all input files into a single source buffer */
     for (int i = 1; i < argc; i++) {
+        fprintf(stderr, "[seed_cpp] Loading file %d/%d: %s\n", i, argc - 1, argv[i]);
         load_file(argv[i]);
+        fprintf(stderr, "[seed_cpp] Loaded %s (%d total lines)\n", argv[i], num_lines);
         /* Add empty line between files for safety */
         if (i < argc - 1 && num_lines < MAX_LINES) {
             source_lines[num_lines++] = strdup("");
         }
     }
+
+    fprintf(stderr, "[seed_cpp] All files loaded (%d lines total). Starting processing...\n", num_lines);
     process_file();
+    fprintf(stderr, "[seed_cpp] Processing complete. Output size: %d bytes\n", out_pos);
 
     fwrite(output, 1, out_pos, stdout);
+    free(output);
 
     return 0;
 }

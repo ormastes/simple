@@ -1,0 +1,91 @@
+# Test optimized bootstrap with real JSON-RPC protocol messages
+# Simulates actual MCP client communication
+
+use app.io.mod (file_write, shell)
+
+fn main():
+    print("Testing optimized bootstrap with JSON-RPC protocol...")
+
+    # Create test input with real MCP protocol messages
+    val test_input = """Content-Length: 123
+
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
+Content-Length: 50
+
+{"jsonrpc":"2.0","id":"2","method":"tools/list"}
+Content-Length: 145
+
+{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"simple_status","arguments":{"directory":"src/"}}}
+"""
+
+    # Write test input to file
+    file_write("/tmp/mcp_test_input.txt", test_input)
+
+    # Run optimized bootstrap with test input
+    print("Executing optimized bootstrap...")
+    val result = shell("bin/simple src/app/mcp/bootstrap/main_optimized.spl < /tmp/mcp_test_input.txt 2>&1")
+
+    val output = result.stdout ?? ""
+    val exit_code = result.exit_code ?? 1
+
+    print("Exit code: {exit_code}")
+    print("")
+
+    if exit_code == 0:
+        print("✓ Bootstrap executed successfully")
+    else:
+        print("✗ Bootstrap failed")
+        print("Output: {output}")
+        return
+
+    # Validate responses
+    var checks_passed = 0
+    var checks_total = 0
+
+    # Check 1: Initialize response
+    checks_total = checks_total + 1
+    if output.contains("protocolVersion") and output.contains("capabilities"):
+        print("✓ Initialize response valid")
+        checks_passed = checks_passed + 1
+    else:
+        print("✗ Initialize response invalid")
+
+    # Check 2: Tools/list response
+    checks_total = checks_total + 1
+    if output.contains("tools") and output.contains("["):
+        print("✓ Tools/list response valid")
+        checks_passed = checks_passed + 1
+    else:
+        print("✗ Tools/list response invalid")
+
+    # Check 3: Tool call response
+    checks_total = checks_total + 1
+    if output.contains("result") or output.contains("content"):
+        print("✓ Tool call response present")
+        checks_passed = checks_passed + 1
+    else:
+        print("✗ Tool call response missing")
+
+    # Check 4: No errors in output
+    checks_total = checks_total + 1
+    if not output.contains("error: "):
+        print("✓ No errors in output")
+        checks_passed = checks_passed + 1
+    else:
+        print("✗ Errors found in output")
+
+    print("")
+    if checks_passed == checks_total:
+        print("All protocol tests passed! ({checks_passed}/{checks_total})")
+        print("Bootstrap is PROTOCOL READY ✅")
+    else:
+        print("Some checks failed ({checks_passed}/{checks_total})")
+        print("Output preview:")
+        val lines = output.split("\n")
+        var count = 0
+        for line in lines:
+            if count < 20:
+                print(line)
+                count = count + 1
+
+main()
