@@ -1,1069 +1,1490 @@
-# Lexer - Simple Language Lexical Analyzer
+# Core Simple — Lexer (Tokenizer)
 #
-# Tokenizes Simple source code into a stream of tokens.
-# Features:
-# - Full Unicode support
-# - String interpolation
-# - Indentation-based blocks
-# - Comment handling
-# - Error recovery
+# Shared core library: converts source text into a stream of tokens.
+# Handles indentation tracking, literals, identifiers, keywords,
+# operators, delimiters, and comments.
 #
-# Token type definitions are in lexer_types.spl
-
-use lexer_types.*
-
-use blocks.{block_registry}
-struct Lexer:
-    """Tokenizer for Simple source code."""
-    source: text
-    pos: i64            # Current byte position
-    line: i64           # Current line (1-based)
-    col: i64            # Current column (1-based)
-    indent_stack: [i64] # Stack of indentation levels
-    pending_dedents: i64 # Number of dedents to emit
-    at_line_start: bool # Are we at the start of a line
-    paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
-    in_math_block: bool # Inside m{} math block (enables ^ as power)
-    math_brace_depth: i64 # Brace depth within math block
-    prev_token_kind: TokenKind  # Previous token kind (for implicit mul)
-    # # DESUGARED: pending_token: Token
-    has_pending_token: bool
-    pending_token: Token
-    generic_depth: i64  # Track <> nesting bit_shr(for, disambiguation)
-
-    # Block system fields
-    # # DESUGARED: block_registry: BlockRegistry
-    has_block_registry: bool
-    block_registry: BlockRegistry
-    # # DESUGARED: current_block_kind: text
-    has_current_block_kind: bool
-    current_block_kind: text
-    current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
-    in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
-    raw_block_start: i64           # Start position of raw block payload
-    block_brace_depth: i64         # Brace depth tracking for blocks
-
-    # Unified registry (blocks + literals)
-    # # DESUGARED: unified_registry: UnifiedRegistry
-    has_unified_registry: bool
-    unified_registry: UnifiedRegistry
-
-
-# ============================================================================
-# Lexer Methods (was: impl Lexer:)
-# ============================================================================
-
-fn lexer_new(source: text) -> Lexer:
-        Lexer(
-            source: source,
-            pos: 0,
-            line: 1,
-            col: 1,
-            indent_stack: [0],  # Start with zero indentation
-            pending_dedents: 0,
-            at_line_start: true,
-            paren_depth: 0,
-            in_math_block: false,
-            math_brace_depth: 0,
-            prev_token_kind: TokenKind.Eof,
-            #  # DESUGARED: pending_token: nil
-            generic_depth: 0,
-            # Block system initialization (lazy-loaded to avoid circular deps)
-            # # DESUGARED: block_registry: nil
-            block_registry: nil,  # TODO: provide default
-            #  # DESUGARED: current_block_kind: nil
-            current_lexer_mode: LexerMode.Normal,
-            in_raw_block: false,
-            raw_block_start: 0,
-            block_brace_depth: 0
-            # Unified registry (lazy-loaded)
-            ## DESUGARED: unified_registry: nil
-        )
-
-
-fn lexer_with_registry(source: text, registry: BlockRegistry) -> Lexer:
-        """Create lexer with a custom block registry."""
-        Lexer(
-            source: source,
-            pos: 0,
-            line: 1,
-            col: 1,
-            indent_stack: [0],
-            pending_dedents: 0,
-            at_line_start: true,
-            paren_depth: 0,
-            in_math_block: false,
-            math_brace_depth: 0,
-            prev_token_kind: TokenKind.Eof,
-            #  # DESUGARED: pending_token: nil
-            generic_depth: 0,
-            # # DESUGARED: block_registry: Some(registry)
-            block_registry: registry,  # Pre-loaded with custom registry
-            #  # DESUGARED: current_block_kind: nil
-            current_lexer_mode: LexerMode.Normal,
-            in_raw_block: false,
-            raw_block_start: 0,
-            block_brace_depth: 0
-            ## DESUGARED: unified_registry: nil
-        )
-
-
-fn lexer_get_block_registry(self: Lexer) -> BlockRegistry:
-        """Get block registry, lazy-loading on first access.
-
-        This avoids circular dependency at module load time:
-        - lexer → blocks → builtin → hir → parser → lexer (cycle!)
-
-        By deferring block_registry() call until runtime, the cycle is broken.
-        """
-        if not self.has_block_registry:
-            # Import happens at runtime, not module load time
-            # MOVED: use blocks.{block_registry}
-            self.block_registry = block_registry()
-        self.block_registry_value
-
-
-fn lexer_maybe_insert_implicit_mul(self: Lexer, token: Token) -> Token:
-        """Check if implicit multiplication is needed before this token.
-
-        In math mode only, insert implicit mul for patterns like:
-        - 2x     (number followed by identifier)
-        - 2(x)   (number followed by lparen)
-        - (a)(b) (rparen followed by lparen)
-        - (a)x   (rparen followed by identifier)
-        """
-        if not self.in_math_block:
-            self.prev_token_kind = token.kind
-            return token
-
-        val needs_implicit_mul = match (self.prev_token_kind, token.kind):
-            # number followed by identifier: 2x
-            case (IntLit, Ident): true
-            case (FloatLit, Ident): true
-            # number followed by lparen: 2(x+1)
-            case (IntLit, LParen): true
-            case (FloatLit, LParen): true
-            # rparen followed by identifier: (x+1)y
-            case [RParen, Ident]: true
-            # rparen followed by lparen: (a)(b)
-            case [RParen, LParen]: true
-            # identifier followed by lparen could be function call, skip
-            case _: false
-
-        if needs_implicit_mul:
-            # Store current token, return ImplicitMul
-            self.pending_token = token
-            val mul_token = Token.new(
-                TokenKind.ImplicitMul,
-                span_new(token.span.start, token.span.start, token.span.line, token.span.col),
-                ""
-            )
-            self.prev_token_kind = TokenKind.ImplicitMul
-            return mul_token
-        else:
-            self.prev_token_kind = token.kind
-            return token
-
-
-fn lexer_next_token(self: Lexer) -> Token:
-        """Get the next token from the source, with implicit multiplication."""
-        # Return pending token if we inserted ImplicitMul
-        if self.has_pending_token:
-            val token = self.pending_token_value
-            self.pending_token = nil
-            self.prev_token_kind = token.kind
-            return token
-
-        # Get the actual token
-        val token = self.scan_token()
-
-        # Check for implicit multiplication
-        return self.maybe_insert_implicit_mul(token)
-
-
-fn lexer_scan_token(self: Lexer) -> Token:
-        """Scan the next token (internal, without implicit mul check)."""
-
-        # Emit pending dedents first
-        if self.pending_dedents > 0:
-            self.pending_dedents = self.pending_dedents - 1
-            return Token.new(
-                TokenKind.Dedent,
-                span_new(self.pos, self.pos, self.line, self.col),
-                ""
-            )
-
-        # Handle raw mode block payload
-        # After entering a raw block and seeing {, scan the entire payload
-        if self.in_raw_block:
-            if self.block_brace_depth == 1 and self.raw_block_start == -1:
-            # We're inside a raw block after {, scan payload
-            self.raw_block_start = 0  # Reset to prevent re-scanning
-            return self.scan_raw_block_payload()
-
-        # Handle indentation at line start
-        if self.at_line_start:
-            val indent_token = self.handle_indentation()
-            if has_indent_token:
-                return indent_token_value
-
-        # Skip whitespace (but not newlines)
-        self.skip_horizontal_whitespace()
-
-        # Check for EOF
-        if self.is_at_end():
-            return token_eof(self.pos, self.line)
-
-        # Get current character
-        val c = self.peek()
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-
-        # Handle different token types
-        match c:
-            # Newline
-            case "\n":
-                return self.scan_newline()
-
-            # Comments
-            case '#':
-                # Check for #[ (attribute start)
-                if self.peek() == '[':
-                    val start_pos = self.pos
-                    val start_line = self.line
-                    val start_col = self.col
-                    self.advance()  # consume #
-                    self.advance()  # consume [
-                    return Token.new(
-                        TokenKind.HashLBracket,
-                        span_new(start_pos, self.pos, start_line, start_col),
-                        "#["
-                    )
-                else:
-                    return self.scan_comment()
-
-            # String literals (and transpose in math mode)
-            case '"':
-                return self.scan_string()
-            case '\'':
-                if self.in_math_block:
-                    # In math mode, single quote is transpose operator
-                    self.advance()
-                    return Token.new(
-                        TokenKind.Transpose,
-                        span_new(start, self.pos, line, col),
-                        "'"
-                    )
-                else:
-                    return self.scan_string()
-
-            # Numbers
-            case '0':
-                return self.scan_number()
-
-            case '1':
-                return self.scan_number()
-
-            case '2':
-                return self.scan_number()
-
-            case '3':
-                return self.scan_number()
-
-            case '4':
-                return self.scan_number()
-
-            case '5':
-                return self.scan_number()
-
-            case '6':
-                return self.scan_number()
-
-            case '7':
-                return self.scan_number()
-
-            case '8':
-                return self.scan_number()
-
-            case '9':
-                return self.scan_number()
-
-            # Identifiers and keywords
-            case 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j'
-               | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't'
-               | 'u' | 'v' | 'w' | 'x' | 'y' | 'z'
-               | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J'
-               | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T'
-               | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
-               | '_':
-                return self.scan_identifier()
-
-            # Operators and delimiters
-            case _:
-                return self.scan_operator_or_delimiter()
-
-
-fn lexer_advance(self: Lexer) -> char:
-        """Consume and return current character."""
-        val c = self.peek()
-        self.pos = self.pos + 1
+\\\\\        to: zzoxzqoo 2b48645a "feat: Complete Track A/B/C - Native backend layout optimization and LLVM backend" (rebase destination)
+ # Token type definitions are in lexer_types.spl
+ 
+ use lexer_types.*
+ 
+ use blocks.{block_registry}
+ struct Lexer:
+     """Tokenizer for Simple source code."""
+     source: text
+     pos: i64            # Current byte position
+     line: i64           # Current line (1-based)
+     col: i64            # Current column (1-based)
+     indent_stack: [i64] # Stack of indentation levels
+     pending_dedents: i64 # Number of dedents to emit
+     at_line_start: bool # Are we at the start of a line
+     paren_depth: i64    # Nested parentheses depth (suppress newlines inside)
+     in_math_block: bool # Inside m{} math block (enables ^ as power)
+     math_brace_depth: i64 # Brace depth within math block
+     prev_token_kind: TokenKind  # Previous token kind (for implicit mul)
+     # # DESUGARED: pending_token: Token
+     has_pending_token: bool
+     pending_token: Token
+     generic_depth: i64  # Track <> nesting bit_shr(for, disambiguation)
+ 
+     # Block system fields
+     # # DESUGARED: block_registry: BlockRegistry
+     has_block_registry: bool
+     block_registry: BlockRegistry
+     # # DESUGARED: current_block_kind: text
+     has_current_block_kind: bool
+     current_block_kind: text
+     current_lexer_mode: LexerMode  # Current lexer mode (Normal, Math, Raw, Custom)
+     in_raw_block: bool             # Inside a raw-mode block (sh{}, sql{})
+     raw_block_start: i64           # Start position of raw block payload
+     block_brace_depth: i64         # Brace depth tracking for blocks
+ 
+     # Unified registry (blocks + literals)
+     # # DESUGARED: unified_registry: UnifiedRegistry
+     has_unified_registry: bool
+     unified_registry: UnifiedRegistry
+ 
+ 
+ # ============================================================================
+ # Lexer Methods (was: impl Lexer:)
+ # ============================================================================
+ 
+ fn lexer_new(source: text) -> Lexer:
+         Lexer(
+             source: source,
+             pos: 0,
+             line: 1,
+             col: 1,
+             indent_stack: [0],  # Start with zero indentation
+             pending_dedents: 0,
+             at_line_start: true,
+             paren_depth: 0,
+             in_math_block: false,
+             math_brace_depth: 0,
+             prev_token_kind: TokenKind.Eof,
+             #  # DESUGARED: pending_token: nil
+             generic_depth: 0,
+             # Block system initialization (lazy-loaded to avoid circular deps)
+             # # DESUGARED: block_registry: nil
+             block_registry: nil,  # TODO: provide default
+             #  # DESUGARED: current_block_kind: nil
+             current_lexer_mode: LexerMode.Normal,
+             in_raw_block: false,
+             raw_block_start: 0,
+             block_brace_depth: 0
+             # Unified registry (lazy-loaded)
+             ## DESUGARED: unified_registry: nil
+         )
+ 
+ 
+ fn lexer_with_registry(source: text, registry: BlockRegistry) -> Lexer:
+         """Create lexer with a custom block registry."""
+         Lexer(
+             source: source,
+             pos: 0,
+             line: 1,
+             col: 1,
+             indent_stack: [0],
+             pending_dedents: 0,
+             at_line_start: true,
+             paren_depth: 0,
+             in_math_block: false,
+             math_brace_depth: 0,
+             prev_token_kind: TokenKind.Eof,
+             #  # DESUGARED: pending_token: nil
+             generic_depth: 0,
+             # # DESUGARED: block_registry: Some(registry)
+             block_registry: registry,  # Pre-loaded with custom registry
+             #  # DESUGARED: current_block_kind: nil
+             current_lexer_mode: LexerMode.Normal,
+             in_raw_block: false,
+             raw_block_start: 0,
+             block_brace_depth: 0
+             ## DESUGARED: unified_registry: nil
+         )
+ 
+ 
+ fn lexer_get_block_registry(self: Lexer) -> BlockRegistry:
+         """Get block registry, lazy-loading on first access.
+ 
+         This avoids circular dependency at module load time:
+         - lexer → blocks → builtin → hir → parser → lexer (cycle!)
+ 
+         By deferring block_registry() call until runtime, the cycle is broken.
+         """
+         if not self.has_block_registry:
+             # Import happens at runtime, not module load time
+             # MOVED: use blocks.{block_registry}
+             self.block_registry = block_registry()
+         self.block_registry_value
+ 
+ 
+ fn lexer_maybe_insert_implicit_mul(self: Lexer, token: Token) -> Token:
+         """Check if implicit multiplication is needed before this token.
+ 
+         In math mode only, insert implicit mul for patterns like:
+         - 2x     (number followed by identifier)
+         - 2(x)   (number followed by lparen)
+         - (a)(b) (rparen followed by lparen)
+         - (a)x   (rparen followed by identifier)
+         """
+         if not self.in_math_block:
+             self.prev_token_kind = token.kind
+             return token
+ 
+         val needs_implicit_mul = match (self.prev_token_kind, token.kind):
+             # number followed by identifier: 2x
+-            case [IntLit, Ident]:
+-            case [FloatLit, Ident]:
++            case (IntLit, Ident): true
++            case (FloatLit, Ident): true
+             # number followed by lparen: 2(x+1)
+-            case [IntLit, LParen]:
+-            case [FloatLit, LParen]:
++            case (IntLit, LParen): true
++            case (FloatLit, LParen): true
+             # rparen followed by identifier: (x+1)y
+             case [RParen, Ident]: true
+             # rparen followed by lparen: (a)(b)
+             case [RParen, LParen]: true
+             # identifier followed by lparen could be function call, skip
+             case _: false
+ 
+         if needs_implicit_mul:
+             # Store current token, return ImplicitMul
+             self.pending_token = token
+             val mul_token = Token.new(
+                 TokenKind.ImplicitMul,
+                 span_new(token.span.start, token.span.start, token.span.line, token.span.col),
+                 ""
+             )
+             self.prev_token_kind = TokenKind.ImplicitMul
+             return mul_token
+         else:
+             self.prev_token_kind = token.kind
+             return token
+ 
+ 
+ fn lexer_next_token(self: Lexer) -> Token:
+         """Get the next token from the source, with implicit multiplication."""
+         # Return pending token if we inserted ImplicitMul
+         if self.has_pending_token:
+             val token = self.pending_token_value
+             self.pending_token = nil
+             self.prev_token_kind = token.kind
+             return token
+ 
+         # Get the actual token
+         val token = self.scan_token()
+ 
+         # Check for implicit multiplication
+         return self.maybe_insert_implicit_mul(token)
+ 
+ 
+ fn lexer_scan_token(self: Lexer) -> Token:
+         """Scan the next token (internal, without implicit mul check)."""
+ 
+         # Emit pending dedents first
+         if self.pending_dedents > 0:
+             self.pending_dedents = self.pending_dedents - 1
+             return Token.new(
+                 TokenKind.Dedent,
+                 span_new(self.pos, self.pos, self.line, self.col),
+                 ""
+             )
+ 
+         # Handle raw mode block payload
+         # After entering a raw block and seeing {, scan the entire payload
+         if self.in_raw_block:
+             if self.block_brace_depth == 1 and self.raw_block_start == -1:
+             # We're inside a raw block after {, scan payload
+             self.raw_block_start = 0  # Reset to prevent re-scanning
+             return self.scan_raw_block_payload()
+ 
+         # Handle indentation at line start
+         if self.at_line_start:
+             val indent_token = self.handle_indentation()
+             if has_indent_token:
+                 return indent_token_value
+ 
+         # Skip whitespace (but not newlines)
+         self.skip_horizontal_whitespace()
+ 
+         # Check for EOF
+         if self.is_at_end():
+             return token_eof(self.pos, self.line)
+ 
+         # Get current character
+         val c = self.peek()
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+ 
+         # Handle different token types
+         match c:
+             # Newline
+             case "\n":
+                 return self.scan_newline()
+ 
+             # Comments
+             case '#':
+                 # Check for #[ (attribute start)
+                 if self.peek() == '[':
+                     val start_pos = self.pos
+                     val start_line = self.line
+                     val start_col = self.col
+                     self.advance()  # consume #
+                     self.advance()  # consume [
+                     return Token.new(
+                         TokenKind.HashLBracket,
+                         span_new(start_pos, self.pos, start_line, start_col),
+                         "#["
+                     )
+                 else:
+                     return self.scan_comment()
+ 
+             # String literals (and transpose in math mode)
+             case '"':
+                 return self.scan_string()
+             case '\'':
+                 if self.in_math_block:
+                     # In math mode, single quote is transpose operator
+                     self.advance()
+                     return Token.new(
+                         TokenKind.Transpose,
+                         span_new(start, self.pos, line, col),
+                         "'"
+                     )
+                 else:
+                     return self.scan_string()
+ 
+             # Numbers
+             case '0':
+                 return self.scan_number()
+ 
+             case '1':
+                 return self.scan_number()
+ 
+             case '2':
+                 return self.scan_number()
+ 
+             case '3':
+                 return self.scan_number()
+ 
+             case '4':
+                 return self.scan_number()
+ 
+             case '5':
+                 return self.scan_number()
+ 
+             case '6':
+                 return self.scan_number()
+ 
+             case '7':
+                 return self.scan_number()
+ 
+             case '8':
+                 return self.scan_number()
+ 
+             case '9':
+                 return self.scan_number()
+ 
+             # Identifiers and keywords
+             case 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j'
+                | 'k' | 'l' | 'm' | 'n' | 'o' | 'p' | 'q' | 'r' | 's' | 't'
+                | 'u' | 'v' | 'w' | 'x' | 'y' | 'z'
+                | 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G' | 'H' | 'I' | 'J'
+                | 'K' | 'L' | 'M' | 'N' | 'O' | 'P' | 'Q' | 'R' | 'S' | 'T'
+                | 'U' | 'V' | 'W' | 'X' | 'Y' | 'Z'
+                | '_':
+                 return self.scan_identifier()
+ 
+             # Operators and delimiters
+             case _:
+                 return self.scan_operator_or_delimiter()
+ 
+ 
+ fn lexer_advance(self: Lexer) -> char:
+         """Consume and return current character."""
+         val c = self.peek()
+         self.pos = self.pos + 1
         if c == "\n":
-            self.line = self.line + 1
-            self.col = 1
-            self.at_line_start = true
-        else:
-            self.col = self.col + 1
-        c
-
-
-fn lexer_scan_newline(self: Lexer) -> Token:
-        """Scan a newline token."""
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-        self.advance()  # Consume "\n"
-
-        # Suppress newlines inside parentheses
-        if self.paren_depth > 0:
-            return self.next_token()
-
-        Token.new(
-            TokenKind.Newline,
-            span_new(start, self.pos, line, col),
-            "\n"
-        )
-
-
-fn lexer_scan_comment(self: Lexer) -> Token:
-        """Scan a comment (skip it and get next token)."""
-        val start = self.pos
-        self.advance()  # Consume '#'
-
-        # Check for doc comment (##)
-        if self.peek() == '#':
-            self.advance()
-            # Doc comment - could preserve for documentation
-
-        self.skip_to_eol()
-
-        # Comments are skipped, get next token
-        self.next_token()
-
-
-fn lexer_scan_string(self: Lexer) -> Token:
-        """Scan a string literal."""
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-        val quote = self.advance()
-
-        # Check for raw string (r"...")
-        var is_raw = false
-        if start > 0:
-            if self.source[start - 1] == 'r':
-            is_raw = true
-
-        # Check for triple-quoted string
-        var triple = false
-        if self.peek() == quote:
-            if self.peek_next() == quote:
-            self.advance()
-            self.advance()
-            triple = true
-
-        var content = ""
-        while not self.is_at_end():
-            val c = self.peek()
-
-            if triple:
-                # Triple-quoted: look for closing """
-                if c == quote:
-                    if self.peek_next() == quote:
-                    val next2 = if self.pos + 2 < self.source.len(): self.source[self.pos + 2] else: "\0"
-                    if next2 == quote:
-                        self.advance()
-                        self.advance()
-                        self.advance()
-                        break
-                content = content + c_to_string(c)
-                self.advance()
-            else:
-                # Single-quoted
-                if c == quote:
-                    self.advance()
-                    break
-                if c == "\n":
-                    # Unterminated string
-                    return Token.new(
-                        TokenKind.Error,
-                        span_new(start, self.pos, line, col),
-                        "unterminated string"
-                    )
-                if c == '\\':
-                    if not is_raw:
-                    self.advance()
-                    val escaped = self.scan_escape_sequence()
-                    content = content + escaped
-                else:
-                    content = content + c_to_string(c)
-                    self.advance()
-
-        Token.new(
-            if is_raw: TokenKind.RawStringLit else: TokenKind.StringLit,
-            span_new(start, self.pos, line, col),
-            content
-        )
-
-
-fn lexer_scan_escape_sequence(self: Lexer) -> text:
-        """Scan an escape sequence after backslash."""
-        if self.is_at_end():
-            return "\\"
-
-        val c = self.advance()
-        match c:
-            case 'n': "\n"
-            case 'r': "\r"
-            case 't': "\t"
-            case '\\': "\\"
-            case '"': "\""
-            case '\'': "'"
-            case '0': "\0"
-            case 'x':
-                # Hex escape: \xNN
-                self.scan_hex_escape(2)
-            case 'u':
-                # Unicode escape: \uNNNN
-                self.scan_hex_escape(4)
-            case _:
-                # Unknown escape, keep as-is
-                "\\" + c.to_string()
-
-
-fn lexer_scan_hex_escape(self: Lexer, digits: i64) -> text:
-        """Scan a hex escape sequence."""
-        var hex = ""
-        for _unused in 0..digits:
-            if self.is_at_end():
-                break
-            val c = self.peek()
-            if is_hex_digit(c):
-                hex = hex + c_to_string(c)
-                self.advance()
-            else:
-                break
-
-        # Convert hex string to character code point
-        var code_point = 0
-        for ch_str in hex:
-            val ch = ch_str[0]
-            code_point = code_point * 16
-            if ch >= '0':
-                if ch <= '9':
-                code_point = code_point + (ch, - '0' as i64)
-            elif ch >= 'a':
-                if ch <= 'f':
-                code_point = code_point + (ch, - 'a' as i64 + 10)
-            elif ch >= 'A':
-                if ch <= 'F':
-                code_point = code_point + (ch, - 'A' as i64 + 10)
-        # Convert code point to character string
-        char_from_code_point(code_point)
-
-
-fn lexer_scan_number(self: Lexer) -> Token:
-        """Scan a number literal (int or float)."""
-        val start_pos = sourceposition_new(self.pos, self.line, self.col)
-
-        # Check for hex, binary, or octal
-        if self.peek() == '0':
-            if not self.is_at_end():
-            val next = self.peek_next()
-            if next == 'x' or next == 'X':
-                return self.scan_hex_number(start_pos)
-            if next == 'b' or next == 'B':
-                return self.scan_binary_number(start_pos)
-            if next == 'o' or next == 'O':
-                return self.scan_octal_number(start_pos)
-
-        # Decimal number
-        self.scan_decimal_number(start_pos)
-
-
-fn lexer_scan_decimal_number(self: Lexer, start_pos: SourcePosition) -> Token:
-        """Scan a decimal number."""
-        # Integer part
-        while not self.is_at_end() and is_digit(self.peek()):
-            self.advance()
-
-        # Check for float
-        var is_float = false
-        if self.peek() == '.':
-            if is_digit(self.peek_next()):
-            is_float = true
-            self.advance()  # Consume '.'
-            while not self.is_at_end() and is_digit(self.peek()):
-                self.advance()
-
-        # Check for exponent
-        val c = self.peek()
-        if c == 'e' or c == 'E':
-            is_float = true
-            self.advance()
-            if self.peek() == '+' or self.peek() == '-':
-                self.advance()
-            while not self.is_at_end() and is_digit(self.peek()):
-                self.advance()
-
-        val text = self.source[start_pos.offset:self.pos]
-        Token.new(
-            if is_float: TokenKind.FloatLit else: TokenKind.IntLit,
-            span_new(start_pos.offset, self.pos, start_pos.line, start_pos.col),
-            text
-        )
-
-
-fn lexer_scan_hex_number(self: Lexer, start_pos: SourcePosition) -> Token:
-        """Scan a hexadecimal number (0x...)."""
-        self.advance()  # Consume '0'
-        self.advance()  # Consume 'x'
-
-        while not self.is_at_end() and is_hex_digit(self.peek()):
-            self.advance()
-
-        val text = self.source[start_pos.offset:self.pos]
-        token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
-
-
-fn lexer_scan_binary_number(self: Lexer, start_pos: SourcePosition) -> Token:
-        """Scan a binary number (0b...)."""
-        self.advance()  # Consume '0'
-        self.advance()  # Consume 'b'
-
-        while not self.is_at_end():
-            val c = self.peek()
-            if c == '0' or c == '1':
-                self.advance()
-            else:
-                break
-
-        val text = self.source[start_pos.offset:self.pos]
-        token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
-
-
-fn lexer_scan_octal_number(self: Lexer, start_pos: SourcePosition) -> Token:
-        """Scan an octal number (0o...)."""
-        self.advance()  # Consume '0'
-        self.advance()  # Consume 'o'
-
-        while not self.is_at_end():
-            val c = self.peek()
-            if c >= '0':
-                if c <= '7':
-                self.advance()
-            else:
-                break
-
-        val text = self.source[start_pos.offset:self.pos]
-        token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
-
-
-fn lexer_scan_identifier(self: Lexer) -> Token:
-        """Scan an identifier or keyword."""
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-
-        # Check for raw string prefix
-        if self.peek() == 'r':
-            if (self.peek_next() == '"' or self.peek_next() == '\''):
-            self.advance()  # Consume 'r'
-            return self.scan_string()
-
-        # PRIORITY 1: Try to detect a literal prefix: s{, sorted{, etc.
-        val literal_result = self.try_scan_literal_start(start, line, col)
-        if has_literal_result:
-            return literal_result_value
-
-        # PRIORITY 2: Try to detect a registered block: m{, loss{, etc.
-        val block_result = self.try_scan_block_start(start, line, col)
-        if has_block_result:
-            return block_result_value
-
-        # Regular identifier scanning
-        while not self.is_at_end():
-            val c = self.peek()
-            if is_ident_char(c):
-                self.advance()
-            else:
-                break
-
-        val text = self.source[start:self.pos]
-        val kind = keyword_kind(text)
-
-        token_new(kind, Span.new(start, self.pos, line, col), text)
-
-
-fn lexer_scan_raw_block_payload(self: Lexer) -> Token:
-        """Scan a raw block payload (everything between { and matching }).
-
-        Used for Raw mode blocks like sh{}, sql{} where the content
-        should not be tokenized.
-        """
-        val lbrace = r"{".char_at(0)
-        val rbrace = r"}".char_at(0)
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-        var brace_depth = 1
-
-        while not self.is_at_end() and brace_depth > 0:
-            val c = self.peek()
-            if c == lbrace:
-                brace_depth = brace_depth + 1
-            elif c == rbrace:
-                brace_depth = brace_depth - 1
-                if brace_depth == 0:
-                    break  # Don't consume the closing brace
-            self.advance()
-
-        val payload = self.source[start:self.pos]
-        token_new(TokenKind.BlockPayload, Span.new(start, self.pos, line, col), payload)
-
-
-fn lexer_scan_operator_or_delimiter(self: Lexer) -> Token:
-        """Scan an operator or delimiter.
-
-        NOTE: Uses if-elif instead of match expression because self.advance()
-        mutations inside match arms do not propagate back in the interpreter.
-        """
-        val start = self.pos
-        val line = self.line
-        val col = self.col
-        val c = self.advance()
-
-        var kind = TokenKind.Error
-
-        if c == '+':
-            if self.peek() == '=':
-                self.advance()
-                kind = TokenKind.PlusEq
-            else:
-                kind = TokenKind.Plus
-        elif c == '-':
-            if self.peek() == '>':
-                self.advance()
-                kind = TokenKind.Arrow
-            elif self.peek() == '=':
-                self.advance()
-                kind = TokenKind.MinusEq
-            else:
-                kind = TokenKind.Minus
-        elif c == '*':
-            if self.peek() == '*':
-                self.advance()
-                kind = TokenKind.StarStar
-            elif self.peek() == '=':
-                self.advance()
-                kind = TokenKind.StarEq
-            else:
-                kind = TokenKind.Star
-        elif c == '/':
-            if self.peek() == '/':
-                self.advance()
-                kind = TokenKind.Parallel
-            elif self.peek() == '=':
-                self.advance()
-                kind = TokenKind.SlashEq
-            else:
-                kind = TokenKind.Slash
-        elif c == '%':
-            if self.peek() == '=':
-                self.advance()
-                kind = TokenKind.PercentEq
-            else:
-                kind = TokenKind.Percent
-        elif c == '=':
-            if self.peek() == '=':
-                self.advance()
-                kind = TokenKind.Eq
-            elif self.peek() == '>':
-                self.advance()
-                kind = TokenKind.FatArrow
-            else:
-                kind = TokenKind.Assign
-        elif c == '!':
-            if self.peek() == '=':
-                self.advance()
-                kind = TokenKind.NotEq
-            else:
-                kind = TokenKind.Bang
-        elif c == '<':
-            if self.peek() == '<':
-                self.advance()
-                # Check for <<< (kernel launch)
-                if self.peek() == '<':
-                    self.advance()
-                    kind = TokenKind.TripleLess
-                else:
-                    kind = TokenKind.ComposeBack
-            elif self.peek() == '=':
-                self.advance()
-                kind = TokenKind.LtEq
-            else:
-                # Track generic depth: < after Ident likely opens a generic
-                if self.prev_token_kind == TokenKind.Ident:
-                    self.generic_depth = self.generic_depth + 1
-                kind = TokenKind.Lt
-        elif c == '>':
-            if self.peek() == '>':
-                if self.generic_depth == 0:
-                self.advance()
-                # Check for >>> (kernel launch end)
-                if self.peek() == '>':
-                    self.advance()
-                    kind = TokenKind.TripleGreater
-                else:
-                    kind = TokenKind.Compose
-            elif self.peek() == '=':
-                self.advance()
-                kind = TokenKind.GtEq
-            else:
-                # Track generic depth: > closes a generic
-                if self.generic_depth > 0:
-                    self.generic_depth = self.generic_depth - 1
-                kind = TokenKind.Gt
-        elif c == '&':
-            if self.peek() == '&':
-                self.advance()
-                kind = TokenKind.AmpAmp
-            else:
-                kind = TokenKind.Ampersand
-        elif c == '|':
-            if self.peek() == '>':
-                self.advance()
-                kind = TokenKind.PipeForward
-            elif self.peek() == '|':
-                self.advance()
-                kind = TokenKind.PipePipe
-            else:
-                kind = TokenKind.Pipe
-        elif c == '^':
-            if self.in_math_block:
-                kind = TokenKind.Caret
-            else:
-                return Token.new(
-                    TokenKind.Error,
-                    span_new(start, self.pos, line, col),
-                    "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
-                )
-        elif c == '~':
-            if self.peek() == '>':
-                self.advance()
-                kind = TokenKind.LayerConnect
-            else:
-                kind = TokenKind.Tilde
-        elif c == '?':
-            if self.peek() == '.':
-                self.advance()
-                kind = TokenKind.QuestionDot
-            elif self.peek() == '?':
-                self.advance()
-                kind = TokenKind.QuestionQuestion
-            else:
-                kind = TokenKind.Question
-        elif c == '.':
-            if self.peek() == '.':
-                self.advance()
-                if self.peek() == '.':
-                    self.advance()
-                    kind = TokenKind.Ellipsis
-                elif self.peek() == '=':
-                    self.advance()
-                    kind = TokenKind.DotDotEq
-                else:
-                    kind = TokenKind.DotDot
-            elif self.peek() == '?':
-                self.advance()
-                kind = TokenKind.DotQuestion
-            elif self.peek() == '+':
-                self.advance()
-                kind = TokenKind.DotPlus
-            elif self.peek() == '-':
-                self.advance()
-                kind = TokenKind.DotMinus
-            elif self.peek() == '*':
-                self.advance()
-                kind = TokenKind.DotStar
-            elif self.peek() == '/':
-                self.advance()
-                kind = TokenKind.DotSlash
-            elif self.peek() == '^':
-                self.advance()
-                kind = TokenKind.DotCaret
-            else:
-                kind = TokenKind.Dot
-        elif c == ',':
-            kind = TokenKind.Comma
-        elif c == ':':
-            kind = TokenKind.Colon
-        elif c == ';':
-            kind = TokenKind.Semicolon
-        elif c == '(':
-            self.paren_depth = self.paren_depth + 1
-            kind = TokenKind.LParen
-        elif c == ')':
-            self.paren_depth = max(0, self.paren_depth - 1)
-            kind = TokenKind.RParen
-        elif c == '{':
-            self.paren_depth = self.paren_depth + 1
-            if self.in_math_block:
-                self.math_brace_depth = self.math_brace_depth + 1
-            if self.has_current_block_kind:
-                self.block_brace_depth = self.block_brace_depth + 1
-                if self.in_raw_block:
-                    if self.block_brace_depth == 1:
-                    self.raw_block_start = -1
-            kind = TokenKind.LBrace
-        elif c == '}':
-            self.paren_depth = max(0, self.paren_depth - 1)
-            if self.in_math_block:
-                self.math_brace_depth = self.math_brace_depth - 1
-                if self.math_brace_depth < 0:
-                    self.in_math_block = false
-                    self.math_brace_depth = 0
-            if self.has_current_block_kind:
-                self.block_brace_depth = self.block_brace_depth - 1
-                if self.block_brace_depth < 0:
-                    val block_kind = self.current_block_kind_value
-                    self.current_block_kind = nil
-                    self.current_lexer_mode = LexerMode.Normal
-                    self.in_raw_block = false
-                    self.block_brace_depth = 0
-                    return token_new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
-            kind = TokenKind.RBrace
-        elif c == '[':
-            self.paren_depth = self.paren_depth + 1
-            kind = TokenKind.LBracket
-        elif c == ']':
-            self.paren_depth = max(0, self.paren_depth - 1)
-            val suffix = self.try_scan_array_suffix()
-            if has_suffix:
-                return token_new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix_value)
-            kind = TokenKind.RBracket
-        elif c == '@':
-            kind = TokenKind.At
-        elif c == '$':
-            kind = TokenKind.Dollar
-        elif c == '\\':
-            kind = TokenKind.Backslash
-        elif c == '_':
-            kind = TokenKind.Underscore
-
-        val text = self.source[start:self.pos]
-        token_new(kind, Span.new(start, self.pos, line, col), text)
-
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
-
-fn is_digit(c: char) -> bool:
-    c >= '0' and c <= '9'
-
-fn is_hex_digit(c: char) -> bool:
-    (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
-
-fn is_alpha(c: char) -> bool:
-    (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
-
-fn is_ident_start(c: char) -> bool:
-    is_alpha(c) or c == '_'
-
-fn is_ident_char(c: char) -> bool:
-    is_alpha(c) or is_digit(c) or c == '_'
-
-fn char_from_code_point(cp: i64) -> text:
-    """Convert a Unicode code point to a character string.
-    Handles common ASCII range; higher code points need proper UTF-8 encoding."""
-    if cp >= 0:
-        if cp <= 127:
-        val ch = cp as char
-        ch_to_string(ch)
-    else:
-        # For non-ASCII, return the hex escape representation
-        "\\u{cp}"
-
-fn keyword_kind(text: text) -> TokenKind:
-    """Look up keyword from text, or return Ident."""
-    match text:
-        # Declarations
-        case "fn": TokenKind.KwFn
-        case "val": TokenKind.KwVal
-        case "var": TokenKind.KwVar
-        case "struct": TokenKind.KwStruct
-        case "class": TokenKind.KwClass
-        case "enum": TokenKind.KwEnum
-        case "trait": TokenKind.KwTrait
-        case "impl": TokenKind.KwImpl
-        case "type": TokenKind.KwType
-        case "mod": TokenKind.KwMod
-        case "pub": TokenKind.KwPub
-        case "pri": TokenKind.KwPri
-        case "static": TokenKind.KwStatic
-        case "me": TokenKind.KwMe
-        case "extern": TokenKind.KwExtern
-        case "const": TokenKind.KwConst
-        case "bitfield": TokenKind.KwBitfield
-        case "kernel": TokenKind.KwKernel
-        case "shared": TokenKind.KwShared
-        case "unsafe": TokenKind.KwUnsafe
-        case "asm": TokenKind.KwAsm
-
-        # Control flow
-        case "if": TokenKind.KwIf
-        case "else": TokenKind.KwElse
-        case "elif": TokenKind.KwElif
-        case "match": TokenKind.KwMatch
-        case "case": TokenKind.KwCase
-        case "for": TokenKind.KwFor
-        case "while": TokenKind.KwWhile
-        case "loop": TokenKind.KwLoop
-        case "break": TokenKind.KwBreak
-        case "continue": TokenKind.KwContinue
-        case "return": TokenKind.KwReturn
-        case "yield": TokenKind.KwYield
-        case "await": TokenKind.KwAwait
-        case "async": TokenKind.KwAsync
-        case "spawn": TokenKind.KwSpawn
-        case "actor": TokenKind.KwActor
-
-        # Expressions
-        case "in": TokenKind.KwIn
-        case "is": TokenKind.KwIs
-        case "as": TokenKind.KwAs
-        case "not": TokenKind.KwNot
-        case "and": TokenKind.KwAnd
-        case "or": TokenKind.KwOr
-        case "xor": TokenKind.KwXor
-        case "try": TokenKind.KwTry
-        case "catch": TokenKind.KwCatch
-        case "throw": TokenKind.KwThrow
-        case "with": TokenKind.KwWith
-
-        # Imports
-        case "import": TokenKind.KwImport
-        case "export": TokenKind.KwExport
-        case "from": TokenKind.KwFrom
-
-        # Special
-        case "self": TokenKind.KwSelf
-        case "super": TokenKind.KwSuper
-        case "None": TokenKind.KwNone
-        case "Some": TokenKind.KwSome
-        case "Ok": TokenKind.KwOk
-        case "Err": TokenKind.KwErr
-        case "loss": TokenKind.KwLoss
-        case "nograd": TokenKind.KwNograd
-
-        # Literals
-        case "true": TokenKind.BoolLit
-        case "false": TokenKind.BoolLit
-        case "nil": TokenKind.NilLit
-
-        case _: TokenKind.Ident
-
-fn min(a: i64, b: i64) -> i64:
-    if a < b: a else: b
-
-fn max(a: i64, b: i64) -> i64:
-    if a > b: a else: b
-
-fn merge_spans(s1: Span, s2: Span) -> Span:
-    """Merge two spans into one covering both."""
-    val start_ = if s1.start < s2.start: s1.start else: s2.start
-    val end_ = if s1.end > s2.end: s1.end else: s2.end
-    val line_ = if s1.line < s2.line: s1.line else: s2.line
-    val col_ = if s1.line <= s2.line: s1.col else: s2.col
-    span_new(start_, end_, line_, col_)
-
-# ============================================================================
-# Convenience Functions
-# ============================================================================
-
-fn lex(source: text, filename: text) -> [Token]:
-    """Convenience function to tokenize source code.
-
-    Returns a list of all tokens from the source.
-    """
-    var lexer = Lexer(
-        source: source,
-        pos: 0,
-        line: 1,
-        col: 1,
-        indent_stack: [0],
-        pending_dedents: 0,
-        at_line_start: true,
-        paren_depth: 0,
-        in_math_block: false
-    )
-
-    var tokens = []
-    var done = false
-    for _unused in 0..10000:
-        if done:
-            break
-        val tok = lexer_next_token(lexer)
-        tokens = tokens + [tok]
-        if tok.kind == TokenKind.Eof:
+\\\\\        to: zzoxzqoo 2b48645a "feat: Complete Track A/B/C - Native backend layout optimization and LLVM backend" (rebase destination)
+             self.line = self.line + 1
+             self.col = 1
+             self.at_line_start = true
+         else:
+             self.col = self.col + 1
+         c
+ 
+ 
+ fn lexer_scan_newline(self: Lexer) -> Token:
+         """Scan a newline token."""
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+         self.advance()  # Consume "\n"
+ 
+         # Suppress newlines inside parentheses
+         if self.paren_depth > 0:
+             return self.next_token()
+ 
+         Token.new(
+             TokenKind.Newline,
+             span_new(start, self.pos, line, col),
+             "\n"
+         )
+ 
+ 
+ fn lexer_scan_comment(self: Lexer) -> Token:
+         """Scan a comment (skip it and get next token)."""
+         val start = self.pos
+         self.advance()  # Consume '#'
+ 
+         # Check for doc comment (##)
+         if self.peek() == '#':
+             self.advance()
+             # Doc comment - could preserve for documentation
+ 
+         self.skip_to_eol()
+ 
+         # Comments are skipped, get next token
+         self.next_token()
+ 
+ 
+ fn lexer_scan_string(self: Lexer) -> Token:
+         """Scan a string literal."""
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+         val quote = self.advance()
+ 
+         # Check for raw string (r"...")
+         var is_raw = false
+         if start > 0:
+             if self.source[start - 1] == 'r':
+             is_raw = true
+ 
+         # Check for triple-quoted string
+         var triple = false
+         if self.peek() == quote:
+             if self.peek_next() == quote:
+             self.advance()
+             self.advance()
+             triple = true
+ 
+         var content = ""
+         while not self.is_at_end():
+             val c = self.peek()
+ 
+             if triple:
+                 # Triple-quoted: look for closing """
+                 if c == quote:
+                     if self.peek_next() == quote:
+                     val next2 = if self.pos + 2 < self.source.len(): self.source[self.pos + 2] else: "\0"
+                     if next2 == quote:
+                         self.advance()
+                         self.advance()
+                         self.advance()
+                         break
+                 content = content + c_to_string(c)
+                 self.advance()
+             else:
+                 # Single-quoted
+                 if c == quote:
+                     self.advance()
+                     break
+                 if c == "\n":
+                     # Unterminated string
+                     return Token.new(
+                         TokenKind.Error,
+                         span_new(start, self.pos, line, col),
+                         "unterminated string"
+                     )
+                 if c == '\\':
+                     if not is_raw:
+                     self.advance()
+                     val escaped = self.scan_escape_sequence()
+                     content = content + escaped
+                 else:
+                     content = content + c_to_string(c)
+                     self.advance()
+ 
+         Token.new(
+             if is_raw: TokenKind.RawStringLit else: TokenKind.StringLit,
+             span_new(start, self.pos, line, col),
+             content
+         )
+ 
+ 
+ fn lexer_scan_escape_sequence(self: Lexer) -> text:
+         """Scan an escape sequence after backslash."""
+         if self.is_at_end():
+             return "\\"
+ 
+         val c = self.advance()
+         match c:
+             case 'n': "\n"
+             case 'r': "\r"
+             case 't': "\t"
+             case '\\': "\\"
+             case '"': "\""
+             case '\'': "'"
+             case '0': "\0"
+             case 'x':
+                 # Hex escape: \xNN
+                 self.scan_hex_escape(2)
+             case 'u':
+                 # Unicode escape: \uNNNN
+                 self.scan_hex_escape(4)
+             case _:
+                 # Unknown escape, keep as-is
+                 "\\" + c.to_string()
+ 
+ 
+ fn lexer_scan_hex_escape(self: Lexer, digits: i64) -> text:
+         """Scan a hex escape sequence."""
+         var hex = ""
+         for _unused in 0..digits:
+             if self.is_at_end():
+                 break
+             val c = self.peek()
+             if is_hex_digit(c):
+                 hex = hex + c_to_string(c)
+                 self.advance()
+             else:
+                 break
+ 
+         # Convert hex string to character code point
+         var code_point = 0
+         for ch_str in hex:
+             val ch = ch_str[0]
+             code_point = code_point * 16
+             if ch >= '0':
+                 if ch <= '9':
+                 code_point = code_point + (ch, - '0' as i64)
+             elif ch >= 'a':
+                 if ch <= 'f':
+                 code_point = code_point + (ch, - 'a' as i64 + 10)
+             elif ch >= 'A':
+                 if ch <= 'F':
+                 code_point = code_point + (ch, - 'A' as i64 + 10)
+         # Convert code point to character string
+         char_from_code_point(code_point)
+ 
+ 
+ fn lexer_scan_number(self: Lexer) -> Token:
+         """Scan a number literal (int or float)."""
+         val start_pos = sourceposition_new(self.pos, self.line, self.col)
+ 
+         # Check for hex, binary, or octal
+         if self.peek() == '0':
+             if not self.is_at_end():
+             val next = self.peek_next()
+             if next == 'x' or next == 'X':
+                 return self.scan_hex_number(start_pos)
+             if next == 'b' or next == 'B':
+                 return self.scan_binary_number(start_pos)
+             if next == 'o' or next == 'O':
+                 return self.scan_octal_number(start_pos)
+ 
+         # Decimal number
+         self.scan_decimal_number(start_pos)
+ 
+ 
+ fn lexer_scan_decimal_number(self: Lexer, start_pos: SourcePosition) -> Token:
+         """Scan a decimal number."""
+         # Integer part
+         while not self.is_at_end() and is_digit(self.peek()):
+             self.advance()
+ 
+         # Check for float
+         var is_float = false
+         if self.peek() == '.':
+             if is_digit(self.peek_next()):
+             is_float = true
+             self.advance()  # Consume '.'
+             while not self.is_at_end() and is_digit(self.peek()):
+                 self.advance()
+ 
+         # Check for exponent
+         val c = self.peek()
+         if c == 'e' or c == 'E':
+             is_float = true
+             self.advance()
+             if self.peek() == '+' or self.peek() == '-':
+                 self.advance()
+             while not self.is_at_end() and is_digit(self.peek()):
+                 self.advance()
+ 
+         val text = self.source[start_pos.offset:self.pos]
+         Token.new(
+             if is_float: TokenKind.FloatLit else: TokenKind.IntLit,
+             span_new(start_pos.offset, self.pos, start_pos.line, start_pos.col),
+             text
+         )
+ 
+ 
+ fn lexer_scan_hex_number(self: Lexer, start_pos: SourcePosition) -> Token:
+         """Scan a hexadecimal number (0x...)."""
+         self.advance()  # Consume '0'
+         self.advance()  # Consume 'x'
+ 
+         while not self.is_at_end() and is_hex_digit(self.peek()):
+             self.advance()
+ 
+         val text = self.source[start_pos.offset:self.pos]
+         token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
+ 
+ 
+ fn lexer_scan_binary_number(self: Lexer, start_pos: SourcePosition) -> Token:
+         """Scan a binary number (0b...)."""
+         self.advance()  # Consume '0'
+         self.advance()  # Consume 'b'
+ 
+         while not self.is_at_end():
+             val c = self.peek()
+             if c == '0' or c == '1':
+                 self.advance()
+             else:
+                 break
+ 
+         val text = self.source[start_pos.offset:self.pos]
+         token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
+ 
+ 
+ fn lexer_scan_octal_number(self: Lexer, start_pos: SourcePosition) -> Token:
+         """Scan an octal number (0o...)."""
+         self.advance()  # Consume '0'
+         self.advance()  # Consume 'o'
+ 
+         while not self.is_at_end():
+             val c = self.peek()
+             if c >= '0':
+                 if c <= '7':
+                 self.advance()
+             else:
+                 break
+ 
+         val text = self.source[start_pos.offset:self.pos]
+         token_new(TokenKind.IntLit, Span.new(start_pos.offset, self.pos, start_pos.line, start_pos.col), text)
+ 
+ 
+ fn lexer_scan_identifier(self: Lexer) -> Token:
+         """Scan an identifier or keyword."""
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+ 
+         # Check for raw string prefix
+         if self.peek() == 'r':
+             if (self.peek_next() == '"' or self.peek_next() == '\''):
+             self.advance()  # Consume 'r'
+             return self.scan_string()
+ 
+         # PRIORITY 1: Try to detect a literal prefix: s{, sorted{, etc.
+         val literal_result = self.try_scan_literal_start(start, line, col)
+         if has_literal_result:
+             return literal_result_value
+ 
+         # PRIORITY 2: Try to detect a registered block: m{, loss{, etc.
+         val block_result = self.try_scan_block_start(start, line, col)
+         if has_block_result:
+             return block_result_value
+ 
+         # Regular identifier scanning
+         while not self.is_at_end():
+             val c = self.peek()
+             if is_ident_char(c):
+                 self.advance()
+             else:
+                 break
+ 
+         val text = self.source[start:self.pos]
+         val kind = keyword_kind(text)
+ 
+         token_new(kind, Span.new(start, self.pos, line, col), text)
+ 
+ 
+ fn lexer_scan_raw_block_payload(self: Lexer) -> Token:
+         """Scan a raw block payload (everything between { and matching }).
+ 
+         Used for Raw mode blocks like sh{}, sql{} where the content
+         should not be tokenized.
+         """
+         val lbrace = r"{".char_at(0)
+         val rbrace = r"}".char_at(0)
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+         var brace_depth = 1
+ 
+         while not self.is_at_end() and brace_depth > 0:
+             val c = self.peek()
+             if c == lbrace:
+                 brace_depth = brace_depth + 1
+             elif c == rbrace:
+                 brace_depth = brace_depth - 1
+                 if brace_depth == 0:
+                     break  # Don't consume the closing brace
+             self.advance()
+ 
+         val payload = self.source[start:self.pos]
+         token_new(TokenKind.BlockPayload, Span.new(start, self.pos, line, col), payload)
+ 
+ 
+ fn lexer_scan_operator_or_delimiter(self: Lexer) -> Token:
+         """Scan an operator or delimiter.
+ 
+         NOTE: Uses if-elif instead of match expression because self.advance()
+         mutations inside match arms do not propagate back in the interpreter.
+         """
+         val start = self.pos
+         val line = self.line
+         val col = self.col
+         val c = self.advance()
+ 
+         var kind = TokenKind.Error
+ 
+         if c == '+':
+             if self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.PlusEq
+             else:
+                 kind = TokenKind.Plus
+         elif c == '-':
+             if self.peek() == '>':
+                 self.advance()
+                 kind = TokenKind.Arrow
+             elif self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.MinusEq
+             else:
+                 kind = TokenKind.Minus
+         elif c == '*':
+             if self.peek() == '*':
+                 self.advance()
+                 kind = TokenKind.StarStar
+             elif self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.StarEq
+             else:
+                 kind = TokenKind.Star
+         elif c == '/':
+             if self.peek() == '/':
+                 self.advance()
+                 kind = TokenKind.Parallel
+             elif self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.SlashEq
+             else:
+                 kind = TokenKind.Slash
+         elif c == '%':
+             if self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.PercentEq
+             else:
+                 kind = TokenKind.Percent
+         elif c == '=':
+             if self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.Eq
+             elif self.peek() == '>':
+                 self.advance()
+                 kind = TokenKind.FatArrow
+             else:
+                 kind = TokenKind.Assign
+         elif c == '!':
+             if self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.NotEq
+             else:
+                 kind = TokenKind.Bang
+         elif c == '<':
+             if self.peek() == '<':
+                 self.advance()
+                 # Check for <<< (kernel launch)
+                 if self.peek() == '<':
+                     self.advance()
+                     kind = TokenKind.TripleLess
+                 else:
+                     kind = TokenKind.ComposeBack
+             elif self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.LtEq
+             else:
+                 # Track generic depth: < after Ident likely opens a generic
+                 if self.prev_token_kind == TokenKind.Ident:
+                     self.generic_depth = self.generic_depth + 1
+                 kind = TokenKind.Lt
+         elif c == '>':
+             if self.peek() == '>':
+                 if self.generic_depth == 0:
+                 self.advance()
+                 # Check for >>> (kernel launch end)
+                 if self.peek() == '>':
+                     self.advance()
+                     kind = TokenKind.TripleGreater
+                 else:
+                     kind = TokenKind.Compose
+             elif self.peek() == '=':
+                 self.advance()
+                 kind = TokenKind.GtEq
+             else:
+                 # Track generic depth: > closes a generic
+                 if self.generic_depth > 0:
+                     self.generic_depth = self.generic_depth - 1
+                 kind = TokenKind.Gt
+         elif c == '&':
+             if self.peek() == '&':
+                 self.advance()
+                 kind = TokenKind.AmpAmp
+             else:
+                 kind = TokenKind.Ampersand
+         elif c == '|':
+             if self.peek() == '>':
+                 self.advance()
+                 kind = TokenKind.PipeForward
+             elif self.peek() == '|':
+                 self.advance()
+                 kind = TokenKind.PipePipe
+             else:
+                 kind = TokenKind.Pipe
+         elif c == '^':
+             if self.in_math_block:
+                 kind = TokenKind.Caret
+             else:
+                 return Token.new(
+                     TokenKind.Error,
+                     span_new(start, self.pos, line, col),
+                     "'^' only valid inside m{} math blocks (use '**' for power, 'xor' for bitwise XOR)"
+                 )
+         elif c == '~':
+             if self.peek() == '>':
+                 self.advance()
+                 kind = TokenKind.LayerConnect
+             else:
+                 kind = TokenKind.Tilde
+         elif c == '?':
+             if self.peek() == '.':
+                 self.advance()
+                 kind = TokenKind.QuestionDot
+             elif self.peek() == '?':
+                 self.advance()
+                 kind = TokenKind.QuestionQuestion
+             else:
+                 kind = TokenKind.Question
+         elif c == '.':
+             if self.peek() == '.':
+                 self.advance()
+                 if self.peek() == '.':
+                     self.advance()
+                     kind = TokenKind.Ellipsis
+                 elif self.peek() == '=':
+                     self.advance()
+                     kind = TokenKind.DotDotEq
+                 else:
+                     kind = TokenKind.DotDot
+             elif self.peek() == '?':
+                 self.advance()
+                 kind = TokenKind.DotQuestion
+             elif self.peek() == '+':
+                 self.advance()
+                 kind = TokenKind.DotPlus
+             elif self.peek() == '-':
+                 self.advance()
+                 kind = TokenKind.DotMinus
+             elif self.peek() == '*':
+                 self.advance()
+                 kind = TokenKind.DotStar
+             elif self.peek() == '/':
+                 self.advance()
+                 kind = TokenKind.DotSlash
+             elif self.peek() == '^':
+                 self.advance()
+                 kind = TokenKind.DotCaret
+             else:
+                 kind = TokenKind.Dot
+         elif c == ',':
+             kind = TokenKind.Comma
+         elif c == ':':
+             kind = TokenKind.Colon
+         elif c == ';':
+             kind = TokenKind.Semicolon
+         elif c == '(':
+             self.paren_depth = self.paren_depth + 1
+             kind = TokenKind.LParen
+         elif c == ')':
+             self.paren_depth = max(0, self.paren_depth - 1)
+             kind = TokenKind.RParen
+         elif c == '{':
+             self.paren_depth = self.paren_depth + 1
+             if self.in_math_block:
+                 self.math_brace_depth = self.math_brace_depth + 1
+             if self.has_current_block_kind:
+                 self.block_brace_depth = self.block_brace_depth + 1
+                 if self.in_raw_block:
+                     if self.block_brace_depth == 1:
+                     self.raw_block_start = -1
+             kind = TokenKind.LBrace
+         elif c == '}':
+             self.paren_depth = max(0, self.paren_depth - 1)
+             if self.in_math_block:
+                 self.math_brace_depth = self.math_brace_depth - 1
+                 if self.math_brace_depth < 0:
+                     self.in_math_block = false
+                     self.math_brace_depth = 0
+             if self.has_current_block_kind:
+                 self.block_brace_depth = self.block_brace_depth - 1
+                 if self.block_brace_depth < 0:
+                     val block_kind = self.current_block_kind_value
+                     self.current_block_kind = nil
+                     self.current_lexer_mode = LexerMode.Normal
+                     self.in_raw_block = false
+                     self.block_brace_depth = 0
+                     return token_new(TokenKind.BlockEnd, Span.new(start, self.pos, line, col), block_kind)
+             kind = TokenKind.RBrace
+         elif c == '[':
+             self.paren_depth = self.paren_depth + 1
+             kind = TokenKind.LBracket
+         elif c == ']':
+             self.paren_depth = max(0, self.paren_depth - 1)
+             val suffix = self.try_scan_array_suffix()
+             if has_suffix:
+                 return token_new(TokenKind.ArraySuffix, Span.new(start, self.pos, line, col), suffix_value)
+             kind = TokenKind.RBracket
+         elif c == '@':
+             kind = TokenKind.At
+         elif c == '$':
+             kind = TokenKind.Dollar
+         elif c == '\\':
+             kind = TokenKind.Backslash
+         elif c == '_':
+             kind = TokenKind.Underscore
+ 
+         val text = self.source[start:self.pos]
+         token_new(kind, Span.new(start, self.pos, line, col), text)
+ 
+ 
+ # ============================================================================
+ # Helper Functions
+ # ============================================================================
+ 
+ fn is_digit(c: char) -> bool:
+     c >= '0' and c <= '9'
+ 
+ fn is_hex_digit(c: char) -> bool:
+     (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+ 
+ fn is_alpha(c: char) -> bool:
+     (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
+ 
+ fn is_ident_start(c: char) -> bool:
+     is_alpha(c) or c == '_'
+ 
+ fn is_ident_char(c: char) -> bool:
+     is_alpha(c) or is_digit(c) or c == '_'
+ 
+ fn char_from_code_point(cp: i64) -> text:
+     """Convert a Unicode code point to a character string.
+     Handles common ASCII range; higher code points need proper UTF-8 encoding."""
+     if cp >= 0:
+         if cp <= 127:
+         val ch = cp as char
+         ch_to_string(ch)
+     else:
+         # For non-ASCII, return the hex escape representation
+         "\\u{cp}"
+ 
+ fn keyword_kind(text: text) -> TokenKind:
+     """Look up keyword from text, or return Ident."""
+     match text:
+         # Declarations
+         case "fn": TokenKind.KwFn
+         case "val": TokenKind.KwVal
+         case "var": TokenKind.KwVar
+         case "struct": TokenKind.KwStruct
+         case "class": TokenKind.KwClass
+         case "enum": TokenKind.KwEnum
+         case "trait": TokenKind.KwTrait
+         case "impl": TokenKind.KwImpl
+         case "type": TokenKind.KwType
+         case "mod": TokenKind.KwMod
+         case "pub": TokenKind.KwPub
+         case "pri": TokenKind.KwPri
+         case "static": TokenKind.KwStatic
+         case "me": TokenKind.KwMe
+         case "extern": TokenKind.KwExtern
+         case "const": TokenKind.KwConst
+         case "bitfield": TokenKind.KwBitfield
+         case "kernel": TokenKind.KwKernel
+         case "shared": TokenKind.KwShared
+         case "unsafe": TokenKind.KwUnsafe
+-        case "asm_code": TokenKind.KwAsm
++        case "asm": TokenKind.KwAsm
+ 
+         # Control flow
+         case "if": TokenKind.KwIf
+         case "else": TokenKind.KwElse
+         case "elif": TokenKind.KwElif
+         case "match": TokenKind.KwMatch
+         case "case": TokenKind.KwCase
+         case "for": TokenKind.KwFor
+         case "while": TokenKind.KwWhile
+-        case "loop_item": TokenKind.KwLoop
++        case "loop": TokenKind.KwLoop
+         case "break": TokenKind.KwBreak
+         case "continue": TokenKind.KwContinue
+         case "return": TokenKind.KwReturn
+         case "yield": TokenKind.KwYield
+         case "await": TokenKind.KwAwait
+         case "async": TokenKind.KwAsync
+         case "spawn": TokenKind.KwSpawn
+         case "actor": TokenKind.KwActor
+ 
+         # Expressions
+         case "in": TokenKind.KwIn
+         case "is": TokenKind.KwIs
+         case "as": TokenKind.KwAs
+         case "not": TokenKind.KwNot
+         case "and": TokenKind.KwAnd
+         case "or": TokenKind.KwOr
+         case "xor": TokenKind.KwXor
+         case "try": TokenKind.KwTry
+         case "catch": TokenKind.KwCatch
+         case "throw": TokenKind.KwThrow
+         case "with": TokenKind.KwWith
+ 
+         # Imports
+         case "import": TokenKind.KwImport
+         case "export": TokenKind.KwExport
+         case "from": TokenKind.KwFrom
+ 
+         # Special
+         case "self": TokenKind.KwSelf
+         case "super": TokenKind.KwSuper
+         case "None": TokenKind.KwNone
+         case "Some": TokenKind.KwSome
+         case "Ok": TokenKind.KwOk
+         case "Err": TokenKind.KwErr
+         case "loss": TokenKind.KwLoss
+         case "nograd": TokenKind.KwNograd
+ 
+         # Literals
+         case "true": TokenKind.BoolLit
+         case "false": TokenKind.BoolLit
+         case "nil": TokenKind.NilLit
+ 
+         case _: TokenKind.Ident
+ 
+ fn min(a: i64, b: i64) -> i64:
+     if a < b: a else: b
+ 
+ fn max(a: i64, b: i64) -> i64:
+     if a > b: a else: b
+ 
+ fn merge_spans(s1: Span, s2: Span) -> Span:
+     """Merge two spans into one covering both."""
+     val start_ = if s1.start < s2.start: s1.start else: s2.start
+     val end_ = if s1.end > s2.end: s1.end else: s2.end
+     val line_ = if s1.line < s2.line: s1.line else: s2.line
+     val col_ = if s1.line <= s2.line: s1.col else: s2.col
+     span_new(start_, end_, line_, col_)
+ 
+ # ============================================================================
+ # Convenience Functions
+ # ============================================================================
+ 
+ fn lex(source: text, filename: text) -> [Token]:
+     """Convenience function to tokenize source code.
+ 
+     Returns a list of all tokens from the source.
+     """
+     var lexer = Lexer(
+         source: source,
+         pos: 0,
+         line: 1,
+         col: 1,
+         indent_stack: [0],
+         pending_dedents: 0,
+         at_line_start: true,
+         paren_depth: 0,
+         in_math_block: false
+     )
+ 
+     var tokens = []
+     var done = false
+     for _unused in 0..10000:
+         if done:
+             break
+         val tok = lexer_next_token(lexer)
+         tokens = tokens + [tok]
+         if tok.kind == TokenKind.Eof:
             done = true
+        elif c == "\\":
+            lex_advance()
+            val esc: text = lex_advance()
+            if esc == "n":
+                result = result + "\n"
+            elif esc == "t":
+                result = result + "\t"
+            elif esc == "r":
+                result = result + "\r"
+            elif esc == "\\":
+                result = result + "\\"
+            elif esc == "\"":
+                result = result + "\""
+            elif esc == "'":
+                result = result + "'"
+            elif esc == "0":
+                result = result + "\0"
+            else:
+                result = result + "\\"
+                result = result + esc
+        else:
+            result = result + lex_advance()
 
-    tokens
+    lex_make_token(TOK_STRING_LIT, result, start_line, start_col)
 
-# ============================================================================
-# Factory functions (standalone, for interpreter compatibility)
-# ============================================================================
+# ===== Identifier/Keyword Scanning =====
 
-fn create_lexer(src: text) -> Lexer:
-    """Create a Lexer. Standalone function for interpreter compatibility."""
-    Lexer(
-        source: src,
-        pos: 0,
-        line: 1,
-        col: 1,
-        indent_stack: [0],
-        pending_dedents: 0,
-        at_line_start: true,
-        paren_depth: 0,
-        in_math_block: false,
-        math_brace_depth: 0,
-        prev_token_kind: TokenKind.Eof,
-        #  # DESUGARED: pending_token: nil
-        generic_depth: 0,
-        #  # DESUGARED: block_registry: nil
-        #  # DESUGARED: current_block_kind: nil
-        current_lexer_mode: LexerMode.Normal,
-        in_raw_block: false,
-        raw_block_start: 0,
-        block_brace_depth: 0
-        ## DESUGARED: unified_registry: nil
-    )
+fn lex_scan_ident():
+    val start: i64 = lex_pos
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
 
-fn create_token_eof(pos: i64, line: i64) -> Token:
-    """Create an EOF token. Standalone function for interpreter compatibility."""
-    Token(
-        kind: TokenKind.Eof,
-        span: Span(start: pos, end: pos, line: line, col: 0),
-        text: ""
-    )
+    for i in 0..1000:
+        val c: text = lex_peek()
+        if is_ident_char(c):
+            lex_advance()
+        else:
+            break
 
-# ============================================================================
-# Exports
-# ============================================================================
+    val ident_text: text = lex_source[start:lex_pos]
 
-export TokenKind, Token, Span, Lexer
-export is_digit, is_hex_digit, is_alpha, is_ident_start, is_ident_char, keyword_kind
-export min, max, merge_spans
-export lex
-export create_lexer, create_token_eof
+    # Check for keyword
+    val kw_kind: i64 = keyword_lookup(ident_text)
+    if kw_kind != TOK_IDENT:
+        # Special: true/false → bool literal, nil → nil literal
+        if kw_kind == TOK_KW_TRUE:
+            lex_make_token(TOK_BOOL_LIT, "true", start_line, start_col)
+        elif kw_kind == TOK_KW_FALSE:
+            lex_make_token(TOK_BOOL_LIT, "false", start_line, start_col)
+        elif kw_kind == TOK_KW_NIL:
+            lex_make_token(TOK_NIL_LIT, "nil", start_line, start_col)
+        else:
+            lex_make_token(kw_kind, ident_text, start_line, start_col)
+    else:
+        # Check for underscore-only as special token
+        if ident_text == "_":
+            lex_make_token(TOK_UNDERSCORE, "_", start_line, start_col)
+        else:
+            lex_make_token(TOK_IDENT, ident_text, start_line, start_col)
+
+# ===== Skip Whitespace (not newlines) =====
+
+fn lex_skip_spaces():
+    for i in 0..100000:
+        val c: text = lex_peek()
+        if c == " ":
+            lex_advance()
+        elif c == "\t":
+            lex_advance()
+        else:
+            break
+
+# ===== Indentation Handling =====
+
+fn lex_handle_indentation():
+    # Count leading whitespace
+    var indent_level: i64 = 0
+    for i in 0..10000:
+        val c: text = lex_peek()
+        if c == " ":
+            indent_level = indent_level + 1
+            lex_advance()
+        elif c == "\t":
+            indent_level = indent_level + 4
+            lex_advance()
+        else:
+            break
+
+    # Skip blank lines and comment-only lines
+    val next_c: text = lex_peek()
+    val is_blank: bool = next_c == "\n"
+    val is_end: bool = next_c == ""
+    val is_comment: bool = next_c == "#"
+    if is_blank:
+        lex_advance()
+        lex_at_line_start = true
+        return
+    if is_end:
+        return
+    if is_comment:
+        # Skip comment, then the newline
+        for i in 0..100000:
+            val cc: text = lex_peek()
+            val is_nl: bool = cc == "\n"
+            val is_eof: bool = cc == ""
+            val done: bool = is_nl or is_eof
+            if done:
+                break
+            lex_advance()
+        if lex_peek() == "\n":
+            lex_advance()
+        lex_at_line_start = true
+        return
+
+    lex_at_line_start = false
+
+    # Compare with current indent level
+    val stack_len: i64 = lex_indent_stack.len()
+    val current_indent: i64 = lex_indent_stack[stack_len - 1]
+
+    if indent_level > current_indent:
+        lex_indent_stack.push(indent_level)
+        lex_make_token(TOK_INDENT, "", lex_line, 1)
+    elif indent_level < current_indent:
+        # Pop indent stack and count dedents
+        var dedent_count: i64 = 0
+        for i in 0..100:
+            val slen: i64 = lex_indent_stack.len()
+            if slen <= 1:
+                break
+            val top: i64 = lex_indent_stack[slen - 1]
+            if top <= indent_level:
+                break
+            lex_indent_stack.pop()
+            dedent_count = dedent_count + 1
+
+        # First dedent is returned immediately, rest are pending
+        if dedent_count > 0:
+            lex_pending_dedents = dedent_count - 1
+            lex_make_token(TOK_DEDENT, "", lex_line, 1)
+        else:
+            # Indent level doesn't match any in stack — error
+            lex_make_token(TOK_ERROR, "inconsistent indentation", lex_line, 1)
+
+# ===== Main Token Scanner =====
+
+fn lex_scan_token():
+    # Check EOF first (before indentation or anything else)
+    if lex_at_end():
+        val slen: i64 = lex_indent_stack.len()
+        if slen > 1:
+            lex_indent_stack.pop()
+            lex_pending_dedents = slen - 2
+            lex_make_token(TOK_DEDENT, "", lex_line, lex_col)
+            return
+        lex_make_token(TOK_EOF, "", lex_line, lex_col)
+        return
+
+    # Handle indentation at line start BEFORE skipping spaces
+    # (handle_indentation counts and consumes leading spaces itself)
+    if lex_at_line_start:
+        if lex_paren_depth > 0:
+            # Inside parens/brackets: suppress indentation tokens
+            lex_at_line_start = false
+            lex_skip_spaces()
+            lex_scan_token()
+            return
+        lex_cur_kind = 0
+        lex_handle_indentation()
+        if lex_cur_kind != 0:
+            return
+        # Same indent or blank/comment line consumed
+        lex_scan_token()
+        return
+
+    # Skip spaces (not newlines) — only for mid-line tokens
+    lex_skip_spaces()
+
+    if lex_at_end():
+        # Emit pending dedents for remaining indentation
+        val slen: i64 = lex_indent_stack.len()
+        if slen > 1:
+            lex_indent_stack.pop()
+            lex_pending_dedents = slen - 2
+            lex_make_token(TOK_DEDENT, "", lex_line, lex_col)
+            return
+        lex_make_token(TOK_EOF, "", lex_line, lex_col)
+        return
+
+    val start_line: i64 = lex_line
+    val start_col: i64 = lex_col
+    val c: text = lex_peek()
+
+    # Newline
+    if c == "\n":
+        lex_advance()
+        lex_at_line_start = true
+        if lex_paren_depth > 0:
+            # Inside parens: suppress newline, scan next token
+            lex_scan_token()
+            return
+        lex_make_token(TOK_NEWLINE, "\n", start_line, start_col)
+        return
+
+    # Comment
+    if c == "#":
+        val next: text = lex_peek_next()
+        if next == "[":
+            # Attribute: #[
+            lex_advance()
+            lex_advance()
+            lex_make_token(TOK_HASH_LBRACKET, "#[", start_line, start_col)
+            return
+        # Skip comment to end of line
+        for i in 0..100000:
+            val cc: text = lex_peek()
+            val is_nl: bool = cc == "\n"
+            val is_eof: bool = cc == ""
+            val done: bool = is_nl or is_eof
+            if done:
+                break
+            lex_advance()
+        # Recurse to get next real token
+        lex_scan_token()
+        return
+
+    # String literal
+    val is_dquote: bool = c == "\""
+    val is_squote: bool = c == "'"
+    if is_dquote:
+        lex_scan_string()
+        return
+    if is_squote:
+        lex_scan_string()
+        return
+
+    # Number literal
+    if is_digit(c):
+        lex_scan_number()
+        return
+
+    # Identifier or keyword
+    val is_al: bool = is_alpha(c)
+    val is_un: bool = c == "_"
+    val starts_ident: bool = is_al or is_un
+    if starts_ident:
+        lex_scan_ident()
+        return
+
+    # Operators and delimiters (single char consumed via advance)
+    lex_advance()
+
+    # Two+ character operators
+    if c == "=":
+        if lex_match_char("="):
+            lex_make_token(TOK_EQ, "==", start_line, start_col)
+        elif lex_match_char(">"):
+            lex_make_token(TOK_FAT_ARROW, "=>", start_line, start_col)
+        else:
+            lex_make_token(TOK_ASSIGN, "=", start_line, start_col)
+        return
+
+    if c == "!":
+        if lex_match_char("="):
+            lex_make_token(TOK_NEQ, "!=", start_line, start_col)
+        else:
+            lex_make_token(TOK_NOT, "!", start_line, start_col)
+        return
+
+    if c == "<":
+        if lex_match_char("<"):
+            lex_make_token(TOK_SHL, "<<", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_LEQ, "<=", start_line, start_col)
+        else:
+            lex_make_token(TOK_LT, "<", start_line, start_col)
+        return
+
+    if c == ">":
+        if lex_match_char(">"):
+            lex_make_token(TOK_SHR, ">>", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_GEQ, ">=", start_line, start_col)
+        else:
+            lex_make_token(TOK_GT, ">", start_line, start_col)
+        return
+
+    if c == "+":
+        if lex_match_char("="):
+            lex_make_token(TOK_PLUS_ASSIGN, "+=", start_line, start_col)
+        else:
+            lex_make_token(TOK_PLUS, "+", start_line, start_col)
+        return
+
+    if c == "-":
+        if lex_match_char(">"):
+            lex_make_token(TOK_ARROW, "->", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_MINUS_ASSIGN, "-=", start_line, start_col)
+        else:
+            lex_make_token(TOK_MINUS, "-", start_line, start_col)
+        return
+
+    if c == "*":
+        if lex_match_char("*"):
+            lex_make_token(TOK_DOUBLE_STAR, "**", start_line, start_col)
+        elif lex_match_char("="):
+            lex_make_token(TOK_STAR_ASSIGN, "*=", start_line, start_col)
+        else:
+            lex_make_token(TOK_STAR, "*", start_line, start_col)
+        return
+
+    if c == "/":
+        if lex_match_char("="):
+            lex_make_token(TOK_SLASH_ASSIGN, "/=", start_line, start_col)
+        else:
+            lex_make_token(TOK_SLASH, "/", start_line, start_col)
+        return
+
+    if c == "%":
+        lex_make_token(TOK_PERCENT, "%", start_line, start_col)
+        return
+
+    if c == ".":
+        val d1: text = lex_peek()
+        if d1 == ".":
+            lex_advance()
+            val d2: text = lex_peek()
+            if d2 == ".":
+                lex_advance()
+                lex_make_token(TOK_DOTDOTDOT, "...", start_line, start_col)
+            elif d2 == "=":
+                lex_advance()
+                lex_make_token(TOK_DOTDOT_EQ, "..=", start_line, start_col)
+            else:
+                lex_make_token(TOK_DOTDOT, "..", start_line, start_col)
+        elif d1 == "?":
+            lex_advance()
+            lex_make_token(TOK_QUESTION_DOT, ".?", start_line, start_col)
+        else:
+            lex_make_token(TOK_DOT, ".", start_line, start_col)
+        return
+
+    if c == "?":
+        val q1: text = lex_peek()
+        if q1 == "?":
+            lex_advance()
+            lex_make_token(TOK_DOUBLE_QUESTION, "??", start_line, start_col)
+        elif q1 == ".":
+            lex_advance()
+            lex_make_token(TOK_QUESTION_DOT, "?.", start_line, start_col)
+        else:
+            lex_make_token(TOK_QUESTION, "?", start_line, start_col)
+        return
+
+    if c == "|":
+        if lex_match_char(">"):
+            lex_make_token(TOK_PIPE_FORWARD, "|>", start_line, start_col)
+        else:
+            lex_make_token(TOK_PIPE, "|", start_line, start_col)
+        return
+
+    if c == "@":
+        lex_make_token(TOK_AT, "@", start_line, start_col)
+        return
+
+    if c == ";":
+        lex_make_token(TOK_SEMICOLON, ";", start_line, start_col)
+        return
+
+    # Delimiters (track paren depth)
+    if c == "(":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_make_token(TOK_LPAREN, "(", start_line, start_col)
+        return
+
+    if c == ")":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        lex_make_token(TOK_RPAREN, ")", start_line, start_col)
+        return
+
+    if c == "[":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_make_token(TOK_LBRACKET, "[", start_line, start_col)
+        return
+
+    if c == "]":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        lex_make_token(TOK_RBRACKET, "]", start_line, start_col)
+        return
+
+    if c == "{":
+        lex_paren_depth = lex_paren_depth + 1
+        lex_make_token(TOK_LBRACE, "{", start_line, start_col)
+        return
+
+    if c == "}":
+        if lex_paren_depth > 0:
+            lex_paren_depth = lex_paren_depth - 1
+        lex_make_token(TOK_RBRACE, "}", start_line, start_col)
+        return
+
+    if c == ":":
+        lex_make_token(TOK_COLON, ":", start_line, start_col)
+        return
+
+    if c == ",":
+        lex_make_token(TOK_COMMA, ",", start_line, start_col)
+        return
+
+    # Unknown character
+    lex_make_token(TOK_ERROR, "unexpected character: " + c, start_line, start_col)
+
+# ===== Public API =====
+
+fn lex_next() -> i64:
+    # Check for pending dedents
+    if lex_pending_dedents > 0:
+        lex_pending_dedents = lex_pending_dedents - 1
+        lex_cur_kind = TOK_DEDENT
+        lex_cur_text = ""
+        return TOK_DEDENT
+
+    lex_scan_token()
+    return lex_cur_kind
+
+fn lex_token_kind() -> i64:
+    lex_cur_kind
+
+fn lex_token_text() -> text:
+    lex_cur_text
+
+fn lex_token_line() -> i64:
+    lex_cur_line
+
+fn lex_token_col() -> i64:
+    lex_cur_col
+
+# ===== Convenience: Tokenize All =====
+# Tokenizes entire source and returns arrays of token data.
+# Useful for testing and debugging.
+
+var lex_all_kinds: [i64] = []
+var lex_all_texts: [text] = []
+var lex_all_lines: [i64] = []
+var lex_all_cols: [i64] = []
+
+fn lex_tokenize_all(source: text) -> i64:
+    lex_init(source)
+    lex_all_kinds = []
+    lex_all_texts = []
+    lex_all_lines = []
+    lex_all_cols = []
+
+    for i in 0..1000000:
+        val kind: i64 = lex_next()
+        lex_all_kinds.push(kind)
+        lex_all_texts.push(lex_cur_text)
+        lex_all_lines.push(lex_cur_line)
+        lex_all_cols.push(lex_cur_col)
+        if kind == TOK_EOF:
+            break
+
+    lex_all_kinds.len()

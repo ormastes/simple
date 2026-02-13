@@ -55,6 +55,7 @@ use core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use core.ast.{expr_range, expr_assign, expr_compound_assign}
 use core.ast.{expr_unit, expr_pass, expr_null_coalesce, expr_slice}
+use core.ast.{expr_dict_lit}
 use core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use core.ast.{expr_match_expr, expr_block}
 use core.ast.{expr_await, expr_yield, expr_spawn}
@@ -184,7 +185,10 @@ fn parser_parse_type() -> i64:
             # Dict<K,V> -> TYPE_DICT
             if type_name == "Dict":
                 return TYPE_DICT
-            # Unknown generic type - return TYPE_ANY
+            # Unknown generic type - check if base is a named struct
+            val gid = named_type_find(type_name)
+            if gid >= 0:
+                return TYPE_NAMED_BASE + gid
             return TYPE_VOID
         # Check for postfix ? for Option shorthand: i64? -> Option<i64>
         if par_kind == TOK_QUESTION:
@@ -906,22 +910,42 @@ fn parse_primary() -> i64:
     # Dict literal: {key: value, ...} or empty {}
     if par_kind == TOK_LBRACE:
         parser_advance()
-        # Skip contents until matching }
-        var brace_depth: i64 = 1
-        for i in 0..100000:
-            if par_kind == TOK_LBRACE:
-                brace_depth = brace_depth + 1
+        var key_exprs: [i64] = []
+        var value_exprs: [i64] = []
+
+        # Check for empty dict {}
+        if par_kind == TOK_RBRACE:
+            parser_advance()
+            return expr_dict_lit(key_exprs, value_exprs, 0)
+
+        # Parse key-value pairs
+        for i in 0..10000:
+            # Parse key
+            val key = parse_expr()
+            key_exprs.push(key)
+
+            # Expect colon
+            parser_expect(TOK_COLON)
+
+            # Parse value
+            val value = parse_expr()
+            value_exprs.push(value)
+
+            # Check for comma or closing brace
+            if par_kind == TOK_COMMA:
                 parser_advance()
-            elif par_kind == TOK_RBRACE:
-                brace_depth = brace_depth - 1
-                parser_advance()
-                if brace_depth == 0:
+                # Allow trailing comma before }
+                if par_kind == TOK_RBRACE:
+                    parser_advance()
                     break
-            elif par_kind == TOK_EOF:
+            elif par_kind == TOK_RBRACE:
+                parser_advance()
                 break
             else:
-                parser_advance()
-        return expr_nil_lit(0)
+                parser_error("expected , or } in dict literal")
+                break
+
+        return expr_dict_lit(key_exprs, value_exprs, 0)
 
     # Lambda: \x: expr or \x, y: expr
     if par_kind == TOK_ERROR:
@@ -1127,14 +1151,51 @@ fn parse_match_stmt() -> i64:
 
         if par_kind == TOK_KW_CASE:
             parser_advance()
-            val pattern = parse_expr()
 
-            # Support multi-value: case X | Y:
-            # For now, just single pattern
+            # Support multi-pattern: case X | Y | Z:
+            # Parse first pattern
+            var patterns: [i64] = []
+            patterns.push(parse_expr())
+
+            # Check for pipe separator and collect additional patterns
+            # Support multi-line patterns by skipping newlines/indents before pipes
+            for skip_idx in 0..100:
+                val is_nl = par_kind == TOK_NEWLINE
+                val is_indent = par_kind == TOK_INDENT
+                val should_skip = is_nl or is_indent
+                if not should_skip:
+                    break
+                parser_advance()
+
+            while par_kind == TOK_PIPE:
+                parser_advance()
+                # Skip newlines/indents after pipe
+                for skip_idx in 0..100:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_indent = par_kind == TOK_INDENT
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+                patterns.push(parse_expr())
+                # Skip newlines/indents after pattern
+                for skip_idx in 0..100:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_indent = par_kind == TOK_INDENT
+                    val should_skip = is_nl or is_indent
+                    if not should_skip:
+                        break
+                    parser_advance()
+
+            # Expect colon after all patterns
             parser_expect(TOK_COLON)
             val arm_body = parse_block()
-            val arm_idx = arm_new(pattern, -1, arm_body)
-            arm_indices.push(arm_idx)
+
+            # Create an arm for each pattern (they share the same body)
+            for i in 0..patterns.len():
+                val pattern_idx = patterns[i]
+                val arm_idx = arm_new(pattern_idx, -1, arm_body)
+                arm_indices.push(arm_idx)
         else:
             parser_error("expected 'case' in match block")
             parser_advance()
