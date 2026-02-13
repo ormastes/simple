@@ -25,18 +25,148 @@ bool rt_dir_create(const char* path, bool recursive) {
 }
 
 const char** rt_dir_list(const char* path, int64_t* out_count) {
-    (void)path;
-    if (out_count) *out_count = 0;
-    return NULL;
+    if (!path || !out_count) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    /* Build search pattern: path + "\\*" */
+    size_t path_len = strlen(path);
+    char* search_pattern = malloc(path_len + 3);
+    if (!search_pattern) {
+        *out_count = 0;
+        return NULL;
+    }
+    strcpy(search_pattern, path);
+    if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
+        strcat(search_pattern, "\\");
+    }
+    strcat(search_pattern, "*");
+
+    /* First pass: count entries (excluding . and ..) */
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_pattern, &find_data);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        free(search_pattern);
+        *out_count = 0;
+        return NULL;
+    }
+
+    int64_t count = 0;
+    do {
+        if (strcmp(find_data.cFileName, ".") != 0 && strcmp(find_data.cFileName, "..") != 0) {
+            count++;
+        }
+    } while (FindNextFileA(hFind, &find_data));
+    FindClose(hFind);
+
+    if (count == 0) {
+        free(search_pattern);
+        *out_count = 0;
+        return NULL;
+    }
+
+    /* Second pass: collect entries */
+    const char** result = malloc(sizeof(char*) * (count + 1));
+    if (!result) {
+        free(search_pattern);
+        *out_count = 0;
+        return NULL;
+    }
+
+    hFind = FindFirstFileA(search_pattern, &find_data);
+    free(search_pattern);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        free(result);
+        *out_count = 0;
+        return NULL;
+    }
+
+    int64_t i = 0;
+    do {
+        if (strcmp(find_data.cFileName, ".") != 0 && strcmp(find_data.cFileName, "..") != 0 && i < count) {
+            result[i++] = _strdup(find_data.cFileName);
+        }
+    } while (FindNextFileA(hFind, &find_data));
+    FindClose(hFind);
+
+    result[count] = NULL;
+    *out_count = count;
+    return result;
 }
 
 void rt_dir_list_free(const char** entries, int64_t count) {
     (void)entries; (void)count;
 }
 
+/* Helper: Recursively remove directory contents */
+static bool rt_dir_remove_all_impl(const char* path) {
+    if (!path) return false;
+
+    /* Build search pattern */
+    size_t path_len = strlen(path);
+    char* search_pattern = malloc(path_len + 3);
+    if (!search_pattern) return false;
+    strcpy(search_pattern, path);
+    if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
+        strcat(search_pattern, "\\");
+    }
+    strcat(search_pattern, "*");
+
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA(search_pattern, &find_data);
+    free(search_pattern);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return RemoveDirectoryA(path);
+    }
+
+    bool success = true;
+    do {
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0) {
+            continue;
+        }
+
+        /* Build full path: path + "\\" + filename */
+        size_t full_len = path_len + 1 + strlen(find_data.cFileName) + 1;
+        char* full_path = malloc(full_len);
+        if (!full_path) {
+            success = false;
+            continue;
+        }
+        strcpy(full_path, path);
+        if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
+            strcat(full_path, "\\");
+        }
+        strcat(full_path, find_data.cFileName);
+
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            /* Recursively remove subdirectory */
+            if (!rt_dir_remove_all_impl(full_path)) {
+                success = false;
+            }
+        } else {
+            /* Delete file */
+            if (!DeleteFileA(full_path)) {
+                success = false;
+            }
+        }
+        free(full_path);
+    } while (FindNextFileA(hFind, &find_data));
+
+    FindClose(hFind);
+
+    /* Remove the directory itself */
+    if (!RemoveDirectoryA(path)) {
+        success = false;
+    }
+
+    return success;
+}
+
 bool rt_dir_remove_all(const char* path) {
-    (void)path;
-    return false;
+    return rt_dir_remove_all_impl(path);
 }
 
 /* ----------------------------------------------------------------
@@ -44,13 +174,69 @@ bool rt_dir_remove_all(const char* path) {
  * ---------------------------------------------------------------- */
 
 int64_t rt_file_lock(const char* path, int64_t timeout_secs) {
-    (void)path; (void)timeout_secs;
-    return -1;
+    if (!path) return -1;
+
+    /* Open or create file for locking */
+    HANDLE hFile = CreateFileA(
+        path,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        NULL
+    );
+
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+
+    /* Set up lock parameters */
+    OVERLAPPED overlapped = {0};
+    DWORD flags = LOCKFILE_EXCLUSIVE_LOCK;
+
+    if (timeout_secs <= 0) {
+        /* Blocking lock */
+        if (!LockFileEx(hFile, flags, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+            CloseHandle(hFile);
+            return -1;
+        }
+    } else {
+        /* Non-blocking lock with timeout via polling */
+        flags |= LOCKFILE_FAIL_IMMEDIATELY;
+        int64_t start_time = (int64_t)GetTickCount64();
+        int64_t timeout_ms = timeout_secs * 1000;
+
+        while (1) {
+            if (LockFileEx(hFile, flags, 0, MAXDWORD, MAXDWORD, &overlapped)) {
+                break;  /* Lock acquired */
+            }
+
+            /* Check timeout */
+            int64_t elapsed = (int64_t)GetTickCount64() - start_time;
+            if (elapsed >= timeout_ms) {
+                CloseHandle(hFile);
+                return -1;  /* Timeout */
+            }
+
+            /* Wait a bit before retrying */
+            Sleep(50);
+        }
+    }
+
+    return (int64_t)hFile;
 }
 
 bool rt_file_unlock(int64_t handle) {
-    (void)handle;
-    return false;
+    if (handle <= 0) return false;
+
+    HANDLE hFile = (HANDLE)handle;
+    OVERLAPPED overlapped = {0};
+
+    UnlockFileEx(hFile, 0, MAXDWORD, MAXDWORD, &overlapped);
+    CloseHandle(hFile);
+
+    return true;
 }
 
 /* ----------------------------------------------------------------

@@ -1388,6 +1388,27 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
         if (strcmp(trimmed, "pass") == 0 || strcmp(trimmed, "()") == 0) {
             emit_indent(c_indent); emit("/* pass */;\n"); (*line_idx)++; continue;
         }
+        if (strcmp(trimmed, "pass_todo") == 0) {
+            emit_indent(c_indent); emit("/* TODO */;\n"); (*line_idx)++; continue;
+        }
+        if (starts_with(trimmed, "pass_todo(")) {
+            emit_indent(c_indent); emit("/* TODO: <message> */;\n"); (*line_idx)++; continue;
+        }
+        if (strcmp(trimmed, "pass_do_nothing") == 0) {
+            emit_indent(c_indent); emit("/* intentional no-op */;\n"); (*line_idx)++; continue;
+        }
+        if (starts_with(trimmed, "pass_do_nothing(")) {
+            emit_indent(c_indent); emit("/* no-op: <message> */;\n"); (*line_idx)++; continue;
+        }
+        if (strcmp(trimmed, "pass_dn") == 0) {
+            emit_indent(c_indent); emit("/* intentional no-op */;\n"); (*line_idx)++; continue;
+        }
+        if (starts_with(trimmed, "pass_dn(")) {
+            emit_indent(c_indent); emit("/* no-op: <message> */;\n"); (*line_idx)++; continue;
+        }
+        if (starts_with(trimmed, "pass(")) {
+            emit_indent(c_indent); emit("/* pass: <message> */;\n"); (*line_idx)++; continue;
+        }
 
         /* print */
         if (starts_with(trimmed, "print ")) {
@@ -1564,6 +1585,27 @@ static void translate_statement(const char *trimmed, int c_indent) {
     if (strcmp(trimmed, "continue") == 0) { emit_indent(c_indent); emit("continue;\n"); return; }
     if (strcmp(trimmed, "pass") == 0 || strcmp(trimmed, "()") == 0) {
         emit_indent(c_indent); emit("/* pass */;\n"); return;
+    }
+    if (strcmp(trimmed, "pass_todo") == 0) {
+        emit_indent(c_indent); emit("/* TODO */;\n"); return;
+    }
+    if (starts_with(trimmed, "pass_todo(")) {
+        emit_indent(c_indent); emit("/* TODO: <message> */;\n"); return;
+    }
+    if (strcmp(trimmed, "pass_do_nothing") == 0) {
+        emit_indent(c_indent); emit("/* intentional no-op */;\n"); return;
+    }
+    if (starts_with(trimmed, "pass_do_nothing(")) {
+        emit_indent(c_indent); emit("/* no-op: <message> */;\n"); return;
+    }
+    if (strcmp(trimmed, "pass_dn") == 0) {
+        emit_indent(c_indent); emit("/* intentional no-op */;\n"); return;
+    }
+    if (starts_with(trimmed, "pass_dn(")) {
+        emit_indent(c_indent); emit("/* no-op: <message> */;\n"); return;
+    }
+    if (starts_with(trimmed, "pass(")) {
+        emit_indent(c_indent); emit("/* pass: <message> */;\n"); return;
     }
 
     /* print */
