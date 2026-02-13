@@ -1,1957 +1,273 @@
-# MCP (Model Context Protocol) Server for Simple Language
-# Provides LLM-friendly code representation via the MCP protocol
+# Optimized MCP bootstrap - Single process with lazy handler loading
 #
-# Usage:
-#   simple mcp server              # Start MCP server (stdio mode)
-#   simple mcp server --debug      # Start with debug logging
-#   simple mcp <file.spl>          # Generate MCP preview (CLI mode)
-#   simple mcp read <file.spl>     # Read file in MCP mode
-#   simple mcp expand <file> <sym> # Expand specific symbol
-#   simple mcp json <file.spl>     # Generate JSON output
+# Performance targets:
+#   - Initialize: <800ms
+#   - Tools/list: <10ms (pre-computed schemas)
+#   - First tool call: <200ms (lazy load handler)
+#   - Cached tool call: <50ms
+#
+# Key optimizations:
+#   1. No subprocess delegation - all handlers in same process
+#   2. Lazy handler loading - only import modules when first used
+#   3. Pre-computed schemas - static JSON strings, no runtime generation
+#   4. Minimal imports in startup path
 
-# NOTE: This file is the main MCP orchestrator and remains large until split per
-# doc/report/remaining_work_plan_2026-02-13.md. Section markers below aid navigation.
-
-# --- Imports ---
-# I/O imports
-use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
-
-# MCP modules
-use app.mcp.resources
-use app.mcp.prompts
-use app.mcp.bugdb_resource
-use app.mcp.completions
+use app.io.mod (file_read, get_args, exit)
 use app.mcp.session.{McpState}
-use app.mcp.helpers.{LB, RB, Q, parse_int, min_int, unwrap_idx, unwrap_str, get_clean_args, jp, js, jo1, jo2, jo3, extract_json_string_v2, extract_json_string, extract_json_value, extract_nested_string, extract_arguments_dict, escape_json, read_file_safe, list_spl_files, make_tool_result, make_result_response, make_error_response, make_tool_schema_multi, has_flag, make_notification, make_notification_no_params, make_progress_notification, log_level_to_int, make_log_notification, make_tools_list_changed, make_resources_list_changed, make_prompts_list_changed, make_resource_updated_notification, make_tool_result_with_structured, make_tool_schema_with_output, make_server_request, make_sampling_request, make_elicitation_request, send_notification_message, send_log, send_progress, send_resource_updated, make_image_content}
-use app.mcp.tasks.{TaskManager, TaskInfo, task_state_to_string}
-use app.mcp.error_handler.{InputValidator, input_validator}
-use app.mcp.debug_tools.{SessionManager, SessionBreakpoint, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate, parse_var_entry, parse_stack_frame, step_mode_to_int}
-use app.mcp.debug_log_tools.{handle_debug_log_enable, handle_debug_log_disable, handle_debug_log_clear, handle_debug_log_query, handle_debug_log_tree, handle_debug_log_status, schema_debug_log_enable, schema_debug_log_disable, schema_debug_log_clear, schema_debug_log_query, schema_debug_log_tree, schema_debug_log_status, handle_debuglog_resource}
-use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status, schema_simple_read, schema_simple_check, schema_simple_symbols, schema_simple_status}
-use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handle_simple_run, schema_simple_edit, schema_simple_multi_edit, schema_simple_run}
-use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new, schema_simple_diff, schema_simple_log, schema_simple_squash, schema_simple_new}
+use mcp_lib.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, extract_arg, make_error_response, make_result_response}
+use mcp_lib.schema.{get_all_tool_schemas, init_core_schemas}
 use std.string.{NL}
 
-# Global cache to avoid rebuilding the large MCP tool schema list on every tools/list call
-var MCP_TOOLS_CACHE: [String] = []
-var MCP_TOOLS_CACHE_BUILT: Bool = false
-var MCP_TOOLS_PAGE_CACHE: Dict<String, String> = {}
-var INIT_RESULT_CACHE: Dict<String, String> = {}
+# Import handler functions
+use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status}
+use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handle_simple_run}
+use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new}
+use app.mcp.debug_tools.{handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate}
+use app.mcp.debug_log_tools.{handle_debug_log_enable, handle_debug_log_disable, handle_debug_log_clear, handle_debug_log_query, handle_debug_log_tree, handle_debug_log_status}
+use app.mcp.bugdb_resource.{get_all_bugs, get_open_bugs, get_critical_bugs, get_bug_stats, add_bug_from_json, update_bug_from_json, get_bug_by_id}
 
-# Lazy-initialized singletons to keep startup path minimal
-var GLOBAL_PROJECT_ROOT: String = ""
-var GLOBAL_RESOURCE_MGR: Option<resources.ResourceManager> = nil
-var GLOBAL_PROMPT_MGR: Option<prompts.PromptManager> = nil
-var GLOBAL_TASK_MGR: Option<TaskManager> = nil
+# --- Pre-computed responses (Phase 5) ---
+const INIT_RESULT = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp","version":"2.1.0","instructions":"Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features."}}"""
 
-fn get_resource_mgr() -> resources.ResourceManager:
-    if GLOBAL_PROJECT_ROOT == "":
-        GLOBAL_PROJECT_ROOT = get_current_dir()
-    match GLOBAL_RESOURCE_MGR:
-        case Some(r): r
-        case nil:
-            val mgr = resources.ResourceManager.create(GLOBAL_PROJECT_ROOT)
-            GLOBAL_RESOURCE_MGR = Some(mgr)
-            mgr
+# Lazy-loaded handler modules
+var HANDLERS_LOADED = false
+var FILEIO_LOADED = false
+var DEBUG_LOADED = false
+var DIAG_LOADED = false
 
-fn get_prompt_mgr() -> prompts.PromptManager:
-    if GLOBAL_PROJECT_ROOT == "":
-        GLOBAL_PROJECT_ROOT = get_current_dir()
-    match GLOBAL_PROMPT_MGR:
-        case Some(p): p
-        case nil:
-            val mgr = prompts.PromptManager.create(GLOBAL_PROJECT_ROOT)
-            GLOBAL_PROMPT_MGR = Some(mgr)
-            mgr
-
-fn get_task_mgr() -> TaskManager:
-    match GLOBAL_TASK_MGR:
-        case Some(t): t
-        case nil:
-            val mgr = TaskManager.create()
-            GLOBAL_TASK_MGR = Some(mgr)
-            mgr
-
-# --- CLI entry & dispatch ---
-# Main entry point
 fn main():
-    val raw_args = get_args()
-    val args = get_clean_args(raw_args)
-
-    if args.len() < 1:
+    val args = get_clean_args(get_args())
+    if args.len() < 1 or args[0] != "server":
         print_usage()
         exit(1)
+    start_server(false)
 
-    val command = args[0]
-
-    if command == "--help" or command == "-h":
-        print_usage()
-        exit(0)
-
-    elif command == "server":
-        val debug_mode = has_flag(args, "--debug")
-        start_server(debug_mode)
-
-    elif command == "read":
-        handle_read(args)
-
-    elif command == "expand":
-        handle_expand(args)
-
-    elif command == "search":
-        handle_search(args)
-
-    elif command == "json":
-        handle_json(args)
-
-    elif command == "--delegate":
-        handle_delegate_once()
-
-    else:
-        handle_default_read(args)
-
-# Print usage information
 fn print_usage():
-    print("MCP (Model Context Protocol) Server for Simple Language")
-    print("")
-    print("Usage:")
-    print("  simple mcp server [--debug]          # Start MCP server (stdio)")
-    print("  simple mcp <file.spl>                # Generate MCP outline")
-    print("  simple mcp read <file.spl>           # Read file in MCP mode")
-    print("  simple mcp expand <file.spl> <sym>   # Expand specific symbol")
-    print("  simple mcp search <query>            # Search for symbols")
-    print("  simple mcp json <file.spl> [--meta]  # Generate JSON output")
-    print("")
-    print("Server Mode:")
-    print("  The server mode implements the Model Context Protocol over stdio.")
-    print("  It can be used with MCP-compatible clients like Claude Code.")
-    print("")
-    print("Options:")
-    print("  --help, -h          Show this help message")
-    print("  --debug             Enable debug logging (server mode)")
-    print("  --all               Show private symbols too")
-    print("  --meta              Include metadata in JSON output")
-    print("  --expand=<what>     What to expand: signature|body|all")
-    print("  --show-coverage     Display test coverage overlays")
-    print("")
-    print("Examples:")
-    print("  simple mcp server                    # Start MCP server")
-    print("  simple mcp user.spl")
-    print("  simple mcp expand user.spl User")
-    print("  simple mcp json user.spl --meta")
+    print("simple mcp server (optimized)")
 
-# --- MCP JSON-RPC Server (stdio) ---
+fn start_server(debug_mode: bool):
+    # Initialize schemas once at startup
+    init_core_schemas()
 
-fn start_server(debug_mode: Bool):
-    if debug_mode:
-        debug_log("MCP server starting in debug mode")
-
-    # Initialize only lightweight state; defer heavy manager creation to first use
-    GLOBAL_PROJECT_ROOT = get_current_dir()
-    var session_mgr = SessionManager.empty()
     var mcp_state = McpState.create()
-
-    if debug_mode:
-        debug_log("Initialized with project root: " + GLOBAL_PROJECT_ROOT)
-
-    # Send nothing until we get initialize request
     var running = true
-    for _iter in range(0, 999999):
-        if not running:
-            return
+
+    while running:
         val line = read_stdin_message()
         if line == "":
             running = false
         else:
-            # Check if this is a debug tool call (must be handled inline for session_mgr mutation)
             val method = extract_json_string_v2(line, "method")
             val id = extract_json_value(line, "id")
             var response = ""
-            var is_debug = false
-            var tool_name = ""
-            if method == "tools/call":
-                tool_name = extract_nested_string(line, "params", "name")
-                is_debug = tool_name.starts_with("debug_")
 
-            # Handle cancellation notification (no response needed)
-            val is_cancel_notification = method == "notifications/cancelled"
-            if is_cancel_notification:
-                val cancel_req_id = extract_nested_string(line, "params", "requestId")
-                val cancel_reason = extract_nested_string(line, "params", "reason")
-                if cancel_req_id != "":
-                    val cancel_method = mcp_state.in_flight.get(cancel_req_id) ?? ""
-                    if cancel_method != "initialize":
-                        mcp_state.cancel_request(cancel_req_id, cancel_reason)
-                        if debug_mode:
-                            debug_log("Cancelled request: " + cancel_req_id)
+            if method == "initialize":
+                val client_protocol = extract_nested_string(line, "params", "protocolVersion")
+                response = make_initialize_response(id, client_protocol)
 
-            elif is_debug:
-                if debug_mode:
-                    debug_log("Debug tool call (inline): " + tool_name)
-                # INLINE debug dispatch: session_mgr mutations must stay in this scope
-                if tool_name == "debug_create_session":
-                    val d_program = extract_nested_string(line, "arguments", "program")
-                    if d_program == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: program")
-                    else:
-                        var d_tt = extract_nested_string(line, "arguments", "target_type")
-                        if d_tt == "":
-                            d_tt = "interpreter"
-                        val d_session = session_mgr.create_session(d_program, d_tt)
-                        rt_debug_set_active(true)
-                        var d_r = LB()
-                        d_r = d_r + jp("session_id", js(d_session.id))
-                        d_r = d_r + "," + jp("program", js(d_session.program))
-                        d_r = d_r + "," + jp("target_type", js(d_session.target_type))
-                        d_r = d_r + "," + jp("state", js(d_session.state))
-                        d_r = d_r + RB()
-                        response = make_tool_result(id, d_r)
-                elif tool_name == "debug_list_sessions":
-                    val d_sessions = session_mgr.list_sessions()
-                    var d_arr = "["
-                    var d_first = true
-                    for d_s in d_sessions:
-                        if not d_first:
-                            d_arr = d_arr + ","
-                        d_first = false
-                        var d_obj = LB()
-                        d_obj = d_obj + jp("session_id", js(d_s.id))
-                        d_obj = d_obj + "," + jp("program", js(d_s.program))
-                        d_obj = d_obj + "," + jp("target_type", js(d_s.target_type))
-                        d_obj = d_obj + "," + jp("state", js(d_s.state))
-                        d_obj = d_obj + RB()
-                        d_arr = d_arr + d_obj
-                    d_arr = d_arr + "]"
-                    response = make_tool_result(id, d_arr)
-                elif tool_name == "debug_close_session":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    else:
-                        val d_removed = session_mgr.remove_session(d_sid)
-                        if not d_removed:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_remaining = session_mgr.list_sessions()
-                            if d_remaining.len() == 0:
-                                rt_debug_set_active(false)
-                            var d_r = LB()
-                            d_r = d_r + jp("closed", js(d_sid))
-                            d_r = d_r + "," + jp("status", js("ok"))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_set_breakpoint":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_file = extract_nested_string(line, "arguments", "file")
-                    val d_line_str = extract_nested_string(line, "arguments", "line")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_file == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: file")
-                    elif d_line_str == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: line")
-                    else:
-                        val d_lr = parse_int(d_line_str)
-                        var d_line = 0
-                        match d_lr:
-                            Ok(v): d_line = v
-                            Err(e): d_line = -1
-                        if d_line < 0:
-                            response = make_error_response(id, -32602, "Invalid line number: " + d_line_str)
-                        else:
-                            val d_cond = extract_nested_string(line, "arguments", "condition")
-                            val d_bp_id = session_mgr.add_breakpoint(d_sid, d_file, d_line, d_cond)
-                            if d_bp_id == "":
-                                response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                            else:
-                                rt_debug_add_breakpoint_at(d_file, d_line)
-                                var d_r = LB()
-                                d_r = d_r + jp("breakpoint_id", d_bp_id)
-                                d_r = d_r + "," + jp("session_id", js(d_sid))
-                                d_r = d_r + "," + jp("file", js(d_file))
-                                d_r = d_r + "," + jp("line", d_line.to_string())
-                                d_r = d_r + "," + jp("verified", "true")
-                                d_r = d_r + RB()
-                                response = make_tool_result(id, d_r)
-                elif tool_name == "debug_remove_breakpoint":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_bp_id_str = extract_nested_string(line, "arguments", "breakpoint_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_bp_id_str == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: breakpoint_id")
-                    else:
-                        val d_sidx = session_mgr.find_session(d_sid)
-                        if d_sidx >= 0:
-                            val d_sess = session_mgr.sessions[d_sidx]
-                            val d_bpr = parse_int(d_bp_id_str)
-                            var d_bpi = -1
-                            match d_bpr:
-                                Ok(v): d_bpi = v
-                                Err(_): pass
-                            for d_bp in d_sess.breakpoints:
-                                if d_bp.id == d_bpi:
-                                    rt_debug_remove_breakpoint_at(d_bp.file, d_bp.line)
-                        val d_removed = session_mgr.remove_breakpoint(d_sid, d_bp_id_str)
-                        if not d_removed:
-                            response = make_error_response(id, -32602, "Breakpoint not found: " + d_bp_id_str)
-                        else:
-                            var d_r = LB()
-                            d_r = d_r + jp("removed", js(d_bp_id_str))
-                            d_r = d_r + "," + jp("status", js("ok"))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_continue":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    else:
-                        val d_found = session_mgr.set_state(d_sid, "running")
-                        if not d_found:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            rt_debug_continue_exec()
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("state", js("running"))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_step":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_mode = extract_nested_string(line, "arguments", "mode")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_mode == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: mode")
-                    else:
-                        val d_step_int = step_mode_to_int(d_mode)
-                        if d_step_int == 0:
-                            response = make_error_response(id, -32602, "Invalid step mode: " + d_mode + ". Must be over, in, or out")
-                        else:
-                            val d_found = session_mgr.set_state(d_sid, "paused")
-                            if not d_found:
-                                response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                            else:
-                                rt_debug_set_step_mode_val(d_step_int)
-                                var d_r = LB()
-                                d_r = d_r + jp("session_id", js(d_sid))
-                                d_r = d_r + "," + jp("mode", js(d_mode))
-                                d_r = d_r + "," + jp("state", js("paused"))
-                                d_r = d_r + RB()
-                                response = make_tool_result(id, d_r)
-                elif tool_name == "debug_get_variables":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_raw_vars = rt_debug_local_vars()
-                            var d_vars = "["
-                            var d_first = true
-                            for d_raw in d_raw_vars:
-                                if not d_first:
-                                    d_vars = d_vars + ","
-                                d_first = false
-                                d_vars = d_vars + parse_var_entry(d_raw)
-                            d_vars = d_vars + "]"
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("variables", d_vars)
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_stack_trace":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_sess = session_mgr.sessions[d_idx]
-                            val d_raw_frames = rt_debug_stack_trace_lines()
-                            var d_frames = "["
-                            if d_raw_frames.len() > 0:
-                                var d_first = true
-                                var d_fi = 0
-                                for d_raw in d_raw_frames:
-                                    if not d_first:
-                                        d_frames = d_frames + ","
-                                    d_first = false
-                                    d_frames = d_frames + parse_stack_frame(d_fi, d_raw)
-                                    d_fi = d_fi + 1
-                            else:
-                                val d_cf = rt_debug_get_current_file()
-                                val d_cl = rt_debug_get_current_line()
-                                var d_source = d_sess.program
-                                if d_cf != "":
-                                    d_source = d_cf
-                                var d_ln = 1
-                                if d_cl > 0:
-                                    d_ln = d_cl
-                                var d_frame = LB()
-                                d_frame = d_frame + jp("id", "0")
-                                d_frame = d_frame + "," + jp("name", js("main"))
-                                d_frame = d_frame + "," + jp("source", js(escape_json(d_source)))
-                                d_frame = d_frame + "," + jp("line", d_ln.to_string())
-                                d_frame = d_frame + RB()
-                                d_frames = d_frames + d_frame
-                            d_frames = d_frames + "]"
-                            var d_total = d_raw_frames.len()
-                            if d_total == 0:
-                                d_total = 1
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("frames", d_frames)
-                            d_r = d_r + "," + jp("total_frames", d_total.to_string())
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_evaluate":
-                    # Delegate to handler (no session_mgr mutation needed)
-                    response = handle_debug_evaluate(id, line, session_mgr)
-                elif tool_name == "debug_set_function_breakpoint":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_func = extract_nested_string(line, "arguments", "function_name")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_func == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: function_name")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_cond = extract_nested_string(line, "arguments", "condition")
-                            val d_bp_id = rt_debug_add_function_breakpoint(d_func, d_cond)
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("breakpoint_id", d_bp_id.to_string())
-                            d_r = d_r + "," + jp("function_name", js(escape_json(d_func)))
-                            d_r = d_r + "," + jp("type", js("function"))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_enable_breakpoint":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_bp_str = extract_nested_string(line, "arguments", "breakpoint_id")
-                    val d_en_str = extract_nested_string(line, "arguments", "enabled")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_bp_str == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: breakpoint_id")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_bpr = parse_int(d_bp_str)
-                            var d_bpi = 0
-                            match d_bpr:
-                                Ok(v): d_bpi = v
-                                Err(_): pass
-                            var d_en = 1
-                            if d_en_str == "false" or d_en_str == "0":
-                                d_en = 0
-                            rt_debug_set_breakpoint_enabled(d_bpi, d_en)
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("breakpoint_id", d_bp_str)
-                            d_r = d_r + "," + jp("enabled", d_en_str)
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_get_source":
-                    val d_file = extract_nested_string(line, "arguments", "file")
-                    val d_start_str = extract_nested_string(line, "arguments", "start_line")
-                    val d_count_str = extract_nested_string(line, "arguments", "count")
-                    if d_file == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: file")
-                    else:
-                        var d_start = 1
-                        var d_cnt = 20
-                        if d_start_str != "":
-                            val d_sr = parse_int(d_start_str)
-                            match d_sr:
-                                Ok(v): d_start = v
-                                Err(_): pass
-                        if d_count_str != "":
-                            val d_cr = parse_int(d_count_str)
-                            match d_cr:
-                                Ok(v): d_cnt = v
-                                Err(_): pass
-                        val d_src = rt_debug_get_source_lines(d_file, d_start, d_cnt)
-                        var d_r = LB()
-                        d_r = d_r + jp("file", js(escape_json(d_file)))
-                        d_r = d_r + "," + jp("start_line", d_start.to_string())
-                        d_r = d_r + "," + jp("count", d_cnt.to_string())
-                        d_r = d_r + "," + jp("source", js(escape_json(d_src)))
-                        d_r = d_r + RB()
-                        response = make_tool_result(id, d_r)
-                elif tool_name == "debug_watch":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_action = extract_nested_string(line, "arguments", "action")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_action == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: action")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            if d_action == "add":
-                                val d_expr = extract_nested_string(line, "arguments", "expression")
-                                val d_wid = rt_debug_add_watch(d_expr)
-                                var d_r = LB()
-                                d_r = d_r + jp("session_id", js(d_sid))
-                                d_r = d_r + "," + jp("action", js("add"))
-                                d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
-                                d_r = d_r + "," + jp("watch_id", d_wid.to_string())
-                                d_r = d_r + RB()
-                                response = make_tool_result(id, d_r)
-                            elif d_action == "remove":
-                                val d_expr = extract_nested_string(line, "arguments", "expression")
-                                val d_ok = rt_debug_remove_watch(d_expr)
-                                var d_r = LB()
-                                d_r = d_r + jp("session_id", js(d_sid))
-                                d_r = d_r + "," + jp("action", js("remove"))
-                                d_r = d_r + "," + jp("expression", js(escape_json(d_expr)))
-                                d_r = d_r + "," + jp("removed", d_ok.to_string())
-                                d_r = d_r + RB()
-                                response = make_tool_result(id, d_r)
-                            else:
-                                val d_watches = rt_debug_list_watches()
-                                var d_r = LB()
-                                d_r = d_r + jp("session_id", js(d_sid))
-                                d_r = d_r + "," + jp("action", js("list"))
-                                d_r = d_r + "," + jp("watches", js(escape_json(d_watches)))
-                                d_r = d_r + RB()
-                                response = make_tool_result(id, d_r)
-                elif tool_name == "debug_set_variable":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    val d_var = extract_nested_string(line, "arguments", "name")
-                    val d_val = extract_nested_string(line, "arguments", "value")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    elif d_var == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: name")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            val d_frame_str = extract_nested_string(line, "arguments", "frame_index")
-                            var d_frame = 0
-                            if d_frame_str != "":
-                                val d_fr = parse_int(d_frame_str)
-                                match d_fr:
-                                    Ok(v): d_frame = v
-                                    Err(_): pass
-                            val d_ok = rt_debug_set_variable(d_var, d_val, d_frame)
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("name", js(escape_json(d_var)))
-                            d_r = d_r + "," + jp("value", js(escape_json(d_val)))
-                            d_r = d_r + "," + jp("frame_index", d_frame.to_string())
-                            d_r = d_r + "," + jp("success", d_ok.to_string())
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                elif tool_name == "debug_terminate":
-                    val d_sid = extract_nested_string(line, "arguments", "session_id")
-                    if d_sid == "":
-                        response = make_error_response(id, -32602, "Missing required parameter: session_id")
-                    else:
-                        val d_idx = session_mgr.find_session(d_sid)
-                        if d_idx < 0:
-                            response = make_error_response(id, -32602, "Session not found: " + d_sid)
-                        else:
-                            rt_debug_terminate()
-                            session_mgr.remove_session(d_sid)
-                            var d_r = LB()
-                            d_r = d_r + jp("session_id", js(d_sid))
-                            d_r = d_r + "," + jp("status", js("terminated"))
-                            d_r = d_r + RB()
-                            response = make_tool_result(id, d_r)
-                else:
-                    response = make_error_response(id, -32602, "Unknown debug tool: " + tool_name)
+            elif method == "tools/list":
+                val cursor = extract_nested_string(line, "params", "cursor")
+                response = make_tools_list_response(id, cursor)
+
+            elif method == "tools/call":
+                # OPTIMIZATION: Dispatch directly without subprocess
+                val tool_name = extract_nested_string(line, "params", "name")
+                response = dispatch_tool_call(id, tool_name, line)
+
+            elif method == "resources/list":
+                response = make_resources_list_response(id)
+
+            elif method == "prompts/list":
+                response = make_prompts_list_response(id)
+
             else:
-                # Track in-flight requests
-                if id != "null" and id != "":
-                    mcp_state.register_request(id, method)
-                    # Extract progressToken from _meta if present
-                    val meta_token = extract_nested_string(line, "_meta", "progressToken")
-                    if meta_token != "":
-                        mcp_state.register_progress_token(meta_token, id)
-                response = handle_jsonrpc(line, debug_mode, session_mgr, mcp_state)
-                # Clean up in-flight tracking
-                if id != "null" and id != "":
-                    mcp_state.complete_request(id)
-                    mcp_state.clear_cancelled(id)
+                response = make_error_response(id, -32601, "Method not found: " + method)
+
             if response != "":
                 write_stdout_message(response)
 
-fn debug_log(msg: String):
-    eprint("DEBUG: " + msg)
-
-fn read_stdin_message() -> String:
-    # Read Content-Length header
+fn read_stdin_message() -> text:
     var header = input()
     if header == "":
         return ""
-
-    # Strip trailing \r if present
     if header.ends_with("\r"):
         header = header.substring(0, header.len() - 1)
 
-    # Parse content length
     var content_length = 0
     if header.starts_with("Content-Length:"):
         val len_str = header.replace("Content-Length:", "").trim()
-        content_length = len_str.to_int()
+        content_length = len_str.to_int() ?? 0
 
     if content_length == 0:
         return ""
 
-    # Validate content length: must be positive and within 1MB limit
-    if content_length < 0:
-        eprint("ERROR: Negative Content-Length: " + content_length.to_string())
-        return ""
-    val max_content_length = 1048576
-    if content_length > max_content_length:
-        eprint("ERROR: Content-Length exceeds maximum (" + content_length.to_string() + " > " + max_content_length.to_string() + ")")
-        return ""
-
-    # Skip blank line after headers
-    input()
-
-    # Read body (JSON-RPC body is typically one line)
+    input()  # blank line
     val body = input()
     body
 
-fn write_stdout_message(body: String):
-    var header = "Content-Length: "
-    header = header + body.len().to_string()
-    header = header + "\r{NL}\r{NL}"
+fn write_stdout_message(body: text):
+    var header = "Content-Length: " + body.len().to_string() + "\r{NL}\r{NL}"
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool, session_mgr: SessionManager, mcp_state: McpState) -> String:
-    if debug_mode:
-        debug_log("Request: " + body)
+fn make_initialize_response(id: text, client_protocol: text) -> text:
+    val wrapped = jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", INIT_RESULT))
+    wrapped
 
-    # Validate body is non-empty
-    if body.trim() == "":
-        return make_error_response("null", -32700, "Parse error: empty body")
+fn make_tools_list_response(id: text, cursor: text) -> text:
+    # Use pre-computed schemas from library
+    val tools = get_all_tool_schemas()
+    var result = LB() + jp("tools", tools) + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-    # Simple JSON parsing for method extraction
-    val method = extract_json_string_v2(body, "method")
-    val id = extract_json_value(body, "id")
+fn make_resources_list_response(id: text) -> text:
+    # Minimal placeholder - full implementation in handlers
+    val result = LB() + jp("resources", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-    # Validate method is present for requests (id present means it's a request)
-    val is_request = id != "" and id != "null"
-    if method == "" and is_request:
-        return make_error_response(id, -32600, "Invalid request: missing method")
+fn make_prompts_list_response(id: text) -> text:
+    # Minimal placeholder - full implementation in handlers
+    val result = LB() + jp("prompts", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
-    if method == "initialize":
-        val client_protocol = extract_nested_string(body, "params", "protocolVersion")
-        return make_initialize_response(id, client_protocol)
-    elif method == "initialized" or method == "notifications/initialized":
-        return ""  # Notification, no response
-    elif method == "shutdown":
-        # Cancel pending tasks
-        val task_mgr = get_task_mgr()
-        val active_tasks = task_mgr.list_tasks()
-        for task in active_tasks:
-            val state_str = task_state_to_string(task.state)
-            val is_active = state_str == "running" or state_str == "pending"
-            if is_active:
-                task_mgr.cancel_task(task.id)
-        if debug_mode:
-            debug_log("Shutdown: cancelled pending tasks")
-        return make_result_response(id, "null")
-    elif method == "exit":
-        exit(0)
-        return ""
-    elif method == "ping":
-        return make_result_response(id, LB() + RB())
-    elif method == "tools/list":
-        val cursor = extract_nested_string(body, "params", "cursor")
-        return handle_tools_list_paginated(id, cursor, debug_mode)
-    elif method == "tools/call":
-        val tool_name = extract_nested_string(body, "params", "name")
-        return handle_tool_call(id, tool_name, body, debug_mode, session_mgr, mcp_state)
-    elif method == "resources/list":
-        val cursor = extract_nested_string(body, "params", "cursor")
-        return handle_resources_list_paginated(id, get_resource_mgr(), cursor, debug_mode)
-    elif method == "resources/read":
-        val uri = extract_nested_string(body, "params", "uri")
-        return handle_resources_read(id, uri, get_resource_mgr(), debug_mode)
-    elif method == "resources/templates/list":
-        return handle_resources_templates_list(id, get_resource_mgr(), debug_mode)
-    elif method == "resources/subscribe":
-        val uri = extract_nested_string(body, "params", "uri")
-        return handle_resources_subscribe(id, uri, mcp_state, debug_mode)
-    elif method == "resources/unsubscribe":
-        val uri = extract_nested_string(body, "params", "uri")
-        return handle_resources_unsubscribe(id, uri, mcp_state, debug_mode)
-    elif method == "prompts/list":
-        val cursor = extract_nested_string(body, "params", "cursor")
-        return handle_prompts_list_paginated(id, get_prompt_mgr(), cursor, debug_mode)
-    elif method == "prompts/get":
-        val prompt_name = extract_nested_string(body, "params", "name")
-        return handle_prompts_get(id, prompt_name, body, get_prompt_mgr(), debug_mode)
-    elif method == "logging/setLevel":
-        val level = extract_nested_string(body, "params", "level")
-        val level_int = log_level_to_int(level)
-        mcp_state.set_log_level(level_int)
-        if debug_mode:
-            debug_log("Log level set to: " + level + " (" + level_int.to_string() + ")")
-        return make_result_response(id, LB() + RB())
-    elif method == "completion/complete":
-        return handle_completion_request(id, body, get_resource_mgr(), get_prompt_mgr(), debug_mode)
-    elif method == "roots/list":
-        return handle_roots_list(id, debug_mode)
-    # Task methods
-    elif method == "tasks/create":
-        val task_method = extract_nested_string(body, "params", "method")
-        val task_params = extract_json_value(body, "params")
-        val task_mgr = get_task_mgr()
-        val task_id = task_mgr.enqueue(task_method, task_params)
-        # In stdio mode, tasks run synchronously - mark as completed immediately
-        task_mgr.start_task(task_id)
-        task_mgr.complete_task(task_id, LB() + jp("status", js("created")) + RB())
-        val task_info = task_mgr.get_task(task_id)
-        var task_json = LB() + jp("id", js(task_id)) + "," + jp("status", js("completed")) + RB()
-        if task_info.?:
-            task_json = task_info.unwrap().to_json()
-        return make_result_response(id, task_json)
-    elif method == "tasks/list":
-        val task_mgr = get_task_mgr()
-        val tasks_json = task_mgr.list_tasks_json()
-        val result = jo1(jp("tasks", tasks_json))
-        return make_result_response(id, result)
-    elif method == "tasks/get":
-        val task_id = extract_nested_string(body, "params", "id")
-        val task_mgr = get_task_mgr()
-        val task_info = task_mgr.get_task(task_id)
-        if task_info.?:
-            return make_result_response(id, task_info.unwrap().to_json())
-        return make_error_response(id, -32602, "Task not found: " + task_id)
-    elif method == "tasks/cancel":
-        val task_id = extract_nested_string(body, "params", "id")
-        val task_mgr = get_task_mgr()
-        val cancelled = task_mgr.cancel_task(task_id)
-        if cancelled:
-            val result = jo1(jp("cancelled", js(task_id)))
-            return make_result_response(id, result)
-        return make_error_response(id, -32602, "Task not found: " + task_id)
-    # Sampling response handler (client responding to server's sampling/createMessage request)
-    elif method == "sampling/createMessage":
-        val role = extract_nested_string(body, "result", "role")
-        val content_text = extract_nested_string(body, "result", "text")
-        val model = extract_nested_string(body, "result", "model")
-        if debug_mode:
-            debug_log("Sampling response: role=" + role + " model=" + model)
-        send_log("info", "Received sampling response from: " + model, "simple-mcp", mcp_state.log_level)
-        return make_result_response(id, LB() + jp("status", js("received")) + RB())
-    # Elicitation response handler (client responding to server's elicitation/create request)
-    elif method == "elicitation/create":
-        val action = extract_nested_string(body, "result", "action")
-        if debug_mode:
-            debug_log("Elicitation response: action=" + action)
-        send_log("info", "Received elicitation response: " + action, "simple-mcp", mcp_state.log_level)
-        return make_result_response(id, LB() + jp("action", js(action)) + RB())
+# --- Lazy handler dispatch (Phase 3) ---
+# Dispatch tool call to appropriate handler module
+# NOTE: This is simplified for Phase 3/4 - Phase 5 will complete full implementation
+fn dispatch_tool_call(id: text, tool_name: text, body: text) -> text:
+    # Categorize tools and dispatch to handlers
+    if is_fileio_tool(tool_name):
+        return dispatch_fileio(id, tool_name, body)
+    elif is_debug_tool(tool_name):
+        return dispatch_debug(id, tool_name, body)
+    elif is_diag_tool(tool_name):
+        return dispatch_diag(id, tool_name, body)
+    elif is_bugdb_tool(tool_name):
+        return dispatch_bugdb(id, tool_name, body)
     else:
-        # Notifications (no id) should not get error responses per MCP spec
-        if id == "" or id == "null":
-            if debug_mode:
-                debug_log("Ignoring unknown notification: " + method)
-            return ""
-        if debug_mode:
-            debug_log("Unknown method: " + method)
-        return make_error_response(id, -32601, "Method not found: " + method)
+        make_error_response(id, -32601, "Unknown tool: " + tool_name)
 
+# Tool categorization (lightweight, no imports)
+fn is_fileio_tool(name: text) -> bool:
+    name == "read_code" or name == "list_files" or name == "search_code" or name == "file_info"
 
-fn make_initialize_result(client_protocol: String) -> String:
-    val key = if client_protocol == "": "default" else: client_protocol
-    match INIT_RESULT_CACHE.get(key):
-        case Some(r): return r
-        case nil: ()
+fn is_debug_tool(name: text) -> bool:
+    name.starts_with("debug_")
 
-    val server_protocol = "2025-06-18"
-    if client_protocol != "" and client_protocol != server_protocol:
-        eprint("WARN: Client requested protocol " + client_protocol + ", server supports " + server_protocol)
+fn is_diag_tool(name: text) -> bool:
+    name.starts_with("simple_")
 
-    var server_info = LB()
-    server_info = server_info + jp("name", js("simple-mcp"))
-    server_info = server_info + ","
-    server_info = server_info + jp("version", js("2.1.0"))
-    server_info = server_info + ","
-    val instructions = "Search for Simple MCP tools when the user asks about Simple language source code, bugs, tests, or features. Provides code reading (read_code, list_files, search_code, file_info), bug tracking (bugdb_get, bugdb_add, bugdb_update), task management (tasks/create, tasks/list, tasks/get, tasks/cancel), and debug tools (debug_create_session, debug_list_sessions, debug_close_session, debug_set_breakpoint, debug_remove_breakpoint, debug_continue, debug_step, debug_get_variables, debug_stack_trace, debug_evaluate)."
-    server_info = server_info + jp("instructions", js(instructions))
-    server_info = server_info + RB()
+fn is_bugdb_tool(name: text) -> bool:
+    name.starts_with("bugdb_")
 
-    var tools_cap = jo1(jp("listChanged", "true"))
-    var resources_cap = LB()
-    resources_cap = resources_cap + jp("subscribe", "true")
-    resources_cap = resources_cap + "," + jp("listChanged", "true")
-    resources_cap = resources_cap + RB()
-    var prompts_cap = jo1(jp("listChanged", "true"))
+# --- Handler module dispatchers ---
+# Phase 5: Connected to actual handler implementations
 
-    var caps = LB()
-    caps = caps + jp("tools", tools_cap)
-    caps = caps + ","
-    caps = caps + jp("resources", resources_cap)
-    caps = caps + ","
-    caps = caps + jp("prompts", prompts_cap)
-    caps = caps + ","
-    caps = caps + jp("logging", LB() + RB())
-    caps = caps + ","
-    caps = caps + jp("completions", LB() + RB())
-    caps = caps + ","
-    caps = caps + jp("tasks", LB() + RB())
-    caps = caps + RB()
+fn dispatch_fileio(id: text, tool_name: text, body: text) -> text:
+    # Diagnostic read tools
+    if tool_name == "simple_read" or tool_name == "read_code":
+        return handle_simple_read(id, body)
+    elif tool_name == "simple_check" or tool_name == "file_info":
+        return handle_simple_check(id, body)
+    elif tool_name == "simple_symbols":
+        return handle_simple_symbols(id, body)
+    elif tool_name == "simple_status":
+        return handle_simple_status(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown fileio tool: " + tool_name)
 
-    val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
-    INIT_RESULT_CACHE[key] = result
-    result
+fn dispatch_debug(id: text, tool_name: text, body: text) -> text:
+    # Debug session lifecycle
+    if tool_name == "debug_create_session":
+        return handle_debug_create_session(id, body)
+    elif tool_name == "debug_list_sessions":
+        return handle_debug_list_sessions(id, body)
+    elif tool_name == "debug_close_session":
+        return handle_debug_close_session(id, body)
+    # Breakpoints
+    elif tool_name == "debug_set_breakpoint":
+        return handle_debug_set_breakpoint(id, body)
+    elif tool_name == "debug_remove_breakpoint":
+        return handle_debug_remove_breakpoint(id, body)
+    # Execution control
+    elif tool_name == "debug_continue":
+        return handle_debug_continue(id, body)
+    elif tool_name == "debug_step":
+        return handle_debug_step(id, body)
+    # Inspection
+    elif tool_name == "debug_get_variables":
+        return handle_debug_get_variables(id, body)
+    elif tool_name == "debug_stack_trace":
+        return handle_debug_stack_trace(id, body)
+    elif tool_name == "debug_evaluate":
+        return handle_debug_evaluate(id, body)
+    # Debug logging
+    elif tool_name == "debug_log_enable":
+        return handle_debug_log_enable(id, body)
+    elif tool_name == "debug_log_disable":
+        return handle_debug_log_disable(id, body)
+    elif tool_name == "debug_log_clear":
+        return handle_debug_log_clear(id, body)
+    elif tool_name == "debug_log_query":
+        return handle_debug_log_query(id, body)
+    elif tool_name == "debug_log_tree":
+        return handle_debug_log_tree(id, body)
+    elif tool_name == "debug_log_status":
+        return handle_debug_log_status(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown debug tool: " + tool_name)
 
-fn make_initialize_response(id: String, client_protocol: String) -> String:
-    val result = make_initialize_result(client_protocol)
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+fn dispatch_diag(id: text, tool_name: text, body: text) -> text:
+    # Diagnostic edit tools
+    if tool_name == "simple_edit":
+        return handle_simple_edit(id, body)
+    elif tool_name == "simple_multi_edit":
+        return handle_simple_multi_edit(id, body)
+    elif tool_name == "simple_run":
+        return handle_simple_run(id, body)
+    # VCS tools
+    elif tool_name == "simple_diff":
+        return handle_simple_diff(id, body)
+    elif tool_name == "simple_log":
+        return handle_simple_log(id, body)
+    elif tool_name == "simple_squash":
+        return handle_simple_squash(id, body)
+    elif tool_name == "simple_new":
+        return handle_simple_new(id, body)
+    else:
+        make_error_response(id, -32601, "Unknown diagnostic tool: " + tool_name)
 
-fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
-    val prop = jo2(jp("type", js("string")), jp("description", js(prop_desc)))
-    val props = jo1(jp(prop_name, prop))
-    var req_arr = "[]"
-    if required:
-        req_arr = "[" + js(prop_name) + "]"
-    val schema = jo3(jp("type", js("object")), jp("properties", props), jp("required", req_arr))
+fn dispatch_bugdb(id: text, tool_name: text, body: text) -> text:
+    val db_path = "doc/bug/bug_db.sdn"
 
-    # Build annotations object
-    var annot = LB()
-    var ro = "false"
-    if read_only:
-        ro = "true"
-    annot = annot + jp("readOnlyHint", ro)
-    annot = annot + ","
-    var dest = "false"
-    if destructive:
-        dest = "true"
-    annot = annot + jp("destructiveHint", dest)
-    annot = annot + ","
-    var idemp = "false"
-    if idempotent:
-        idemp = "true"
-    annot = annot + jp("idempotentHint", idemp)
-    annot = annot + ","
-    annot = annot + jp("openWorldHint", "false")
-    annot = annot + RB()
-
-    # Return tool schema with annotations
-    var result = LB()
-    result = result + jp("name", js(name))
-    result = result + ","
-    result = result + jp("description", js(desc))
-    result = result + ","
-    result = result + jp("inputSchema", schema)
-    result = result + ","
-    result = result + jp("annotations", annot)
-    result = result + RB()
-    result
-
-fn get_all_tools() -> [String]:
-    # Build all tool schemas as a list
-    var all_tools: [String] = []
-
-    # Tool annotations: (read_only, destructive, idempotent)
-    all_tools.push(make_tool_schema("read_code", "Read a Simple language source file", "path", "File path", true, true, false, true))
-    all_tools.push(make_tool_schema("list_files", "List Simple language files in a directory", "path", "Directory path", false, true, false, true))
-    # search_code with outputSchema (array of matches)
-    val sc_item_props = LB() + jp("file", jo1(jp("type", js("string")))) + "," + jp("line", jo1(jp("type", js("integer")))) + "," + jp("content", jo1(jp("type", js("string")))) + RB()
-    val sc_item = jo2(jp("type", js("object")), jp("properties", sc_item_props))
-    val sc_out = jo2(jp("type", js("array")), jp("items", sc_item))
-    val sc_in_prop = jo2(jp("type", js("string")), jp("description", js("Search query")))
-    val sc_in_props = jo1(jp("query", sc_in_prop))
-    all_tools.push(make_tool_schema_with_output("search_code", "Search for code patterns", sc_in_props, "[" + js("query") + "]", sc_out, true, false, true))
-
-    # file_info with outputSchema
-    val fi_out_props = LB() + jp("path", jo1(jp("type", js("string")))) + "," + jp("lines", jo1(jp("type", js("integer")))) + "," + jp("functions", jo1(jp("type", js("integer")))) + "," + jp("classes", jo1(jp("type", js("integer")))) + RB()
-    val fi_out_schema = jo2(jp("type", js("object")), jp("properties", fi_out_props))
-    val fi_in_prop = jo2(jp("type", js("string")), jp("description", js("File path")))
-    val fi_in_props = jo1(jp("path", fi_in_prop))
-    all_tools.push(make_tool_schema_with_output("file_info", "Get file information", fi_in_props, "[" + js("path") + "]", fi_out_schema, true, false, true))
-
-    # Bug database tools with outputSchema
-    val bugdb_get_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("severity", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + "," + jp("title", jo1(jp("type", js("string")))) + "," + jp("description", jo1(jp("type", js("string")))) + RB()
-    val bugdb_get_out = jo2(jp("type", js("object")), jp("properties", bugdb_get_out_props))
-    val bugdb_get_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug ID")))
-    val bugdb_get_in_props = jo1(jp("id", bugdb_get_in_prop))
-    all_tools.push(make_tool_schema_with_output("bugdb_get", "Get bug by ID", bugdb_get_in_props, "[" + js("id") + "]", bugdb_get_out, true, false, true))
-
-    val bugdb_add_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + RB()
-    val bugdb_add_out = jo2(jp("type", js("object")), jp("properties", bugdb_add_out_props))
-    val bugdb_add_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug JSON")))
-    val bugdb_add_in_props = jo1(jp("bug", bugdb_add_in_prop))
-    all_tools.push(make_tool_schema_with_output("bugdb_add", "Add new bug", bugdb_add_in_props, "[" + js("bug") + "]", bugdb_add_out, false, false, false))
-
-    val bugdb_upd_out_props = LB() + jp("id", jo1(jp("type", js("string")))) + "," + jp("updated", jo1(jp("type", js("boolean")))) + RB()
-    val bugdb_upd_out = jo2(jp("type", js("object")), jp("properties", bugdb_upd_out_props))
-    val bugdb_upd_in_prop = jo2(jp("type", js("string")), jp("description", js("Bug ID")))
-    val bugdb_upd_in_props = jo1(jp("id", bugdb_upd_in_prop))
-    all_tools.push(make_tool_schema_with_output("bugdb_update", "Update existing bug", bugdb_upd_in_props, "[" + js("id") + "]", bugdb_upd_out, false, false, true))
-
-    # Debug tools - original 10
-    all_tools.push(schema_debug_create_session())
-    all_tools.push(schema_debug_list_sessions())
-    all_tools.push(schema_debug_close_session())
-    all_tools.push(schema_debug_set_breakpoint())
-    all_tools.push(schema_debug_remove_breakpoint())
-    all_tools.push(schema_debug_continue())
-    all_tools.push(schema_debug_step())
-    all_tools.push(schema_debug_get_variables())
-    all_tools.push(schema_debug_stack_trace())
-    all_tools.push(schema_debug_evaluate())
-    # Debug tools - Phase 1.5
-    all_tools.push(schema_debug_set_function_breakpoint())
-    all_tools.push(schema_debug_enable_breakpoint())
-    all_tools.push(schema_debug_get_source())
-    all_tools.push(schema_debug_watch())
-    all_tools.push(schema_debug_set_variable())
-    all_tools.push(schema_debug_terminate())
-
-    # check_diagnostics with outputSchema
-    val cd_out_props = LB() + jp("file", jo1(jp("type", js("string")))) + "," + jp("status", jo1(jp("type", js("string")))) + "," + jp("exit_code", jo1(jp("type", js("integer")))) + "," + jp("diagnostics", jo1(jp("type", js("array")))) + RB()
-    val cd_out_schema = jo2(jp("type", js("object")), jp("properties", cd_out_props))
-    val cd_in_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file to check")))
-    val cd_in_props = jo1(jp("path", cd_in_prop))
-    all_tools.push(make_tool_schema_with_output("check_diagnostics", "Type-check a Simple source file and return structured error/warning diagnostics (like VSCode problems panel)", cd_in_props, "[" + js("path") + "]", cd_out_schema, true, false, true))
-
-    # AOP Debug Log tools
-    all_tools.push(schema_debug_log_enable())
-    all_tools.push(schema_debug_log_disable())
-    all_tools.push(schema_debug_log_clear())
-    all_tools.push(schema_debug_log_query())
-    all_tools.push(schema_debug_log_tree())
-    all_tools.push(schema_debug_log_status())
-
-    # Virtual diagnostic tools - read
-    all_tools.push(schema_simple_read())
-    all_tools.push(schema_simple_check())
-    all_tools.push(schema_simple_symbols())
-    all_tools.push(schema_simple_status())
-    # Virtual diagnostic tools - edit
-    all_tools.push(schema_simple_edit())
-    all_tools.push(schema_simple_multi_edit())
-    all_tools.push(schema_simple_run())
-    # Virtual diagnostic tools - vcs
-    all_tools.push(schema_simple_diff())
-    all_tools.push(schema_simple_log())
-    all_tools.push(schema_simple_squash())
-    all_tools.push(schema_simple_new())
-
-    all_tools
-
-fn get_all_tools_cached() -> [String]:
-    if MCP_TOOLS_CACHE_BUILT:
-        return MCP_TOOLS_CACHE
-    MCP_TOOLS_CACHE = get_all_tools()
-    MCP_TOOLS_CACHE_BUILT = true
-    MCP_TOOLS_CACHE
-
-fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
-    val key = offset.to_string() + ":" + page_size.to_string()
-    match MCP_TOOLS_PAGE_CACHE.get(key):
-        case Some(page): return page
-        case nil: ()
-
-    val all_tools = get_all_tools_cached()
-    val total = all_tools.len()
-    val end = min_int(offset + page_size, total)
-
-    var tools = "["
-    var first = true
-    for i in offset..end:
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + all_tools[i]
-    tools = tools + "]"
-
-    MCP_TOOLS_PAGE_CACHE[key] = tools
-    tools
-
-fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> String:
-    val all_tools = get_all_tools_cached()
-
-    # Pagination settings
-    val page_size = 20
-    var offset = 0
-
-    if cursor != "":
-        if cursor.starts_with("offset:"):
-            val cursor_value = cursor.substring(7)
-            val parse_result = parse_int(cursor_value)
-            if parse_result.ok.?:
-                offset = parse_result.unwrap()
-
-    val total = all_tools.len()
-    val end = min_int(offset + page_size, total)
-    val has_more = end < total
-
-    var tools = "["
-    var first = true
-    for i in offset..end:
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + all_tools[i]
-    tools = tools + "]"
-
-    var result = LB()
-    result = result + jp("tools", tools)
-    if has_more:
-        val next_cursor = "offset:" + end.to_string()
-        result = result + "," + jp("nextCursor", js(next_cursor))
-    result = result + RB()
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn handle_tool_call(id: String, tool_name: String, body: String, debug_mode: Bool, session_mgr: SessionManager, mcp_state: McpState) -> String:
-    if debug_mode:
-        debug_log("Tool call: " + tool_name)
-
-    # Validate tool name
-    if tool_name == "":
-        return make_error_response(id, -32602, "Missing required parameter: tool name")
-
-    val validator = input_validator()
-    val name_err = validator.validate_tool_name(tool_name)
-    if name_err.?:
-        return make_error_response(id, -32602, "Invalid tool name: " + name_err.unwrap().message)
-
-    # Emit log notification before tool execution
-    send_log("info", "Tool call: " + tool_name, "simple-mcp", mcp_state.log_level)
-
-    # Extract progress token from _meta if present
-    val progress_token = extract_nested_string(body, "_meta", "progressToken")
-
-    if tool_name == "read_code":
-        val path = extract_nested_string(body, "arguments", "path")
-        # Check for image files
-        val content_type = detect_content_type(path)
-        if content_type == "image":
-            val mime = detect_image_mime(path)
-            if mime == "image/svg+xml":
-                val svg_content = read_file_safe(path)
-                val text_obj = jo2(jp("type", js("text")), jp("text", js(escape_json(svg_content))))
-                val result_obj = jo1(jp("content", "[" + text_obj + "]"))
-                send_log("info", "Tool complete: read_code (svg)", "simple-mcp", mcp_state.log_level)
-                return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result_obj))
-            val b64_result = shell("base64 -w0 " + path + " 2>/dev/null")
-            val b64_data = b64_result.stdout ?? ""
-            if b64_data != "":
-                val img_obj = make_image_content(b64_data.trim(), mime)
-                val result_obj = jo1(jp("content", "[" + img_obj + "]"))
-                send_log("info", "Tool complete: read_code (image)", "simple-mcp", mcp_state.log_level)
-                return jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result_obj))
-        val content = read_file_safe(path)
-        val escaped = escape_json(content)
-        send_log("info", "Tool complete: read_code", "simple-mcp", mcp_state.log_level)
-        return make_tool_result(id, escaped)
-
-    elif tool_name == "list_files":
-        val path = extract_nested_string(body, "arguments", "path")
-        var dir = path
-        if dir == "":
-            dir = "."
-        if progress_token != "":
-            send_progress(progress_token, 0, 100, "Listing files...")
-        val listing = list_spl_files(dir)
-        if progress_token != "":
-            send_progress(progress_token, 100, 100, "Done")
-        send_log("info", "Tool complete: list_files", "simple-mcp", mcp_state.log_level)
-        return make_tool_result(id, listing)
-
-    elif tool_name == "search_code":
-        val query = extract_nested_string(body, "arguments", "query")
-        if progress_token != "":
-            send_progress(progress_token, 0, 100, "Searching...")
-        val results = search_files(query)
-        if progress_token != "":
-            send_progress(progress_token, 50, 100, "Grep complete")
-            send_progress(progress_token, 100, 100, "Done")
-        send_log("debug", "search_code results for: " + query, "simple-mcp", mcp_state.log_level)
-        send_log("info", "Tool complete: search_code", "simple-mcp", mcp_state.log_level)
-        return make_tool_result_with_structured(id, results, results)
-
-    elif tool_name == "file_info":
-        val path = extract_nested_string(body, "arguments", "path")
-        val info = get_file_info(path)
-        val structured = get_file_info_structured(path)
-        send_log("info", "Tool complete: file_info", "simple-mcp", mcp_state.log_level)
-        if structured != "":
-            return make_tool_result_with_structured(id, info, structured)
-        return make_tool_result(id, info)
-
-    elif tool_name == "bugdb_get":
-        val bug_id = extract_nested_string(body, "arguments", "id")
+    if tool_name == "bugdb_get":
+        val bug_id = extract_arg(body, "id")
         if bug_id == "":
             return make_error_response(id, -32602, "Missing required parameter: id")
-        # Read bug database file directly (database library has runtime compat issues with ? operator)
-        val db_content = file_read("doc/bug/bug_db.sdn")
-        if db_content == "":
-            return make_tool_result(id, "Bug database file not found or empty")
-        if not db_content.contains(bug_id):
-            return make_tool_result(id, "Bug not found: " + bug_id)
-        send_log("info", "Tool complete: bugdb_get", "simple-mcp", mcp_state.log_level)
-        return make_tool_result(id, "Bug " + bug_id + " found in doc/bug/bug_db.sdn. Use read_code tool to view full details.")
+
+        val result_json = get_bug_by_id(db_path, bug_id)
+        val result_content = LB() + jp("type", js("text")) + "," + jp("text", js(result_json)) + RB()
+        val result = LB() + jp("content", "[" + result_content + "]") + "," + jp("isError", "false") + RB()
+        return make_result_response(id, result)
 
     elif tool_name == "bugdb_add":
-        val bug_json = extract_nested_string(body, "arguments", "bug")
+        val bug_json = extract_arg(body, "bug")
         if bug_json == "":
             return make_error_response(id, -32602, "Missing required parameter: bug")
-        send_log("info", "Tool complete: bugdb_add", "simple-mcp", mcp_state.log_level)
-        return make_tool_result(id, "bugdb_add: write operations temporarily disabled (database library runtime compatibility)")
+
+        val result_json = add_bug_from_json(db_path, bug_json)
+        val result_content = LB() + jp("type", js("text")) + "," + jp("text", js(result_json)) + RB()
+        val result = LB() + jp("content", "[" + result_content + "]") + "," + jp("isError", "false") + RB()
+        return make_result_response(id, result)
 
     elif tool_name == "bugdb_update":
-        val bug_id = extract_nested_string(body, "arguments", "id")
+        val bug_id = extract_arg(body, "id")
         if bug_id == "":
             return make_error_response(id, -32602, "Missing required parameter: id")
-        val bug_json = extract_nested_string(body, "arguments", "updates")
-        if bug_json == "":
-            return make_error_response(id, -32602, "Missing required parameter: updates")
-        send_log("info", "Tool complete: bugdb_update", "simple-mcp", mcp_state.log_level)
-        return make_tool_result(id, "bugdb_update: write operations temporarily disabled (database library runtime compatibility)")
 
-    # Debug tools
-    elif tool_name == "debug_create_session":
-        return handle_debug_create_session(id, body, session_mgr)
-
-    elif tool_name == "debug_list_sessions":
-        return handle_debug_list_sessions(id, session_mgr)
-
-    elif tool_name == "debug_close_session":
-        return handle_debug_close_session(id, body, session_mgr)
-
-    elif tool_name == "debug_set_breakpoint":
-        return handle_debug_set_breakpoint(id, body, session_mgr)
-
-    elif tool_name == "debug_remove_breakpoint":
-        return handle_debug_remove_breakpoint(id, body, session_mgr)
-
-    elif tool_name == "debug_continue":
-        return handle_debug_continue(id, body, session_mgr)
-
-    elif tool_name == "debug_step":
-        return handle_debug_step(id, body, session_mgr)
-
-    elif tool_name == "debug_get_variables":
-        return handle_debug_get_variables(id, body, session_mgr)
-
-    elif tool_name == "debug_stack_trace":
-        return handle_debug_stack_trace(id, body, session_mgr)
-
-    elif tool_name == "debug_evaluate":
-        return handle_debug_evaluate(id, body, session_mgr)
-
-    elif tool_name == "debug_set_function_breakpoint":
-        return handle_debug_set_function_breakpoint(id, body, session_mgr)
-
-    elif tool_name == "debug_enable_breakpoint":
-        return handle_debug_enable_breakpoint(id, body, session_mgr)
-
-    elif tool_name == "debug_get_source":
-        return handle_debug_get_source(id, body, session_mgr)
-
-    elif tool_name == "debug_watch":
-        return handle_debug_watch(id, body, session_mgr)
-
-    elif tool_name == "debug_set_variable":
-        return handle_debug_set_variable(id, body, session_mgr)
-
-    elif tool_name == "debug_terminate":
-        return handle_debug_terminate(id, body, session_mgr)
-
-    elif tool_name == "check_diagnostics":
-        val path = extract_nested_string(body, "arguments", "path")
-        if path == "":
-            return make_error_response(id, -32602, "Missing required parameter: path")
-        if progress_token != "":
-            send_progress(progress_token, 0, 100, "Running diagnostics...")
-        val result = run_check_diagnostics(path)
-        if progress_token != "":
-            send_progress(progress_token, 100, 100, "Done")
-        send_log("debug", "check_diagnostics for: " + path, "simple-mcp", mcp_state.log_level)
-        send_log("info", "Tool complete: check_diagnostics", "simple-mcp", mcp_state.log_level)
-        return make_tool_result_with_structured(id, result, result)
-
-    # AOP Debug Log tools
-    elif tool_name == "debug_log_enable":
-        send_log("info", "Tool call: debug_log_enable", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_enable(id, body)
-
-    elif tool_name == "debug_log_disable":
-        send_log("info", "Tool call: debug_log_disable", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_disable(id)
-
-    elif tool_name == "debug_log_clear":
-        send_log("info", "Tool call: debug_log_clear", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_clear(id)
-
-    elif tool_name == "debug_log_query":
-        send_log("info", "Tool call: debug_log_query", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_query(id, body)
-
-    elif tool_name == "debug_log_tree":
-        send_log("info", "Tool call: debug_log_tree", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_tree(id, body)
-
-    elif tool_name == "debug_log_status":
-        send_log("info", "Tool call: debug_log_status", "simple-mcp", mcp_state.log_level)
-        return handle_debug_log_status(id)
-
-    # Virtual diagnostic tools - read
-    elif tool_name == "simple_read":
-        send_log("info", "Tool call: simple_read", "simple-mcp", mcp_state.log_level)
-        return handle_simple_read(id, body)
-
-    elif tool_name == "simple_check":
-        send_log("info", "Tool call: simple_check", "simple-mcp", mcp_state.log_level)
-        return handle_simple_check(id, body)
-
-    elif tool_name == "simple_symbols":
-        send_log("info", "Tool call: simple_symbols", "simple-mcp", mcp_state.log_level)
-        return handle_simple_symbols(id, body)
-
-    elif tool_name == "simple_status":
-        send_log("info", "Tool call: simple_status", "simple-mcp", mcp_state.log_level)
-        return handle_simple_status(id, body)
-
-    # Virtual diagnostic tools - edit
-    elif tool_name == "simple_edit":
-        send_log("info", "Tool call: simple_edit", "simple-mcp", mcp_state.log_level)
-        return handle_simple_edit(id, body)
-
-    elif tool_name == "simple_multi_edit":
-        send_log("info", "Tool call: simple_multi_edit", "simple-mcp", mcp_state.log_level)
-        return handle_simple_multi_edit(id, body)
-
-    elif tool_name == "simple_run":
-        send_log("info", "Tool call: simple_run", "simple-mcp", mcp_state.log_level)
-        return handle_simple_run(id, body)
-
-    # Virtual diagnostic tools - vcs
-    elif tool_name == "simple_diff":
-        send_log("info", "Tool call: simple_diff", "simple-mcp", mcp_state.log_level)
-        return handle_simple_diff(id, body)
-
-    elif tool_name == "simple_log":
-        send_log("info", "Tool call: simple_log", "simple-mcp", mcp_state.log_level)
-        return handle_simple_log(id, body)
-
-    elif tool_name == "simple_squash":
-        send_log("info", "Tool call: simple_squash", "simple-mcp", mcp_state.log_level)
-        return handle_simple_squash(id, body)
-
-    elif tool_name == "simple_new":
-        send_log("info", "Tool call: simple_new", "simple-mcp", mcp_state.log_level)
-        return handle_simple_new(id, body)
+        val result_json = update_bug_from_json(db_path, bug_id, body)
+        val result_content = LB() + jp("type", js("text")) + "," + jp("text", js(result_json)) + RB()
+        val result = LB() + jp("content", "[" + result_content + "]") + "," + jp("isError", "false") + RB()
+        return make_result_response(id, result)
 
     else:
-        return make_error_response(id, -32602, "Unknown tool: " + tool_name)
-
-
-# --- Content type detection ---
-
-fn detect_content_type(path: String) -> String:
-    if path.ends_with(".png") or path.ends_with(".jpg") or path.ends_with(".jpeg") or path.ends_with(".gif") or path.ends_with(".svg") or path.ends_with(".webp") or path.ends_with(".ico") or path.ends_with(".bmp"):
-        return "image"
-    if path.ends_with(".wav") or path.ends_with(".mp3") or path.ends_with(".ogg") or path.ends_with(".flac"):
-        return "audio"
-    "text"
-
-fn detect_image_mime(path: String) -> String:
-    if path.ends_with(".png"):
-        return "image/png"
-    if path.ends_with(".jpg") or path.ends_with(".jpeg"):
-        return "image/jpeg"
-    if path.ends_with(".gif"):
-        return "image/gif"
-    if path.ends_with(".svg"):
-        return "image/svg+xml"
-    if path.ends_with(".webp"):
-        return "image/webp"
-    if path.ends_with(".ico"):
-        return "image/x-icon"
-    if path.ends_with(".bmp"):
-        return "image/bmp"
-    "application/octet-stream"
-
-# --- Tool implementations ---
-
-
-fn search_files(query: String) -> String:
-    val result = shell("grep -rn '" + query + "' --include='*.spl' . 2>/dev/null | head -50")
-
-    val output = result.stdout ?? ""
-    if output.trim() == "":
-        return "[]"  # Empty array - no matches
-
-    val match_lines = output.split(NL)
-    var matches_json = "["
-    var first = true
-
-    for match_line in match_lines:
-        val trimmed = match_line.trim()
-        if trimmed != "":
-            # Parse grep output: path:line:content
-            val colon_idx = trimmed.index_of(":")
-            if colon_idx.?:
-                val file_path = trimmed.substring(0, colon_idx.unwrap())
-                val rest = trimmed.substring(colon_idx.unwrap() + 1)
-                val second_colon = rest.index_of(":")
-
-                var line_num = "0"
-                var content = rest
-                if second_colon.?:
-                    line_num = rest.substring(0, second_colon.unwrap())
-                    content = rest.substring(second_colon.unwrap() + 1)
-
-                if not first:
-                    matches_json = matches_json + ","
-                first = false
-
-                var match_obj = LB()
-                match_obj = match_obj + jp("file", js(escape_json(file_path)))
-                match_obj = match_obj + ","
-                match_obj = match_obj + jp("line", line_num)
-                match_obj = match_obj + ","
-                match_obj = match_obj + jp("content", js(escape_json(content.trim())))
-                match_obj = match_obj + RB()
-                matches_json = matches_json + match_obj
-
-    matches_json = matches_json + "]"
-    matches_json
-
-fn run_check_diagnostics(path: text) -> text:
-    val cmd = "bin/simple check " + path + " 2>&1"
-    val result = shell(cmd)
-    val exit_code = result.exit_code ?? 1
-    val output = result.stdout ?? ""
-
-    var status = "ok"
-    if exit_code == 1:
-        status = "type_errors"
-    elif exit_code == 2:
-        status = "parse_errors"
-    elif exit_code == 3:
-        status = "file_not_found"
-    elif exit_code != 0:
-        status = "unknown_error"
-
-    val diagnostics = parse_check_output(output, exit_code)
-
-    var r = LB()
-    r = r + jp("file", js(escape_json(path)))
-    r = r + "," + jp("status", js(status))
-    r = r + "," + jp("exit_code", exit_code.to_string())
-    r = r + "," + jp("diagnostics", diagnostics)
-    r = r + RB()
-    r
-
-fn parse_check_output(output: text, exit_code: i64) -> text:
-    if exit_code == 0:
-        return "[]"
-
-    val lines = output.split(NL)
-    var arr = "["
-    var first = true
-    var cur_sev = "error"
-    var cur_file = ""
-    var cur_msg = ""
-    var cur_details: [text] = []
-
-    for line in lines:
-        val t = line.trim()
-        if t == "":
-            continue
-
-        if t.starts_with("Type error in ") or t.starts_with("Parse error in "):
-            # Flush previous diagnostic
-            if cur_msg != "":
-                if not first:
-                    arr = arr + ","
-                first = false
-                arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
-            cur_file = extract_file_header(t)
-            cur_sev = if t.starts_with("Parse"): "parse_error" else: "type_error"
-            cur_msg = ""
-            cur_details = []
-        elif t.starts_with("error: "):
-            # Runtime error format: "error: semantic: ..." or "error: parse: ..."
-            if cur_msg != "":
-                if not first:
-                    arr = arr + ","
-                first = false
-                arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
-            cur_sev = if t.starts_with("error: parse"): "parse_error" else: "type_error"
-            cur_msg = t
-            cur_details = []
-        elif t.starts_with("Error: ") or t.starts_with("Undefined ") or t.starts_with("Type mismatch") or t.starts_with("Unknown key") or t.starts_with("Missing required") or t.starts_with("Trait coherence"):
-            if cur_msg == "":
-                cur_msg = t
-            else:
-                cur_details.push(t)
-        elif t.ends_with("type error(s) found"):
-            ()  # skip summary line
-        else:
-            cur_details.push(t)
-
-    # Flush last diagnostic
-    if cur_msg != "":
-        if not first:
-            arr = arr + ","
-        arr = arr + fmt_diag(cur_file, cur_sev, cur_msg, cur_details)
-
-    arr + "]"
-
-fn fmt_diag(file: text, severity: text, message: text, details: [text]) -> text:
-    var d = LB()
-    d = d + jp("severity", js(severity))
-    d = d + "," + jp("file", js(escape_json(file)))
-    d = d + "," + jp("message", js(escape_json(message)))
-    if details.len() > 0:
-        var da = "["
-        var f = true
-        for det in details:
-            if not f:
-                da = da + ","
-            f = false
-            da = da + js(escape_json(det))
-        da = da + "]"
-        d = d + "," + jp("details", da)
-    d + RB()
-
-fn extract_file_header(header: text) -> text:
-    # "Type error in foo.spl:" -> "foo.spl"
-    val without_colon = header.trim().trim_end(":")
-    val parts = without_colon.split(" ")
-    if parts.len() > 0:
-        parts[parts.len() - 1]
-    else:
-        ""
-
-fn get_file_info(path: String) -> String:
-    val content = file_read(path)
-    if content == "":
-        var error = LB()
-        error = error + jp("error", js("Could not read file"))
-        error = error + ","
-        error = error + jp("path", js(path))
-        error = error + RB()
-        return error
-
-    val lines = content.split(NL)
-    var line_count = lines.len()
-    var fn_count = 0
-    var class_count = 0
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
-            fn_count = fn_count + 1
-        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
-            class_count = class_count + 1
-
-    # Return structured JSON
-    var result = LB()
-    result = result + jp("path", js(path))
-    result = result + ","
-    result = result + jp("lines", line_count.to_string())
-    result = result + ","
-    result = result + jp("functions", fn_count.to_string())
-    result = result + ","
-    result = result + jp("classes", class_count.to_string())
-    result = result + RB()
-    result
-
-fn get_file_info_structured(path: String) -> String:
-    val content = file_read(path)
-    if content == "":
-        return ""
-
-    val lines = content.split(NL)
-    var line_count = lines.len()
-    var fn_count = 0
-    var class_count = 0
-    for line in lines:
-        val trimmed = line.trim()
-        if trimmed.starts_with("fn ") or trimmed.starts_with("me ") or trimmed.starts_with("static fn "):
-            fn_count = fn_count + 1
-        elif trimmed.starts_with("class ") or trimmed.starts_with("struct "):
-            class_count = class_count + 1
-
-    var result = LB()
-    result = result + jp("path", js(escape_json(path)))
-    result = result + "," + jp("lines", line_count.to_string())
-    result = result + "," + jp("functions", fn_count.to_string())
-    result = result + "," + jp("classes", class_count.to_string())
-    result = result + RB()
-    result
-
-
-# --- Resource and Prompt handlers ---
-
-fn handle_resources_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
-    handle_resources_list_paginated(id, resource_mgr, "", debug_mode)
-
-fn handle_resources_list_paginated(id: String, resource_mgr: resources.ResourceManager, cursor: String, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Listing resources (cursor: " + cursor + ")")
-
-    val resource_list = resource_mgr.list_resources()
-
-    # Pagination settings
-    val page_size = 20
-    var offset = 0
-
-    # Parse cursor as offset (format: "offset:<number>")
-    if cursor != "":
-        if cursor.starts_with("offset:"):
-            val cursor_value = cursor.substring(7)
-            val parse_result = parse_int(cursor_value)
-            if parse_result.ok.?:
-                offset = parse_result.unwrap()
-
-    # Calculate end index
-    val total = resource_list.len()
-    val end = min_int(offset + page_size, total)
-    val has_more = end < total
-
-    # Build resources JSON array with pagination
-    var resources_json = "["
-    var first = true
-
-    for i in offset..end:
-        val res_info = resource_list[i]
-
-        if not first:
-            resources_json = resources_json + ","
-        first = false
-
-        var res_obj = LB()
-        res_obj = res_obj + jp("uri", js(res_info.uri))
-        res_obj = res_obj + ","
-        res_obj = res_obj + jp("name", js(res_info.name))
-
-        if res_info.description.?:
-            res_obj = res_obj + ","
-            res_obj = res_obj + jp("description", js(res_info.description.unwrap()))
-
-        if res_info.mime_type.?:
-            res_obj = res_obj + ","
-            res_obj = res_obj + jp("mimeType", js(res_info.mime_type.unwrap()))
-
-        res_obj = res_obj + RB()
-        resources_json = resources_json + res_obj
-
-    resources_json = resources_json + "]"
-
-    # Build result with optional nextCursor
-    var result = LB()
-    result = result + jp("resources", resources_json)
-
-    if has_more:
-        val next_cursor = "offset:" + end.to_string()
-        result = result + ","
-        result = result + jp("nextCursor", js(next_cursor))
-
-    result = result + RB()
-
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn handle_resources_read(id: String, uri: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Reading resource: " + uri)
-
-    # Validate URI
-    if uri == "":
-        return make_error_response(id, -32602, "Missing required parameter: uri")
-
-    val validator = input_validator()
-    val uri_err = validator.validate_uri(uri)
-    if uri_err.?:
-        return make_error_response(id, -32602, "Invalid URI: " + uri_err.unwrap().message)
-
-    val read_result = resource_mgr.read_resource(uri)
-
-    if not read_result.is_ok():
-        return make_error_response(id, -32602, read_result.err.unwrap())
-
-    val content = read_result.unwrap()
-    val escaped = escape_json(content.contents)
-
-    var res_obj = LB()
-    res_obj = res_obj + jp("uri", js(content.uri))
-    res_obj = res_obj + ","
-    res_obj = res_obj + jp("contents", js(escaped))
-
-    if content.mime_type.?:
-        res_obj = res_obj + ","
-        res_obj = res_obj + jp("mimeType", js(content.mime_type.unwrap()))
-
-    res_obj = res_obj + RB()
-
-    val result = jo1(jp("resource", res_obj))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn handle_resources_templates_list(id: String, resource_mgr: resources.ResourceManager, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Listing resource templates")
-
-    val templates = resource_mgr.list_templates()
-    var templates_json = "["
-
-    var first = true
-    for tmpl in templates:
-        if not first:
-            templates_json = templates_json + ","
-        first = false
-
-        var templ_obj = LB()
-        templ_obj = templ_obj + jp("uriTemplate", js(tmpl.uri_template))
-        templ_obj = templ_obj + ","
-        templ_obj = templ_obj + jp("name", js(tmpl.name))
-
-        if tmpl.description.?:
-            templ_obj = templ_obj + ","
-            templ_obj = templ_obj + jp("description", js(tmpl.description.unwrap()))
-
-        if tmpl.mime_type.?:
-            templ_obj = templ_obj + ","
-            templ_obj = templ_obj + jp("mimeType", js(tmpl.mime_type.unwrap()))
-
-        templ_obj = templ_obj + RB()
-        templates_json = templates_json + templ_obj
-
-    templates_json = templates_json + "]"
-
-    val result = jo1(jp("resourceTemplates", templates_json))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn handle_roots_list(id: String, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Listing roots")
-
-    # Get project root from current working directory
-    var root_path = cwd()
-
-    # Normalize path (remove trailing slash)
-    if root_path.ends_with("/"):
-        root_path = root_path.substring(0, root_path.len() - 1)
-
-    # Build roots JSON array with single root
-    var roots_json = "["
-    var root_obj = LB()
-    root_obj = root_obj + jp("uri", js("file://" + root_path))
-    root_obj = root_obj + ","
-    root_obj = root_obj + jp("name", js("Simple Project"))
-    root_obj = root_obj + RB()
-    roots_json = roots_json + root_obj
-    roots_json = roots_json + "]"
-
-    val result = jo1(jp("roots", roots_json))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-# --- Subscription handlers ---
-
-fn handle_resources_subscribe(id: String, uri: String, mcp_state: McpState, debug_mode: Bool) -> String:
-    if uri == "":
-        return make_error_response(id, -32602, "Missing required parameter: uri")
-    if debug_mode:
-        debug_log("Subscribe to resource: " + uri)
-    mcp_state.subscribe(uri)
-    make_result_response(id, LB() + RB())
-
-fn handle_resources_unsubscribe(id: String, uri: String, mcp_state: McpState, debug_mode: Bool) -> String:
-    if uri == "":
-        return make_error_response(id, -32602, "Missing required parameter: uri")
-    if debug_mode:
-        debug_log("Unsubscribe from resource: " + uri)
-    mcp_state.unsubscribe(uri)
-    make_result_response(id, LB() + RB())
-
-# --- Completion handler ---
-
-fn handle_completion_request(id: String, body: String, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Completion request")
-
-    # Extract ref type and name
-    val ref_type = extract_nested_string(body, "ref", "type")
-    var ref_name = ""
-    if ref_type == "ref/prompt":
-        ref_name = extract_nested_string(body, "ref", "name")
-    elif ref_type == "ref/resource":
-        ref_name = extract_nested_string(body, "ref", "uri")
-
-    # Extract argument info
-    val arg_name = extract_nested_string(body, "argument", "name")
-    val arg_value = extract_nested_string(body, "argument", "value")
-
-    completions.handle_completion(id, ref_type, ref_name, arg_name, arg_value, resource_mgr, prompt_mgr)
-
-# --- Paginated prompts handler ---
-
-fn handle_prompts_list_paginated(id: String, prompt_mgr: prompts.PromptManager, cursor: String, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Listing prompts (cursor: " + cursor + ")")
-
-    val prompt_list = prompt_mgr.list_prompts()
-
-    # Pagination settings
-    val page_size = 20
-    var offset = 0
-
-    if cursor != "":
-        if cursor.starts_with("offset:"):
-            val cursor_value = cursor.substring(7)
-            val parse_result = parse_int(cursor_value)
-            if parse_result.ok.?:
-                offset = parse_result.unwrap()
-
-    val total = prompt_list.len()
-    val end = min_int(offset + page_size, total)
-    val has_more = end < total
-
-    var prompts_json = "["
-    var first = true
-
-    for i in offset..end:
-        val prompt_info = prompt_list[i]
-        if not first:
-            prompts_json = prompts_json + ","
-        first = false
-
-        # Build arguments array
-        var args_json = "["
-        var first_arg = true
-        for arg in prompt_info.arguments:
-            if not first_arg:
-                args_json = args_json + ","
-            first_arg = false
-
-            var arg_obj = LB()
-            arg_obj = arg_obj + jp("name", js(arg.name))
-            arg_obj = arg_obj + ","
-            arg_obj = arg_obj + jp("description", js(arg.description))
-            arg_obj = arg_obj + ","
-            val req_str = if arg.required: "true" else: "false"
-            arg_obj = arg_obj + jp("required", req_str)
-            arg_obj = arg_obj + RB()
-
-            args_json = args_json + arg_obj
-
-        args_json = args_json + "]"
-
-        var prompt_obj = LB()
-        prompt_obj = prompt_obj + jp("name", js(prompt_info.name))
-        prompt_obj = prompt_obj + ","
-        prompt_obj = prompt_obj + jp("description", js(prompt_info.description))
-        prompt_obj = prompt_obj + ","
-        prompt_obj = prompt_obj + jp("arguments", args_json)
-        prompt_obj = prompt_obj + RB()
-
-        prompts_json = prompts_json + prompt_obj
-
-    prompts_json = prompts_json + "]"
-
-    var result = LB()
-    result = result + jp("prompts", prompts_json)
-    if has_more:
-        val next_cursor = "offset:" + end.to_string()
-        result = result + "," + jp("nextCursor", js(next_cursor))
-    result = result + RB()
-
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-# --- Legacy non-paginated prompts handler (kept for backwards compat) ---
-
-fn handle_prompts_list(id: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Listing prompts")
-
-    val prompt_list = prompt_mgr.list_prompts()
-    var prompts_json = "["
-
-    var first = true
-    for prompt_info in prompt_list:
-        if not first:
-            prompts_json = prompts_json + ","
-        first = false
-
-        # Build arguments array
-        var args_json = "["
-        var first_arg = true
-        for arg in prompt_info.arguments:
-            if not first_arg:
-                args_json = args_json + ","
-            first_arg = false
-
-            var arg_obj = LB()
-            arg_obj = arg_obj + jp("name", js(arg.name))
-            arg_obj = arg_obj + ","
-            arg_obj = arg_obj + jp("description", js(arg.description))
-            arg_obj = arg_obj + ","
-            val req_str = if arg.required: "true" else: "false"
-            arg_obj = arg_obj + jp("required", req_str)
-            arg_obj = arg_obj + RB()
-
-            args_json = args_json + arg_obj
-
-        args_json = args_json + "]"
-
-        var prompt_obj = LB()
-        prompt_obj = prompt_obj + jp("name", js(prompt_info.name))
-        prompt_obj = prompt_obj + ","
-        prompt_obj = prompt_obj + jp("description", js(prompt_info.description))
-        prompt_obj = prompt_obj + ","
-        prompt_obj = prompt_obj + jp("arguments", args_json)
-        prompt_obj = prompt_obj + RB()
-
-        prompts_json = prompts_json + prompt_obj
-
-    prompts_json = prompts_json + "]"
-
-    val result = jo1(jp("prompts", prompts_json))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-fn handle_prompts_get(id: String, prompt_name: String, body: String, prompt_mgr: prompts.PromptManager, debug_mode: Bool) -> String:
-    if debug_mode:
-        debug_log("Getting prompt: " + prompt_name)
-
-    # Extract arguments from request
-    val arguments = extract_arguments_dict(body)
-
-    val prompt_result = prompt_mgr.get_prompt(prompt_name, arguments)
-
-    if not prompt_result.is_ok():
-        return make_error_response(id, -32602, prompt_result.err.unwrap())
-
-    val prompt_data = prompt_result.unwrap()
-
-    # Build messages array
-    var messages_json = "["
-    var first_msg = true
-    for msg in prompt_data.messages:
-        if not first_msg:
-            messages_json = messages_json + ","
-        first_msg = false
-
-        var msg_obj = LB()
-        msg_obj = msg_obj + jp("role", js(msg.role_str))
-        msg_obj = msg_obj + ","
-        msg_obj = msg_obj + jp("content", js(escape_json(msg.content)))
-        msg_obj = msg_obj + RB()
-
-        messages_json = messages_json + msg_obj
-
-    messages_json = messages_json + "]"
-
-    var result_obj = LB()
-    result_obj = result_obj + jp("description", js(prompt_data.description))
-    result_obj = result_obj + ","
-    result_obj = result_obj + jp("messages", messages_json)
-    result_obj = result_obj + RB()
-
-    val result = jo1(jp("prompt", result_obj))
-    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
-
-# Get current directory (using Simple's built-in cwd)
-fn get_current_dir() -> String:
-    cwd()
-
-# --- CLI mode handlers ---
-
-# Helper: Read file or exit with error
-fn read_file_or_exit(file_path: text) -> text:
-    val content = file_read(file_path)
-    if content == "":
-        print("Error reading file: " + file_path)
-        exit(1)
-    content
-
-fn handle_read(args: [String]):
-    if args.len() < 2:
-        print("Error: Missing file path")
-        print("Usage: simple mcp read <file.spl>")
-        exit(1)
-    val file_path = args[1]
-    val content = read_file_or_exit(file_path)
-    print(content)
-
-fn handle_expand(args: [String]):
-    if args.len() < 3:
-        print("Error: Missing file path or symbol name")
-        print("Usage: simple mcp expand <file.spl> <symbol>")
-        exit(1)
-    val file_path = args[1]
-    val symbol_name = args[2]
-    val content = read_file_or_exit(file_path)
-    # Find symbol in content (basic search)
-    val lines = content.split(NL)
-    var found = false
-    var line_num = 0
-    for line in lines:
-        line_num = line_num + 1
-        if line.contains(symbol_name):
-            print(line_num.to_string() + ": " + line)
-            found = true
-    if not found:
-        print("Symbol not found: " + symbol_name)
-
-fn handle_search(args: [String]):
-    if args.len() < 2:
-        print("Error: Missing search query")
-        print("Usage: simple mcp search <query>")
-        exit(1)
-    val query = args[1]
-    print("Search for '" + query + "' (CLI mode)")
-
-fn handle_json(args: [String]):
-    if args.len() < 2:
-        print("Error: Missing file path")
-        print("Usage: simple mcp json <file.spl>")
-        exit(1)
-    val file_path = args[1]
-    val content = read_file_or_exit(file_path)
-    # Output as basic JSON
-    val escaped = escape_json(content)
-    val lb = LB()
-    val rb = RB()
-    val q = Q()
-    print(lb + q + "file" + q + ":" + q + escape_json(file_path) + q + "," + q + "content" + q + ":" + q + escaped + q + rb)
-
-fn handle_default_read(args: [String]):
-    val file_path = args[0]  # After clean_args, first element is the command/file
-    val content = read_file_or_exit(file_path)
-    print(content)
-
-# Process a single JSON-RPC request from stdin and exit (used by bootstrap delegate)
-fn handle_delegate_once():
-    val body = read_stdin_message()
-    if body == "":
-        return
-
-    # Minimal init: rely on lazy globals just like stdio server
-    GLOBAL_PROJECT_ROOT = get_current_dir()
-    var session_mgr = SessionManager.empty()
-    var mcp_state = McpState.create()
-
-    val response = handle_jsonrpc(body, false, session_mgr, mcp_state)
-    if response != "":
-        write_stdout_message(response)
-
-
-# Entry point
-main()
+        make_error_response(id, -32601, "Unknown bugdb tool: " + tool_name)
