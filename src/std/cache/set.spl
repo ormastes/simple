@@ -1,0 +1,225 @@
+# Cache Set Operations
+#
+# Purpose: Store values in different cache types
+#
+# Contains:
+# - LRU cache put
+# - FIFO cache put
+# - LFU cache put
+# - TTL cache put
+# - Generic cache put
+
+# ============================================================================
+# LRU Cache Put
+# ============================================================================
+
+fn cache_lru_put(cache, key: text, value):
+    """Put value into LRU cache.
+    Evicts least recently used entry if at capacity."""
+    val keys = cache['keys']
+    val values = cache['values']
+    val index = _find_key_index(keys, key)
+
+    if index >= 0:
+        # Update existing entry
+        cache['keys'] = _remove_at_index(keys, index)
+        cache['values'] = _remove_at_index(values, index)
+    else:
+        # New entry - check capacity
+        if keys.len() >= cache['capacity']:
+            # Evict least recently used (first element)
+            cache['keys'] = keys[1:]
+            cache['values'] = values[1:]
+
+    # Add to end (most recently used)
+    var new_keys = cache['keys']
+    new_keys.push(key)
+    cache['keys'] = new_keys
+
+    var new_values = cache['values']
+    new_values.push(value)
+    cache['values'] = new_values
+
+    cache
+
+# ============================================================================
+# FIFO Cache Put
+# ============================================================================
+
+fn cache_fifo_put(cache, key: text, value):
+    """Put value into FIFO cache.
+    Evicts oldest entry if at capacity."""
+    val keys = cache['keys']
+    val values = cache['values']
+    val index = _find_key_index(keys, key)
+
+    if index >= 0:
+        # Update existing entry in place
+        var new_values = cache['values']
+        new_values[index] = value
+        cache['values'] = new_values
+    else:
+        # New entry - check capacity
+        if keys.len() >= cache['capacity']:
+            # Evict first entry (oldest)
+            cache['keys'] = keys[1:]
+            cache['values'] = values[1:]
+
+        # Add to end
+        var new_keys = cache['keys']
+        new_keys.push(key)
+        cache['keys'] = new_keys
+
+        var new_values = cache['values']
+        new_values.push(value)
+        cache['values'] = new_values
+
+    cache
+
+# ============================================================================
+# LFU Cache Put
+# ============================================================================
+
+fn cache_lfu_put(cache, key: text, value):
+    """Put value into LFU cache.
+    Evicts least frequently used entry if at capacity."""
+    val keys = cache['keys']
+    val values = cache['values']
+    val frequencies = cache['frequencies']
+    val index = _find_key_index(keys, key)
+
+    if index >= 0:
+        # Update existing entry
+        var new_values = values
+        new_values[index] = value
+        cache['values'] = new_values
+
+        # Increment frequency
+        var new_frequencies = frequencies
+        new_frequencies[index] = frequencies[index] + 1
+        cache['frequencies'] = new_frequencies
+    else:
+        # New entry - check capacity
+        if keys.len() >= cache['capacity']:
+            # Find least frequently used entry
+            var min_freq = frequencies[0]
+            var min_index = 0
+            var i = 1
+            while i < frequencies.len():
+                if frequencies[i] < min_freq:
+                    min_freq = frequencies[i]
+                    min_index = i
+                i = i + 1
+
+            # Evict least frequently used
+            cache['keys'] = _remove_at_index(keys, min_index)
+            cache['values'] = _remove_at_index(values, min_index)
+            cache['frequencies'] = _remove_at_index(frequencies, min_index)
+
+        # Add new entry with frequency 1
+        var new_keys = cache['keys']
+        new_keys.push(key)
+        cache['keys'] = new_keys
+
+        var new_values = cache['values']
+        new_values.push(value)
+        cache['values'] = new_values
+
+        var new_frequencies = cache['frequencies']
+        new_frequencies.push(1)
+        cache['frequencies'] = new_frequencies
+
+    cache
+
+# ============================================================================
+# TTL Cache Put
+# ============================================================================
+
+fn cache_ttl_put(cache, key: text, value):
+    """Put value into TTL cache with expiry time.
+    Evicts oldest entry if at capacity."""
+    val keys = cache['keys']
+    val values = cache['values']
+    val expiry_times = cache['expiry_times']
+    val index = _find_key_index(keys, key)
+    val now = _get_timestamp()
+    val expiry = now + cache['ttl']
+
+    if index >= 0:
+        # Update existing entry
+        var new_values = values
+        new_values[index] = value
+        cache['values'] = new_values
+
+        var new_expiry_times = expiry_times
+        new_expiry_times[index] = expiry
+        cache['expiry_times'] = new_expiry_times
+    else:
+        # New entry - check capacity
+        if keys.len() >= cache['capacity']:
+            # Evict first entry (oldest)
+            cache['keys'] = keys[1:]
+            cache['values'] = values[1:]
+            cache['expiry_times'] = expiry_times[1:]
+
+        # Add new entry
+        var new_keys = cache['keys']
+        new_keys.push(key)
+        cache['keys'] = new_keys
+
+        var new_values = cache['values']
+        new_values.push(value)
+        cache['values'] = new_values
+
+        var new_expiry_times = cache['expiry_times']
+        new_expiry_times.push(expiry)
+        cache['expiry_times'] = new_expiry_times
+
+    cache
+
+# ============================================================================
+# Generic Cache Operations
+# ============================================================================
+
+fn cache_put(cache, key: text, value):
+    """Generic cache put operation. Works with any cache type."""
+    val cache_type = cache['type']
+    if cache_type == 'lru':
+        cache_lru_put(cache, key, value)
+    elif cache_type == 'fifo':
+        cache_fifo_put(cache, key, value)
+    elif cache_type == 'lfu':
+        cache_lfu_put(cache, key, value)
+    elif cache_type == 'ttl':
+        cache_ttl_put(cache, key, value)
+    else:
+        cache
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn _find_key_index(keys, key: text) -> i64:
+    """Find index of key in keys array. Returns -1 if not found."""
+    var i = 0
+    while i < keys.len():
+        if keys[i] == key:
+            return i
+        i = i + 1
+    -1
+
+fn _remove_at_index(arr, index: i64):
+    """Remove element at index from array. Returns new array."""
+    var result = []
+    var i = 0
+    while i < arr.len():
+        if i != index:
+            result.push(arr[i])
+        i = i + 1
+    result
+
+fn _get_timestamp() -> i64:
+    """Get current timestamp (simulated with counter for testing)."""
+    1000000
+
+export cache_lru_put, cache_fifo_put, cache_lfu_put, cache_ttl_put, cache_put

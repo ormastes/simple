@@ -1,0 +1,147 @@
+# HTTP Server Response Module
+# Response building and formatting
+
+# =============================================================================
+# Response Building
+# =============================================================================
+
+# Create basic response tuple: (status, reason, headers, body)
+fn create_response(status: i64, body: text) -> (i64, text, list, text):
+    var reason = status_reason(status)
+    var headers = []
+    (status, reason, headers, body)
+
+# Add header to response
+fn add_response_header(response: (i64, text, list, text), name: text, value: text) -> (i64, text, list, text):
+    var status = response.at(0)
+    var reason = response.at(1)
+    var headers = response.at(2)
+    var body = response.at(3)
+
+    var new_headers = headers
+    new_headers.append((name, value))
+
+    (status, reason, new_headers, body)
+
+# Set Content-Type header
+fn set_content_type(response: (i64, text, list, text), mime_type: text) -> (i64, text, list, text):
+    add_response_header(response, "Content-Type", mime_type)
+
+# Set Content-Length header
+fn set_content_length(response: (i64, text, list, text), length: i64) -> (i64, text, list, text):
+    var length_str = length.to_string()
+    add_response_header(response, "Content-Length", length_str)
+
+# Create JSON response
+fn json_response(status: i64, json_body: text) -> (i64, text, list, text):
+    var resp = create_response(status, json_body)
+    var resp2 = set_content_type(resp, "application/json")
+    var body_len = json_body.length()
+    var resp3 = set_content_length(resp2, body_len)
+    resp3
+
+# Create HTML response
+fn html_response(status: i64, html_body: text) -> (i64, text, list, text):
+    var resp = create_response(status, html_body)
+    var resp2 = set_content_type(resp, "text/html")
+    var body_len = html_body.length()
+    var resp3 = set_content_length(resp2, body_len)
+    resp3
+
+# Create plain text response
+fn text_response(status: i64, text_body: text) -> (i64, text, list, text):
+    var resp = create_response(status, text_body)
+    var resp2 = set_content_type(resp, "text/plain")
+    var body_len = text_body.length()
+    var resp3 = set_content_length(resp2, body_len)
+    resp3
+
+# Create redirect response
+fn redirect_response(location: text, permanent: bool) -> (i64, text, list, text):
+    var status = 302
+    if permanent:
+        status = 301
+
+    var resp = create_response(status, "")
+    var resp2 = add_response_header(resp, "Location", location)
+    resp2
+
+# Create error response
+fn error_response(status: i64, message: text) -> (i64, text, list, text):
+    var body = "{\"error\": \"{message}\"}"
+    json_response(status, body)
+
+# Create 404 Not Found response
+fn not_found_response(path: text) -> (i64, text, list, text):
+    var message = "Resource not found: {path}"
+    error_response(404, message)
+
+# Create 500 Internal Server Error response
+fn internal_error_response(message: text) -> (i64, text, list, text):
+    error_response(500, message)
+
+# Serialize response to HTTP format
+fn serialize_response(response: (i64, text, list, text)) -> text:
+    var status = response.at(0)
+    var reason = response.at(1)
+    var headers = response.at(2)
+    var body = response.at(3)
+
+    var result = "HTTP/1.1 {status} {reason}\r\n"
+
+    var i = 0
+    while i < headers.length():
+        var header = headers.at(i)
+        var name = header.at(0)
+        var value = header.at(1)
+        result = result + "{name}: {value}\r\n"
+        i = i + 1
+
+    result = result + "\r\n"
+    result = result + body
+    result
+
+# =============================================================================
+# Error Page Generation
+# =============================================================================
+
+# Generate HTML error page
+fn generate_error_page(status: i64, message: text) -> text:
+    var reason = status_reason(status)
+    var html = "<!DOCTYPE html>\n"
+    html = html + "<html>\n"
+    html = html + "<head><title>{status} {reason}</title></head>\n"
+    html = html + "<body>\n"
+    html = html + "<h1>{status} {reason}</h1>\n"
+    html = html + "<p>{message}</p>\n"
+    html = html + "</body>\n"
+    html = html + "</html>"
+    html
+
+# Generate 404 error page
+fn generate_404_page(path: text) -> text:
+    var message = "The requested resource '{path}' was not found on this server."
+    generate_error_page(404, message)
+
+# Generate 500 error page
+fn generate_500_page(error: text) -> text:
+    var message = "An internal server error occurred: {error}"
+    generate_error_page(500, message)
+
+# =============================================================================
+# Content Negotiation
+# =============================================================================
+
+# Select best content type from Accept header
+fn negotiate_content_type(accept_header: text, available_types: list) -> text:
+    var accepted = parse_accept_header(accept_header)
+    var result = "text/plain"
+
+    if accepted.length() == 0:
+        if available_types.length() > 0:
+            result = available_types.at(0)
+        return result
+
+    var first_accept = accepted.at(0)
+    result = first_accept.at(0)
+    result

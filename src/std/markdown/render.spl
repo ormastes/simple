@@ -1,0 +1,339 @@
+
+# =============================================================================
+# HTML Rendering (12 functions)
+# =============================================================================
+
+fn render_inline_token(token: tuple) -> text:
+    val type = token.0
+    if type == "text":
+        val content = token.1
+        return escape_html(content)
+    if type == "bold":
+        val tokens = token.1
+        val inner = render_inline_tokens(tokens)
+        return "<strong>" + inner + "</strong>"
+    if type == "italic":
+        val tokens = token.1
+        val inner = render_inline_tokens(tokens)
+        return "<em>" + inner + "</em>"
+    if type == "code":
+        val content = token.1
+        val escaped = escape_html(content)
+        return "<code>" + escaped + "</code>"
+    if type == "link":
+        val text_tokens = token.1
+        val url = token.2
+        val title = token.3
+        val text_html = render_inline_tokens(text_tokens)
+        val url_escaped = escape_attr(url)
+        var html = "<a href=\"" + url_escaped + "\""
+        if title.length() > 0:
+            val title_escaped = escape_attr(title)
+            html = html + " title=\"" + title_escaped + "\""
+        html = html + ">" + text_html + "</a>"
+        return html
+    if type == "image":
+        val alt = token.1
+        val url = token.2
+        val title = token.3
+        val alt_escaped = escape_attr(alt)
+        val url_escaped = escape_attr(url)
+        var html = "<img src=\"" + url_escaped + "\" alt=\"" + alt_escaped + "\""
+        if title.length() > 0:
+            val title_escaped = escape_attr(title)
+            html = html + " title=\"" + title_escaped + "\""
+        html = html + " />"
+        return html
+    if type == "autolink":
+        val url = token.1
+        val url_escaped = escape_attr(url)
+        val url_text = escape_html(url)
+        return "<a href=\"" + url_escaped + "\">" + url_text + "</a>"
+    if type == "strikethrough":
+        val tokens = token.1
+        val inner = render_inline_tokens(tokens)
+        return "<del>" + inner + "</del>"
+    if type == "line_break":
+        return "<br />"
+    ""
+
+fn render_inline_tokens(tokens: array) -> text:
+    var html = ""
+    var i = 0
+    var len = tokens.length()
+    while i < len:
+        val token = tokens.get(i)
+        val token_html = render_inline_token(token)
+        html = html + token_html
+        i = i + 1
+    html
+
+fn extract_text_from_tokens(tokens: array) -> text:
+    var text = ""
+    var i = 0
+    var len = tokens.length()
+    while i < len:
+        val token = tokens.get(i)
+        val type = token.0
+        if type == "text":
+            val content = token.1
+            text = text + content
+        else:
+            if type == "bold" or type == "italic" or type == "link" or type == "strikethrough":
+                val inner_tokens = token.1
+                val inner_text = extract_text_from_tokens(inner_tokens)
+                text = text + inner_text
+            else:
+                if type == "code":
+                    val content = token.1
+                    text = text + content
+                else:
+                    if type == "image":
+                        val alt = token.1
+                        text = text + alt
+        i = i + 1
+    text
+
+fn render_heading_block(block: tuple) -> text:
+    val level = block.1
+    val tokens = block.2
+    val content = render_inline_tokens(tokens)
+    val text = extract_text_from_tokens(tokens)
+    val id = slugify(text)
+    val tag = "h" + level.to_text()
+    var html = "<" + tag
+    if id.length() > 0:
+        html = html + " id=\"" + id + "\""
+    html = html + ">" + content + "</" + tag + ">"
+    html
+
+fn render_paragraph_block(block: tuple) -> text:
+    val tokens = block.1
+    val content = render_inline_tokens(tokens)
+    "<p>" + content + "</p>"
+
+fn render_code_block(block: tuple) -> text:
+    val lang = block.1
+    val code = block.2
+    val escaped = escape_html(code)
+    var html = "<pre><code"
+    if lang.length() > 0:
+        val lang_escaped = escape_attr(lang)
+        html = html + " class=\"language-" + lang_escaped + "\""
+    html = html + ">" + escaped + "</code></pre>"
+    html
+
+fn render_blockquote_block(block: tuple) -> text:
+    val child_blocks = block.1
+    val inner = render_blocks(child_blocks)
+    "<blockquote>" + inner + "</blockquote>"
+
+fn render_unordered_list_block(block: tuple) -> text:
+    val items = block.1
+    var html = "<ul>"
+    var i = 0
+    var len = items.length()
+    while i < len:
+        val item_tokens = items.get(i)
+        val item_html = render_inline_tokens(item_tokens)
+        html = html + "<li>" + item_html + "</li>"
+        i = i + 1
+    html = html + "</ul>"
+    html
+
+fn render_ordered_list_block(block: tuple) -> text:
+    val start_num = block.1
+    val items = block.2
+    var html = "<ol"
+    if start_num != 1:
+        html = html + " start=\"" + start_num.to_text() + "\""
+    html = html + ">"
+    var i = 0
+    var len = items.length()
+    while i < len:
+        val item_tokens = items.get(i)
+        val item_html = render_inline_tokens(item_tokens)
+        html = html + "<li>" + item_html + "</li>"
+        i = i + 1
+    html = html + "</ol>"
+    html
+
+fn render_table_block(block: tuple) -> text:
+    val headers = block.1
+    val alignments = block.2
+    val rows = block.3
+    var html = "<table><thead><tr>"
+    var i = 0
+    var header_len = headers.length()
+    while i < header_len:
+        val header = headers.get(i)
+        var align = "left"
+        if i < alignments.length():
+            align = alignments.get(i)
+        var th = "<th"
+        if align != "left":
+            th = th + " style=\"text-align: " + align + "\""
+        th = th + ">" + escape_html(header) + "</th>"
+        html = html + th
+        i = i + 1
+    html = html + "</tr></thead><tbody>"
+    var row_i = 0
+    var row_len = rows.length()
+    while row_i < row_len:
+        val row = rows.get(row_i)
+        html = html + "<tr>"
+        var cell_i = 0
+        var cell_len = row.length()
+        while cell_i < cell_len:
+            val cell = row.get(cell_i)
+            var align = "left"
+            if cell_i < alignments.length():
+                align = alignments.get(cell_i)
+            var td = "<td"
+            if align != "left":
+                td = td + " style=\"text-align: " + align + "\""
+            td = td + ">" + escape_html(cell) + "</td>"
+            html = html + td
+            cell_i = cell_i + 1
+        html = html + "</tr>"
+        row_i = row_i + 1
+    html = html + "</tbody></table>"
+    html
+
+fn render_block(block: tuple) -> text:
+    val type = block.0
+    if type == "heading":
+        return render_heading_block(block)
+    if type == "paragraph":
+        return render_paragraph_block(block)
+    if type == "code_block":
+        return render_code_block(block)
+    if type == "blockquote":
+        return render_blockquote_block(block)
+    if type == "unordered_list":
+        return render_unordered_list_block(block)
+    if type == "ordered_list":
+        return render_ordered_list_block(block)
+    if type == "horizontal_rule":
+        return "<hr />"
+    if type == "table":
+        return render_table_block(block)
+    ""
+
+fn render_blocks(blocks: array) -> text:
+    var html = ""
+    var i = 0
+    var len = blocks.length()
+    while i < len:
+        val block = blocks.get(i)
+        val block_html = render_block(block)
+        html = html + block_html + "\n"
+        i = i + 1
+    html
+
+# =============================================================================
+# Public API (6 functions)
+# =============================================================================
+
+fn markdown_to_html(markdown: text) -> text:
+    val lines = split_lines(markdown)
+    val blocks = parse_blocks(lines)
+    render_blocks(blocks)
+
+fn markdown_to_ast(markdown: text) -> array:
+    val lines = split_lines(markdown)
+    parse_blocks(lines)
+
+fn extract_headings(blocks: array) -> array:
+    var headings = []
+    var i = 0
+    var len = blocks.length()
+    while i < len:
+        val block = blocks.get(i)
+        val type = block.0
+        if type == "heading":
+            val level = block.1
+            val tokens = block.2
+            val text = extract_text_from_tokens(tokens)
+            headings = headings.push((level, text))
+        i = i + 1
+    headings
+
+fn extract_links(blocks: array) -> array:
+    var links = []
+    var i = 0
+    var len = blocks.length()
+    while i < len:
+        val block = blocks.get(i)
+        val block_links = extract_links_from_block(block)
+        var j = 0
+        var link_len = block_links.length()
+        while j < link_len:
+            links = links.push(block_links.get(j))
+            j = j + 1
+        i = i + 1
+    links
+
+fn extract_links_from_block(block: tuple) -> array:
+    var links = []
+    val type = block.0
+    if type == "heading":
+        val tokens = block.2
+        return extract_links_from_tokens(tokens)
+    if type == "paragraph":
+        val tokens = block.1
+        return extract_links_from_tokens(tokens)
+    if type == "blockquote":
+        val child_blocks = block.1
+        return extract_links(child_blocks)
+    if type == "unordered_list":
+        val items = block.1
+        var i = 0
+        var len = items.length()
+        while i < len:
+            val item_tokens = items.get(i)
+            val item_links = extract_links_from_tokens(item_tokens)
+            var j = 0
+            var link_len = item_links.length()
+            while j < link_len:
+                links = links.push(item_links.get(j))
+                j = j + 1
+            i = i + 1
+    if type == "ordered_list":
+        val items = block.2
+        var i = 0
+        var len = items.length()
+        while i < len:
+            val item_tokens = items.get(i)
+            val item_links = extract_links_from_tokens(item_tokens)
+            var j = 0
+            var link_len = item_links.length()
+            while j < link_len:
+                links = links.push(item_links.get(j))
+                j = j + 1
+            i = i + 1
+    links
+
+fn extract_links_from_tokens(tokens: array) -> array:
+    var links = []
+    var i = 0
+    var len = tokens.length()
+    while i < len:
+        val token = tokens.get(i)
+        val type = token.0
+        if type == "link":
+            val text_tokens = token.1
+            val url = token.2
+            val text = extract_text_from_tokens(text_tokens)
+            links = links.push((text, url))
+        else:
+            if type == "bold" or type == "italic" or type == "strikethrough":
+                val inner_tokens = token.1
+                val inner_links = extract_links_from_tokens(inner_tokens)
+                var j = 0
+                var link_len = inner_links.length()
+                while j < link_len:
+                    links = links.push(inner_links.get(j))
+                    j = j + 1
+        i = i + 1
+    links

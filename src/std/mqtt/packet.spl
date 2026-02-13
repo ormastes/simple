@@ -1,0 +1,235 @@
+# MQTT Packet Encoding/Decoding Module
+# Functions for encoding and decoding MQTT packet components
+
+# =============================================================================
+# Encoding/Decoding Utilities
+# =============================================================================
+
+fn mqtt_encode_remaining_length(length):
+    """Encode remaining length using variable byte integer format."""
+    var result = []
+    var value = length
+
+    var continue = true
+    while continue:
+        var encoded_byte = value % 128
+        value = value / 128
+
+        if value > 0:
+            encoded_byte = encoded_byte | 128
+
+        result = result + [encoded_byte]
+
+        if value == 0:
+            continue = false
+
+    result
+
+fn mqtt_decode_remaining_length(bytes):
+    """Decode remaining length from variable byte integer format.
+    Returns (length, bytes_consumed)."""
+    var multiplier = 1
+    var value = 0
+    var index = 0
+
+    var continue = true
+    while continue:
+        if index >= bytes.length():
+            return nil
+
+        val encoded_byte = bytes[index]
+        value = value + (encoded_byte & 127) * multiplier
+
+        if multiplier > 128 * 128 * 128:
+            return nil
+
+        multiplier = multiplier * 128
+        index = index + 1
+
+        if (encoded_byte & 128) == 0:
+            continue = false
+
+    (value, index)
+
+fn mqtt_encode_string(text):
+    """Encode UTF-8 string with 2-byte length prefix."""
+    val length = text.length()
+    val high_byte = length / 256
+    val low_byte = length % 256
+
+    var result = [high_byte, low_byte]
+
+    var i = 0
+    while i < length:
+        val char_code = text[i].ord()
+        result = result + [char_code]
+        i = i + 1
+
+    result
+
+fn mqtt_decode_string(bytes, offset):
+    """Decode UTF-8 string with 2-byte length prefix.
+    Returns (string, bytes_consumed) or nil on error."""
+    if offset + 2 > bytes.length():
+        return nil
+
+    val high_byte = bytes[offset]
+    val low_byte = bytes[offset + 1]
+    val length = high_byte * 256 + low_byte
+
+    if offset + 2 + length > bytes.length():
+        return nil
+
+    var chars = []
+    var i = 0
+    while i < length:
+        val byte_val = bytes[offset + 2 + i]
+        chars = chars + [byte_val.chr()]
+        i = i + 1
+
+    val result = chars.join("")
+    (result, 2 + length)
+
+fn mqtt_encode_binary(data):
+    """Encode binary data with 2-byte length prefix."""
+    val length = data.length()
+    val high_byte = length / 256
+    val low_byte = length % 256
+
+    [high_byte, low_byte] + data
+
+fn mqtt_decode_binary(bytes, offset):
+    """Decode binary data with 2-byte length prefix.
+    Returns (data, bytes_consumed) or nil on error."""
+    if offset + 2 > bytes.length():
+        return nil
+
+    val high_byte = bytes[offset]
+    val low_byte = bytes[offset + 1]
+    val length = high_byte * 256 + low_byte
+
+    if offset + 2 + length > bytes.length():
+        return nil
+
+    var data = []
+    var i = 0
+    while i < length:
+        data = data + [bytes[offset + 2 + i]]
+        i = i + 1
+
+    (data, 2 + length)
+
+fn mqtt_encode_two_byte_int(value):
+    """Encode 2-byte integer (MSB first)."""
+    val high_byte = value / 256
+    val low_byte = value % 256
+    [high_byte, low_byte]
+
+fn mqtt_decode_two_byte_int(bytes, offset):
+    """Decode 2-byte integer (MSB first).
+    Returns (value, bytes_consumed) or nil on error."""
+    if offset + 2 > bytes.length():
+        return nil
+
+    val high_byte = bytes[offset]
+    val low_byte = bytes[offset + 1]
+    val value = high_byte * 256 + low_byte
+
+    (value, 2)
+
+fn mqtt_encode_four_byte_int(value):
+    """Encode 4-byte integer (MSB first)."""
+    val byte3 = value / (256 * 256 * 256)
+    val remainder = value % (256 * 256 * 256)
+    val byte2 = remainder / (256 * 256)
+    val remainder2 = remainder % (256 * 256)
+    val byte1 = remainder2 / 256
+    val byte0 = remainder2 % 256
+
+    [byte3, byte2, byte1, byte0]
+
+fn mqtt_decode_four_byte_int(bytes, offset):
+    """Decode 4-byte integer (MSB first).
+    Returns (value, bytes_consumed) or nil on error."""
+    if offset + 4 > bytes.length():
+        return nil
+
+    val byte3 = bytes[offset]
+    val byte2 = bytes[offset + 1]
+    val byte1 = bytes[offset + 2]
+    val byte0 = bytes[offset + 3]
+
+    val value = byte3 * 256 * 256 * 256 + byte2 * 256 * 256 + byte1 * 256 + byte0
+
+    (value, 4)
+
+fn mqtt_encode_variable_byte_int(value):
+    """Encode variable byte integer (MQTT v5.0)."""
+    mqtt_encode_remaining_length(value)
+
+fn mqtt_decode_variable_byte_int(bytes, offset):
+    """Decode variable byte integer (MQTT v5.0).
+    Returns (value, bytes_consumed) or nil on error."""
+    if offset >= bytes.length():
+        return nil
+
+    var slice = []
+    var i = offset
+    while i < bytes.length():
+        slice = slice + [bytes[i]]
+        i = i + 1
+
+    val result = mqtt_decode_remaining_length(slice)
+    if result == nil:
+        return nil
+
+    val parts = result
+    val value = parts[0]
+    val consumed = parts[1]
+    (value, consumed)
+
+# =============================================================================
+# Fixed Header Functions
+# =============================================================================
+
+fn mqtt_create_fixed_header(packet_type, flags):
+    """Create MQTT fixed header byte."""
+    (packet_type * 16) | flags
+
+fn mqtt_parse_fixed_header(byte):
+    """Parse MQTT fixed header byte.
+    Returns (packet_type, flags)."""
+    val packet_type = byte / 16
+    val flags = byte % 16
+    (packet_type, flags)
+
+fn mqtt_get_qos_from_flags(flags):
+    """Extract QoS level from flags."""
+    (flags / 2) % 4
+
+fn mqtt_set_qos_in_flags(flags, qos):
+    """Set QoS level in flags."""
+    val masked = flags & 249
+    masked | (qos * 2)
+
+fn mqtt_has_dup_flag(flags):
+    """Check if DUP flag is set."""
+    (flags & 8) != 0
+
+fn mqtt_set_dup_flag(flags, dup):
+    """Set DUP flag in flags."""
+    if dup:
+        flags | 8
+    else:
+        flags & 247
+
+fn mqtt_has_retain_flag(flags):
+    """Check if RETAIN flag is set."""
+    (flags & 1) != 0
+
+fn mqtt_set_retain_flag(flags, retain):
+    """Set RETAIN flag in flags."""
+    if retain:
+        flags | 1
+    else:
+        flags & 254

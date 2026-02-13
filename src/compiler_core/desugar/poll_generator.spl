@@ -104,14 +104,14 @@ fn generate_poll_function(
 
     # Wrap in block
     val body = Block(
-        statements: [Stmt(
+        stmts: [Stmt(
             kind: stmtkind_Expr(match_expr),
             span: dummy_span()
         )],
         span: dummy_span()
     )
 
-    val _tv_0 = [StateEnum, Poll<T>]
+    # val _tv_0 = [StateEnum, Poll<T>]
     # Create return type: _tv_0
     val return_type = make_poll_return_type(state_enum.name)
 
@@ -175,10 +175,7 @@ fn generate_state0_arm(
         # Return (State1(future: future), Poll.Pending)
         val next_state = make_state_constructor("State1", ["future"])
         val return_expr = make_poll_tuple(next_state, make_pending())
-        body_stmts = body_stmts.push(Stmt(
-            kind: stmtkind_Expr(return_expr),
-            span: dummy_span()
-        ))
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
     else:
         # No awaits - immediately return ready
         # Extract return value from function body's last expression
@@ -194,18 +191,9 @@ fn generate_state0_arm(
             make_state_constructor("State0", []),
             make_ready(return_val)
         )
-        body_stmts = body_stmts.push(Stmt(
-            kind: stmtkind_Expr(return_expr),
-            span: dummy_span()
-        ))
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
 
-    val body = Block(stmts: body_stmts, span: dummy_span())
-
-    MatchArm(
-        pattern: pattern,
-        #  # DESUGARED: guard: nil
-        body: body
-    )
+    make_match_arm(pattern, body_stmts)
 
 fn generate_resume_arm(
     sp: SuspensionPoint,
@@ -271,13 +259,7 @@ fn generate_resume_arm(
         span: dummy_span()
     ))
 
-    val body = Block(stmts: body_stmts, span: dummy_span())
-
-    MatchArm(
-        pattern: pattern,
-        #  # DESUGARED: guard: nil
-        body: body
-    )
+    make_match_arm(pattern, body_stmts)
 
 fn generate_ready_arm(
     sp: SuspensionPoint,
@@ -323,10 +305,7 @@ fn generate_ready_arm(
         val next_state = make_state_constructor(next_state_name, field_names)
         val return_expr = make_poll_tuple(next_state, make_pending())
 
-        body_stmts = body_stmts.push(Stmt(
-            kind: stmtkind_Expr(return_expr),
-            span: dummy_span()
-        ))
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
     else:
         # This was the last await - apply post-await computation and return
         # Extract statements from func_body that come after the last suspension point
@@ -352,18 +331,9 @@ fn generate_ready_arm(
             make_ready(final_value)
         )
 
-        body_stmts = body_stmts.push(Stmt(
-            kind: stmtkind_Expr(return_expr),
-            span: dummy_span()
-        ))
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
 
-    val body = Block(stmts: body_stmts, span: dummy_span())
-
-    MatchArm(
-        pattern: pattern,
-        #  # DESUGARED: guard: nil
-        body: body
-    )
+    make_match_arm(pattern, body_stmts)
 
 fn generate_pending_arm(variant: StateVariant) -> MatchArm:
     """Generate Pending arm of poll result match.
@@ -387,19 +357,7 @@ fn generate_pending_arm(variant: StateVariant) -> MatchArm:
     val same_state = make_state_constructor(variant.name, field_names)
     val return_expr = make_poll_tuple(same_state, make_pending())
 
-    val body = Block(
-        statements: [Stmt(
-            kind: stmtkind_Expr(return_expr),
-            span: dummy_span()
-        )],
-        span: dummy_span()
-    )
-
-    MatchArm(
-        pattern: pattern,
-        #  # DESUGARED: guard: nil
-        body: body
-    )
+    make_match_arm(pattern, [make_expr_stmt(return_expr)])
 
 # ================================================================
 # AST Helper Functions
@@ -410,7 +368,7 @@ fn dummy_span() -> Span:
     span_new(0, 0, 1, 1)
 
 fn make_poll_return_type(state_enum_name: text) -> Type:
-    val _tv_1 = [StateEnum, Poll<T>]
+    # val _tv_1 = [StateEnum, Poll<T>]
     """Create return type: _tv_1.
 
     Args:
@@ -527,8 +485,43 @@ fn make_ready(value: Expr) -> Expr:
                 ),
                 span: dummy_span()
             ),
-            [CallArg(value: value, name: nil)]
+            [CallArg(
+                value: value,
+                #  # DESUGARED: name: nil
+                span: dummy_span()
+            )]
         ),
+        span: dummy_span()
+    )
+
+fn make_match_arm(pattern: Pattern, body_stmts: [Stmt]) -> MatchArm:
+    """Create a MatchArm from pattern and body statements.
+    
+    Args:
+        pattern: Pattern to match
+        body_stmts: Statements for the match arm body
+    
+    Returns:
+        Constructed MatchArm
+    """
+    val body = Block(stmts: body_stmts, span: dummy_span())
+    MatchArm(
+        pattern: pattern,
+        #  # DESUGARED: guard: nil
+        body: body
+    )
+
+fn make_expr_stmt(expr: Expr) -> Stmt:
+    """Create a statement that evaluates an expression.
+    
+    Args:
+        expr: Expression to wrap
+    
+    Returns:
+        Statement containing the expression
+    """
+    Stmt(
+        kind: stmtkind_Expr(expr),
         span: dummy_span()
     )
 

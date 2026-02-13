@@ -1,0 +1,284 @@
+# Protocol Buffers Encoding Functions
+
+from "std/protobuf/types" import WIRE_TYPE_VARINT, WIRE_TYPE_FIXED32, WIRE_TYPE_FIXED64, WIRE_TYPE_LENGTH_DELIMITED, string_to_bytes
+
+# ==============================================================================
+# Varint Encoding
+# ==============================================================================
+
+# Encode unsigned 64-bit integer as varint
+# Returns list of bytes
+fn encode_varint(value: i64) -> list:
+    var result = []
+    var v = value
+    loop:
+        if v < 128:
+            result = result + [v]
+            break
+        var byte = (v & 127) | 128
+        result = result + [byte]
+        v = v >> 7
+    result
+
+# Compute size of varint encoding
+fn varint_size(value: i64) -> i64:
+    if value < 0:
+        return 10  # Negative numbers always take 10 bytes
+
+    var size = 1
+    var v = value
+    loop:
+        v = v >> 7
+        if v == 0:
+            break
+        size = size + 1
+    size
+
+# ==============================================================================
+# ZigZag Encoding (for signed integers)
+# ==============================================================================
+
+# Encode signed 32-bit integer using ZigZag
+fn zigzag_encode_32(value: i64) -> i64:
+    ((value << 1) ^ (value >> 31)) & 0xFFFFFFFF
+
+# Encode signed 64-bit integer using ZigZag
+fn zigzag_encode_64(value: i64) -> i64:
+    (value << 1) ^ (value >> 63)
+
+# ==============================================================================
+# Tag Encoding
+# ==============================================================================
+
+# Encode field tag (field_number << 3 | wire_type)
+fn encode_tag(field_number: i64, wire_type: i64) -> i64:
+    (field_number << 3) | wire_type
+
+# ==============================================================================
+# Fixed-Width Encoding
+# ==============================================================================
+
+# Encode 32-bit fixed value as little-endian bytes
+fn encode_fixed32(value: i64) -> list:
+    var v = value & 0xFFFFFFFF
+    [
+        v & 0xFF,
+        (v >> 8) & 0xFF,
+        (v >> 16) & 0xFF,
+        (v >> 24) & 0xFF
+    ]
+
+# Encode 64-bit fixed value as little-endian bytes
+fn encode_fixed64(value: i64) -> list:
+    [
+        value & 0xFF,
+        (value >> 8) & 0xFF,
+        (value >> 16) & 0xFF,
+        (value >> 24) & 0xFF,
+        (value >> 32) & 0xFF,
+        (value >> 40) & 0xFF,
+        (value >> 48) & 0xFF,
+        (value >> 56) & 0xFF
+    ]
+
+# Encode float as fixed32 (simplified - no actual IEEE 754 conversion)
+fn encode_float(value: i64) -> list:
+    encode_fixed32(value)
+
+# Encode double as fixed64 (simplified - no actual IEEE 754 conversion)
+fn encode_double(value: i64) -> list:
+    encode_fixed64(value)
+
+# ==============================================================================
+# String/Bytes Encoding (Length-Delimited)
+# ==============================================================================
+
+# Encode string as length-delimited bytes
+fn encode_string(value: text) -> list:
+    var str_bytes = string_to_bytes(value)
+    var len_bytes = encode_varint(str_bytes.length())
+    len_bytes + str_bytes
+
+# Encode bytes as length-delimited
+fn encode_bytes(value: list) -> list:
+    var len_bytes = encode_varint(value.length())
+    len_bytes + value
+
+# ==============================================================================
+# Field Encoding (Complete Fields)
+# ==============================================================================
+
+# Encode int32 field (varint)
+fn encode_int32_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var value_masked = value & 0xFFFFFFFF
+    var value_bytes = encode_varint(value_masked)
+    tag_bytes + value_bytes
+
+# Encode int64 field (varint)
+fn encode_int64_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_varint(value)
+    tag_bytes + value_bytes
+
+# Encode uint32 field (varint)
+fn encode_uint32_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var value_masked = value & 0xFFFFFFFF
+    var value_bytes = encode_varint(value_masked)
+    tag_bytes + value_bytes
+
+# Encode uint64 field (varint)
+fn encode_uint64_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_varint(value)
+    tag_bytes + value_bytes
+
+# Encode sint32 field (ZigZag + varint)
+fn encode_sint32_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var zigzag = zigzag_encode_32(value)
+    var value_bytes = encode_varint(zigzag)
+    tag_bytes + value_bytes
+
+# Encode sint64 field (ZigZag + varint)
+fn encode_sint64_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var zigzag = zigzag_encode_64(value)
+    var value_bytes = encode_varint(zigzag)
+    tag_bytes + value_bytes
+
+# Encode bool field (varint 0 or 1)
+fn encode_bool_field(field_number: i64, value: bool) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var int_value = 0
+    if value:
+        int_value = 1
+    var value_bytes = encode_varint(int_value)
+    tag_bytes + value_bytes
+
+# Encode enum field (varint)
+fn encode_enum_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_VARINT())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_varint(value)
+    tag_bytes + value_bytes
+
+# Encode fixed32 field
+fn encode_fixed32_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED32())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_fixed32(value)
+    tag_bytes + value_bytes
+
+# Encode fixed64 field
+fn encode_fixed64_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED64())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_fixed64(value)
+    tag_bytes + value_bytes
+
+# Encode sfixed32 field (signed fixed32)
+fn encode_sfixed32_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED32())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_fixed32(value)
+    tag_bytes + value_bytes
+
+# Encode sfixed64 field (signed fixed64)
+fn encode_sfixed64_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED64())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_fixed64(value)
+    tag_bytes + value_bytes
+
+# Encode float field
+fn encode_float_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED32())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_float(value)
+    tag_bytes + value_bytes
+
+# Encode double field
+fn encode_double_field(field_number: i64, value: i64) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_FIXED64())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_double(value)
+    tag_bytes + value_bytes
+
+# Encode string field
+fn encode_string_field(field_number: i64, value: text) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_LENGTH_DELIMITED())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_string(value)
+    tag_bytes + value_bytes
+
+# Encode bytes field
+fn encode_bytes_field(field_number: i64, value: list) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_LENGTH_DELIMITED())
+    var tag_bytes = encode_varint(tag)
+    var value_bytes = encode_bytes(value)
+    tag_bytes + value_bytes
+
+# Encode embedded message field
+fn encode_message_field(field_number: i64, message_bytes: list) -> list:
+    var tag = encode_tag(field_number, WIRE_TYPE_LENGTH_DELIMITED())
+    var tag_bytes = encode_varint(tag)
+    var len_bytes = encode_varint(message_bytes.length())
+    tag_bytes + len_bytes + message_bytes
+
+# ==============================================================================
+# Repeated Fields (Packed)
+# ==============================================================================
+
+# Encode packed repeated varint field
+fn encode_packed_varint(field_number: i64, values: list) -> list:
+    var data = []
+    var i = 0
+    var count = values.length()
+    loop:
+        if i >= count:
+            break
+        var v = values[i]
+        var bytes = encode_varint(v)
+        data = data + bytes
+        i = i + 1
+
+    encode_bytes_field(field_number, data)
+
+# Encode packed repeated fixed32 field
+fn encode_packed_fixed32(field_number: i64, values: list) -> list:
+    var data = []
+    var i = 0
+    var count = values.length()
+    loop:
+        if i >= count:
+            break
+        var v = values[i]
+        var bytes = encode_fixed32(v)
+        data = data + bytes
+        i = i + 1
+
+    encode_bytes_field(field_number, data)
+
+# Encode packed repeated fixed64 field
+fn encode_packed_fixed64(field_number: i64, values: list) -> list:
+    var data = []
+    var i = 0
+    var count = values.length()
+    loop:
+        if i >= count:
+            break
+        var v = values[i]
+        var bytes = encode_fixed64(v)
+        data = data + bytes
+        i = i + 1
+
+    encode_bytes_field(field_number, data)

@@ -1,0 +1,94 @@
+# LZ77 Compression Operations
+#
+# Core compression algorithm implementation.
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export compress_bytes_simple
+export context_reset, context_get_stats
+export should_use_lazy_match, apply_lazy_matching
+
+# ============================================================================
+# Compression Core
+# ============================================================================
+
+fn compress_bytes_simple(input: list) -> list:
+    # Simple compression without hash table
+    val tokens = []
+    val input_len = input.len()
+    var pos = 0
+    while pos < input_len:
+        val remaining = input_len - pos
+        val max_len = calculate_max_match_length(remaining)
+        if max_len < MIN_MATCH_LENGTH:
+            val byte = input[pos]
+            val token = create_literal_token(byte)
+            tokens.push(token)
+            pos = pos + 1
+        else:
+            val match = find_longest_match_simple(input, pos, input, pos, max_len)
+            if match == nil:
+                val byte = input[pos]
+                val token = create_literal_token(byte)
+                tokens.push(token)
+                pos = pos + 1
+            else:
+                val distance = match.distance
+                val length = match.length
+                val token = create_match_token(distance, length)
+                tokens.push(token)
+                pos = pos + length
+    tokens
+
+# ============================================================================
+# Compression Context
+# ============================================================================
+
+fn context_reset(ctx: any):
+    # Reset compression context
+    val window = ctx.window
+    window_reset(window)
+    val lookahead = ctx.lookahead
+    lookahead_clear(lookahead)
+    val hash_table = ctx.hash_table
+    hash_table_clear(hash_table)
+    val stats = ctx.stats
+    stats_reset(stats)
+    ctx.input_pos = 0
+    ctx.lazy_match = nil
+
+fn context_get_stats(ctx: any) -> any:
+    # Get context statistics
+    ctx.stats
+
+# ============================================================================
+# Lazy Matching
+# ============================================================================
+
+fn should_use_lazy_match(current: any, lazy: any) -> bool:
+    # Decide if lazy match is better than current
+    if lazy == nil:
+        false
+    else:
+        val lazy_len = lazy.length
+        val curr_len = current.length
+        val gain = lazy_len - curr_len
+        gain >= 2
+
+fn apply_lazy_matching(ctx: any, current_match: any) -> any:
+    # Apply lazy matching strategy
+    val has_lazy = ctx.has_lazy_match()
+    if has_lazy:
+        val lazy = ctx.lazy_match
+        val should_use = should_use_lazy_match(current_match, lazy)
+        if should_use:
+            ctx.lazy_match = nil
+            lazy
+        else:
+            ctx.lazy_match = current_match
+            nil
+    else:
+        ctx.lazy_match = current_match
+        nil

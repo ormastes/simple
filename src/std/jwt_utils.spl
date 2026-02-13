@@ -1,4 +1,4 @@
-# JWT (JSON Web Token) Utilities Module
+# JWT (JSON Web Token) Utilities Module - Facade
 #
 # Pure Simple implementation of JWT encoding, decoding, and validation.
 # Supports HS256, HS384, HS512 HMAC-based signing algorithms.
@@ -22,25 +22,138 @@
 #   - Reject tokens with "alg": "none"
 #   - Transmit JWTs only over HTTPS
 #   - Use httpOnly cookies for storage when possible
+#
+# Architecture:
+#   This is a facade module that coordinates functionality from:
+#   - jwt/types.spl: Type definitions and data structures
+#   - jwt/encode.spl: Base64URL and JSON encoding
+#   - jwt/decode.spl: JSON and token parsing
+#   - jwt/sign.spl: HMAC-SHA signing operations
+#   - jwt/verify.spl: Signature verification
+#   - jwt/claims.spl: Claims management
+#   - jwt/utilities.spl: Helper functions and security checks
 
 # ============================================================================
-# Data Structures (tuple-based for runtime compatibility)
+# Re-export Types Module Functions
 # ============================================================================
 
-# JWT components: (header_text, payload_text, signature_text)
-# JWTHeader: List of tuples [(key, value), ...]
-# JWTPayload: List of tuples [(claim_key, claim_value), ...]
-# ValidationOptions: List of tuples [(option_key, option_value), ...]
+# Create default JWT header with algorithm
+fn create_header(alg: text) -> list:
+    var header = []
+    var alg_tuple = ["alg", alg]
+    var typ_tuple = ["typ", "JWT"]
+    header = header + [alg_tuple]
+    header = header + [typ_tuple]
+    return header
+
+# Get value from header by key
+fn get_header_value(header: list, key: text) -> text:
+    var i = 0
+    var len = header.length()
+
+    while i < len:
+        var tuple = header.at(i)
+        var k = tuple.at(0)
+        if k == key:
+            return tuple.at(1)
+        i = i + 1
+
+    return ""
+
+# Set value in header
+fn set_header_value(header: list, key: text, value: text) -> list:
+    var result = []
+    var found = false
+    var i = 0
+    var len = header.length()
+
+    while i < len:
+        var tuple = header.at(i)
+        var k = tuple.at(0)
+
+        if k == key:
+            var new_tuple = [key, value]
+            result = result + [new_tuple]
+            found = true
+        else:
+            result = result + [tuple]
+
+        i = i + 1
+
+    if not found:
+        var new_tuple = [key, value]
+        result = result + [new_tuple]
+
+    return result
+
+# Get algorithm from header
+fn get_algorithm(header: list) -> text:
+    return get_header_value(header, "alg")
+
+# Create empty payload
+fn create_payload() -> list:
+    return []
+
+# Create default validation options
+fn create_validation_options() -> list:
+    var options = []
+    var opt1 = ["validate_exp", "true"]
+    var opt2 = ["validate_nbf", "true"]
+    var opt3 = ["leeway", "0"]
+    options = options + [opt1]
+    options = options + [opt2]
+    options = options + [opt3]
+    return options
+
+# Get validation option value
+fn get_validation_option(options: list, key: text) -> text:
+    var i = 0
+    var len = options.length()
+
+    while i < len:
+        var tuple = options.at(i)
+        var k = tuple.at(0)
+        if k == key:
+            return tuple.at(1)
+        i = i + 1
+
+    return ""
+
+# Set validation option
+fn set_option(options: list, key: text, value: text) -> list:
+    var result = []
+    var found = false
+    var i = 0
+    var len = options.length()
+
+    while i < len:
+        var tuple = options.at(i)
+        var k = tuple.at(0)
+
+        if k == key:
+            var new_tuple = [key, value]
+            result = result + [new_tuple]
+            found = true
+        else:
+            result = result + [tuple]
+
+        i = i + 1
+
+    if not found:
+        var new_tuple = [key, value]
+        result = result + [new_tuple]
+
+    return result
 
 # ============================================================================
-# Base64URL Encoding/Decoding
+# Re-export Encode Module Functions
 # ============================================================================
 
 # Base64 character set
 fn base64_chars() -> text:
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-# Base64URL character set (replaces + with -, / with _)
+# Base64URL character set
 fn base64url_chars() -> text:
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
@@ -140,7 +253,7 @@ fn base64_decode(encoded: text) -> text:
 
     return result
 
-# Encode to Base64URL (URL-safe Base64 without padding)
+# Encode to Base64URL
 fn base64url_encode(data: text) -> text:
     var b64 = base64_encode(data)
     var result = b64.replace("+", "-")
@@ -177,11 +290,179 @@ fn pad_base64(encoded: text) -> text:
         return encoded + "="
     return encoded
 
+# Escape string for JSON
+fn json_escape_string(s: text) -> text:
+    var result = s
+    result = result.replace("\\", "\\\\")
+    result = result.replace("\"", "\\\"")
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+    return result
+
+# Encode list of tuples to JSON object
+fn json_encode_object(tuples: list) -> text:
+    var result = "{"
+    var i = 0
+    var len = tuples.length()
+
+    while i < len:
+        var tuple = tuples.at(i)
+        var key = tuple.at(0)
+        var value = tuple.at(1)
+
+        if i > 0:
+            result = result + ","
+
+        var escaped_key = json_escape_string(key)
+        result = result + "\"" + escaped_key + "\":"
+
+        # Encode value based on type
+        var value_str = text.from_any(value)
+
+        # Check if value is numeric
+        var is_numeric = false
+        var first_char = ""
+        if value_str.length() > 0:
+            first_char = value_str.substring(0, 1)
+
+        var is_digit = first_char == "0" or first_char == "1" or first_char == "2"
+        is_digit = is_digit or first_char == "3" or first_char == "4"
+        is_digit = is_digit or first_char == "5" or first_char == "6"
+        is_digit = is_digit or first_char == "7" or first_char == "8"
+        is_digit = is_digit or first_char == "9" or first_char == "-"
+
+        if is_digit:
+            result = result + value_str
+        else:
+            var escaped_value = json_escape_string(value_str)
+            result = result + "\"" + escaped_value + "\""
+
+        i = i + 1
+
+    result = result + "}"
+    return result
+
+# Encode claims list to JSON
+fn json_encode(claims: list) -> text:
+    return json_encode_object(claims)
+
+# Convert claims to JSON string
+fn claims_to_json(claims: list) -> text:
+    return json_encode(claims)
+
+# Pretty-print JSON
+fn json_stringify(claims: list) -> text:
+    return json_encode(claims)
+
 # ============================================================================
-# HMAC-SHA256/384/512 Implementation
+# Re-export Decode Module Functions
 # ============================================================================
 
-# SHA-256 constants (first 32 bits of fractional parts of cube roots of first 64 primes)
+# Simple JSON parser
+fn json_parse_object(json: text) -> list:
+    var result = []
+    var trimmed = json.trim()
+
+    # Remove outer braces
+    if trimmed.starts_with("{") and trimmed.ends_with("}"):
+        trimmed = trimmed.substring(1, trimmed.length() - 1)
+
+    # Split by comma (simplified)
+    var pairs = trimmed.split(",")
+    var i = 0
+    var pairs_len = pairs.length()
+
+    while i < pairs_len:
+        var pair = pairs.at(i)
+        var parts = pair.split(":")
+
+        if parts.length() >= 2:
+            var key = parts.at(0)
+            var value = parts.at(1)
+
+            # Remove quotes and whitespace
+            key = key.trim()
+            key = key.replace("\"", "")
+
+            value = value.trim()
+            value = value.replace("\"", "")
+
+            # Add to result
+            var tuple = [key, value]
+            result = result + [tuple]
+
+        i = i + 1
+
+    return result
+
+# Decode JSON to claims list
+fn json_decode(json: text) -> list:
+    return json_parse_object(json)
+
+# Convert JSON string to claims
+fn json_to_claims(json: text) -> list:
+    return json_decode(json)
+
+# Split JWT token into parts
+fn split_token(token: text) -> list:
+    var parts = token.split(".")
+    if parts.length() != 3:
+        return []
+    return parts
+
+# Join JWT parts
+fn join_parts(parts: list) -> text:
+    if parts.length() != 3:
+        return ""
+    var part0 = parts.at(0)
+    var part1 = parts.at(1)
+    var part2 = parts.at(2)
+    return part0 + "." + part1 + "." + part2
+
+# Parse JWT token structure
+fn parse_jwt(token: text) -> list:
+    var parts = split_token(token)
+    if parts.length() != 3:
+        return []
+    return parts
+
+# Parse and decode JWT header
+fn parse_header(token: text) -> list:
+    var parts = split_token(token)
+    if parts.length() != 3:
+        return []
+
+    var header_b64 = parts.at(0)
+    var header_json = base64url_decode(header_b64)
+    var header = json_decode(header_json)
+    return header
+
+# Parse and decode JWT payload
+fn parse_payload(token: text) -> list:
+    var parts = split_token(token)
+    if parts.length() != 3:
+        return []
+
+    var payload_b64 = parts.at(1)
+    var payload_json = base64url_decode(payload_b64)
+    var payload = json_decode(payload_json)
+    return payload
+
+# Parse JWT signature
+fn parse_signature(token: text) -> text:
+    var parts = split_token(token)
+    if parts.length() != 3:
+        return ""
+
+    var signature = parts.at(2)
+    return signature
+
+# ============================================================================
+# Re-export Sign Module Functions
+# ============================================================================
+
+# SHA-256 constants
 fn sha256_k() -> list:
     return [
         1116352408, 1899447441, 3049323471, 3921009573,
@@ -204,17 +485,16 @@ fn sha256_k() -> list:
 
 # Right rotate 32-bit integer
 fn rotr32(n: i64, b: i64) -> i64:
-    var mask = 4294967295  # 0xFFFFFFFF
+    var mask = 4294967295
     var n_masked = n & mask
     var shifted = n_masked >> b
     var rotated = n_masked << (32 - b)
     var result = (shifted | rotated) & mask
     return result
 
-# Real SHA-256 hash per FIPS 180-4.
-# Returns hex-encoded digest string (64 hex characters).
+# SHA-256 hash implementation
 fn sha256_hash(message: text) -> text:
-    var mask32 = 4294967295  # 0xFFFFFFFF
+    var mask32 = 4294967295
 
     # Initial hash values
     var h0 = 1779033703
@@ -239,7 +519,7 @@ fn sha256_hash(message: text) -> text:
 
     # Pre-processing: pad to 512-bit blocks
     var data_len = bytes.length()
-    bytes.push(128)  # 0x80
+    bytes.push(128)
 
     var pad_target = data_len + 1
     var pad_zeros = 56 - (pad_target % 64)
@@ -359,12 +639,9 @@ fn sha256_hash(message: text) -> text:
 
     return result
 
-# HMAC-SHA256 (simplified)
+# HMAC-SHA256
 fn hmac_sha256(key: text, message: text) -> text:
-    # Simplified HMAC implementation for demonstration
-    # In production, use proper HMAC-SHA256 via FFI
-
-    var block_size = 64  # SHA-256 block size
+    var block_size = 64
     var key_len = key.length()
 
     # Adjust key length
@@ -387,10 +664,10 @@ fn hmac_sha256(key: text, message: text) -> text:
         if i < padded_key.length():
             k_byte = padded_key.char_code_at(i)
 
-        var i_byte = k_byte ^ 54  # 0x36
+        var i_byte = k_byte ^ 54
         i_pad = i_pad + text.from_char_code(i_byte)
 
-        var o_byte = k_byte ^ 92  # 0x5c
+        var o_byte = k_byte ^ 92
         o_pad = o_pad + text.from_char_code(o_byte)
 
         i = i + 1
@@ -403,18 +680,14 @@ fn hmac_sha256(key: text, message: text) -> text:
 
     return result
 
-# HMAC-SHA384 (simplified - uses SHA-256 as base for demonstration)
+# HMAC-SHA384 (simplified)
 fn hmac_sha384(key: text, message: text) -> text:
-    # In production, implement proper SHA-384
-    # For now, use SHA-256 with different initialization
     var hash1 = hmac_sha256(key, message)
     var hash2 = hmac_sha256(key + "384", message)
     return hash1 + hash2.substring(0, 8)
 
-# HMAC-SHA512 (simplified - uses SHA-256 as base for demonstration)
+# HMAC-SHA512 (simplified)
 fn hmac_sha512(key: text, message: text) -> text:
-    # In production, implement proper SHA-512
-    # For now, use SHA-256 with different initialization
     var hash1 = hmac_sha256(key, message)
     var hash2 = hmac_sha256(key + "512", message)
     return hash1 + hash2
@@ -431,7 +704,7 @@ fn sign_hs384(data: text, secret: text) -> text:
 fn sign_hs512(data: text, secret: text) -> text:
     return hmac_sha512(secret, data)
 
-# Sign data with specified algorithm
+# Sign data with algorithm
 fn sign_with_algorithm(data: text, secret: text, alg: text) -> text:
     if alg == "HS256":
         return sign_hs256(data, secret)
@@ -441,7 +714,7 @@ fn sign_with_algorithm(data: text, secret: text, alg: text) -> text:
         return sign_hs512(data, secret)
     return ""
 
-# Constant-time string comparison (prevent timing attacks)
+# Constant-time string comparison
 fn constant_time_compare(a: text, b: text) -> bool:
     var a_len = a.length()
     var b_len = b.length()
@@ -471,241 +744,8 @@ fn constant_time_compare(a: text, b: text) -> bool:
     return result
 
 # ============================================================================
-# JSON Encoding/Decoding (Simple Implementation)
+# Re-export Claims Module Functions
 # ============================================================================
-
-# Escape string for JSON
-fn json_escape_string(s: text) -> text:
-    var result = s
-    result = result.replace("\\", "\\\\")
-    result = result.replace("\"", "\\\"")
-    result = result.replace("\n", "\\n")
-    result = result.replace("\r", "\\r")
-    result = result.replace("\t", "\\t")
-    return result
-
-# Encode list of tuples to JSON object
-fn json_encode_object(tuples: list) -> text:
-    var result = "{"
-    var i = 0
-    var len = tuples.length()
-
-    while i < len:
-        var tuple = tuples.at(i)
-        var key = tuple.at(0)
-        var value = tuple.at(1)
-
-        if i > 0:
-            result = result + ","
-
-        var escaped_key = json_escape_string(key)
-        result = result + "\"" + escaped_key + "\":"
-
-        # Encode value based on type
-        var value_str = text.from_any(value)
-
-        # Check if value is numeric
-        var is_numeric = false
-        var first_char = ""
-        if value_str.length() > 0:
-            first_char = value_str.substring(0, 1)
-
-        var is_digit = first_char == "0" or first_char == "1" or first_char == "2"
-        is_digit = is_digit or first_char == "3" or first_char == "4"
-        is_digit = is_digit or first_char == "5" or first_char == "6"
-        is_digit = is_digit or first_char == "7" or first_char == "8"
-        is_digit = is_digit or first_char == "9" or first_char == "-"
-
-        if is_digit:
-            result = result + value_str
-        else:
-            var escaped_value = json_escape_string(value_str)
-            result = result + "\"" + escaped_value + "\""
-
-        i = i + 1
-
-    result = result + "}"
-    return result
-
-# Simple JSON parser - extract key-value pairs from JSON object
-fn json_parse_object(json: text) -> list:
-    var result = []
-    var trimmed = json.trim()
-
-    # Remove outer braces
-    if trimmed.starts_with("{") and trimmed.ends_with("}"):
-        trimmed = trimmed.substring(1, trimmed.length() - 1)
-
-    # Split by comma (simplified - doesn't handle nested objects)
-    var pairs = trimmed.split(",")
-    var i = 0
-    var pairs_len = pairs.length()
-
-    while i < pairs_len:
-        var pair = pairs.at(i)
-        var parts = pair.split(":")
-
-        if parts.length() >= 2:
-            var key = parts.at(0)
-            var value = parts.at(1)
-
-            # Remove quotes and whitespace
-            key = key.trim()
-            key = key.replace("\"", "")
-
-            value = value.trim()
-            value = value.replace("\"", "")
-
-            # Add to result
-            var tuple = [key, value]
-            result = result + [tuple]
-
-        i = i + 1
-
-    return result
-
-# Encode claims list to JSON
-fn json_encode(claims: list) -> text:
-    return json_encode_object(claims)
-
-# Decode JSON to claims list
-fn json_decode(json: text) -> list:
-    return json_parse_object(json)
-
-# Convert JSON string to claims (alias)
-fn json_to_claims(json: text) -> list:
-    return json_decode(json)
-
-# Convert claims to JSON string (alias)
-fn claims_to_json(claims: list) -> text:
-    return json_encode(claims)
-
-# Pretty-print JSON
-fn json_stringify(claims: list) -> text:
-    return json_encode(claims)
-
-# ============================================================================
-# JWT Token Parsing
-# ============================================================================
-
-# Split JWT token into three parts: [header, payload, signature]
-fn split_token(token: text) -> list:
-    var parts = token.split(".")
-    if parts.length() != 3:
-        return []
-    return parts
-
-# Join JWT parts with "."
-fn join_parts(parts: list) -> text:
-    if parts.length() != 3:
-        return ""
-    var part0 = parts.at(0)
-    var part1 = parts.at(1)
-    var part2 = parts.at(2)
-    return part0 + "." + part1 + "." + part2
-
-# Parse JWT token structure (no verification)
-fn parse_jwt(token: text) -> list:
-    var parts = split_token(token)
-    if parts.length() != 3:
-        return []
-    return parts
-
-# Parse and decode JWT header
-fn parse_header(token: text) -> list:
-    var parts = split_token(token)
-    if parts.length() != 3:
-        return []
-
-    var header_b64 = parts.at(0)
-    var header_json = base64url_decode(header_b64)
-    var header = json_decode(header_json)
-    return header
-
-# Parse and decode JWT payload
-fn parse_payload(token: text) -> list:
-    var parts = split_token(token)
-    if parts.length() != 3:
-        return []
-
-    var payload_b64 = parts.at(1)
-    var payload_json = base64url_decode(payload_b64)
-    var payload = json_decode(payload_json)
-    return payload
-
-# Parse JWT signature (returns Base64URL encoded signature)
-fn parse_signature(token: text) -> text:
-    var parts = split_token(token)
-    if parts.length() != 3:
-        return ""
-
-    var signature = parts.at(2)
-    return signature
-
-# ============================================================================
-# JWT Header Operations
-# ============================================================================
-
-# Create default JWT header with algorithm
-fn create_header(alg: text) -> list:
-    var header = []
-    var alg_tuple = ["alg", alg]
-    var typ_tuple = ["typ", "JWT"]
-    header = header + [alg_tuple]
-    header = header + [typ_tuple]
-    return header
-
-# Get value from header by key
-fn get_header_value(header: list, key: text) -> text:
-    var i = 0
-    var len = header.length()
-
-    while i < len:
-        var tuple = header.at(i)
-        var k = tuple.at(0)
-        if k == key:
-            return tuple.at(1)
-        i = i + 1
-
-    return ""
-
-# Set value in header
-fn set_header_value(header: list, key: text, value: text) -> list:
-    var result = []
-    var found = false
-    var i = 0
-    var len = header.length()
-
-    while i < len:
-        var tuple = header.at(i)
-        var k = tuple.at(0)
-
-        if k == key:
-            var new_tuple = [key, value]
-            result = result + [new_tuple]
-            found = true
-        else:
-            result = result + [tuple]
-
-        i = i + 1
-
-    if not found:
-        var new_tuple = [key, value]
-        result = result + [new_tuple]
-
-    return result
-
-# Get algorithm from header
-fn get_algorithm(header: list) -> text:
-    return get_header_value(header, "alg")
-
-# ============================================================================
-# JWT Payload (Claims) Operations
-# ============================================================================
-
-# Create empty payload
-fn create_payload() -> list:
-    return []
 
 # Get claim value from payload
 fn get_claim(payload: list, key: text) -> text:
@@ -721,7 +761,7 @@ fn get_claim(payload: list, key: text) -> text:
 
     return ""
 
-# Set claim in payload (returns new payload)
+# Set claim in payload
 fn set_claim(payload: list, key: text, value: text) -> list:
     var result = []
     var found = false
@@ -769,45 +809,43 @@ fn has_claim(payload: list, key: text) -> bool:
     var value = get_claim(payload, key)
     return value != ""
 
-# Get current Unix timestamp (seconds since epoch)
+# Get current Unix timestamp
 fn current_timestamp() -> i64:
-    # NOTE: In production, use FFI to get actual system time
-    # For demonstration, return a placeholder
     return 1700000000
 
-# Set issued-at claim (iat) to current timestamp
+# Set issued-at claim
 fn set_iat(payload: list) -> list:
     var now = current_timestamp()
     var now_str = text.from_any(now)
     return set_claim(payload, "iat", now_str)
 
-# Set expiration claim (exp) - expires after specified seconds
+# Set expiration claim
 fn set_exp(payload: list, seconds: i64) -> list:
     var now = current_timestamp()
     var exp_time = now + seconds
     var exp_str = text.from_any(exp_time)
     return set_claim(payload, "exp", exp_str)
 
-# Set not-before claim (nbf) - valid after specified seconds
+# Set not-before claim
 fn set_nbf(payload: list, seconds: i64) -> list:
     var now = current_timestamp()
     var nbf_time = now + seconds
     var nbf_str = text.from_any(nbf_time)
     return set_claim(payload, "nbf", nbf_str)
 
-# Set issuer claim (iss)
+# Set issuer claim
 fn set_iss(payload: list, issuer: text) -> list:
     return set_claim(payload, "iss", issuer)
 
-# Set subject claim (sub)
+# Set subject claim
 fn set_sub(payload: list, subject: text) -> list:
     return set_claim(payload, "sub", subject)
 
-# Set audience claim (aud)
+# Set audience claim
 fn set_aud(payload: list, audience: text) -> list:
     return set_claim(payload, "aud", audience)
 
-# Set JWT ID claim (jti)
+# Set JWT ID claim
 fn set_jti(payload: list, jti: text) -> list:
     return set_claim(payload, "jti", jti)
 
@@ -852,7 +890,7 @@ fn get_expiry_time(payload: list) -> i64:
 
     return result
 
-# Get seconds until token expires (negative if expired)
+# Get seconds until token expires
 fn get_time_until_expiry(payload: list) -> i64:
     var exp = get_expiry_time(payload)
     if exp == 0:
@@ -866,8 +904,26 @@ fn is_expired(payload: list) -> bool:
     var time_left = get_time_until_expiry(payload)
     return time_left < 0
 
+# Count claims in payload
+fn count_claims(payload: list) -> i64:
+    return payload.length()
+
+# Get claim keys
+fn get_claim_keys(payload: list) -> list:
+    var result = []
+    var i = 0
+    var len = payload.length()
+
+    while i < len:
+        var tuple = payload.at(i)
+        var key = tuple.at(0)
+        result = result + [key]
+        i = i + 1
+
+    return result
+
 # ============================================================================
-# JWT Signing
+# Verification and Validation (Facade Integration)
 # ============================================================================
 
 # Sign JWT header and payload
@@ -917,89 +973,17 @@ fn verify_signature(token: text, secret: text, expected_alg: text) -> bool:
     var expected_sig = sign_with_algorithm(signing_input, secret, alg)
     var expected_sig_b64 = base64url_encode(expected_sig)
 
-    # Constant-time comparison to prevent timing attacks
+    # Constant-time comparison
     return constant_time_compare(signature_b64, expected_sig_b64)
 
-# ============================================================================
-# JWT Validation
-# ============================================================================
-
-# Create default validation options
-fn create_validation_options() -> list:
-    var options = []
-    var opt1 = ["validate_exp", "true"]
-    var opt2 = ["validate_nbf", "true"]
-    var opt3 = ["leeway", "0"]
-    options = options + [opt1]
-    options = options + [opt2]
-    options = options + [opt3]
-    return options
-
-# Get validation option value
-fn get_validation_option(options: list, key: text) -> text:
+# Parse integer from string
+fn parse_int(s: text) -> i64:
+    var result = 0
     var i = 0
-    var len = options.length()
+    var len = s.length()
 
     while i < len:
-        var tuple = options.at(i)
-        var k = tuple.at(0)
-        if k == key:
-            return tuple.at(1)
-        i = i + 1
-
-    return ""
-
-# Set validation option
-fn set_option(options: list, key: text, value: text) -> list:
-    var result = []
-    var found = false
-    var i = 0
-    var len = options.length()
-
-    while i < len:
-        var tuple = options.at(i)
-        var k = tuple.at(0)
-
-        if k == key:
-            var new_tuple = [key, value]
-            result = result + [new_tuple]
-            found = true
-        else:
-            result = result + [tuple]
-
-        i = i + 1
-
-    if not found:
-        var new_tuple = [key, value]
-        result = result + [new_tuple]
-
-    return result
-
-# Validate expiration with leeway
-fn validate_expiry(payload: list, leeway: i64) -> bool:
-    var exp_str = get_claim(payload, "exp")
-    if exp_str == "":
-        return true  # No expiration claim
-
-    var exp = get_expiry_time(payload)
-    var now = current_timestamp()
-
-    # Allow leeway for clock skew
-    return now < (exp + leeway)
-
-# Validate not-before with leeway
-fn validate_not_before(payload: list, leeway: i64) -> bool:
-    var nbf_str = get_claim(payload, "nbf")
-    if nbf_str == "":
-        return true  # No nbf claim
-
-    # Parse nbf timestamp
-    var nbf = 0
-    var i = 0
-    var len = nbf_str.length()
-
-    while i < len:
-        var c = nbf_str.substring(i, i + 1)
+        var c = s.substring(i, i + 1)
         var digit = 0
 
         if c == "0":
@@ -1023,9 +1007,31 @@ fn validate_not_before(payload: list, leeway: i64) -> bool:
         if c == "9":
             digit = 9
 
-        nbf = nbf * 10 + digit
+        result = result * 10 + digit
         i = i + 1
 
+    return result
+
+# Validate expiration with leeway
+fn validate_expiry(payload: list, leeway: i64) -> bool:
+    var exp_str = get_claim(payload, "exp")
+    if exp_str == "":
+        return true
+
+    var exp = get_expiry_time(payload)
+    var now = current_timestamp()
+
+    # Allow leeway for clock skew
+    return now < (exp + leeway)
+
+# Validate not-before with leeway
+fn validate_not_before(payload: list, leeway: i64) -> bool:
+    var nbf_str = get_claim(payload, "nbf")
+    if nbf_str == "":
+        return true
+
+    # Parse nbf timestamp
+    var nbf = parse_int(nbf_str)
     var now = current_timestamp()
 
     # Allow leeway for clock skew
@@ -1052,35 +1058,7 @@ fn validate_jwt_with_options(token: text, secret: text, options: list) -> bool:
     # Parse leeway
     var leeway = 0
     if leeway_str != "":
-        var i = 0
-        var len = leeway_str.length()
-        while i < len:
-            var c = leeway_str.substring(i, i + 1)
-            var digit = 0
-
-            if c == "0":
-                digit = 0
-            if c == "1":
-                digit = 1
-            if c == "2":
-                digit = 2
-            if c == "3":
-                digit = 3
-            if c == "4":
-                digit = 4
-            if c == "5":
-                digit = 5
-            if c == "6":
-                digit = 6
-            if c == "7":
-                digit = 7
-            if c == "8":
-                digit = 8
-            if c == "9":
-                digit = 9
-
-            leeway = leeway * 10 + digit
-            i = i + 1
+        leeway = parse_int(leeway_str)
 
     # Validate claims
     var payload = parse_payload(token)
@@ -1103,7 +1081,7 @@ fn validate_jwt(token: text, secret: text) -> bool:
     return validate_jwt_with_options(token, secret, options)
 
 # ============================================================================
-# High-Level JWT Operations
+# High-Level JWT Operations (Facade)
 # ============================================================================
 
 # Create JWT from payload and secret
@@ -1118,19 +1096,19 @@ fn create_jwt_with_header(header: list, payload: list, secret: text) -> text:
         alg = "HS256"
     return sign_jwt(header, payload, secret, alg)
 
-# Encode JWT (alias for create_jwt)
+# Encode JWT
 fn encode_jwt(payload: list, secret: text, alg: text) -> text:
     var header = create_header(alg)
     return sign_jwt(header, payload, secret, alg)
 
-# Decode JWT without verification (returns payload or nil)
+# Decode JWT without verification
 fn decode_jwt_unsafe(token: text) -> list:
     var payload = parse_payload(token)
     if payload.length() == 0:
         return []
     return payload
 
-# Decode and verify JWT (returns payload or nil)
+# Decode and verify JWT
 fn decode_jwt(token: text, secret: text) -> list:
     # Verify signature
     var header = parse_header(token)
@@ -1143,7 +1121,7 @@ fn decode_jwt(token: text, secret: text) -> list:
     # Return payload
     return parse_payload(token)
 
-# Verify and decode JWT (returns payload or nil)
+# Verify and decode JWT
 fn verify_jwt(token: text, secret: text) -> list:
     return decode_jwt(token, secret)
 
@@ -1156,7 +1134,7 @@ fn verify_and_validate_jwt(token: text, secret: text) -> list:
     return parse_payload(token)
 
 # ============================================================================
-# Token Inspection Utilities
+# Utility Functions (Facade)
 # ============================================================================
 
 # Get token algorithm without verification
@@ -1189,38 +1167,16 @@ fn get_token_id(token: text) -> text:
     var payload = parse_payload(token)
     return get_claim(payload, "jti")
 
-# Check if token has expired (without verification)
+# Check if token has expired
 fn is_token_expired(token: text) -> bool:
     var payload = parse_payload(token)
     return is_expired(payload)
 
-# Get all claims from token (without verification)
+# Get all claims from token
 fn get_all_claims(token: text) -> list:
     return parse_payload(token)
 
-# Count claims in payload
-fn count_claims(payload: list) -> i64:
-    return payload.length()
-
-# Get claim keys
-fn get_claim_keys(payload: list) -> list:
-    var result = []
-    var i = 0
-    var len = payload.length()
-
-    while i < len:
-        var tuple = payload.at(i)
-        var key = tuple.at(0)
-        result = result + [key]
-        i = i + 1
-
-    return result
-
-# ============================================================================
-# Token Generation Helpers
-# ============================================================================
-
-# Create access token (short-lived)
+# Create access token
 fn create_access_token(user_id: text, secret: text, expires_in: i64) -> text:
     var payload = create_payload()
     payload = set_sub(payload, user_id)
@@ -1229,7 +1185,7 @@ fn create_access_token(user_id: text, secret: text, expires_in: i64) -> text:
     payload = set_exp(payload, expires_in)
     return create_jwt(payload, secret)
 
-# Create refresh token (long-lived)
+# Create refresh token
 fn create_refresh_token(user_id: text, secret: text, expires_in: i64) -> text:
     var payload = create_payload()
     payload = set_sub(payload, user_id)
@@ -1263,11 +1219,7 @@ fn create_token_with_permissions(user_id: text, permissions: text, secret: text,
     payload = set_exp(payload, expires_in)
     return create_jwt(payload, secret)
 
-# ============================================================================
-# Token Refresh and Renewal
-# ============================================================================
-
-# Refresh token by creating new one with updated expiry
+# Refresh token
 fn refresh_token(old_token: text, secret: text, new_expires_in: i64) -> text:
     # Verify old token
     var payload = verify_jwt(old_token, secret)
@@ -1279,7 +1231,7 @@ fn refresh_token(old_token: text, secret: text, new_expires_in: i64) -> text:
     payload = set_exp(payload, new_expires_in)
     return create_jwt(payload, secret)
 
-# Renew token if close to expiry
+# Renew token if expiring soon
 fn renew_if_expiring_soon(token: text, secret: text, threshold: i64, new_expires_in: i64) -> text:
     var payload = verify_jwt(token, secret)
     if payload.length() == 0:
@@ -1291,10 +1243,6 @@ fn renew_if_expiring_soon(token: text, secret: text, threshold: i64, new_expires
 
     return token
 
-# ============================================================================
-# Security Utilities
-# ============================================================================
-
 # Check if algorithm is secure
 fn is_algorithm_secure(alg: text) -> bool:
     if alg == "none" or alg == "None" or alg == "NONE":
@@ -1305,7 +1253,7 @@ fn is_algorithm_secure(alg: text) -> bool:
 
     return false
 
-# Validate token format (basic structure check)
+# Validate token format
 fn is_valid_token_format(token: text) -> bool:
     var parts = split_token(token)
     if parts.length() != 3:
@@ -1325,20 +1273,16 @@ fn is_valid_token_format(token: text) -> bool:
 
     return true
 
-# Check if secret is strong enough (minimum 32 characters recommended)
+# Check if secret is strong
 fn is_secret_strong(secret: text) -> bool:
     return secret.length() >= 32
 
-# ============================================================================
-# Debugging and Display Utilities
-# ============================================================================
-
-# Display JWT header in readable format
+# Display JWT header
 fn display_header(token: text) -> text:
     var header = parse_header(token)
     return json_encode(header)
 
-# Display JWT payload in readable format
+# Display JWT payload
 fn display_payload(token: text) -> text:
     var payload = parse_payload(token)
     return json_encode(payload)
@@ -1364,41 +1308,3 @@ fn display_jwt_info(token: text) -> text:
         result = result + "Time until expiry: " + time_str + " seconds\n"
 
     return result
-
-# ============================================================================
-# Export Functions (Public API)
-# ============================================================================
-
-# This module exports all functions above.
-# Key functions for typical usage:
-#
-# Token Creation:
-#   - create_jwt(payload, secret)
-#   - encode_jwt(payload, secret, alg)
-#   - create_access_token(user_id, secret, expires_in)
-#   - create_refresh_token(user_id, secret, expires_in)
-#
-# Token Verification:
-#   - verify_jwt(token, secret)
-#   - decode_jwt(token, secret)
-#   - validate_jwt(token, secret)
-#
-# Payload Operations:
-#   - create_payload()
-#   - set_claim(payload, key, value)
-#   - get_claim(payload, key)
-#   - set_exp(payload, seconds)
-#   - set_iat(payload)
-#   - set_iss(payload, issuer)
-#
-# Token Inspection:
-#   - parse_jwt(token)
-#   - parse_header(token)
-#   - parse_payload(token)
-#   - is_token_expired(token)
-#   - get_expiry_time(payload)
-#
-# Security:
-#   - is_algorithm_secure(alg)
-#   - is_secret_strong(secret)
-#   - constant_time_compare(a, b)

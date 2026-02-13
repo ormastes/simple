@@ -18,6 +18,22 @@
  * Directory Operations (stub)
  * ---------------------------------------------------------------- */
 
+bool rt_dir_create(const char* path, bool recursive) {
+    (void)recursive;
+    if (!path) return false;
+    return CreateDirectoryA(path, NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+const char** rt_dir_list(const char* path, int64_t* out_count) {
+    (void)path;
+    if (out_count) *out_count = 0;
+    return NULL;
+}
+
+void rt_dir_list_free(const char** entries, int64_t count) {
+    (void)entries; (void)count;
+}
+
 bool rt_dir_remove_all(const char* path) {
     (void)path;
     return false;

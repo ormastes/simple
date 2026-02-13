@@ -1,0 +1,328 @@
+# Scrypt Utilities Module
+# High-level password hashing API and utilities
+
+import scrypt.types
+import scrypt.validation
+import scrypt.scrypt
+import crypto_utils
+import base64_utils
+import random_utils
+
+# HASH FORMATTING AND PARSING
+# =============================================================================
+
+fn format_scrypt_hash(params, salt: text, hash: list) -> text:
+    """Format scrypt hash in standard format.
+
+    Format: $scrypt$ln=<N_log2>,r=<r>,p=<p>$<salt_base64>$<hash_base64>
+
+    Example:
+        val hash_str = format_scrypt_hash(params, salt, hash)
+        # $scrypt$ln=14,r=8,p=1$aM15713r3Xd...$c2l4VH+U...
+    """
+    val (N, r, p, dkLen) = params
+    val n_log2 = log2(N)
+
+    # Encode salt and hash as base64
+    val salt_bytes = crypto_utils.text_to_bytes(salt)
+    val salt_b64 = base64_utils.base64_encode_bytes(salt_bytes)
+    val hash_b64 = base64_utils.base64_encode_bytes(hash)
+
+    # Build hash string
+    val param_str = "ln={n_log2},r={r},p={p}"
+    val result = "{SCRYPT_PREFIX}{param_str}${salt_b64}${hash_b64}"
+    result
+
+fn parse_scrypt_hash(hash_string: text):
+    """Parse scrypt hash string.
+
+    Extracts parameters, salt, and hash from formatted string.
+
+    Returns: ((N, r, p, dkLen), salt_text, hash_bytes) or nil on error
+
+    Example:
+        val parsed = parse_scrypt_hash(hash_str)
+        if parsed != nil:
+            val (params, salt, hash) = parsed
+    """
+    # Check prefix
+    var has_prefix = hash_string.starts_with(SCRYPT_PREFIX)
+    if has_prefix == 0:
+        return nil
+
+    # Remove prefix
+    val prefix_len = SCRYPT_PREFIX.len()
+    var remaining = hash_string.substring(prefix_len)
+
+    # Split by $
+    val parts = remaining.split("$")
+    if parts.len() < 3:
+        return nil
+
+    # Parse parameters (ln=14,r=8,p=1)
+    val param_str = parts.get(0)
+    val param_parts = param_str.split(",")
+    if param_parts.len() < 3:
+        return nil
+
+    # Extract N (from ln=14)
+    val ln_part = param_parts.get(0)
+    var ln_eq_idx = ln_part.find("=")
+    if ln_eq_idx < 0:
+        return nil
+    val ln_str = ln_part.substring(ln_eq_idx + 1)
+    val n_log2 = ln_str.to_int()
+    val N = 1 << n_log2  # 2^n_log2
+
+    # Extract r (from r=8)
+    val r_part = param_parts.get(1)
+    var r_eq_idx = r_part.find("=")
+    if r_eq_idx < 0:
+        return nil
+    val r_str = r_part.substring(r_eq_idx + 1)
+    val r = r_str.to_int()
+
+    # Extract p (from p=1)
+    val p_part = param_parts.get(2)
+    var p_eq_idx = p_part.find("=")
+    if p_eq_idx < 0:
+        return nil
+    val p_str = p_part.substring(p_eq_idx + 1)
+    val p = p_str.to_int()
+
+    # Decode salt (base64)
+    val salt_b64 = parts.get(1)
+    val salt_bytes = base64_utils.base64_decode_to_bytes(salt_b64)
+    val salt = crypto_utils.bytes_to_text(salt_bytes)
+
+    # Decode hash (base64)
+    val hash_b64 = parts.get(2)
+    val hash_bytes = base64_utils.base64_decode_to_bytes(hash_b64)
+    val dkLen = hash_bytes.len()
+
+    # Create params tuple
+    val params = create_scrypt_params(N, r, p, dkLen)
+
+    (params, salt, hash_bytes)
+
+# =============================================================================
+# HIGH-LEVEL PASSWORD HASHING API
+# =============================================================================
+
+fn scrypt_hash(password: text, params):
+    """Hash password with specified scrypt parameters.
+
+    Generates random salt and returns formatted hash string.
+
+    Example:
+        val params = recommended_params()
+        val hash = scrypt_hash("my_password", params)
+    """
+    val (N, r, p, dkLen) = params
+
+    # Validate parameters
+    var is_valid = validate_params(params)
+    if is_valid == 0:
+        return nil
+
+    # Generate random salt
+    val salt = generate_scrypt_salt()
+
+    # Compute scrypt hash
+    val hash = scrypt(password, salt, N, r, p, dkLen)
+
+    # Format and return
+    format_scrypt_hash(params, salt, hash)
+
+fn scrypt_hash_password(password: text) -> text:
+    """Hash password with default parameters.
+
+    Simple interface using recommended parameters.
+
+    Example:
+        val hash = scrypt_hash_password("my_password")
+    """
+    val params = recommended_params()
+    scrypt_hash(password, params)
+
+fn scrypt_simple(password: text, salt: text) -> text:
+    """Simple scrypt interface with default parameters.
+
+    Returns hex-encoded hash.
+
+    Example:
+        val hash = scrypt_simple("password", "salt")
+    """
+    val hash = scrypt(password, salt, DEFAULT_N, DEFAULT_R, DEFAULT_P, DEFAULT_DKLEN)
+    crypto_utils.bytes_to_hex(hash)
+
+fn scrypt_verify(password: text, hash_string: text) -> i64:
+    """Verify password against scrypt hash.
+
+    Uses constant-time comparison to prevent timing attacks.
+
+    Returns: 1 if password matches, 0 otherwise
+
+    Example:
+        val is_valid = scrypt_verify("my_password", hash)
+        if is_valid:
+            print "Password correct!"
+    """
+    # Parse hash string
+    val parsed = parse_scrypt_hash(hash_string)
+    if parsed == nil:
+        return 0
+
+    val (params, salt, expected_hash) = parsed
+    val (N, r, p, dkLen) = params
+
+    # Validate parameters
+    var is_valid = validate_params(params)
+    if is_valid == 0:
+        return 0
+
+    # Compute scrypt hash with same parameters
+    val computed_hash = scrypt(password, salt, N, r, p, dkLen)
+
+    # Constant-time comparison
+    compare_constant_time(computed_hash, expected_hash)
+
+fn scrypt_check(password: text, hash_string: text) -> i64:
+    """Alias for scrypt_verify.
+
+    Example:
+        val is_valid = scrypt_check("password", hash)
+    """
+    scrypt_verify(password, hash_string)
+
+# =============================================================================
+# ADDITIONAL UTILITIES
+# =============================================================================
+
+fn scrypt_with_params(password: text, salt: text, params) -> list:
+    """Scrypt using parameter tuple.
+
+    Example:
+        val params = recommended_params()
+        val hash = scrypt_with_params("password", "salt", params)
+    """
+    val (N, r, p, dkLen) = params
+    scrypt(password, salt, N, r, p, dkLen)
+
+fn scrypt_hash_with_salt(password: text, salt: text, params):
+    """Hash password with specified salt and parameters.
+
+    Example:
+        val hash = scrypt_hash_with_salt("password", "mysalt", params)
+    """
+    val (N, r, p, dkLen) = params
+    val hash = scrypt(password, salt, N, r, p, dkLen)
+    format_scrypt_hash(params, salt, hash)
+
+fn get_hash_info(hash_string: text):
+    """Extract information from scrypt hash without verifying.
+
+    Returns parameters and salt (but not the hash itself).
+
+    Example:
+        val info = get_hash_info(hash)
+        if info != nil:
+            val (params, salt) = info
+    """
+    val parsed = parse_scrypt_hash(hash_string)
+    if parsed == nil:
+        return nil
+
+    val (params, salt, hash) = parsed
+    (params, salt)
+
+fn params_to_text(params) -> text:
+    """Convert parameters to human-readable text.
+
+    Example:
+        val text = params_to_text(params)
+        # "N=16384, r=8, p=1, dkLen=32"
+    """
+    val (N, r, p, dkLen) = params
+    "N={N}, r={r}, p={p}, dkLen={dkLen}"
+
+fn memory_usage_text(params) -> text:
+    """Get human-readable memory usage text.
+
+    Example:
+        val text = memory_usage_text(params)
+        # "16 MB"
+    """
+    val memory = estimate_memory_usage(params)
+    val mb = memory / 1048576
+    if mb >= 1:
+        return "{mb} MB"
+
+    val kb = memory / 1024
+    if kb >= 1:
+        return "{kb} KB"
+
+    "{memory} bytes"
+
+fn compare_params(params1, params2) -> i64:
+    """Compare two parameter sets for equality.
+
+    Returns: 1 if equal, 0 otherwise
+
+    Example:
+        val equal = compare_params(params1, params2)
+    """
+    val (N1, r1, p1, dkLen1) = params1
+    val (N2, r2, p2, dkLen2) = params2
+
+    var equal = 1
+    if N1 != N2:
+        equal = 0
+    if r1 != r2:
+        equal = 0
+    if p1 != p2:
+        equal = 0
+    if dkLen1 != dkLen2:
+        equal = 0
+
+    equal
+
+fn is_valid_hash_format(hash_string: text) -> i64:
+    """Check if string is valid scrypt hash format.
+
+    Returns: 1 if valid format, 0 otherwise
+
+    Example:
+        val is_valid = is_valid_hash_format(hash)
+    """
+    val parsed = parse_scrypt_hash(hash_string)
+    if parsed == nil:
+        return 0
+    1
+
+fn rehash_needed(hash_string: text, current_params) -> i64:
+    """Check if password needs rehashing with new parameters.
+
+    Returns: 1 if rehash needed, 0 if current params match
+
+    Example:
+        val needs_rehash = rehash_needed(hash, recommended_params())
+        if needs_rehash:
+            val new_hash = scrypt_hash_password(password)
+    """
+    val parsed = parse_scrypt_hash(hash_string)
+    if parsed == nil:
+        return 1  # Invalid hash, needs rehash
+
+    val (old_params, salt, hash) = parsed
+
+    # Compare parameters
+    val params_equal = compare_params(old_params, current_params)
+    if params_equal == 0:
+        return 1  # Parameters differ, needs rehash
+
+    0  # No rehash needed
+
+# =============================================================================
+# BENCHMARKING AND TESTING UTILITIES
+# =============================================================================

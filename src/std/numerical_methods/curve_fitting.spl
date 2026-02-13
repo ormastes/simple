@@ -1,0 +1,345 @@
+# Curve Fitting
+#
+# Purpose: Fitting curves to data points using least squares methods
+#
+# Contains:
+# - Linear least squares (line fitting)
+# - Polynomial least squares (polynomial fitting)
+# - Residual sum of squares (RSS)
+# - Coefficient of determination (R²)
+# - Optimization helpers (golden section search, gradient descent)
+
+fn nm_least_squares_linear(xs: [f64], ys: [f64]) -> [f64]:
+    """Fit line y = a + bx using least squares.
+
+    Returns [a, b] where a is intercept and b is slope.
+
+    Example:
+        nm_least_squares_linear([0.0, 1.0, 2.0], [1.0, 3.0, 5.0])  # [1.0, 2.0]
+    """
+    val n = xs.len()
+    if n == 0 or n != ys.len():
+        return [0.0, 0.0]
+
+    var sum_x = 0.0
+    var sum_y = 0.0
+    var sum_xx = 0.0
+    var sum_xy = 0.0
+
+    var i = 0
+    while i < n:
+        val x = xs[i]
+        val y = ys[i]
+        sum_x = sum_x + x
+        sum_y = sum_y + y
+        sum_xx = sum_xx + x * x
+        sum_xy = sum_xy + x * y
+        i = i + 1
+
+    val n_f64 = n * 1.0
+    val denominator = n_f64 * sum_xx - sum_x * sum_x
+
+    if denominator == 0.0:
+        return [0.0, 0.0]
+
+    val b = (n_f64 * sum_xy - sum_x * sum_y) / denominator
+    val a = (sum_y - b * sum_x) / n_f64
+
+    [a, b]
+
+fn nm_polynomial_fit(xs: [f64], ys: [f64], degree: i64) -> [f64]:
+    """Fit polynomial of given degree using least squares.
+
+    Returns coefficients from highest to lowest degree.
+
+    Example:
+        nm_polynomial_fit([0.0, 1.0, 2.0], [0.0, 1.0, 4.0], 2)
+    """
+    val n = xs.len()
+    if n == 0 or n != ys.len() or degree < 0:
+        return []
+
+    if degree == 1:
+        return nm_least_squares_linear(xs, ys)
+
+    # Gauss elimination (local copy)
+    fn gauss_elim_local(a_mat: [[f64]], b_vec: [f64]) -> [f64]:
+        val n_local = a_mat.len()
+        if n_local == 0 or b_vec.len() != n_local:
+            return []
+
+        val eps = 1e-14
+
+        var aug = []
+        var i_local = 0
+        while i_local < n_local:
+            var row = []
+            var j_local = 0
+            while j_local < n_local:
+                row.push(a_mat[i_local][j_local])
+                j_local = j_local + 1
+            row.push(b_vec[i_local])
+            aug.push(row)
+            i_local = i_local + 1
+
+        i_local = 0
+        while i_local < n_local:
+            var max_row = i_local
+            var j_local = i_local + 1
+            while j_local < n_local:
+                var abs_max = aug[max_row][i_local]
+                if abs_max < 0.0:
+                    abs_max = -abs_max
+                var abs_curr = aug[j_local][i_local]
+                if abs_curr < 0.0:
+                    abs_curr = -abs_curr
+                if abs_curr > abs_max:
+                    max_row = j_local
+                j_local = j_local + 1
+
+            if max_row != i_local:
+                val temp_row = aug[i_local]
+                aug[i_local] = aug[max_row]
+                aug[max_row] = temp_row
+
+            val pivot = aug[i_local][i_local]
+            var abs_pivot = pivot
+            if abs_pivot < 0.0:
+                abs_pivot = -abs_pivot
+            if abs_pivot < eps:
+                return []
+
+            j_local = i_local + 1
+            while j_local < n_local:
+                val factor = aug[j_local][i_local] / pivot
+                var k_local = i_local
+                while k_local <= n_local:
+                    aug[j_local][k_local] = aug[j_local][k_local] - factor * aug[i_local][k_local]
+                    k_local = k_local + 1
+                j_local = j_local + 1
+
+            i_local = i_local + 1
+
+        var x_local = []
+        i_local = 0
+        while i_local < n_local:
+            x_local.push(0.0)
+            i_local = i_local + 1
+
+        i_local = n_local - 1
+        while i_local >= 0:
+            var sum_local = aug[i_local][n_local]
+            var j_local = i_local + 1
+            while j_local < n_local:
+                sum_local = sum_local - aug[i_local][j_local] * x_local[j_local]
+                j_local = j_local + 1
+            x_local[i_local] = sum_local / aug[i_local][i_local]
+            i_local = i_local - 1
+
+        x_local
+
+    val m = degree + 1
+    var a_matrix = []
+    var i = 0
+    while i < m:
+        var row = []
+        var j = 0
+        while j < m:
+            row.push(0.0)
+            j = j + 1
+        a_matrix.push(row)
+        i = i + 1
+
+    var b_vector = []
+    i = 0
+    while i < m:
+        b_vector.push(0.0)
+        i = i + 1
+
+    i = 0
+    while i < m:
+        var j = 0
+        while j < m:
+            var sum = 0.0
+            var k = 0
+            while k < n:
+                var x_power = 1.0
+                var p = 0
+                while p < i + j:
+                    x_power = x_power * xs[k]
+                    p = p + 1
+                sum = sum + x_power
+                k = k + 1
+            a_matrix[i][j] = sum
+            j = j + 1
+        i = i + 1
+
+    i = 0
+    while i < m:
+        var sum = 0.0
+        var k = 0
+        while k < n:
+            var x_power = 1.0
+            var p = 0
+            while p < i:
+                x_power = x_power * xs[k]
+                p = p + 1
+            sum = sum + ys[k] * x_power
+            k = k + 1
+        b_vector[i] = sum
+        i = i + 1
+
+    gauss_elim_local(a_matrix, b_vector)
+
+fn nm_residual_sum_of_squares(xs: [f64], ys: [f64], coeffs: [f64]) -> f64:
+    """Calculate residual sum of squares for polynomial fit.
+
+    Measures quality of fit - lower is better.
+
+    Example:
+        nm_residual_sum_of_squares([0.0, 1.0], [0.0, 2.0], [0.0, 2.0])
+    """
+    # Horner eval (local copy)
+    fn horner_eval_local(c: [f64], x: f64) -> f64:
+        if c.len() == 0:
+            return 0.0
+
+        var result = c[0]
+        var i_local = 1
+        while i_local < c.len():
+            result = result * x + c[i_local]
+            i_local = i_local + 1
+        result
+
+    var rss = 0.0
+    var i = 0
+
+    while i < xs.len():
+        val y_pred = horner_eval_local(coeffs, xs[i])
+        val residual = ys[i] - y_pred
+        rss = rss + residual * residual
+        i = i + 1
+
+    rss
+
+fn nm_coefficient_of_determination(xs: [f64], ys: [f64], coeffs: [f64]) -> f64:
+    """Calculate R² coefficient of determination.
+
+    R² = 1 - (RSS / TSS)
+    Values close to 1 indicate good fit.
+
+    Example:
+        nm_coefficient_of_determination([0.0, 1.0, 2.0], [0.0, 2.0, 4.0], [0.0, 2.0])
+    """
+    if ys.len() == 0:
+        return 0.0
+
+    var sum_y = 0.0
+    var i = 0
+    while i < ys.len():
+        sum_y = sum_y + ys[i]
+        i = i + 1
+    val mean_y = sum_y / ys.len()
+
+    var tss = 0.0
+    i = 0
+    while i < ys.len():
+        val diff = ys[i] - mean_y
+        tss = tss + diff * diff
+        i = i + 1
+
+    if tss == 0.0:
+        return 1.0
+
+    val rss = nm_residual_sum_of_squares(xs, ys, coeffs)
+    1.0 - (rss / tss)
+
+# ============================================================================
+# Optimization Helpers
+# ============================================================================
+
+fn nm_golden_section_search(f, a: f64, b: f64, tolerance: f64, max_iter: i64) -> f64:
+    """Find minimum using golden section search.
+
+    One-dimensional optimization for unimodal functions.
+
+    Example:
+        nm_golden_section_search(lambda x: x*x - 4*x, 0.0, 5.0, 1e-6, 100)
+    """
+    val NM_GOLDEN_RATIO = 1.618033988749895
+    val phi = NM_GOLDEN_RATIO
+    val resphi = 2.0 - phi
+
+    var x_a = a
+    var x_b = b
+    var x1 = x_a + resphi * (x_b - x_a)
+    var x2 = x_b - resphi * (x_b - x_a)
+    var f1 = f(x1)
+    var f2 = f(x2)
+
+    var iterations = 0
+
+    while iterations < max_iter:
+        var abs_diff = x_b - x_a
+        if abs_diff < 0.0:
+            abs_diff = -abs_diff
+
+        if abs_diff < tolerance:
+            return (x_a + x_b) / 2.0
+
+        if f1 < f2:
+            x_b = x2
+            x2 = x1
+            f2 = f1
+            x1 = x_a + resphi * (x_b - x_a)
+            f1 = f(x1)
+        else:
+            x_a = x1
+            x1 = x2
+            f1 = f2
+            x2 = x_b - resphi * (x_b - x_a)
+            f2 = f(x2)
+
+        iterations = iterations + 1
+
+    (x_a + x_b) / 2.0
+
+fn nm_gradient_descent_1d(df, x0: f64, learning_rate: f64, tolerance: f64, max_iter: i64) -> f64:
+    """Minimize function using gradient descent.
+
+    Requires derivative df.
+
+    Example:
+        nm_gradient_descent_1d(lambda x: 2*x - 4, 0.0, 0.1, 1e-6, 1000)
+    """
+    # Local convergence check
+    fn nm_is_converged_local(current: f64, previous: f64, tol: f64) -> bool:
+        var diff = current - previous
+        if diff < 0.0:
+            diff = -diff
+        diff < tol
+
+    var x = x0
+    var iterations = 0
+
+    while iterations < max_iter:
+        val grad = df(x)
+
+        var abs_grad = grad
+        if abs_grad < 0.0:
+            abs_grad = -abs_grad
+
+        if abs_grad < tolerance:
+            return x
+
+        val x_new = x - learning_rate * grad
+
+        if nm_is_converged_local(x_new, x, tolerance):
+            return x_new
+
+        x = x_new
+        iterations = iterations + 1
+
+    x
+
+export *

@@ -1,0 +1,305 @@
+# TLS Handshake Protocol Module
+#
+# Implements handshake message building and parsing for TLS protocol.
+# Handles ClientHello, ServerHello, ClientKeyExchange, Finished, and other
+# handshake messages.
+
+# Build a handshake message wrapper
+# Parameters:
+#   msg_type: Handshake message type (0-20)
+#   data: Message payload
+# Returns: (type, length, data) tuple
+fn build_handshake_message(msg_type, data):
+    val length = len(data)
+    (msg_type, length, data)
+
+# Parse handshake message from bytes
+# Parameters:
+#   raw_data: Raw handshake message bytes
+# Returns: (type, length, data) tuple or nil on error
+fn parse_handshake_message(raw_data):
+    val data_len = len(raw_data)
+    if data_len < 4:
+        nil
+    else:
+        val msg_type = byte_at(raw_data, 0)
+        val len_hi = byte_at(raw_data, 1)
+        val len_mid = byte_at(raw_data, 2)
+        val len_lo = byte_at(raw_data, 3)
+        val length = (len_hi * 65536) + (len_mid * 256) + len_lo
+
+        if data_len < (4 + length):
+            nil
+        else:
+            val payload = slice(raw_data, 4, 4 + length)
+            (msg_type, length, payload)
+
+# Get handshake message type name
+# Parameters:
+#   msg_type: Message type code
+# Returns: Human-readable message type
+fn handshake_type_name(msg_type):
+    val HANDSHAKE_TYPE_HELLO_REQUEST = 0
+    val HANDSHAKE_TYPE_CLIENT_HELLO = 1
+    val HANDSHAKE_TYPE_SERVER_HELLO = 2
+    val HANDSHAKE_TYPE_CERTIFICATE = 11
+    val HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE = 12
+    val HANDSHAKE_TYPE_CERTIFICATE_REQUEST = 13
+    val HANDSHAKE_TYPE_SERVER_HELLO_DONE = 14
+    val HANDSHAKE_TYPE_CERTIFICATE_VERIFY = 15
+    val HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = 16
+    val HANDSHAKE_TYPE_FINISHED = 20
+
+    if msg_type == HANDSHAKE_TYPE_HELLO_REQUEST:
+        "HelloRequest"
+    else if msg_type == HANDSHAKE_TYPE_CLIENT_HELLO:
+        "ClientHello"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_HELLO:
+        "ServerHello"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE:
+        "Certificate"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE:
+        "ServerKeyExchange"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE_REQUEST:
+        "CertificateRequest"
+    else if msg_type == HANDSHAKE_TYPE_SERVER_HELLO_DONE:
+        "ServerHelloDone"
+    else if msg_type == HANDSHAKE_TYPE_CERTIFICATE_VERIFY:
+        "CertificateVerify"
+    else if msg_type == HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE:
+        "ClientKeyExchange"
+    else if msg_type == HANDSHAKE_TYPE_FINISHED:
+        "Finished"
+    else:
+        "Unknown"
+
+# Build ClientHello message
+# Parameters:
+#   version: Client-supported TLS version
+#   random: 32 bytes of random data
+#   session_id: Session ID (empty for new session)
+#   cipher_suites: List of cipher suite IDs
+#   extensions: List of extension tuples
+# Returns: ClientHello tuple (version, random, session_id, cipher_suites, extensions)
+fn build_client_hello(version, random, session_id, cipher_suites, extensions):
+    (version, random, session_id, cipher_suites, extensions)
+
+# Parse ServerHello message
+# Parameters:
+#   data: ServerHello payload bytes
+# Returns: (version, random, session_id, cipher_suite, extensions) tuple or nil
+fn parse_server_hello(data):
+    val data_len = len(data)
+    if data_len < 38:  # Minimum: 2 (version) + 32 (random) + 1 (session_id len) + 2 (cipher) + 1 (compression)
+        nil
+    else:
+        val version_hi = byte_at(data, 0)
+        val version_lo = byte_at(data, 1)
+        val version = (version_hi * 256) + version_lo
+
+        val random = slice(data, 2, 34)
+        val session_id_len = byte_at(data, 34)
+
+        if data_len < (35 + session_id_len + 3):
+            nil
+        else:
+            val session_id = slice(data, 35, 35 + session_id_len)
+            val cipher_offset = 35 + session_id_len
+            val cipher_hi = byte_at(data, cipher_offset)
+            val cipher_lo = byte_at(data, cipher_offset + 1)
+            val cipher_suite = (cipher_hi * 256) + cipher_lo
+
+            # Compression method (1 byte) - always 0 in TLS 1.2+
+            val ext_offset = cipher_offset + 3
+            var extensions = []
+
+            if data_len > ext_offset:
+                extensions = parse_extensions(slice(data, ext_offset, data_len))
+            else:
+                pass
+
+            (version, random, session_id, cipher_suite, extensions)
+
+# Build ClientKeyExchange message
+# Parameters:
+#   key_data: Pre-master secret or key exchange data
+# Returns: ClientKeyExchange tuple
+fn build_client_key_exchange(key_data):
+    (len(key_data), key_data)
+
+# Build Finished message
+# Parameters:
+#   verify_data: 12 bytes of PRF output
+# Returns: Finished message data
+fn build_finished_message(verify_data):
+    verify_data
+
+# Parse Finished message
+# Parameters:
+#   data: Finished message payload
+# Returns: Verify data (12 bytes) or nil
+fn parse_finished_message(data):
+    if len(data) == 12:
+        data
+    else:
+        nil
+
+# Build Server Name Indication (SNI) extension
+# Parameters:
+#   hostname: Server hostname (e.g., "example.com")
+# Returns: (type, data) extension tuple
+fn build_sni_extension(hostname):
+    val EXTENSION_TYPE_SERVER_NAME = 0
+    val host_bytes = to_bytes(hostname)
+    # SNI extension format:
+    # - Extension type: 0
+    # - Extension length: 2 bytes
+    # - Server name list length: 2 bytes
+    # - Server name type: 1 byte (0 = hostname)
+    # - Server name length: 2 bytes
+    # - Server name: variable
+    (EXTENSION_TYPE_SERVER_NAME, host_bytes)
+
+# Build Supported Versions extension
+# Parameters:
+#   versions: List of supported version codes
+# Returns: (type, data) extension tuple
+fn build_supported_versions_extension(versions):
+    val EXTENSION_TYPE_SUPPORTED_VERSIONS = 43
+    (EXTENSION_TYPE_SUPPORTED_VERSIONS, versions)
+
+# Build ALPN (Application-Layer Protocol Negotiation) extension
+# Parameters:
+#   protocols: List of protocol names (e.g., ["h2", "http/1.1"])
+# Returns: (type, data) extension tuple
+fn build_alpn_extension(protocols):
+    val EXTENSION_TYPE_ALPN = 16
+    (EXTENSION_TYPE_ALPN, protocols)
+
+# Build Signature Algorithms extension
+# Parameters:
+#   algorithms: List of signature algorithm codes
+# Returns: (type, data) extension tuple
+fn build_signature_algorithms_extension(algorithms):
+    val EXTENSION_TYPE_SIGNATURE_ALGORITHMS = 13
+    (EXTENSION_TYPE_SIGNATURE_ALGORITHMS, algorithms)
+
+# Build Supported Groups (Elliptic Curves) extension
+# Parameters:
+#   groups: List of supported group codes
+# Returns: (type, data) extension tuple
+fn build_supported_groups_extension(groups):
+    val EXTENSION_TYPE_SUPPORTED_GROUPS = 10
+    (EXTENSION_TYPE_SUPPORTED_GROUPS, groups)
+
+# Parse extensions from bytes
+# Parameters:
+#   data: Extension data bytes
+# Returns: List of (type, data) extension tuples
+fn parse_extensions(data):
+    var extensions = []
+    var offset = 0
+    val data_len = len(data)
+
+    # Extensions have 2-byte length prefix
+    if data_len < 2:
+        extensions
+    else:
+        val ext_list_len_hi = byte_at(data, 0)
+        val ext_list_len_lo = byte_at(data, 1)
+        val ext_list_len = (ext_list_len_hi * 256) + ext_list_len_lo
+        offset = 2
+
+        # Parse individual extensions
+        var continue_parsing = offset < data_len
+        var loop_count = 0
+        var max_loops = 100
+
+        while continue_parsing and (loop_count < max_loops):
+            loop_count = loop_count + 1
+
+            if (offset + 4) > data_len:
+                continue_parsing = false
+            else:
+                val ext_type_hi = byte_at(data, offset)
+                val ext_type_lo = byte_at(data, offset + 1)
+                val ext_type = (ext_type_hi * 256) + ext_type_lo
+
+                val ext_len_hi = byte_at(data, offset + 2)
+                val ext_len_lo = byte_at(data, offset + 3)
+                val ext_len = (ext_len_hi * 256) + ext_len_lo
+
+                offset = offset + 4
+
+                if (offset + ext_len) > data_len:
+                    continue_parsing = false
+                else:
+                    val ext_data = slice(data, offset, offset + ext_len)
+                    extensions = append(extensions, (ext_type, ext_data))
+                    offset = offset + ext_len
+
+                    if offset >= data_len:
+                        continue_parsing = false
+                    else:
+                        pass
+
+        extensions
+
+# Get extension type name
+# Parameters:
+#   ext_type: Extension type code
+# Returns: Human-readable name
+fn extension_type_name(ext_type):
+    val EXTENSION_TYPE_SERVER_NAME = 0
+    val EXTENSION_TYPE_MAX_FRAGMENT_LENGTH = 1
+    val EXTENSION_TYPE_STATUS_REQUEST = 5
+    val EXTENSION_TYPE_SUPPORTED_GROUPS = 10
+    val EXTENSION_TYPE_EC_POINT_FORMATS = 11
+    val EXTENSION_TYPE_SIGNATURE_ALGORITHMS = 13
+    val EXTENSION_TYPE_ALPN = 16
+    val EXTENSION_TYPE_SUPPORTED_VERSIONS = 43
+
+    if ext_type == EXTENSION_TYPE_SERVER_NAME:
+        "server_name"
+    else if ext_type == EXTENSION_TYPE_MAX_FRAGMENT_LENGTH:
+        "max_fragment_length"
+    else if ext_type == EXTENSION_TYPE_STATUS_REQUEST:
+        "status_request"
+    else if ext_type == EXTENSION_TYPE_SUPPORTED_GROUPS:
+        "supported_groups"
+    else if ext_type == EXTENSION_TYPE_EC_POINT_FORMATS:
+        "ec_point_formats"
+    else if ext_type == EXTENSION_TYPE_SIGNATURE_ALGORITHMS:
+        "signature_algorithms"
+    else if ext_type == EXTENSION_TYPE_ALPN:
+        "alpn"
+    else if ext_type == EXTENSION_TYPE_SUPPORTED_VERSIONS:
+        "supported_versions"
+    else:
+        "unknown"
+
+# Find extension by type in extension list
+# Parameters:
+#   extensions: List of (type, data) tuples
+#   ext_type: Extension type to find
+# Returns: Extension data or nil if not found
+fn find_extension(extensions, ext_type):
+    var found = nil
+    for ext in extensions:
+        val current_type = ext[0]
+        if current_type == ext_type:
+            found = ext[1]
+        else:
+            pass
+    found
+
+# Compute verify data for Finished message
+# Parameters:
+#   master_secret: Master secret (48 bytes)
+#   label: "client finished" or "server finished"
+#   handshake_hash: Hash of all handshake messages
+# Returns: Verify data (12 bytes)
+#
+# verify_data = PRF(master_secret, finished_label, Hash(handshake_messages))[0..11]
+fn compute_verify_data(master_secret, label, handshake_hash):
+    tls_prf(master_secret, label, handshake_hash, 12)

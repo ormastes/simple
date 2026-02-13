@@ -1,0 +1,246 @@
+# statistics/inference.spl - Statistical inference and hypothesis testing
+
+import math from "std/math"
+import types from "./types"
+import descriptive from "./descriptive"
+import distributions from "./distributions"
+
+# ============================================================================
+# STATISTICAL TESTS
+# ============================================================================
+
+fn z_score(x: f64, mu: f64, sigma: f64) -> Option<f64>:
+    """Calculate z-score (standard score)."""
+    if sigma < types.EPSILON:
+        return nil
+
+    Some((x - mu) / sigma)
+
+fn z_scores(data: List<f64>) -> Option<List<f64>>:
+    """Calculate z-scores for all values in array."""
+    val mean_opt = descriptive.mean(data)
+    val std_opt = descriptive.stddev(data)
+
+    if mean_opt == nil or std_opt == nil:
+        return nil
+
+    if std_opt < types.EPSILON:
+        return nil
+
+    val m = mean_opt
+    val s = std_opt
+
+    var result = []
+    for val in data:
+        result.push((val - m) / s)
+
+    Some(result)
+
+fn t_statistic(sample: List<f64>, pop_mean: f64) -> Option<f64>:
+    """Calculate one-sample t-statistic."""
+    val mean_opt = descriptive.mean(sample)
+    val se_opt = descriptive.standard_error(sample)
+
+    if mean_opt == nil or se_opt == nil:
+        return nil
+
+    if se_opt < types.EPSILON:
+        return nil
+
+    Some((mean_opt - pop_mean) / se_opt)
+
+fn t_statistic_two_sample(x: List<f64>, y: List<f64>) -> Option<f64>:
+    """Calculate two-sample t-statistic (equal variance assumed)."""
+    if x.length() < 2 or y.length() < 2:
+        return nil
+
+    val mean_x_opt = descriptive.mean(x)
+    val mean_y_opt = descriptive.mean(y)
+    val var_x_opt = descriptive.variance_sample(x)
+    val var_y_opt = descriptive.variance_sample(y)
+
+    if mean_x_opt == nil or mean_y_opt == nil or var_x_opt == nil or var_y_opt == nil:
+        return nil
+
+    val nx = x.length()
+    val ny = y.length()
+
+    val pooled_var = ((nx - 1) * var_x_opt + (ny - 1) * var_y_opt) / (nx + ny - 2)
+    val se = math.sqrt(pooled_var * (1.0 / nx + 1.0 / ny))
+
+    if se < types.EPSILON:
+        return nil
+
+    Some((mean_x_opt - mean_y_opt) / se)
+
+fn chi_square_statistic(observed: List<f64>, expected: List<f64>) -> Option<f64>:
+    """Calculate chi-square statistic."""
+    if observed.length() != expected.length() or observed.length() == 0:
+        return nil
+
+    var chi_sq = 0.0
+    var i = 0
+
+    while i < observed.length():
+        if expected[i] < types.EPSILON:
+            return nil
+
+        val diff = observed[i] - expected[i]
+        chi_sq = chi_sq + (diff * diff / expected[i])
+        i = i + 1
+
+    Some(chi_sq)
+
+fn confidence_interval_mean(data: List<f64>, confidence: f64) -> Option<List<f64>>:
+    """Calculate confidence interval for mean (returns [lower, upper])."""
+    if data.length() < 2:
+        return nil
+
+    val mean_opt = descriptive.mean(data)
+    val se_opt = descriptive.standard_error(data)
+
+    if mean_opt == nil or se_opt == nil:
+        return nil
+
+    val z = if confidence >= 0.99: 2.576 else: if confidence >= 0.95: 1.96 else: 1.645
+    val margin = z * se_opt
+
+    Some([mean_opt - margin, mean_opt + margin])
+
+fn bootstrap_mean(data: List<f64>, num_samples: i64, seed: i64) -> Option<List<f64>>:
+    """Bootstrap resampling of mean estimates."""
+    if data.length() == 0 or num_samples <= 0:
+        return nil
+
+    var means = []
+    var rng = seed
+
+    var i = 0
+    while i < num_samples:
+        val sample = sample_with_replacement(data, data.length(), rng)
+        val mean_opt = descriptive.mean(sample)
+        if mean_opt == nil:
+            return nil
+        means.push(mean_opt)
+        rng = rng + 1
+        i = i + 1
+
+    Some(means)
+
+fn sample_with_replacement(data: List<f64>, size: i64, seed: i64) -> List<f64>:
+    """Simple sampling with replacement (pseudo-random)."""
+    var result = []
+    var rng = seed
+
+    var i = 0
+    while i < size:
+        rng = (rng * 1103515245 + 12345) % 2147483648
+        val idx = (rng % data.length())
+        result.push(data[idx])
+        i = i + 1
+
+    result
+
+fn normalize(data: List<f64>) -> Option<List<f64>>:
+    """Normalize data to [0, 1] range using min-max scaling."""
+    if data.length() == 0:
+        return nil
+
+    val min_opt = min_value(data)
+    val max_opt = max_value(data)
+
+    if min_opt == nil or max_opt == nil:
+        return nil
+
+    val min_v = min_opt
+    val max_v = max_opt
+    val range_v = max_v - min_v
+
+    if range_v < types.EPSILON:
+        var result = []
+        for val in data:
+            result.push(0.5)
+        return Some(result)
+
+    var result = []
+    for val in data:
+        result.push((val - min_v) / range_v)
+
+    Some(result)
+
+fn standardize(data: List<f64>) -> Option<List<f64>>:
+    """Standardize data to have mean=0 and stddev=1."""
+    z_scores(data)
+
+fn log_transform(data: List<f64>) -> Option<List<f64>>:
+    """Apply natural logarithm transformation."""
+    var result = []
+
+    for val in data:
+        if val <= 0.0:
+            return nil
+        result.push(math.log(val))
+
+    Some(result)
+
+fn log10_transform(data: List<f64>) -> Option<List<f64>>:
+    """Apply base-10 logarithm transformation."""
+    var result = []
+
+    for val in data:
+        if val <= 0.0:
+            return nil
+        result.push(math.log10(val))
+
+    Some(result)
+
+fn sqrt_transform(data: List<f64>) -> Option<List<f64>>:
+    """Apply square root transformation."""
+    var result = []
+
+    for val in data:
+        if val < 0.0:
+            return nil
+        result.push(math.sqrt(val))
+
+    Some(result)
+
+fn box_cox_transform(data: List<f64>, lambda: f64) -> Option<List<f64>>:
+    """Apply Box-Cox transformation."""
+    var result = []
+
+    for val in data:
+        if val <= 0.0:
+            return nil
+
+        if math.abs(lambda) < types.EPSILON:
+            result.push(math.log(val))
+        else:
+            val transformed = (math.pow(val, lambda) - 1.0) / lambda
+            result.push(transformed)
+
+    Some(result)
+
+fn min_value(data: List<f64>) -> Option<f64>:
+    """Find minimum value."""
+    if data.length() == 0:
+        return nil
+
+    var min_val = data[0]
+    for val in data:
+        if val < min_val:
+            min_val = val
+
+    Some(min_val)
+
+fn max_value(data: List<f64>) -> Option<f64>:
+    """Find maximum value."""
+    if data.length() == 0:
+        return nil
+
+    var max_val = data[0]
+    for val in data:
+        if val > max_val:
+            max_val = val
+
+    Some(max_val)

@@ -1,0 +1,293 @@
+# LZ77 Match Finding Operations
+#
+# Functions for finding and comparing matches in the sliding window.
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export is_better_match, compare_bytes
+export find_longest_match_simple, find_match_at_position, find_match_with_hash
+export calculate_max_match_length, is_valid_match, get_match_savings
+export calculate_hash_single, calculate_hash_two, calculate_hash_three, calculate_hash_bytes
+export update_hash, hash_to_index, is_valid_hash, normalize_hash
+export hash_table_insert, hash_table_get_chain, hash_table_clear, hash_table_remove_old
+
+# ============================================================================
+# Constants (re-exported from types)
+# ============================================================================
+
+val MIN_MATCH_LENGTH = 3
+val MAX_MATCH_LENGTH = 258
+val HASH_MASK = 32767
+val HASH_SIZE = 32768
+val NIL_INDEX = -1
+
+# ============================================================================
+# Match Finding
+# ============================================================================
+
+fn is_better_match(new_match: any, old_match: any) -> bool:
+    # Compare two matches, return true if new is better
+    if old_match == nil:
+        true
+    else:
+        val new_len = new_match.length
+        val old_len = old_match.length
+        if new_len > old_len:
+            true
+        else:
+            if new_len == old_len:
+                val new_dist = new_match.distance
+                val old_dist = old_match.distance
+                new_dist < old_dist
+            else:
+                false
+
+fn compare_bytes(data1: list, pos1: i64, data2: list, pos2: i64, max_len: i64) -> i64:
+    # Compare bytes and return match length
+    var length = 0
+    var i = 0
+    val len1 = data1.len()
+    val len2 = data2.len()
+    while i < max_len:
+        val idx1 = pos1 + i
+        val idx2 = pos2 + i
+        if idx1 >= len1:
+            length
+        else:
+            if idx2 >= len2:
+                length
+            else:
+                val b1 = data1[idx1]
+                val b2 = data2[idx2]
+                if b1 == b2:
+                    length = length + 1
+                    i = i + 1
+                else:
+                    length
+    length
+
+fn find_longest_match_simple(window: list, window_pos: i64, lookahead: list, lookahead_pos: i64, max_length: i64) -> any:
+    # Find longest match using simple linear search
+    var best_match = nil
+    var search_pos = 0
+    val window_len = window.len()
+    while search_pos < window_pos:
+        val match_len = compare_bytes(window, search_pos, lookahead, lookahead_pos, max_length)
+        if match_len >= MIN_MATCH_LENGTH:
+            val distance = window_pos - search_pos
+            val match = create_match_result(distance, match_len, search_pos)
+            val is_better = is_better_match(match, best_match)
+            if is_better:
+                best_match = match
+        search_pos = search_pos + 1
+    best_match
+
+fn find_match_at_position(window: list, window_pos: i64, search_pos: i64, lookahead: list, lookahead_pos: i64, max_length: i64) -> any:
+    # Find match at specific position
+    val match_len = compare_bytes(window, search_pos, lookahead, lookahead_pos, max_length)
+    if match_len >= MIN_MATCH_LENGTH:
+        val distance = window_pos - search_pos
+        create_match_result(distance, match_len, search_pos)
+    else:
+        nil
+
+fn find_match_with_hash(window: list, window_pos: i64, lookahead: list, lookahead_pos: i64, hash_chain: list, max_length: i64, max_chain: i64) -> any:
+    # Find match using hash chain
+    var best_match = nil
+    var chain_pos = 0
+    var i = 0
+    val chain_len = hash_chain.len()
+    while i < max_chain:
+        if i >= chain_len:
+            best_match
+        else:
+            val search_pos = hash_chain[i]
+            if search_pos < 0:
+                best_match
+            else:
+                if search_pos >= window_pos:
+                    best_match
+                else:
+                    val match = find_match_at_position(window, window_pos, search_pos, lookahead, lookahead_pos, max_length)
+                    val is_better = is_better_match(match, best_match)
+                    if is_better:
+                        best_match = match
+                    i = i + 1
+    best_match
+
+fn calculate_max_match_length(lookahead_remaining: i64) -> i64:
+    # Calculate maximum possible match length
+    if lookahead_remaining > MAX_MATCH_LENGTH:
+        MAX_MATCH_LENGTH
+    else:
+        lookahead_remaining
+
+fn is_valid_match(match: any) -> bool:
+    # Check if match is valid
+    if match == nil:
+        false
+    else:
+        match.is_valid()
+
+fn get_match_savings(match: any) -> i64:
+    # Calculate bytes saved by match
+    if match == nil:
+        0
+    else:
+        val len = match.length
+        len - 2
+
+# ============================================================================
+# Hash Functions
+# ============================================================================
+
+fn calculate_hash_single(byte: i64) -> i64:
+    # Calculate hash for single byte
+    val h = byte & HASH_MASK
+    h
+
+fn calculate_hash_two(byte1: i64, byte2: i64) -> i64:
+    # Calculate hash for two bytes
+    val h1 = byte1 << 8
+    val h2 = byte2
+    val h = (h1 + h2) & HASH_MASK
+    h
+
+fn calculate_hash_three(byte1: i64, byte2: i64, byte3: i64) -> i64:
+    # Calculate hash for three bytes (standard LZ77)
+    val h1 = byte1 << 10
+    val h2 = byte2 << 5
+    val h3 = byte3
+    val temp = h1 + h2
+    val h = (temp + h3) & HASH_MASK
+    h
+
+fn calculate_hash_bytes(bytes: list, start: i64, count: i64) -> i64:
+    # Calculate hash for byte sequence
+    val len = bytes.len()
+    if start < 0:
+        0
+    else:
+        if start >= len:
+            0
+        else:
+            if count <= 0:
+                0
+            else:
+                if count == 1:
+                    val b = bytes[start]
+                    calculate_hash_single(b)
+                else:
+                    if count == 2:
+                        val b1 = bytes[start]
+                        val next = start + 1
+                        if next < len:
+                            val b2 = bytes[next]
+                            calculate_hash_two(b1, b2)
+                        else:
+                            calculate_hash_single(b1)
+                    else:
+                        val b1 = bytes[start]
+                        val next1 = start + 1
+                        val next2 = start + 2
+                        if next2 < len:
+                            val b2 = bytes[next1]
+                            val b3 = bytes[next2]
+                            calculate_hash_three(b1, b2, b3)
+                        else:
+                            if next1 < len:
+                                val b2 = bytes[next1]
+                                calculate_hash_two(b1, b2)
+                            else:
+                                calculate_hash_single(b1)
+
+fn update_hash(old_hash: i64, old_byte: i64, new_byte: i64) -> i64:
+    # Update rolling hash (simple version)
+    val temp = old_hash << 1
+    val h = (temp + new_byte) & HASH_MASK
+    h
+
+fn hash_to_index(hash: i64) -> i64:
+    # Convert hash to table index
+    hash & HASH_MASK
+
+fn is_valid_hash(hash: i64) -> bool:
+    # Check if hash is valid
+    if hash >= 0:
+        hash < HASH_SIZE
+    else:
+        false
+
+fn normalize_hash(hash: i64) -> i64:
+    # Normalize hash to valid range
+    if hash < 0:
+        0
+    else:
+        hash & HASH_MASK
+
+# ============================================================================
+# Hash Table Operations
+# ============================================================================
+
+fn hash_table_insert(ht: any, hash: i64, position: i64):
+    # Insert position into hash table
+    val idx = hash & HASH_MASK
+    val table = ht.table
+    val old_head = table[idx]
+    table[idx] = position
+    val prev = ht.prev
+    val prev_len = prev.len()
+    if position >= prev_len:
+        var i = prev_len
+        while i <= position:
+            prev.push(NIL_INDEX)
+            i = i + 1
+    prev[position] = old_head
+
+fn hash_table_get_chain(ht: any, hash: i64, max_length: i64) -> list:
+    # Get hash chain for lookup
+    val idx = hash & HASH_MASK
+    val table = ht.table
+    val head = table[idx]
+    val chain = []
+    if head == NIL_INDEX:
+        chain
+    else:
+        var pos = head
+        var count = 0
+        val prev = ht.prev
+        val prev_len = prev.len()
+        while count < max_length:
+            if pos == NIL_INDEX:
+                chain
+            else:
+                chain.push(pos)
+                count = count + 1
+                if pos >= prev_len:
+                    chain
+                else:
+                    pos = prev[pos]
+        chain
+
+fn hash_table_clear(ht: any):
+    # Clear hash table
+    val table = ht.table
+    var i = 0
+    val len = table.len()
+    while i < len:
+        table[i] = NIL_INDEX
+        i = i + 1
+    ht.prev = []
+
+fn hash_table_remove_old(ht: any, threshold: i64):
+    # Remove entries older than threshold
+    val table = ht.table
+    var i = 0
+    val len = table.len()
+    while i < len:
+        val head = table[i]
+        if head < threshold:
+            table[i] = NIL_INDEX
+        i = i + 1

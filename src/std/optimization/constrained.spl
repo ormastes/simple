@@ -1,0 +1,124 @@
+# Constrained Optimization Module
+# Penalty and barrier methods for constrained optimization
+
+fn penalty_method(f: fn(List<f64>) -> f64,
+                 constraints: fn(List<f64>) -> List<f64>,
+                 grad_f: fn(List<f64>) -> List<f64>,
+                 x0: List<f64>, config: OptimizationConfig,
+                 mu_init: f64, mu_scale: f64) -> OptimizationResult:
+    var mu = mu_init
+    var x = vector_copy(x0)
+    var outer_iteration = 0
+    val max_outer = 20
+
+    while outer_iteration < max_outer:
+        # Define augmented objective function
+        fn augmented_f(x_val: List<f64>) -> f64:
+            val f_val = f(x_val)
+            val c = constraints(x_val)
+            var penalty = 0.0
+            var i = 0
+            while i < c.length():
+                val violation = max(0.0, c[i])
+                penalty = penalty + violation * violation
+                i = i + 1
+            f_val + mu * penalty
+
+        fn augmented_grad(x_val: List<f64>) -> List<f64>:
+            val grad = grad_f(x_val)
+            val c = constraints(x_val)
+
+            val epsilon = 1e-6
+            val grad_penalty = finite_difference_gradient(augmented_f, x_val, epsilon)
+
+            grad_penalty
+
+        val result = gradient_descent(augmented_f, augmented_grad, x, config)
+        x = result.solution
+
+        val c = constraints(x)
+        var max_violation = 0.0
+        var i = 0
+        while i < c.length():
+            val violation = max(0.0, c[i])
+            if violation > max_violation:
+                max_violation = violation
+            i = i + 1
+
+        if max_violation < config.tolerance:
+            return OptimizationResult(
+                solution: x,
+                objective_value: f(x),
+                iterations: outer_iteration,
+                converged: true,
+                gradient_norm: result.gradient_norm,
+                message: "Converged: constraints satisfied"
+            )
+
+        mu = mu * mu_scale
+        outer_iteration = outer_iteration + 1
+
+    OptimizationResult(
+        solution: x,
+        objective_value: f(x),
+        iterations: outer_iteration,
+        converged: false,
+        gradient_norm: 0.0,
+        message: "Maximum outer iterations reached"
+    )
+
+fn log_barrier(x: f64, t: f64) -> f64:
+    if x > 0.0:
+        return -log(x) / t
+    1e10
+
+fn barrier_method(f: fn(List<f64>) -> f64,
+                 inequality_constraints: fn(List<f64>) -> List<f64>,
+                 grad_f: fn(List<f64>) -> List<f64>,
+                 x0: List<f64>, config: OptimizationConfig,
+                 t_init: f64, mu: f64) -> OptimizationResult:
+    var t = t_init
+    var x = vector_copy(x0)
+    var outer_iteration = 0
+    val max_outer = 30
+
+    while outer_iteration < max_outer:
+        fn barrier_f(x_val: List<f64>) -> f64:
+            val f_val = f(x_val)
+            val c = inequality_constraints(x_val)
+            var barrier = 0.0
+            var i = 0
+            while i < c.length():
+                barrier = barrier + log_barrier(-c[i], t)
+                i = i + 1
+            f_val + barrier
+
+        fn barrier_grad(x_val: List<f64>) -> List<f64>:
+            val epsilon = 1e-6
+            finite_difference_gradient(barrier_f, x_val, epsilon)
+
+        val result = gradient_descent(barrier_f, barrier_grad, x, config)
+        x = result.solution
+
+        val m = inequality_constraints(x).length()
+        if float(m) / t < config.tolerance:
+            return OptimizationResult(
+                solution: x,
+                objective_value: f(x),
+                iterations: outer_iteration,
+                converged: true,
+                gradient_norm: result.gradient_norm,
+                message: "Converged: barrier method"
+            )
+
+        t = t * mu
+        outer_iteration = outer_iteration + 1
+
+    OptimizationResult(
+        solution: x,
+        objective_value: f(x),
+        iterations: outer_iteration,
+        converged: false,
+        gradient_norm: 0.0,
+        message: "Maximum outer iterations reached"
+    )

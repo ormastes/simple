@@ -14,1487 +14,279 @@
 #
 # All implementations are pure Simple with no FFI dependencies.
 # Uses tuple-based data structures to avoid generic type issues at runtime.
+#
+# This module uses the facade pattern to organize HTTP functionality into
+# logical categories while maintaining a unified public interface.
+
+import types from "std/http/types"
+import request from "std/http/request"
+import response from "std/http/response"
+import headers from "std/http/headers"
+import url from "std/http/url"
+import cookie from "std/http/cookie"
+import utilities from "std/http/utilities"
 
 # ============================================================================
-# HTTP Request Parsing
+# Types Module - Status codes and content type utilities
 # ============================================================================
 
-# Parse complete HTTP request into tuple structure
-# Returns: (method, path, version, headers, body)
-fn parse_request(text: text) -> tuple:
-    val lines = text.split("\r\n")
-
-    # Parse request line (first line)
-    val request_line = lines[0]
-    val request_parts = parse_request_line(request_line)
-    val method = request_parts[0]
-    val path = request_parts[1]
-    val version = request_parts[2]
-
-    # Find empty line separating headers from body
-    var header_end = 1
-    var i = 1
-    while i < lines.length():
-        val line = lines[i]
-        if line == "":
-            header_end = i
-            break
-        i = i + 1
-
-    # Parse headers
-    var header_lines = []
-    var j = 1
-    while j < header_end:
-        header_lines = header_lines.append(lines[j])
-        j = j + 1
-
-    val headers = parse_headers(header_lines)
-
-    # Parse body (everything after empty line)
-    var body_lines = []
-    var k = header_end + 1
-    while k < lines.length():
-        body_lines = body_lines.append(lines[k])
-        k = k + 1
-
-    val body = "\r\n".join(body_lines)
-
-    return (method, path, version, headers, body)
-
-# Parse HTTP request line
-# Example: "GET /path HTTP/1.1" -> ("GET", "/path", "HTTP/1.1")
-fn parse_request_line(line: text) -> tuple:
-    val parts = line.split(" ")
-
-    if parts.length() < 3:
-        return ("GET", "/", "HTTP/1.1")
-
-    val method = parts[0]
-    val path = parts[1]
-    val version = parts[2]
-
-    return (method, path, version)
-
-# Extract HTTP method from request line
-fn parse_method(text: text) -> text:
-    val parts = text.split(" ")
-    if parts.length() > 0:
-        return parts[0]
-    return "GET"
-
-# Extract path from request line
-fn parse_path(text: text) -> text:
-    val parts = text.split(" ")
-    if parts.length() > 1:
-        return parts[1]
-    return "/"
-
-# Extract HTTP version from request line
-fn parse_version(text: text) -> text:
-    val parts = text.split(" ")
-    if parts.length() > 2:
-        return parts[2]
-    return "HTTP/1.1"
-
-# ============================================================================
-# HTTP Request Building
-# ============================================================================
-
-# Build complete HTTP request from components
-# headers: list of (name, value) tuples
-fn build_request(method: text, path: text, headers: list, body: text) -> text:
-    var result = method
-    result = result + " "
-    result = result + path
-    result = result + " HTTP/1.1\r\n"
-
-    val headers_text = format_headers(headers)
-    result = result + headers_text
-
-    result = result + "\r\n"
-    result = result + body
-
-    return result
-
-# Create GET request with headers
-fn create_get_request(url: text, headers: list) -> text:
-    return build_request("GET", url, headers, "")
-
-# Create POST request with headers and body
-fn create_post_request(url: text, headers: list, body: text) -> text:
-    return build_request("POST", url, headers, body)
-
-# Create PUT request with headers and body
-fn create_put_request(url: text, headers: list, body: text) -> text:
-    return build_request("PUT", url, headers, body)
-
-# Create DELETE request with headers
-fn create_delete_request(url: text, headers: list) -> text:
-    return build_request("DELETE", url, headers, "")
-
-# Create PATCH request with headers and body
-fn create_patch_request(url: text, headers: list, body: text) -> text:
-    return build_request("PATCH", url, headers, body)
-
-# Create HEAD request with headers
-fn create_head_request(url: text, headers: list) -> text:
-    return build_request("HEAD", url, headers, "")
-
-# Create OPTIONS request with headers
-fn create_options_request(url: text, headers: list) -> text:
-    return build_request("OPTIONS", url, headers, "")
-
-# ============================================================================
-# HTTP Response Parsing
-# ============================================================================
-
-# Parse complete HTTP response into tuple structure
-# Returns: (version, status_code, reason, headers, body)
-fn parse_response(text: text) -> tuple:
-    val lines = text.split("\r\n")
-
-    # Parse status line (first line)
-    val status_line = lines[0]
-    val status_parts = parse_status_line(status_line)
-    val version = status_parts[0]
-    val status = status_parts[1]
-    val reason = status_parts[2]
-
-    # Find empty line separating headers from body
-    var header_end = 1
-    var i = 1
-    while i < lines.length():
-        val line = lines[i]
-        if line == "":
-            header_end = i
-            break
-        i = i + 1
-
-    # Parse headers
-    var header_lines = []
-    var j = 1
-    while j < header_end:
-        header_lines = header_lines.append(lines[j])
-        j = j + 1
-
-    val headers = parse_headers(header_lines)
-
-    # Parse body (everything after empty line)
-    var body_lines = []
-    var k = header_end + 1
-    while k < lines.length():
-        body_lines = body_lines.append(lines[k])
-        k = k + 1
-
-    val body = "\r\n".join(body_lines)
-
-    return (version, status, reason, headers, body)
-
-# Parse HTTP status line
-# Example: "HTTP/1.1 200 OK" -> ("HTTP/1.1", 200, "OK")
-fn parse_status_line(line: text) -> tuple:
-    val parts = line.split(" ")
-
-    if parts.length() < 2:
-        return ("HTTP/1.1", 200, "OK")
-
-    val version = parts[0]
-    val status_text = parts[1]
-    val status = parse_status_code(status_text)
-
-    # Reason phrase is everything after status code
-    var reason = "OK"
-    if parts.length() > 2:
-        var reason_parts = []
-        var i = 2
-        while i < parts.length():
-            reason_parts = reason_parts.append(parts[i])
-            i = i + 1
-        reason = " ".join(reason_parts)
-
-    return (version, status, reason)
-
-# Parse status code from text to integer
-fn parse_status_code(text: text) -> i64:
-    # Simple integer parsing
-    var result = 0
-    var i = 0
-    while i < text.length():
-        val ch = text[i]
-        if ch >= "0" and ch <= "9":
-            val digit_val = ch.char_code() - "0".char_code()
-            result = result * 10
-            result = result + digit_val
-        i = i + 1
-    return result
-
-# ============================================================================
-# HTTP Response Building
-# ============================================================================
-
-# Build complete HTTP response from components
-fn build_response(status: i64, headers: list, body: text) -> text:
-    val reason = status_text(status)
-
-    var result = "HTTP/1.1 "
-    result = result + status.to_text()
-    result = result + " "
-    result = result + reason
-    result = result + "\r\n"
-
-    val headers_text = format_headers(headers)
-    result = result + headers_text
-
-    result = result + "\r\n"
-    result = result + body
-
-    return result
-
-# Create response with status code (empty body)
-fn create_response(status: i64) -> text:
-    return build_response(status, [], "")
-
-# Create 200 OK response with body
-fn create_ok_response(body: text) -> text:
-    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
-    return build_response(200, headers, body)
-
-# Create 404 Not Found response
-fn create_not_found_response() -> text:
-    val body = "Not Found"
-    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
-    return build_response(404, headers, body)
-
-# Create 500 Internal Server Error response
-fn create_server_error_response() -> text:
-    val body = "Internal Server Error"
-    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
-    return build_response(500, headers, body)
-
-# Create JSON response
-fn create_json_response(status: i64, json: text) -> text:
-    val headers = [("Content-Type", "application/json"), ("Content-Length", json.length().to_text())]
-    return build_response(status, headers, json)
-
-# Create HTML response
-fn create_html_response(status: i64, html: text) -> text:
-    val headers = [("Content-Type", "text/html"), ("Content-Length", html.length().to_text())]
-    return build_response(status, headers, html)
-
-# Create redirect response
-fn create_redirect_response(location: text) -> text:
-    val headers = [("Location", location)]
-    return build_response(302, headers, "")
-
-# ============================================================================
-# HTTP Headers
-# ============================================================================
-
-# Parse list of header lines into list of (name, value) tuples
-fn parse_headers(lines: list) -> list:
-    var headers = []
-    var i = 0
-    while i < lines.length():
-        val line = lines[i]
-        val header = parse_header(line)
-        headers = headers.append(header)
-        i = i + 1
-    return headers
-
-# Parse single header line
-# Example: "Content-Type: application/json" -> ("Content-Type", "application/json")
-fn parse_header(line: text) -> tuple:
-    val colon_pos = line.index_of(":")
-
-    if colon_pos < 0:
-        return ("", "")
-
-    val name = line.substring(0, colon_pos)
-
-    var value_start = colon_pos + 1
-
-    # Skip leading whitespace in value
-    while value_start < line.length():
-        val ch = line[value_start]
-        var is_space = false
-        if ch == " ":
-            is_space = true
-        if ch == "\t":
-            is_space = true
-
-        if is_space:
-            value_start = value_start + 1
-        else:
-            break
-
-    val value = line.substring(value_start, line.length())
-
-    return (name, value)
-
-# Format headers list into HTTP header text
-fn format_headers(headers: list) -> text:
-    var result = ""
-    var i = 0
-    while i < headers.length():
-        val header = headers[i]
-        val name = header[0]
-        val value = header[1]
-
-        result = result + name
-        result = result + ": "
-        result = result + value
-        result = result + "\r\n"
-
-        i = i + 1
-    return result
-
-# Get header value by name (case-insensitive)
-# Returns nil if not found
-fn get_header(headers: list, name: text) -> text:
-    val lower_name = name.to_lower()
-
-    var i = 0
-    while i < headers.length():
-        val header = headers[i]
-        val header_name = header[0]
-        val header_value = header[1]
-
-        val lower_header_name = header_name.to_lower()
-
-        if lower_header_name == lower_name:
-            return header_value
-
-        i = i + 1
-
-    return nil
-
-# Set header value (replaces existing or adds new)
-fn set_header(headers: list, name: text, value: text) -> list:
-    val lower_name = name.to_lower()
-
-    var found = false
-    var new_headers = []
-    var i = 0
-    while i < headers.length():
-        val header = headers[i]
-        val header_name = header[0]
-        val header_value = header[1]
-
-        val lower_header_name = header_name.to_lower()
-
-        if lower_header_name == lower_name:
-            new_headers = new_headers.append((name, value))
-            found = true
-        else:
-            new_headers = new_headers.append(header)
-
-        i = i + 1
-
-    if not found:
-        new_headers = new_headers.append((name, value))
-
-    return new_headers
-
-# Remove header by name (case-insensitive)
-fn remove_header(headers: list, name: text) -> list:
-    val lower_name = name.to_lower()
-
-    var new_headers = []
-    var i = 0
-    while i < headers.length():
-        val header = headers[i]
-        val header_name = header[0]
-
-        val lower_header_name = header_name.to_lower()
-
-        if lower_header_name != lower_name:
-            new_headers = new_headers.append(header)
-
-        i = i + 1
-
-    return new_headers
-
-# Normalize header name to standard case
-# Example: "content-type" -> "Content-Type"
-fn normalize_header_name(name: text) -> text:
-    val parts = name.split("-")
-    var normalized_parts = []
-
-    var i = 0
-    while i < parts.length():
-        val part = parts[i]
-        val capitalized = capitalize_word(part)
-        normalized_parts = normalized_parts.append(capitalized)
-        i = i + 1
-
-    return "-".join(normalized_parts)
-
-# Capitalize first letter of word
-fn capitalize_word(word: text) -> text:
-    if word.length() == 0:
-        return word
-
-    val first = word[0].to_upper()
-    val rest = word.substring(1, word.length())
-
-    return first + rest
-
-# ============================================================================
-# Query String Handling
-# ============================================================================
-
-# Parse query string into list of (name, value) tuples
-# Example: "name=Alice&age=30" -> [("name", "Alice"), ("age", "30")]
-fn parse_query_string(query: text) -> list:
-    if query.length() == 0:
-        return []
-
-    val pairs = query.split("&")
-    var params = []
-
-    var i = 0
-    while i < pairs.length():
-        val pair = pairs[i]
-        val param = parse_query_param(pair)
-        params = params.append(param)
-        i = i + 1
-
-    return params
-
-# Parse single query parameter
-# Example: "name=Alice" -> ("name", "Alice")
-fn parse_query_param(pair: text) -> tuple:
-    val eq_pos = pair.index_of("=")
-
-    if eq_pos < 0:
-        return (pair, "")
-
-    val name = pair.substring(0, eq_pos)
-    val value_encoded = pair.substring(eq_pos + 1, pair.length())
-    val value = url_decode(value_encoded)
-
-    return (name, value)
-
-# Build query string from list of (name, value) tuples
-fn build_query_string(params: list) -> text:
-    if params.length() == 0:
-        return ""
-
-    var parts = []
-    var i = 0
-    while i < params.length():
-        val param = params[i]
-        val name = param[0]
-        val value = param[1]
-
-        val encoded_value = url_encode(value)
-
-        var part = name
-        part = part + "="
-        part = part + encoded_value
-
-        parts = parts.append(part)
-        i = i + 1
-
-    return "&".join(parts)
-
-# Encode query parameter value
-fn encode_query_param(value: text) -> text:
-    return url_encode(value)
-
-# Get query parameter value by name
-fn get_query_param(params: list, name: text) -> text:
-    var i = 0
-    while i < params.length():
-        val param = params[i]
-        val param_name = param[0]
-        val param_value = param[1]
-
-        if param_name == name:
-            return param_value
-
-        i = i + 1
-
-    return nil
-
-# ============================================================================
-# URL Encoding/Decoding
-# ============================================================================
-
-# URL encode text (percent encoding)
-fn url_encode(text: text) -> text:
-    var result = ""
-    var i = 0
-
-    while i < text.length():
-        val ch = text[i]
-
-        val should_encode = should_url_encode_char(ch)
-
-        if should_encode:
-            val encoded = percent_encode_char(ch)
-            result = result + encoded
-        else:
-            result = result + ch
-
-        i = i + 1
-
-    return result
-
-# Check if character should be URL encoded
-fn should_url_encode_char(ch: text) -> bool:
-    # Unreserved characters (don't encode): A-Z a-z 0-9 - _ . ~
-
-    var is_alpha = false
-    if ch >= "A" and ch <= "Z":
-        is_alpha = true
-    if ch >= "a" and ch <= "z":
-        is_alpha = true
-
-    var is_digit = false
-    if ch >= "0" and ch <= "9":
-        is_digit = true
-
-    var is_unreserved = false
-    if ch == "-":
-        is_unreserved = true
-    if ch == "_":
-        is_unreserved = true
-    if ch == ".":
-        is_unreserved = true
-    if ch == "~":
-        is_unreserved = true
-
-    var should_not_encode = false
-    if is_alpha:
-        should_not_encode = true
-    if is_digit:
-        should_not_encode = true
-    if is_unreserved:
-        should_not_encode = true
-
-    if should_not_encode:
-        return false
-
-    return true
-
-# Percent encode a single character
-fn percent_encode_char(ch: text) -> text:
-    val code = ch.char_code()
-
-    var result = "%"
-    result = result + to_hex(code)
-
-    return result
-
-# Convert integer to hex string (2 digits)
-fn to_hex(n: i64) -> text:
-    val hex_chars = "0123456789ABCDEF"
-
-    val high = n / 16
-    val low = n % 16
-
-    var result = hex_chars[high]
-    result = result + hex_chars[low]
-
-    return result
-
-# URL decode text (percent decoding)
-fn url_decode(encoded: text) -> text:
-    var result = ""
-    var i = 0
-
-    while i < encoded.length():
-        val ch = encoded[i]
-
-        if ch == "%":
-            # Decode percent-encoded character
-            if i + 2 < encoded.length():
-                val hex1 = encoded[i + 1]
-                val hex2 = encoded[i + 2]
-
-                val code = from_hex(hex1, hex2)
-                val decoded = char_from_code(code)
-
-                result = result + decoded
-                i = i + 3
-            else:
-                result = result + ch
-                i = i + 1
-        else:
-            if ch == "+":
-                result = result + " "
-            else:
-                result = result + ch
-            i = i + 1
-
-    return result
-
-# Convert hex digit to integer
-fn hex_to_int(ch: text) -> i64:
-    if ch >= "0" and ch <= "9":
-        return ch.char_code() - "0".char_code()
-
-    if ch >= "A" and ch <= "F":
-        val offset = ch.char_code() - "A".char_code()
-        return 10 + offset
-
-    if ch >= "a" and ch <= "f":
-        val offset = ch.char_code() - "a".char_code()
-        return 10 + offset
-
-    return 0
-
-# Convert two hex digits to integer
-fn from_hex(hex1: text, hex2: text) -> i64:
-    val high = hex_to_int(hex1)
-    val low = hex_to_int(hex2)
-
-    val result = high * 16
-    return result + low
-
-# Convert character code to character
-fn char_from_code(code: i64) -> text:
-    # This is a simplified version - in real implementation
-    # we would use proper character encoding
-    if code >= 32 and code <= 126:
-        # Printable ASCII range
-        val chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-        val index = code - 32
-        if index >= 0 and index < chars.length():
-            return chars[index]
-
-    return "?"
-
-# URL encode component (encodes more characters than url_encode)
-fn url_encode_component(text: text) -> text:
-    # For now, same as url_encode
-    return url_encode(text)
-
-# ============================================================================
-# Cookie Parsing
-# ============================================================================
-
-# Parse Cookie header into list of (name, value) tuples
-# Example: "session=abc123; user=alice" -> [("session", "abc123"), ("user", "alice")]
-fn parse_cookie_header(header: text) -> list:
-    val pairs = header.split("; ")
-    var cookies = []
-
-    var i = 0
-    while i < pairs.length():
-        val pair = pairs[i]
-        val cookie = parse_cookie_pair(pair)
-        cookies = cookies.append(cookie)
-        i = i + 1
-
-    return cookies
-
-# Parse single cookie pair
-fn parse_cookie_pair(pair: text) -> tuple:
-    val eq_pos = pair.index_of("=")
-
-    if eq_pos < 0:
-        return (pair, "")
-
-    val name = pair.substring(0, eq_pos)
-    val value = pair.substring(eq_pos + 1, pair.length())
-
-    return (name, value)
-
-# Build cookie string with options
-# options: (max_age, path, domain, secure, http_only, same_site)
-fn build_cookie(name: text, value: text, options: tuple) -> text:
-    var result = name
-    result = result + "="
-    result = result + value
-
-    # Add Max-Age if specified
-    val max_age = options[0]
-    if max_age != nil:
-        result = result + "; Max-Age="
-        result = result + max_age.to_text()
-
-    # Add Path if specified
-    val path = options[1]
-    if path != nil:
-        result = result + "; Path="
-        result = result + path
-
-    # Add Domain if specified
-    val domain = options[2]
-    if domain != nil:
-        result = result + "; Domain="
-        result = result + domain
-
-    # Add Secure if true
-    val secure = options[3]
-    if secure == true:
-        result = result + "; Secure"
-
-    # Add HttpOnly if true
-    val http_only = options[4]
-    if http_only == true:
-        result = result + "; HttpOnly"
-
-    # Add SameSite if specified
-    val same_site = options[5]
-    if same_site != nil:
-        result = result + "; SameSite="
-        result = result + same_site
-
-    return result
-
-# Parse Set-Cookie header into tuple
-# Returns: (name, value, options)
-fn parse_set_cookie(header: text) -> tuple:
-    val parts = header.split("; ")
-
-    if parts.length() == 0:
-        return ("", "", nil)
-
-    # First part is name=value
-    val first = parts[0]
-    val cookie = parse_cookie_pair(first)
-    val name = cookie[0]
-    val value = cookie[1]
-
-    # Parse options
-    var max_age = nil
-    var path = nil
-    var domain = nil
-    var secure = false
-    var http_only = false
-    var same_site = nil
-
-    var i = 1
-    while i < parts.length():
-        val part = parts[i]
-
-        if part == "Secure":
-            secure = true
-        else:
-            if part == "HttpOnly":
-                http_only = true
-            else:
-                val eq_pos = part.index_of("=")
-                if eq_pos > 0:
-                    val opt_name = part.substring(0, eq_pos)
-                    val opt_value = part.substring(eq_pos + 1, part.length())
-
-                    if opt_name == "Max-Age":
-                        max_age = parse_status_code(opt_value)
-                    else:
-                        if opt_name == "Path":
-                            path = opt_value
-                        else:
-                            if opt_name == "Domain":
-                                domain = opt_value
-                            else:
-                                if opt_name == "SameSite":
-                                    same_site = opt_value
-
-        i = i + 1
-
-    val options = (max_age, path, domain, secure, http_only, same_site)
-    return (name, value, options)
-
-# ============================================================================
-# Content Type Handling
-# ============================================================================
-
-# Parse Content-Type header
-# Returns: (media_type, charset)
-fn parse_content_type(header: text) -> tuple:
-    val parts = header.split(";")
-
-    if parts.length() == 0:
-        return ("text/plain", nil)
-
-    val media_type = parts[0].trim()
-
-    var charset = nil
-
-    var i = 1
-    while i < parts.length():
-        val part = parts[i].trim()
-
-        if part.starts_with("charset="):
-            charset = part.substring(8, part.length())
-
-        i = i + 1
-
-    return (media_type, charset)
-
-# Check if content type is JSON
-fn is_json(content_type: text) -> bool:
-    val lower = content_type.to_lower()
-    return lower.contains("json")
-
-# Check if content type is HTML
-fn is_html(content_type: text) -> bool:
-    val lower = content_type.to_lower()
-    return lower.contains("html")
-
-# Check if content type is XML
-fn is_xml(content_type: text) -> bool:
-    val lower = content_type.to_lower()
-    return lower.contains("xml")
-
-# Check if content type is text
-fn is_text(content_type: text) -> bool:
-    val lower = content_type.to_lower()
-    return lower.starts_with("text/")
-
-# Get content length from headers
-fn get_content_length(headers: list) -> i64:
-    val length_str = get_header(headers, "Content-Length")
-
-    if length_str == nil:
-        return 0
-
-    return parse_status_code(length_str)
-
-# Check if response uses chunked encoding
-fn is_chunked(headers: list) -> bool:
-    val encoding = get_header(headers, "Transfer-Encoding")
-
-    if encoding == nil:
-        return false
-
-    val lower = encoding.to_lower()
-    return lower.contains("chunked")
-
-# ============================================================================
-# Chunked Transfer Encoding
-# ============================================================================
-
-# Encode data using chunked transfer encoding
-fn encode_chunked(data: text) -> text:
-    val length = data.length()
-
-    var result = to_hex_text(length)
-    result = result + "\r\n"
-    result = result + data
-    result = result + "\r\n"
-    result = result + "0\r\n\r\n"
-
-    return result
-
-# Convert integer to hex text
-fn to_hex_text(n: i64) -> text:
-    if n == 0:
-        return "0"
-
-    var result = ""
-    var num = n
-
-    while num > 0:
-        val digit = num % 16
-        val hex_chars = "0123456789abcdef"
-        val hex_char = hex_chars[digit]
-
-        result = hex_char + result
-        num = num / 16
-
-    return result
-
-# Decode chunked transfer encoded data
-fn decode_chunked(encoded: text) -> text:
-    var result = ""
-    var pos = 0
-
-    while pos < encoded.length():
-        # Find end of chunk size line
-        val size_end = encoded.index_of("\r\n", pos)
-
-        if size_end < 0:
-            break
-
-        # Parse chunk size
-        val size_str = encoded.substring(pos, size_end)
-        val chunk_size = parse_hex_text(size_str)
-
-        if chunk_size == 0:
-            break
-
-        # Extract chunk data
-        val data_start = size_end + 2
-        val data_end = data_start + chunk_size
-
-        if data_end > encoded.length():
-            break
-
-        val chunk_data = encoded.substring(data_start, data_end)
-        result = result + chunk_data
-
-        # Move past chunk data and trailing \r\n
-        pos = data_end + 2
-
-    return result
-
-# Parse hex text to integer
-fn parse_hex_text(hex: text) -> i64:
-    var result = 0
-    var i = 0
-
-    while i < hex.length():
-        val ch = hex[i]
-        val digit = hex_to_int(ch)
-
-        result = result * 16
-        result = result + digit
-
-        i = i + 1
-
-    return result
-
-# ============================================================================
-# Status Code Utilities
-# ============================================================================
-
-# Get status text for HTTP status code
+# Status code utilities
 fn status_text(code: i64) -> text:
-    # 1xx Informational
-    if code == 100:
-        return "Continue"
-    if code == 101:
-        return "Switching Protocols"
+    return types.status_text(code)
 
-    # 2xx Success
-    if code == 200:
-        return "OK"
-    if code == 201:
-        return "Created"
-    if code == 202:
-        return "Accepted"
-    if code == 204:
-        return "No Content"
-    if code == 206:
-        return "Partial Content"
-
-    # 3xx Redirection
-    if code == 300:
-        return "Multiple Choices"
-    if code == 301:
-        return "Moved Permanently"
-    if code == 302:
-        return "Found"
-    if code == 303:
-        return "See Other"
-    if code == 304:
-        return "Not Modified"
-    if code == 307:
-        return "Temporary Redirect"
-    if code == 308:
-        return "Permanent Redirect"
-
-    # 4xx Client Error
-    if code == 400:
-        return "Bad Request"
-    if code == 401:
-        return "Unauthorized"
-    if code == 403:
-        return "Forbidden"
-    if code == 404:
-        return "Not Found"
-    if code == 405:
-        return "Method Not Allowed"
-    if code == 406:
-        return "Not Acceptable"
-    if code == 408:
-        return "Request Timeout"
-    if code == 409:
-        return "Conflict"
-    if code == 410:
-        return "Gone"
-    if code == 413:
-        return "Payload Too Large"
-    if code == 414:
-        return "URI Too Long"
-    if code == 415:
-        return "Unsupported Media Type"
-    if code == 429:
-        return "Too Many Requests"
-
-    # 5xx Server Error
-    if code == 500:
-        return "Internal Server Error"
-    if code == 501:
-        return "Not Implemented"
-    if code == 502:
-        return "Bad Gateway"
-    if code == 503:
-        return "Service Unavailable"
-    if code == 504:
-        return "Gateway Timeout"
-    if code == 505:
-        return "HTTP Version Not Supported"
-
-    return "Unknown"
-
-# Check if status code is success (2xx)
 fn is_success(code: i64) -> bool:
-    return code >= 200 and code < 300
+    return types.is_success(code)
 
-# Check if status code is redirect (3xx)
 fn is_redirect(code: i64) -> bool:
-    return code >= 300 and code < 400
+    return types.is_redirect(code)
 
-# Check if status code is client error (4xx)
 fn is_client_error(code: i64) -> bool:
-    return code >= 400 and code < 500
+    return types.is_client_error(code)
 
-# Check if status code is server error (5xx)
 fn is_server_error(code: i64) -> bool:
-    return code >= 500 and code < 600
+    return types.is_server_error(code)
 
-# Check if status code is error (4xx or 5xx)
 fn is_error(code: i64) -> bool:
-    return code >= 400
+    return types.is_error(code)
 
-# Check if status code is informational (1xx)
 fn is_informational(code: i64) -> bool:
-    return code >= 100 and code < 200
+    return types.is_informational(code)
 
-# ============================================================================
-# HTTP Method Utilities
-# ============================================================================
-
-# Check if HTTP method is safe (no side effects)
+# HTTP method utilities
 fn is_safe_method(method: text) -> bool:
-    val upper = method.to_upper()
+    return types.is_safe_method(method)
 
-    if upper == "GET":
-        return true
-    if upper == "HEAD":
-        return true
-    if upper == "OPTIONS":
-        return true
-    if upper == "TRACE":
-        return true
-
-    return false
-
-# Check if HTTP method is idempotent
 fn is_idempotent(method: text) -> bool:
-    val upper = method.to_upper()
+    return types.is_idempotent(method)
 
-    if upper == "GET":
-        return true
-    if upper == "HEAD":
-        return true
-    if upper == "PUT":
-        return true
-    if upper == "DELETE":
-        return true
-    if upper == "OPTIONS":
-        return true
-    if upper == "TRACE":
-        return true
-
-    return false
-
-# Check if HTTP method typically has a request body
 fn has_request_body(method: text) -> bool:
-    val upper = method.to_upper()
+    return types.has_request_body(method)
 
-    if upper == "POST":
-        return true
-    if upper == "PUT":
-        return true
-    if upper == "PATCH":
-        return true
-
-    return false
-
-# Check if HTTP method is valid
 fn is_valid_method(method: text) -> bool:
-    val upper = method.to_upper()
+    return types.is_valid_method(method)
 
-    if upper == "GET":
-        return true
-    if upper == "POST":
-        return true
-    if upper == "PUT":
-        return true
-    if upper == "DELETE":
-        return true
-    if upper == "PATCH":
-        return true
-    if upper == "HEAD":
-        return true
-    if upper == "OPTIONS":
-        return true
-    if upper == "TRACE":
-        return true
-    if upper == "CONNECT":
-        return true
+# Content type utilities
+fn parse_content_type(header: text) -> tuple:
+    return types.parse_content_type(header)
 
-    return false
+fn is_json(content_type: text) -> bool:
+    return types.is_json(content_type)
+
+fn is_html(content_type: text) -> bool:
+    return types.is_html(content_type)
+
+fn is_xml(content_type: text) -> bool:
+    return types.is_xml(content_type)
+
+fn is_text(content_type: text) -> bool:
+    return types.is_text(content_type)
 
 # ============================================================================
-# Authentication Helpers
+# Request Module - HTTP request parsing and building
 # ============================================================================
 
-# Parse Basic Authentication header
-# Returns: (username, password) or nil if invalid
-fn parse_basic_auth(header: text) -> tuple:
-    if not header.starts_with("Basic "):
-        return nil
+fn parse_request(text: text) -> tuple:
+    return request.parse_request(text)
 
-    val encoded = header.substring(6, header.length())
+fn parse_request_line(line: text) -> tuple:
+    return request.parse_request_line(line)
 
-    # In real implementation, would base64 decode
-    # For now, simplified version
-    val decoded = base64_decode_simple(encoded)
+fn parse_method(text: text) -> text:
+    return request.parse_method(text)
 
-    val colon_pos = decoded.index_of(":")
+fn parse_path(text: text) -> text:
+    return request.parse_path(text)
 
-    if colon_pos < 0:
-        return nil
+fn parse_version(text: text) -> text:
+    return request.parse_version(text)
 
-    val username = decoded.substring(0, colon_pos)
-    val password = decoded.substring(colon_pos + 1, decoded.length())
+fn build_request(method: text, path: text, headers: list, body: text) -> text:
+    return request.build_request(method, path, headers, body)
 
-    return (username, password)
+fn create_get_request(url: text, headers: list) -> text:
+    return request.create_get_request(url, headers)
 
-# Build Basic Authentication header value
-fn build_basic_auth(username: text, password: text) -> text:
-    var credentials = username
-    credentials = credentials + ":"
-    credentials = credentials + password
+fn create_post_request(url: text, headers: list, body: text) -> text:
+    return request.create_post_request(url, headers, body)
 
-    val encoded = base64_encode_simple(credentials)
+fn create_put_request(url: text, headers: list, body: text) -> text:
+    return request.create_put_request(url, headers, body)
 
-    var result = "Basic "
-    result = result + encoded
+fn create_delete_request(url: text, headers: list) -> text:
+    return request.create_delete_request(url, headers)
 
-    return result
+fn create_patch_request(url: text, headers: list, body: text) -> text:
+    return request.create_patch_request(url, headers, body)
 
-# Parse Bearer token from Authorization header
-fn parse_bearer_token(header: text) -> text:
-    if not header.starts_with("Bearer "):
-        return nil
+fn create_head_request(url: text, headers: list) -> text:
+    return request.create_head_request(url, headers)
 
-    return header.substring(7, header.length())
-
-# Build Bearer Authorization header value
-fn build_bearer_auth(token: text) -> text:
-    var result = "Bearer "
-    result = result + token
-    return result
-
-# Base64 encoding (RFC 4648 standard)
-fn base64_encode_simple(input: text) -> text:
-    var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    var result = ""
-    var i = 0
-    var input_len = input.length()
-
-    while i < input_len:
-        var b0 = input.char_code_at(i)
-        var b1 = 0
-        var b2 = 0
-        var has_b1 = false
-        var has_b2 = false
-
-        if i + 1 < input_len:
-            b1 = input.char_code_at(i + 1)
-            has_b1 = true
-        if i + 2 < input_len:
-            b2 = input.char_code_at(i + 2)
-            has_b2 = true
-
-        # First 6 bits of b0
-        var idx0 = (b0 >> 2) & 63
-        result = result + alphabet.substring(idx0, idx0 + 1)
-
-        # Last 2 bits of b0 + first 4 bits of b1
-        var idx1 = ((b0 & 3) << 4) | ((b1 >> 4) & 15)
-        result = result + alphabet.substring(idx1, idx1 + 1)
-
-        # Last 4 bits of b1 + first 2 bits of b2
-        if has_b1:
-            var idx2 = ((b1 & 15) << 2) | ((b2 >> 6) & 3)
-            result = result + alphabet.substring(idx2, idx2 + 1)
-        else:
-            result = result + "="
-
-        # Last 6 bits of b2
-        if has_b2:
-            var idx3 = b2 & 63
-            result = result + alphabet.substring(idx3, idx3 + 1)
-        else:
-            result = result + "="
-
-        i = i + 3
-
-    return result
-
-# Base64 decoding (RFC 4648 standard)
-fn base64_decode_simple(encoded: text) -> text:
-    var result = ""
-    var i = 0
-    var enc_len = encoded.length()
-
-    while i < enc_len:
-        var c0 = _b64_char_val(encoded, i)
-        var c1 = _b64_char_val(encoded, i + 1)
-        var c2 = _b64_char_val(encoded, i + 2)
-        var c3 = _b64_char_val(encoded, i + 3)
-
-        # First byte: 6 bits from c0 + top 2 bits from c1
-        var byte0 = ((c0 << 2) | (c1 >> 4)) & 255
-        result = result + text.from_char_code(byte0)
-
-        # Second byte (if not padding)
-        if c2 >= 0:
-            var byte1 = ((c1 << 4) | (c2 >> 2)) & 255
-            result = result + text.from_char_code(byte1)
-
-        # Third byte (if not padding)
-        if c3 >= 0:
-            var byte2 = ((c2 << 6) | c3) & 255
-            result = result + text.from_char_code(byte2)
-
-        i = i + 4
-
-    return result
-
-# Helper: get Base64 value for character at position
-fn _b64_char_val(s: text, pos: i64) -> i64:
-    if pos >= s.length():
-        return -1
-    var code = s.char_code_at(pos)
-    # A-Z: 65-90 -> 0-25
-    if code >= 65:
-        if code <= 90:
-            return code - 65
-    # a-z: 97-122 -> 26-51
-    if code >= 97:
-        if code <= 122:
-            return code - 71
-    # 0-9: 48-57 -> 52-61
-    if code >= 48:
-        if code <= 57:
-            return code + 4
-    # '+' = 43 -> 62
-    if code == 43:
-        return 62
-    # '/' = 47 -> 63
-    if code == 47:
-        return 63
-    # '=' padding
-    -1
+fn create_options_request(url: text, headers: list) -> text:
+    return request.create_options_request(url, headers)
 
 # ============================================================================
-# Range Header Handling
+# Response Module - HTTP response parsing and building
 # ============================================================================
 
-# Parse Range header
-# Returns: (start, end) or nil if invalid
-# Example: "bytes=0-1023" -> (0, 1023)
+fn parse_response(text: text) -> tuple:
+    return response.parse_response(text)
+
+fn parse_status_line(line: text) -> tuple:
+    return response.parse_status_line(line)
+
+fn parse_status_code(text: text) -> i64:
+    return response.parse_status_code(text)
+
+fn build_response(status: i64, headers: list, body: text) -> text:
+    return response.build_response(status, headers, body)
+
+fn create_response(status: i64) -> text:
+    return response.create_response(status)
+
+fn create_ok_response(body: text) -> text:
+    return response.create_ok_response(body)
+
+fn create_not_found_response() -> text:
+    return response.create_not_found_response()
+
+fn create_server_error_response() -> text:
+    return response.create_server_error_response()
+
+fn create_json_response(status: i64, json: text) -> text:
+    return response.create_json_response(status, json)
+
+fn create_html_response(status: i64, html: text) -> text:
+    return response.create_html_response(status, html)
+
+fn create_redirect_response(location: text) -> text:
+    return response.create_redirect_response(location)
+
+# ============================================================================
+# Headers Module - HTTP headers manipulation
+# ============================================================================
+
+fn parse_headers(lines: list) -> list:
+    return headers.parse_headers(lines)
+
+fn parse_header(line: text) -> tuple:
+    return headers.parse_header(line)
+
+fn format_headers(headers: list) -> text:
+    return headers.format_headers(headers)
+
+fn get_header(headers: list, name: text) -> text:
+    return headers.get_header(headers, name)
+
+fn set_header(headers: list, name: text, value: text) -> list:
+    return headers.set_header(headers, name, value)
+
+fn remove_header(headers: list, name: text) -> list:
+    return headers.remove_header(headers, name)
+
+fn normalize_header_name(name: text) -> text:
+    return headers.normalize_header_name(name)
+
+fn get_content_length(headers: list) -> i64:
+    return headers.get_content_length(headers)
+
+fn is_chunked(headers: list) -> bool:
+    return headers.is_chunked(headers)
+
+# Chunked transfer encoding
+fn encode_chunked(data: text) -> text:
+    return headers.encode_chunked(data)
+
+fn decode_chunked(encoded: text) -> text:
+    return headers.decode_chunked(encoded)
+
+# Range headers
 fn parse_range_header(header: text) -> tuple:
-    if not header.starts_with("bytes="):
-        return nil
+    return headers.parse_range_header(header)
 
-    val range_spec = header.substring(6, header.length())
-    val dash_pos = range_spec.index_of("-")
-
-    if dash_pos < 0:
-        return nil
-
-    val start_str = range_spec.substring(0, dash_pos)
-    val end_str = range_spec.substring(dash_pos + 1, range_spec.length())
-
-    var start = 0
-    if start_str.length() > 0:
-        start = parse_status_code(start_str)
-
-    var end = 0
-    if end_str.length() > 0:
-        end = parse_status_code(end_str)
-
-    return (start, end)
-
-# Build Range header value
 fn build_range_header(start: i64, end: i64) -> text:
-    var result = "bytes="
-    result = result + start.to_text()
-    result = result + "-"
-    result = result + end.to_text()
+    return headers.build_range_header(start, end)
 
-    return result
-
-# ============================================================================
-# Multipart Form Data
-# ============================================================================
-
-# Parse multipart form data
-# Returns: list of (headers, body) tuples
+# Multipart form data
 fn parse_multipart(body: text, boundary: text) -> list:
-    var delimiter = "--"
-    delimiter = delimiter + boundary
+    return headers.parse_multipart(body, boundary)
 
-    val parts_raw = body.split(delimiter)
-    var parts = []
-
-    var i = 0
-    while i < parts_raw.length():
-        val part_raw = parts_raw[i]
-
-        # Skip empty parts and final boundary
-        if part_raw.length() > 2:
-            val part = parse_multipart_part(part_raw)
-            if part != nil:
-                parts = parts.append(part)
-
-        i = i + 1
-
-    return parts
-
-# Parse single multipart part
-fn parse_multipart_part(part_text: text) -> tuple:
-    val lines = part_text.split("\r\n")
-
-    # Find empty line separating headers from body
-    var header_end = 0
-    var i = 0
-    while i < lines.length():
-        val line = lines[i]
-        if line == "":
-            header_end = i
-            break
-        i = i + 1
-
-    if header_end == 0:
-        return nil
-
-    # Parse headers
-    var header_lines = []
-    var j = 0
-    while j < header_end:
-        header_lines = header_lines.append(lines[j])
-        j = j + 1
-
-    val headers = parse_headers(header_lines)
-
-    # Parse body
-    var body_lines = []
-    var k = header_end + 1
-    while k < lines.length():
-        body_lines = body_lines.append(lines[k])
-        k = k + 1
-
-    val body = "\r\n".join(body_lines)
-
-    return (headers, body)
-
-# Build multipart form data
 fn build_multipart(parts: list, boundary: text) -> text:
-    var result = ""
+    return headers.build_multipart(parts, boundary)
 
-    var i = 0
-    while i < parts.length():
-        val part = parts[i]
-        val headers = part[0]
-        val body = part[1]
-
-        result = result + "--"
-        result = result + boundary
-        result = result + "\r\n"
-
-        val headers_text = format_headers(headers)
-        result = result + headers_text
-
-        result = result + "\r\n"
-        result = result + body
-        result = result + "\r\n"
-
-        i = i + 1
-
-    result = result + "--"
-    result = result + boundary
-    result = result + "--\r\n"
-
-    return result
-
-# Generate random boundary string
 fn generate_boundary() -> text:
-    # Simplified - in real implementation would use random data
-    return "----SimpleFormBoundary7MA4YWxkTrZu0gW"
+    return headers.generate_boundary()
 
 # ============================================================================
-# Utility Functions
+# URL Module - URL encoding and query strings
 # ============================================================================
 
-# Trim whitespace from text
+fn parse_query_string(query: text) -> list:
+    return url.parse_query_string(query)
+
+fn parse_query_param(pair: text) -> tuple:
+    return url.parse_query_param(pair)
+
+fn build_query_string(params: list) -> text:
+    return url.build_query_string(params)
+
+fn encode_query_param(value: text) -> text:
+    return url.encode_query_param(value)
+
+fn get_query_param(params: list, name: text) -> text:
+    return url.get_query_param(params, name)
+
+fn url_encode(text: text) -> text:
+    return url.url_encode(text)
+
+fn url_decode(encoded: text) -> text:
+    return url.url_decode(encoded)
+
+fn url_encode_component(text: text) -> text:
+    return url.url_encode_component(text)
+
+# ============================================================================
+# Cookie Module - Cookie parsing and building
+# ============================================================================
+
+fn parse_cookie_header(header: text) -> list:
+    return cookie.parse_cookie_header(header)
+
+fn parse_cookie_pair(pair: text) -> tuple:
+    return cookie.parse_cookie_pair(pair)
+
+fn build_cookie(name: text, value: text, options: tuple) -> text:
+    return cookie.build_cookie(name, value, options)
+
+fn parse_set_cookie(header: text) -> tuple:
+    return cookie.parse_set_cookie(header)
+
+# ============================================================================
+# Utilities Module - Authentication and general utilities
+# ============================================================================
+
+fn parse_basic_auth(header: text) -> tuple:
+    return utilities.parse_basic_auth(header)
+
+fn build_basic_auth(username: text, password: text) -> text:
+    return utilities.build_basic_auth(username, password)
+
+fn parse_bearer_token(header: text) -> text:
+    return utilities.parse_bearer_token(header)
+
+fn build_bearer_auth(token: text) -> text:
+    return utilities.build_bearer_auth(token)
+
+fn base64_encode_simple(input: text) -> text:
+    return utilities.base64_encode_simple(input)
+
+fn base64_decode_simple(encoded: text) -> text:
+    return utilities.base64_decode_simple(encoded)
+
 fn trim(text: text) -> text:
-    var start = 0
-    var end_val = text.length()
+    return utilities.trim(text)
 
-    # Trim from start
-    while start < end_val:
-        val ch = text[start]
-        var is_space = false
-        if ch == " ":
-            is_space = true
-        if ch == "\t":
-            is_space = true
-        if ch == "\r":
-            is_space = true
-        if ch == "\n":
-            is_space = true
-
-        if is_space:
-            start = start + 1
-        else:
-            break
-
-    # Trim from end
-    while end_val > start:
-        val pos = end_val - 1
-        val ch = text[pos]
-        var is_space = false
-        if ch == " ":
-            is_space = true
-        if ch == "\t":
-            is_space = true
-        if ch == "\r":
-            is_space = true
-        if ch == "\n":
-            is_space = true
-
-        if is_space:
-            end_val = end_val - 1
-        else:
-            break
-
-    if start >= end_val:
-        return ""
-
-    return text.substring(start, end_val)
-
-# Check if text contains substring
 fn contains(text: text, substring: text) -> bool:
-    return text.index_of(substring) >= 0
+    return utilities.contains(text, substring)
 
-# Index of substring with start position
 fn index_of(text: text, substring: text, start: i64) -> i64:
-    var i = start
-    while i <= text.length() - substring.length():
-        var match = true
-        var j = 0
-        while j < substring.length():
-            if text[i + j] != substring[j]:
-                match = false
-                break
-            j = j + 1
-
-        if match:
-            return i
-
-        i = i + 1
-
-    return -1
+    return utilities.index_of(text, substring, start)

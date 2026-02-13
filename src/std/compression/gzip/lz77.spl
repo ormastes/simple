@@ -1,0 +1,187 @@
+# LZ77 Sliding Window Compression
+#
+# Purpose: LZ77 compression algorithm implementation
+#
+# Contains:
+# - Sliding window match finding
+# - LZ77 compression (data to tokens)
+# - LZ77 decompression (tokens to data)
+# - LZ77 statistics calculation
+#
+# LZ77 match structure: (distance, length)
+# - distance: how far back in the window
+# - length: how many bytes to copy
+
+mod compression.gzip.types
+
+# =============================================================================
+# LZ77 COMPRESSION (Sliding Window)
+# =============================================================================
+
+# Find longest match in sliding window
+fn lz77_find_match(data, pos, window_start, max_len):
+    if data == nil:
+        return [0, 0]
+
+    val data_len = data.length()
+    if pos >= data_len:
+        return [0, 0]
+
+    var best_dist = 0
+    var best_len = 0
+
+    var i = window_start
+    loop:
+        if i >= pos:
+            break
+
+        # Try to match at position i
+        var match_len = 0
+        var j = 0
+
+        loop:
+            if j >= max_len:
+                break
+            if pos + j >= data_len:
+                break
+            if i + j >= pos:
+                break
+
+            if data[i + j] == data[pos + j]:
+                match_len = match_len + 1
+            else:
+                break
+
+            j = j + 1
+
+        # Update best match if this is longer
+        if match_len >= MIN_MATCH:
+            if match_len > best_len:
+                best_len = match_len
+                best_dist = pos - i
+
+        i = i + 1
+
+    return [best_dist, best_len]
+
+# Compress data using LZ77 algorithm
+# Returns: array of tokens [(type, value, extra)]
+# type: 0 = literal byte, 1 = match (distance, length)
+fn lz77_compress(data, level):
+    if data == nil:
+        return []
+
+    val data_len = data.length()
+    if data_len == 0:
+        return []
+
+    # Adjust search based on level
+    var max_search = 128
+    if level >= 6:
+        max_search = 4096
+    if level >= 9:
+        max_search = 32768
+
+    var tokens = []
+    var pos = 0
+
+    loop:
+        if pos >= data_len:
+            break
+
+        # Calculate window start
+        var window_start = pos - WINDOW_SIZE
+        if window_start < 0:
+            window_start = 0
+
+        # Find longest match
+        var max_len = MAX_MATCH
+        if pos + max_len > data_len:
+            max_len = data_len - pos
+
+        val match = lz77_find_match(data, pos, window_start, max_len)
+        val distance = match[0]
+        val length = match[1]
+
+        if length >= MIN_MATCH:
+            # Encode as match
+            tokens = tokens + [[1, distance, length]]
+            pos = pos + length
+        else:
+            # Encode as literal
+            tokens = tokens + [[0, data[pos], 0]]
+            pos = pos + 1
+
+    return tokens
+
+# Decompress LZ77 tokens back to original data
+fn lz77_decompress(tokens):
+    if tokens == nil:
+        return []
+
+    var result = []
+    var i = 0
+
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+        val value = token[1]
+        val extra = token[2]
+
+        if token_type == 0:
+            # Literal byte
+            result = result + [value]
+        else:
+            # Match: copy from window
+            val distance = value
+            val length = extra
+            val start_pos = result.length() - distance
+
+            var j = 0
+            loop:
+                if j >= length:
+                    break
+
+                val copy_pos = start_pos + j
+                if copy_pos >= 0:
+                    if copy_pos < result.length():
+                        result = result + [result[copy_pos]]
+
+                j = j + 1
+
+        i = i + 1
+
+    return result
+
+# Calculate LZ77 statistics
+fn lz77_stats(tokens):
+    if tokens == nil:
+        return [0, 0, 0]
+
+    var literal_count = 0
+    var match_count = 0
+    var total_matched_bytes = 0
+
+    var i = 0
+    loop:
+        if i >= tokens.length():
+            break
+
+        val token = tokens[i]
+        val token_type = token[0]
+
+        if token_type == 0:
+            literal_count = literal_count + 1
+        else:
+            match_count = match_count + 1
+            val length = token[2]
+            total_matched_bytes = total_matched_bytes + length
+
+        i = i + 1
+
+    return [literal_count, match_count, total_matched_bytes]
+
+export *

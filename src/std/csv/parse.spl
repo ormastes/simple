@@ -1,0 +1,337 @@
+# CSV Parsing Functions
+
+# Import character utilities (conceptual - will be in utilities.spl)
+
+# ============================================================================
+# Core Parsing Functions
+# ============================================================================
+
+fn parse_csv_line(line: text, config: CsvConfig) -> list:
+    var fields = []
+    var current_field = ""
+    var in_quotes = false
+    var i = 0
+    val len = line.length()
+
+    loop:
+        if i >= len:
+            break
+
+        val c = char_at(line, i)
+        val is_q = is_quote_char(c, config.quote_char)
+
+        if is_q:
+            if in_quotes:
+                val next_i = i + 1
+                if next_i < len:
+                    val next_c = char_at(line, next_i)
+                    val next_is_q = is_quote_char(next_c, config.quote_char)
+                    if next_is_q:
+                        current_field = current_field + config.quote_char
+                        i = i + 2
+                    else:
+                        in_quotes = false
+                        i = i + 1
+                else:
+                    in_quotes = false
+                    i = i + 1
+            else:
+                in_quotes = true
+                i = i + 1
+        else:
+            val is_delim = is_delimiter_char(c, config.delimiter)
+            if is_delim:
+                if in_quotes:
+                    current_field = current_field + c
+                    i = i + 1
+                else:
+                    val trimmed = trim_field(current_field, config.trim_whitespace)
+                    fields = fields.append(trimmed)
+                    current_field = ""
+                    i = i + 1
+            else:
+                current_field = current_field + c
+                i = i + 1
+
+    val trimmed = trim_field(current_field, config.trim_whitespace)
+    fields = fields.append(trimmed)
+    fields
+
+fn parse_csv_string(content: text, config: CsvConfig) -> CsvTable:
+    val lines = split_lines(content)
+    var rows = []
+    var i = 0
+    val line_count = lines.length()
+
+    loop:
+        if i >= line_count:
+            break
+        val line = lines.at(i)
+        val line_len = line.length()
+        val should_skip = config.skip_empty_lines and line_len == 0
+        if not should_skip:
+            val fields = parse_csv_line(line, config)
+            rows = rows.append(fields)
+        i = i + 1
+
+    val empty_headers = []
+    CsvTable(headers: empty_headers, rows: rows, config: config)
+
+fn parse_csv(content: text) -> CsvTable:
+    val config = default_csv_config()
+    parse_csv_string(content, config)
+
+fn parse_csv_with_delimiter(content: text, delimiter: text) -> CsvTable:
+    val config = default_csv_config()
+    val new_config = CsvConfig(
+        delimiter: delimiter,
+        quote_char: config.quote_char,
+        escape_char: config.escape_char,
+        line_ending: config.line_ending,
+        trim_whitespace: config.trim_whitespace,
+        skip_empty_lines: config.skip_empty_lines
+    )
+    parse_csv_string(content, new_config)
+
+fn parse_csv_with_headers(content: text, config: CsvConfig) -> CsvTable:
+    val lines = split_lines(content)
+    val line_count = lines.length()
+    if line_count == 0:
+        val empty_headers = []
+        val empty_rows = []
+        return CsvTable(headers: empty_headers, rows: empty_rows, config: config)
+
+    val header_line = lines.at(0)
+    val headers = parse_csv_line(header_line, config)
+
+    var rows = []
+    var i = 1
+    loop:
+        if i >= line_count:
+            break
+        val line = lines.at(i)
+        val line_len = line.length()
+        val should_skip = config.skip_empty_lines and line_len == 0
+        if not should_skip:
+            val fields = parse_csv_line(line, config)
+            rows = rows.append(fields)
+        i = i + 1
+
+    CsvTable(headers: headers, rows: rows, config: config)
+
+fn parse_csv_simple_headers(content: text) -> CsvTable:
+    val config = default_csv_config()
+    parse_csv_with_headers(content, config)
+
+fn parse_tsv(content: text) -> CsvTable:
+    parse_csv_with_delimiter(content, "\t")
+
+fn parse_ssv(content: text) -> CsvTable:
+    parse_csv_with_delimiter(content, ";")
+
+fn parse_psv(content: text) -> CsvTable:
+    parse_csv_with_delimiter(content, "|")
+
+fn parse_csv_auto_delimiter(content: text) -> CsvTable:
+    val delimiter = detect_delimiter(content)
+    parse_csv_with_delimiter(content, delimiter)
+
+fn parse_csv_with_trim(content: text, should_trim: bool) -> CsvTable:
+    val config = create_config_with_trim(",", should_trim)
+    parse_csv_string(content, config)
+
+fn parse_csv_skip_empty_lines(content: text) -> CsvTable:
+    val config = create_config_skip_empty(",", true)
+    parse_csv_string(content, config)
+
+# Helper functions (from utilities)
+fn char_at(s: text, index: i64) -> text:
+    val len = s.length()
+    if index < 0 or index >= len:
+        return ""
+    val substring = s.substring(index, index + 1)
+    substring
+
+fn is_quote_char(c: text, quote: text) -> bool:
+    c == quote
+
+fn is_delimiter_char(c: text, delimiter: text) -> bool:
+    c == delimiter
+
+fn trim_field(field: text, should_trim: bool) -> text:
+    if not should_trim:
+        return field
+    val result = trim_whitespace(field)
+    result
+
+fn split_lines(content: text) -> list:
+    split_lines_crlf(content)
+
+fn split_lines_crlf(content: text) -> list:
+    var lines = []
+    var current = ""
+    var i = 0
+    val len = content.length()
+    loop:
+        if i >= len:
+            break
+        val c = char_at(content, i)
+        val is_cr = is_carriage_return(c)
+        if is_cr:
+            val next_i = i + 1
+            if next_i < len:
+                val next_c = char_at(content, next_i)
+                val is_nl = is_newline_char(next_c)
+                if is_nl:
+                    lines = lines.append(current)
+                    current = ""
+                    i = i + 2
+                else:
+                    current = current + c
+                    i = i + 1
+            else:
+                current = current + c
+                i = i + 1
+        else:
+            val is_nl = is_newline_char(c)
+            if is_nl:
+                lines = lines.append(current)
+                current = ""
+                i = i + 1
+            else:
+                current = current + c
+                i = i + 1
+    val current_len = current.length()
+    if current_len > 0:
+        lines = lines.append(current)
+    lines
+
+fn is_newline_char(c: text) -> bool:
+    val result = c == "\n"
+    result
+
+fn is_carriage_return(c: text) -> bool:
+    val result = c == "\r"
+    result
+
+fn is_whitespace_char(c: text) -> bool:
+    val is_space = c == " "
+    val is_tab = c == "\t"
+    val is_nl = c == "\n"
+    val is_cr = c == "\r"
+    val result1 = is_space or is_tab
+    val result2 = is_nl or is_cr
+    val final_result = result1 or result2
+    final_result
+
+fn trim_left(s: text) -> text:
+    var i = 0
+    val len = s.length()
+    loop:
+        if i >= len:
+            break
+        val c = char_at(s, i)
+        val is_ws = is_whitespace_char(c)
+        if not is_ws:
+            break
+        i = i + 1
+    val result = s.substring(i, len)
+    result
+
+fn trim_right(s: text) -> text:
+    var i = s.length()
+    loop:
+        if i <= 0:
+            break
+        val c = char_at(s, i - 1)
+        val is_ws = is_whitespace_char(c)
+        if not is_ws:
+            break
+        i = i - 1
+    val result = s.substring(0, i)
+    result
+
+fn trim_whitespace(s: text) -> text:
+    val temp = trim_left(s)
+    val result = trim_right(temp)
+    result
+
+fn detect_delimiter(content: text) -> text:
+    val lines = split_lines(content)
+    val line_count = lines.length()
+    if line_count == 0:
+        return ","
+
+    val first_line = lines.at(0)
+    detect_delimiter_in_line(first_line)
+
+fn detect_delimiter_in_line(line: text) -> text:
+    val comma_count = count_char_occurrences(line, ",")
+    val tab_count = count_char_occurrences(line, "\t")
+    val semicolon_count = count_char_occurrences(line, ";")
+    val pipe_count = count_char_occurrences(line, "|")
+
+    var max_count = comma_count
+    var delimiter = ","
+
+    if tab_count > max_count:
+        max_count = tab_count
+        delimiter = "\t"
+
+    if semicolon_count > max_count:
+        max_count = semicolon_count
+        delimiter = ";"
+
+    if pipe_count > max_count:
+        max_count = pipe_count
+        delimiter = "|"
+
+    delimiter
+
+fn count_char_occurrences(s: text, c: text) -> i64:
+    var count = 0
+    var i = 0
+    val len = s.length()
+
+    loop:
+        if i >= len:
+            break
+        val current = char_at(s, i)
+        if current == c:
+            count = count + 1
+        i = i + 1
+
+    count
+
+# Placeholder imports
+fn default_csv_config() -> CsvConfig:
+    CsvConfig(
+        delimiter: ",",
+        quote_char: "\"",
+        escape_char: "\"",
+        line_ending: "\n",
+        trim_whitespace: false,
+        skip_empty_lines: false
+    )
+
+fn create_config_with_trim(delimiter: text, should_trim: bool) -> CsvConfig:
+    val base = default_csv_config()
+    CsvConfig(
+        delimiter: delimiter,
+        quote_char: base.quote_char,
+        escape_char: base.escape_char,
+        line_ending: base.line_ending,
+        trim_whitespace: should_trim,
+        skip_empty_lines: base.skip_empty_lines
+    )
+
+fn create_config_skip_empty(delimiter: text, skip_empty: bool) -> CsvConfig:
+    val base = default_csv_config()
+    CsvConfig(
+        delimiter: delimiter,
+        quote_char: base.quote_char,
+        escape_char: base.escape_char,
+        line_ending: base.line_ending,
+        trim_whitespace: base.trim_whitespace,
+        skip_empty_lines: skip_empty
+    )

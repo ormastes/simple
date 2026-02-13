@@ -31,6 +31,9 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dirent.h>
+#include <errno.h>
+#include <limits.h>
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -46,6 +49,102 @@ static int unlink_cb(const char *fpath, const struct stat *sb,
                      int typeflag, struct FTW *ftwbuf) {
     (void)sb; (void)typeflag; (void)ftwbuf;
     return remove(fpath);
+}
+
+bool rt_dir_create(const char* path, bool recursive) {
+    if (!path) return false;
+    
+    if (!recursive) {
+        return mkdir(path, 0755) == 0 || errno == EEXIST;
+    }
+    
+    /* Recursive mkdir -p logic */
+    char tmp[PATH_MAX];
+    char* p = NULL;
+    size_t len;
+    
+    len = strlen(path);
+    if (len >= sizeof(tmp)) return false;
+    
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    
+    /* Remove trailing slash */
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+    
+    /* Create parent directories */
+    for (p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+                return false;
+            }
+            *p = '/';
+        }
+    }
+    
+    /* Create final directory */
+    return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+}
+
+const char** rt_dir_list(const char* path, int64_t* out_count) {
+    if (!path || !out_count) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    
+    DIR* dir = opendir(path);
+    if (!dir) {
+        *out_count = 0;
+        return NULL;
+    }
+    
+    /* Count entries (excluding . and ..) */
+    int64_t count = 0;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) {
+            count++;
+        }
+    }
+    
+    if (count == 0) {
+        closedir(dir);
+        *out_count = 0;
+        return NULL;
+    }
+    
+    /* Allocate array (null-terminated) */
+    const char** result = malloc(sizeof(char*) * (count + 1));
+    if (!result) {
+        closedir(dir);
+        *out_count = 0;
+        return NULL;
+    }
+    
+    /* Read entries again */
+    rewinddir(dir);
+    int64_t i = 0;
+    while ((ent = readdir(dir)) != NULL && i < count) {
+        if (strcmp(ent->d_name, ".") != 0 && strcmp(ent->d_name, "..") != 0) {
+            result[i++] = strdup(ent->d_name);
+        }
+    }
+    result[count] = NULL;
+    closedir(dir);
+    
+    *out_count = count;
+    return result;
+}
+
+void rt_dir_list_free(const char** entries, int64_t count) {
+    if (!entries) return;
+    for (int64_t i = 0; i < count; i++) {
+        free((void*)entries[i]);
+    }
+    free((void*)entries);
 }
 
 bool rt_dir_remove_all(const char* path) {

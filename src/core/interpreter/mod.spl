@@ -2,8 +2,14 @@
 #
 # Re-exports all core interpreter modules.
 # Entry points:
-#   core_interpret(source, path) → value_id       (pure tree-walk)
-#   core_jit_interpret(source, path, threshold) → value_id  (JIT-enabled)
+#   core_interpret(source, path) → value_id       (JIT-enabled, reads env vars for config)
+#   core_jit_interpret(source, path, threshold) → value_id  (JIT with custom threshold)
+#
+# Environment variables (set by CLI via apply_jit_env_vars):
+#   SIMPLE_NO_JIT=1          Disable JIT (pure tree-walk)
+#   SIMPLE_JIT_THRESHOLD=N   JIT compile after N calls (default: 10)
+#   SIMPLE_JIT_BACKEND=X     JIT backend: auto, cranelift, llvm
+#   SIMPLE_JIT_VERBOSE=1     Enable JIT debug output
 #
 # Usage (seed compilation):
 #   seed tokens.spl lexer.spl parser.spl ast.spl \
@@ -14,9 +20,11 @@
 # All modules share globals when compiled by seed, so no explicit imports needed.
 # This file provides the top-level entry points.
 
-fn core_interpret(source: text, path: text) -> i64:
-    # Initialize all subsystems (pure tree-walk, no JIT)
-    jit_init(999999, 0)
+extern fn rt_env_get(key: text) -> text
+
+# ===== Shared Pipeline =====
+
+fn _core_run_pipeline(source: text, path: text) -> i64:
     eval_init()
     ast_reset()
 
@@ -32,44 +40,58 @@ fn core_interpret(source: text, path: text) -> i64:
 
     # Evaluate
     eval_module()
+
+# ===== Public Entry Points =====
+
+fn core_interpret(source: text, path: text) -> i64:
+    # Read JIT configuration from environment variables
+    val env_no_jit = rt_env_get("SIMPLE_NO_JIT")
+    val env_threshold = rt_env_get("SIMPLE_JIT_THRESHOLD")
+    val env_backend = rt_env_get("SIMPLE_JIT_BACKEND")
+    val env_verbose = rt_env_get("SIMPLE_JIT_VERBOSE")
+
+    # Determine threshold
+    var threshold = 10
+    val has_no_jit = env_no_jit == "1"
+    if has_no_jit:
+        threshold = 999999
+
+    val has_threshold = env_threshold != ""
+    val threshold_not_nil = env_threshold != nil
+    val use_threshold = has_threshold and threshold_not_nil
+    if use_threshold:
+        threshold = int(env_threshold)
+
+    # Determine verbose
+    var verbose = 0
+    val has_verbose = env_verbose == "1"
+    if has_verbose:
+        verbose = 1
+
+    # Determine backend
+    var backend = "auto"
+    val has_backend = env_backend != ""
+    val backend_not_nil = env_backend != nil
+    val use_backend = has_backend and backend_not_nil
+    if use_backend:
+        backend = env_backend
+
+    # Initialize JIT with resolved config
+    jit_init_with_backend(threshold, verbose, backend)
+
+    # Run shared pipeline
+    val result = _core_run_pipeline(source, path)
+    if verbose == 1:
+        jit_cleanup()
+    result
 
 fn core_jit_interpret(source: text, path: text, threshold: i64) -> i64:
-    # Initialize with JIT enabled
     jit_init(threshold, 0)
-    eval_init()
-    ast_reset()
-
-    # Lex and parse
-    lex_init(source)
-    parser_init(source)
-    parse_module(source, path)
-
-    # Check for parse errors
-    if par_had_error:
-        eval_set_error("parse error")
-        return -1
-
-    # Evaluate (eval_function_call uses JIT tracking internally)
-    eval_module()
+    _core_run_pipeline(source, path)
 
 fn core_jit_interpret_verbose(source: text, path: text, threshold: i64, backend: text) -> i64:
-    # Initialize with JIT enabled + verbose + specific backend
     jit_init_with_backend(threshold, 1, backend)
-    eval_init()
-    ast_reset()
-
-    # Lex and parse
-    lex_init(source)
-    parser_init(source)
-    parse_module(source, path)
-
-    # Check for parse errors
-    if par_had_error:
-        eval_set_error("parse error")
-        return -1
-
-    # Evaluate
-    val result = eval_module()
+    val result = _core_run_pipeline(source, path)
     jit_cleanup()
     result
 

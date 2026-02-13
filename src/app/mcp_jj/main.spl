@@ -18,6 +18,11 @@ use tools_git.{get_all_git_tool_schemas, handle_git_tool}
 use resources.{get_all_resources, read_resource}
 use prompts.{get_all_prompts, get_prompt}
 
+# Cache tool schemas to avoid rebuilding on every tools/list request
+var JJ_TOOLS_CACHE: [String] = []
+var JJ_TOOLS_CACHE_BUILT: Bool = false
+var JJ_TOOLS_PAGE_CACHE: Dict<String, String> = {}
+
 fn main():
     val raw_args = get_args()
     val args = get_clean_args(raw_args)
@@ -51,7 +56,7 @@ fn print_usage():
     print("  JJ_MCP_SHOW_WARNINGS  Show git compat warnings (default: true)")
 
 fn start_server():
-    var repo_path = get_default_repo_path()
+    var repo_path = ""
 
     var running = true
     for _iter in range(0, 999999):
@@ -79,6 +84,8 @@ fn start_server():
                 val cursor = extract_nested_string(line, "params", "cursor")
                 response = handle_tools_list(id, cursor)
             elif method == "tools/call":
+                if repo_path == "":
+                    repo_path = get_default_repo_path()
                 val tool_name = extract_nested_string(line, "params", "name")
                 val result = handle_tool_call(id, tool_name, line, repo_path)
                 response = result
@@ -88,8 +95,12 @@ fn start_server():
                     if new_path != "":
                         repo_path = new_path
             elif method == "resources/list":
+                if repo_path == "":
+                    repo_path = get_default_repo_path()
                 response = handle_resources_list(id, repo_path)
             elif method == "resources/read":
+                if repo_path == "":
+                    repo_path = get_default_repo_path()
                 val uri = extract_nested_string(line, "params", "uri")
                 response = handle_resources_read(id, uri, repo_path)
             elif method == "prompts/list":
@@ -173,8 +184,36 @@ fn get_all_tools() -> [String]:
         all_tools.push(tool)
     all_tools
 
+fn get_all_tools_cached() -> [String]:
+    if JJ_TOOLS_CACHE_BUILT:
+        return JJ_TOOLS_CACHE
+    JJ_TOOLS_CACHE = get_all_tools()
+    JJ_TOOLS_CACHE_BUILT = true
+    JJ_TOOLS_CACHE
+
+fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
+    val key = offset.to_string()
+    match JJ_TOOLS_PAGE_CACHE.get(key):
+        case Some(page): return page
+        case nil: ()
+
+    val all_tools = get_all_tools_cached()
+    val total = all_tools.len()
+    val end = min_int(offset + page_size, total)
+
+    var tools = "["
+    var first = true
+    for i in offset..end:
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + all_tools[i]
+    tools = tools + "]"
+
+    JJ_TOOLS_PAGE_CACHE[key] = tools
+    tools
+
 fn handle_tools_list(id: String, cursor: String) -> String:
-    val all_tools = get_all_tools()
     val page_size = 20
     var offset = 0
 
@@ -185,18 +224,12 @@ fn handle_tools_list(id: String, cursor: String) -> String:
             if parse_result.ok.?:
                 offset = parse_result.unwrap()
 
+    val all_tools = get_all_tools_cached()
     val total = all_tools.len()
     val end = min_int(offset + page_size, total)
     val has_more = end < total
 
-    var tools = "["
-    var first = true
-    for i in offset..end:
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + all_tools[i]
-    tools = tools + "]"
+    val tools = get_tools_page_cached(offset, page_size)
 
     var result = LB()
     result = result + jp("tools", tools)

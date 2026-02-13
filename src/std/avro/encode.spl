@@ -1,0 +1,620 @@
+# Avro Binary Encoding
+#
+# Binary encoding functions for Avro data serialization including varint,
+# ZigZag encoding, and encoding for all Avro types.
+
+# ============================================================================
+# Binary Encoding - ZigZag Encoding for Integers
+# ============================================================================
+
+fn avro_zigzag_encode(n: i64) -> i64:
+    """Encode signed integer using ZigZag encoding.
+    Maps negative values to positive: -1 -> 1, -2 -> 3, etc."""
+    if n >= 0:
+        return n * 2
+    (n * -2) - 1
+
+fn avro_zigzag_decode(n: i64) -> i64:
+    """Decode ZigZag encoded integer."""
+    if n % 2 == 0:
+        return n / 2
+    -((n + 1) / 2)
+
+# ============================================================================
+# Binary Encoding - Varint (Variable-length Integer)
+# ============================================================================
+
+fn avro_write_varint(n: i64) -> [i64]:
+    """Encode integer as Avro varint (base-128 encoding).
+    Uses ZigZag encoding for signed integers."""
+    val encoded = avro_zigzag_encode(n)
+    var result = []
+    var value = encoded
+
+    if value == 0:
+        return [0]
+
+    while value > 0:
+        var byte_val = value % 128
+        value = value / 128
+        if value > 0:
+            byte_val = byte_val + 128
+        result = result.push(byte_val)
+
+    result
+
+fn avro_read_varint(bytes: [i64], offset: i64):
+    """Decode Avro varint from byte array.
+    Returns (value, bytes_consumed) tuple."""
+    var result = 0
+    var shift = 0
+    var pos = offset
+    var continues = true
+
+    while continues:
+        if pos >= bytes.len():
+            return (nil, nil)
+
+        val byte_val = bytes[pos]
+        val value_bits = byte_val % 128
+        result = result + (value_bits * (1 << shift))
+        shift = shift + 7
+        pos = pos + 1
+
+        if byte_val < 128:
+            continues = false
+
+    val decoded = avro_zigzag_decode(result)
+    val consumed = pos - offset
+    (decoded, consumed)
+
+# ============================================================================
+# Binary Encoding - Long Integers
+# ============================================================================
+
+fn avro_write_long(n: i64) -> [i64]:
+    """Encode long integer (same as varint for Simple)."""
+    avro_write_varint(n)
+
+fn avro_read_long(bytes: [i64], offset: i64):
+    """Decode long integer."""
+    avro_read_varint(bytes, offset)
+
+# ============================================================================
+# Binary Encoding - Floating Point
+# ============================================================================
+
+fn avro_write_float(f: f64) -> [i64]:
+    """Encode float as 4-byte IEEE 754 (simplified for runtime).
+    Note: Full IEEE 754 requires bit-level operations."""
+    val int_val = (f * 1000000.0).to_int()
+    val bytes = avro_write_varint(int_val)
+    var result = [0]  # Float marker
+    for b in bytes:
+        result = result.push(b)
+    result
+
+fn avro_read_float(bytes: [i64], offset: i64):
+    """Decode float from byte array."""
+    if bytes[offset] != 0:
+        return (nil, nil)
+
+    val varint_result = avro_read_varint(bytes, offset + 1)
+    if varint_result.0 == nil:
+        return (nil, nil)
+
+    val int_val = varint_result.0
+    val consumed = varint_result.1
+    val float_val = int_val.to_float() / 1000000.0
+    (float_val, consumed + 1)
+
+fn avro_write_double(d: f64) -> [i64]:
+    """Encode double as 8-byte IEEE 754 (simplified for runtime)."""
+    val int_val = (d * 1000000000.0).to_int()
+    val bytes = avro_write_varint(int_val)
+    var result = [1]  # Double marker
+    for b in bytes:
+        result = result.push(b)
+    result
+
+fn avro_read_double(bytes: [i64], offset: i64):
+    """Decode double from byte array."""
+    if bytes[offset] != 1:
+        return (nil, nil)
+
+    val varint_result = avro_read_varint(bytes, offset + 1)
+    if varint_result.0 == nil:
+        return (nil, nil)
+
+    val int_val = varint_result.0
+    val consumed = varint_result.1
+    val double_val = int_val.to_float() / 1000000000.0
+    (double_val, consumed + 1)
+
+# ============================================================================
+# Binary Encoding - Bytes and Strings
+# ============================================================================
+
+fn avro_write_bytes(data: [i64]) -> [i64]:
+    """Encode byte array with length prefix."""
+    val len_bytes = avro_write_varint(data.len())
+    var result = []
+    for b in len_bytes:
+        result = result.push(b)
+    for b in data:
+        result = result.push(b)
+    result
+
+fn avro_read_bytes(bytes: [i64], offset: i64):
+    """Decode byte array.
+    Returns (byte_array, bytes_consumed) tuple."""
+    val len_result = avro_read_varint(bytes, offset)
+    if len_result.0 == nil:
+        return (nil, nil)
+
+    val length = len_result.0
+    val len_consumed = len_result.1
+    var data = []
+    var pos = offset + len_consumed
+
+    var i = 0
+    while i < length:
+        if pos >= bytes.len():
+            return (nil, nil)
+        data = data.push(bytes[pos])
+        pos = pos + 1
+        i = i + 1
+
+    val total_consumed = len_consumed + length
+    (data, total_consumed)
+
+fn avro_write_string(s: text) -> [i64]:
+    """Encode string as UTF-8 bytes with length prefix."""
+    val byte_data = avro_string_to_bytes(s)
+    avro_write_bytes(byte_data)
+
+fn avro_read_string(bytes: [i64], offset: i64):
+    """Decode string from byte array.
+    Returns (string, bytes_consumed) tuple."""
+    val bytes_result = avro_read_bytes(bytes, offset)
+    if bytes_result.0 == nil:
+        return (nil, nil)
+
+    val byte_data = bytes_result.0
+    val consumed = bytes_result.1
+    val string_val = avro_bytes_to_string(byte_data)
+    (string_val, consumed)
+
+# ============================================================================
+# Binary Encoding - Boolean
+# ============================================================================
+
+fn avro_write_boolean(b: bool) -> [i64]:
+    """Encode boolean as single byte (0 or 1)."""
+    if b:
+        return [1]
+    [0]
+
+fn avro_read_boolean(bytes: [i64], offset: i64):
+    """Decode boolean from byte array.
+    Returns (boolean, bytes_consumed) tuple."""
+    if offset >= bytes.len():
+        return (nil, nil)
+
+    val byte_val = bytes[offset]
+    if byte_val == 0:
+        return (false, 1)
+    (true, 1)
+
+# ============================================================================
+# Binary Encoding - Null
+# ============================================================================
+
+fn avro_write_null():
+    """Encode null (no bytes needed)."""
+    []
+
+fn avro_read_null(bytes: [i64], offset: i64):
+    """Decode null (returns nil).
+    Returns (nil, 0) tuple."""
+    (nil, 0)
+
+# ============================================================================
+# Binary Encoding - Arrays
+# ============================================================================
+
+fn avro_encode_array(schema, items: [tuple]) -> [i64]:
+    """Encode array according to Avro binary format.
+    Format: blocks of [count, items...], terminated by 0-count block."""
+    var result = []
+    val count = items.len()
+
+    if count == 0:
+        # Empty array - just write 0
+        val zero_bytes = avro_write_varint(0)
+        for b in zero_bytes:
+            result = result.push(b)
+        return result
+
+    # Write count
+    val count_bytes = avro_write_varint(count)
+    for b in count_bytes:
+        result = result.push(b)
+
+    # Write items
+    val item_schema = schema.items
+    for item in items:
+        val item_bytes = avro_encode_value(item_schema, item)
+        for b in item_bytes:
+            result = result.push(b)
+
+    # Terminator block (count = 0)
+    val zero_bytes = avro_write_varint(0)
+    for b in zero_bytes:
+        result = result.push(b)
+
+    result
+
+fn avro_decode_array(schema, bytes: [i64], offset: i64):
+    """Decode array from binary format.
+    Returns (array, bytes_consumed) tuple."""
+    var items = []
+    var pos = offset
+    var continues = true
+
+    while continues:
+        val count_result = avro_read_varint(bytes, pos)
+        if count_result.0 == nil:
+            return (nil, nil)
+
+        val count = count_result.0
+        val count_consumed = count_result.1
+        pos = pos + count_consumed
+
+        if count == 0:
+            continues = false
+        else:
+            val item_schema = schema.items
+            var i = 0
+            while i < count:
+                val item_result = avro_decode_value(item_schema, bytes, pos)
+                if item_result.0 == nil:
+                    return (nil, nil)
+                items = items.push(item_result.0)
+                pos = pos + item_result.1
+                i = i + 1
+
+    val total_consumed = pos - offset
+    (items, total_consumed)
+
+# ============================================================================
+# Binary Encoding - Maps
+# ============================================================================
+
+fn avro_encode_map(schema, map_data: [tuple]) -> [i64]:
+    """Encode map according to Avro binary format.
+    map_data: list of (key, value) tuples where keys are strings.
+    Format: blocks of [count, (string, value)...], terminated by 0-count block."""
+    var result = []
+    val count = map_data.len()
+
+    if count == 0:
+        val zero_bytes = avro_write_varint(0)
+        for b in zero_bytes:
+            result = result.push(b)
+        return result
+
+    # Write count
+    val count_bytes = avro_write_varint(count)
+    for b in count_bytes:
+        result = result.push(b)
+
+    # Write key-value pairs
+    val value_schema = schema.values
+    for pair in map_data:
+        val key = pair.0
+        val value = pair.1
+
+        # Write key (always string)
+        val key_bytes = avro_write_string(key)
+        for b in key_bytes:
+            result = result.push(b)
+
+        # Write value
+        val value_bytes = avro_encode_value(value_schema, value)
+        for b in value_bytes:
+            result = result.push(b)
+
+    # Terminator block
+    val zero_bytes = avro_write_varint(0)
+    for b in zero_bytes:
+        result = result.push(b)
+
+    result
+
+fn avro_decode_map(schema, bytes: [i64], offset: i64):
+    """Decode map from binary format.
+    Returns (list_of_pairs, bytes_consumed) tuple."""
+    var pairs = []
+    var pos = offset
+    var continues = true
+
+    while continues:
+        val count_result = avro_read_varint(bytes, pos)
+        if count_result.0 == nil:
+            return (nil, nil)
+
+        val count = count_result.0
+        val count_consumed = count_result.1
+        pos = pos + count_consumed
+
+        if count == 0:
+            continues = false
+        else:
+            val value_schema = schema.values
+            var i = 0
+            while i < count:
+                # Read key (string)
+                val key_result = avro_read_string(bytes, pos)
+                if key_result.0 == nil:
+                    return (nil, nil)
+                val key = key_result.0
+                pos = pos + key_result.1
+
+                # Read value
+                val value_result = avro_decode_value(value_schema, bytes, pos)
+                if value_result.0 == nil:
+                    return (nil, nil)
+                val value = value_result.0
+                pos = pos + value_result.1
+
+                pairs = pairs.push((key, value))
+                i = i + 1
+
+    val total_consumed = pos - offset
+    (pairs, total_consumed)
+
+# ============================================================================
+# Binary Encoding - Unions
+# ============================================================================
+
+fn avro_encode_union(schema, value, branch_index: i64) -> [i64]:
+    """Encode union value.
+    branch_index: index of the selected type in the union"""
+    var result = []
+
+    # Write branch index
+    val index_bytes = avro_write_varint(branch_index)
+    for b in index_bytes:
+        result = result.push(b)
+
+    # Write value according to selected type
+    val selected_schema = schema.types[branch_index]
+    val value_bytes = avro_encode_value(selected_schema, value)
+    for b in value_bytes:
+        result = result.push(b)
+
+    result
+
+fn avro_decode_union(schema, bytes: [i64], offset: i64):
+    """Decode union value.
+    Returns ((branch_index, value), bytes_consumed) tuple."""
+    val index_result = avro_read_varint(bytes, offset)
+    if index_result.0 == nil:
+        return (nil, nil)
+
+    val branch_index = index_result.0
+    val index_consumed = index_result.1
+    var pos = offset + index_consumed
+
+    val selected_schema = schema.types[branch_index]
+    val value_result = avro_decode_value(selected_schema, bytes, pos)
+    if value_result.0 == nil:
+        return (nil, nil)
+
+    val value = value_result.0
+    val value_consumed = value_result.1
+    val total_consumed = index_consumed + value_consumed
+
+    ((branch_index, value), total_consumed)
+
+# ============================================================================
+# Binary Encoding - Enums
+# ============================================================================
+
+fn avro_encode_enum(schema, symbol_index: i64) -> [i64]:
+    """Encode enum value as symbol index."""
+    avro_write_varint(symbol_index)
+
+fn avro_decode_enum(schema, bytes: [i64], offset: i64):
+    """Decode enum value.
+    Returns (symbol_index, bytes_consumed) tuple."""
+    avro_read_varint(bytes, offset)
+
+# ============================================================================
+# Binary Encoding - Fixed
+# ============================================================================
+
+fn avro_encode_fixed(schema, data: [i64]) -> [i64]:
+    """Encode fixed-size byte array.
+    Data must have exactly schema.size bytes."""
+    if data.len() != schema.size:
+        return []
+    data
+
+fn avro_decode_fixed(schema, bytes: [i64], offset: i64):
+    """Decode fixed-size byte array.
+    Returns (byte_array, bytes_consumed) tuple."""
+    val size = schema.size
+    var data = []
+    var pos = offset
+
+    var i = 0
+    while i < size:
+        if pos >= bytes.len():
+            return (nil, nil)
+        data = data.push(bytes[pos])
+        pos = pos + 1
+        i = i + 1
+
+    (data, size)
+
+# ============================================================================
+# Binary Encoding - Records
+# ============================================================================
+
+fn avro_encode_record(schema, record_data) -> [i64]:
+    """Encode record according to schema.
+    record_data: tuple with field values"""
+    var result = []
+    val fields = schema.fields
+
+    for field in fields:
+        val field_name = field.name
+        val field_schema = field.type
+        val field_value = avro_get_field_value(record_data, field_name)
+
+        val field_bytes = avro_encode_value(field_schema, field_value)
+        for b in field_bytes:
+            result = result.push(b)
+
+    result
+
+fn avro_decode_record(schema, bytes: [i64], offset: i64):
+    """Decode record from binary format.
+    Returns (field_list, bytes_consumed) tuple."""
+    var field_values = []
+    var pos = offset
+    val fields = schema.fields
+
+    for field in fields:
+        val field_schema = field.type
+        val value_result = avro_decode_value(field_schema, bytes, pos)
+        if value_result.0 == nil:
+            return (nil, nil)
+
+        val field_name = field.name
+        val field_value = value_result.0
+        field_values = field_values.push((field_name, field_value))
+        pos = pos + value_result.1
+
+    val total_consumed = pos - offset
+    (field_values, total_consumed)
+
+# ============================================================================
+# Binary Encoding - Generic Value Encoder/Decoder
+# ============================================================================
+
+fn avro_encode_value(schema, value) -> [i64]:
+    """Encode any value according to its schema."""
+    val type_id = schema.type
+
+    if type_id == avro_type_null():
+        return avro_write_null()
+
+    if type_id == avro_type_boolean():
+        return avro_write_boolean(value)
+
+    if type_id == avro_type_int():
+        return avro_write_varint(value)
+
+    if type_id == avro_type_long():
+        return avro_write_long(value)
+
+    if type_id == avro_type_float():
+        return avro_write_float(value)
+
+    if type_id == avro_type_double():
+        return avro_write_double(value)
+
+    if type_id == avro_type_bytes():
+        return avro_write_bytes(value)
+
+    if type_id == avro_type_string():
+        return avro_write_string(value)
+
+    if type_id == avro_type_array():
+        return avro_encode_array(schema, value)
+
+    if type_id == avro_type_map():
+        return avro_encode_map(schema, value)
+
+    if type_id == avro_type_record():
+        return avro_encode_record(schema, value)
+
+    if type_id == avro_type_enum():
+        return avro_encode_enum(schema, value)
+
+    if type_id == avro_type_union():
+        # For unions, value should be (branch_index, actual_value)
+        return avro_encode_union(schema, value.1, value.0)
+
+    if type_id == avro_type_fixed():
+        return avro_encode_fixed(schema, value)
+
+    []
+
+fn avro_decode_value(schema, bytes: [i64], offset: i64):
+    """Decode any value according to its schema.
+    Returns (value, bytes_consumed) tuple."""
+    val type_id = schema.type
+
+    if type_id == avro_type_null():
+        return avro_read_null(bytes, offset)
+
+    if type_id == avro_type_boolean():
+        return avro_read_boolean(bytes, offset)
+
+    if type_id == avro_type_int():
+        return avro_read_varint(bytes, offset)
+
+    if type_id == avro_type_long():
+        return avro_read_long(bytes, offset)
+
+    if type_id == avro_type_float():
+        return avro_read_float(bytes, offset)
+
+    if type_id == avro_type_double():
+        return avro_read_double(bytes, offset)
+
+    if type_id == avro_type_bytes():
+        return avro_read_bytes(bytes, offset)
+
+    if type_id == avro_type_string():
+        return avro_read_string(bytes, offset)
+
+    if type_id == avro_type_array():
+        return avro_decode_array(schema, bytes, offset)
+
+    if type_id == avro_type_map():
+        return avro_decode_map(schema, bytes, offset)
+
+    if type_id == avro_type_record():
+        return avro_decode_record(schema, bytes, offset)
+
+    if type_id == avro_type_enum():
+        return avro_decode_enum(schema, bytes, offset)
+
+    if type_id == avro_type_union():
+        return avro_decode_union(schema, bytes, offset)
+
+    if type_id == avro_type_fixed():
+        return avro_decode_fixed(schema, bytes, offset)
+
+    (nil, nil)
+
+# ============================================================================
+# High-Level Binary Encoding API
+# ============================================================================
+
+fn avro_encode_binary(schema, value) -> [i64]:
+    """Encode value to Avro binary format."""
+    avro_encode_value(schema, value)
+
+fn avro_decode_binary(schema, bytes: [i64]):
+    """Decode value from Avro binary format.
+    Returns decoded value or nil on error."""
+    val result = avro_decode_value(schema, bytes, 0)
+    if result.0 == nil:
+        return nil
+    result.0

@@ -1,0 +1,335 @@
+# Regular Expression Engine - Parser
+#
+# Recursive descent parser for regex patterns.
+
+from .tokenizer import tokenize_regex, token_type, token_value
+from .ast import ast_literal, ast_dot, ast_char_class, ast_concat, ast_alternation, ast_quantifier, ast_group, ast_anchor
+from .char_utils import expand_escape, is_digit_char
+
+# ============================================================================
+# REGEX PARSING
+# ============================================================================
+
+fn parse_regex(pattern: text) -> any:
+    """Parse regex pattern into AST. Returns (success, ast, error_msg)."""
+    val tokens = tokenize_regex(pattern)
+    var pos = 0
+    val result = parse_alternation(tokens, pos)
+    result
+
+fn parse_alternation(tokens: [any], start_pos: i64) -> any:
+    """Parse alternation (a|b|c). Returns (success, ast, next_pos, error_msg)."""
+    var pos = start_pos
+    var branches = []
+    val first_result = parse_concatenation(tokens, pos)
+    val first_success = first_result.0
+    if not first_success:
+        return first_result
+    val first_ast = first_result.1
+    val first_next = first_result.2
+    branches.push(first_ast)
+    pos = first_next
+    var done = false
+    while not done:
+        if pos >= tokens.len():
+            done = true
+        else:
+            val token = tokens[pos]
+            val ttype = token_type(token)
+            if ttype == "pipe":
+                pos = pos + 1
+                val branch_result = parse_concatenation(tokens, pos)
+                val branch_success = branch_result.0
+                if not branch_success:
+                    return branch_result
+                val branch_ast = branch_result.1
+                val branch_next = branch_result.2
+                branches.push(branch_ast)
+                pos = branch_next
+            else:
+                done = true
+    if branches.len() == 1:
+        return (true, branches[0], pos, "")
+    val ast = ast_alternation(branches)
+    (true, ast, pos, "")
+
+fn parse_concatenation(tokens: [any], start_pos: i64) -> any:
+    """Parse concatenation (abc). Returns (success, ast, next_pos, error_msg)."""
+    var pos = start_pos
+    var items = []
+    var done = false
+    while not done:
+        if pos >= tokens.len():
+            done = true
+        else:
+            val token = tokens[pos]
+            val ttype = token_type(token)
+            if ttype == "pipe" or ttype == "rparen" or ttype == "eof":
+                done = true
+            else:
+                val item_result = parse_quantifier(tokens, pos)
+                val item_success = item_result.0
+                if not item_success:
+                    return item_result
+                val item_ast = item_result.1
+                val item_next = item_result.2
+                items.push(item_ast)
+                pos = item_next
+    if items.len() == 0:
+        val empty = ast_literal("")
+        return (true, empty, pos, "")
+    if items.len() == 1:
+        return (true, items[0], pos, "")
+    val ast = ast_concat(items)
+    (true, ast, pos, "")
+
+fn parse_quantifier(tokens: [any], start_pos: i64) -> any:
+    """Parse quantifier (*, +, ?, {n,m}). Returns (success, ast, next_pos, error_msg)."""
+    val base_result = parse_atom(tokens, start_pos)
+    val base_success = base_result.0
+    if not base_success:
+        return base_result
+    val base_ast = base_result.1
+    var pos = base_result.2
+    if pos >= tokens.len():
+        return (true, base_ast, pos, "")
+    val token = tokens[pos]
+    val ttype = token_type(token)
+    if ttype == "star":
+        pos = pos + 1
+        var lazy = false
+        if pos < tokens.len():
+            val next_token = tokens[pos]
+            val next_type = token_type(next_token)
+            if next_type == "question":
+                lazy = true
+                pos = pos + 1
+        val ast = ast_quantifier(base_ast, 0, -1, lazy)
+        return (true, ast, pos, "")
+    if ttype == "plus":
+        pos = pos + 1
+        var lazy = false
+        if pos < tokens.len():
+            val next_token = tokens[pos]
+            val next_type = token_type(next_token)
+            if next_type == "question":
+                lazy = true
+                pos = pos + 1
+        val ast = ast_quantifier(base_ast, 1, -1, lazy)
+        return (true, ast, pos, "")
+    if ttype == "question":
+        pos = pos + 1
+        var lazy = false
+        if pos < tokens.len():
+            val next_token = tokens[pos]
+            val next_type = token_type(next_token)
+            if next_type == "question":
+                lazy = true
+                pos = pos + 1
+        val ast = ast_quantifier(base_ast, 0, 1, lazy)
+        return (true, ast, pos, "")
+    if ttype == "lbrace":
+        val quant_result = parse_brace_quantifier(tokens, pos)
+        val quant_success = quant_result.0
+        if not quant_success:
+            return quant_result
+        val min_c = quant_result.1
+        val max_c = quant_result.2
+        val quant_next = quant_result.3
+        var lazy = false
+        pos = quant_next
+        if pos < tokens.len():
+            val next_token = tokens[pos]
+            val next_type = token_type(next_token)
+            if next_type == "question":
+                lazy = true
+                pos = pos + 1
+        val ast = ast_quantifier(base_ast, min_c, max_c, lazy)
+        return (true, ast, pos, "")
+    (true, base_ast, pos, "")
+
+fn parse_atom(tokens: [any], start_pos: i64) -> any:
+    """Parse atomic regex element. Returns (success, ast, next_pos, error_msg)."""
+    if start_pos >= tokens.len():
+        return (false, nil, start_pos, "Unexpected end of pattern")
+    val token = tokens[start_pos]
+    val ttype = token_type(token)
+    val tvalue = token_value(token)
+    if ttype == "literal":
+        val ast = ast_literal(tvalue)
+        return (true, ast, start_pos + 1, "")
+    if ttype == "dot":
+        val ast = ast_dot()
+        return (true, ast, start_pos + 1, "")
+    if ttype == "escape":
+        val expanded = expand_escape(tvalue)
+        if expanded.starts_with("["):
+            val def_end = expanded.len() - 1
+            val definition = expanded[1:def_end]
+            val negated = definition.starts_with("^")
+            val def_text = definition[1:definition.len()]
+            val ast = ast_char_class(def_text, negated)
+            return (true, ast, start_pos + 1, "")
+        if expanded == "\\b" or expanded == "\\B":
+            val ast = ast_anchor(expanded)
+            return (true, ast, start_pos + 1, "")
+        val ast = ast_literal(expanded)
+        return (true, ast, start_pos + 1, "")
+    if ttype == "caret":
+        val ast = ast_anchor("^")
+        return (true, ast, start_pos + 1, "")
+    if ttype == "dollar":
+        val ast = ast_anchor("$")
+        return (true, ast, start_pos + 1, "")
+    if ttype == "lparen":
+        return parse_group(tokens, start_pos)
+    if ttype == "lbracket":
+        return parse_char_class_bracket(tokens, start_pos)
+    (false, nil, start_pos, "Unexpected token: " + ttype)
+
+fn parse_group(tokens: [any], start_pos: i64) -> any:
+    """Parse group (...) or (?:...) or (?<name>...). Returns (success, ast, next_pos, error_msg)."""
+    var pos = start_pos + 1
+    var group_id = 0
+    var group_name = ""
+    var is_capturing = true
+    if pos < tokens.len():
+        val token = tokens[pos]
+        val ttype = token_type(token)
+        if ttype == "question":
+            pos = pos + 1
+            if pos < tokens.len():
+                val next_token = tokens[pos]
+                val next_type = token_type(next_token)
+                if next_type == "literal":
+                    val next_value = token_value(next_token)
+                    if next_value == ":":
+                        is_capturing = false
+                        pos = pos + 1
+                    else:
+                        if next_value == "<":
+                            pos = pos + 1
+                            var name_chars = ""
+                            var name_done = false
+                            while not name_done and pos < tokens.len():
+                                val name_token = tokens[pos]
+                                val name_value = token_value(name_token)
+                                if name_value == ">":
+                                    name_done = true
+                                    pos = pos + 1
+                                else:
+                                    name_chars = name_chars + name_value
+                                    pos = pos + 1
+                            group_name = name_chars
+    val inner_result = parse_alternation(tokens, pos)
+    val inner_success = inner_result.0
+    if not inner_success:
+        return inner_result
+    val inner_ast = inner_result.1
+    pos = inner_result.2
+    if pos >= tokens.len():
+        return (false, nil, pos, "Unclosed group")
+    val close_token = tokens[pos]
+    val close_type = token_type(close_token)
+    if close_type != "rparen":
+        return (false, nil, pos, "Expected )")
+    pos = pos + 1
+    if is_capturing:
+        val ast = ast_group(inner_ast, group_id, group_name)
+        return (true, ast, pos, "")
+    (true, inner_ast, pos, "")
+
+fn parse_char_class_bracket(tokens: [any], start_pos: i64) -> any:
+    """Parse character class [...] or [^...]. Returns (success, ast, next_pos, error_msg)."""
+    var pos = start_pos + 1
+    var negated = false
+    if pos < tokens.len():
+        val token = tokens[pos]
+        val ttype = token_type(token)
+        if ttype == "caret":
+            negated = true
+            pos = pos + 1
+    var chars = ""
+    var done = false
+    while not done and pos < tokens.len():
+        val token = tokens[pos]
+        val ttype = token_type(token)
+        if ttype == "rbracket":
+            done = true
+            pos = pos + 1
+        else:
+            val tvalue = token_value(token)
+            chars = chars + tvalue
+            pos = pos + 1
+    if not done:
+        return (false, nil, pos, "Unclosed character class")
+    val ast = ast_char_class(chars, negated)
+    (true, ast, pos, "")
+
+fn parse_brace_quantifier(tokens: [any], start_pos: i64) -> any:
+    """Parse {n}, {n,}, {n,m} quantifier. Returns (success, min, max, next_pos)."""
+    var pos = start_pos + 1
+    var min_str = ""
+    var max_str = ""
+    var in_max = false
+    var done = false
+    while not done and pos < tokens.len():
+        val token = tokens[pos]
+        val ttype = token_type(token)
+        val tvalue = token_value(token)
+        if ttype == "rbrace":
+            done = true
+            pos = pos + 1
+        else:
+            if tvalue == ",":
+                in_max = true
+                pos = pos + 1
+            else:
+                if is_digit_char(tvalue):
+                    if in_max:
+                        max_str = max_str + tvalue
+                    else:
+                        min_str = min_str + tvalue
+                    pos = pos + 1
+                else:
+                    return (false, 0, 0, pos)
+    if not done:
+        return (false, 0, 0, pos)
+    val min_count = parse_int(min_str)
+    var max_count = min_count
+    if in_max:
+        if max_str == "":
+            max_count = -1
+        else:
+            max_count = parse_int(max_str)
+    (true, min_count, max_count, pos)
+
+fn parse_int(s: text) -> i64:
+    """Parse integer from string."""
+    if s == "": return 0
+    var result = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        val digit = char_code(ch) - 48
+        result = result * 10 + digit
+        i = i + 1
+    result
+
+fn char_code(ch: text) -> i64:
+    """Get ASCII code of character (internal)."""
+    if ch == "0": return 48
+    if ch == "1": return 49
+    if ch == "2": return 50
+    if ch == "3": return 51
+    if ch == "4": return 52
+    if ch == "5": return 53
+    if ch == "6": return 54
+    if ch == "7": return 55
+    if ch == "8": return 56
+    if ch == "9": return 57
+    0
+
+export parse_regex, parse_alternation, parse_concatenation, parse_quantifier
+export parse_atom, parse_group, parse_char_class_bracket, parse_brace_quantifier
+export parse_int

@@ -1,0 +1,303 @@
+# Regular Expression Engine - NFA
+#
+# Non-deterministic finite automaton construction and simulation.
+
+from .types import NFA, NFAState, NFATransition
+from .char_class import char_class_create, char_class_parse
+
+# ============================================================================
+# NFA CONSTRUCTION
+# ============================================================================
+
+fn nfa_create() -> any:
+    """Create empty NFA."""
+    NFA(states: [], transitions: [], start_state: 0, accept_state: 0, next_state_id: 0, group_count: 0)
+
+fn nfa_add_state(nfa: any, is_accept: bool) -> any:
+    """Add state to NFA. Returns (nfa, state_id)."""
+    val state_id = nfa.next_state_id
+    val state = NFAState(state_id: state_id, is_accept: is_accept, group_start: -1, group_end: -1)
+    var states = nfa.states
+    states.push(state)
+    val new_nfa = NFA(states: states, transitions: nfa.transitions, start_state: nfa.start_state, accept_state: nfa.accept_state, next_state_id: state_id + 1, group_count: nfa.group_count)
+    (new_nfa, state_id)
+
+fn nfa_add_transition(nfa: any, from_state: i64, to_state: i64, symbol: text) -> any:
+    """Add transition to NFA."""
+    val trans = NFATransition(from_state: from_state, to_state: to_state, symbol: symbol, char_class: "")
+    var transitions = nfa.transitions
+    transitions.push(trans)
+    NFA(states: nfa.states, transitions: transitions, start_state: nfa.start_state, accept_state: nfa.accept_state, next_state_id: nfa.next_state_id, group_count: nfa.group_count)
+
+fn nfa_add_epsilon(nfa: any, from_state: i64, to_state: i64) -> any:
+    """Add epsilon transition to NFA."""
+    nfa_add_transition(nfa, from_state, to_state, "")
+
+fn nfa_set_start(nfa: any, state_id: i64) -> any:
+    """Set start state of NFA."""
+    NFA(states: nfa.states, transitions: nfa.transitions, start_state: state_id, accept_state: nfa.accept_state, next_state_id: nfa.next_state_id, group_count: nfa.group_count)
+
+fn nfa_set_accept(nfa: any, state_id: i64) -> any:
+    """Set accept state of NFA."""
+    NFA(states: nfa.states, transitions: nfa.transitions, start_state: nfa.start_state, accept_state: state_id, next_state_id: nfa.next_state_id, group_count: nfa.group_count)
+
+# ============================================================================
+# THOMPSON'S CONSTRUCTION
+# ============================================================================
+
+fn thompson_from_ast(ast: any, nfa: any) -> any:
+    """Build NFA from AST using Thompson's construction. Returns (nfa, start, accept)."""
+    val node_type = ast.node_type
+    if node_type == "literal":
+        return thompson_literal(ast.value, nfa)
+    if node_type == "dot":
+        return thompson_dot(nfa)
+    if node_type == "char_class":
+        return thompson_char_class(ast.value, ast.negated, nfa)
+    if node_type == "concat":
+        return thompson_concat(ast.children, nfa)
+    if node_type == "alternation":
+        return thompson_alternation(ast.children, nfa)
+    if node_type == "quantifier":
+        val child = ast.children[0]
+        return thompson_quantifier(child, ast.min_count, ast.max_count, ast.lazy, nfa)
+    if node_type == "group":
+        val child = ast.children[0]
+        return thompson_from_ast(child, nfa)
+    if node_type == "anchor":
+        return thompson_anchor(ast.value, nfa)
+    (nfa, 0, 0)
+
+fn thompson_literal(ch: text, nfa: any) -> any:
+    """Create NFA fragment for literal character. Returns (nfa, start, accept)."""
+    val add_start = nfa_add_state(nfa, false)
+    val nfa1 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    val nfa3 = nfa_add_transition(nfa2, start_id, accept_id, ch)
+    (nfa3, start_id, accept_id)
+
+fn thompson_dot(nfa: any) -> any:
+    """Create NFA fragment for dot (any character). Returns (nfa, start, accept)."""
+    val add_start = nfa_add_state(nfa, false)
+    val nfa1 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    val nfa3 = nfa_add_transition(nfa2, start_id, accept_id, ".")
+    (nfa3, start_id, accept_id)
+
+fn thompson_char_class(definition: text, negated: bool, nfa: any) -> any:
+    """Create NFA fragment for character class. Returns (nfa, start, accept)."""
+    val add_start = nfa_add_state(nfa, false)
+    val nfa1 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    val char_class = char_class_create(definition, negated)
+    val chars = char_class_parse(definition)
+    var nfa_curr = nfa2
+    var i = 0
+    while i < chars.len():
+        nfa_curr = nfa_add_transition(nfa_curr, start_id, accept_id, chars[i])
+        i = i + 1
+    (nfa_curr, start_id, accept_id)
+
+fn thompson_concat(children: [any], nfa: any) -> any:
+    """Create NFA fragment for concatenation. Returns (nfa, start, accept)."""
+    if children.len() == 0:
+        val add_state = nfa_add_state(nfa, false)
+        val nfa1 = add_state.0
+        val state_id = add_state.1
+        return (nfa1, state_id, state_id)
+    var nfa_curr = nfa
+    var overall_start = 0
+    var prev_accept = 0
+    var i = 0
+    while i < children.len():
+        val child = children[i]
+        val fragment = thompson_from_ast(child, nfa_curr)
+        nfa_curr = fragment.0
+        val frag_start = fragment.1
+        val frag_accept = fragment.2
+        if i == 0:
+            overall_start = frag_start
+        else:
+            nfa_curr = nfa_add_epsilon(nfa_curr, prev_accept, frag_start)
+        prev_accept = frag_accept
+        i = i + 1
+    (nfa_curr, overall_start, prev_accept)
+
+fn thompson_alternation(children: [any], nfa: any) -> any:
+    """Create NFA fragment for alternation. Returns (nfa, start, accept)."""
+    val add_start = nfa_add_state(nfa, false)
+    val nfa1 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    var nfa_curr = nfa2
+    var i = 0
+    while i < children.len():
+        val child = children[i]
+        val fragment = thompson_from_ast(child, nfa_curr)
+        nfa_curr = fragment.0
+        val frag_start = fragment.1
+        val frag_accept = fragment.2
+        nfa_curr = nfa_add_epsilon(nfa_curr, start_id, frag_start)
+        nfa_curr = nfa_add_epsilon(nfa_curr, frag_accept, accept_id)
+        i = i + 1
+    (nfa_curr, start_id, accept_id)
+
+fn thompson_quantifier(child: any, min_count: i64, max_count: i64, lazy: bool, nfa: any) -> any:
+    """Create NFA fragment for quantifier. Returns (nfa, start, accept)."""
+    if min_count == 0 and max_count == 1:
+        return thompson_optional(child, nfa)
+    if min_count == 0 and max_count == -1:
+        return thompson_star(child, nfa)
+    if min_count == 1 and max_count == -1:
+        return thompson_plus(child, nfa)
+    thompson_star(child, nfa)
+
+fn thompson_star(child: any, nfa: any) -> any:
+    """Create NFA fragment for star (*). Returns (nfa, start, accept)."""
+    val fragment = thompson_from_ast(child, nfa)
+    val nfa1 = fragment.0
+    val frag_start = fragment.1
+    val frag_accept = fragment.2
+    val add_start = nfa_add_state(nfa1, false)
+    val nfa2 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa2, false)
+    val nfa3 = add_accept.0
+    val accept_id = add_accept.1
+    var nfa4 = nfa_add_epsilon(nfa3, start_id, frag_start)
+    nfa4 = nfa_add_epsilon(nfa4, frag_accept, accept_id)
+    nfa4 = nfa_add_epsilon(nfa4, frag_accept, frag_start)
+    nfa4 = nfa_add_epsilon(nfa4, start_id, accept_id)
+    (nfa4, start_id, accept_id)
+
+fn thompson_plus(child: any, nfa: any) -> any:
+    """Create NFA fragment for plus (+). Returns (nfa, start, accept)."""
+    val fragment = thompson_from_ast(child, nfa)
+    val nfa1 = fragment.0
+    val frag_start = fragment.1
+    val frag_accept = fragment.2
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    var nfa3 = nfa_add_epsilon(nfa2, frag_accept, accept_id)
+    nfa3 = nfa_add_epsilon(nfa3, frag_accept, frag_start)
+    (nfa3, frag_start, accept_id)
+
+fn thompson_optional(child: any, nfa: any) -> any:
+    """Create NFA fragment for optional (?). Returns (nfa, start, accept)."""
+    val fragment = thompson_from_ast(child, nfa)
+    val nfa1 = fragment.0
+    val frag_start = fragment.1
+    val frag_accept = fragment.2
+    val add_start = nfa_add_state(nfa1, false)
+    val nfa2 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa2, false)
+    val nfa3 = add_accept.0
+    val accept_id = add_accept.1
+    var nfa4 = nfa_add_epsilon(nfa3, start_id, frag_start)
+    nfa4 = nfa_add_epsilon(nfa4, frag_accept, accept_id)
+    nfa4 = nfa_add_epsilon(nfa4, start_id, accept_id)
+    (nfa4, start_id, accept_id)
+
+fn thompson_anchor(anchor_type: text, nfa: any) -> any:
+    """Create NFA fragment for anchor. Returns (nfa, start, accept)."""
+    val add_start = nfa_add_state(nfa, false)
+    val nfa1 = add_start.0
+    val start_id = add_start.1
+    val add_accept = nfa_add_state(nfa1, false)
+    val nfa2 = add_accept.0
+    val accept_id = add_accept.1
+    val nfa3 = nfa_add_epsilon(nfa2, start_id, accept_id)
+    (nfa3, start_id, accept_id)
+
+# ============================================================================
+# NFA SIMULATION
+# ============================================================================
+
+fn nfa_epsilon_closure(nfa: any, states: [i64]) -> [i64]:
+    """Compute epsilon closure of a set of NFA states."""
+    var closure = []
+    var stack = []
+    var i = 0
+    while i < states.len():
+        stack.push(states[i])
+        closure.push(states[i])
+        i = i + 1
+    while stack.len() > 0:
+        val curr_idx = stack.len() - 1
+        val curr = stack[curr_idx]
+        stack = stack[0:curr_idx]
+        var j = 0
+        while j < nfa.transitions.len():
+            val trans = nfa.transitions[j]
+            if trans.from_state == curr and trans.symbol == "":
+                val target = trans.to_state
+                var already_in = false
+                var k = 0
+                while k < closure.len():
+                    if closure[k] == target:
+                        already_in = true
+                    k = k + 1
+                if not already_in:
+                    closure.push(target)
+                    stack.push(target)
+            j = j + 1
+    closure
+
+fn nfa_move(nfa: any, states: [i64], symbol: text) -> [i64]:
+    """Compute states reachable from given states by consuming symbol."""
+    var result = []
+    var i = 0
+    while i < states.len():
+        val state = states[i]
+        var j = 0
+        while j < nfa.transitions.len():
+            val trans = nfa.transitions[j]
+            if trans.from_state == state:
+                val trans_sym = trans.symbol
+                if trans_sym == symbol:
+                    result.push(trans.to_state)
+                else:
+                    if trans_sym == ".":
+                        result.push(trans.to_state)
+            j = j + 1
+        i = i + 1
+    result
+
+fn nfa_simulate(nfa: any, input: text) -> bool:
+    """Simulate NFA on input string. Returns true if accepted."""
+    val start_states = [nfa.start_state]
+    var current_states = nfa_epsilon_closure(nfa, start_states)
+    var pos = 0
+    while pos < input.len():
+        val ch = input[pos:pos + 1]
+        val next_states = nfa_move(nfa, current_states, ch)
+        current_states = nfa_epsilon_closure(nfa, next_states)
+        if current_states.len() == 0:
+            return false
+        pos = pos + 1
+    var i = 0
+    while i < current_states.len():
+        if current_states[i] == nfa.accept_state:
+            return true
+        i = i + 1
+    false
+
+export nfa_create, nfa_add_state, nfa_add_transition, nfa_add_epsilon
+export nfa_set_start, nfa_set_accept
+export thompson_from_ast, thompson_literal, thompson_dot, thompson_char_class
+export thompson_concat, thompson_alternation, thompson_quantifier
+export thompson_star, thompson_plus, thompson_optional, thompson_anchor
+export nfa_epsilon_closure, nfa_move, nfa_simulate

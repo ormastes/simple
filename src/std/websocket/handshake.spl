@@ -1,0 +1,373 @@
+# WebSocket Handshake Module
+# Implements HTTP upgrade handshake, key generation, and validation
+
+from std.websocket.types import WEBSOCKET_GUID
+from std.websocket.types import BASE64_CHARS
+
+# ==============================================================================
+# Base64 Encoding
+# ==============================================================================
+
+fn base64_encode_byte(value: i64) -> text:
+    val chars = BASE64_CHARS
+    val index = value % 64
+    chars.char_at(index)
+
+fn base64_encode_triple(b1: i64, b2: i64, b3: i64) -> text:
+    val val1 = (b1 >> 2) & 0x3F
+    val val2 = ((b1 & 0x03) << 4) | ((b2 >> 4) & 0x0F)
+    val val3 = ((b2 & 0x0F) << 2) | ((b3 >> 6) & 0x03)
+    val val4 = b3 & 0x3F
+
+    val c1 = base64_encode_byte(val1)
+    val c2 = base64_encode_byte(val2)
+    val c3 = base64_encode_byte(val3)
+    val c4 = base64_encode_byte(val4)
+
+    "{c1}{c2}{c3}{c4}"
+
+fn base64_encode_pair(b1: i64, b2: i64) -> text:
+    val val1 = (b1 >> 2) & 0x3F
+    val val2 = ((b1 & 0x03) << 4) | ((b2 >> 4) & 0x0F)
+    val val3 = ((b2 & 0x0F) << 2)
+
+    val c1 = base64_encode_byte(val1)
+    val c2 = base64_encode_byte(val2)
+    val c3 = base64_encode_byte(val3)
+
+    "{c1}{c2}{c3}="
+
+fn base64_encode_single(b1: i64) -> text:
+    val val1 = (b1 >> 2) & 0x3F
+    val val2 = ((b1 & 0x03) << 4)
+
+    val c1 = base64_encode_byte(val1)
+    val c2 = base64_encode_byte(val2)
+
+    "{c1}{c2}=="
+
+fn text_to_bytes(input: text) -> List<i64>:
+    val result = []
+    val len = input.length()
+    var i = 0
+    while i < len:
+        val byte = input.char_at(i).byte_at(0)
+        result.push(byte)
+        i = i + 1
+    result
+
+fn bytes_to_text(bytes: List<i64>) -> text:
+    var result = ""
+    val len = bytes.length()
+    var i = 0
+
+    while i < len:
+        val byte = bytes.at(i)
+        val chr = String.from_byte(byte)
+        result = result + chr
+        i = i + 1
+
+    result
+
+fn base64_encode(input: text) -> text:
+    val bytes = text_to_bytes(input)
+    val len = bytes.length()
+    var result = ""
+    var i = 0
+
+    while i < len:
+        val remaining = len - i
+        if remaining >= 3:
+            val b1 = bytes.at(i)
+            val b2 = bytes.at(i + 1)
+            val b3 = bytes.at(i + 2)
+            val encoded = base64_encode_triple(b1, b2, b3)
+            result = result + encoded
+            i = i + 3
+        else:
+            if remaining == 2:
+                val b1 = bytes.at(i)
+                val b2 = bytes.at(i + 1)
+                val encoded = base64_encode_pair(b1, b2)
+                result = result + encoded
+            else:
+                val b1 = bytes.at(i)
+                val encoded = base64_encode_single(b1)
+                result = result + encoded
+            i = len
+
+    result
+
+# ==============================================================================
+# SHA-1 Implementation
+# ==============================================================================
+
+fn sha1_rotate_left(value: i64, bits: i64) -> i64:
+    val mask = 0xFFFFFFFF
+    val shifted = (value << bits) & mask
+    val rotated = (value >> (32 - bits)) & mask
+    (shifted | rotated) & mask
+
+fn bytes_to_word(b0: i64, b1: i64, b2: i64, b3: i64) -> i64:
+    val w0 = (b0 & 0xFF) << 24
+    val w1 = (b1 & 0xFF) << 16
+    val w2 = (b2 & 0xFF) << 8
+    val w3 = b3 & 0xFF
+    (w0 | w1 | w2 | w3) & 0xFFFFFFFF
+
+fn word_to_bytes(word: i64) -> List<i64>:
+    val b0 = (word >> 24) & 0xFF
+    val b1 = (word >> 16) & 0xFF
+    val b2 = (word >> 8) & 0xFF
+    val b3 = word & 0xFF
+    [b0, b1, b2, b3]
+
+fn sha1_pad(bytes: List<i64>) -> List<i64>:
+    val result = []
+    val len = bytes.length()
+    var i = 0
+
+    # Copy original bytes
+    while i < len:
+        result.push(bytes.at(i))
+        i = i + 1
+
+    # Append 0x80
+    result.push(0x80)
+
+    # Calculate padding
+    val msg_len_bits = len * 8
+    val current_len = result.length()
+    val target_len = ((current_len + 8) / 64 + 1) * 64
+
+    # Append zeros
+    while result.length() < target_len - 8:
+        result.push(0)
+
+    # Append length (64-bit big-endian)
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    result.push(0)
+    val len_b3 = (msg_len_bits >> 24) & 0xFF
+    val len_b2 = (msg_len_bits >> 16) & 0xFF
+    val len_b1 = (msg_len_bits >> 8) & 0xFF
+    val len_b0 = msg_len_bits & 0xFF
+    result.push(len_b3)
+    result.push(len_b2)
+    result.push(len_b1)
+    result.push(len_b0)
+
+    result
+
+fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: i64) -> List<i64>:
+    val w = []
+    var i = 0
+
+    # Prepare message schedule
+    while i < 16:
+        val offset = i * 4
+        val b0 = block.at(offset)
+        val b1 = block.at(offset + 1)
+        val b2 = block.at(offset + 2)
+        val b3 = block.at(offset + 3)
+        val word = bytes_to_word(b0, b1, b2, b3)
+        w.push(word)
+        i = i + 1
+
+    while i < 80:
+        val w3 = w.at(i - 3)
+        val w8 = w.at(i - 8)
+        val w14 = w.at(i - 14)
+        val w16 = w.at(i - 16)
+        val xor1 = w3 ^ w8
+        val xor2 = xor1 ^ w14
+        val xor3 = xor2 ^ w16
+        val rotated = sha1_rotate_left(xor3, 1)
+        w.push(rotated)
+        i = i + 1
+
+    # Initialize working variables
+    var a = h0
+    var b = h1
+    var c = h2
+    var d = h3
+    var e = h4
+
+    # Main loop
+    i = 0
+    while i < 80:
+        var f = 0
+        var k = 0
+
+        if i < 20:
+            f = (b & c) | ((~b & 0xFFFFFFFF) & d)
+            k = 0x5A827999
+        else:
+            if i < 40:
+                f = b ^ c ^ d
+                k = 0x6ED9EBA1
+            else:
+                if i < 60:
+                    f = (b & c) | (b & d) | (c & d)
+                    k = 0x8F1BBCDC
+                else:
+                    f = b ^ c ^ d
+                    k = 0xCA62C1D6
+
+        val temp1 = sha1_rotate_left(a, 5)
+        val temp2 = (temp1 + f) & 0xFFFFFFFF
+        val temp3 = (temp2 + e) & 0xFFFFFFFF
+        val temp4 = (temp3 + k) & 0xFFFFFFFF
+        val wi = w.at(i)
+        val temp5 = (temp4 + wi) & 0xFFFFFFFF
+
+        e = d
+        d = c
+        c = sha1_rotate_left(b, 30)
+        b = a
+        a = temp5
+
+        i = i + 1
+
+    # Add to hash values
+    val new_h0 = (h0 + a) & 0xFFFFFFFF
+    val new_h1 = (h1 + b) & 0xFFFFFFFF
+    val new_h2 = (h2 + c) & 0xFFFFFFFF
+    val new_h3 = (h3 + d) & 0xFFFFFFFF
+    val new_h4 = (h4 + e) & 0xFFFFFFFF
+
+    [new_h0, new_h1, new_h2, new_h3, new_h4]
+
+fn sha1(input: text) -> List<i64>:
+    val bytes = text_to_bytes(input)
+    val padded = sha1_pad(bytes)
+
+    # Initialize hash values
+    var h0 = 0x67452301
+    var h1 = 0xEFCDAB89
+    var h2 = 0x98BADCFE
+    var h3 = 0x10325476
+    var h4 = 0xC3D2E1F0
+
+    # Process blocks
+    val num_blocks = padded.length() / 64
+    var block_idx = 0
+
+    while block_idx < num_blocks:
+        val block = []
+        val offset = block_idx * 64
+        var i = 0
+
+        while i < 64:
+            block.push(padded.at(offset + i))
+            i = i + 1
+
+        val hash_values = sha1_process_block(block, h0, h1, h2, h3, h4)
+        h0 = hash_values.at(0)
+        h1 = hash_values.at(1)
+        h2 = hash_values.at(2)
+        h3 = hash_values.at(3)
+        h4 = hash_values.at(4)
+
+        block_idx = block_idx + 1
+
+    # Convert hash values to bytes
+    val result = []
+    val words = [h0, h1, h2, h3, h4]
+    var i = 0
+
+    while i < 5:
+        val word = words.at(i)
+        val bytes = word_to_bytes(word)
+        var j = 0
+        while j < 4:
+            result.push(bytes.at(j))
+            j = j + 1
+        i = i + 1
+
+    result
+
+# ==============================================================================
+# WebSocket Handshake Functions
+# ==============================================================================
+
+fn generate_websocket_key() -> text:
+    val bytes = []
+    val time = Platform.timestamp()
+    val seed = time % 256
+
+    var i = 0
+    while i < 16:
+        val value = ((seed * (i + 1) * 17) + (i * 23)) % 256
+        bytes.push(value)
+        i = i + 1
+
+    val text_bytes = bytes_to_text(bytes)
+    base64_encode(text_bytes)
+
+fn compute_websocket_accept(key: text) -> text:
+    val concatenated = key + WEBSOCKET_GUID
+    val hash = sha1(concatenated)
+    val hash_text = bytes_to_text(hash)
+    base64_encode(hash_text)
+
+fn build_upgrade_request(host: text, path: text, key: text) -> text:
+    val line1 = "GET {path} HTTP/1.1\r\n"
+    val line2 = "Host: {host}\r\n"
+    val line3 = "Upgrade: websocket\r\n"
+    val line4 = "Connection: Upgrade\r\n"
+    val line5 = "Sec-WebSocket-Key: {key}\r\n"
+    val line6 = "Sec-WebSocket-Version: 13\r\n"
+    val line7 = "\r\n"
+
+    line1 + line2 + line3 + line4 + line5 + line6 + line7
+
+fn parse_upgrade_response(response: text) -> i64:
+    val has_101 = response.contains("101")
+    val has_upgrade = response.contains("Upgrade: websocket")
+    val has_connection = response.contains("Connection: Upgrade")
+
+    if has_101:
+        if has_upgrade:
+            if has_connection:
+                1
+            else:
+                0
+        else:
+            0
+    else:
+        0
+
+fn validate_websocket_accept(response: text, key: text) -> i64:
+    val expected = compute_websocket_accept(key)
+    val header = "Sec-WebSocket-Accept: {expected}"
+
+    if response.contains(header):
+        1
+    else:
+        0
+
+fn build_upgrade_response(key: text) -> text:
+    val accept = compute_websocket_accept(key)
+    val line1 = "HTTP/1.1 101 Switching Protocols\r\n"
+    val line2 = "Upgrade: websocket\r\n"
+    val line3 = "Connection: Upgrade\r\n"
+    val line4 = "Sec-WebSocket-Accept: {accept}\r\n"
+    val line5 = "\r\n"
+
+    line1 + line2 + line3 + line4 + line5
+
+fn extract_websocket_key(request: text) -> text:
+    val lines = request.split("\r\n")
+    val len = lines.length()
+    var i = 0
+
+    while i < len:
+        val line = lines.at(i)
+        if line.starts_with("Sec-WebSocket-Key: "):
+            val key = line.substring(19)
+            return key
+        i = i + 1
+
+    ""

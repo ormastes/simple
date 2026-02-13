@@ -1,0 +1,169 @@
+# Digital Signature Signing Module
+# RSA and DSA signature generation functions
+
+# =============================================================================
+# RSA PKCS#1 v1.5 Signatures
+# =============================================================================
+
+fn rsa_sign_pkcs1(message: text, private_key: tuple) -> tuple:
+    """Sign message using RSA PKCS#1 v1.5."""
+    # Hash message
+    val hash_value = hash_for_signature(message, "RSA-PKCS1")
+
+    # Get key components
+    val n = rsa_private_key_n(private_key)
+    val d = rsa_private_key_d(private_key)
+
+    # Calculate modulus bit size (simplified: use byte count)
+    val em_len = 32  # bytes
+
+    # Encode hash
+    val encoded = emsa_pkcs1_encode(hash_value, em_len)
+
+    # Convert to integer
+    val em_int = bytes_to_int(encoded)
+
+    # Sign: s = em^d mod n
+    val signature_value = mod_pow(em_int, d, n)
+
+    create_signature(signature_value, 0, "RSA-PKCS1")
+
+# =============================================================================
+# RSA-PSS (Probabilistic Signature Scheme)
+# =============================================================================
+
+fn pss_encode(hash_value: i64, salt: list, em_bits: i64) -> list:
+    """PSS encoding (simplified implementation)."""
+    val em_len = (em_bits + 7) / 8  # Round up to bytes
+    val h_len = 8  # Hash length (simplified)
+    val salt_len = salt.len()
+
+    # M' = 8*0x00 || hash || salt
+    var m_prime = []
+    var i = 0
+    while i < 8:
+        m_prime.push(0x00)
+        i = i + 1
+
+    # Add hash bytes
+    val hash_bytes = int_to_bytes(hash_value, h_len)
+    var j = 0
+    while j < hash_bytes.len():
+        m_prime.push(hash_bytes.get(j))
+        j = j + 1
+
+    # Add salt
+    var k = 0
+    while k < salt.len():
+        m_prime.push(salt.get(k))
+        k = k + 1
+
+    # H = Hash(M')
+    val h = hash_bytes_simple(m_prime)
+    val h_bytes = int_to_bytes(h, h_len)
+
+    # DB = PS || 0x01 || salt
+    val db_len = em_len - h_len - 1
+    val ps_len = db_len - salt_len - 1
+
+    var db = []
+    var ps = 0
+    while ps < ps_len:
+        db.push(0x00)
+        ps = ps + 1
+
+    db.push(0x01)
+
+    var s = 0
+    while s < salt.len():
+        db.push(salt.get(s))
+        s = s + 1
+
+    # dbMask = MGF(H, db_len)
+    val db_mask = mgf1_simple(h, db_len)
+
+    # maskedDB = DB XOR dbMask
+    val masked_db = xor_bytes(db, db_mask)
+
+    # EM = maskedDB || H || 0xbc
+    var em = []
+    var m = 0
+    while m < masked_db.len():
+        em.push(masked_db.get(m))
+        m = m + 1
+
+    var hb = 0
+    while hb < h_bytes.len():
+        em.push(h_bytes.get(hb))
+        hb = hb + 1
+
+    em.push(0xbc)
+
+    em
+
+fn rsa_sign_pss(message: text, private_key: tuple, salt_len: i64) -> tuple:
+    """Sign message using RSA-PSS."""
+    # Hash message
+    val hash_value = hash_for_signature(message, "RSA-PSS")
+
+    # Generate random salt
+    val salt = generate_random_salt(salt_len)
+
+    # Get key components
+    val n = rsa_private_key_n(private_key)
+    val d = rsa_private_key_d(private_key)
+
+    # PSS encoding
+    val em_bits = 256  # Simplified
+    val encoded = pss_encode(hash_value, salt, em_bits)
+
+    # Convert to integer
+    val em_int = bytes_to_int(encoded)
+
+    # Sign: s = em^d mod n
+    val signature_value = mod_pow(em_int, d, n)
+
+    create_signature(signature_value, salt_len, "RSA-PSS")
+
+# =============================================================================
+# DSA (Digital Signature Algorithm)
+# =============================================================================
+
+fn dsa_sign(message: text, private_key: tuple) -> tuple:
+    """Sign message using DSA.
+
+    CRITICAL: k must be unique per signature and secret!
+    Reusing k allows private key recovery."""
+    val params = dsa_private_key_params(private_key)
+    val p = dsa_params_p(params)
+    val q = dsa_params_q(params)
+    val g = dsa_params_g(params)
+    val x = dsa_private_key_x(private_key)
+
+    # Hash message
+    val h = hash_for_signature(message, "DSA")
+    val h_mod_q = h % q
+
+    # Generate random k (simplified: derived from message hash)
+    val k = (h % (q - 1)) + 1
+
+    # r = (g^k mod p) mod q
+    val r = mod_pow(g, k, p) % q
+
+    # s = k^(-1) * (h + x*r) mod q
+    val k_inv = mod_inverse(k, q)
+    val s = (k_inv * (h_mod_q + x * r)) % q
+
+    create_signature(r, s, "DSA")
+
+# =============================================================================
+# Multi-Signature Schemes
+# =============================================================================
+
+fn aggregate_signatures(signatures: list) -> tuple:
+    """Aggregate multiple signatures (simplified)."""
+    if signatures.len() == 0:
+        return create_signature(0, 0, "NONE")
+
+    # Simplified: just return first signature
+    signatures.get(0)

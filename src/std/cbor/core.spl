@@ -1,0 +1,1305 @@
+# CBOR Core Implementation
+# This file contains the complete CBOR implementation.
+# It will be split into smaller modules in a future refactoring phase.
+#
+# TODO: Split into:
+# - types.spl (major types, constants)
+# - encode.spl (encoding functions)
+# - decode.spl (decoding functions)
+# - major_types.spl (type detection)
+# - utilities.spl (utilities, diagnostics)
+
+# For now, include the complete implementation here
+
+# ============================================================================
+# CBOR MAJOR TYPES (3-bit type in high bits of initial byte)
+# ============================================================================
+
+fn major_unsigned_int() -> i64: 0      # 0..23: immediate, 24..27: uint8/16/32/64
+fn major_negative_int() -> i64: 1      # -1 minus the encoded unsigned value
+fn major_byte_string() -> i64: 2       # Byte string (length + data)
+fn major_text_string() -> i64: 3       # UTF-8 text string (length + data)
+fn major_array() -> i64: 4             # Array of data items
+fn major_map() -> i64: 5               # Map of key-value pairs
+fn major_tag() -> i64: 6               # Semantic tag followed by value
+fn major_simple_float() -> i64: 7      # Simple values and floats
+
+# ============================================================================
+# ADDITIONAL INFO CONSTANTS (5-bit value in low bits)
+# ============================================================================
+
+fn addl_immediate() -> i64: 23         # 0..23: value in additional info
+fn addl_uint8() -> i64: 24             # 1-byte uint8 follows
+fn addl_uint16() -> i64: 25            # 2-byte uint16 follows
+fn addl_uint32() -> i64: 26            # 4-byte uint32 follows
+fn addl_uint64() -> i64: 27            # 8-byte uint64 follows
+fn addl_indefinite() -> i64: 31        # Indefinite-length (for strings/arrays/maps)
+
+# ============================================================================
+# SIMPLE VALUES (major type 7, additional info 0..19 and 32+)
+# ============================================================================
+
+fn simple_false() -> i64: 20           # Boolean false
+fn simple_true() -> i64: 21            # Boolean true
+fn simple_null() -> i64: 22            # Null/nil
+fn simple_undefined() -> i64: 23       # Undefined
+fn simple_float16() -> i64: 25         # Half-precision float (16-bit)
+fn simple_float32() -> i64: 26         # Single-precision float (32-bit)
+fn simple_float64() -> i64: 27         # Double-precision float (64-bit)
+fn simple_break() -> i64: 31           # Break stop code for indefinite
+
+# ============================================================================
+# WELL-KNOWN SEMANTIC TAGS
+# ============================================================================
+
+fn tag_datetime_string() -> i64: 0    # Standard date/time string (RFC 3339)
+fn tag_epoch_datetime() -> i64: 1     # Unix timestamp (seconds since epoch)
+fn tag_positive_bignum() -> i64: 2    # Positive bignum (byte string)
+fn tag_negative_bignum() -> i64: 3    # Negative bignum (byte string)
+fn tag_decimal_fraction() -> i64: 4   # Decimal fraction [exponent, mantissa]
+fn tag_bigfloat() -> i64: 5            # Bigfloat [exponent, mantissa]
+fn tag_base64url() -> i64: 21          # Expected conversion to base64url
+fn tag_base64() -> i64: 22             # Expected conversion to base64
+fn tag_base16() -> i64: 23             # Expected conversion to base16 (hex)
+fn tag_encoded_cbor() -> i64: 24       # Encoded CBOR data item
+fn tag_uri() -> i64: 32                # URI (RFC 3986)
+fn tag_base64url_encoded() -> i64: 33 # Base64url-encoded text
+fn tag_base64_encoded() -> i64: 34    # Base64-encoded text
+fn tag_regex() -> i64: 35              # Regular expression (PCRE/ECMA262)
+fn tag_mime() -> i64: 36               # MIME message (RFC 2045)
+fn tag_self_describe() -> i64: 55799  # Self-describe CBOR (magic number)
+
+# ============================================================================
+# BYTE ARRAY HELPERS
+# ============================================================================
+
+fn byte_at(bytes: [i64], index: i64) -> i64:
+    """Get byte at index, or 0 if out of bounds."""
+    if index < 0:
+        return 0
+    if index >= bytes.len():
+        return 0
+    bytes[index]
+
+fn bytes_append(bytes: [i64], byte_val: i64) -> [i64]:
+    """Append byte to byte array."""
+    bytes.push(byte_val)
+
+fn bytes_concat(a: [i64], b: [i64]) -> [i64]:
+    """Concatenate two byte arrays."""
+    var result = a
+    for byte_val in b:
+        result = result.push(byte_val)
+    result
+
+fn bytes_slice(bytes: [i64], start: i64, length: i64) -> [i64]:
+    """Extract slice of bytes."""
+    var result = []
+    var i = 0
+    while i < length:
+        val idx = start + i
+        if idx < bytes.len():
+            result = result.push(bytes[idx])
+        i = i + 1
+    result
+
+# ============================================================================
+# INITIAL BYTE ENCODING/DECODING
+# ============================================================================
+
+fn make_initial_byte(major_type: i64, additional_info: i64) -> i64:
+    """Construct CBOR initial byte from major type and additional info.
+    Major type: 3 bits (0..7) in bits 5-7
+    Additional info: 5 bits (0..31) in bits 0-4"""
+    var major_shifted = (major_type % 8) * 32
+    var addl = additional_info % 32
+    major_shifted + addl
+
+fn get_major_type(initial_byte: i64) -> i64:
+    """Extract major type (bits 5-7) from initial byte."""
+    (initial_byte / 32) % 8
+
+fn get_additional_info(initial_byte: i64) -> i64:
+    """Extract additional info (bits 0-4) from initial byte."""
+    initial_byte % 32
+
+# ============================================================================
+# INTEGER ENCODING
+# ============================================================================
+
+fn encode_uint(major: i64, value: i64) -> [i64]:
+    """Encode unsigned integer with given major type.
+    Returns byte array with initial byte and optional additional bytes."""
+    if value < 0:
+        return []
+
+    # Immediate value (0..23)
+    if value <= 23:
+        val initial = make_initial_byte(major, value)
+        return [initial]
+
+    # 1-byte uint8 (24..255)
+    if value <= 255:
+        val initial = make_initial_byte(major, addl_uint8())
+        return [initial, value]
+
+    # 2-byte uint16 (256..65535)
+    if value <= 65535:
+        val initial = make_initial_byte(major, addl_uint16())
+        val high_byte = value / 256
+        val low_byte = value % 256
+        return [initial, high_byte, low_byte]
+
+    # 4-byte uint32 (up to 2^32-1)
+    if value <= 4294967295:
+        val initial = make_initial_byte(major, addl_uint32())
+        var result = [initial]
+        var remaining = value
+        var i = 0
+        while i < 4:
+            val divisor = 1 << (24 - i * 8)
+            val byte_val = remaining / divisor
+            result = result.push(byte_val)
+            remaining = remaining % divisor
+            i = i + 1
+        return result
+
+    # 8-byte uint64
+    val initial = make_initial_byte(major, addl_uint64())
+    var result = [initial]
+    var remaining = value
+    var i = 0
+    while i < 8:
+        val shift_amount = 56 - i * 8
+        var divisor = 1
+        var j = 0
+        while j < shift_amount:
+            divisor = divisor * 2
+            j = j + 1
+        val byte_val = remaining / divisor
+        result = result.push(byte_val % 256)
+        remaining = remaining % divisor
+        i = i + 1
+    result
+
+fn cbor_encode_unsigned(value: i64) -> [i64]:
+    """Encode unsigned integer (major type 0)."""
+    encode_uint(major_unsigned_int(), value)
+
+fn cbor_encode_int(value: i64) -> [i64]:
+    """Encode signed integer (major type 0 or 1)."""
+    if value >= 0:
+        return cbor_encode_unsigned(value)
+    # Negative: encode as major type 1 with (-1 - value)
+    val encoded_value = -1 - value
+    encode_uint(major_negative_int(), encoded_value)
+
+# ============================================================================
+# STRING ENCODING
+# ============================================================================
+
+fn text_to_bytes(text: text) -> [i64]:
+    """Convert text to UTF-8 byte array (simplified ASCII for now)."""
+    var result = []
+    var i = 0
+    while i < text.len():
+        var char = text.substring(i, i + 1)
+        # Simple ASCII conversion (char codes 0..127)
+        var code = 0
+        if char == " ": code = 32
+        if char == "!": code = 33
+        if char == "\"": code = 34
+        if char == "#": code = 35
+        if char == "$": code = 36
+        if char == "%": code = 37
+        if char == "&": code = 38
+        if char == "'": code = 39
+        if char == "(": code = 40
+        if char == ")": code = 41
+        if char == "*": code = 42
+        if char == "+": code = 43
+        if char == ",": code = 44
+        if char == "-": code = 45
+        if char == ".": code = 46
+        if char == "/": code = 47
+        if char == "0": code = 48
+        if char == "1": code = 49
+        if char == "2": code = 50
+        if char == "3": code = 51
+        if char == "4": code = 52
+        if char == "5": code = 53
+        if char == "6": code = 54
+        if char == "7": code = 55
+        if char == "8": code = 56
+        if char == "9": code = 57
+        if char == ":": code = 58
+        if char == ";": code = 59
+        if char == "<": code = 60
+        if char == "=": code = 61
+        if char == ">": code = 62
+        if char == "?": code = 63
+        if char == "@": code = 64
+        if char == "A": code = 65
+        if char == "B": code = 66
+        if char == "C": code = 67
+        if char == "D": code = 68
+        if char == "E": code = 69
+        if char == "F": code = 70
+        if char == "G": code = 71
+        if char == "H": code = 72
+        if char == "I": code = 73
+        if char == "J": code = 74
+        if char == "K": code = 75
+        if char == "L": code = 76
+        if char == "M": code = 77
+        if char == "N": code = 78
+        if char == "O": code = 79
+        if char == "P": code = 80
+        if char == "Q": code = 81
+        if char == "R": code = 82
+        if char == "S": code = 83
+        if char == "T": code = 84
+        if char == "U": code = 85
+        if char == "V": code = 86
+        if char == "W": code = 87
+        if char == "X": code = 88
+        if char == "Y": code = 89
+        if char == "Z": code = 90
+        if char == "[": code = 91
+        if char == "\\": code = 92
+        if char == "]": code = 93
+        if char == "^": code = 94
+        if char == "_": code = 95
+        if char == "`": code = 96
+        if char == "a": code = 97
+        if char == "b": code = 98
+        if char == "c": code = 99
+        if char == "d": code = 100
+        if char == "e": code = 101
+        if char == "f": code = 102
+        if char == "g": code = 103
+        if char == "h": code = 104
+        if char == "i": code = 105
+        if char == "j": code = 106
+        if char == "k": code = 107
+        if char == "l": code = 108
+        if char == "m": code = 109
+        if char == "n": code = 110
+        if char == "o": code = 111
+        if char == "p": code = 112
+        if char == "q": code = 113
+        if char == "r": code = 114
+        if char == "s": code = 115
+        if char == "t": code = 116
+        if char == "u": code = 117
+        if char == "v": code = 118
+        if char == "w": code = 119
+        if char == "x": code = 120
+        if char == "y": code = 121
+        if char == "z": code = 122
+        if char == "{": code = 123
+        if char == "|": code = 124
+        if char == "}": code = 125
+        if char == "~": code = 126
+        result = result.push(code)
+        i = i + 1
+    result
+
+fn bytes_to_text(bytes: [i64]) -> text:
+    """Convert byte array to text (simplified ASCII for now)."""
+    var result = ""
+    for byte_val in bytes:
+        var char = ""
+        if byte_val == 32: char = " "
+        if byte_val == 33: char = "!"
+        if byte_val == 34: char = "\""
+        if byte_val == 35: char = "#"
+        if byte_val == 36: char = "$"
+        if byte_val == 37: char = "%"
+        if byte_val == 38: char = "&"
+        if byte_val == 39: char = "'"
+        if byte_val == 40: char = "("
+        if byte_val == 41: char = ")"
+        if byte_val == 42: char = "*"
+        if byte_val == 43: char = "+"
+        if byte_val == 44: char = ","
+        if byte_val == 45: char = "-"
+        if byte_val == 46: char = "."
+        if byte_val == 47: char = "/"
+        if byte_val == 48: char = "0"
+        if byte_val == 49: char = "1"
+        if byte_val == 50: char = "2"
+        if byte_val == 51: char = "3"
+        if byte_val == 52: char = "4"
+        if byte_val == 53: char = "5"
+        if byte_val == 54: char = "6"
+        if byte_val == 55: char = "7"
+        if byte_val == 56: char = "8"
+        if byte_val == 57: char = "9"
+        if byte_val == 58: char = ":"
+        if byte_val == 59: char = ";"
+        if byte_val == 60: char = "<"
+        if byte_val == 61: char = "="
+        if byte_val == 62: char = ">"
+        if byte_val == 63: char = "?"
+        if byte_val == 64: char = "@"
+        if byte_val == 65: char = "A"
+        if byte_val == 66: char = "B"
+        if byte_val == 67: char = "C"
+        if byte_val == 68: char = "D"
+        if byte_val == 69: char = "E"
+        if byte_val == 70: char = "F"
+        if byte_val == 71: char = "G"
+        if byte_val == 72: char = "H"
+        if byte_val == 73: char = "I"
+        if byte_val == 74: char = "J"
+        if byte_val == 75: char = "K"
+        if byte_val == 76: char = "L"
+        if byte_val == 77: char = "M"
+        if byte_val == 78: char = "N"
+        if byte_val == 79: char = "O"
+        if byte_val == 80: char = "P"
+        if byte_val == 81: char = "Q"
+        if byte_val == 82: char = "R"
+        if byte_val == 83: char = "S"
+        if byte_val == 84: char = "T"
+        if byte_val == 85: char = "U"
+        if byte_val == 86: char = "V"
+        if byte_val == 87: char = "W"
+        if byte_val == 88: char = "X"
+        if byte_val == 89: char = "Y"
+        if byte_val == 90: char = "Z"
+        if byte_val == 91: char = "["
+        if byte_val == 92: char = "\\"
+        if byte_val == 93: char = "]"
+        if byte_val == 94: char = "^"
+        if byte_val == 95: char = "_"
+        if byte_val == 96: char = "`"
+        if byte_val == 97: char = "a"
+        if byte_val == 98: char = "b"
+        if byte_val == 99: char = "c"
+        if byte_val == 100: char = "d"
+        if byte_val == 101: char = "e"
+        if byte_val == 102: char = "f"
+        if byte_val == 103: char = "g"
+        if byte_val == 104: char = "h"
+        if byte_val == 105: char = "i"
+        if byte_val == 106: char = "j"
+        if byte_val == 107: char = "k"
+        if byte_val == 108: char = "l"
+        if byte_val == 109: char = "m"
+        if byte_val == 110: char = "n"
+        if byte_val == 111: char = "o"
+        if byte_val == 112: char = "p"
+        if byte_val == 113: char = "q"
+        if byte_val == 114: char = "r"
+        if byte_val == 115: char = "s"
+        if byte_val == 116: char = "t"
+        if byte_val == 117: char = "u"
+        if byte_val == 118: char = "v"
+        if byte_val == 119: char = "w"
+        if byte_val == 120: char = "x"
+        if byte_val == 121: char = "y"
+        if byte_val == 122: char = "z"
+        if byte_val == 123: char = "{"
+        if byte_val == 124: char = "|"
+        if byte_val == 125: char = "}"
+        if byte_val == 126: char = "~"
+        result = result + char
+    result
+
+fn cbor_encode_bytes(bytes: [i64]) -> [i64]:
+    """Encode byte string (major type 2)."""
+    val length = bytes.len()
+    val header = encode_uint(major_byte_string(), length)
+    bytes_concat(header, bytes)
+
+fn cbor_encode_text(text: text) -> [i64]:
+    """Encode text string (major type 3)."""
+    val utf8_bytes = text_to_bytes(text)
+    val length = utf8_bytes.len()
+    val header = encode_uint(major_text_string(), length)
+    bytes_concat(header, utf8_bytes)
+
+# ============================================================================
+# ARRAY AND MAP ENCODING
+# ============================================================================
+
+fn cbor_encode_array_header(length: i64) -> [i64]:
+    """Encode array header (major type 4) with definite length."""
+    encode_uint(major_array(), length)
+
+fn cbor_encode_array_start() -> [i64]:
+    """Encode start of indefinite-length array."""
+    val initial = make_initial_byte(major_array(), addl_indefinite())
+    [initial]
+
+fn cbor_encode_map_header(length: i64) -> [i64]:
+    """Encode map header (major type 5) with definite length."""
+    encode_uint(major_map(), length)
+
+fn cbor_encode_map_start() -> [i64]:
+    """Encode start of indefinite-length map."""
+    val initial = make_initial_byte(major_map(), addl_indefinite())
+    [initial]
+
+fn cbor_encode_break() -> [i64]:
+    """Encode break stop code for indefinite-length items."""
+    val initial = make_initial_byte(major_simple_float(), simple_break())
+    [initial]
+
+# ============================================================================
+# SIMPLE VALUES ENCODING
+# ============================================================================
+
+fn cbor_encode_false() -> [i64]:
+    """Encode boolean false."""
+    val initial = make_initial_byte(major_simple_float(), simple_false())
+    [initial]
+
+fn cbor_encode_true() -> [i64]:
+    """Encode boolean true."""
+    val initial = make_initial_byte(major_simple_float(), simple_true())
+    [initial]
+
+fn cbor_encode_bool(value: bool) -> [i64]:
+    """Encode boolean value."""
+    if value:
+        return cbor_encode_true()
+    cbor_encode_false()
+
+fn cbor_encode_null() -> [i64]:
+    """Encode null/nil value."""
+    val initial = make_initial_byte(major_simple_float(), simple_null())
+    [initial]
+
+fn cbor_encode_undefined() -> [i64]:
+    """Encode undefined value."""
+    val initial = make_initial_byte(major_simple_float(), simple_undefined())
+    [initial]
+
+fn cbor_encode_simple(value: i64) -> [i64]:
+    """Encode simple value (0..19 are unassigned, 32..255 need uint8)."""
+    if value < 0:
+        return []
+    if value <= 19:
+        val initial = make_initial_byte(major_simple_float(), value)
+        return [initial]
+    if value <= 255:
+        val initial = make_initial_byte(major_simple_float(), addl_uint8())
+        return [initial, value]
+    []
+
+# ============================================================================
+# FLOATING-POINT ENCODING (SIMPLIFIED)
+# ============================================================================
+
+fn cbor_encode_float64(value: f64) -> [i64]:
+    """Encode double-precision float (simplified - stores as integer for now)."""
+    # In real implementation, would convert float bits to 8 bytes
+    # For now, convert to integer representation
+    val int_value = value.to_int()
+    val initial = make_initial_byte(major_simple_float(), simple_float64())
+    var result = [initial]
+    # Simplified: encode as 8-byte integer
+    var remaining = int_value
+    var i = 0
+    while i < 8:
+        result = result.push(remaining % 256)
+        remaining = remaining / 256
+        i = i + 1
+    result
+
+fn cbor_encode_float32(value: f64) -> [i64]:
+    """Encode single-precision float (simplified)."""
+    val int_value = value.to_int()
+    val initial = make_initial_byte(major_simple_float(), simple_float32())
+    var result = [initial]
+    # Simplified: encode as 4-byte integer
+    var remaining = int_value
+    var i = 0
+    while i < 4:
+        result = result.push(remaining % 256)
+        remaining = remaining / 256
+        i = i + 1
+    result
+
+# ============================================================================
+# TAGGED VALUES ENCODING
+# ============================================================================
+
+fn cbor_encode_tagged(tag: i64, value: [i64]) -> [i64]:
+    """Encode tagged value (major type 6).
+    tag: semantic tag number
+    value: CBOR-encoded data item"""
+    val tag_header = encode_uint(major_tag(), tag)
+    bytes_concat(tag_header, value)
+
+fn cbor_encode_timestamp(unix_seconds: i64) -> [i64]:
+    """Encode Unix timestamp (tag 1 + integer)."""
+    val value_bytes = cbor_encode_int(unix_seconds)
+    cbor_encode_tagged(tag_epoch_datetime(), value_bytes)
+
+fn cbor_encode_datetime_string(iso8601: text) -> [i64]:
+    """Encode ISO 8601 datetime string (tag 0 + text)."""
+    val value_bytes = cbor_encode_text(iso8601)
+    cbor_encode_tagged(tag_datetime_string(), value_bytes)
+
+fn cbor_encode_uri(uri: text) -> [i64]:
+    """Encode URI (tag 32 + text)."""
+    val value_bytes = cbor_encode_text(uri)
+    cbor_encode_tagged(tag_uri(), value_bytes)
+
+fn cbor_encode_regex(pattern: text) -> [i64]:
+    """Encode regular expression (tag 35 + text)."""
+    val value_bytes = cbor_encode_text(pattern)
+    cbor_encode_tagged(tag_regex(), value_bytes)
+
+fn cbor_encode_base64(data: text) -> [i64]:
+    """Encode base64-expected data (tag 22 + text)."""
+    val value_bytes = cbor_encode_text(data)
+    cbor_encode_tagged(tag_base64(), value_bytes)
+
+fn cbor_encode_base64url(data: text) -> [i64]:
+    """Encode base64url-expected data (tag 21 + text)."""
+    val value_bytes = cbor_encode_text(data)
+    cbor_encode_tagged(tag_base64url(), value_bytes)
+
+fn cbor_encode_base16(data: text) -> [i64]:
+    """Encode base16/hex-expected data (tag 23 + text)."""
+    val value_bytes = cbor_encode_text(data)
+    cbor_encode_tagged(tag_base16(), value_bytes)
+
+fn cbor_encode_mime(mime_message: text) -> [i64]:
+    """Encode MIME message (tag 36 + text)."""
+    val value_bytes = cbor_encode_text(mime_message)
+    cbor_encode_tagged(tag_mime(), value_bytes)
+
+fn cbor_encode_self_describe(value: [i64]) -> [i64]:
+    """Encode self-describing CBOR (magic tag 55799 + value)."""
+    cbor_encode_tagged(tag_self_describe(), value)
+
+# ============================================================================
+# DECODING - HEADER PARSING
+# ============================================================================
+
+fn decode_uint_value(bytes: [i64], offset: i64, additional_info: i64) -> (i64, i64):
+    """Decode unsigned integer value from additional info.
+    Returns (value, bytes_consumed) tuple."""
+    # Immediate value (0..23)
+    if additional_info <= 23:
+        return (additional_info, 1)
+
+    # 1-byte uint8
+    if additional_info == addl_uint8():
+        if offset + 1 < bytes.len():
+            val value = byte_at(bytes, offset + 1)
+            return (value, 2)
+        return (0, 0)
+
+    # 2-byte uint16
+    if additional_info == addl_uint16():
+        if offset + 2 < bytes.len():
+            val high = byte_at(bytes, offset + 1)
+            val low = byte_at(bytes, offset + 2)
+            val value = high * 256 + low
+            return (value, 3)
+        return (0, 0)
+
+    # 4-byte uint32
+    if additional_info == addl_uint32():
+        if offset + 4 < bytes.len():
+            var value = 0
+            var i = 0
+            while i < 4:
+                val byte_val = byte_at(bytes, offset + 1 + i)
+                val shift_amount = 24 - i * 8
+                var multiplier = 1
+                var j = 0
+                while j < shift_amount:
+                    multiplier = multiplier * 2
+                    j = j + 1
+                value = value + byte_val * multiplier
+                i = i + 1
+            return (value, 5)
+        return (0, 0)
+
+    # 8-byte uint64
+    if additional_info == addl_uint64():
+        if offset + 8 < bytes.len():
+            var value = 0
+            var i = 0
+            while i < 8:
+                val byte_val = byte_at(bytes, offset + 1 + i)
+                val shift_amount = 56 - i * 8
+                var multiplier = 1
+                var j = 0
+                while j < shift_amount:
+                    multiplier = multiplier * 2
+                    j = j + 1
+                value = value + byte_val * multiplier
+                i = i + 1
+            return (value, 9)
+        return (0, 0)
+
+    # Indefinite or reserved
+    (0, 0)
+
+# ============================================================================
+# DECODING - TYPE DETECTION
+# ============================================================================
+
+fn cbor_decode_type(bytes: [i64], offset: i64) -> (i64, i64, i64):
+    """Decode CBOR item type information.
+    Returns (major_type, additional_info, header_size) tuple."""
+    if offset >= bytes.len():
+        return (0, 0, 0)
+
+    val initial_byte = byte_at(bytes, offset)
+    val major = get_major_type(initial_byte)
+    val addl = get_additional_info(initial_byte)
+
+    # Determine header size based on additional info
+    var header_size = 1
+    if addl == addl_uint8():
+        header_size = 2
+    if addl == addl_uint16():
+        header_size = 3
+    if addl == addl_uint32():
+        header_size = 5
+    if addl == addl_uint64():
+        header_size = 9
+
+    (major, addl, header_size)
+
+fn cbor_is_unsigned_int(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is unsigned integer."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_unsigned_int()
+
+fn cbor_is_negative_int(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is negative integer."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_negative_int()
+
+fn cbor_is_byte_string(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is byte string."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_byte_string()
+
+fn cbor_is_text_string(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is text string."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_text_string()
+
+fn cbor_is_array(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is array."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_array()
+
+fn cbor_is_map(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is map."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_map()
+
+fn cbor_is_tagged(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is tagged value."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_tag()
+
+fn cbor_is_simple(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is simple value or float."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    major == major_simple_float()
+
+fn cbor_is_indefinite(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is indefinite-length."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val addl = type_info.1
+    addl == addl_indefinite()
+
+fn cbor_is_break(bytes: [i64], offset: i64) -> bool:
+    """Check if CBOR item at offset is break stop code."""
+    if offset >= bytes.len():
+        return false
+    val initial_byte = byte_at(bytes, offset)
+    val expected = make_initial_byte(major_simple_float(), simple_break())
+    initial_byte == expected
+
+# ============================================================================
+# DECODING - INTEGER VALUES
+# ============================================================================
+
+fn cbor_decode_unsigned(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode unsigned integer.
+    Returns (value, bytes_consumed) or (0, 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_unsigned_int():
+        return (0, 0)
+
+    decode_uint_value(bytes, offset, addl)
+
+fn cbor_decode_int(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode signed integer.
+    Returns (value, bytes_consumed) or (0, 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major == major_unsigned_int():
+        return decode_uint_value(bytes, offset, addl)
+
+    if major == major_negative_int():
+        val result = decode_uint_value(bytes, offset, addl)
+        val encoded_value = result.0
+        val consumed = result.1
+        val actual_value = -1 - encoded_value
+        return (actual_value, consumed)
+
+    (0, 0)
+
+# ============================================================================
+# DECODING - STRING VALUES
+# ============================================================================
+
+fn cbor_decode_bytes(bytes: [i64], offset: i64) -> ([i64], i64):
+    """Decode byte string.
+    Returns (byte_array, bytes_consumed) or ([], 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_byte_string():
+        return ([], 0)
+
+    if addl == addl_indefinite():
+        # Indefinite-length byte string (RFC 7049 Section 2.2.1):
+        # Sequence of definite-length byte string chunks terminated by break (0xFF)
+        var result: [i64] = []
+        var pos = offset + 1  # Skip the initial indefinite-length header byte
+        while pos < bytes.len():
+            val current_byte = bytes[pos]
+            # Check for break code (0xFF)
+            if current_byte == 0xFF:
+                pos = pos + 1
+                break
+            # Decode the next definite-length chunk
+            val chunk = cbor_decode_bytes(bytes, pos)
+            val chunk_data = chunk.0
+            val chunk_consumed = chunk.1
+            if chunk_consumed == 0:
+                return ([], 0)  # Error decoding chunk
+            for b in chunk_data:
+                result = result.push(b)
+            pos = pos + chunk_consumed
+        val total_consumed = pos - offset
+        return (result, total_consumed)
+
+    val length_info = decode_uint_value(bytes, offset, addl)
+    val length = length_info.0
+    val header_size = length_info.1
+
+    if offset + header_size + length > bytes.len():
+        return ([], 0)
+
+    val data_start = offset + header_size
+    val data = bytes_slice(bytes, data_start, length)
+    val total_consumed = header_size + length
+    (data, total_consumed)
+
+fn cbor_decode_text(bytes: [i64], offset: i64) -> (text, i64):
+    """Decode text string.
+    Returns (text, bytes_consumed) or ("", 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_text_string():
+        return ("", 0)
+
+    if addl == addl_indefinite():
+        # Indefinite-length text string (RFC 7049 Section 2.2.1):
+        # Sequence of definite-length text string chunks terminated by break (0xFF)
+        var result = ""
+        var pos = offset + 1  # Skip the initial indefinite-length header byte
+        while pos < bytes.len():
+            val current_byte = bytes[pos]
+            # Check for break code (0xFF)
+            if current_byte == 0xFF:
+                pos = pos + 1
+                break
+            # Decode the next definite-length text chunk
+            val chunk = cbor_decode_text(bytes, pos)
+            val chunk_text = chunk.0
+            val chunk_consumed = chunk.1
+            if chunk_consumed == 0:
+                return ("", 0)  # Error decoding chunk
+            result = result + chunk_text
+            pos = pos + chunk_consumed
+        val total_consumed = pos - offset
+        return (result, total_consumed)
+
+    val length_info = decode_uint_value(bytes, offset, addl)
+    val length = length_info.0
+    val header_size = length_info.1
+
+    if offset + header_size + length > bytes.len():
+        return ("", 0)
+
+    val data_start = offset + header_size
+    val utf8_bytes = bytes_slice(bytes, data_start, length)
+    val text_value = bytes_to_text(utf8_bytes)
+    val total_consumed = header_size + length
+    (text_value, total_consumed)
+
+# ============================================================================
+# DECODING - ARRAY AND MAP
+# ============================================================================
+
+fn cbor_decode_array_header(bytes: [i64], offset: i64) -> (i64, i64, i64):
+    """Decode array header.
+    Returns (length, is_indefinite, bytes_consumed) or (0, 0, 0) on error.
+    is_indefinite: 1 if indefinite-length, 0 if definite-length."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_array():
+        return (0, 0, 0)
+
+    if addl == addl_indefinite():
+        return (0, 1, 1)
+
+    val length_info = decode_uint_value(bytes, offset, addl)
+    val length = length_info.0
+    val consumed = length_info.1
+    (length, 0, consumed)
+
+fn cbor_decode_map_header(bytes: [i64], offset: i64) -> (i64, i64, i64):
+    """Decode map header.
+    Returns (pair_count, is_indefinite, bytes_consumed) or (0, 0, 0) on error.
+    is_indefinite: 1 if indefinite-length, 0 if definite-length."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_map():
+        return (0, 0, 0)
+
+    if addl == addl_indefinite():
+        return (0, 1, 1)
+
+    val length_info = decode_uint_value(bytes, offset, addl)
+    val pair_count = length_info.0
+    val consumed = length_info.1
+    (pair_count, 0, consumed)
+
+# ============================================================================
+# DECODING - SIMPLE VALUES
+# ============================================================================
+
+fn cbor_decode_bool(bytes: [i64], offset: i64) -> (bool, i64):
+    """Decode boolean value.
+    Returns (value, bytes_consumed) or (false, 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_simple_float():
+        return (false, 0)
+
+    if addl == simple_false():
+        return (false, 1)
+
+    if addl == simple_true():
+        return (true, 1)
+
+    (false, 0)
+
+fn cbor_decode_null(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode null value.
+    Returns (1, bytes_consumed) if null, (0, 0) otherwise."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_simple_float():
+        return (0, 0)
+
+    if addl == simple_null():
+        return (1, 1)
+
+    (0, 0)
+
+fn cbor_decode_undefined(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode undefined value.
+    Returns (1, bytes_consumed) if undefined, (0, 0) otherwise."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_simple_float():
+        return (0, 0)
+
+    if addl == simple_undefined():
+        return (1, 1)
+
+    (0, 0)
+
+fn cbor_decode_simple_value(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode simple value (0..255).
+    Returns (value, bytes_consumed) or (0, 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_simple_float():
+        return (0, 0)
+
+    if addl <= 19:
+        return (addl, 1)
+
+    if addl == addl_uint8():
+        if offset + 1 < bytes.len():
+            val value = byte_at(bytes, offset + 1)
+            return (value, 2)
+        return (0, 0)
+
+    (0, 0)
+
+# ============================================================================
+# DECODING - TAGGED VALUES
+# ============================================================================
+
+fn cbor_decode_tag(bytes: [i64], offset: i64) -> (i64, i64):
+    """Decode tag number.
+    Returns (tag_number, bytes_consumed) or (0, 0) on error."""
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    if major != major_tag():
+        return (0, 0)
+
+    decode_uint_value(bytes, offset, addl)
+
+# ============================================================================
+# SIZE CALCULATION
+# ============================================================================
+
+fn cbor_item_size(bytes: [i64], offset: i64) -> i64:
+    """Calculate size in bytes of CBOR item at offset.
+    Returns total size including header and payload, or 0 on error."""
+    if offset >= bytes.len():
+        return 0
+
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+    val header_size = type_info.2
+
+    # Unsigned/negative integer - just header
+    if major == major_unsigned_int():
+        return header_size
+    if major == major_negative_int():
+        return header_size
+
+    # Byte/text string - header + length
+    if major == major_byte_string():
+        if addl == addl_indefinite():
+            return 0  # Not implemented
+        val length_info = decode_uint_value(bytes, offset, addl)
+        val length = length_info.0
+        return header_size + length
+
+    if major == major_text_string():
+        if addl == addl_indefinite():
+            return 0  # Not implemented
+        val length_info = decode_uint_value(bytes, offset, addl)
+        val length = length_info.0
+        return header_size + length
+
+    # Array - header + sum of item sizes
+    if major == major_array():
+        if addl == addl_indefinite():
+            return 0  # Not implemented
+        val length_info = decode_uint_value(bytes, offset, addl)
+        val count = length_info.0
+        var total_size = header_size
+        var item_offset = offset + header_size
+        var i = 0
+        while i < count:
+            val item_size = cbor_item_size(bytes, item_offset)
+            if item_size == 0:
+                return 0
+            total_size = total_size + item_size
+            item_offset = item_offset + item_size
+            i = i + 1
+        return total_size
+
+    # Map - header + sum of key-value pair sizes
+    if major == major_map():
+        if addl == addl_indefinite():
+            return 0  # Not implemented
+        val length_info = decode_uint_value(bytes, offset, addl)
+        val pair_count = length_info.0
+        var total_size = header_size
+        var item_offset = offset + header_size
+        var i = 0
+        while i < pair_count * 2:  # Each pair = key + value
+            val item_size = cbor_item_size(bytes, item_offset)
+            if item_size == 0:
+                return 0
+            total_size = total_size + item_size
+            item_offset = item_offset + item_size
+            i = i + 1
+        return total_size
+
+    # Tagged - header + value size
+    if major == major_tag():
+        val value_offset = offset + header_size
+        val value_size = cbor_item_size(bytes, value_offset)
+        if value_size == 0:
+            return 0
+        return header_size + value_size
+
+    # Simple/float - just header for simple, header + payload for floats
+    if major == major_simple_float():
+        if addl == simple_false():
+            return 1
+        if addl == simple_true():
+            return 1
+        if addl == simple_null():
+            return 1
+        if addl == simple_undefined():
+            return 1
+        if addl == simple_float16():
+            return 3
+        if addl == simple_float32():
+            return 5
+        if addl == simple_float64():
+            return 9
+        if addl == simple_break():
+            return 1
+        return header_size
+
+    0
+
+# ============================================================================
+# SEQUENCE HANDLING
+# ============================================================================
+
+fn cbor_sequence_count(bytes: [i64]) -> i64:
+    """Count number of CBOR items in sequence."""
+    var count = 0
+    var offset = 0
+    while offset < bytes.len():
+        val item_size = cbor_item_size(bytes, offset)
+        if item_size == 0:
+            break
+        count = count + 1
+        offset = offset + item_size
+    count
+
+fn cbor_sequence_item(bytes: [i64], index: i64) -> ([i64], i64):
+    """Extract item at index from CBOR sequence.
+    Returns (item_bytes, offset) or ([], 0) on error."""
+    var current_index = 0
+    var offset = 0
+    while offset < bytes.len():
+        val item_size = cbor_item_size(bytes, offset)
+        if item_size == 0:
+            return ([], 0)
+        if current_index == index:
+            val item_bytes = bytes_slice(bytes, offset, item_size)
+            return (item_bytes, offset)
+        offset = offset + item_size
+        current_index = current_index + 1
+    ([], 0)
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
+fn cbor_validate(bytes: [i64]) -> bool:
+    """Validate CBOR data structure.
+    Returns true if valid, false otherwise."""
+    if bytes.len() == 0:
+        return false
+    val size = cbor_item_size(bytes, 0)
+    size > 0
+
+fn cbor_validate_sequence(bytes: [i64]) -> bool:
+    """Validate CBOR sequence (concatenated items).
+    Returns true if all items are valid, false otherwise."""
+    if bytes.len() == 0:
+        return false
+    var offset = 0
+    while offset < bytes.len():
+        val item_size = cbor_item_size(bytes, offset)
+        if item_size == 0:
+            return false
+        offset = offset + item_size
+    true
+
+# ============================================================================
+# DETERMINISTIC ENCODING UTILITIES
+# ============================================================================
+
+fn cbor_is_canonical_int(value: i64, encoding: [i64]) -> bool:
+    """Check if integer encoding is canonical (minimal length)."""
+    if encoding.len() == 0:
+        return false
+
+    val initial_byte = encoding[0]
+    val major = get_major_type(initial_byte)
+    val addl = get_additional_info(initial_byte)
+
+    # Unsigned or negative int
+    if major != major_unsigned_int():
+        if major != major_negative_int():
+            return false
+
+    val abs_value = if value < 0: -1 - value else value
+
+    # Should be immediate (0..23)
+    if abs_value <= 23:
+        return addl == abs_value
+
+    # Should be uint8 (24..255)
+    if abs_value <= 255:
+        return addl == addl_uint8()
+
+    # Should be uint16 (256..65535)
+    if abs_value <= 65535:
+        return addl == addl_uint16()
+
+    # Should be uint32
+    if abs_value <= 4294967295:
+        return addl == addl_uint32()
+
+    # Should be uint64
+    addl == addl_uint64()
+
+# ============================================================================
+# DIAGNOSTIC NOTATION (HUMAN-READABLE REPRESENTATION)
+# ============================================================================
+
+fn cbor_to_diagnostic(bytes: [i64], offset: i64) -> (text, i64):
+    """Convert CBOR item to diagnostic notation text.
+    Returns (text, bytes_consumed) or ("", 0) on error."""
+    if offset >= bytes.len():
+        return ("", 0)
+
+    val type_info = cbor_decode_type(bytes, offset)
+    val major = type_info.0
+    val addl = type_info.1
+
+    # Unsigned integer
+    if major == major_unsigned_int():
+        val int_result = cbor_decode_unsigned(bytes, offset)
+        val value = int_result.0
+        val consumed = int_result.1
+        return ("{value}", consumed)
+
+    # Negative integer
+    if major == major_negative_int():
+        val int_result = cbor_decode_int(bytes, offset)
+        val value = int_result.0
+        val consumed = int_result.1
+        return ("{value}", consumed)
+
+    # Byte string
+    if major == major_byte_string():
+        val bytes_result = cbor_decode_bytes(bytes, offset)
+        val data = bytes_result.0
+        val consumed = bytes_result.1
+        return ("h'<bytes>'", consumed)
+
+    # Text string
+    if major == major_text_string():
+        val text_result = cbor_decode_text(bytes, offset)
+        val text = text_result.0
+        val consumed = text_result.1
+        return ("\"{text}\"", consumed)
+
+    # Simple values
+    if major == major_simple_float():
+        if addl == simple_false():
+            return ("false", 1)
+        if addl == simple_true():
+            return ("true", 1)
+        if addl == simple_null():
+            return ("null", 1)
+        if addl == simple_undefined():
+            return ("undefined", 1)
+        if addl == simple_break():
+            return ("break", 1)
+
+    ("?", 1)
+
+# ============================================================================
+# UTILITY - HEXDUMP
+# ============================================================================
+
+fn cbor_hexdump(bytes: [i64]) -> text:
+    """Create hexdump of CBOR bytes for debugging."""
+    var result = ""
+    var i = 0
+    while i < bytes.len():
+        val byte_val = bytes[i]
+        val high = byte_val / 16
+        val low = byte_val % 16
+        var high_char = "0"
+        var low_char = "0"
+
+        if high == 0: high_char = "0"
+        if high == 1: high_char = "1"
+        if high == 2: high_char = "2"
+        if high == 3: high_char = "3"
+        if high == 4: high_char = "4"
+        if high == 5: high_char = "5"
+        if high == 6: high_char = "6"
+        if high == 7: high_char = "7"
+        if high == 8: high_char = "8"
+        if high == 9: high_char = "9"
+        if high == 10: high_char = "a"
+        if high == 11: high_char = "b"
+        if high == 12: high_char = "c"
+        if high == 13: high_char = "d"
+        if high == 14: high_char = "e"
+        if high == 15: high_char = "f"
+
+        if low == 0: low_char = "0"
+        if low == 1: low_char = "1"
+        if low == 2: low_char = "2"
+        if low == 3: low_char = "3"
+        if low == 4: low_char = "4"
+        if low == 5: low_char = "5"
+        if low == 6: low_char = "6"
+        if low == 7: low_char = "7"
+        if low == 8: low_char = "8"
+        if low == 9: low_char = "9"
+        if low == 10: low_char = "a"
+        if low == 11: low_char = "b"
+        if low == 12: low_char = "c"
+        if low == 13: low_char = "d"
+        if low == 14: low_char = "e"
+        if low == 15: low_char = "f"
+
+        result = result + high_char + low_char
+        if i + 1 < bytes.len():
+            result = result + " "
+        i = i + 1
+    result
