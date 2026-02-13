@@ -1,0 +1,190 @@
+# Lazy-Loading MCP Bootstrap
+#
+# Performance targets:
+#   - Initialize: <200ms (metadata only, no handler imports)
+#   - Tools/list: <10ms (pre-computed schemas)
+#   - First tool in category: <200ms (load category + execute)
+#   - Cached tool call: <50ms
+#
+# Key optimizations:
+#   1. No handler imports at startup - register metadata only
+#   2. Lazy category loading - import on first use
+#   3. Handler caching - subsequent calls are fast
+#   4. Pre-computed schemas - static JSON strings
+
+use app.io.mod (get_args, exit)
+use app.mcp.session.{McpState}
+use mcp_lib.helpers.{LB, RB, get_clean_args, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_error_response}
+use mcp_lib.schema.{get_all_tool_schemas, init_core_schemas}
+use mcp_lib.lazy_registry.{init_registry, register_handler_metadata, get_tool_category, is_category_loaded, get_cached_handler, call_cached_handler, get_registry_stats}
+use mcp_lib.category_loaders.{load_category}
+use std.string.{NL}
+
+# Pre-computed initialize response
+const INIT_RESULT = """{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":true},\"resources":{"subscribe":true,"listChanged":true},"prompts":{"listChanged":true},"logging":{},"completions":{},"tasks":{}},"serverInfo":{"name":"simple-mcp-lazy","version":"2.1.0","instructions":"Lazy-loading MCP server with on-demand handler imports"}}"""
+
+fn main():
+    val args = get_clean_args(get_args())
+    if args.len() < 1 or args[0] != "server":
+        print_usage()
+        exit(1)
+    start_server(false)
+
+fn print_usage():
+    print("simple mcp server (lazy-loading)")
+
+fn start_server(debug_mode: bool):
+    # Initialize schemas and registry
+    init_core_schemas()
+    init_registry()
+    register_all_handlers()
+
+    var mcp_state = McpState.create()
+    var running = true
+
+    if debug_mode:
+        print("Lazy-loading MCP server started")
+        print(get_registry_stats())
+
+    while running:
+        val line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            val method = extract_json_string_v2(line, "method")
+            val id = extract_json_value(line, "id")
+            var response = ""
+
+            if method == "initialize":
+                val client_protocol = extract_nested_string(line, "params", "protocolVersion")
+                response = make_initialize_response(id, client_protocol)
+
+            elif method == "tools/list":
+                response = make_tools_list_response(id)
+
+            elif method == "tools/call":
+                val tool_name = extract_nested_string(line, "params", "name")
+                response = dispatch_tool_lazy(id, tool_name, line)
+
+            elif method == "resources/list":
+                response = make_resources_list_response(id)
+
+            elif method == "prompts/list":
+                response = make_prompts_list_response(id)
+
+            else:
+                response = make_error_response(id, -32601, "Method not found: " + method)
+
+            if response != "":
+                write_stdout_message(response)
+
+# Register all handler metadata (no imports yet!)
+fn register_all_handlers():
+    # Fileio category (4 tools + 2 aliases)
+    register_handler_metadata("simple_read", "fileio", "app.mcp.diag_read_tools", "handle_simple_read")
+    register_handler_metadata("read_code", "fileio", "app.mcp.diag_read_tools", "handle_simple_read")
+    register_handler_metadata("simple_check", "fileio", "app.mcp.diag_read_tools", "handle_simple_check")
+    register_handler_metadata("file_info", "fileio", "app.mcp.diag_read_tools", "handle_simple_check")
+    register_handler_metadata("simple_symbols", "fileio", "app.mcp.diag_read_tools", "handle_simple_symbols")
+    register_handler_metadata("simple_status", "fileio", "app.mcp.diag_read_tools", "handle_simple_status")
+
+    # Edit category (3 tools)
+    register_handler_metadata("simple_edit", "edit", "app.mcp.diag_edit_tools", "handle_simple_edit")
+    register_handler_metadata("simple_multi_edit", "edit", "app.mcp.diag_edit_tools", "handle_simple_multi_edit")
+    register_handler_metadata("simple_run", "edit", "app.mcp.diag_edit_tools", "handle_simple_run")
+
+    # VCS category (4 tools)
+    register_handler_metadata("simple_diff", "vcs", "app.mcp.diag_vcs_tools", "handle_simple_diff")
+    register_handler_metadata("simple_log", "vcs", "app.mcp.diag_vcs_tools", "handle_simple_log")
+    register_handler_metadata("simple_squash", "vcs", "app.mcp.diag_vcs_tools", "handle_simple_squash")
+    register_handler_metadata("simple_new", "vcs", "app.mcp.diag_vcs_tools", "handle_simple_new")
+
+    # Debug category (10 tools)
+    register_handler_metadata("debug_create_session", "debug", "app.mcp.debug_tools", "handle_debug_create_session")
+    register_handler_metadata("debug_list_sessions", "debug", "app.mcp.debug_tools", "handle_debug_list_sessions")
+    register_handler_metadata("debug_close_session", "debug", "app.mcp.debug_tools", "handle_debug_close_session")
+    register_handler_metadata("debug_set_breakpoint", "debug", "app.mcp.debug_tools", "handle_debug_set_breakpoint")
+    register_handler_metadata("debug_remove_breakpoint", "debug", "app.mcp.debug_tools", "handle_debug_remove_breakpoint")
+    register_handler_metadata("debug_continue", "debug", "app.mcp.debug_tools", "handle_debug_continue")
+    register_handler_metadata("debug_step", "debug", "app.mcp.debug_tools", "handle_debug_step")
+    register_handler_metadata("debug_get_variables", "debug", "app.mcp.debug_tools", "handle_debug_get_variables")
+    register_handler_metadata("debug_stack_trace", "debug", "app.mcp.debug_tools", "handle_debug_stack_trace")
+    register_handler_metadata("debug_evaluate", "debug", "app.mcp.debug_tools", "handle_debug_evaluate")
+
+    # Debug log category (6 tools)
+    register_handler_metadata("debug_log_enable", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_enable")
+    register_handler_metadata("debug_log_disable", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_disable")
+    register_handler_metadata("debug_log_clear", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_clear")
+    register_handler_metadata("debug_log_query", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_query")
+    register_handler_metadata("debug_log_tree", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_tree")
+    register_handler_metadata("debug_log_status", "debug_log", "app.mcp.debug_log_tools", "handle_debug_log_status")
+
+# Lazy dispatch - load category on first use
+fn dispatch_tool_lazy(id: text, tool_name: text, body: text) -> text:
+    # Check if handler is already cached
+    val cached = get_cached_handler(tool_name)
+    if cached == "found":
+        return call_cached_handler(tool_name, id, body)
+
+    # Handler not cached - load its category
+    val category = get_tool_category(tool_name)
+
+    if category == "unknown":
+        return make_error_response(id, -32601, "Unknown tool: " + tool_name)
+
+    # Load category if not loaded yet
+    if not is_category_loaded(category):
+        load_category(category)
+
+    # Try again after loading
+    val loaded = get_cached_handler(tool_name)
+    if loaded == "found":
+        return call_cached_handler(tool_name, id, body)
+
+    # Still not found - error
+    make_error_response(id, -32601, "Handler not found after loading: " + tool_name)
+
+# --- Message I/O (same as optimized) ---
+
+fn read_stdin_message() -> text:
+    var header = input()
+    if header == "":
+        return ""
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        val len_str = header.replace("Content-Length:", "").trim()
+        content_length = len_str.to_int() ?? 0
+
+    if content_length == 0:
+        return ""
+
+    input()  # blank line
+    val body = input()
+    body
+
+fn write_stdout_message(body: text):
+    var header = "Content-Length: " + body.len().to_string() + "\r{NL}\r{NL}"
+    print_raw(header)
+    print_raw(body)
+
+# --- Response builders (same as optimized) ---
+
+fn make_initialize_response(id: text, client_protocol: text) -> text:
+    val wrapped = jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", INIT_RESULT))
+    wrapped
+
+fn make_tools_list_response(id: text) -> text:
+    val tools = get_all_tool_schemas()
+    var result = LB() + jp("tools", tools) + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_resources_list_response(id: text) -> text:
+    val result = LB() + jp("resources", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
+
+fn make_prompts_list_response(id: text) -> text:
+    val result = LB() + jp("prompts", "[]") + RB()
+    jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
