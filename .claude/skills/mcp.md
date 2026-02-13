@@ -4,8 +4,9 @@
 
 The Simple MCP server provides LLM-friendly code representation via the Model Context Protocol. It enables automated code analysis, bug detection, and debugging workflows.
 
-**Location:** `src/app/mcp/main.spl`
-**Server Binary:** `bin/simple src/app/mcp/main.spl`
+**Location:** `src/app/mcp/main.spl` (optimized, 273 lines)
+**Server Binary:** `bin/simple_mcp_server_optimized`
+**Performance:** <800ms startup, <10ms tool list, <200ms first call
 
 ---
 
@@ -15,12 +16,15 @@ The Simple MCP server provides LLM-friendly code representation via the Model Co
 Start MCP server for interactive client connections:
 
 ```bash
+# Production (optimized, <800ms startup)
+bin/simple_mcp_server_optimized
+
+# Direct (for debugging)
 bin/simple src/app/mcp/main.spl server
-bin/simple src/app/mcp/main.spl server --debug
 ```
 
 **Use Cases:**
-- Claude Code integration
+- Claude Code integration (via .mcp.json)
 - IDE integrations
 - Automated tooling
 

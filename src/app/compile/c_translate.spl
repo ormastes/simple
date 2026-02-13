@@ -285,6 +285,11 @@ fn translate_method_expr(expr: text, types: text) -> text:
             return "{c_base}.len"
         return "{base}.len"
 
+    # .to_int() - convert string to integer
+    if expr.ends_with(".to_int()"):
+        val base = expr.substring(0, expr.len() - 9)
+        return "atoll({base})"
+
     # .pop()
     if expr.ends_with(".pop()"):
         val base = expr.substring(0, expr.len() - 6)
@@ -861,7 +866,7 @@ fn translate_print(arg: text, types: text) -> text:
         val has_concat = arg.contains("\" + ") or arg.contains(" + \"")
         if has_concat:
             val c_arg = translate_expr(arg, types)
-            return "printf(\"%s\{NL}\", {c_arg});"
+            return "printf(\"%s\\n\",{c_arg});"
         # Check for interpolation: {expr} inside the string
         if arg.contains("{"):
             # Extract inner text between quotes for interpolation
@@ -875,7 +880,7 @@ fn translate_print(arg: text, types: text) -> text:
         return "puts({arg});"
     # Print a variable
     if is_text_var(arg, types):
-        return "printf(\"%s\{NL}\", {arg});"
+        return "printf(\"%s\\n\",{arg});"
     # Translate expression and check if it's a string result
     val c_arg = translate_expr(arg, types)
     val c_is_str = c_arg.contains("simple_str_concat") or c_arg.contains("simple_substring")
@@ -883,8 +888,8 @@ fn translate_print(arg: text, types: text) -> text:
     val c_is_str3 = c_arg.contains("simple_char_at") or c_arg.contains("simple_string_join")
     val c_is_str4 = c_arg.contains("simple_dict_get") or c_arg.contains("simple_option_unwrap_str")
     if c_is_str or c_is_str2 or c_is_str3 or c_is_str4:
-        return "printf(\"%s\{NL}\", {c_arg});"
-    "printf(\"%lld\{NL}\", (long long){c_arg});"
+        return "printf(\"%s\\n\",{c_arg});"
+    "printf(\"%lld\\n\",(long long){c_arg});"
 
 # Translate array declaration
 # Returns "code|||;arr:name;" if a string array is declared
@@ -933,11 +938,22 @@ fn translate_array_decl(name: text, rhs: text, type_hint: text, types: text) -> 
                     sa_init = sa_init + " {{ {sa_elem}* _e = malloc(sizeof({sa_elem})); *_e = {sa_te}; simple_struct_push(&{name}, (void*)_e); }}"
                 return sa_init + "|||;struct_arr_var:{name}={sa_elem};"
 
-    # Default: integer array using SimpleIntArray
+    # Default: infer array type from first element
     val inner = rhs.substring(1, rhs.len() - 1).trim()
     if inner == "":
         return "SimpleIntArray {name} = simple_new_int_array();|||;int_arr:{name};"
     val elements = inner.split(",")
+    # Check first element to infer type
+    val first_elem = elements[0].trim()
+    val is_string_elem = first_elem.starts_with("\"")
+    if is_string_elem:
+        # String array
+        var str_init = "SimpleStringArray {name} = simple_new_string_array();"
+        for str_e in elements:
+            val trimmed_str = str_e.trim()
+            str_init = str_init + " simple_string_push(&{name}, {trimmed_str});"
+        return str_init + "|||;arr:{name};"
+    # Integer array (default)
     var init_code = "SimpleIntArray {name} = simple_new_int_array();"
     for elem in elements:
         val trimmed_elem = elem.trim()
@@ -1021,6 +1037,14 @@ fn translate_var_decl(stmt: text, types: text) -> text:
         if is_str_arr_arr_var(rhs_base, types):
             val c_rhs_idx = translate_expr(rhs, types)
             return "SimpleStringArray {name} = {c_rhs_idx};|||;arr:{name};"
+        # Handle simple string array indexing: val x = str_arr[i] -> const char*
+        if is_string_array_var(rhs_base, types):
+            val c_rhs_idx = translate_expr(rhs, types)
+            return "const char* {name} = {c_rhs_idx};|||;text:{name};"
+        # Handle simple int array indexing: val x = int_arr[i] -> long long
+        if is_int_array_var(rhs_base, types):
+            val c_rhs_idx = translate_expr(rhs, types)
+            return "long long {name} = {c_rhs_idx};"
 
     # Handle Some/None -> SimpleOption
     if rhs.starts_with("Some(") or rhs == "None" or rhs == "nil":
@@ -1367,8 +1391,8 @@ fn translate_statement(trimmed: text, types: text) -> text:
                 # Reuse print interpolation logic but redirect to stderr
                 val print_code = translate_interpolated_print(inner, types)
                 return print_code.replace("printf(", "fprintf(stderr, ")
-            return "fprintf(stderr, \"{inner}\{NL}\");"
-        return "fprintf(stderr, \"%s\{NL}\", {translate_expr(rest, types)});"
+            return "fprintf(stderr, \"{inner}\\n\");"
+        return "fprintf(stderr, \"%s\\n\",{translate_expr(rest, types)});"
 
     # Tuple destructuring: val (a, b) = expr
     if trimmed.starts_with("val (") or trimmed.starts_with("var ("):
@@ -1844,7 +1868,7 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
         else:
             deduped_lines.push(dl)
 
-    var result = "{sig} {{NL}"
+    var result = "{sig} {\n"
     for line_idx in range(0, deduped_lines.len()):
         val body_line = deduped_lines[line_idx]
         if line_idx == last_stmt_idx:
@@ -1859,7 +1883,7 @@ fn build_function(name: text, sig: text, body_lines: [text]) -> text:
                 if stmt.ends_with(";"):
                     stmt = stmt.substring(0, stmt.len() - 1)
                 val indent = body_line.substring(0, body_line.len() - bl_trimmed.len())
-                result = result + "{indent}return {stmt};{NL}"
+                result = result + "{indent}return {stmt};\n"
                 continue
         result = result + body_line + NL
     result = result + "}"

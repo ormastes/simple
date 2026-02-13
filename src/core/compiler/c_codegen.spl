@@ -47,6 +47,7 @@ use core.types.{type_tag_to_c, type_tag_name}
 use core.types.{named_type_register, named_type_update, named_type_find, named_type_name, named_type_fields, named_type_field_type_tags}
 # named_type_set_enum, named_type_check_enum — not yet in types.spl
 use core.types.{fn_sig_register, fn_sig_find, fn_sig_ret_type}
+use core.types.{fn_sig_param_count, fn_sig_get_param_names, fn_sig_get_param_types}
 use core.types.{int_to_str}
 
 # ===== Output Buffer =====
@@ -1888,6 +1889,36 @@ fn cg_emit_forward_decls():
             ext_line = ext_line + params_c
             ext_line = ext_line + ");"
             cg_emit_line(ext_line)
+
+        if tag == DECL_USE:
+            # Emit forward declarations for imported functions
+            # In whole-program compilation, imported functions are in the same C++ file
+            # but may be defined later, so we need forward declarations
+            val imports = decl_get_imports(decl_idx)
+            for j in range(0, imports.len()):
+                val import_name = imports[j]
+                val sig_id = fn_sig_find(import_name)
+                if sig_id >= 0:
+                    # Function signature is registered, emit proper forward declaration
+                    val ret_type = fn_sig_ret_type(sig_id)
+                    val ret_c = type_tag_to_c(ret_type)
+                    val pnames = fn_sig_get_param_names(sig_id)
+                    val ptypes = fn_sig_get_param_types(sig_id)
+                    var params_c: text = ""
+                    for k in range(0, pnames.len()):
+                        if k > 0:
+                            params_c = params_c + ", "
+                        val p_type_c: text = type_tag_to_c(ptypes[k])
+                        val p_name: text = pnames[k]
+                        params_c = params_c + p_type_c
+                        params_c = params_c + " "
+                        params_c = params_c + p_name
+                    var use_line: text = ret_c + " "
+                    use_line = use_line + import_name
+                    use_line = use_line + "("
+                    use_line = use_line + params_c
+                    use_line = use_line + ");"
+                    cg_emit_line(use_line)
 
         if tag == DECL_FN:
             val name = decl_get_name(decl_idx)
