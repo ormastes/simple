@@ -10,7 +10,7 @@
 #   simple -c "code"    - Run code string
 
 use app.cli_util (get_cli_args)
-use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, shell, file_size_raw,
+use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, env_set, shell, file_size_raw,
     cli_file_exists, cli_read_file,
     cli_run_code, cli_run_file, cli_watch_file, cli_run_repl, cli_run_tests,
     cli_run_lint, cli_run_fmt, cli_run_fix, cli_run_verify,
@@ -21,6 +21,7 @@ use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, sh
     cli_compile, cli_handle_web, cli_handle_diagram, cli_handle_run,
     fault_set_stack_overflow_detection, fault_set_max_recursion_depth,
     fault_set_timeout, fault_set_execution_limit)
+use app.io.jit_ffi (jit_available)
 use app.build.cli_entry (handle_build)
 use app.cli.check (run_check)  # New type checking implementation
 use app.stats.dynamic (run_stats)
@@ -341,6 +342,15 @@ fn apply_fault_detection(flags: GlobalFlags):
     if flags.execution_limit > 0:
         fault_set_execution_limit(flags.execution_limit)
 
+fn apply_jit_env_vars(flags: GlobalFlags):
+    if flags.no_jit:
+        env_set("SIMPLE_NO_JIT", "1")
+    if flags.jit_threshold != 10:
+        val t = "{flags.jit_threshold}"
+        env_set("SIMPLE_JIT_THRESHOLD", t)
+    if flags.backend != "auto":
+        env_set("SIMPLE_JIT_BACKEND", flags.backend)
+
 fn filter_internal_flags(args: [str]) -> [str]:
     var result = []
     var skip_next = false
@@ -509,11 +519,22 @@ fn main() -> i64:
 
     val flags = parse_global_flags(args)
     apply_fault_detection(flags)
+    apply_jit_env_vars(flags)
 
     # Load user-level DL config (~/.simple/dl.config.sdn) once at startup
     load_user_config()
 
     val filtered_args = filter_internal_flags(args)
+
+    # If user explicitly requested a JIT backend but native JIT is absent, fail fast
+    if flags.backend != "auto" and not flags.force_interpret:
+        if not jit_native_available():
+            print_error("requested JIT backend '{flags.backend}' but runtime has no native exec_manager support")
+            return 1
+    # If backend is auto and only soft JIT is present, inform user once.
+    if flags.backend == "auto" and not flags.force_interpret:
+        if not jit_native_available() and jit_available():
+            print "[jit] Using soft exec_manager fallback (interpreted); native JIT not present."
 
     if filtered_args.len() == 0:
         return cli_run_repl(flags.gc_log, flags.gc_off)

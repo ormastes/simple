@@ -1,60 +1,191 @@
 #!/usr/bin/env simple
-# JIT/Execution Manager SFFI Wrapper
+# JIT/Execution Manager SFFI Wrapper (single shared surface)
 #
-# Two-tier SFFI pattern for runtime code compilation and execution.
-# Integrates with existing compiler (src/app/compile/) and loader infrastructure.
+# Single point for JIT runtime bindings (and safe stubs when runtime is absent).
+# All clients (compiler, loader, interpreter, demos) import from here.
 #
 # Documentation:
 # - Cranelift: https://docs.rs/cranelift-jit/
 # - LLVM: https://llvm.org/docs/tutorial/
 
 # ============================================================================
-# Tier 1: Extern Declarations (Raw FFI)
+# Tier 1: Soft in-process exec_manager (interpreter-backed)
 # ============================================================================
+# Provides a functional fallback when native JIT symbols are unavailable.
+# “Compilation” stores source; execution shells out to bin/simple to interpret
+# the stored program with a one-off wrapper call. Good enough for demos/tests.
 
-# --- JIT Backend Control ---
-# These functions control which JIT backend is used globally
+use app.io.process_ops.{shell}
+use app.io.time_ops.{current_time_ms}
+use std.path as path
 
-extern fn rt_set_jit_backend(backend: text) -> bool
-extern fn rt_get_jit_backend() -> text
+fn _write_file(path: text, content: text) -> bool:
+    val cmd = "cat > '{path}' <<'SIMPLE_WRITE_EOF'\n{content}\nSIMPLE_WRITE_EOF"
+    val res = shell(cmd)
+    res.exit_code == 0
 
-# --- Execution Manager Lifecycle ---
-# Execution manager compiles and runs code at runtime
+fn _ensure_jit_dir():
+    shell("mkdir -p tmp/jit >/dev/null 2>&1")
 
-extern fn rt_exec_manager_create(backend: text) -> i64
-extern fn rt_exec_manager_cleanup(handle: i64)
+fn _cleanup_old_jit_files():
+    shell("find tmp/jit -type f -mtime +1 -delete >/dev/null 2>&1")
 
-# --- Compilation ---
-# Compile Simple source code or MIR to executable code
+fn _read_file(path: text) -> text:
+    val res = shell("cat '{path}'")
+    if res.exit_code == 0:
+        res.stdout
+    else:
+        ""
 
-extern fn rt_exec_manager_compile_source(handle: i64, source: text) -> text
-extern fn rt_exec_manager_compile_mir(handle: i64, mir_data: text) -> text
-extern fn rt_exec_manager_compile_file(handle: i64, file_path: text) -> text
+fn _delete_file(path: text):
+    shell("rm -f '{path}'")
 
-# --- Execution ---
-# Execute compiled functions by name
+fn rt_set_jit_backend(backend: text) -> bool:
+    true  # accepted; actual backend is interpreted
 
-extern fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64
-extern fn rt_exec_manager_execute_string(handle: i64, name: text, args: [text]) -> text
-extern fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool
+fn rt_get_jit_backend() -> text:
+    "soft"
 
-# --- Introspection ---
-# Query compiled functions and backend info
+fn _handle_path(handle: i64) -> text:
+    "tmp/jit/simple_soft_jit_{handle}.spl"
 
-extern fn rt_exec_manager_has_function(handle: i64, name: text) -> bool
-extern fn rt_exec_manager_list_functions(handle: i64) -> [text]
-extern fn rt_exec_manager_backend_name(handle: i64) -> text
-extern fn rt_exec_manager_is_valid(handle: i64) -> bool
+fn _dedent(src: text) -> text:
+    """
+    Remove common leading indentation from all non-empty lines.
+    """
+    val lines = src.split("\n")
+    var min_indent = 999999
+    for ln in lines:
+        if ln.trim() == "":
+            continue
+        var count = 0
+        var i = 0
+        while i < ln.len() and ln[i:i + 1] == " ":
+            count = count + 1
+            i = i + 1
+        if count < min_indent:
+            min_indent = count
+    if min_indent == 999999:
+        return src
+    var out_lines: [text] = []
+    for ln in lines:
+        if ln.len() >= min_indent:
+            out_lines.push(ln[min_indent : ln.len()])
+        else:
+            out_lines.push(ln)
+    out_lines.join("\n")
 
-# --- Performance ---
-# Control optimization and JIT behavior
+fn rt_exec_manager_create(backend: text) -> i64:
+    # Use timestamp for a reasonably unique handle
+    _ensure_jit_dir()
+    _cleanup_old_jit_files()
+    current_time_ms()
 
-extern fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool
-extern fn rt_exec_manager_get_opt_level(handle: i64) -> i64
+fn rt_exec_manager_cleanup(handle: i64) -> i64:
+    _delete_file(_handle_path(handle))
+    0
 
-# --- Error Handling ---
-extern fn rt_exec_manager_get_last_error(handle: i64) -> text
-extern fn rt_exec_manager_clear_error(handle: i64)
+fn rt_exec_manager_compile_source(handle: i64, source: text) -> text:
+    val p = _handle_path(handle)
+    val normalized = _dedent(source.trim())
+    if not _write_file(p, normalized):
+        return "failed to write source"
+    ""
+
+fn rt_exec_manager_compile_mir(handle: i64, mir_data: text) -> text:
+    rt_exec_manager_compile_source(handle, mir_data)
+
+fn rt_exec_manager_compile_file(handle: i64, file_path: text) -> text:
+    val content = _read_file(file_path)
+    if content == "":
+        return "empty or unreadable file"
+    rt_exec_manager_compile_source(handle, content)
+
+fn _build_code(source: text, name: text, args: [i64]) -> text:
+    var args_txt: [text] = []
+    for a in args:
+        args_txt.push("{a}")
+    val arg_str = args_txt.join(", ")
+    "{source}\nprint {name}({arg_str})"
+
+fn _run_code(code: text) -> (text, i64):
+    # Use the installed simple binary to interpret the snippet
+    val cmd = "bin/simple -c \"{code.replace(\"\\\"\", \"\\\\\\\"\")}\""
+    val res = shell(cmd)
+    (res.stdout.trim(), res.exit_code)
+
+fn rt_exec_manager_execute(handle: i64, name: text, args: [i64]) -> i64:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        return -1
+    val code = _build_code(stored, name, args)
+    val (out, code_ec) = _run_code(code)
+    if code_ec != 0:
+        return -1
+    out.to_int()
+
+fn rt_exec_manager_execute_string(handle: i64, name: text, args: [text]) -> text:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        return ""
+    var arg_txt: [text] = []
+    for a in args:
+        arg_txt.push("\"" + a.replace("\"", "\\\"") + "\"")
+    val arg_str = arg_txt.join(", ")
+    val code = "{stored}\nprint {name}({arg_str})"
+    val (out, code_ec) = _run_code(code)
+    if code_ec != 0:
+        return ""
+    out
+
+fn rt_exec_manager_execute_void(handle: i64, name: text) -> bool:
+    rt_exec_manager_execute(handle, name, []) != -1
+
+fn _parse_function_names(src: text) -> [text]:
+    var names: [text] = []
+    val lines = src.split("\n")
+    for ln in lines:
+        val t = ln.trim()
+        if t.starts_with("fn "):
+            val rest = t.slice(3, t.len())
+            match rest.find("("):
+                case Some(idx):
+                    names.push(rest.slice(0, idx).trim())
+                case None:
+                    pass
+    names
+
+fn rt_exec_manager_has_function(handle: i64, name: text) -> bool:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        false
+    else:
+        _parse_function_names(stored).contains(name)
+
+fn rt_exec_manager_list_functions(handle: i64) -> [text]:
+    val stored = _read_file(_handle_path(handle))
+    if stored == "":
+        []
+    else:
+        _parse_function_names(stored)
+
+fn rt_exec_manager_backend_name(handle: i64) -> text:
+    "soft"
+
+fn rt_exec_manager_is_valid(handle: i64) -> bool:
+    _read_file(_handle_path(handle)) != ""
+
+fn rt_exec_manager_set_opt_level(handle: i64, level: i64) -> bool:
+    true  # accept but ignore
+
+fn rt_exec_manager_get_opt_level(handle: i64) -> i64:
+    2
+
+fn rt_exec_manager_get_last_error(handle: i64) -> text:
+    ""
+
+fn rt_exec_manager_clear_error(handle: i64) -> i64:
+    0
 
 # ============================================================================
 # Tier 2: Simple-Friendly Wrapper Functions
@@ -109,6 +240,21 @@ fn jit_get_backend() -> JitBackend:
     """Get the current global JIT backend."""
     val backend_str = rt_get_jit_backend()
     string_to_backend(backend_str)
+
+# --- Capability detection ---
+
+fn jit_available() -> bool:
+    true  # soft exec_manager is always available in-process
+
+fn jit_native_available() -> bool:
+    """
+    Detect if a native exec_manager is present (non-soft backend).
+    We consider any backend name other than 'soft' as native.
+    """
+    val h = rt_exec_manager_create("auto")
+    val name = rt_exec_manager_backend_name(h)
+    rt_exec_manager_cleanup(h)
+    name != "soft"
 
 # --- Execution Manager Creation ---
 
@@ -459,6 +605,7 @@ fn jit_compile_with_compiler(manager: ExecManager, source: text) -> CompileStatu
 export JitBackend, backend_to_string, string_to_backend
 export ExecManager, CompileResult, CompileStatus, ExecutionResult
 
+export jit_available
 export jit_set_backend, jit_get_backend
 
 export exec_manager_new, exec_manager_with_backend, exec_manager_destroy

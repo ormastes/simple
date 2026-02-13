@@ -1,0 +1,179 @@
+# Template Engine Renderer Module
+# Template rendering and execution
+
+import template.types
+import template.parse
+import template.utilities
+import template.context
+
+# ============================================================================
+# RENDERER
+# ============================================================================
+
+fn render_nodes(nodes: [[text]], ctx: [[text]], registry: [[text]]) -> text:
+    var result = ""
+    var i = 0
+
+    while i < nodes.len():
+        val node = nodes[i]
+        val ntype = node_type(node)
+
+        if ntype == "TEXT":
+            result = result + node_data1(node)
+            i = i + 1
+        else:
+            if ntype == "VAR":
+                val var_name = node_data1(node)
+                val value = resolve_var(ctx, var_name)
+                result = result + html_escape(value)
+                i = i + 1
+            else:
+                if ntype == "RAW_VAR":
+                    val var_name = node_data1(node)
+                    val value = resolve_var(ctx, var_name)
+                    result = result + value
+                    i = i + 1
+                else:
+                    if ntype == "PARTIAL":
+                        val partial_name = node_data1(node)
+                        val partial_opt = reg_get(registry, partial_name)
+                        if partial_opt != nil:
+                            val p_nodes = compile_template(partial_opt)
+                            result = result + render_nodes(p_nodes, ctx, registry)
+                        i = i + 1
+                    else:
+                        if ntype == "BLOCK":
+                            val block_type = node_data1(node)
+                            val block_arg = node_data2(node)
+
+                            if block_type == "if":
+                                # Find matching {{/if}}
+                                var j = i + 1
+                                var depth = 1
+                                var if_body: [[text]] = []
+                                var else_body: [[text]] = []
+                                var in_else = false
+
+                                while j < nodes.len() and depth > 0:
+                                    val n = nodes[j]
+                                    val nt = node_type(n)
+
+                                    if nt == "BLOCK":
+                                        if node_data1(n) == "if":
+                                            depth = depth + 1
+                                        if node_data1(n) == "else":
+                                            if depth == 1:
+                                                in_else = true
+                                                j = j + 1
+                                    if nt == "END_BLOCK":
+                                        if node_data1(n) == "if":
+                                            depth = depth - 1
+                                            if depth == 0:
+                                                j = nodes.len()
+
+                                    if depth > 0:
+                                        if in_else:
+                                            else_body.push(n)
+                                        else:
+                                            if_body.push(n)
+                                    j = j + 1
+
+                                # Evaluate condition
+                                val cond_val = resolve_var(ctx, block_arg)
+                                if is_truthy(cond_val):
+                                    result = result + render_nodes(if_body, ctx, registry)
+                                else:
+                                    result = result + render_nodes(else_body, ctx, registry)
+
+                                i = j
+                            else:
+                                if block_type == "each":
+                                    # Find matching {{/each}}
+                                    var j = i + 1
+                                    var depth = 1
+                                    var loop_body: [[text]] = []
+
+                                    while j < nodes.len() and depth > 0:
+                                        val n = nodes[j]
+                                        val nt = node_type(n)
+
+                                        if nt == "BLOCK":
+                                            if node_data1(n) == "each":
+                                                depth = depth + 1
+                                        if nt == "END_BLOCK":
+                                            if node_data1(n) == "each":
+                                                depth = depth - 1
+                                                if depth == 0:
+                                                    j = nodes.len()
+
+                                        if depth > 0:
+                                            loop_body.push(n)
+                                        j = j + 1
+
+                                    # Get array from context
+                                    # For now, simple implementation - assume comma-separated values
+                                    val items_str = resolve_var(ctx, block_arg)
+                                    val items = str_split(items_str, ",")
+
+                                    var idx = 0
+                                    for item in items:
+                                        var loop_ctx = ctx_clone(ctx)
+                                        loop_ctx = ctx_set(loop_ctx, "this", str_trim(item))
+                                        loop_ctx = ctx_set(loop_ctx, "@index", int_to_str(idx))
+                                        loop_ctx = ctx_set(loop_ctx, "@first", if idx == 0: "true" else: "false")
+                                        loop_ctx = ctx_set(loop_ctx, "@last", if idx == items.len() - 1: "true" else: "false")
+                                        loop_ctx = ctx_set(loop_ctx, "@key", int_to_str(idx))
+
+                                        result = result + render_nodes(loop_body, loop_ctx, registry)
+                                        idx = idx + 1
+
+                                    i = j
+                                else:
+                                    if block_type == "with":
+                                        # Find matching {{/with}}
+                                        var j = i + 1
+                                        var depth = 1
+                                        var with_body: [[text]] = []
+
+                                        while j < nodes.len() and depth > 0:
+                                            val n = nodes[j]
+                                            val nt = node_type(n)
+
+                                            if nt == "BLOCK":
+                                                if node_data1(n) == "with":
+                                                    depth = depth + 1
+                                            if nt == "END_BLOCK":
+                                                if node_data1(n) == "with":
+                                                    depth = depth - 1
+                                                    if depth == 0:
+                                                        j = nodes.len()
+
+                                            if depth > 0:
+                                                with_body.push(n)
+                                            j = j + 1
+
+                                        # Create new context with variable
+                                        var with_ctx = ctx_clone(ctx)
+                                        val with_val = resolve_var(ctx, block_arg)
+                                        with_ctx = ctx_set(with_ctx, "this", with_val)
+
+                                        result = result + render_nodes(with_body, with_ctx, registry)
+                                        i = j
+                                    else:
+                                        # Unknown block type
+                                        i = i + 1
+                        else:
+                            # Unknown node type or END_BLOCK
+                            i = i + 1
+
+    result
+
+fn render_template(template: text, ctx: [[text]], registry: [[text]]) -> text:
+    val nodes = compile_template(template)
+    render_nodes(nodes, ctx, registry)
+
+# ============================================================================
+# EXPORTS
+# ============================================================================
+
+export render_nodes, render_template

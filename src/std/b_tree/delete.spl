@@ -1,0 +1,539 @@
+# B-Tree Deletion Operations
+#
+# Purpose: Delete keys from B-tree while maintaining properties
+#
+# Contains:
+# - Predecessor/successor finding
+# - Key borrowing from siblings
+# - Node merging
+# - Main deletion API
+
+mod b_tree.types
+mod b_tree.search
+
+# ============================================================================
+# Deletion Helper Functions
+# ============================================================================
+
+# Get predecessor key (largest key in left subtree)
+fn get_predecessor(node):
+    val is_leaf = node_is_leaf(node)
+    if is_leaf:
+        val keys = node_keys(node)
+        val n = node_n(node)
+        val last_idx = n - 1
+        keys.last_idx
+    else:
+        val children = node_children(node)
+        val n = node_n(node)
+        val last_child = children.n
+        get_predecessor(last_child)
+
+# Get successor key (smallest key in right subtree)
+fn get_successor(node):
+    val is_leaf = node_is_leaf(node)
+    if is_leaf:
+        val keys = node_keys(node)
+        keys.0
+    else:
+        val children = node_children(node)
+        val first_child = children.0
+        get_successor(first_child)
+
+# Remove key at index from leaf node
+fn remove_from_leaf(node, idx):
+    val keys = node_keys(node)
+    val n = node_n(node)
+
+    var new_keys = []
+    for i in 0..idx:
+        val k = keys.i
+        new_keys = list_append(new_keys, k)
+    for i in (idx + 1)..n:
+        val k = keys.i
+        new_keys = list_append(new_keys, k)
+
+    var new_node = node
+    new_node = node_set_keys(new_node, new_keys)
+    new_node = node_set_n(new_node, n - 1)
+    new_node
+
+# Borrow a key from previous sibling
+fn borrow_from_prev(parent, idx):
+    val children = node_children(parent)
+    val child = children.idx
+    val sibling = children.(idx - 1)
+
+    val parent_keys = node_keys(parent)
+    val parent_n = node_n(parent)
+
+    val child_keys = node_keys(child)
+    val child_children = node_children(child)
+    val child_n = node_n(child)
+    val child_is_leaf = node_is_leaf(child)
+
+    val sibling_keys = node_keys(sibling)
+    val sibling_children = node_children(sibling)
+    val sibling_n = node_n(sibling)
+
+    # Move parent key down to child
+    val parent_key = parent_keys.(idx - 1)
+    var new_child_keys = []
+    new_child_keys = list_append(new_child_keys, parent_key)
+    for i in 0..child_n:
+        val k = child_keys.i
+        new_child_keys = list_append(new_child_keys, k)
+
+    # Move sibling's last child to child's first child
+    var new_child_children = []
+    val is_not_leaf = !child_is_leaf
+    if is_not_leaf:
+        val last_child = sibling_children.(sibling_n)
+        new_child_children = list_append(new_child_children, last_child)
+        for i in 0..(child_n + 1):
+            val c = child_children.i
+            new_child_children = list_append(new_child_children, c)
+
+    # Update child
+    var new_child = child
+    new_child = node_set_keys(new_child, new_child_keys)
+    new_child = node_set_children(new_child, new_child_children)
+    new_child = node_set_n(new_child, child_n + 1)
+
+    # Move sibling's last key up to parent
+    val last_sibling_key = sibling_keys.(sibling_n - 1)
+    var new_parent_keys = []
+    for i in 0..(idx - 1):
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+    new_parent_keys = list_append(new_parent_keys, last_sibling_key)
+    for i in idx..parent_n:
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+
+    # Remove last key from sibling
+    var new_sibling_keys = []
+    for i in 0..(sibling_n - 1):
+        val k = sibling_keys.i
+        new_sibling_keys = list_append(new_sibling_keys, k)
+
+    var new_sibling_children = sibling_children
+    if is_not_leaf:
+        new_sibling_children = []
+        for i in 0..sibling_n:
+            val c = sibling_children.i
+            new_sibling_children = list_append(new_sibling_children, c)
+
+    var new_sibling = sibling
+    new_sibling = node_set_keys(new_sibling, new_sibling_keys)
+    new_sibling = node_set_children(new_sibling, new_sibling_children)
+    new_sibling = node_set_n(new_sibling, sibling_n - 1)
+
+    # Update parent
+    var new_parent = parent
+    new_parent = node_set_keys(new_parent, new_parent_keys)
+
+    var new_parent_children = []
+    for i in 0..(idx - 1):
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+    new_parent_children = list_append(new_parent_children, new_sibling)
+    new_parent_children = list_append(new_parent_children, new_child)
+    for i in (idx + 1)..(parent_n + 1):
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+
+    new_parent = node_set_children(new_parent, new_parent_children)
+    new_parent
+
+# Borrow a key from next sibling
+fn borrow_from_next(parent, idx):
+    val children = node_children(parent)
+    val child = children.idx
+    val sibling = children.(idx + 1)
+
+    val parent_keys = node_keys(parent)
+    val parent_n = node_n(parent)
+
+    val child_keys = node_keys(child)
+    val child_children = node_children(child)
+    val child_n = node_n(child)
+    val child_is_leaf = node_is_leaf(child)
+
+    val sibling_keys = node_keys(sibling)
+    val sibling_children = node_children(sibling)
+    val sibling_n = node_n(sibling)
+
+    # Move parent key down to child
+    val parent_key = parent_keys.idx
+    var new_child_keys = []
+    for i in 0..child_n:
+        val k = child_keys.i
+        new_child_keys = list_append(new_child_keys, k)
+    new_child_keys = list_append(new_child_keys, parent_key)
+
+    # Move sibling's first child to child's last child
+    var new_child_children = child_children
+    val is_not_leaf = !child_is_leaf
+    if is_not_leaf:
+        new_child_children = []
+        for i in 0..(child_n + 1):
+            val c = child_children.i
+            new_child_children = list_append(new_child_children, c)
+        val first_child = sibling_children.0
+        new_child_children = list_append(new_child_children, first_child)
+
+    # Update child
+    var new_child = child
+    new_child = node_set_keys(new_child, new_child_keys)
+    new_child = node_set_children(new_child, new_child_children)
+    new_child = node_set_n(new_child, child_n + 1)
+
+    # Move sibling's first key up to parent
+    val first_sibling_key = sibling_keys.0
+    var new_parent_keys = []
+    for i in 0..idx:
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+    new_parent_keys = list_append(new_parent_keys, first_sibling_key)
+    for i in (idx + 1)..parent_n:
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+
+    # Remove first key from sibling
+    var new_sibling_keys = []
+    for i in 1..sibling_n:
+        val k = sibling_keys.i
+        new_sibling_keys = list_append(new_sibling_keys, k)
+
+    var new_sibling_children = []
+    if is_not_leaf:
+        for i in 1..(sibling_n + 1):
+            val c = sibling_children.i
+            new_sibling_children = list_append(new_sibling_children, c)
+
+    var new_sibling = sibling
+    new_sibling = node_set_keys(new_sibling, new_sibling_keys)
+    new_sibling = node_set_children(new_sibling, new_sibling_children)
+    new_sibling = node_set_n(new_sibling, sibling_n - 1)
+
+    # Update parent
+    var new_parent = parent
+    new_parent = node_set_keys(new_parent, new_parent_keys)
+
+    var new_parent_children = []
+    for i in 0..idx:
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+    new_parent_children = list_append(new_parent_children, new_child)
+    new_parent_children = list_append(new_parent_children, new_sibling)
+    for i in (idx + 2)..(parent_n + 1):
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+
+    new_parent = node_set_children(new_parent, new_parent_children)
+    new_parent
+
+# Merge child with its sibling
+fn merge_nodes(parent, idx):
+    val children = node_children(parent)
+    val child = children.idx
+    val sibling = children.(idx + 1)
+    val t = node_t(child)
+
+    val parent_keys = node_keys(parent)
+    val parent_n = node_n(parent)
+
+    val child_keys = node_keys(child)
+    val child_children = node_children(child)
+    val child_n = node_n(child)
+    val child_is_leaf = node_is_leaf(child)
+
+    val sibling_keys = node_keys(sibling)
+    val sibling_children = node_children(sibling)
+    val sibling_n = node_n(sibling)
+
+    # Pull parent key down
+    val parent_key = parent_keys.idx
+
+    # Merge: child + parent_key + sibling
+    var merged_keys = []
+    for i in 0..child_n:
+        val k = child_keys.i
+        merged_keys = list_append(merged_keys, k)
+    merged_keys = list_append(merged_keys, parent_key)
+    for i in 0..sibling_n:
+        val k = sibling_keys.i
+        merged_keys = list_append(merged_keys, k)
+
+    var merged_children = []
+    val is_not_leaf = !child_is_leaf
+    if is_not_leaf:
+        for i in 0..(child_n + 1):
+            val c = child_children.i
+            merged_children = list_append(merged_children, c)
+        for i in 0..(sibling_n + 1):
+            val c = sibling_children.i
+            merged_children = list_append(merged_children, c)
+
+    var merged = child
+    merged = node_set_keys(merged, merged_keys)
+    merged = node_set_children(merged, merged_children)
+    merged = node_set_n(merged, child_n + 1 + sibling_n)
+
+    # Remove key from parent
+    var new_parent_keys = []
+    for i in 0..idx:
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+    for i in (idx + 1)..parent_n:
+        val k = parent_keys.i
+        new_parent_keys = list_append(new_parent_keys, k)
+
+    # Remove sibling from parent's children
+    var new_parent_children = []
+    for i in 0..idx:
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+    new_parent_children = list_append(new_parent_children, merged)
+    for i in (idx + 2)..(parent_n + 1):
+        val c = children.i
+        new_parent_children = list_append(new_parent_children, c)
+
+    var new_parent = parent
+    new_parent = node_set_keys(new_parent, new_parent_keys)
+    new_parent = node_set_children(new_parent, new_parent_children)
+    new_parent = node_set_n(new_parent, parent_n - 1)
+    new_parent
+
+# Fill child if it has minimum keys
+fn fill_child(parent, idx):
+    val children = node_children(parent)
+    val parent_n = node_n(parent)
+
+    # Check if previous sibling can donate
+    val has_prev = idx > 0
+    if has_prev:
+        val prev_sibling = children.(idx - 1)
+        val can_donate_prev = can_donate(prev_sibling)
+        if can_donate_prev:
+            val result = borrow_from_prev(parent, idx)
+            result
+        else:
+            # Merge with previous sibling
+            val result = merge_nodes(parent, idx - 1)
+            result
+    else:
+        # No previous sibling, check next
+        val has_next = idx < parent_n
+        if has_next:
+            val next_sibling = children.(idx + 1)
+            val can_donate_next = can_donate(next_sibling)
+            if can_donate_next:
+                val result = borrow_from_next(parent, idx)
+                result
+            else:
+                # Merge with next sibling
+                val result = merge_nodes(parent, idx)
+                result
+        else:
+            parent
+
+# ============================================================================
+# Deletion Main Functions
+# ============================================================================
+
+# Delete a key from a node
+fn delete_from_node(node, key):
+    val keys = node_keys(node)
+    val children = node_children(node)
+    val is_leaf = node_is_leaf(node)
+    val n = node_n(node)
+    val t = node_t(node)
+
+    val idx = find_key_index(node, key)
+    val found = find_key(node, key)
+    val is_nil = found == nil
+
+    val in_node = !is_nil
+    if in_node:
+        # Key is in this node
+        if is_leaf:
+            # Case 1: Key in leaf - simply remove
+            val result = remove_from_leaf(node, found)
+            result
+        else:
+            # Case 2: Key in internal node
+            val left_child = children.found
+            val right_child = children.(found + 1)
+
+            val left_can_donate = can_donate(left_child)
+            if left_can_donate:
+                # Case 2a: Left child has >= t keys
+                val pred = get_predecessor(left_child)
+
+                # Replace key with predecessor
+                var new_keys = []
+                for i in 0..found:
+                    val k = keys.i
+                    new_keys = list_append(new_keys, k)
+                new_keys = list_append(new_keys, pred)
+                for i in (found + 1)..n:
+                    val k = keys.i
+                    new_keys = list_append(new_keys, k)
+
+                var temp_node = node
+                temp_node = node_set_keys(temp_node, new_keys)
+
+                # Delete predecessor from left child
+                val updated_left = delete_from_node(left_child, pred)
+
+                var new_children = []
+                for i in 0..found:
+                    val c = children.i
+                    new_children = list_append(new_children, c)
+                new_children = list_append(new_children, updated_left)
+                for i in (found + 1)..(n + 1):
+                    val c = children.i
+                    new_children = list_append(new_children, c)
+
+                val result = node_set_children(temp_node, new_children)
+                result
+            else:
+                val right_can_donate = can_donate(right_child)
+                if right_can_donate:
+                    # Case 2b: Right child has >= t keys
+                    val succ = get_successor(right_child)
+
+                    # Replace key with successor
+                    var new_keys = []
+                    for i in 0..found:
+                        val k = keys.i
+                        new_keys = list_append(new_keys, k)
+                    new_keys = list_append(new_keys, succ)
+                    for i in (found + 1)..n:
+                        val k = keys.i
+                        new_keys = list_append(new_keys, k)
+
+                    var temp_node = node
+                    temp_node = node_set_keys(temp_node, new_keys)
+
+                    # Delete successor from right child
+                    val updated_right = delete_from_node(right_child, succ)
+
+                    var new_children = []
+                    for i in 0..(found + 1):
+                        val c = children.i
+                        new_children = list_append(new_children, c)
+                    new_children = list_append(new_children, updated_right)
+                    for i in (found + 2)..(n + 1):
+                        val c = children.i
+                        new_children = list_append(new_children, c)
+
+                    val result = node_set_children(temp_node, new_children)
+                    result
+                else:
+                    # Case 2c: Both children have t-1 keys - merge
+                    val merged_parent = merge_nodes(node, found)
+                    val merged_children = node_children(merged_parent)
+                    val merged_child = merged_children.found
+                    val updated_merged = delete_from_node(merged_child, key)
+
+                    var new_children = []
+                    val merged_n = node_n(merged_parent)
+                    for i in 0..found:
+                        val c = merged_children.i
+                        new_children = list_append(new_children, c)
+                    new_children = list_append(new_children, updated_merged)
+                    for i in (found + 1)..(merged_n + 1):
+                        val c = merged_children.i
+                        new_children = list_append(new_children, c)
+
+                    val result = node_set_children(merged_parent, new_children)
+                    result
+    else:
+        # Key not in this node
+        if is_leaf:
+            # Key doesn't exist
+            node
+        else:
+            # Case 3: Key in subtree
+            val child = children.idx
+            val child_minimal = is_minimal(child)
+            if child_minimal:
+                # Fill child first
+                val filled_parent = fill_child(node, idx)
+                val filled_children = node_children(filled_parent)
+                val filled_n = node_n(filled_parent)
+
+                # Find correct child after filling
+                val new_idx = find_key_index(filled_parent, key)
+                val final_idx = new_idx
+                val check = final_idx <= filled_n
+                if check:
+                    val target_child = filled_children.final_idx
+                    val updated_child = delete_from_node(target_child, key)
+
+                    var new_children = []
+                    for i in 0..final_idx:
+                        val c = filled_children.i
+                        new_children = list_append(new_children, c)
+                    new_children = list_append(new_children, updated_child)
+                    for i in (final_idx + 1)..(filled_n + 1):
+                        val c = filled_children.i
+                        new_children = list_append(new_children, c)
+
+                    val result = node_set_children(filled_parent, new_children)
+                    result
+                else:
+                    filled_parent
+            else:
+                # Child has enough keys
+                val updated_child = delete_from_node(child, key)
+
+                var new_children = []
+                for i in 0..idx:
+                    val c = children.i
+                    new_children = list_append(new_children, c)
+                new_children = list_append(new_children, updated_child)
+                for i in (idx + 1)..(n + 1):
+                    val c = children.i
+                    new_children = list_append(new_children, c)
+
+                val result = node_set_children(node, new_children)
+                result
+
+# Delete a key from the B-tree
+fn btree_delete(tree, key):
+    val root = tree_root(tree)
+    val updated_root = delete_from_node(root, key)
+
+    # Check if root is now empty
+    val root_n = node_n(updated_root)
+    val root_empty = root_n == 0
+    val root_is_leaf = node_is_leaf(updated_root)
+    val is_not_leaf = !root_is_leaf
+
+    val should_shrink = root_empty
+    val can_shrink = is_not_leaf
+    val do_shrink = should_shrink
+    val final_shrink = can_shrink
+
+    if do_shrink:
+        if final_shrink:
+            # Make first child the new root
+            val children = node_children(updated_root)
+            val new_root = children.0
+            val height = tree_height(tree)
+            var new_tree = tree
+            new_tree = tree_set_root(new_tree, new_root)
+            new_tree = tree_set_height(new_tree, height - 1)
+            new_tree
+        else:
+            val result = tree_set_root(tree, updated_root)
+            result
+    else:
+        val result = tree_set_root(tree, updated_root)
+        result
+
+export *

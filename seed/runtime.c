@@ -851,6 +851,10 @@ const char* spl_env_get(const char* key) {
     return val ? val : "";
 }
 
+const char* rt_env_get(const char* key) {
+    return spl_env_get(key);
+}
+
 /* spl_env_set — see platform/ headers */
 
 /* ================================================================
@@ -901,6 +905,30 @@ const char* spl_get_arg(int64_t idx) {
 const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
 int         rt_file_exists(const char* path)    { return spl_file_exists(path); }
 int         rt_file_write(const char* path, const char* content) { return spl_file_write(path, content); }
+int         rt_file_copy(const char* src, const char* dst) {
+    FILE* in = fopen(src, "rb");
+    if (!in) return 0;
+    
+    FILE* out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return 0;
+    }
+    
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return 0;
+        }
+    }
+    
+    fclose(in);
+    fclose(out);
+    return 1;
+}
 int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
 int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }
 

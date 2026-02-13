@@ -1,0 +1,130 @@
+# Scrypt Main Algorithm Module
+# Main scrypt key derivation function
+
+import scrypt.types
+import scrypt.validation
+import scrypt.pbkdf2
+import crypto_utils
+
+# =============================================================================
+# MAIN SCRYPT ALGORITHM
+# =============================================================================
+
+fn scrypt(password: text, salt: text, N: i64, r: i64, p: i64, dkLen: i64) -> list:
+    """Scrypt key derivation function.
+
+    The main scrypt algorithm combining PBKDF2, ROMix, and Salsa20/8.
+
+    Algorithm:
+    1. B = PBKDF2-HMAC-SHA256(password, salt, 1, p * 128 * r)
+    2. For i = 0 to p-1:
+         B[i] = ROMix(B[i], N, r)
+    3. DK = PBKDF2-HMAC-SHA256(password, B, 1, dkLen)
+
+    Parameters:
+    - password: Password string
+    - salt: Salt string
+    - N: CPU/memory cost (must be power of 2)
+    - r: Block size parameter
+    - p: Parallelization parameter
+    - dkLen: Desired key length in bytes
+
+    Returns: Derived key as byte list
+
+    Example:
+        val key = scrypt("password", "salt", 16384, 8, 1, 32)
+    """
+    # Validate parameters
+    val params = create_scrypt_params(N, r, p, dkLen)
+    var is_valid = validate_params(params)
+    if is_valid == 0:
+        # Return empty list on invalid parameters
+        return []
+
+    val block_size = 128 * r
+    val total_blocks = p
+
+    # Step 1: B = PBKDF2(password, salt, 1, p * 128 * r)
+    val b_len = p * block_size
+    val B = pbkdf2_hmac_sha256(password, salt, 1, b_len)
+
+    # Step 2: For each block, apply ROMix
+    var B_mixed = []
+    var i = 0
+    while i < b_len:
+        B_mixed.push(0)
+        i = i + 1
+
+    var block_idx = 0
+    while block_idx < p:
+        # Extract block
+        var block = []
+        i = 0
+        while i < block_size:
+            val byte = B.get(block_idx * block_size + i)
+            block.push(byte)
+            i = i + 1
+
+        # Apply ROMix
+        val mixed = romix(block, N, r)
+
+        # Store result back
+        i = 0
+        while i < block_size:
+            B_mixed.set(block_idx * block_size + i, mixed.get(i))
+            i = i + 1
+
+        block_idx = block_idx + 1
+
+    # Step 3: DK = PBKDF2(password, B_mixed, 1, dkLen)
+    val password_bytes = crypto_utils.text_to_bytes(password)
+    val DK = crypto_utils.pbkdf2_sha256_bytes(password_bytes, B_mixed, 1, dkLen)
+
+    DK
+
+fn scrypt_bytes(password_bytes: list, salt_bytes: list, N: i64, r: i64, p: i64, dkLen: i64) -> list:
+    """Scrypt with byte array inputs.
+
+    Example:
+        val key = scrypt_bytes(pwd_bytes, salt_bytes, 16384, 8, 1, 32)
+    """
+    # Convert to text for now (could be optimized)
+    val password = crypto_utils.bytes_to_text(password_bytes)
+    val salt = crypto_utils.bytes_to_text(salt_bytes)
+    scrypt(password, salt, N, r, p, dkLen)
+
+# =============================================================================
+# SALT GENERATION
+# =============================================================================
+
+fn generate_scrypt_salt() -> text:
+    """Generate random salt for scrypt.
+
+    Generates 16 bytes (128 bits) of random data.
+
+    Returns: Base64-encoded salt string
+
+    Example:
+        val salt = generate_scrypt_salt()
+    """
+    generate_salt_with_length(DEFAULT_SALT_LENGTH)
+
+fn generate_salt_with_length(length: i64) -> text:
+    """Generate random salt with specified length.
+
+    Example:
+        val salt = generate_salt_with_length(32)
+    """
+    # Use crypto_utils salt generation
+    crypto_utils.generate_salt(length)
+
+fn generate_salt_bytes(length: i64) -> list:
+    """Generate random salt as byte array.
+
+    Example:
+        val salt_bytes = generate_salt_bytes(16)
+    """
+    val salt_text = generate_salt_with_length(length)
+    crypto_utils.text_to_bytes(salt_text)
+
+# =============================================================================

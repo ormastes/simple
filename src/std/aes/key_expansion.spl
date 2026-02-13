@@ -1,0 +1,123 @@
+# AES Key Expansion Module
+#
+# This module handles AES key schedule generation
+
+# Import dependencies
+import aes/utilities
+import aes/sbox
+
+# AES Round Constants (for key expansion)
+fn aes_rcon() -> list:
+    [
+        0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40,
+        0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a,
+        0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a,
+        0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39
+    ]
+
+# Get round constant
+fn rcon_lookup(round: i64) -> i64:
+    val rcon = aes_rcon()
+    rcon[round]
+
+# Rotate word left by 1 byte (for key expansion)
+fn rotate_word(word: list) -> list:
+    [word[1], word[2], word[3], word[0]]
+
+# Rotate word right by 1 byte
+fn rotate_word_right(word: list) -> list:
+    [word[3], word[0], word[1], word[2]]
+
+# Get word from expanded key
+fn get_key_word(expanded_key: list, word_index: i64) -> list:
+    val start = word_index * 4
+    [
+        expanded_key[start],
+        expanded_key[start + 1],
+        expanded_key[start + 2],
+        expanded_key[start + 3]
+    ]
+
+# XOR two words (4 bytes each)
+fn xor_words(word_a: list, word_b: list) -> list:
+    [
+        xor_byte(word_a[0], word_b[0]),
+        xor_byte(word_a[1], word_b[1]),
+        xor_byte(word_a[2], word_b[2]),
+        xor_byte(word_a[3], word_b[3])
+    ]
+
+# Expand AES key (supports 128, 192, 256-bit keys)
+fn expand_key(key: list, key_size: i64) -> list:
+    val expanded = []
+
+    # Copy original key to expanded key
+    var i = 0
+    while i < key_size:
+        expanded.append(key[i])
+        i = i + 1
+
+    # Calculate number of words and rounds
+    val nk = key_size / 4
+    val nr = 0
+    var num_rounds = 0
+
+    if key_size == 16:
+        num_rounds = 10
+    else:
+        if key_size == 24:
+            num_rounds = 12
+        else:
+            num_rounds = 14
+
+    val total_words = (num_rounds + 1) * 4
+
+    # Expand key
+    var word_idx = nk
+    while word_idx < total_words:
+        val prev_word = get_key_word(expanded, word_idx - 1)
+        var temp_word = prev_word
+
+        # Every Nk words, apply special transformation
+        if word_idx % nk == 0:
+            val rotated = rotate_word(temp_word)
+            val subbed = sub_word(rotated)
+            val round_num = word_idx / nk
+            val rc = rcon_lookup(round_num)
+
+            # XOR with round constant
+            temp_word = [
+                xor_byte(subbed[0], rc),
+                subbed[1],
+                subbed[2],
+                subbed[3]
+            ]
+        else:
+            # For AES-256, apply SubWord every 4 words after Nk
+            if key_size == 32:
+                if word_idx % nk == 4:
+                    temp_word = sub_word(temp_word)
+
+        # XOR with word Nk positions back
+        val nk_back_word = get_key_word(expanded, word_idx - nk)
+        val new_word = xor_words(nk_back_word, temp_word)
+
+        # Append to expanded key
+        expanded.append(new_word[0])
+        expanded.append(new_word[1])
+        expanded.append(new_word[2])
+        expanded.append(new_word[3])
+
+        word_idx = word_idx + 1
+
+    expanded
+
+# Get round key from expanded key
+fn get_round_key(expanded_key: list, round: i64) -> list:
+    val start = round * 16
+    val round_key = []
+    var i = 0
+    while i < 16:
+        round_key.append(expanded_key[start + i])
+        i = i + 1
+    round_key

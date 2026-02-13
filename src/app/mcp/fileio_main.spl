@@ -8,23 +8,43 @@ use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, e
 use app.io.mod (cli_get_args, env_get, shell, exit)
 use lib.json.builder.{escape_json}
 
+# Cache tool schemas to avoid rebuilding on every tools/list request
+var FILEIO_TOOLS_CACHE: [String] = []
+var FILEIO_TOOLS_CACHE_BUILT: Bool = false
+
 # MCP Server state
 class FileIOServer:
-    engine: ProtectionEngine
-    temp_manager: TempManager
+    engine: Option<ProtectionEngine>
+    temp_manager: Option<TempManager>
     config_path: text
+    temp_base: text
 
-    # Initialize server
+    # Initialize server with lazy engine/temp creation to keep startup fast
     static fn init(config_path: text) -> FileIOServer:
-        val temp_base = ".fileio_temp"
-        val engine = create_engine(config_path, temp_base)
-        val temp_manager = create_temp_manager(temp_base, "session_", true, 24)
-
         FileIOServer(
-            engine: engine,
-            temp_manager: temp_manager,
-            config_path: config_path
+            engine: nil,
+            temp_manager: nil,
+            config_path: config_path,
+            temp_base: ".fileio_temp"
         )
+
+    # Lazily construct the protection engine
+    me ensure_engine() -> ProtectionEngine:
+        match self.engine:
+            case Some(e): e
+            case nil:
+                val eng = create_engine(self.config_path, self.temp_base)
+                self.engine = Some(eng)
+                eng
+
+    # Lazily construct the temp manager
+    me ensure_temp_manager() -> TempManager:
+        match self.temp_manager:
+            case Some(t): t
+            case nil:
+                val tm = create_temp_manager(self.temp_base, "session_", true, 24)
+                self.temp_manager = Some(tm)
+                tm
 
     # Handle MCP tool request
     fn handle_tool(tool_name: text, arguments: text) -> text:
@@ -51,7 +71,7 @@ class FileIOServer:
             return self.error_response("Missing 'path' argument")
 
         # Check protection
-        val result = self.engine.check_path(path, "read")
+        val result = self.ensure_engine().check_path(path, "read")
         match result:
             ProtectionResult.Allowed:
                 # Read file
@@ -80,7 +100,7 @@ class FileIOServer:
             return self.error_response("Missing 'path' argument")
 
         # Check protection
-        val result = self.engine.check_path(path, "write")
+        val result = self.ensure_engine().check_path(path, "write")
         match result:
             ProtectionResult.Allowed:
                 # Write file
@@ -89,7 +109,7 @@ class FileIOServer:
 
             ProtectionResult.Redirected(new_path):
                 # Write to temp
-                val actual_path = self.temp_manager.get_temp_path(path)
+                val actual_path = self.ensure_temp_manager().get_temp_path(path)
                 self.write_file(actual_path, content)
                 self.success_response("File written to temp: " + actual_path)
 
@@ -106,7 +126,7 @@ class FileIOServer:
             return self.error_response("Missing 'path' argument")
 
         # Check protection
-        val result = self.engine.check_path(path, "delete")
+        val result = self.ensure_engine().check_path(path, "delete")
         match result:
             ProtectionResult.Allowed:
                 # Delete file
@@ -115,7 +135,7 @@ class FileIOServer:
 
             ProtectionResult.Redirected(new_path):
                 # Delete from temp
-                val actual_path = self.temp_manager.get_temp_path(path)
+                val actual_path = self.ensure_temp_manager().get_temp_path(path)
                 self.delete_file(actual_path)
                 self.success_response("Temp file deleted: " + actual_path)
 
@@ -134,21 +154,21 @@ class FileIOServer:
             return self.error_response("Missing 'src' or 'dest' argument")
 
         # Check read permission on source
-        val src_result = self.engine.check_path(src, "read")
+        val src_result = self.ensure_engine().check_path(src, "read")
         match src_result:
             ProtectionResult.Denied(reason):
                 return self.error_response("Source read denied: " + reason)
             _: ()
 
         # Check write permission on destination
-        val dest_result = self.engine.check_path(dest, "write")
+        val dest_result = self.ensure_engine().check_path(dest, "write")
         match dest_result:
             ProtectionResult.Allowed:
                 self.copy_file(src, dest)
                 self.success_response("File copied: {src} -> {dest}")
 
             ProtectionResult.Redirected(new_path):
-                val actual_dest = self.temp_manager.get_temp_path(dest)
+                val actual_dest = self.ensure_temp_manager().get_temp_path(dest)
                 self.copy_file(src, actual_dest)
                 self.success_response("File copied to temp: {src} -> {actual_dest}")
 
@@ -167,21 +187,21 @@ class FileIOServer:
             return self.error_response("Missing 'src' or 'dest' argument")
 
         # Check delete permission on source
-        val src_result = self.engine.check_path(src, "delete")
+        val src_result = self.ensure_engine().check_path(src, "delete")
         match src_result:
             ProtectionResult.Denied(reason):
                 return self.error_response("Source delete denied: " + reason)
             _: ()
 
         # Check write permission on destination
-        val dest_result = self.engine.check_path(dest, "write")
+        val dest_result = self.ensure_engine().check_path(dest, "write")
         match dest_result:
             ProtectionResult.Allowed:
                 self.move_file(src, dest)
                 self.success_response("File moved: {src} -> {dest}")
 
             ProtectionResult.Redirected(new_path):
-                val actual_dest = self.temp_manager.get_temp_path(dest)
+                val actual_dest = self.ensure_temp_manager().get_temp_path(dest)
                 self.move_file(src, actual_dest)
                 self.success_response("File moved to temp: {src} -> {actual_dest}")
 
@@ -214,14 +234,14 @@ class FileIOServer:
             return self.error_response("Missing 'path' argument")
 
         # Check protection
-        val result = self.engine.check_path(path, "write")
+        val result = self.ensure_engine().check_path(path, "write")
         match result:
             ProtectionResult.Allowed:
                 self.append_file(path, content)
                 self.success_response("Content appended: " + path)
 
             ProtectionResult.Redirected(new_path):
-                val actual_path = self.temp_manager.get_temp_path(path)
+                val actual_path = self.ensure_temp_manager().get_temp_path(path)
                 self.append_file(actual_path, content)
                 self.success_response("Content appended to temp: " + actual_path)
 
@@ -236,7 +256,7 @@ class FileIOServer:
         val pattern = self.parse_arg(arguments, "pattern")
         val search = if pattern.len() > 0: pattern else: "*"
 
-        val files = self.engine.list_protected_files(search)
+        val files = self.ensure_engine().list_protected_files(search)
         val json = self.files_to_json(files)
         self.success_response(json)
 
@@ -246,7 +266,7 @@ class FileIOServer:
         if path.len() == 0:
             return self.error_response("Missing 'path' argument")
 
-        val info = self.engine.get_protection_info(path)
+        val info = self.ensure_engine().get_protection_info(path)
         self.success_response(info)
 
     # Tool: add_protection_rule
@@ -273,23 +293,23 @@ class FileIOServer:
             "allow": RuleAction.Allow
             _: RuleAction.Allow
 
-        self.engine.add_rule(pattern, type_enum, action_enum, reason)
+        self.ensure_engine().add_rule(pattern, type_enum, action_enum, reason)
         self.success_response("Protection rule added: " + pattern)
 
     # Tool: list_temp_files
     fn tool_list_temp_files(arguments: text) -> text:
-        val files = self.temp_manager.list_temp_files()
+        val files = self.ensure_temp_manager().list_temp_files()
         val json = self.files_to_json(files)
         self.success_response(json)
 
     # Tool: cleanup_temp
     fn tool_cleanup_temp(arguments: text) -> text:
-        self.temp_manager.cleanup_session()
+        self.ensure_temp_manager().cleanup_session()
         self.success_response("Temp files cleaned up")
 
     # Tool: get_temp_dir
     fn tool_get_temp_dir(arguments: text) -> text:
-        val temp_dir = self.temp_manager.get_temp_dir()
+        val temp_dir = self.ensure_temp_manager().get_temp_dir()
         self.success_response(temp_dir)
 
     # Parse path argument from JSON
@@ -543,14 +563,7 @@ fn make_initialize_response(id: String) -> String:
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn handle_tools_list(id: String) -> String:
-    var tools = "["
-    var first = true
-    for tool in get_all_tools():
-        if not first:
-            tools = tools + ","
-        first = false
-        tools = tools + tool
-    tools = tools + "]"
+    val tools = get_tools_page_cached(0, 100)  # all tools fit in one page
 
     val result = jo1(jp("tools", tools))
     make_result_response(id, result)
@@ -579,6 +592,13 @@ fn get_all_tools() -> [String]:
         schema_cleanup_temp(),
         schema_get_temp_dir()
     ]
+
+fn get_all_tools_cached() -> [String]:
+    if FILEIO_TOOLS_CACHE_BUILT:
+        return FILEIO_TOOLS_CACHE
+    FILEIO_TOOLS_CACHE = get_all_tools()
+    FILEIO_TOOLS_CACHE_BUILT = true
+    FILEIO_TOOLS_CACHE
 
 fn schema_safe_read() -> String:
     val props = LB() + make_prop("path", "Path to read") + RB()

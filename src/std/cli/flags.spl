@@ -1,0 +1,384 @@
+# CLI Flags Module
+# Argument parsing logic
+
+# =============================================================================
+# Helper Functions for Parsing
+# =============================================================================
+
+fn starts_with(text: text, prefix: text) -> bool:
+    if len(prefix) > len(text):
+        return false
+    val sub = substring(text, 0, len(prefix))
+    sub == prefix
+
+fn index_of(text: text, search: text) -> i64:
+    var i = 0
+    while i < len(text):
+        if i + len(search) <= len(text):
+            val sub = substring(text, i, i + len(search))
+            if sub == search:
+                return i
+        i = i + 1
+    -1
+
+fn find_flag_by_long(flags: list, long_name: text) -> tuple:
+    var i = 0
+    while i < len(flags):
+        val flag = flags[i]
+        val flag_long = flag[2]
+        if flag_long == long_name:
+            return flag
+        i = i + 1
+    nil
+
+fn find_flag_by_short(flags: list, short_name: text) -> tuple:
+    var i = 0
+    while i < len(flags):
+        val flag = flags[i]
+        val flag_short = flag[1]
+        if flag_short == short_name:
+            return flag
+        i = i + 1
+    nil
+
+fn find_option_by_long(options: list, long_name: text) -> tuple:
+    var i = 0
+    while i < len(options):
+        val option = options[i]
+        val option_long = option[2]
+        if option_long == long_name:
+            return option
+        i = i + 1
+    nil
+
+fn find_option_by_short(options: list, short_name: text) -> tuple:
+    var i = 0
+    while i < len(options):
+        val option = options[i]
+        val option_short = option[1]
+        if option_short == short_name:
+            return option
+        i = i + 1
+    nil
+
+fn contains_flag(flags: list, name: text) -> bool:
+    var i = 0
+    while i < len(flags):
+        val flag = flags[i]
+        val flag_name = flag[0]
+        if flag_name == name:
+            return true
+        i = i + 1
+    false
+
+fn contains_option(options: list, name: text) -> bool:
+    var i = 0
+    while i < len(options):
+        val option = options[i]
+        val option_name = option[0]
+        if option_name == name:
+            return true
+        i = i + 1
+    false
+
+fn contains_positional(positionals: list, name: text) -> bool:
+    var i = 0
+    while i < len(positionals):
+        val pos = positionals[i]
+        val pos_name = pos[0]
+        if pos_name == name:
+            return true
+        i = i + 1
+    false
+
+# =============================================================================
+# Argument Parsing
+# =============================================================================
+
+# Parse command-line arguments
+fn parse_args(parser: tuple, args: list) -> tuple:
+    val parser_flags = parser[2]
+    val parser_options = parser[3]
+    val parser_positionals = parser[4]
+    val commands = parser[5]
+
+    var result_flags = []
+    var result_options = []
+    var result_positionals = []
+    var result_command = nil
+    var remaining_args = []
+    var errors = []
+
+    var i = 0
+    var positional_index = 0
+
+    while i < len(args):
+        val arg = args[i]
+
+        # Check for command
+        if i == 0:
+            val cmd = get_command(parser, arg)
+            if cmd != nil:
+                result_command = arg
+                i = i + 1
+                continue
+
+        # Check for long flag (--flag)
+        if starts_with(arg, "--"):
+            val flag_name = substring(arg, 2, len(arg))
+
+            # Check for option with = (--option=value)
+            var eq_pos = index_of(flag_name, "=")
+            if eq_pos >= 0:
+                val opt_name = substring(flag_name, 0, eq_pos)
+                val opt_value = substring(flag_name, eq_pos + 1, len(flag_name))
+                val option_tuple = find_option_by_long(parser_options, opt_name)
+                if option_tuple != nil:
+                    var updated_option = (option_tuple[0], option_tuple[1], option_tuple[2],
+                                         option_tuple[3], option_tuple[4], opt_value, option_tuple[6])
+                    result_options = result_options + [updated_option]
+                else:
+                    errors = errors + ["Unknown option: --{opt_name}"]
+                i = i + 1
+                continue
+
+            # Check if it's a flag
+            val flag_tuple = find_flag_by_long(parser_flags, flag_name)
+            if flag_tuple != nil:
+                var updated_flag = (flag_tuple[0], flag_tuple[1], flag_tuple[2], flag_tuple[3], true)
+                result_flags = result_flags + [updated_flag]
+                i = i + 1
+                continue
+
+            # Check if it's an option (next arg is value)
+            val option_tuple = find_option_by_long(parser_options, flag_name)
+            if option_tuple != nil:
+                if i + 1 < len(args):
+                    val opt_value = args[i + 1]
+                    var updated_option = (option_tuple[0], option_tuple[1], option_tuple[2],
+                                         option_tuple[3], option_tuple[4], opt_value, option_tuple[6])
+                    result_options = result_options + [updated_option]
+                    i = i + 2
+                    continue
+                else:
+                    errors = errors + ["Option --{flag_name} requires a value"]
+                    i = i + 1
+                    continue
+
+            errors = errors + ["Unknown flag: --{flag_name}"]
+            i = i + 1
+            continue
+
+        # Check for short flag (-f)
+        if starts_with(arg, "-"):
+            val flag_name = substring(arg, 1, len(arg))
+
+            # Check if it's a flag
+            val flag_tuple = find_flag_by_short(parser_flags, flag_name)
+            if flag_tuple != nil:
+                var updated_flag = (flag_tuple[0], flag_tuple[1], flag_tuple[2], flag_tuple[3], true)
+                result_flags = result_flags + [updated_flag]
+                i = i + 1
+                continue
+
+            # Check if it's an option (next arg is value)
+            val option_tuple = find_option_by_short(parser_options, flag_name)
+            if option_tuple != nil:
+                if i + 1 < len(args):
+                    val opt_value = args[i + 1]
+                    var updated_option = (option_tuple[0], option_tuple[1], option_tuple[2],
+                                         option_tuple[3], option_tuple[4], opt_value, option_tuple[6])
+                    result_options = result_options + [updated_option]
+                    i = i + 2
+                    continue
+                else:
+                    errors = errors + ["Option -{flag_name} requires a value"]
+                    i = i + 1
+                    continue
+
+            errors = errors + ["Unknown flag: -{flag_name}"]
+            i = i + 1
+            continue
+
+        # Positional argument
+        if positional_index < len(parser_positionals):
+            val pos = parser_positionals[positional_index]
+            var updated_pos = (pos[0], pos[1], arg, pos[3])
+            result_positionals = result_positionals + [updated_pos]
+            positional_index = positional_index + 1
+        else:
+            remaining_args = remaining_args + [arg]
+
+        i = i + 1
+
+    # Add unset flags with default (false)
+    var j = 0
+    while j < len(parser_flags):
+        val flag = parser_flags[j]
+        val flag_name = flag[0]
+        if not contains_flag(result_flags, flag_name):
+            result_flags = result_flags + [flag]
+        j = j + 1
+
+    # Add unset options with default values
+    var k = 0
+    while k < len(parser_options):
+        val option = parser_options[k]
+        val option_name = option[0]
+        if not contains_option(result_options, option_name):
+            result_options = result_options + [option]
+        k = k + 1
+
+    # Add unset positionals
+    var m = 0
+    while m < len(parser_positionals):
+        val pos = parser_positionals[m]
+        val pos_name = pos[0]
+        if not contains_positional(result_positionals, pos_name):
+            result_positionals = result_positionals + [pos]
+        m = m + 1
+
+    # Validate required options
+    var n = 0
+    while n < len(result_options):
+        val option = result_options[n]
+        val is_required = option[6]
+        val value = option[5]
+        val name = option[0]
+        if is_required:
+            if value == "":
+                errors = errors + ["Required option '{name}' not provided"]
+        n = n + 1
+
+    # Validate required positionals
+    var p = 0
+    while p < len(result_positionals):
+        val pos = result_positionals[p]
+        val is_required = pos[3]
+        val value = pos[2]
+        val name = pos[0]
+        if is_required:
+            if value == "":
+                errors = errors + ["Required argument '{name}' not provided"]
+        p = p + 1
+
+    (result_flags, result_options, result_positionals, result_command, remaining_args, errors)
+
+# =============================================================================
+# Result Accessors
+# =============================================================================
+
+# Get flag value from parse result
+fn get_flag(result: tuple, name: text) -> bool:
+    val flags = result[0]
+    var i = 0
+    while i < len(flags):
+        val flag = flags[i]
+        val flag_name = flag[0]
+        if flag_name == name:
+            return flag[4]
+        i = i + 1
+    false
+
+# Get option value from parse result
+fn get_option(result: tuple, name: text) -> text:
+    val options = result[1]
+    var i = 0
+    while i < len(options):
+        val option = options[i]
+        val option_name = option[0]
+        if option_name == name:
+            return option[5]
+        i = i + 1
+    ""
+
+# Get positional value from parse result
+fn get_positional(result: tuple, name: text) -> text:
+    val positionals = result[2]
+    var i = 0
+    while i < len(positionals):
+        val pos = positionals[i]
+        val pos_name = pos[0]
+        if pos_name == name:
+            return pos[2]
+        i = i + 1
+    ""
+
+# Get command name from parse result
+fn get_command_name(result: tuple) -> text:
+    val cmd = result[3]
+    if cmd == nil:
+        return ""
+    cmd
+
+# Get remaining args from parse result
+fn get_remaining_args(result: tuple) -> list:
+    result[4]
+
+# Get errors from parse result
+fn get_errors(result: tuple) -> list:
+    result[5]
+
+# Check if parsing had errors
+fn has_errors(result: tuple) -> bool:
+    val errors = result[5]
+    len(errors) > 0
+
+# Helper function for parse_args
+fn get_command(parser: tuple, name: text) -> tuple:
+    val commands = parser[5]
+    var result = nil
+    var i = 0
+    while i < len(commands):
+        val cmd = commands[i]
+        val cmd_name = cmd[0]
+        if cmd_name == name:
+            result = cmd
+            i = len(commands)
+        i = i + 1
+    result
+
+# =============================================================================
+# Validation Helpers
+# =============================================================================
+
+# Validate all required options are present
+fn validate_required_options(result: tuple) -> bool:
+    val options = result[1]
+    var i = 0
+    while i < len(options):
+        val option = options[i]
+        val is_required = option[6]
+        val value = option[5]
+        if is_required:
+            if value == "":
+                return false
+        i = i + 1
+    true
+
+# Validate all required positionals are present
+fn validate_required_positionals(result: tuple) -> bool:
+    val positionals = result[2]
+    var i = 0
+    while i < len(positionals):
+        val pos = positionals[i]
+        val is_required = pos[3]
+        val value = pos[2]
+        if is_required:
+            if value == "":
+                return false
+        i = i + 1
+    true
+
+# Print all validation errors
+fn print_validation_errors(result: tuple):
+    val errors = result[5]
+    var i = 0
+    while i < len(errors):
+        val error = errors[i]
+        print_error(error)
+        i = i + 1
+
+# Convenience function (needs to be defined after print_error)
+fn print_error(message: text):
+    print "[ERROR] {message}"

@@ -170,7 +170,10 @@ int64_t  spl_file_size(const char* path);
 
 /* ===== Directory Operations ===== */
 
+bool     rt_dir_create(const char* path, bool recursive);
 bool     rt_dir_remove_all(const char* path);
+const char** rt_dir_list(const char* path, int64_t* out_count);
+void     rt_dir_list_free(const char** entries, int64_t count);
 
 /* ===== File Locking ===== */
 
@@ -222,6 +225,7 @@ bool     rt_process_kill(int64_t pid);
 /* ===== Environment ===== */
 
 const char* spl_env_get(const char* key);
+const char* rt_env_get(const char* key);
 void        spl_env_set(const char* key, const char* value);
 
 /* ===== Memory ===== */
@@ -242,6 +246,7 @@ const char* rt_file_read_text(const char* path);
 int         rt_file_exists(const char* path);
 int         rt_file_write(const char* path, const char* content);
 int         rt_file_delete(const char* path);
+int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);

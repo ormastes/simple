@@ -9,6 +9,10 @@
 #   simple mcp expand <file> <sym> # Expand specific symbol
 #   simple mcp json <file.spl>     # Generate JSON output
 
+# NOTE: This file is the main MCP orchestrator and remains large until split per
+# doc/report/remaining_work_plan_2026-02-13.md. Section markers below aid navigation.
+
+# --- Imports ---
 # I/O imports
 use app.io.mod (file_read, get_args, exit, shell, cwd, rt_debug_set_active, rt_debug_add_breakpoint_at, rt_debug_remove_breakpoint_at, rt_debug_continue_exec, rt_debug_pause_exec, rt_debug_set_step_mode_val, rt_debug_stack_trace_lines, rt_debug_local_vars, rt_debug_get_current_file, rt_debug_get_current_line, rt_debug_add_breakpoint_rich, rt_debug_add_function_breakpoint, rt_debug_set_breakpoint_enabled, rt_debug_get_breakpoint_info, rt_debug_list_breakpoints, rt_debug_get_source_lines, rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches, rt_debug_set_variable, rt_debug_terminate, rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals)
 
@@ -27,6 +31,45 @@ use app.mcp.diag_read_tools.{handle_simple_read, handle_simple_check, handle_sim
 use app.mcp.diag_edit_tools.{handle_simple_edit, handle_simple_multi_edit, handle_simple_run, schema_simple_edit, schema_simple_multi_edit, schema_simple_run}
 use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple_squash, handle_simple_new, schema_simple_diff, schema_simple_log, schema_simple_squash, schema_simple_new}
 
+# Global cache to avoid rebuilding the large MCP tool schema list on every tools/list call
+var MCP_TOOLS_CACHE: [String] = []
+var MCP_TOOLS_CACHE_BUILT: Bool = false
+
+# Lazy-initialized singletons to keep startup path minimal
+var GLOBAL_PROJECT_ROOT: String = ""
+var GLOBAL_RESOURCE_MGR: Option<resources.ResourceManager> = nil
+var GLOBAL_PROMPT_MGR: Option<prompts.PromptManager> = nil
+var GLOBAL_TASK_MGR: Option<TaskManager> = nil
+
+fn get_resource_mgr() -> resources.ResourceManager:
+    if GLOBAL_PROJECT_ROOT == "":
+        GLOBAL_PROJECT_ROOT = get_current_dir()
+    match GLOBAL_RESOURCE_MGR:
+        case Some(r): r
+        case nil:
+            val mgr = resources.ResourceManager.create(GLOBAL_PROJECT_ROOT)
+            GLOBAL_RESOURCE_MGR = Some(mgr)
+            mgr
+
+fn get_prompt_mgr() -> prompts.PromptManager:
+    if GLOBAL_PROJECT_ROOT == "":
+        GLOBAL_PROJECT_ROOT = get_current_dir()
+    match GLOBAL_PROMPT_MGR:
+        case Some(p): p
+        case nil:
+            val mgr = prompts.PromptManager.create(GLOBAL_PROJECT_ROOT)
+            GLOBAL_PROMPT_MGR = Some(mgr)
+            mgr
+
+fn get_task_mgr() -> TaskManager:
+    match GLOBAL_TASK_MGR:
+        case Some(t): t
+        case nil:
+            val mgr = TaskManager.create()
+            GLOBAL_TASK_MGR = Some(mgr)
+            mgr
+
+# --- CLI entry & dispatch ---
 # Main entry point
 fn main():
     val raw_args = get_args()
@@ -97,16 +140,13 @@ fn start_server(debug_mode: Bool):
     if debug_mode:
         debug_log("MCP server starting in debug mode")
 
-    # Initialize resource, prompt, and debug session managers
-    val project_root = get_current_dir()
-    val resource_mgr = resources.ResourceManager.create(project_root)
-    val prompt_mgr = prompts.PromptManager.create(project_root)
+    # Initialize only lightweight state; defer heavy manager creation to first use
+    GLOBAL_PROJECT_ROOT = get_current_dir()
     var session_mgr = SessionManager.empty()
     var mcp_state = McpState.create()
-    var task_mgr = TaskManager.create()
 
     if debug_mode:
-        debug_log("Initialized with project root: " + project_root)
+        debug_log("Initialized with project root: " + GLOBAL_PROJECT_ROOT)
 
     # Send nothing until we get initialize request
     var running = true
@@ -537,7 +577,7 @@ fn start_server(debug_mode: Bool):
                     val meta_token = extract_nested_string(line, "_meta", "progressToken")
                     if meta_token != "":
                         mcp_state.register_progress_token(meta_token, id)
-                response = handle_jsonrpc(line, debug_mode, resource_mgr, prompt_mgr, session_mgr, mcp_state, task_mgr)
+                response = handle_jsonrpc(line, debug_mode, session_mgr, mcp_state)
                 # Clean up in-flight tracking
                 if id != "null" and id != "":
                     mcp_state.complete_request(id)
@@ -590,7 +630,7 @@ fn write_stdout_message(body: String):
     print_raw(header)
     print_raw(body)
 
-fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.ResourceManager, prompt_mgr: prompts.PromptManager, session_mgr: SessionManager, mcp_state: McpState, task_mgr: TaskManager) -> String:
+fn handle_jsonrpc(body: String, debug_mode: Bool, session_mgr: SessionManager, mcp_state: McpState) -> String:
     if debug_mode:
         debug_log("Request: " + body)
 
@@ -614,6 +654,7 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return ""  # Notification, no response
     elif method == "shutdown":
         # Cancel pending tasks
+        val task_mgr = get_task_mgr()
         val active_tasks = task_mgr.list_tasks()
         for task in active_tasks:
             val state_str = task_state_to_string(task.state)
@@ -636,12 +677,12 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return handle_tool_call(id, tool_name, body, debug_mode, session_mgr, mcp_state)
     elif method == "resources/list":
         val cursor = extract_nested_string(body, "params", "cursor")
-        return handle_resources_list_paginated(id, resource_mgr, cursor, debug_mode)
+        return handle_resources_list_paginated(id, get_resource_mgr(), cursor, debug_mode)
     elif method == "resources/read":
         val uri = extract_nested_string(body, "params", "uri")
-        return handle_resources_read(id, uri, resource_mgr, debug_mode)
+        return handle_resources_read(id, uri, get_resource_mgr(), debug_mode)
     elif method == "resources/templates/list":
-        return handle_resources_templates_list(id, resource_mgr, debug_mode)
+        return handle_resources_templates_list(id, get_resource_mgr(), debug_mode)
     elif method == "resources/subscribe":
         val uri = extract_nested_string(body, "params", "uri")
         return handle_resources_subscribe(id, uri, mcp_state, debug_mode)
@@ -650,10 +691,10 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
         return handle_resources_unsubscribe(id, uri, mcp_state, debug_mode)
     elif method == "prompts/list":
         val cursor = extract_nested_string(body, "params", "cursor")
-        return handle_prompts_list_paginated(id, prompt_mgr, cursor, debug_mode)
+        return handle_prompts_list_paginated(id, get_prompt_mgr(), cursor, debug_mode)
     elif method == "prompts/get":
         val prompt_name = extract_nested_string(body, "params", "name")
-        return handle_prompts_get(id, prompt_name, body, prompt_mgr, debug_mode)
+        return handle_prompts_get(id, prompt_name, body, get_prompt_mgr(), debug_mode)
     elif method == "logging/setLevel":
         val level = extract_nested_string(body, "params", "level")
         val level_int = log_level_to_int(level)
@@ -662,13 +703,14 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
             debug_log("Log level set to: " + level + " (" + level_int.to_string() + ")")
         return make_result_response(id, LB() + RB())
     elif method == "completion/complete":
-        return handle_completion_request(id, body, resource_mgr, prompt_mgr, debug_mode)
+        return handle_completion_request(id, body, get_resource_mgr(), get_prompt_mgr(), debug_mode)
     elif method == "roots/list":
         return handle_roots_list(id, debug_mode)
     # Task methods
     elif method == "tasks/create":
         val task_method = extract_nested_string(body, "params", "method")
         val task_params = extract_json_value(body, "params")
+        val task_mgr = get_task_mgr()
         val task_id = task_mgr.enqueue(task_method, task_params)
         # In stdio mode, tasks run synchronously - mark as completed immediately
         task_mgr.start_task(task_id)
@@ -679,17 +721,20 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, resource_mgr: resources.Resour
             task_json = task_info.unwrap().to_json()
         return make_result_response(id, task_json)
     elif method == "tasks/list":
+        val task_mgr = get_task_mgr()
         val tasks_json = task_mgr.list_tasks_json()
         val result = jo1(jp("tasks", tasks_json))
         return make_result_response(id, result)
     elif method == "tasks/get":
         val task_id = extract_nested_string(body, "params", "id")
+        val task_mgr = get_task_mgr()
         val task_info = task_mgr.get_task(task_id)
         if task_info.?:
             return make_result_response(id, task_info.unwrap().to_json())
         return make_error_response(id, -32602, "Task not found: " + task_id)
     elif method == "tasks/cancel":
         val task_id = extract_nested_string(body, "params", "id")
+        val task_mgr = get_task_mgr()
         val cancelled = task_mgr.cancel_task(task_id)
         if cancelled:
             val result = jo1(jp("cancelled", js(task_id)))
@@ -894,8 +939,15 @@ fn get_all_tools() -> [String]:
 
     all_tools
 
+fn get_all_tools_cached() -> [String]:
+    if MCP_TOOLS_CACHE_BUILT:
+        return MCP_TOOLS_CACHE
+    MCP_TOOLS_CACHE = get_all_tools()
+    MCP_TOOLS_CACHE_BUILT = true
+    MCP_TOOLS_CACHE
+
 fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> String:
-    val all_tools = get_all_tools()
+    val all_tools = get_all_tools_cached()
 
     # Pagination settings
     val page_size = 20

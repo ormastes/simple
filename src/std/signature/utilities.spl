@@ -1,0 +1,453 @@
+# Digital Signature Utilities Module
+# Helper functions for modular arithmetic, hashing, encoding, and conversions
+
+# =============================================================================
+# Modular Arithmetic Utilities
+# =============================================================================
+
+fn mod_pow(base: i64, exp: i64, modulus: i64) -> i64:
+    """Modular exponentiation: (base^exp) mod modulus.
+    Uses binary exponentiation for efficiency."""
+    if modulus == 1:
+        return 0
+
+    var result = 1
+    var b = base % modulus
+    var e = exp
+
+    while e > 0:
+        if e % 2 == 1:
+            result = (result * b) % modulus
+        e = e / 2
+        b = (b * b) % modulus
+
+    result
+
+fn mod_inverse(a: i64, m: i64) -> i64:
+    """Modular multiplicative inverse using Extended Euclidean Algorithm.
+    Returns -1 if inverse doesn't exist."""
+    if m == 1:
+        return 0
+
+    val m0 = m
+    var x0 = 0
+    var x1 = 1
+    var a_var = a
+    var m_var = m
+
+    while a_var > 1:
+        val q = a_var / m_var
+        var t = m_var
+
+        m_var = a_var % m_var
+        a_var = t
+        t = x0
+
+        x0 = x1 - q * x0
+        x1 = t
+
+    if x1 < 0:
+        x1 = x1 + m0
+
+    x1
+
+fn gcd(a: i64, b: i64) -> i64:
+    """Greatest Common Divisor using Euclidean algorithm."""
+    var x = a
+    var y = b
+
+    while y != 0:
+        val temp = y
+        y = x % y
+        x = temp
+
+    if x < 0:
+        -x
+    else:
+        x
+
+# =============================================================================
+# Simple Hash Functions
+# =============================================================================
+
+fn hash_message_simple(message: text) -> i64:
+    """Simple hash for message signing.
+    WARNING: Not cryptographically secure."""
+    var hash = 5381
+    var i = 0
+
+    while i < message.len():
+        hash = ((hash << 5) + hash) + message[i].ord()
+        i = i + 1
+
+    if hash < 0:
+        hash = -hash
+
+    hash % 1000000007
+
+fn hash_bytes_simple(bytes: list) -> i64:
+    """Hash a byte list."""
+    var hash = 5381
+    var i = 0
+
+    while i < bytes.len():
+        hash = ((hash << 5) + hash) + bytes.get(i)
+        i = i + 1
+
+    if hash < 0:
+        hash = -hash
+
+    hash % 1000000007
+
+fn hash_for_signature(message: text, algorithm: text) -> i64:
+    """Hash message for signature with algorithm selection."""
+    hash_message_simple(message)
+
+# =============================================================================
+# Byte Conversion Utilities
+# =============================================================================
+
+fn bytes_to_int(bytes: list) -> i64:
+    """Convert byte list to integer (big-endian)."""
+    var result = 0
+    var i = 0
+
+    while i < bytes.len():
+        result = (result << 8) | bytes.get(i)
+        i = i + 1
+
+    result
+
+fn int_to_bytes(value: i64, length: i64) -> list:
+    """Convert integer to byte list (big-endian, fixed length)."""
+    var bytes = []
+    var v = value
+
+    var i = 0
+    while i < length:
+        bytes.push(v & 0xFF)
+        v = v >> 8
+        i = i + 1
+
+    # Reverse to big-endian
+    var result = []
+    var j = bytes.len() - 1
+    while j >= 0:
+        result.push(bytes.get(j))
+        j = j - 1
+
+    result
+
+fn xor_bytes(a: list, b: list) -> list:
+    """XOR two byte lists."""
+    var result = []
+    val min_len = if a.len() < b.len(): a.len() else: b.len()
+
+    var i = 0
+    while i < min_len:
+        result.push(a.get(i) ^ b.get(i))
+        i = i + 1
+
+    result
+
+# =============================================================================
+# Encoding Utilities
+# =============================================================================
+
+fn emsa_pkcs1_encode(hash_value: i64, em_len: i64) -> list:
+    """EMSA-PKCS1-v1_5 encoding.
+    Encoding: 0x00 || 0x01 || PS || 0x00 || DigestInfo"""
+    var em = []
+
+    # 0x00 0x01
+    em.push(0x00)
+    em.push(0x01)
+
+    # Convert hash to bytes (8 bytes for i64)
+    var hash_bytes = []
+    var h = hash_value
+    var i = 0
+    while i < 8:
+        hash_bytes.push(h & 0xFF)
+        h = h >> 8
+        i = i + 1
+
+    val hash_len = hash_bytes.len()
+    val ps_len = em_len - 3 - hash_len
+
+    # Add padding string (0xFF bytes)
+    var j = 0
+    while j < ps_len:
+        em.push(0xFF)
+        j = j + 1
+
+    # 0x00 separator
+    em.push(0x00)
+
+    # Add hash (big-endian)
+    var k = hash_len - 1
+    while k >= 0:
+        em.push(hash_bytes.get(k))
+        k = k - 1
+
+    em
+
+fn emsa_pkcs1_decode(em: list) -> i64:
+    """Decode EMSA-PKCS1-v1_5 encoding to extract hash.
+    Returns -1 on error."""
+    if em.len() < 11:
+        return -1
+
+    if em.get(0) != 0x00:
+        return -1
+
+    if em.get(1) != 0x01:
+        return -1
+
+    # Find 0x00 separator
+    var sep_idx = -1
+    var i = 2
+    while i < em.len():
+        if em.get(i) == 0x00:
+            sep_idx = i
+            i = em.len()  # break
+        else:
+            if em.get(i) != 0xFF:
+                return -1
+        i = i + 1
+
+    if sep_idx < 0:
+        return -1
+
+    # Extract hash (last 8 bytes, big-endian)
+    val hash_start = sep_idx + 1
+    var hash_value = 0
+
+    var j = hash_start
+    while j < em.len():
+        hash_value = (hash_value << 8) | em.get(j)
+        j = j + 1
+
+    hash_value
+
+# =============================================================================
+# MGF1 and PSS Utilities
+# =============================================================================
+
+fn mgf1_simple(seed: i64, length: i64) -> list:
+    """MGF1 mask generation function (simplified)."""
+    var mask = []
+    var state = seed
+
+    var i = 0
+    while i < length:
+        # Simple PRNG
+        state = (state * 1103515245 + 12345) % 2147483648
+        mask.push((state >> 8) & 0xFF)
+        i = i + 1
+
+    mask
+
+fn generate_random_salt(length: i64) -> list:
+    """Generate random salt (simplified PRNG)."""
+    var salt = []
+    var state = 12345
+
+    var i = 0
+    while i < length:
+        state = (state * 1103515245 + 12345) % 2147483648
+        salt.push((state >> 8) & 0xFF)
+        i = i + 1
+
+    salt
+
+# =============================================================================
+# Comparison Utilities (Timing Attack Prevention)
+# =============================================================================
+
+fn constant_time_compare(a: i64, b: i64) -> bool:
+    """Constant-time integer comparison."""
+    val diff = a ^ b
+    diff == 0
+
+fn constant_time_compare_bytes(a: list, b: list) -> bool:
+    """Constant-time byte list comparison."""
+    if a.len() != b.len():
+        return false
+
+    var result = 0
+    var i = 0
+    while i < a.len():
+        result = result | (a.get(i) ^ b.get(i))
+        i = i + 1
+
+    result == 0
+
+# =============================================================================
+# Signature Serialization
+# =============================================================================
+
+fn serialize_signature(signature: tuple) -> list:
+    """Convert signature to byte list.
+    Format: [r_bytes(32)] [s_bytes(32)] [algo_len(2)] [algo_bytes]"""
+    var bytes = []
+
+    val r = signature[0]
+    val s = signature[1]
+    val algo = signature[2]
+
+    # Serialize r (32 bytes)
+    val r_bytes = int_to_bytes(r, 32)
+    var i = 0
+    while i < r_bytes.len():
+        bytes.push(r_bytes.get(i))
+        i = i + 1
+
+    # Serialize s (32 bytes)
+    val s_bytes = int_to_bytes(s, 32)
+    var j = 0
+    while j < s_bytes.len():
+        bytes.push(s_bytes.get(j))
+        j = j + 1
+
+    # Algorithm length (2 bytes)
+    val algo_len = algo.len()
+    bytes.push((algo_len >> 8) & 0xFF)
+    bytes.push(algo_len & 0xFF)
+
+    # Algorithm bytes
+    var k = 0
+    while k < algo.len():
+        bytes.push(algo[k].ord())
+        k = k + 1
+
+    bytes
+
+fn deserialize_signature(bytes: list) -> tuple:
+    """Parse signature from byte list."""
+    if bytes.len() < 66:
+        return nil
+
+    # Extract r (first 32 bytes)
+    var r_bytes = []
+    var i = 0
+    while i < 32:
+        r_bytes.push(bytes.get(i))
+        i = i + 1
+    val r = bytes_to_int(r_bytes)
+
+    # Extract s (next 32 bytes)
+    var s_bytes = []
+    var j = 32
+    while j < 64:
+        s_bytes.push(bytes.get(j))
+        j = j + 1
+    val s = bytes_to_int(s_bytes)
+
+    # Extract algorithm length
+    val algo_len = (bytes.get(64) << 8) | bytes.get(65)
+
+    # Extract algorithm
+    var algo = ""
+    var k = 66
+    while k < 66 + algo_len:
+        if k < bytes.len():
+            algo = algo + bytes.get(k).chr()
+        k = k + 1
+
+    (r, s, algo)
+
+fn signature_to_hex(signature: tuple) -> text:
+    """Convert signature to hex representation."""
+    val bytes = serialize_signature(signature)
+
+    var hex = ""
+    var i = 0
+    while i < bytes.len():
+        val byte = bytes.get(i)
+        val high = (byte >> 4) & 0xF
+        val low = byte & 0xF
+
+        val high_char = if high < 10:
+            (high + 48).chr()
+        else:
+            (high - 10 + 97).chr()
+
+        val low_char = if low < 10:
+            (low + 48).chr()
+        else:
+            (low - 10 + 97).chr()
+
+        hex = hex + high_char + low_char
+        i = i + 1
+
+    hex
+
+fn compare_signatures(sig1: tuple, sig2: tuple) -> bool:
+    """Compare two signatures for equality."""
+    val r1 = sig1[0]
+    val s1 = sig1[1]
+    val algo1 = sig1[2]
+
+    val r2 = sig2[0]
+    val s2 = sig2[1]
+    val algo2 = sig2[2]
+
+    var same = true
+    same = same && (r1 == r2)
+    same = same && (s1 == s2)
+    same = same && (algo1 == algo2)
+    same
+
+fn get_signature_length(key_bits: i64) -> i64:
+    """Get expected signature length in bytes."""
+    (key_bits + 7) / 8
+
+fn is_valid_signature_format(signature: tuple) -> bool:
+    """Validate signature format."""
+    if signature == nil:
+        return false
+
+    val algo = signature[2]
+
+    if algo == "RSA-PKCS1":
+        return true
+
+    if algo == "RSA-PSS":
+        return true
+
+    if algo == "DSA":
+        val r = signature[0]
+        val s = signature[1]
+        var valid = true
+        valid = valid && (r > 0)
+        valid = valid && (s > 0)
+        return valid
+
+    false
+
+# =============================================================================
+# Timestamp and Metadata Utilities
+# =============================================================================
+
+fn current_timestamp() -> i64:
+    """Get current timestamp (simplified)."""
+    1234567890
+
+fn timestamp_signature(signature: tuple) -> tuple:
+    """Add timestamp to signature."""
+    val ts = current_timestamp()
+    (signature, ts)
+
+fn verify_timestamp(sig_with_ts: tuple, max_timestamp: i64) -> bool:
+    """Verify signature timestamp."""
+    val ts = sig_with_ts[1]
+    ts <= max_timestamp
+
+fn attach_metadata(signature: tuple, metadata: tuple) -> tuple:
+    """Attach metadata to signature."""
+    (signature, metadata)
+
+fn extract_metadata(sig_with_meta: tuple) -> tuple:
+    """Extract metadata from signature."""
+    sig_with_meta[1]

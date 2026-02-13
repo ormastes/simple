@@ -27,8 +27,8 @@ The Simple language project includes a fully functional MCP server that provides
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "/home/ormastes/dev/pub/simple/bin/simple_runtime",
-      "args": ["src/app/mcp/main.spl", "server"]
+      "command": "/home/ormastes/dev/pub/simple/bin/simple_mcp_server",
+      "args": []
     }
   }
 }
@@ -37,88 +37,47 @@ The Simple language project includes a fully functional MCP server that provides
 ### What This Means
 
 - **Server Name**: `simple-mcp`
-- **Command**: Uses the Simple runtime binary
-- **Script**: Runs the MCP server implementation (`src/app/mcp/main.spl`)
+- **Command**: Wrapper `bin/simple_mcp_server` (launches release runtime + `src/app/mcp/main.spl server`, stderr silenced)
 - **Mode**: Server mode (JSON-RPC over stdio)
 
-## Available Tools
+## Available Tools (current)
 
-The MCP server provides 4 tools for codebase interaction:
+**Core navigation**
+- `read` — read file contents  
+- `search` — regex search (optional path filter)  
+- `list_files` — recursive directory listing  
+- `file_info` — size/mtime metadata
 
-### 1. `read` - Read File Contents
+**Diagnostics (read-only)**
+- `simple_read` — file view with inline diagnostics and hints  
+- `simple_check` — structured diagnostics JSON  
+- `simple_symbols` — symbols in a file with line numbers  
+- `simple_status` — project overview (errors/warnings)
 
-Reads and returns the complete contents of a file.
+**Diagnostics (edit/run)**
+- `simple_edit` — single replace + before/after diagnostics  
+- `simple_multi_edit` — batch edits in one pass  
+- `simple_run` — run a Simple file with annotated errors
 
-**Parameters**:
-- `path` (string): Relative or absolute file path
+**Version control helpers**
+- `simple_diff`, `simple_log`, `simple_squash`, `simple_new`
 
-**Example**:
-```
-Read src/compiler/backend.spl
-```
+**Debugging**
+- `debug_*` family for sessions, breakpoints, stack/vars, evaluate, watch, function breakpoints
 
-**Use Cases**:
-- Reading source code
-- Examining configuration files
-- Reviewing documentation
+**Debug log utilities**
+- `debug_log_enable/disable/clear/query/tree/status`
 
----
+**Tasks**
+- `tasks/list`, `tasks/info`, `tasks/start`, `tasks/stop` (via TaskManager)
 
-### 2. `search` - Search Code
+**Resources & prompts**
+- Resource manager + prompt manager exposed for MCP clients (roots/list, resources/list, prompts/list, resource_updated notifications)
 
-Searches for patterns in the codebase using regex.
+**Database resources**
+- Bug DB / Feature DB / Test DB MCP endpoints (bugdb://*, featuredb://*, testdb://*)
 
-**Parameters**:
-- `pattern` (string): Search pattern (supports regex)
-- `path` (string, optional): Limit search to specific directory
-
-**Example**:
-```
-Search for "fn eval_expr" in src/compiler/
-```
-
-**Use Cases**:
-- Finding function definitions
-- Locating specific code patterns
-- Discovering API usage
-
----
-
-### 3. `list_files` - List Directory Contents
-
-Lists all files in a directory (recursive).
-
-**Parameters**:
-- `path` (string): Directory path to list
-
-**Example**:
-```
-List all files in src/app/mcp/
-```
-
-**Use Cases**:
-- Exploring directory structure
-- Finding related files
-- Understanding module organization
-
----
-
-### 4. `file_info` - Get File Metadata
-
-Returns metadata about a file (size, last modified, etc.).
-
-**Parameters**:
-- `path` (string): File path
-
-**Example**:
-```
-Get info about src/compiler/backend.spl
-```
-
-**Use Cases**:
-- Checking file size
-- Verifying file existence
-- Getting modification time
+> Tool schemas live in `src/app/mcp/*_tools.spl`; the server registers every tool above at startup.
 
 ## Usage with Claude Code
 

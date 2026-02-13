@@ -1,0 +1,138 @@
+# HTTP Response Handling
+#
+# Provides HTTP response parsing and building functionality.
+
+import common from "std/http/common"
+import types from "std/http/types"
+
+# ============================================================================
+# HTTP Response Parsing
+# ============================================================================
+
+# Parse complete HTTP response into tuple structure
+# Returns: (version, status_code, reason, headers, body)
+fn parse_response(text: text) -> tuple:
+    val lines = text.split("\r\n")
+
+    # Parse status line (first line)
+    val status_line = lines[0]
+    val status_parts = parse_status_line(status_line)
+    val version = status_parts[0]
+    val status = status_parts[1]
+    val reason = status_parts[2]
+
+    # Find empty line separating headers from body
+    var header_end = 1
+    var i = 1
+    while i < lines.length():
+        val line = lines[i]
+        if line == "":
+            header_end = i
+            break
+        i = i + 1
+
+    # Parse headers
+    var header_lines = []
+    var j = 1
+    while j < header_end:
+        header_lines = header_lines.append(lines[j])
+        j = j + 1
+
+    val headers = common.parse_headers(header_lines)
+
+    # Parse body (everything after empty line)
+    var body_lines = []
+    var k = header_end + 1
+    while k < lines.length():
+        body_lines = body_lines.append(lines[k])
+        k = k + 1
+
+    val body = "\r\n".join(body_lines)
+
+    return (version, status, reason, headers, body)
+
+# Parse HTTP status line
+# Example: "HTTP/1.1 200 OK" -> ("HTTP/1.1", 200, "OK")
+fn parse_status_line(line: text) -> tuple:
+    val parts = line.split(" ")
+
+    if parts.length() < 2:
+        return ("HTTP/1.1", 200, "OK")
+
+    val version = parts[0]
+    val status_text = parts[1]
+    val status = parse_status_code(status_text)
+
+    # Reason phrase is everything after status code
+    var reason = "OK"
+    if parts.length() > 2:
+        var reason_parts = []
+        var i = 2
+        while i < parts.length():
+            reason_parts = reason_parts.append(parts[i])
+            i = i + 1
+        reason = " ".join(reason_parts)
+
+    return (version, status, reason)
+
+# Parse status code from text to integer
+fn parse_status_code(text: text) -> i64:
+    return common.parse_int(text)
+
+# ============================================================================
+# HTTP Response Building
+# ============================================================================
+
+# Build complete HTTP response from components
+fn build_response(status: i64, headers: list, body: text) -> text:
+    val reason = types.status_text(status)
+
+    var result = "HTTP/1.1 "
+    result = result + status.to_text()
+    result = result + " "
+    result = result + reason
+    result = result + "\r\n"
+
+    val headers_text = common.format_headers(headers)
+    result = result + headers_text
+
+    result = result + "\r\n"
+    result = result + body
+
+    return result
+
+# Create response with status code (empty body)
+fn create_response(status: i64) -> text:
+    return build_response(status, [], "")
+
+# Create 200 OK response with body
+fn create_ok_response(body: text) -> text:
+    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
+    return build_response(200, headers, body)
+
+# Create 404 Not Found response
+fn create_not_found_response() -> text:
+    val body = "Not Found"
+    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
+    return build_response(404, headers, body)
+
+# Create 500 Internal Server Error response
+fn create_server_error_response() -> text:
+    val body = "Internal Server Error"
+    val headers = [("Content-Type", "text/plain"), ("Content-Length", body.length().to_text())]
+    return build_response(500, headers, body)
+
+# Create JSON response
+fn create_json_response(status: i64, json: text) -> text:
+    val headers = [("Content-Type", "application/json"), ("Content-Length", json.length().to_text())]
+    return build_response(status, headers, json)
+
+# Create HTML response
+fn create_html_response(status: i64, html: text) -> text:
+    val headers = [("Content-Type", "text/html"), ("Content-Length", html.length().to_text())]
+    return build_response(status, headers, html)
+
+# Create redirect response
+fn create_redirect_response(location: text) -> text:
+    val headers = [("Location", location)]
+    return build_response(302, headers, "")

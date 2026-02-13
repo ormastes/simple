@@ -1,6 +1,9 @@
 # WebSocket Protocol Implementation Module
 # Implements RFC 6455 WebSocket protocol
 #
+# This is a facade module that re-exports all WebSocket functionality
+# from organized submodules.
+#
 # Components:
 # - HTTP upgrade handshake
 # - Frame encoding/decoding
@@ -11,1165 +14,161 @@
 # - Base64 encoding for handshake
 
 # ==============================================================================
-# Constants
+# Re-export Types and Constants
 # ==============================================================================
 
-# WebSocket opcodes
-val OPCODE_CONTINUATION = 0x0
-val OPCODE_TEXT = 0x1
-val OPCODE_BINARY = 0x2
-val OPCODE_CLOSE = 0x8
-val OPCODE_PING = 0x9
-val OPCODE_PONG = 0xA
+from std.websocket.types import OPCODE_CONTINUATION
+from std.websocket.types import OPCODE_TEXT
+from std.websocket.types import OPCODE_BINARY
+from std.websocket.types import OPCODE_CLOSE
+from std.websocket.types import OPCODE_PING
+from std.websocket.types import OPCODE_PONG
 
-# Frame bit masks
-val FIN_BIT = 0x80
-val RSV1_BIT = 0x40
-val RSV2_BIT = 0x20
-val RSV3_BIT = 0x10
-val OPCODE_MASK = 0x0F
-val MASK_BIT = 0x80
-val PAYLOAD_LEN_MASK = 0x7F
+from std.websocket.types import FIN_BIT
+from std.websocket.types import RSV1_BIT
+from std.websocket.types import RSV2_BIT
+from std.websocket.types import RSV3_BIT
+from std.websocket.types import OPCODE_MASK
+from std.websocket.types import MASK_BIT
+from std.websocket.types import PAYLOAD_LEN_MASK
 
-# Payload length thresholds
-val PAYLOAD_LEN_EXTENDED_16 = 126
-val PAYLOAD_LEN_EXTENDED_64 = 127
+from std.websocket.types import PAYLOAD_LEN_EXTENDED_16
+from std.websocket.types import PAYLOAD_LEN_EXTENDED_64
 
-# WebSocket GUID for handshake
-val WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+from std.websocket.types import WEBSOCKET_GUID
+from std.websocket.types import BASE64_CHARS
 
-# Base64 encoding table
-val BASE64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+from std.websocket.types import CLOSE_NORMAL
+from std.websocket.types import CLOSE_GOING_AWAY
+from std.websocket.types import CLOSE_PROTOCOL_ERROR
+from std.websocket.types import CLOSE_UNSUPPORTED_DATA
+from std.websocket.types import CLOSE_NO_STATUS
+from std.websocket.types import CLOSE_ABNORMAL
+from std.websocket.types import CLOSE_INVALID_PAYLOAD
+from std.websocket.types import CLOSE_POLICY_VIOLATION
+from std.websocket.types import CLOSE_MESSAGE_TOO_BIG
+from std.websocket.types import CLOSE_MANDATORY_EXTENSION
+from std.websocket.types import CLOSE_INTERNAL_ERROR
 
-# Close status codes
-val CLOSE_NORMAL = 1000
-val CLOSE_GOING_AWAY = 1001
-val CLOSE_PROTOCOL_ERROR = 1002
-val CLOSE_UNSUPPORTED_DATA = 1003
-val CLOSE_NO_STATUS = 1005
-val CLOSE_ABNORMAL = 1006
-val CLOSE_INVALID_PAYLOAD = 1007
-val CLOSE_POLICY_VIOLATION = 1008
-val CLOSE_MESSAGE_TOO_BIG = 1009
-val CLOSE_MANDATORY_EXTENSION = 1010
-val CLOSE_INTERNAL_ERROR = 1011
+from std.websocket.types import is_text_frame
+from std.websocket.types import is_binary_frame
+from std.websocket.types import is_continuation_frame
+from std.websocket.types import is_control_frame
+from std.websocket.types import is_close_frame
+from std.websocket.types import is_ping_frame
+from std.websocket.types import is_pong_frame
+from std.websocket.types import is_data_frame
 
-# ==============================================================================
-# Base64 Encoding (for handshake)
-# ==============================================================================
+from std.websocket.types import opcode_name
+from std.websocket.types import frame_type_category
 
-# Encode a byte to base64 character
-fn base64_encode_byte(value: i64) -> text:
-    val chars = BASE64_CHARS
-    val index = value % 64
-    chars.char_at(index)
+from std.websocket.types import is_valid_opcode
+from std.websocket.types import is_valid_control_frame
+from std.websocket.types import is_valid_control_payload_length
+from std.websocket.types import max_control_payload_size
+from std.websocket.types import validate_frame_structure
 
-# Encode 3 bytes to 4 base64 characters
-fn base64_encode_triple(b1: i64, b2: i64, b3: i64) -> text:
-    val val1 = (b1 >> 2) & 0x3F
-    val val2 = ((b1 & 0x03) << 4) | ((b2 >> 4) & 0x0F)
-    val val3 = ((b2 & 0x0F) << 2) | ((b3 >> 6) & 0x03)
-    val val4 = b3 & 0x3F
+from std.websocket.types import is_final_frame
+from std.websocket.types import is_fragmented_frame
 
-    val c1 = base64_encode_byte(val1)
-    val c2 = base64_encode_byte(val2)
-    val c3 = base64_encode_byte(val3)
-    val c4 = base64_encode_byte(val4)
+from std.websocket.types import has_rsv_bits
+from std.websocket.types import get_rsv1
+from std.websocket.types import get_rsv2
+from std.websocket.types import get_rsv3
 
-    "{c1}{c2}{c3}{c4}"
-
-# Encode bytes to base64 with padding
-fn base64_encode_pair(b1: i64, b2: i64) -> text:
-    val val1 = (b1 >> 2) & 0x3F
-    val val2 = ((b1 & 0x03) << 4) | ((b2 >> 4) & 0x0F)
-    val val3 = ((b2 & 0x0F) << 2)
-
-    val c1 = base64_encode_byte(val1)
-    val c2 = base64_encode_byte(val2)
-    val c3 = base64_encode_byte(val3)
-
-    "{c1}{c2}{c3}="
-
-# Encode single byte to base64 with padding
-fn base64_encode_single(b1: i64) -> text:
-    val val1 = (b1 >> 2) & 0x3F
-    val val2 = ((b1 & 0x03) << 4)
-
-    val c1 = base64_encode_byte(val1)
-    val c2 = base64_encode_byte(val2)
-
-    "{c1}{c2}=="
-
-# Convert text to byte array (ASCII)
-fn text_to_bytes(input: text) -> List<i64>:
-    val result = []
-    val len = input.length()
-    var i = 0
-    while i < len:
-        val byte = input.char_at(i).byte_at(0)
-        result.push(byte)
-        i = i + 1
-    result
-
-# Encode text to base64
-fn base64_encode(input: text) -> text:
-    val bytes = text_to_bytes(input)
-    val len = bytes.length()
-    var result = ""
-    var i = 0
-
-    while i < len:
-        val remaining = len - i
-        if remaining >= 3:
-            val b1 = bytes.at(i)
-            val b2 = bytes.at(i + 1)
-            val b3 = bytes.at(i + 2)
-            val encoded = base64_encode_triple(b1, b2, b3)
-            result = result + encoded
-            i = i + 3
-        else:
-            if remaining == 2:
-                val b1 = bytes.at(i)
-                val b2 = bytes.at(i + 1)
-                val encoded = base64_encode_pair(b1, b2)
-                result = result + encoded
-            else:
-                val b1 = bytes.at(i)
-                val encoded = base64_encode_single(b1)
-                result = result + encoded
-            i = len
-
-    result
+from std.websocket.types import requires_extended_length
+from std.websocket.types import requires_64bit_length
+from std.websocket.types import get_header_size
+from std.websocket.types import calculate_frame_size
 
 # ==============================================================================
-# SHA-1 Implementation (for handshake)
+# Re-export Handshake Functions
 # ==============================================================================
 
-# Left rotate 32-bit value
-fn sha1_rotate_left(value: i64, bits: i64) -> i64:
-    val mask = 0xFFFFFFFF
-    val shifted = (value << bits) & mask
-    val rotated = (value >> (32 - bits)) & mask
-    (shifted | rotated) & mask
+from std.websocket.handshake import base64_encode_byte
+from std.websocket.handshake import base64_encode_triple
+from std.websocket.handshake import base64_encode_pair
+from std.websocket.handshake import base64_encode_single
+from std.websocket.handshake import text_to_bytes
+from std.websocket.handshake import bytes_to_text
+from std.websocket.handshake import base64_encode
 
-# Convert bytes to 32-bit word (big-endian)
-fn bytes_to_word(b0: i64, b1: i64, b2: i64, b3: i64) -> i64:
-    val w0 = (b0 & 0xFF) << 24
-    val w1 = (b1 & 0xFF) << 16
-    val w2 = (b2 & 0xFF) << 8
-    val w3 = b3 & 0xFF
-    (w0 | w1 | w2 | w3) & 0xFFFFFFFF
+from std.websocket.handshake import sha1_rotate_left
+from std.websocket.handshake import bytes_to_word
+from std.websocket.handshake import word_to_bytes
+from std.websocket.handshake import sha1_pad
+from std.websocket.handshake import sha1_process_block
+from std.websocket.handshake import sha1
 
-# Convert 32-bit word to bytes (big-endian)
-fn word_to_bytes(word: i64) -> List<i64>:
-    val b0 = (word >> 24) & 0xFF
-    val b1 = (word >> 16) & 0xFF
-    val b2 = (word >> 8) & 0xFF
-    val b3 = word & 0xFF
-    [b0, b1, b2, b3]
-
-# SHA-1 padding
-fn sha1_pad(bytes: List<i64>) -> List<i64>:
-    val result = []
-    val len = bytes.length()
-    var i = 0
-
-    # Copy original bytes
-    while i < len:
-        result.push(bytes.at(i))
-        i = i + 1
-
-    # Append 0x80
-    result.push(0x80)
-
-    # Calculate padding
-    val msg_len_bits = len * 8
-    val current_len = result.length()
-    val target_len = ((current_len + 8) / 64 + 1) * 64
-
-    # Append zeros
-    while result.length() < target_len - 8:
-        result.push(0)
-
-    # Append length (64-bit big-endian)
-    result.push(0)
-    result.push(0)
-    result.push(0)
-    result.push(0)
-    val len_b3 = (msg_len_bits >> 24) & 0xFF
-    val len_b2 = (msg_len_bits >> 16) & 0xFF
-    val len_b1 = (msg_len_bits >> 8) & 0xFF
-    val len_b0 = msg_len_bits & 0xFF
-    result.push(len_b3)
-    result.push(len_b2)
-    result.push(len_b1)
-    result.push(len_b0)
-
-    result
-
-# SHA-1 process block
-fn sha1_process_block(block: List<i64>, h0: i64, h1: i64, h2: i64, h3: i64, h4: i64) -> List<i64>:
-    val w = []
-    var i = 0
-
-    # Prepare message schedule
-    while i < 16:
-        val offset = i * 4
-        val b0 = block.at(offset)
-        val b1 = block.at(offset + 1)
-        val b2 = block.at(offset + 2)
-        val b3 = block.at(offset + 3)
-        val word = bytes_to_word(b0, b1, b2, b3)
-        w.push(word)
-        i = i + 1
-
-    while i < 80:
-        val w3 = w.at(i - 3)
-        val w8 = w.at(i - 8)
-        val w14 = w.at(i - 14)
-        val w16 = w.at(i - 16)
-        val xor1 = w3 ^ w8
-        val xor2 = xor1 ^ w14
-        val xor3 = xor2 ^ w16
-        val rotated = sha1_rotate_left(xor3, 1)
-        w.push(rotated)
-        i = i + 1
-
-    # Initialize working variables
-    var a = h0
-    var b = h1
-    var c = h2
-    var d = h3
-    var e = h4
-
-    # Main loop
-    i = 0
-    while i < 80:
-        var f = 0
-        var k = 0
-
-        if i < 20:
-            f = (b & c) | ((~b & 0xFFFFFFFF) & d)
-            k = 0x5A827999
-        else:
-            if i < 40:
-                f = b ^ c ^ d
-                k = 0x6ED9EBA1
-            else:
-                if i < 60:
-                    f = (b & c) | (b & d) | (c & d)
-                    k = 0x8F1BBCDC
-                else:
-                    f = b ^ c ^ d
-                    k = 0xCA62C1D6
-
-        val temp1 = sha1_rotate_left(a, 5)
-        val temp2 = (temp1 + f) & 0xFFFFFFFF
-        val temp3 = (temp2 + e) & 0xFFFFFFFF
-        val temp4 = (temp3 + k) & 0xFFFFFFFF
-        val wi = w.at(i)
-        val temp5 = (temp4 + wi) & 0xFFFFFFFF
-
-        e = d
-        d = c
-        c = sha1_rotate_left(b, 30)
-        b = a
-        a = temp5
-
-        i = i + 1
-
-    # Add to hash values
-    val new_h0 = (h0 + a) & 0xFFFFFFFF
-    val new_h1 = (h1 + b) & 0xFFFFFFFF
-    val new_h2 = (h2 + c) & 0xFFFFFFFF
-    val new_h3 = (h3 + d) & 0xFFFFFFFF
-    val new_h4 = (h4 + e) & 0xFFFFFFFF
-
-    [new_h0, new_h1, new_h2, new_h3, new_h4]
-
-# Compute SHA-1 hash
-fn sha1(input: text) -> List<i64>:
-    val bytes = text_to_bytes(input)
-    val padded = sha1_pad(bytes)
-
-    # Initialize hash values
-    var h0 = 0x67452301
-    var h1 = 0xEFCDAB89
-    var h2 = 0x98BADCFE
-    var h3 = 0x10325476
-    var h4 = 0xC3D2E1F0
-
-    # Process blocks
-    val num_blocks = padded.length() / 64
-    var block_idx = 0
-
-    while block_idx < num_blocks:
-        val block = []
-        val offset = block_idx * 64
-        var i = 0
-
-        while i < 64:
-            block.push(padded.at(offset + i))
-            i = i + 1
-
-        val hash_values = sha1_process_block(block, h0, h1, h2, h3, h4)
-        h0 = hash_values.at(0)
-        h1 = hash_values.at(1)
-        h2 = hash_values.at(2)
-        h3 = hash_values.at(3)
-        h4 = hash_values.at(4)
-
-        block_idx = block_idx + 1
-
-    # Convert hash values to bytes
-    val result = []
-    val words = [h0, h1, h2, h3, h4]
-    var i = 0
-
-    while i < 5:
-        val word = words.at(i)
-        val bytes = word_to_bytes(word)
-        var j = 0
-        while j < 4:
-            result.push(bytes.at(j))
-            j = j + 1
-        i = i + 1
-
-    result
-
-# Convert bytes to text
-fn bytes_to_text(bytes: List<i64>) -> text:
-    var result = ""
-    val len = bytes.length()
-    var i = 0
-
-    while i < len:
-        val byte = bytes.at(i)
-        val chr = String.from_byte(byte)
-        result = result + chr
-        i = i + 1
-
-    result
+from std.websocket.handshake import generate_websocket_key
+from std.websocket.handshake import compute_websocket_accept
+from std.websocket.handshake import build_upgrade_request
+from std.websocket.handshake import parse_upgrade_response
+from std.websocket.handshake import validate_websocket_accept
+from std.websocket.handshake import build_upgrade_response
+from std.websocket.handshake import extract_websocket_key
 
 # ==============================================================================
-# WebSocket Handshake
+# Re-export Frame Functions
 # ==============================================================================
 
-# Generate random masking key (4 bytes)
-fn generate_masking_key() -> List<i64>:
-    val time = Platform.timestamp()
-    val seed = time % 256
+from std.websocket.frame import generate_masking_key
+from std.websocket.frame import mask_payload
+from std.websocket.frame import unmask_payload
 
-    val key1 = (seed * 37) % 256
-    val key2 = (seed * 73) % 256
-    val key3 = (seed * 109) % 256
-    val key4 = (seed * 157) % 256
+from std.websocket.frame import create_frame
+from std.websocket.frame import create_text_frame
+from std.websocket.frame import create_binary_frame
+from std.websocket.frame import create_continuation_frame
+from std.websocket.frame import create_ping_frame
+from std.websocket.frame import create_pong_frame
+from std.websocket.frame import create_text_frame_from_bytes
+from std.websocket.frame import create_ping_text
+from std.websocket.frame import create_pong_text
+from std.websocket.frame import create_pong_response
 
-    [key1, key2, key3, key4]
-
-# Generate Sec-WebSocket-Key (random 16 bytes, base64 encoded)
-fn generate_websocket_key() -> text:
-    val bytes = []
-    val time = Platform.timestamp()
-    val seed = time % 256
-
-    var i = 0
-    while i < 16:
-        val value = ((seed * (i + 1) * 17) + (i * 23)) % 256
-        bytes.push(value)
-        i = i + 1
-
-    val text_bytes = bytes_to_text(bytes)
-    base64_encode(text_bytes)
-
-# Compute Sec-WebSocket-Accept from Sec-WebSocket-Key
-fn compute_websocket_accept(key: text) -> text:
-    val concatenated = key + WEBSOCKET_GUID
-    val hash = sha1(concatenated)
-    val hash_text = bytes_to_text(hash)
-    base64_encode(hash_text)
-
-# Build HTTP upgrade request
-fn build_upgrade_request(host: text, path: text, key: text) -> text:
-    val line1 = "GET {path} HTTP/1.1\r\n"
-    val line2 = "Host: {host}\r\n"
-    val line3 = "Upgrade: websocket\r\n"
-    val line4 = "Connection: Upgrade\r\n"
-    val line5 = "Sec-WebSocket-Key: {key}\r\n"
-    val line6 = "Sec-WebSocket-Version: 13\r\n"
-    val line7 = "\r\n"
-
-    line1 + line2 + line3 + line4 + line5 + line6 + line7
-
-# Parse HTTP upgrade response
-fn parse_upgrade_response(response: text) -> i64:
-    val has_101 = response.contains("101")
-    val has_upgrade = response.contains("Upgrade: websocket")
-    val has_connection = response.contains("Connection: Upgrade")
-
-    if has_101:
-        if has_upgrade:
-            if has_connection:
-                1
-            else:
-                0
-        else:
-            0
-    else:
-        0
-
-# Validate Sec-WebSocket-Accept header
-fn validate_websocket_accept(response: text, key: text) -> i64:
-    val expected = compute_websocket_accept(key)
-    val header = "Sec-WebSocket-Accept: {expected}"
-
-    if response.contains(header):
-        1
-    else:
-        0
-
-# Build HTTP upgrade response
-fn build_upgrade_response(key: text) -> text:
-    val accept = compute_websocket_accept(key)
-    val line1 = "HTTP/1.1 101 Switching Protocols\r\n"
-    val line2 = "Upgrade: websocket\r\n"
-    val line3 = "Connection: Upgrade\r\n"
-    val line4 = "Sec-WebSocket-Accept: {accept}\r\n"
-    val line5 = "\r\n"
-
-    line1 + line2 + line3 + line4 + line5
-
-# Extract Sec-WebSocket-Key from request
-fn extract_websocket_key(request: text) -> text:
-    val lines = request.split("\r\n")
-    val len = lines.length()
-    var i = 0
-
-    while i < len:
-        val line = lines.at(i)
-        if line.starts_with("Sec-WebSocket-Key: "):
-            val key = line.substring(19)
-            return key
-        i = i + 1
-
-    ""
+from std.websocket.frame import parse_frame_header
+from std.websocket.frame import extract_mask_key
+from std.websocket.frame import extract_payload
+from std.websocket.frame import parse_frame
+from std.websocket.frame import get_frame_payload
+from std.websocket.frame import get_frame_metadata
+from std.websocket.frame import has_complete_frame
+from std.websocket.frame import required_bytes_for_frame
 
 # ==============================================================================
-# Frame Masking
+# Re-export Connection Functions
 # ==============================================================================
 
-# Apply masking to payload
-fn mask_payload(payload: List<i64>, mask_key: List<i64>) -> List<i64>:
-    val result = []
-    val len = payload.length()
-    var i = 0
+from std.websocket.connection import create_close_frame
+from std.websocket.connection import create_empty_close_frame
+from std.websocket.connection import create_close_with_status
 
-    while i < len:
-        val byte = payload.at(i)
-        val key_byte = mask_key.at(i % 4)
-        val masked = byte ^ key_byte
-        result.push(masked)
-        i = i + 1
+from std.websocket.connection import extract_close_status
+from std.websocket.connection import extract_close_reason
 
-    result
-
-# Remove masking from payload
-fn unmask_payload(payload: List<i64>, mask_key: List<i64>) -> List<i64>:
-    mask_payload(payload, mask_key)
+from std.websocket.connection import close_status_name
+from std.websocket.connection import is_valid_close_status
 
 # ==============================================================================
-# Frame Structure
+# Re-export Message Functions
 # ==============================================================================
 
-# Frame tuple: (fin, opcode, masked, payload_length, mask_key, payload)
-# - fin: 1 if final frame, 0 if more fragments
-# - opcode: frame opcode (0-15)
-# - masked: 1 if payload is masked, 0 otherwise
-# - payload_length: length of payload in bytes
-# - mask_key: list of 4 mask bytes (or empty if not masked)
-# - payload: list of payload bytes
+from std.websocket.message import split_into_chunks
+from std.websocket.message import create_fragmented_text
+from std.websocket.message import create_fragmented_binary
 
-# Create text frame
-fn create_text_frame(text_data: text, is_final: i64, is_masked: i64) -> List<i64>:
-    val payload = text_to_bytes(text_data)
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final, OPCODE_TEXT, is_masked, payload, mask_key)
+from std.websocket.message import reassemble_fragments
+from std.websocket.message import merge_payloads
 
-# Create binary frame
-fn create_binary_frame(data: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final, OPCODE_BINARY, is_masked, data, mask_key)
-
-# Create continuation frame
-fn create_continuation_frame(data: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final, OPCODE_CONTINUATION, is_masked, data, mask_key)
-
-# Create ping frame
-fn create_ping_frame(data: List<i64>, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(1, OPCODE_PING, is_masked, data, mask_key)
-
-# Create pong frame
-fn create_pong_frame(data: List<i64>, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(1, OPCODE_PONG, is_masked, data, mask_key)
-
-# Create close frame
-fn create_close_frame(status_code: i64, reason: text, is_masked: i64) -> List<i64>:
-    val payload = []
-    val b1 = (status_code >> 8) & 0xFF
-    val b2 = status_code & 0xFF
-    payload.push(b1)
-    payload.push(b2)
-
-    val reason_bytes = text_to_bytes(reason)
-    val len = reason_bytes.length()
-    var i = 0
-    while i < len:
-        payload.push(reason_bytes.at(i))
-        i = i + 1
-
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(1, OPCODE_CLOSE, is_masked, payload, mask_key)
-
-# Create generic frame
-fn create_frame(is_final: i64, opcode: i64, is_masked: i64, payload: List<i64>, mask_key: List<i64>) -> List<i64>:
-    val result = []
-
-    # First byte: FIN + RSV + opcode
-    val fin_bit = if is_final == 1: FIN_BIT else: 0
-    val byte1 = fin_bit | opcode
-    result.push(byte1)
-
-    # Second byte: MASK + payload length
-    val payload_len = payload.length()
-    val mask_bit = if is_masked == 1: MASK_BIT else: 0
-
-    if payload_len < PAYLOAD_LEN_EXTENDED_16:
-        val byte2 = mask_bit | payload_len
-        result.push(byte2)
-    else:
-        if payload_len < 65536:
-            val byte2 = mask_bit | PAYLOAD_LEN_EXTENDED_16
-            result.push(byte2)
-            val len_hi = (payload_len >> 8) & 0xFF
-            val len_lo = payload_len & 0xFF
-            result.push(len_hi)
-            result.push(len_lo)
-        else:
-            val byte2 = mask_bit | PAYLOAD_LEN_EXTENDED_64
-            result.push(byte2)
-            # 64-bit length (we only support up to 32-bit)
-            result.push(0)
-            result.push(0)
-            result.push(0)
-            result.push(0)
-            val len_b3 = (payload_len >> 24) & 0xFF
-            val len_b2 = (payload_len >> 16) & 0xFF
-            val len_b1 = (payload_len >> 8) & 0xFF
-            val len_b0 = payload_len & 0xFF
-            result.push(len_b3)
-            result.push(len_b2)
-            result.push(len_b1)
-            result.push(len_b0)
-
-    # Masking key (if masked)
-    if is_masked == 1:
-        result.push(mask_key.at(0))
-        result.push(mask_key.at(1))
-        result.push(mask_key.at(2))
-        result.push(mask_key.at(3))
-
-        # Masked payload
-        val masked_payload = mask_payload(payload, mask_key)
-        var i = 0
-        while i < payload_len:
-            result.push(masked_payload.at(i))
-            i = i + 1
-    else:
-        # Unmasked payload
-        var i = 0
-        while i < payload_len:
-            result.push(payload.at(i))
-            i = i + 1
-
-    result
+from std.websocket.message import concatenate_frames
+from std.websocket.message import extract_all_payloads
 
 # ==============================================================================
-# Frame Parsing
+# Re-export Utility Functions
 # ==============================================================================
 
-# Parse frame header (returns tuple or nil)
-fn parse_frame_header(data: List<i64>) -> List<i64>:
-    val len = data.length()
-    if len < 2:
-        return []
-
-    val byte1 = data.at(0)
-    val byte2 = data.at(1)
-
-    val fin = if (byte1 & FIN_BIT) != 0: 1 else: 0
-    val opcode = byte1 & OPCODE_MASK
-    val masked = if (byte2 & MASK_BIT) != 0: 1 else: 0
-    val payload_len_initial = byte2 & PAYLOAD_LEN_MASK
-
-    var header_size = 2
-    var payload_length = payload_len_initial
-
-    if payload_len_initial == PAYLOAD_LEN_EXTENDED_16:
-        if len < 4:
-            return []
-        val len_hi = data.at(2)
-        val len_lo = data.at(3)
-        payload_length = (len_hi << 8) | len_lo
-        header_size = 4
-    else:
-        if payload_len_initial == PAYLOAD_LEN_EXTENDED_64:
-            if len < 10:
-                return []
-            val len_b3 = data.at(6)
-            val len_b2 = data.at(7)
-            val len_b1 = data.at(8)
-            val len_b0 = data.at(9)
-            payload_length = (len_b3 << 24) | (len_b2 << 16) | (len_b1 << 8) | len_b0
-            header_size = 10
-
-    if masked == 1:
-        header_size = header_size + 4
-
-    [fin, opcode, masked, payload_length, header_size]
-
-# Extract masking key from frame
-fn extract_mask_key(data: List<i64>, header_size: i64, is_masked: i64) -> List<i64>:
-    if is_masked == 0:
-        return []
-
-    val offset = header_size - 4
-    val k0 = data.at(offset)
-    val k1 = data.at(offset + 1)
-    val k2 = data.at(offset + 2)
-    val k3 = data.at(offset + 3)
-
-    [k0, k1, k2, k3]
-
-# Extract payload from frame
-fn extract_payload(data: List<i64>, header_size: i64, payload_length: i64, mask_key: List<i64>) -> List<i64>:
-    val result = []
-    var i = 0
-
-    while i < payload_length:
-        val offset = header_size + i
-        if offset < data.length():
-            val byte = data.at(offset)
-            result.push(byte)
-        i = i + 1
-
-    if mask_key.length() == 4:
-        unmask_payload(result, mask_key)
-    else:
-        result
-
-# Parse complete frame
-fn parse_frame(data: List<i64>) -> List<i64>:
-    val header = parse_frame_header(data)
-    if header.length() == 0:
-        return []
-
-    val fin = header.at(0)
-    val opcode = header.at(1)
-    val masked = header.at(2)
-    val payload_length = header.at(3)
-    val header_size = header.at(4)
-
-    val total_size = header_size + payload_length
-    if data.length() < total_size:
-        return []
-
-    val mask_key = extract_mask_key(data, header_size, masked)
-    val payload = extract_payload(data, header_size, payload_length, mask_key)
-
-    [fin, opcode, masked, payload_length, total_size]
-
-# Get payload from parsed frame data
-fn get_frame_payload(data: List<i64>, header_size: i64, payload_length: i64, mask_key: List<i64>) -> List<i64>:
-    extract_payload(data, header_size, payload_length, mask_key)
-
-# ==============================================================================
-# Frame Type Checks
-# ==============================================================================
-
-# Check if opcode is text frame
-fn is_text_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_TEXT: 1 else: 0
-
-# Check if opcode is binary frame
-fn is_binary_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_BINARY: 1 else: 0
-
-# Check if opcode is continuation frame
-fn is_continuation_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_CONTINUATION: 1 else: 0
-
-# Check if opcode is control frame
-fn is_control_frame(opcode: i64) -> i64:
-    if opcode >= OPCODE_CLOSE: 1 else: 0
-
-# Check if opcode is close frame
-fn is_close_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_CLOSE: 1 else: 0
-
-# Check if opcode is ping frame
-fn is_ping_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_PING: 1 else: 0
-
-# Check if opcode is pong frame
-fn is_pong_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_PONG: 1 else: 0
-
-# ==============================================================================
-# Message Fragmentation
-# ==============================================================================
-
-# Split data into chunks of given size
-fn split_into_chunks(data: List<i64>, chunk_size: i64) -> List<List<i64>>:
-    val result = []
-    val len = data.length()
-    var offset = 0
-
-    while offset < len:
-        val chunk = []
-        val remaining = len - offset
-        val size = if remaining < chunk_size: remaining else: chunk_size
-
-        var i = 0
-        while i < size:
-            chunk.push(data.at(offset + i))
-            i = i + 1
-
-        result.push(chunk)
-        offset = offset + size
-
-    result
-
-# Create fragmented text message
-fn create_fragmented_text(text_data: text, chunk_size: i64, is_masked: i64) -> List<List<i64>>:
-    val payload = text_to_bytes(text_data)
-    val chunks = split_into_chunks(payload, chunk_size)
-    val num_chunks = chunks.length()
-    val frames = []
-
-    var i = 0
-    while i < num_chunks:
-        val chunk = chunks.at(i)
-        val is_final = if i == num_chunks - 1: 1 else: 0
-        val opcode = if i == 0: OPCODE_TEXT else: OPCODE_CONTINUATION
-        val mask_key = if is_masked == 1: generate_masking_key() else: []
-        val frame = create_frame(is_final, opcode, is_masked, chunk, mask_key)
-        frames.push(frame)
-        i = i + 1
-
-    frames
-
-# Create fragmented binary message
-fn create_fragmented_binary(data: List<i64>, chunk_size: i64, is_masked: i64) -> List<List<i64>>:
-    val chunks = split_into_chunks(data, chunk_size)
-    val num_chunks = chunks.length()
-    val frames = []
-
-    var i = 0
-    while i < num_chunks:
-        val chunk = chunks.at(i)
-        val is_final = if i == num_chunks - 1: 1 else: 0
-        val opcode = if i == 0: OPCODE_BINARY else: OPCODE_CONTINUATION
-        val mask_key = if is_masked == 1: generate_masking_key() else: []
-        val frame = create_frame(is_final, opcode, is_masked, chunk, mask_key)
-        frames.push(frame)
-        i = i + 1
-
-    frames
-
-# Reassemble fragmented message
-fn reassemble_fragments(fragments: List<List<i64>>) -> List<i64>:
-    val result = []
-    val num_fragments = fragments.length()
-
-    var i = 0
-    while i < num_fragments:
-        val fragment = fragments.at(i)
-        val len = fragment.length()
-        var j = 0
-        while j < len:
-            result.push(fragment.at(j))
-            j = j + 1
-        i = i + 1
-
-    result
-
-# ==============================================================================
-# Close Frame Handling
-# ==============================================================================
-
-# Extract status code from close frame payload
-fn extract_close_status(payload: List<i64>) -> i64:
-    if payload.length() < 2:
-        return CLOSE_NO_STATUS
-
-    val b1 = payload.at(0)
-    val b2 = payload.at(1)
-    (b1 << 8) | b2
-
-# Extract close reason from close frame payload
-fn extract_close_reason(payload: List<i64>) -> text:
-    if payload.length() <= 2:
-        return ""
-
-    val reason_bytes = []
-    val len = payload.length()
-    var i = 2
-
-    while i < len:
-        reason_bytes.push(payload.at(i))
-        i = i + 1
-
-    bytes_to_text(reason_bytes)
-
-# Get close status code name
-fn close_status_name(code: i64) -> text:
-    if code == CLOSE_NORMAL:
-        "Normal Closure"
-    else:
-        if code == CLOSE_GOING_AWAY:
-            "Going Away"
-        else:
-            if code == CLOSE_PROTOCOL_ERROR:
-                "Protocol Error"
-            else:
-                if code == CLOSE_UNSUPPORTED_DATA:
-                    "Unsupported Data"
-                else:
-                    if code == CLOSE_NO_STATUS:
-                        "No Status"
-                    else:
-                        if code == CLOSE_ABNORMAL:
-                            "Abnormal Closure"
-                        else:
-                            if code == CLOSE_INVALID_PAYLOAD:
-                                "Invalid Payload"
-                            else:
-                                if code == CLOSE_POLICY_VIOLATION:
-                                    "Policy Violation"
-                                else:
-                                    if code == CLOSE_MESSAGE_TOO_BIG:
-                                        "Message Too Big"
-                                    else:
-                                        if code == CLOSE_MANDATORY_EXTENSION:
-                                            "Mandatory Extension"
-                                        else:
-                                            if code == CLOSE_INTERNAL_ERROR:
-                                                "Internal Error"
-                                            else:
-                                                "Unknown"
-
-# ==============================================================================
-# Utility Functions
-# ==============================================================================
-
-# Get opcode name as text
-fn opcode_name(opcode: i64) -> text:
-    if opcode == OPCODE_CONTINUATION:
-        "Continuation"
-    else:
-        if opcode == OPCODE_TEXT:
-            "Text"
-        else:
-            if opcode == OPCODE_BINARY:
-                "Binary"
-            else:
-                if opcode == OPCODE_CLOSE:
-                    "Close"
-                else:
-                    if opcode == OPCODE_PING:
-                        "Ping"
-                    else:
-                        if opcode == OPCODE_PONG:
-                            "Pong"
-                        else:
-                            "Unknown"
-
-# Convert frame bytes to hex string (for debugging)
-fn bytes_to_hex(data: List<i64>) -> text:
-    val hex_chars = "0123456789ABCDEF"
-    var result = ""
-    val len = data.length()
-    var i = 0
-
-    while i < len:
-        val byte = data.at(i)
-        val hi = (byte >> 4) & 0x0F
-        val lo = byte & 0x0F
-        val hi_char = hex_chars.char_at(hi)
-        val lo_char = hex_chars.char_at(lo)
-        result = result + hi_char + lo_char
-        if i < len - 1:
-            result = result + " "
-        i = i + 1
-
-    result
-
-# Get frame info as text (for debugging)
-fn frame_info(fin: i64, opcode: i64, masked: i64, payload_length: i64) -> text:
-    val fin_text = if fin == 1: "FIN" else: "MORE"
-    val opcode_text = opcode_name(opcode)
-    val masked_text = if masked == 1: "MASKED" else: "UNMASKED"
-
-    "Frame: {fin_text} | {opcode_text} | {masked_text} | Payload: {payload_length} bytes"
-
-# Validate frame opcode
-fn is_valid_opcode(opcode: i64) -> i64:
-    if opcode == OPCODE_CONTINUATION: return 1
-    if opcode == OPCODE_TEXT: return 1
-    if opcode == OPCODE_BINARY: return 1
-    if opcode == OPCODE_CLOSE: return 1
-    if opcode == OPCODE_PING: return 1
-    if opcode == OPCODE_PONG: return 1
-    0
-
-# Validate control frame
-fn is_valid_control_frame(opcode: i64, payload_length: i64) -> i64:
-    val is_control = is_control_frame(opcode)
-    if is_control == 0:
-        return 1
-
-    if payload_length > 125:
-        0
-    else:
-        1
-
-# Calculate frame size
-fn calculate_frame_size(payload_length: i64, is_masked: i64) -> i64:
-    var size = 2
-
-    if payload_length < PAYLOAD_LEN_EXTENDED_16:
-        size = size + 0
-    else:
-        if payload_length < 65536:
-            size = size + 2
-        else:
-            size = size + 8
-
-    if is_masked == 1:
-        size = size + 4
-
-    size + payload_length
-
-# ==============================================================================
-# Additional Utility Functions
-# ==============================================================================
-
-# Create empty close frame (no status code)
-fn create_empty_close_frame(is_masked: i64) -> List<i64>:
-    val payload = []
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(1, OPCODE_CLOSE, is_masked, payload, mask_key)
-
-# Create text frame from payload bytes
-fn create_text_frame_from_bytes(payload: List<i64>, is_final: i64, is_masked: i64) -> List<i64>:
-    val mask_key = if is_masked == 1: generate_masking_key() else: []
-    create_frame(is_final, OPCODE_TEXT, is_masked, payload, mask_key)
-
-# Get payload as text
-fn payload_to_text(payload: List<i64>) -> text:
-    bytes_to_text(payload)
-
-# Get text payload length
-fn text_payload_length(text_data: text) -> i64:
-    text_data.length()
-
-# Check if payload length requires extended format
-fn requires_extended_length(payload_length: i64) -> i64:
-    if payload_length >= PAYLOAD_LEN_EXTENDED_16: 1 else: 0
-
-# Check if payload length requires 64-bit format
-fn requires_64bit_length(payload_length: i64) -> i64:
-    if payload_length >= 65536: 1 else: 0
-
-# Get header size for payload length
-fn get_header_size(payload_length: i64, is_masked: i64) -> i64:
-    var size = 2
-
-    if payload_length < PAYLOAD_LEN_EXTENDED_16:
-        size = size + 0
-    else:
-        if payload_length < 65536:
-            size = size + 2
-        else:
-            size = size + 8
-
-    if is_masked == 1:
-        size = size + 4
-
-    size
-
-# Check if frame is final
-fn is_final_frame(fin: i64) -> i64:
-    if fin == 1: 1 else: 0
-
-# Check if frame is fragmented
-fn is_fragmented_frame(fin: i64) -> i64:
-    if fin == 0: 1 else: 0
-
-# Create ping with text payload
-fn create_ping_text(text_data: text, is_masked: i64) -> List<i64>:
-    val payload = text_to_bytes(text_data)
-    create_ping_frame(payload, is_masked)
-
-# Create pong with text payload
-fn create_pong_text(text_data: text, is_masked: i64) -> List<i64>:
-    val payload = text_to_bytes(text_data)
-    create_pong_frame(payload, is_masked)
-
-# Respond to ping with pong
-fn create_pong_response(ping_payload: List<i64>, is_masked: i64) -> List<i64>:
-    create_pong_frame(ping_payload, is_masked)
-
-# Validate payload length for control frame
-fn is_valid_control_payload_length(payload_length: i64) -> i64:
-    if payload_length <= 125: 1 else: 0
-
-# Get maximum control frame payload size
-fn max_control_payload_size() -> i64:
-    125
-
-# Check if close status is valid
-fn is_valid_close_status(code: i64) -> i64:
-    if code >= 1000:
-        if code <= 1011:
-            1
-        else:
-            0
-    else:
-        0
-
-# Create close frame with only status code
-fn create_close_with_status(status_code: i64, is_masked: i64) -> List<i64>:
-    create_close_frame(status_code, "", is_masked)
-
-# Extract frame metadata
-fn get_frame_metadata(data: List<i64>) -> List<i64>:
-    parse_frame_header(data)
-
-# Check if enough data for complete frame
-fn has_complete_frame(data: List<i64>) -> i64:
-    val header = parse_frame_header(data)
-    if header.length() == 0:
-        return 0
-
-    val payload_length = header.at(3)
-    val header_size = header.at(4)
-    val required_size = header_size + payload_length
-
-    if data.length() >= required_size: 1 else: 0
-
-# Get required bytes for complete frame
-fn required_bytes_for_frame(data: List<i64>) -> i64:
-    val header = parse_frame_header(data)
-    if header.length() == 0:
-        return 2
-
-    val payload_length = header.at(3)
-    val header_size = header.at(4)
-    val required_size = header_size + payload_length
-    val current_size = data.length()
-
-    if current_size >= required_size:
-        0
-    else:
-        required_size - current_size
-
-# Validate frame structure
-fn validate_frame_structure(fin: i64, opcode: i64, payload_length: i64) -> i64:
-    val valid_opcode = is_valid_opcode(opcode)
-    if valid_opcode == 0:
-        return 0
-
-    val valid_control = is_valid_control_frame(opcode, payload_length)
-    if valid_control == 0:
-        return 0
-
-    1
-
-# Check if opcode is data frame
-fn is_data_frame(opcode: i64) -> i64:
-    if opcode == OPCODE_TEXT: return 1
-    if opcode == OPCODE_BINARY: return 1
-    if opcode == OPCODE_CONTINUATION: return 1
-    0
-
-# Get frame type category
-fn frame_type_category(opcode: i64) -> text:
-    if is_data_frame(opcode) == 1:
-        "Data"
-    else:
-        if is_control_frame(opcode) == 1:
-            "Control"
-        else:
-            "Unknown"
-
-# Concatenate multiple frames
-fn concatenate_frames(frames: List<List<i64>>) -> List<i64>:
-    val result = []
-    val num_frames = frames.length()
-
-    var i = 0
-    while i < num_frames:
-        val frame = frames.at(i)
-        val len = frame.length()
-        var j = 0
-        while j < len:
-            result.push(frame.at(j))
-            j = j + 1
-        i = i + 1
-
-    result
-
-# Extract all payloads from frames
-fn extract_all_payloads(frames: List<List<i64>>) -> List<List<i64>>:
-    val result = []
-    val num_frames = frames.length()
-
-    var i = 0
-    while i < num_frames:
-        val frame = frames.at(i)
-        val parsed = parse_frame(frame)
-        if parsed.length() > 0:
-            val header_size = parsed.at(4)
-            val payload_length = parsed.at(3)
-            val masked = parsed.at(2)
-            val mask_key = extract_mask_key(frame, header_size, masked)
-            val payload = extract_payload(frame, header_size, payload_length, mask_key)
-            result.push(payload)
-        i = i + 1
-
-    result
-
-# Merge payloads into single payload
-fn merge_payloads(payloads: List<List<i64>>) -> List<i64>:
-    reassemble_fragments(payloads)
-
-# Check if RSV bits are set
-fn has_rsv_bits(byte1: i64) -> i64:
-    val rsv = byte1 & (RSV1_BIT | RSV2_BIT | RSV3_BIT)
-    if rsv != 0: 1 else: 0
-
-# Extract RSV1 bit
-fn get_rsv1(byte1: i64) -> i64:
-    if (byte1 & RSV1_BIT) != 0: 1 else: 0
-
-# Extract RSV2 bit
-fn get_rsv2(byte1: i64) -> i64:
-    if (byte1 & RSV2_BIT) != 0: 1 else: 0
-
-# Extract RSV3 bit
-fn get_rsv3(byte1: i64) -> i64:
-    if (byte1 & RSV3_BIT) != 0: 1 else: 0
+from std.websocket.utilities import bytes_to_hex
+from std.websocket.utilities import frame_info
+from std.websocket.utilities import payload_to_text
+from std.websocket.utilities import text_payload_length

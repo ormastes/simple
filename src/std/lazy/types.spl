@@ -1,0 +1,100 @@
+# Lazy Evaluation Types and Internal Helpers
+#
+# Provides the core data structures and internal utilities for lazy evaluation:
+# - Lazy value representation
+# - Stream representation
+# - Generator representation
+# - Stream iteration helpers
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export stream_next_internal
+
+# ============================================================================
+# Type Documentation
+# ============================================================================
+
+# Stream Representation:
+# A stream is a dict with:
+#   - "type": "stream"
+#   - "data": current list of materialized elements
+#   - "index": current position
+#   - "generator": function to generate next element (or nil if finite)
+#   - "state": generator state (varies by stream type)
+#   - "exhausted": boolean indicating if stream is done
+#
+# Lazy Value Representation:
+# A lazy value is a dict with:
+#   - "type": "lazy"
+#   - "evaluated": boolean
+#   - "thunk": function to compute value (or nil if evaluated)
+#   - "value": computed value (or nil if not evaluated)
+#
+# Generator Representation:
+# A generator is a dict with:
+#   - "type": "generator"
+#   - "items": list of items to iterate
+#   - "index": current iteration position
+
+# ============================================================================
+# Stream Helper - Get Next Element
+# ============================================================================
+
+fn stream_next_internal(stream):
+    """Internal: Get next element from stream. Returns (element, has_next)."""
+    # Check if already exhausted
+    if stream["exhausted"]:
+        return (nil, false)
+
+    # If we have buffered data, use it
+    if stream["index"] < stream["data"].len():
+        val elem = stream["data"][stream["index"]]
+        stream["index"] = stream["index"] + 1
+        return (elem, true)
+
+    # No generator means finite stream is exhausted
+    if stream["generator"] == nil:
+        stream["exhausted"] = true
+        return (nil, false)
+
+    # Generate next element based on generator type
+    val gen_type = stream["generator"]
+    val state = stream["state"]
+
+    if gen_type == "repeat":
+        val value = state["value"]
+        stream["data"].push(value)
+        stream["index"] = stream["index"] + 1
+        return (value, true)
+
+    if gen_type == "cycle":
+        val items = state["items"]
+        val pos = state["position"]
+        val value = items[pos]
+        state["position"] = (pos + 1) % items.len()
+        stream["data"].push(value)
+        stream["index"] = stream["index"] + 1
+        return (value, true)
+
+    if gen_type == "iterate":
+        val current = state["current"]
+        val fn = state["fn"]
+        val is_first = state["first"]
+
+        if is_first:
+            state["first"] = false
+            stream["data"].push(current)
+            stream["index"] = stream["index"] + 1
+            return (current, true)
+
+        val next_val = fn(current)
+        state["current"] = next_val
+        stream["data"].push(next_val)
+        stream["index"] = stream["index"] + 1
+        return (next_val, true)
+
+    # Unknown generator
+    stream["exhausted"] = true
+    (nil, false)

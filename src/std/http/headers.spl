@@ -1,0 +1,358 @@
+# HTTP Headers Handling
+#
+# Provides HTTP header parsing, formatting, and manipulation.
+
+import common from "std/http/common"
+
+# ============================================================================
+# HTTP Headers
+# ============================================================================
+
+# Parse list of header lines into list of (name, value) tuples
+fn parse_headers(lines: list) -> list:
+    return common.parse_headers(lines)
+
+# Parse single header line
+# Example: "Content-Type: application/json" -> ("Content-Type", "application/json")
+fn parse_header(line: text) -> tuple:
+    return common.parse_header(line)
+
+# Format headers list into HTTP header text
+fn format_headers(headers: list) -> text:
+    return common.format_headers(headers)
+
+# Get header value by name (case-insensitive)
+# Returns nil if not found
+fn get_header(headers: list, name: text) -> text:
+    val lower_name = name.to_lower()
+
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val header_name = header[0]
+        val header_value = header[1]
+
+        val lower_header_name = header_name.to_lower()
+
+        if lower_header_name == lower_name:
+            return header_value
+
+        i = i + 1
+
+    return nil
+
+# Set header value (replaces existing or adds new)
+fn set_header(headers: list, name: text, value: text) -> list:
+    val lower_name = name.to_lower()
+
+    var found = false
+    var new_headers = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val header_name = header[0]
+        val header_value = header[1]
+
+        val lower_header_name = header_name.to_lower()
+
+        if lower_header_name == lower_name:
+            new_headers = new_headers.append((name, value))
+            found = true
+        else:
+            new_headers = new_headers.append(header)
+
+        i = i + 1
+
+    if not found:
+        new_headers = new_headers.append((name, value))
+
+    return new_headers
+
+# Remove header by name (case-insensitive)
+fn remove_header(headers: list, name: text) -> list:
+    val lower_name = name.to_lower()
+
+    var new_headers = []
+    var i = 0
+    while i < headers.length():
+        val header = headers[i]
+        val header_name = header[0]
+
+        val lower_header_name = header_name.to_lower()
+
+        if lower_header_name != lower_name:
+            new_headers = new_headers.append(header)
+
+        i = i + 1
+
+    return new_headers
+
+# Normalize header name to standard case
+# Example: "content-type" -> "Content-Type"
+fn normalize_header_name(name: text) -> text:
+    val parts = name.split("-")
+    var normalized_parts = []
+
+    var i = 0
+    while i < parts.length():
+        val part = parts[i]
+        val capitalized = capitalize_word(part)
+        normalized_parts = normalized_parts.append(capitalized)
+        i = i + 1
+
+    return "-".join(normalized_parts)
+
+# Capitalize first letter of word
+fn capitalize_word(word: text) -> text:
+    if word.length() == 0:
+        return word
+
+    val first = word[0].to_upper()
+    val rest = word.substring(1, word.length())
+
+    return first + rest
+
+# Get content length from headers
+fn get_content_length(headers: list) -> i64:
+    val length_str = get_header(headers, "Content-Length")
+
+    if length_str == nil:
+        return 0
+
+    return common.parse_int(length_str)
+
+# Check if response uses chunked encoding
+fn is_chunked(headers: list) -> bool:
+    val encoding = get_header(headers, "Transfer-Encoding")
+
+    if encoding == nil:
+        return false
+
+    val lower = encoding.to_lower()
+    return lower.contains("chunked")
+
+# ============================================================================
+# Chunked Transfer Encoding
+# ============================================================================
+
+# Encode data using chunked transfer encoding
+fn encode_chunked(data: text) -> text:
+    val length = data.length()
+
+    var result = to_hex_text(length)
+    result = result + "\r\n"
+    result = result + data
+    result = result + "\r\n"
+    result = result + "0\r\n\r\n"
+
+    return result
+
+# Convert integer to hex text
+fn to_hex_text(n: i64) -> text:
+    if n == 0:
+        return "0"
+
+    var result = ""
+    var num = n
+
+    while num > 0:
+        val digit = num % 16
+        val hex_chars = "0123456789abcdef"
+        val hex_char = hex_chars[digit]
+
+        result = hex_char + result
+        num = num / 16
+
+    return result
+
+# Decode chunked transfer encoded data
+fn decode_chunked(encoded: text) -> text:
+    var result = ""
+    var pos = 0
+
+    while pos < encoded.length():
+        # Find end of chunk size line
+        val size_end = common.index_of(encoded, "\r\n", pos)
+
+        if size_end < 0:
+            break
+
+        # Parse chunk size
+        val size_str = encoded.substring(pos, size_end)
+        val chunk_size = parse_hex_text(size_str)
+
+        if chunk_size == 0:
+            break
+
+        # Extract chunk data
+        val data_start = size_end + 2
+        val data_end = data_start + chunk_size
+
+        if data_end > encoded.length():
+            break
+
+        val chunk_data = encoded.substring(data_start, data_end)
+        result = result + chunk_data
+
+        # Move past chunk data and trailing \r\n
+        pos = data_end + 2
+
+    return result
+
+# Parse hex text to integer
+fn parse_hex_text(hex: text) -> i64:
+    var result = 0
+    var i = 0
+
+    while i < hex.length():
+        val ch = hex[i]
+        val digit = hex_to_int(ch)
+
+        result = result * 16
+        result = result + digit
+
+        i = i + 1
+
+    return result
+
+# Convert hex digit to integer
+fn hex_to_int(ch: text) -> i64:
+    return common.hex_to_int(ch)
+
+# ============================================================================
+# Range Header Handling
+# ============================================================================
+
+# Parse Range header
+# Returns: (start, end) or nil if invalid
+# Example: "bytes=0-1023" -> (0, 1023)
+fn parse_range_header(header: text) -> tuple:
+    if not header.starts_with("bytes="):
+        return nil
+
+    val range_spec = header.substring(6, header.length())
+    val dash_pos = range_spec.index_of("-")
+
+    if dash_pos < 0:
+        return nil
+
+    val start_str = range_spec.substring(0, dash_pos)
+    val end_str = range_spec.substring(dash_pos + 1, range_spec.length())
+
+    var start = 0
+    if start_str.length() > 0:
+        start = common.parse_int(start_str)
+
+    var end = 0
+    if end_str.length() > 0:
+        end = common.parse_int(end_str)
+
+    return (start, end)
+
+# Build Range header value
+fn build_range_header(start: i64, end: i64) -> text:
+    var result = "bytes="
+    result = result + start.to_text()
+    result = result + "-"
+    result = result + end.to_text()
+
+    return result
+
+# ============================================================================
+# Multipart Form Data
+# ============================================================================
+
+# Parse multipart form data
+# Returns: list of (headers, body) tuples
+fn parse_multipart(body: text, boundary: text) -> list:
+    var delimiter = "--"
+    delimiter = delimiter + boundary
+
+    val parts_raw = body.split(delimiter)
+    var parts = []
+
+    var i = 0
+    while i < parts_raw.length():
+        val part_raw = parts_raw[i]
+
+        # Skip empty parts and final boundary
+        if part_raw.length() > 2:
+            val part = parse_multipart_part(part_raw)
+            if part != nil:
+                parts = parts.append(part)
+
+        i = i + 1
+
+    return parts
+
+# Parse single multipart part
+fn parse_multipart_part(part_text: text) -> tuple:
+    val lines = part_text.split("\r\n")
+
+    # Find empty line separating headers from body
+    var header_end = 0
+    var i = 0
+    while i < lines.length():
+        val line = lines[i]
+        if line == "":
+            header_end = i
+            break
+        i = i + 1
+
+    if header_end == 0:
+        return nil
+
+    # Parse headers
+    var header_lines = []
+    var j = 0
+    while j < header_end:
+        header_lines = header_lines.append(lines[j])
+        j = j + 1
+
+    val headers = parse_headers(header_lines)
+
+    # Parse body
+    var body_lines = []
+    var k = header_end + 1
+    while k < lines.length():
+        body_lines = body_lines.append(lines[k])
+        k = k + 1
+
+    val body = "\r\n".join(body_lines)
+
+    return (headers, body)
+
+# Build multipart form data
+fn build_multipart(parts: list, boundary: text) -> text:
+    var result = ""
+
+    var i = 0
+    while i < parts.length():
+        val part = parts[i]
+        val headers = part[0]
+        val body = part[1]
+
+        result = result + "--"
+        result = result + boundary
+        result = result + "\r\n"
+
+        val headers_text = format_headers(headers)
+        result = result + headers_text
+
+        result = result + "\r\n"
+        result = result + body
+        result = result + "\r\n"
+
+        i = i + 1
+
+    result = result + "--"
+    result = result + boundary
+    result = result + "--\r\n"
+
+    return result
+
+# Generate random boundary string
+fn generate_boundary() -> text:
+    # Simplified - in real implementation would use random data
+    return "----SimpleFormBoundary7MA4YWxkTrZu0gW"
+

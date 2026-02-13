@@ -1,0 +1,156 @@
+# HTTP Server Utilities Module
+# Path utilities, header handling, logging, and other helpers
+
+# =============================================================================
+# Path Utilities
+# =============================================================================
+
+# Normalize path: remove ".." and "."
+fn normalize_path(path: text) -> text:
+    var parts = path.split("/")
+    var normalized = []
+
+    var i = 0
+    while i < parts.length():
+        var part = parts.at(i)
+
+        if part == "..":
+            if normalized.length() > 0:
+                normalized.pop()
+
+        if part == ".":
+            i = i + 1
+            continue
+
+        if part.length() > 0:
+            normalized.append(part)
+
+        i = i + 1
+
+    var result = normalized.join("/")
+    if path.starts_with("/"):
+        result = "/" + result
+    result
+
+# Check if path is safe (no directory traversal)
+fn is_safe_path(path: text, base_dir: text) -> bool:
+    var normalized = normalize_path(path)
+    var safe = normalized.starts_with(base_dir)
+    safe
+
+# Join path segments
+fn join_paths(base: text, segment: text) -> text:
+    var result = base
+
+    var base_has_slash = base.ends_with("/")
+    var segment_has_slash = segment.starts_with("/")
+
+    if base_has_slash:
+        if segment_has_slash:
+            var seg_start = 1
+            result = base + segment.substring(seg_start, segment.length())
+        if segment_has_slash == false:
+            result = base + segment
+
+    if base_has_slash == false:
+        if segment_has_slash:
+            result = base + segment
+        if segment_has_slash == false:
+            result = base + "/" + segment
+
+    normalize_path(result)
+
+# =============================================================================
+# Header Utilities
+# =============================================================================
+
+# Get header value from header list
+fn get_header_value(headers: list, name: text) -> text:
+    var result = ""
+    var lower_name = name.to_lower()
+
+    var i = 0
+    while i < headers.length():
+        var header = headers.at(i)
+        var header_name = header.at(0).to_lower()
+        var header_value = header.at(1)
+
+        if header_name == lower_name:
+            result = header_value
+            break
+
+        i = i + 1
+
+    result
+
+# Check if header exists
+fn has_header(headers: list, name: text) -> bool:
+    var value = get_header_value(headers, name)
+    value.length() > 0
+
+# Parse Accept header: "text/html,application/json;q=0.9"
+fn parse_accept_header(accept: text) -> list:
+    var types = []
+
+    var parts = accept.split(",")
+    var i = 0
+    while i < parts.length():
+        var part = parts.at(i).trim()
+        var semicolon_idx = part.index_of(";")
+
+        var mime_type = part
+        var quality = 1.0
+
+        if semicolon_idx > 0:
+            mime_type = part.substring(0, semicolon_idx)
+
+        types.append((mime_type, quality))
+        i = i + 1
+
+    types
+
+# =============================================================================
+# Range Request Support
+# =============================================================================
+
+# Parse Range header: "bytes=0-1023"
+fn parse_range_header(range: text) -> (i64, i64):
+    var start = 0
+    var end = -1
+
+    var bytes_prefix = "bytes="
+    if range.starts_with(bytes_prefix):
+        var range_start = bytes_prefix.length()
+        var range_part = range.substring(range_start, range.length())
+        var dash_idx = range_part.index_of("-")
+
+        if dash_idx > 0:
+            var start_str = range_part.substring(0, dash_idx)
+            var end_start = dash_idx + 1
+            var end_str = range_part.substring(end_start, range_part.length())
+
+            start = start_str.to_int()
+            if end_str.length() > 0:
+                end = end_str.to_int()
+
+
+    (start, end)
+
+# Create Content-Range header value
+fn create_content_range(start: i64, end: i64, total: i64) -> text:
+    "bytes {start}-{end}/{total}"
+
+# =============================================================================
+# Logging Utilities
+# =============================================================================
+
+# Format request log entry
+fn format_request_log(method: text, path: text, status: i64, duration_ms: i64) -> text:
+    "{method} {path} - {status} ({duration_ms}ms)"
+
+# Create access log entry
+fn create_access_log(request: (text, text, list, text, list, list), response: (i64, text, list, text), duration_ms: i64) -> text:
+    var method = request.at(0)
+    var path = request.at(1)
+    var status = response.at(0)
+    format_request_log(method, path, status, duration_ms)

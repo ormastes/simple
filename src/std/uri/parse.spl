@@ -1,0 +1,288 @@
+# URI Parsing Functions
+
+# Parse a complete URI into components
+# Returns UriComponents with all parts extracted
+fn parse_uri(uri: text) -> UriComponents:
+    var components = UriComponents(
+        scheme: "",
+        userinfo: "",
+        host: "",
+        port: "",
+        path: "",
+        query: "",
+        fragment: ""
+    )
+
+    if uri == "":
+        return components
+
+    var remaining = uri
+
+    # Extract fragment first (rightmost)
+    var fragment_idx = string_index_of(remaining, "#")
+    if fragment_idx >= 0:
+        components.fragment = string_substring(remaining, fragment_idx + 1, string_length(remaining))
+        remaining = string_substring(remaining, 0, fragment_idx)
+
+    # Extract query
+    var query_idx = string_index_of(remaining, "?")
+    if query_idx >= 0:
+        components.query = string_substring(remaining, query_idx + 1, string_length(remaining))
+        remaining = string_substring(remaining, 0, query_idx)
+
+    # Extract scheme
+    var scheme_idx = string_index_of(remaining, ":")
+    if scheme_idx > 0:
+        var potential_scheme = string_substring(remaining, 0, scheme_idx)
+        if is_valid_scheme(potential_scheme):
+            components.scheme = string_to_lower(potential_scheme)
+            remaining = string_substring(remaining, scheme_idx + 1, string_length(remaining))
+
+    # Check for authority (starts with //)
+    if string_starts_with(remaining, "//"):
+        remaining = string_substring(remaining, 2, string_length(remaining))
+
+        # Find where path starts
+        var path_idx = string_index_of(remaining, "/")
+        var authority = ""
+        if path_idx >= 0:
+            authority = string_substring(remaining, 0, path_idx)
+            components.path = string_substring(remaining, path_idx, string_length(remaining))
+        else:
+            authority = remaining
+            components.path = ""
+
+        # Parse authority: [userinfo@]host[:port]
+        var at_idx = string_index_of(authority, "@")
+        var host_port = authority
+        if at_idx >= 0:
+            components.userinfo = string_substring(authority, 0, at_idx)
+            host_port = string_substring(authority, at_idx + 1, string_length(authority))
+
+        # Parse host and port
+        var port_idx = string_last_index_of(host_port, ":")
+        if port_idx >= 0:
+            # Check if it's actually a port (not IPv6)
+            var potential_port = string_substring(host_port, port_idx + 1, string_length(host_port))
+            if is_numeric(potential_port):
+                components.host = string_substring(host_port, 0, port_idx)
+                components.port = potential_port
+            else:
+                components.host = host_port
+        else:
+            components.host = host_port
+    else:
+        # No authority, remaining is path
+        components.path = remaining
+
+    components
+
+# Parse a URL (alias for parse_uri with HTTP/HTTPS assumption)
+fn parse_url(url: text) -> UriComponents:
+    parse_uri(url)
+
+# Parse a query string into list of QueryParam
+fn parse_query_string(query: text) -> array:
+    var params = []
+
+    var query_str = query
+    if string_starts_with(query_str, "?"):
+        query_str = string_substring(query_str, 1, string_length(query_str))
+
+    if query_str == "":
+        return params
+
+    var pairs = string_split(query_str, "&")
+    var i = 0
+    while i < array_length(pairs):
+        var pair = array_get(pairs, i)
+        var eq_idx = string_index_of(pair, "=")
+        if eq_idx >= 0:
+            var key = string_substring(pair, 0, eq_idx)
+            var value = string_substring(pair, eq_idx + 1, string_length(pair))
+            var param = QueryParam(key: uri_decode(key), value: uri_decode(value))
+            params = array_push(params, param)
+        else:
+            var param = QueryParam(key: uri_decode(pair), value: "")
+            params = array_push(params, param)
+        i = i + 1
+
+    params
+
+# Component Access Functions
+
+fn get_scheme(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.scheme
+
+fn get_host(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.host
+
+fn get_port(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.port
+
+fn get_path(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.path
+
+fn get_query(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.query
+
+fn get_fragment(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.fragment
+
+fn get_userinfo(uri: text) -> text:
+    var components = parse_uri(uri)
+    components.userinfo
+
+fn get_authority(uri: text) -> text:
+    var components = parse_uri(uri)
+    var authority = ""
+
+    if components.userinfo != "":
+        authority = components.userinfo + "@"
+
+    authority = authority + components.host
+
+    if components.port != "":
+        authority = authority + ":" + components.port
+
+    authority
+
+# Path Operations
+
+fn join_path(segments: array) -> text:
+    if array_length(segments) == 0:
+        return ""
+
+    var result = ""
+    var i = 0
+    while i < array_length(segments):
+        var segment = array_get(segments, i)
+
+        # Skip empty segments
+        if segment != "":
+            if i > 0 and not string_starts_with(segment, "/"):
+                result = result + "/"
+            result = result + segment
+
+        i = i + 1
+
+    result
+
+fn normalize_path(path: text) -> text:
+    if path == "" or path == "/":
+        return path
+
+    var is_absolute = string_starts_with(path, "/")
+    var segments = string_split(path, "/")
+    var normalized = []
+
+    var i = 0
+    while i < array_length(segments):
+        var segment = array_get(segments, i)
+
+        if segment == "" or segment == ".":
+            # Skip empty and current directory
+            pass
+        else:
+            if segment == "..":
+                # Go up one level if possible
+                if array_length(normalized) > 0:
+                    var last = array_get(normalized, array_length(normalized) - 1)
+                    if last != "..":
+                        normalized = array_pop(normalized)
+                    else:
+                        normalized = array_push(normalized, segment)
+                else:
+                    if not is_absolute:
+                        normalized = array_push(normalized, segment)
+            else:
+                normalized = array_push(normalized, segment)
+
+        i = i + 1
+
+    var result = join_path(normalized)
+    if is_absolute and not string_starts_with(result, "/"):
+        result = "/" + result
+
+    result
+
+fn resolve_relative(base: text, relative: text) -> text:
+    if relative == "":
+        return base
+
+    var rel_components = parse_uri(relative)
+
+    # If relative URI has scheme, it's absolute
+    if rel_components.scheme != "":
+        return relative
+
+    var base_components = parse_uri(base)
+    var result = UriComponents(
+        scheme: base_components.scheme,
+        userinfo: base_components.userinfo,
+        host: base_components.host,
+        port: base_components.port,
+        path: base_components.path,
+        query: base_components.query,
+        fragment: base_components.fragment
+    )
+
+    # If relative has authority, use it
+    if rel_components.host != "":
+        result.userinfo = rel_components.userinfo
+        result.host = rel_components.host
+        result.port = rel_components.port
+        result.path = normalize_path(rel_components.path)
+        result.query = rel_components.query
+        result.fragment = rel_components.fragment
+        return build_uri(result)
+
+    # Relative path resolution
+    if rel_components.path == "":
+        # Only query or fragment
+        if rel_components.query != "":
+            result.query = rel_components.query
+        if rel_components.fragment != "":
+            result.fragment = rel_components.fragment
+    else:
+        if string_starts_with(rel_components.path, "/"):
+            # Absolute path
+            result.path = normalize_path(rel_components.path)
+        else:
+            # Relative path - merge with base
+            var base_path = base_components.path
+            var last_slash = string_last_index_of(base_path, "/")
+            var merged = ""
+            if last_slash >= 0:
+                merged = string_substring(base_path, 0, last_slash + 1) + rel_components.path
+            else:
+                merged = rel_components.path
+            result.path = normalize_path(merged)
+
+        result.query = rel_components.query
+        result.fragment = rel_components.fragment
+
+    build_uri(result)
+
+# Forward declarations
+fn is_valid_scheme(scheme: text) -> bool
+fn is_numeric(str: text) -> bool
+fn uri_decode(str: text) -> text
+fn build_uri(components: UriComponents) -> text
+fn string_to_lower(s: text) -> text
+fn string_starts_with(s: text, prefix: text) -> bool
+fn string_last_index_of(s: text, needle: text) -> i64
+fn string_index_of(s: text, needle: text) -> i64
+fn string_substring(s: text, start: i64, end: i64) -> text
+fn string_length(s: text) -> i64
+fn string_split(s: text, delimiter: text) -> array
+fn array_length(arr: array) -> i64
+fn array_get(arr: array, index: i64) -> any
+fn array_push(arr: array, item: any) -> array
+fn array_pop(arr: array) -> array

@@ -1,883 +1,138 @@
-# SMTP Email Protocol Module
+# SMTP Email Protocol Module - Facade
 # Comprehensive SMTP/MIME implementation for Simple language
 # RFC 5321 (SMTP), RFC 5322 (Email), RFC 2045-2049 (MIME)
-
-# ============================================================================
-# SMTP Response Codes
-# ============================================================================
-
-fn smtp_code_220() -> i64: 220  # Service ready
-fn smtp_code_221() -> i64: 221  # Service closing
-fn smtp_code_250() -> i64: 250  # OK
-fn smtp_code_354() -> i64: 354  # Start mail input
-fn smtp_code_421() -> i64: 421  # Service not available
-fn smtp_code_450() -> i64: 450  # Mailbox unavailable
-fn smtp_code_500() -> i64: 500  # Syntax error
-fn smtp_code_501() -> i64: 501  # Syntax error in parameters
-fn smtp_code_502() -> i64: 502  # Command not implemented
-fn smtp_code_503() -> i64: 503  # Bad sequence of commands
-fn smtp_code_550() -> i64: 550  # Mailbox unavailable
-fn smtp_code_551() -> i64: 551  # User not local
-fn smtp_code_552() -> i64: 552  # Exceeded storage allocation
-
-fn smtp_code_description(code: i64) -> text:
-    if code == 220:
-        return "Service ready"
-    if code == 221:
-        return "Service closing transmission channel"
-    if code == 250:
-        return "Requested mail action okay, completed"
-    if code == 354:
-        return "Start mail input; end with <CRLF>.<CRLF>"
-    if code == 421:
-        return "Service not available, closing transmission channel"
-    if code == 450:
-        return "Requested mail action not taken: mailbox unavailable"
-    if code == 500:
-        return "Syntax error, command unrecognized"
-    if code == 501:
-        return "Syntax error in parameters or arguments"
-    if code == 502:
-        return "Command not implemented"
-    if code == 503:
-        return "Bad sequence of commands"
-    if code == 550:
-        return "Requested action not taken: mailbox unavailable"
-    if code == 551:
-        return "User not local; please try forward path"
-    if code == 552:
-        return "Requested mail action aborted: exceeded storage allocation"
-    return "Unknown response code"
-
-fn smtp_is_success_code(code: i64) -> bool:
-    var is_2xx = code >= 200
-    var less_than_300 = code < 300
-    return is_2xx and less_than_300
-
-fn smtp_is_error_code(code: i64) -> bool:
-    var is_4xx = code >= 400
-    var less_than_600 = code < 600
-    return is_4xx and less_than_600
-
-# ============================================================================
-# SMTP Commands
-# ============================================================================
-
-fn smtp_command_helo(domain: text) -> text:
-    return "HELO {domain}\r\n"
-
-fn smtp_command_ehlo(domain: text) -> text:
-    return "EHLO {domain}\r\n"
-
-fn smtp_command_mail_from(email: text) -> text:
-    return "MAIL FROM:<{email}>\r\n"
-
-fn smtp_command_rcpt_to(email: text) -> text:
-    return "RCPT TO:<{email}>\r\n"
-
-fn smtp_command_data() -> text:
-    return "DATA\r\n"
-
-fn smtp_command_quit() -> text:
-    return "QUIT\r\n"
-
-fn smtp_command_rset() -> text:
-    return "RSET\r\n"
-
-fn smtp_command_vrfy(email: text) -> text:
-    return "VRFY {email}\r\n"
-
-fn smtp_command_noop() -> text:
-    return "NOOP\r\n"
-
-fn smtp_command_auth_plain() -> text:
-    return "AUTH PLAIN\r\n"
-
-fn smtp_command_auth_login() -> text:
-    return "AUTH LOGIN\r\n"
-
-# ============================================================================
-# Email Address Validation and Parsing
-# ============================================================================
-
-fn email_is_valid_char(ch: text) -> bool:
-    if ch == "@":
-        return true
-    if ch == ".":
-        return true
-    if ch == "-":
-        return true
-    if ch == "_":
-        return true
-    if ch == "+":
-        return true
-
-    var is_alpha = ch >= "a" and ch <= "z"
-    if is_alpha:
-        return true
-
-    var is_upper = ch >= "A" and ch <= "Z"
-    if is_upper:
-        return true
-
-    var is_digit = ch >= "0" and ch <= "9"
-    return is_digit
-
-fn email_validate(email: text) -> bool:
-    var at_pos = email.index_of("@")
-    if at_pos == -1:
-        return false
-
-    var at_count = 0
-    var i = 0
-    var len = email.length()
-    while i < len:
-        var ch = email.char_at(i)
-        if ch == "@":
-            at_count = at_count + 1
-        i = i + 1
-
-    if at_count != 1:
-        return false
-
-    var local_part = email.substring(0, at_pos)
-    var domain_part_start = at_pos + 1
-    var domain_part = email.substring(domain_part_start, len)
-
-    if local_part.length() == 0:
-        return false
-    if domain_part.length() == 0:
-        return false
-
-    var dot_pos = domain_part.index_of(".")
-    if dot_pos == -1:
-        return false
-
-    return true
-
-fn email_parse_local_part(email: text) -> text:
-    var at_pos = email.index_of("@")
-    if at_pos == -1:
-        return ""
-    return email.substring(0, at_pos)
-
-fn email_parse_domain(email: text) -> text:
-    var at_pos = email.index_of("@")
-    if at_pos == -1:
-        return ""
-    var start = at_pos + 1
-    var len = email.length()
-    return email.substring(start, len)
-
-fn email_parse_display_name(full_address: text) -> text:
-    var start_bracket = full_address.index_of("<")
-    if start_bracket == -1:
-        return ""
-    var display = full_address.substring(0, start_bracket)
-    return display.trim()
-
-fn email_parse_address(full_address: text) -> text:
-    var start_bracket = full_address.index_of("<")
-    var end_bracket = full_address.index_of(">")
-
-    if start_bracket == -1:
-        return full_address.trim()
-
-    if end_bracket == -1:
-        return full_address.trim()
-
-    var start_pos = start_bracket + 1
-    return full_address.substring(start_pos, end_bracket)
-
-fn email_format_address(email: text, display_name: text) -> text:
-    if display_name.length() == 0:
-        return email
-    return "{display_name} <{email}>"
-
-# ============================================================================
-# Email Headers
-# ============================================================================
-
-fn header_from(email: text) -> text:
-    return "From: {email}\r\n"
-
-fn header_to(email: text) -> text:
-    return "To: {email}\r\n"
-
-fn header_cc(email: text) -> text:
-    return "Cc: {email}\r\n"
-
-fn header_bcc(email: text) -> text:
-    return "Bcc: {email}\r\n"
-
-fn header_subject(subject: text) -> text:
-    return "Subject: {subject}\r\n"
-
-fn header_date(date: text) -> text:
-    return "Date: {date}\r\n"
-
-fn header_message_id(id: text) -> text:
-    return "Message-ID: <{id}>\r\n"
-
-fn header_content_type(content_type: text) -> text:
-    return "Content-Type: {content_type}\r\n"
-
-fn header_content_transfer_encoding(encoding: text) -> text:
-    return "Content-Transfer-Encoding: {encoding}\r\n"
-
-fn header_mime_version() -> text:
-    return "MIME-Version: 1.0\r\n"
-
-fn header_reply_to(email: text) -> text:
-    return "Reply-To: {email}\r\n"
-
-fn header_sender(email: text) -> text:
-    return "Sender: {email}\r\n"
-
-fn header_return_path(email: text) -> text:
-    return "Return-Path: <{email}>\r\n"
-
-fn header_content_disposition(disposition: text) -> text:
-    return "Content-Disposition: {disposition}\r\n"
-
-# ============================================================================
-# Header Folding (RFC 5322)
-# ============================================================================
-
-fn header_fold_line(header: text, max_length: i64) -> text:
-    var len = header.length()
-    if len <= max_length:
-        return header
-
-    var result = ""
-    var current_line = ""
-    var words = header.split(" ")
-    var word_idx = 0
-    var word_count = words.length()
-
-    while word_idx < word_count:
-        var word = words.get(word_idx)
-        var test_line = current_line
-        if test_line.length() > 0:
-            test_line = test_line + " "
-        test_line = test_line + word
-
-        if test_line.length() > max_length:
-            if current_line.length() > 0:
-                result = result + current_line + "\r\n "
-                current_line = word
-            else:
-                result = result + word + "\r\n "
-                current_line = ""
-        else:
-            current_line = test_line
-
-        word_idx = word_idx + 1
-
-    if current_line.length() > 0:
-        result = result + current_line
-
-    return result
-
-fn header_unfold(header: text) -> text:
-    var result = header.replace("\r\n ", " ")
-    var result2 = result.replace("\r\n\t", " ")
-    return result2
-
-# ============================================================================
-# MIME Content Types
-# ============================================================================
-
-fn mime_type_text_plain() -> text:
-    return "text/plain; charset=utf-8"
-
-fn mime_type_text_html() -> text:
-    return "text/html; charset=utf-8"
-
-fn mime_type_multipart_mixed() -> text:
-    return "multipart/mixed"
-
-fn mime_type_multipart_alternative() -> text:
-    return "multipart/alternative"
-
-fn mime_type_multipart_related() -> text:
-    return "multipart/related"
-
-fn mime_type_application_octet_stream() -> text:
-    return "application/octet-stream"
-
-fn mime_type_image_png() -> text:
-    return "image/png"
-
-fn mime_type_image_jpeg() -> text:
-    return "image/jpeg"
-
-fn mime_type_application_pdf() -> text:
-    return "application/pdf"
-
-# ============================================================================
-# Boundary Generation
-# ============================================================================
-
-fn mime_generate_boundary() -> text:
-    var timestamp = "1234567890"
-    var random = "abcdef"
-    return "----=_Part_{timestamp}_{random}"
-
-fn mime_boundary_start(boundary: text) -> text:
-    return "--{boundary}\r\n"
-
-fn mime_boundary_end(boundary: text) -> text:
-    return "--{boundary}--\r\n"
-
-# ============================================================================
-# Base64 Encoding
-# ============================================================================
-
-fn base64_char(value: i64) -> text:
-    if value < 26:
-        var ch_code = 65 + value
-        return text_from_char_code(ch_code)
-    if value < 52:
-        var offset = value - 26
-        var ch_code = 97 + offset
-        return text_from_char_code(ch_code)
-    if value < 62:
-        var offset = value - 52
-        var ch_code = 48 + offset
-        return text_from_char_code(ch_code)
-    if value == 62:
-        return "+"
-    if value == 63:
-        return "/"
-    return "="
-
-fn base64_encode_bytes(data: text) -> text:
-    var result = ""
-    var len = data.length()
-    var i = 0
-
-    while i < len:
-        var byte1 = data.char_code_at(i)
-        var has_byte2 = i + 1 < len
-        var has_byte3 = i + 2 < len
-
-        var byte2 = 0
-        if has_byte2:
-            byte2 = data.char_code_at(i + 1)
-
-        var byte3 = 0
-        if has_byte3:
-            byte3 = data.char_code_at(i + 2)
-
-        var enc1 = byte1 >> 2
-        var enc2_part1 = (byte1 & 3) << 4
-        var enc2_part2 = byte2 >> 4
-        var enc2 = enc2_part1 | enc2_part2
-        var enc3_part1 = (byte2 & 15) << 2
-        var enc3_part2 = byte3 >> 6
-        var enc3 = enc3_part1 | enc3_part2
-        var enc4 = byte3 & 63
-
-        result = result + base64_char(enc1)
-        result = result + base64_char(enc2)
-
-        if has_byte2:
-            result = result + base64_char(enc3)
-        else:
-            result = result + "="
-
-        if has_byte3:
-            result = result + base64_char(enc4)
-        else:
-            result = result + "="
-
-        i = i + 3
-
-    return result
-
-fn base64_encode_with_line_breaks(data: text, line_length: i64) -> text:
-    var encoded = base64_encode_bytes(data)
-    var result = ""
-    var len = encoded.length()
-    var i = 0
-
-    while i < len:
-        var end_pos = i + line_length
-        if end_pos > len:
-            end_pos = len
-
-        var chunk = encoded.substring(i, end_pos)
-        result = result + chunk
-
-        var needs_line_break = end_pos < len
-        if needs_line_break:
-            result = result + "\r\n"
-
-        i = i + line_length
-
-    return result
-
-fn text_from_char_code(code: i64) -> text:
-    if code == 65: return "A"
-    if code == 66: return "B"
-    if code == 67: return "C"
-    if code == 68: return "D"
-    if code == 69: return "E"
-    if code == 70: return "F"
-    if code == 71: return "G"
-    if code == 72: return "H"
-    if code == 73: return "I"
-    if code == 74: return "J"
-    if code == 75: return "K"
-    if code == 76: return "L"
-    if code == 77: return "M"
-    if code == 78: return "N"
-    if code == 79: return "O"
-    if code == 80: return "P"
-    if code == 81: return "Q"
-    if code == 82: return "R"
-    if code == 83: return "S"
-    if code == 84: return "T"
-    if code == 85: return "U"
-    if code == 86: return "V"
-    if code == 87: return "W"
-    if code == 88: return "X"
-    if code == 89: return "Y"
-    if code == 90: return "Z"
-    if code == 97: return "a"
-    if code == 98: return "b"
-    if code == 99: return "c"
-    if code == 100: return "d"
-    if code == 101: return "e"
-    if code == 102: return "f"
-    if code == 103: return "g"
-    if code == 104: return "h"
-    if code == 105: return "i"
-    if code == 106: return "j"
-    if code == 107: return "k"
-    if code == 108: return "l"
-    if code == 109: return "m"
-    if code == 110: return "n"
-    if code == 111: return "o"
-    if code == 112: return "p"
-    if code == 113: return "q"
-    if code == 114: return "r"
-    if code == 115: return "s"
-    if code == 116: return "t"
-    if code == 117: return "u"
-    if code == 118: return "v"
-    if code == 119: return "w"
-    if code == 120: return "x"
-    if code == 121: return "y"
-    if code == 122: return "z"
-    if code == 48: return "0"
-    if code == 49: return "1"
-    if code == 50: return "2"
-    if code == 51: return "3"
-    if code == 52: return "4"
-    if code == 53: return "5"
-    if code == 54: return "6"
-    if code == 55: return "7"
-    if code == 56: return "8"
-    if code == 57: return "9"
-    return "?"
-
-# ============================================================================
-# Quoted-Printable Encoding
-# ============================================================================
-
-fn qp_needs_encoding(ch: text) -> bool:
-    var code = ch.char_code_at(0)
-
-    if code < 33:
-        return true
-    if code > 126:
-        return true
-    if ch == "=":
-        return true
-
-    return false
-
-fn qp_encode_char(ch: text) -> text:
-    var code = ch.char_code_at(0)
-    var hex = code.to_hex()
-    var hex_upper = hex.to_upper()
-    return "={hex_upper}"
-
-fn qp_encode(text_data: text, line_length: i64) -> text:
-    var result = ""
-    var current_line = ""
-    var i = 0
-    var len = text_data.length()
-
-    while i < len:
-        var ch = text_data.char_at(i)
-        var encoded = ch
-
-        if qp_needs_encoding(ch):
-            encoded = qp_encode_char(ch)
-
-        var new_line = current_line + encoded
-        var new_len = new_line.length()
-
-        if new_len > line_length:
-            result = result + current_line + "=\r\n"
-            current_line = encoded
-        else:
-            current_line = new_line
-
-        i = i + 1
-
-    if current_line.length() > 0:
-        result = result + current_line
-
-    return result
-
-# ============================================================================
-# Message Building
-# ============================================================================
-
-fn message_build_simple(from: text, to: text, subject: text, body: text) -> text:
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_content_type(mime_type_text_plain())
-    msg = msg + "\r\n"
-    msg = msg + body
-    msg = msg + "\r\n"
-    return msg
-
-fn message_build_html(from: text, to: text, subject: text, html_body: text) -> text:
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_content_type(mime_type_text_html())
-    msg = msg + "\r\n"
-    msg = msg + html_body
-    msg = msg + "\r\n"
-    return msg
-
-fn message_build_multipart_alternative(from: text, to: text, subject: text, text_body: text, html_body: text) -> text:
-    var boundary = mime_generate_boundary()
-    var content_type = mime_type_multipart_alternative() + "; boundary=\"{boundary}\""
-
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_mime_version()
-    msg = msg + header_content_type(content_type)
-    msg = msg + "\r\n"
-
-    msg = msg + mime_boundary_start(boundary)
-    msg = msg + header_content_type(mime_type_text_plain())
-    msg = msg + "\r\n"
-    msg = msg + text_body
-    msg = msg + "\r\n\r\n"
-
-    msg = msg + mime_boundary_start(boundary)
-    msg = msg + header_content_type(mime_type_text_html())
-    msg = msg + "\r\n"
-    msg = msg + html_body
-    msg = msg + "\r\n\r\n"
-
-    msg = msg + mime_boundary_end(boundary)
-    return msg
-
-fn message_build_with_attachment(from: text, to: text, subject: text, body: text, attachment_name: text, attachment_data: text) -> text:
-    var boundary = mime_generate_boundary()
-    var content_type = mime_type_multipart_mixed() + "; boundary=\"{boundary}\""
-
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_mime_version()
-    msg = msg + header_content_type(content_type)
-    msg = msg + "\r\n"
-
-    msg = msg + mime_boundary_start(boundary)
-    msg = msg + header_content_type(mime_type_text_plain())
-    msg = msg + "\r\n"
-    msg = msg + body
-    msg = msg + "\r\n\r\n"
-
-    msg = msg + mime_boundary_start(boundary)
-    msg = msg + header_content_type(mime_type_application_octet_stream())
-    var disposition = "attachment; filename=\"{attachment_name}\""
-    msg = msg + header_content_disposition(disposition)
-    msg = msg + header_content_transfer_encoding("base64")
-    msg = msg + "\r\n"
-    var encoded_attachment = base64_encode_with_line_breaks(attachment_data, 76)
-    msg = msg + encoded_attachment
-    msg = msg + "\r\n\r\n"
-
-    msg = msg + mime_boundary_end(boundary)
-    return msg
-
-fn message_terminate() -> text:
-    return "\r\n.\r\n"
-
-# ============================================================================
-# Authentication Encoding
-# ============================================================================
-
-fn auth_plain_encode(username: text, password: text) -> text:
-    var auth_string = "\0{username}\0{password}"
-    return base64_encode_bytes(auth_string)
-
-fn auth_login_encode_username(username: text) -> text:
-    return base64_encode_bytes(username)
-
-fn auth_login_encode_password(password: text) -> text:
-    return base64_encode_bytes(password)
-
-# ============================================================================
-# Message Parsing Utilities
-# ============================================================================
-
-fn message_extract_header(message: text, header_name: text) -> text:
-    var search = header_name + ":"
-    var start = message.index_of(search)
-    if start == -1:
-        return ""
-
-    var value_start = start + search.length()
-    var line_end = message.index_of("\r\n", value_start)
-
-    if line_end == -1:
-        var len = message.length()
-        return message.substring(value_start, len).trim()
-
-    return message.substring(value_start, line_end).trim()
-
-fn message_extract_body(message: text) -> text:
-    var separator = "\r\n\r\n"
-    var pos = message.index_of(separator)
-    if pos == -1:
-        return ""
-    var body_start = pos + 4
-    var len = message.length()
-    return message.substring(body_start, len)
-
-fn message_has_header(message: text, header_name: text) -> bool:
-    var search = header_name + ":"
-    var pos = message.index_of(search)
-    return pos != -1
-
-# ============================================================================
-# Response Parsing
-# ============================================================================
-
-fn response_parse_code(response: text) -> i64:
-    if response.length() < 3:
-        return 0
-
-    var code_str = response.substring(0, 3)
-    return code_str.to_int()
-
-fn response_parse_message(response: text) -> text:
-    if response.length() < 4:
-        return ""
-    var len = response.length()
-    return response.substring(4, len)
-
-fn response_is_multiline(response: text) -> bool:
-    if response.length() < 4:
-        return false
-    var fourth_char = response.char_at(3)
-    return fourth_char == "-"
-
-# ============================================================================
-# Email Validation and Utility Functions
-# ============================================================================
-
-fn email_list_to_recipients(emails: text) -> List:
-    var parts = emails.split(",")
-    var result = []
-    var i = 0
-    var count = parts.length()
-
-    while i < count:
-        var email = parts.get(i)
-        var trimmed = email.trim()
-        if trimmed.length() > 0:
-            result.push(trimmed)
-        i = i + 1
-
-    return result
-
-fn email_sanitize_subject(subject: text) -> text:
-    var result = subject.replace("\r", "")
-    var result2 = result.replace("\n", "")
-    return result2
-
-fn email_sanitize_body(body: text) -> text:
-    var result = body.replace("\n.\n", "\n..\n")
-    var result2 = result.replace("\r\n.\r\n", "\r\n..\r\n")
-    return result2
-
-fn message_id_generate(domain: text) -> text:
-    var timestamp = "1234567890"
-    var random = "abcdef"
-    return "{timestamp}.{random}@{domain}"
-
-fn date_rfc5322_format(timestamp: i64) -> text:
-    return "Mon, 01 Jan 2024 12:00:00 +0000"
-
-# ============================================================================
-# Content Encoding Detection
-# ============================================================================
-
-fn content_needs_base64(data: text) -> bool:
-    var i = 0
-    var len = data.length()
-    var non_ascii_count = 0
-
-    while i < len:
-        var code = data.char_code_at(i)
-        if code > 127:
-            non_ascii_count = non_ascii_count + 1
-        i = i + 1
-
-    var threshold = len / 3
-    return non_ascii_count > threshold
-
-fn content_needs_qp(data: text) -> bool:
-    var i = 0
-    var len = data.length()
-    var special_count = 0
-
-    while i < len:
-        var ch = data.char_at(i)
-        if qp_needs_encoding(ch):
-            special_count = special_count + 1
-        i = i + 1
-
-    var needs_encoding = special_count > 0
-    var not_too_many = special_count < (len / 3)
-    return needs_encoding and not_too_many
-
-fn content_choose_encoding(data: text) -> text:
-    if content_needs_base64(data):
-        return "base64"
-    if content_needs_qp(data):
-        return "quoted-printable"
-    return "7bit"
-
-# ============================================================================
-# Additional MIME Functions
-# ============================================================================
-
-fn mime_part_build(content_type: text, encoding: text, body: text) -> text:
-    var part = ""
-    part = part + header_content_type(content_type)
-    part = part + header_content_transfer_encoding(encoding)
-    part = part + "\r\n"
-    part = part + body
-    part = part + "\r\n"
-    return part
-
-fn mime_attachment_build(filename: text, content_type: text, data: text) -> text:
-    var part = ""
-    part = part + header_content_type(content_type)
-    var disposition = "attachment; filename=\"{filename}\""
-    part = part + header_content_disposition(disposition)
-    part = part + header_content_transfer_encoding("base64")
-    part = part + "\r\n"
-    var encoded = base64_encode_with_line_breaks(data, 76)
-    part = part + encoded
-    part = part + "\r\n"
-    return part
-
-# ============================================================================
-# SMTP Session State Management
-# ============================================================================
-
-fn smtp_session_new() -> text:
-    return "INITIAL"
-
-fn smtp_session_after_helo() -> text:
-    return "HELO"
-
-fn smtp_session_after_mail() -> text:
-    return "MAIL"
-
-fn smtp_session_after_rcpt() -> text:
-    return "RCPT"
-
-fn smtp_session_after_data() -> text:
-    return "DATA"
-
-fn smtp_can_mail(state: text) -> bool:
-    return state == "HELO"
-
-fn smtp_can_rcpt(state: text) -> bool:
-    var after_mail = state == "MAIL"
-    var after_rcpt = state == "RCPT"
-    return after_mail or after_rcpt
-
-fn smtp_can_data(state: text) -> bool:
-    return state == "RCPT"
-
-# ============================================================================
-# Extended Functions
-# ============================================================================
-
-fn smtp_command_starttls() -> text:
-    return "STARTTLS\r\n"
-
-fn smtp_code_502_not_implemented() -> i64:
-    return 502
-
-fn header_custom(name: text, value: text) -> text:
-    return "{name}: {value}\r\n"
-
-fn mime_encode_header_value(value: text) -> text:
-    var needs_encoding = false
-    var i = 0
-    var len = value.length()
-
-    while i < len:
-        var code = value.char_code_at(i)
-        if code > 127:
-            needs_encoding = true
-        i = i + 1
-
-    if needs_encoding:
-        var encoded = base64_encode_bytes(value)
-        return "=?utf-8?B?{encoded}?="
-
-    return value
-
-fn message_build_reply(original_message_id: text, from: text, to: text, subject: text, body: text) -> text:
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_custom("In-Reply-To", "<{original_message_id}>")
-    msg = msg + header_custom("References", "<{original_message_id}>")
-    msg = msg + header_content_type(mime_type_text_plain())
-    msg = msg + "\r\n"
-    msg = msg + body
-    msg = msg + "\r\n"
-    return msg
-
-fn message_build_forward(original_from: text, from: text, to: text, subject: text, original_body: text, preamble: text) -> text:
-    var msg = ""
-    msg = msg + header_from(from)
-    msg = msg + header_to(to)
-    msg = msg + header_subject(subject)
-    msg = msg + header_content_type(mime_type_text_plain())
-    msg = msg + "\r\n"
-    msg = msg + preamble
-    msg = msg + "\r\n\r\n"
-    msg = msg + "---------- Forwarded message ---------\r\n"
-    msg = msg + "From: {original_from}\r\n"
-    msg = msg + "\r\n"
-    msg = msg + original_body
-    msg = msg + "\r\n"
-    return msg
+#
+# This is a facade that re-exports all SMTP functionality from submodules:
+# - smtp/types.spl: Response codes, session states, response parsing
+# - smtp/connect.spl: SMTP protocol commands
+# - smtp/send.spl: Email validation, headers, message building
+# - smtp/mime.spl: MIME types, boundaries, encoding detection
+# - smtp/auth.spl: Authentication encoding
+# - smtp/utilities.spl: Base64, quoted-printable encoding
+
+# Import all submodules
+import smtp.types
+import smtp.connect
+import smtp.send
+import smtp.mime
+import smtp.auth
+import smtp.utilities
+
+# Re-export types module
+fn smtp_code_220() -> i64: smtp.types.smtp_code_220()
+fn smtp_code_221() -> i64: smtp.types.smtp_code_221()
+fn smtp_code_250() -> i64: smtp.types.smtp_code_250()
+fn smtp_code_354() -> i64: smtp.types.smtp_code_354()
+fn smtp_code_421() -> i64: smtp.types.smtp_code_421()
+fn smtp_code_450() -> i64: smtp.types.smtp_code_450()
+fn smtp_code_500() -> i64: smtp.types.smtp_code_500()
+fn smtp_code_501() -> i64: smtp.types.smtp_code_501()
+fn smtp_code_502() -> i64: smtp.types.smtp_code_502()
+fn smtp_code_503() -> i64: smtp.types.smtp_code_503()
+fn smtp_code_550() -> i64: smtp.types.smtp_code_550()
+fn smtp_code_551() -> i64: smtp.types.smtp_code_551()
+fn smtp_code_552() -> i64: smtp.types.smtp_code_552()
+fn smtp_code_description(code: i64) -> text: smtp.types.smtp_code_description(code)
+fn smtp_is_success_code(code: i64) -> bool: smtp.types.smtp_is_success_code(code)
+fn smtp_is_error_code(code: i64) -> bool: smtp.types.smtp_is_error_code(code)
+fn smtp_code_502_not_implemented() -> i64: smtp.types.smtp_code_502_not_implemented()
+fn smtp_session_new() -> text: smtp.types.smtp_session_new()
+fn smtp_session_after_helo() -> text: smtp.types.smtp_session_after_helo()
+fn smtp_session_after_mail() -> text: smtp.types.smtp_session_after_mail()
+fn smtp_session_after_rcpt() -> text: smtp.types.smtp_session_after_rcpt()
+fn smtp_session_after_data() -> text: smtp.types.smtp_session_after_data()
+fn smtp_can_mail(state: text) -> bool: smtp.types.smtp_can_mail(state)
+fn smtp_can_rcpt(state: text) -> bool: smtp.types.smtp_can_rcpt(state)
+fn smtp_can_data(state: text) -> bool: smtp.types.smtp_can_data(state)
+fn response_parse_code(response: text) -> i64: smtp.types.response_parse_code(response)
+fn response_parse_message(response: text) -> text: smtp.types.response_parse_message(response)
+fn response_is_multiline(response: text) -> bool: smtp.types.response_is_multiline(response)
+
+# Re-export connect module
+fn smtp_command_helo(domain: text) -> text: smtp.connect.smtp_command_helo(domain)
+fn smtp_command_ehlo(domain: text) -> text: smtp.connect.smtp_command_ehlo(domain)
+fn smtp_command_mail_from(email: text) -> text: smtp.connect.smtp_command_mail_from(email)
+fn smtp_command_rcpt_to(email: text) -> text: smtp.connect.smtp_command_rcpt_to(email)
+fn smtp_command_data() -> text: smtp.connect.smtp_command_data()
+fn smtp_command_quit() -> text: smtp.connect.smtp_command_quit()
+fn smtp_command_rset() -> text: smtp.connect.smtp_command_rset()
+fn smtp_command_vrfy(email: text) -> text: smtp.connect.smtp_command_vrfy(email)
+fn smtp_command_noop() -> text: smtp.connect.smtp_command_noop()
+fn smtp_command_starttls() -> text: smtp.connect.smtp_command_starttls()
+fn smtp_command_auth_plain() -> text: smtp.connect.smtp_command_auth_plain()
+fn smtp_command_auth_login() -> text: smtp.connect.smtp_command_auth_login()
+
+# Re-export send module
+fn email_is_valid_char(ch: text) -> bool: smtp.send.email_is_valid_char(ch)
+fn email_validate(email: text) -> bool: smtp.send.email_validate(email)
+fn email_parse_local_part(email: text) -> text: smtp.send.email_parse_local_part(email)
+fn email_parse_domain(email: text) -> text: smtp.send.email_parse_domain(email)
+fn email_parse_display_name(full_address: text) -> text: smtp.send.email_parse_display_name(full_address)
+fn email_parse_address(full_address: text) -> text: smtp.send.email_parse_address(full_address)
+fn email_format_address(email: text, display_name: text) -> text: smtp.send.email_format_address(email, display_name)
+fn email_list_to_recipients(emails: text) -> List: smtp.send.email_list_to_recipients(emails)
+fn email_sanitize_subject(subject: text) -> text: smtp.send.email_sanitize_subject(subject)
+fn email_sanitize_body(body: text) -> text: smtp.send.email_sanitize_body(body)
+fn header_from(email: text) -> text: smtp.send.header_from(email)
+fn header_to(email: text) -> text: smtp.send.header_to(email)
+fn header_cc(email: text) -> text: smtp.send.header_cc(email)
+fn header_bcc(email: text) -> text: smtp.send.header_bcc(email)
+fn header_subject(subject: text) -> text: smtp.send.header_subject(subject)
+fn header_date(date: text) -> text: smtp.send.header_date(date)
+fn header_message_id(id: text) -> text: smtp.send.header_message_id(id)
+fn header_content_type(content_type: text) -> text: smtp.send.header_content_type(content_type)
+fn header_content_transfer_encoding(encoding: text) -> text: smtp.send.header_content_transfer_encoding(encoding)
+fn header_mime_version() -> text: smtp.send.header_mime_version()
+fn header_reply_to(email: text) -> text: smtp.send.header_reply_to(email)
+fn header_sender(email: text) -> text: smtp.send.header_sender(email)
+fn header_return_path(email: text) -> text: smtp.send.header_return_path(email)
+fn header_content_disposition(disposition: text) -> text: smtp.send.header_content_disposition(disposition)
+fn header_custom(name: text, value: text) -> text: smtp.send.header_custom(name, value)
+fn header_fold_line(header: text, max_length: i64) -> text: smtp.send.header_fold_line(header, max_length)
+fn header_unfold(header: text) -> text: smtp.send.header_unfold(header)
+fn message_build_simple(from: text, to: text, subject: text, body: text) -> text: smtp.send.message_build_simple(from, to, subject, body)
+fn message_build_html(from: text, to: text, subject: text, html_body: text) -> text: smtp.send.message_build_html(from, to, subject, html_body)
+fn message_build_multipart_alternative(from: text, to: text, subject: text, text_body: text, html_body: text) -> text: smtp.send.message_build_multipart_alternative(from, to, subject, text_body, html_body)
+fn message_build_with_attachment(from: text, to: text, subject: text, body: text, attachment_name: text, attachment_data: text) -> text: smtp.send.message_build_with_attachment(from, to, subject, body, attachment_name, attachment_data)
+fn message_build_reply(original_message_id: text, from: text, to: text, subject: text, body: text) -> text: smtp.send.message_build_reply(original_message_id, from, to, subject, body)
+fn message_build_forward(original_from: text, from: text, to: text, subject: text, original_body: text, preamble: text) -> text: smtp.send.message_build_forward(original_from, from, to, subject, original_body, preamble)
+fn message_terminate() -> text: smtp.send.message_terminate()
+fn message_extract_header(message: text, header_name: text) -> text: smtp.send.message_extract_header(message, header_name)
+fn message_extract_body(message: text) -> text: smtp.send.message_extract_body(message)
+fn message_has_header(message: text, header_name: text) -> bool: smtp.send.message_has_header(message, header_name)
+fn message_id_generate(domain: text) -> text: smtp.send.message_id_generate(domain)
+fn date_rfc5322_format(timestamp: i64) -> text: smtp.send.date_rfc5322_format(timestamp)
+
+# Re-export mime module
+fn mime_type_text_plain() -> text: smtp.mime.mime_type_text_plain()
+fn mime_type_text_html() -> text: smtp.mime.mime_type_text_html()
+fn mime_type_multipart_mixed() -> text: smtp.mime.mime_type_multipart_mixed()
+fn mime_type_multipart_alternative() -> text: smtp.mime.mime_type_multipart_alternative()
+fn mime_type_multipart_related() -> text: smtp.mime.mime_type_multipart_related()
+fn mime_type_application_octet_stream() -> text: smtp.mime.mime_type_application_octet_stream()
+fn mime_type_image_png() -> text: smtp.mime.mime_type_image_png()
+fn mime_type_image_jpeg() -> text: smtp.mime.mime_type_image_jpeg()
+fn mime_type_application_pdf() -> text: smtp.mime.mime_type_application_pdf()
+fn mime_generate_boundary() -> text: smtp.mime.mime_generate_boundary()
+fn mime_boundary_start(boundary: text) -> text: smtp.mime.mime_boundary_start(boundary)
+fn mime_boundary_end(boundary: text) -> text: smtp.mime.mime_boundary_end(boundary)
+fn mime_part_build(content_type: text, encoding: text, body: text) -> text: smtp.mime.mime_part_build(content_type, encoding, body)
+fn mime_attachment_build(filename: text, content_type: text, data: text) -> text: smtp.mime.mime_attachment_build(filename, content_type, data)
+fn mime_encode_header_value(value: text) -> text: smtp.mime.mime_encode_header_value(value)
+fn content_needs_base64(data: text) -> bool: smtp.mime.content_needs_base64(data)
+fn content_needs_qp(data: text) -> bool: smtp.mime.content_needs_qp(data)
+fn content_choose_encoding(data: text) -> text: smtp.mime.content_choose_encoding(data)
+
+# Re-export auth module
+fn auth_plain_encode(username: text, password: text) -> text: smtp.auth.auth_plain_encode(username, password)
+fn auth_login_encode_username(username: text) -> text: smtp.auth.auth_login_encode_username(username)
+fn auth_login_encode_password(password: text) -> text: smtp.auth.auth_login_encode_password(password)
+
+# Re-export utilities module
+fn base64_char(value: i64) -> text: smtp.utilities.base64_char(value)
+fn base64_encode_bytes(data: text) -> text: smtp.utilities.base64_encode_bytes(data)
+fn base64_encode_with_line_breaks(data: text, line_length: i64) -> text: smtp.utilities.base64_encode_with_line_breaks(data, line_length)
+fn text_from_char_code(code: i64) -> text: smtp.utilities.text_from_char_code(code)
+fn qp_needs_encoding(ch: text) -> bool: smtp.utilities.qp_needs_encoding(ch)
+fn qp_encode_char(ch: text) -> text: smtp.utilities.qp_encode_char(ch)
+fn qp_encode(text_data: text, line_length: i64) -> text: smtp.utilities.qp_encode(text_data, line_length)

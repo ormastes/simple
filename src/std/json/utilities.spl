@@ -1,0 +1,159 @@
+# JSON Utilities
+#
+# Purpose: Advanced JSON operations and transformations
+#
+# Contains:
+# - Deep merge: json_merge_deep
+# - Diff/Patch: json_diff, json_patch
+# - Flattening: json_flatten_object, json_unflatten_object
+# - String escaping: json_escape_string, json_unescape_string (re-exported)
+
+# Import types and other modules
+mod json.types
+mod json.object_ops
+mod json.path_ops
+mod json.validation
+
+fn json_merge_deep(obj1: any, obj2: any) -> any:
+    """Deep merge two JSON objects.
+
+    Args:
+        obj1: First JSON object
+        obj2: Second JSON object (takes precedence)
+
+    Returns:
+        Merged JSON object
+
+    Example:
+        json_merge_deep(base, overrides)
+    """
+    if not json_is_object(obj1):
+        return obj2
+    if not json_is_object(obj2):
+        return obj1
+    val map1 = json_to_object(obj1)
+    val map2 = json_to_object(obj2)
+    var result: {text: any} = {}
+    for key in map1.keys():
+        result[key] = map1[key]
+    for key in map2.keys():
+        if result.has_key(key):
+            val v1 = result[key]
+            val v2 = map2[key]
+            if json_is_object(v1) and json_is_object(v2):
+                result[key] = json_merge_deep(v1, v2)
+            else:
+                result[key] = v2
+        else:
+            result[key] = map2[key]
+    json_object(result)
+
+fn json_diff(obj1: any, obj2: any) -> any:
+    """Find differences between two JSON objects.
+
+    Args:
+        obj1: First JSON object
+        obj2: Second JSON object
+
+    Returns:
+        Object containing changed/added/removed keys
+
+    Example:
+        json_diff(old_data, new_data)
+    """
+    var changes: {text: any} = {}
+    if json_is_object(obj1) and json_is_object(obj2):
+        val map1 = json_to_object(obj1)
+        val map2 = json_to_object(obj2)
+        for key in map1.keys():
+            if not map2.has_key(key):
+                changes[key] = json_object({"_op": json_string("removed"), "_old": map1[key]})
+            else:
+                if not json_deep_equals(map1[key], map2[key]):
+                    changes[key] = json_object({"_op": json_string("changed"), "_old": map1[key], "_new": map2[key]})
+        for key in map2.keys():
+            if not map1.has_key(key):
+                changes[key] = json_object({"_op": json_string("added"), "_new": map2[key]})
+    json_object(changes)
+
+fn json_patch(obj: any, patch: any) -> any:
+    """Apply patch to JSON object.
+
+    Args:
+        obj: JSON object
+        patch: Patch object (from json_diff)
+
+    Returns:
+        Patched JSON object
+
+    Example:
+        json_patch(data, changes)
+    """
+    if not json_is_object(obj) or not json_is_object(patch):
+        return obj
+    var result = json_deep_clone(obj)
+    val patch_map = json_to_object(patch)
+    for key in patch_map.keys():
+        val change = patch_map[key]
+        val op = json_object_get(change, "_op")
+        val op_str = json_to_string(op)
+        if op_str == "removed":
+            result = json_object_remove(result, key)
+        else:
+            if op_str == "added":
+                val new_val = json_object_get(change, "_new")
+                result = json_object_set(result, key, new_val)
+            else:
+                if op_str == "changed":
+                    val new_val = json_object_get(change, "_new")
+                    result = json_object_set(result, key, new_val)
+    result
+
+fn json_flatten_object(obj: any) -> any:
+    """Flatten nested object to flat key-value pairs.
+
+    Args:
+        obj: Nested JSON object
+
+    Returns:
+        Flat JSON object with dotted keys
+
+    Example:
+        json_flatten_object({"a": {"b": 1}})  # {"a.b": 1}
+    """
+    if not json_is_object(obj):
+        return obj
+    var result: {text: any} = {}
+    val map = json_to_object(obj)
+    for key in map.keys():
+        val value = map[key]
+        if json_is_object(value):
+            val nested = json_flatten_object(value)
+            val nested_map = json_to_object(nested)
+            for nested_key in nested_map.keys():
+                result["{key}.{nested_key}"] = nested_map[nested_key]
+        else:
+            result[key] = value
+    json_object(result)
+
+fn json_unflatten_object(obj: any) -> any:
+    """Unflatten object with dotted keys to nested structure.
+
+    Args:
+        obj: Flat JSON object with dotted keys
+
+    Returns:
+        Nested JSON object
+
+    Example:
+        json_unflatten_object({"a.b": 1})  # {"a": {"b": 1}}
+    """
+    if not json_is_object(obj):
+        return obj
+    var result = json_object({})
+    val map = json_to_object(obj)
+    for key in map.keys():
+        result = json_path_set(result, key, map[key])
+    result
+
+export *
