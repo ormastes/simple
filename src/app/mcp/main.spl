@@ -34,6 +34,8 @@ use app.mcp.diag_vcs_tools.{handle_simple_diff, handle_simple_log, handle_simple
 # Global cache to avoid rebuilding the large MCP tool schema list on every tools/list call
 var MCP_TOOLS_CACHE: [String] = []
 var MCP_TOOLS_CACHE_BUILT: Bool = false
+var MCP_TOOLS_PAGE_CACHE: Dict<String, String> = {}
+var INIT_RESULT_CACHE: Dict<String, String> = {}
 
 # Lazy-initialized singletons to keep startup path minimal
 var GLOBAL_PROJECT_ROOT: String = ""
@@ -767,13 +769,16 @@ fn handle_jsonrpc(body: String, debug_mode: Bool, session_mgr: SessionManager, m
         return make_error_response(id, -32601, "Method not found: " + method)
 
 
-fn make_initialize_response(id: String, client_protocol: String) -> String:
-    # Log protocol version negotiation
+fn make_initialize_result(client_protocol: String) -> String:
+    val key = if client_protocol == "": "default" else: client_protocol
+    match INIT_RESULT_CACHE.get(key):
+        case Some(r): return r
+        case nil: ()
+
     val server_protocol = "2025-06-18"
     if client_protocol != "" and client_protocol != server_protocol:
         eprint("WARN: Client requested protocol " + client_protocol + ", server supports " + server_protocol)
 
-    # Server info with instructions for MCPSearch
     var server_info = LB()
     server_info = server_info + jp("name", js("simple-mcp"))
     server_info = server_info + ","
@@ -783,7 +788,6 @@ fn make_initialize_response(id: String, client_protocol: String) -> String:
     server_info = server_info + jp("instructions", js(instructions))
     server_info = server_info + RB()
 
-    # Capabilities: tools, resources, prompts, logging, completions, tasks
     var tools_cap = jo1(jp("listChanged", "true"))
     var resources_cap = LB()
     resources_cap = resources_cap + jp("subscribe", "true")
@@ -804,7 +808,13 @@ fn make_initialize_response(id: String, client_protocol: String) -> String:
     caps = caps + ","
     caps = caps + jp("tasks", LB() + RB())
     caps = caps + RB()
+
     val result = jo3(jp("protocolVersion", js(server_protocol)), jp("capabilities", caps), jp("serverInfo", server_info))
+    INIT_RESULT_CACHE[key] = result
+    result
+
+fn make_initialize_response(id: String, client_protocol: String) -> String:
+    val result = make_initialize_result(client_protocol)
     jo3(jp("jsonrpc", js("2.0")), jp("id", id), jp("result", result))
 
 fn make_tool_schema(name: String, desc: String, prop_name: String, prop_desc: String, required: Bool, read_only: Bool, destructive: Bool, idempotent: Bool) -> String:
@@ -945,6 +955,28 @@ fn get_all_tools_cached() -> [String]:
     MCP_TOOLS_CACHE = get_all_tools()
     MCP_TOOLS_CACHE_BUILT = true
     MCP_TOOLS_CACHE
+
+fn get_tools_page_cached(offset: Int, page_size: Int) -> String:
+    val key = offset.to_string() + ":" + page_size.to_string()
+    match MCP_TOOLS_PAGE_CACHE.get(key):
+        case Some(page): return page
+        case nil: ()
+
+    val all_tools = get_all_tools_cached()
+    val total = all_tools.len()
+    val end = min_int(offset + page_size, total)
+
+    var tools = "["
+    var first = true
+    for i in offset..end:
+        if not first:
+            tools = tools + ","
+        first = false
+        tools = tools + all_tools[i]
+    tools = tools + "]"
+
+    MCP_TOOLS_PAGE_CACHE[key] = tools
+    tools
 
 fn handle_tools_list_paginated(id: String, cursor: String, debug_mode: Bool) -> String:
     val all_tools = get_all_tools_cached()
