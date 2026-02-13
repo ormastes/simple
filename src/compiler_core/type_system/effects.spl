@@ -206,23 +206,30 @@ fn propagate_effects_transitive(functions: [FunctionInfo]) -> Dict<text, Effect>
 
     # Process SCCs
     for scc in sccs:
-        val any_explicit_async = scc_any(scc, \name: env.get(name)?.is_async() ?? false)
+        var any_explicit_async = false
+        for name in scc:
+            val env_entry = env_get(env, name)
+            if env_entry != nil:
+                if env_entry.is_async():
+                    any_explicit_async = true
 
-        val any_suspension = scc.any(\name:
+        var any_suspension = false
+        for name in scc:
             val f = func_map_get(func_map, name)
             if has_f:
                 val func = f_value
-                not func.is_sync and func.contains_suspension
-            else:
-                false
-        )
+                if not func.is_sync and func.contains_suspension:
+                    any_suspension = true
 
-        val any_calls_async = scc.any(\name:
+        var any_calls_async = false
+        for name in scc:
             val callees = call_graph_get(call_graph, name) ?? []
-            callees.any(\callee:
-                not scc_contains(scc, callee) and (env_get(env, callee)?.is_async() ?? false)
-            )
-        )
+            for callee in callees:
+                if not scc_contains(scc, callee):
+                    val callee_entry = env_get(env, callee)
+                    if callee_entry != nil:
+                        if callee_entry.is_async():
+                            any_calls_async = true
 
         val scc_effect = if any_explicit_async or any_suspension or any_calls_async:
             Effect.Async

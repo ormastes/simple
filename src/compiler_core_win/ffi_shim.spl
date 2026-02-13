@@ -1,0 +1,259 @@
+# FFI Shim for Windows Bootstrap
+#
+# Provides function definitions for external modules that compiler_core
+# imports (std.io_runtime, app.io, std.platform, std.sdn, etc.)
+# Since seed ignores 'use' statements and treats all files as one namespace,
+# this file defines the functions those modules would normally provide.
+
+# ==============================================================================
+# Platform Types
+# ==============================================================================
+
+enum TargetOS:
+    Linux
+    Windows
+    MacOS
+    FreeBSD
+    OpenBSD
+    NetBSD
+    iOS
+    Android
+    Fuchsia
+    Wasi
+    Unknown
+
+enum TargetArch:
+    X86_64
+    Aarch64
+    Riscv64
+    Wasm32
+    Wasm64
+    X86
+    Arm
+    Mips64
+    PowerPC64
+    S390x
+    Unknown
+
+# CompileMode is defined in driver_types.spl, not here
+
+# ==============================================================================
+# File I/O
+# ==============================================================================
+
+extern fn spl_file_read(path: text) -> text
+extern fn spl_file_write(path: text, content: text) -> i64
+extern fn spl_file_exists(path: text) -> i64
+extern fn spl_file_delete(path: text) -> i64
+extern fn spl_file_size(path: text) -> i64
+extern fn spl_file_append(path: text, content: text) -> i64
+
+fn file_read(path: text) -> text:
+    spl_file_read(path)
+
+fn file_write(path: text, content: text) -> bool:
+    spl_file_write(path, content) != 0
+
+fn file_exists(path: text) -> bool:
+    spl_file_exists(path) != 0
+
+fn file_delete(path: text) -> bool:
+    spl_file_delete(path) != 0
+
+fn file_size(path: text) -> i64:
+    spl_file_size(path)
+
+fn file_size_raw(path: text) -> i64:
+    spl_file_size(path)
+
+fn file_append(path: text, content: text) -> bool:
+    spl_file_append(path, content) != 0
+
+fn file_copy(src: text, dst: text) -> bool:
+    val content = spl_file_read(src)
+    spl_file_write(dst, content) != 0
+
+fn file_size_for_mmap(path: text) -> i64:
+    spl_file_size(path)
+
+extern fn rt_file_read_bytes(path: text) -> text
+fn file_read_bytes(path: text) -> text:
+    rt_file_read_bytes(path)
+
+# ==============================================================================
+# Path Operations
+# ==============================================================================
+
+extern fn rt_path_join(a: text, b: text) -> text
+extern fn rt_path_parent(path: text) -> text
+extern fn rt_dir_exists(path: text) -> i64
+
+fn path_join(a: text, b: text) -> text:
+    rt_path_join(a, b)
+
+fn path_parent(path: text) -> text:
+    rt_path_parent(path)
+
+fn dir_exists(path: text) -> bool:
+    rt_dir_exists(path) != 0
+
+fn normalize_path(path: text) -> text:
+    path.replace("\\", "/")
+
+fn join_path(parts: [text]) -> text:
+    var result = ""
+    var first = true
+    for part in parts:
+        if first:
+            result = part
+            first = false
+        else:
+            result = rt_path_join(result, part)
+    result
+
+# ==============================================================================
+# Shell / Process Execution
+# ==============================================================================
+
+extern fn spl_shell(cmd: text) -> i64
+extern fn spl_shell_output(cmd: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+extern fn rt_exec(cmd: text) -> i64
+
+fn shell(cmd: text) -> i64:
+    spl_shell(cmd)
+
+fn shell_output(cmd: text) -> text:
+    spl_shell_output(cmd)
+
+fn shell_bool(cmd: text) -> bool:
+    spl_shell(cmd) == 0
+
+fn process_run(cmd: text, args: [text]) -> text:
+    rt_process_run(cmd, args)
+
+# ==============================================================================
+# Environment
+# ==============================================================================
+
+extern fn spl_env_get(key: text) -> text
+extern fn spl_env_set(key: text, value: text)
+
+fn env_get(key: text) -> text:
+    spl_env_get(key)
+
+fn env_set(key: text, value: text):
+    spl_env_set(key, value)
+
+extern fn rt_time_millis() -> i64
+
+fn getpid() -> i64:
+    0
+
+fn cwd() -> text:
+    "."
+
+# ==============================================================================
+# Platform Detection
+# ==============================================================================
+
+extern fn rt_get_host_target_code() -> i64
+extern fn rt_cpu_count() -> i64
+
+fn is_windows() -> bool:
+    rt_get_host_target_code() == 4
+
+fn is_unix() -> bool:
+    val code = rt_get_host_target_code()
+    code == 1 or code == 2 or code == 3
+
+fn host_os() -> text:
+    val code = rt_get_host_target_code()
+    if code == 1:
+        return "linux"
+    if code == 2 or code == 3:
+        return "macos"
+    if code == 4:
+        return "windows"
+    "unknown"
+
+fn host_arch() -> text:
+    "x86_64"
+
+fn get_host_os() -> TargetOS:
+    val code = rt_get_host_target_code()
+    if code == 1:
+        return TargetOS.Linux
+    if code == 2 or code == 3:
+        return TargetOS.MacOS
+    if code == 4:
+        return TargetOS.Windows
+    TargetOS.Unknown
+
+fn get_host_arch() -> TargetArch:
+    TargetArch.X86_64
+
+fn cpu_count() -> i64:
+    rt_cpu_count()
+
+# ==============================================================================
+# CompileMode conversion
+# ==============================================================================
+
+fn CompileMode__from_text(s: text) -> CompileMode:
+    if s == "interpret":
+        return CompileMode.Interpret
+    if s == "jit":
+        return CompileMode.Jit
+    if s == "aot":
+        return CompileMode.Aot
+    if s == "check":
+        return CompileMode.Check
+    if s == "sdn":
+        return CompileMode.Sdn
+    CompileMode.Interpret
+
+# ==============================================================================
+# SDN (Simple Data Notation) - Minimal Stub
+# ==============================================================================
+
+struct SdnValue:
+    kind: text
+    text_val: text
+    children: [text]
+
+fn sdn_parse(content: text) -> SdnValue:
+    SdnValue(kind: "text", text_val: content, children: [])
+
+fn sdn_parse_file(path: text) -> SdnValue:
+    val content = file_read(path)
+    sdn_parse(content)
+
+fn parse_file(path: text) -> SdnValue:
+    sdn_parse_file(path)
+
+# ==============================================================================
+# JSON - Minimal Stub
+# ==============================================================================
+
+fn parse_json(content: text) -> text:
+    content
+
+# ==============================================================================
+# Debug / Stack Trace
+# ==============================================================================
+
+extern fn rt_debug_stack_trace_lines() -> [text]
+
+fn frames_len(frames: [text]) -> i64:
+    frames.len()
+
+# ==============================================================================
+# Misc runtime stubs
+# ==============================================================================
+
+fn format_text(fmt: text) -> text:
+    fmt
+
+fn print_err(msg: text):
+    print msg
