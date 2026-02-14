@@ -19,12 +19,16 @@ fn parse_version(s: text) -> Result<Version, text>:
     # Split by + to separate build metadata
     val parts = s.split("+")
     val version_part = parts[0]
-    val build = if parts.length > 1: Some(parts[1]) else: nil
+    var build = nil
+    if parts.length > 1:
+        build = Some(parts[1])
 
     # Split by - to separate prerelease
     val pre_parts = version_part.split("-")
     val core_version = pre_parts[0]
-    val prerelease = if pre_parts.length > 1: Some(pre_parts[1]) else: nil
+    var prerelease = nil
+    if pre_parts.length > 1:
+        prerelease = Some(pre_parts[1])
 
     # Parse core version (MAJOR.MINOR.PATCH)
     val components = core_version.split(".")
@@ -32,9 +36,19 @@ fn parse_version(s: text) -> Result<Version, text>:
         return Err("Version must have exactly 3 components (MAJOR.MINOR.PATCH)")
 
     # Parse each component as integer
-    val major = parse_int_component(components[0])?
-    val minor = parse_int_component(components[1])?
-    val patch = parse_int_component(components[2])?
+    val major_result = parse_int_component(components[0])
+    if major_result.err.?:
+        return major_result
+    val minor_result = parse_int_component(components[1])
+    if minor_result.err.?:
+        return minor_result
+    val patch_result = parse_int_component(components[2])
+    if patch_result.err.?:
+        return patch_result
+
+    val major = major_result.unwrap()
+    val minor = minor_result.unwrap()
+    val patch = patch_result.unwrap()
 
     Ok(Version(
         major: major,
@@ -87,12 +101,15 @@ fn version_greater(a: Version, b: Version) -> bool:
 
     # Compare prerelease (no prerelease > with prerelease)
     match (a.prerelease, b.prerelease):
-        (nil, Some(_)): true        # 1.0.0 > 1.0.0-alpha
-        (Some(_), nil): false       # 1.0.0-alpha < 1.0.0
-        (Some(pre_a), Some(pre_b)):
+        case (nil, Some(_)):
+            true        # 1.0.0 > 1.0.0-alpha
+        case (Some(_), nil):
+            false       # 1.0.0-alpha < 1.0.0
+        case (Some(pre_a), Some(pre_b)):
             # Lexicographic comparison of prerelease
             pre_a > pre_b
-        (nil, nil): false          # Equal versions
+        case (nil, nil):
+            false          # Equal versions
 
 fn version_greater_or_equal(a: Version, b: Version) -> bool:
     """Check if version a >= version b"""
@@ -127,13 +144,19 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
     # Caret constraint (^1.2.3)
     if trimmed.starts_with("^"):
         val version_str = trimmed.substring(1)
-        val version = parse_version(version_str)?
+        val version_result = parse_version(version_str)
+        if version_result.err.?:
+            return version_result
+        val version = version_result.unwrap()
         return Ok(VersionConstraint.Caret(base: version))
 
     # Tilde constraint (~1.2.3)
     if trimmed.starts_with("~"):
         val version_str = trimmed.substring(1)
-        val version = parse_version(version_str)?
+        val version_result = parse_version(version_str)
+        if version_result.err.?:
+            return version_result
+        val version = version_result.unwrap()
         return Ok(VersionConstraint.Tilde(base: version))
 
     # Range constraint (>=1.0.0, <2.0.0)
@@ -143,17 +166,26 @@ fn parse_constraint(s: text) -> Result<VersionConstraint, text>:
     # Greater or equal (>=1.2.3)
     if trimmed.starts_with(">="):
         val version_str = trimmed.substring(2).trim()
-        val version = parse_version(version_str)?
+        val version_result = parse_version(version_str)
+        if version_result.err.?:
+            return version_result
+        val version = version_result.unwrap()
         return Ok(VersionConstraint.GreaterEq(version: version))
 
     # Less than (<2.0.0)
     if trimmed.starts_with("<"):
         val version_str = trimmed.substring(1).trim()
-        val version = parse_version(version_str)?
+        val version_result = parse_version(version_str)
+        if version_result.err.?:
+            return version_result
+        val version = version_result.unwrap()
         return Ok(VersionConstraint.LessThan(version: version))
 
     # Exact version (1.2.3)
-    val version = parse_version(trimmed)?
+    val version_result = parse_version(trimmed)
+    if version_result.err.?:
+        return version_result
+    val version = version_result.unwrap()
     Ok(VersionConstraint.Exact(version: version))
 
 fn parse_range_constraint(s: text) -> Result<VersionConstraint, text>:
@@ -168,12 +200,18 @@ fn parse_range_constraint(s: text) -> Result<VersionConstraint, text>:
     # Parse left bound (must be >=)
     if not left.starts_with(">="):
         return Err("Range left bound must be '>='")
-    val min = parse_version(left.substring(2).trim())?
+    val min_result = parse_version(left.substring(2).trim())
+    if min_result.err.?:
+        return min_result
+    val min = min_result.unwrap()
 
     # Parse right bound (must be <)
     if not right.starts_with("<"):
         return Err("Range right bound must be '<'")
-    val max = parse_version(right.substring(1).trim())?
+    val max_result = parse_version(right.substring(1).trim())
+    if max_result.err.?:
+        return max_result
+    val max = max_result.unwrap()
 
     # Validate range
     if not version_less(min, max):
@@ -188,25 +226,25 @@ fn parse_range_constraint(s: text) -> Result<VersionConstraint, text>:
 fn satisfies(version: Version, constraint: VersionConstraint) -> bool:
     """Check if a version satisfies a constraint"""
     match constraint:
-        VersionConstraint.Any:
+        case VersionConstraint.Any:
             true
 
-        VersionConstraint.Exact(exact_version):
+        case VersionConstraint.Exact(exact_version):
             version_equal(version, exact_version)
 
-        VersionConstraint.Caret(base):
+        case VersionConstraint.Caret(base):
             satisfies_caret(version, base)
 
-        VersionConstraint.Tilde(base):
+        case VersionConstraint.Tilde(base):
             satisfies_tilde(version, base)
 
-        VersionConstraint.Range(min, max):
+        case VersionConstraint.Range(min, max):
             version_greater_or_equal(version, min) and version_less(version, max)
 
-        VersionConstraint.GreaterEq(min_version):
+        case VersionConstraint.GreaterEq(min_version):
             version_greater_or_equal(version, min_version)
 
-        VersionConstraint.LessThan(max_version):
+        case VersionConstraint.LessThan(max_version):
             version_less(version, max_version)
 
 fn satisfies_caret(version: Version, base: Version) -> bool:
@@ -252,25 +290,25 @@ fn satisfies_tilde(version: Version, base: Version) -> bool:
 fn constraint_to_string(constraint: VersionConstraint) -> text:
     """Convert constraint to string representation"""
     match constraint:
-        VersionConstraint.Any:
+        case VersionConstraint.Any:
             "*"
 
-        VersionConstraint.Exact(v):
+        case VersionConstraint.Exact(v):
             v.to_string()
 
-        VersionConstraint.Caret(base):
+        case VersionConstraint.Caret(base):
             "^" + base.to_string()
 
-        VersionConstraint.Tilde(base):
+        case VersionConstraint.Tilde(base):
             "~" + base.to_string()
 
-        VersionConstraint.Range(min, max):
+        case VersionConstraint.Range(min, max):
             ">={min.to_string()}, <{max.to_string()}"
 
-        VersionConstraint.GreaterEq(v):
+        case VersionConstraint.GreaterEq(v):
             ">=" + v.to_string()
 
-        VersionConstraint.LessThan(v):
+        case VersionConstraint.LessThan(v):
             "<" + v.to_string()
 
 fn find_max_satisfying(versions: [Version], constraint: VersionConstraint) -> Version?:
@@ -280,9 +318,9 @@ fn find_max_satisfying(versions: [Version], constraint: VersionConstraint) -> Ve
     for version in versions:
         if satisfies(version, constraint):
             match max_version:
-                nil:
+                case nil:
                     max_version = Some(version)
-                Some(current_max):
+                case Some(current_max):
                     if version_greater(version, current_max):
                         max_version = Some(version)
 
