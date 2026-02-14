@@ -19,6 +19,75 @@ fn record_decision(file: text, line: i64, taken: bool):
         coverage_counter = coverage_counter + 1
         rt_coverage_decision_probe(file, line, coverage_counter, taken)
 
+# ===== Type Checking Integration =====
+# Basic runtime type checking for function parameters
+# Type constants from types.spl
+val TYPE_VOID: i64 = 0
+val TYPE_BOOL: i64 = 1
+val TYPE_I64: i64 = 2
+val TYPE_F64: i64 = 3
+val TYPE_TEXT: i64 = 4
+val TYPE_ANY: i64 = 12
+
+fn type_check_value(value_id: i64, expected_type: i64) -> bool:
+    # TYPE_ANY or TYPE_VOID means no constraint
+    if expected_type == TYPE_ANY or expected_type == TYPE_VOID:
+        return true
+
+    # Get actual type from value
+    val kind = val_kind(value_id)
+
+    # Value kind constants (from value.spl)
+    val VAL_NIL: i64 = 0
+    val VAL_BOOL: i64 = 1
+    val VAL_INT: i64 = 2
+    val VAL_FLOAT: i64 = 3
+    val VAL_TEXT: i64 = 4
+
+    # Check type match
+    if expected_type == TYPE_BOOL:
+        return kind == VAL_BOOL
+    if expected_type == TYPE_I64:
+        return kind == VAL_INT
+    if expected_type == TYPE_F64:
+        return kind == VAL_FLOAT
+    if expected_type == TYPE_TEXT:
+        return kind == VAL_TEXT
+
+    # Default: allow if we don't recognize the type
+    true
+
+# ===== Type Erasure / Monomorphization Support =====
+# Cache for monomorphic function instances
+# Maps (fn_name, type_args_str) -> specialized_decl_id
+var mono_cache_keys: [text] = []
+var mono_cache_decls: [i64] = []
+
+fn mono_cache_lookup(fn_name: text, type_args_str: text) -> i64:
+    val cache_key = fn_name + "__" + type_args_str
+    var i: i64 = 0
+    for key in mono_cache_keys:
+        if key == cache_key:
+            return mono_cache_decls[i]
+        i = i + 1
+    -1
+
+fn mono_cache_register(fn_name: text, type_args_str: text, decl_id: i64):
+    val cache_key = fn_name + "__" + type_args_str
+    mono_cache_keys.push(cache_key)
+    mono_cache_decls.push(decl_id)
+
+fn infer_type_args_from_values(arg_values: [i64]) -> text:
+    # Infer type arguments from runtime values
+    # Simple approach: concatenate type kinds
+    var type_str: text = ""
+    for av in arg_values:
+        val kind = val_kind(av)
+        if type_str != "":
+            type_str = type_str + "_"
+        type_str = type_str + str(kind)
+    type_str
+
 # ===== Control Flow Flags =====
 var eval_returning: bool = false
 var eval_return_value: i64 = -1
@@ -646,6 +715,8 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     val d_node = decl_get(decl_id)
     val fn_name = d_node.name
     val param_names = d_node.param_names
+    val param_types = d_node.param_types
+    val type_params = d_node.type_params
     val body_stmts = d_node.body_stmts
 
     # Record call for JIT threshold tracking
@@ -657,6 +728,37 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         val av = eval_expr(aeid)
         if eval_had_error: return -1
         arg_values.push(av)
+
+    # Check if function is generic (has type parameters)
+    # If so, look up or create monomorphic instance
+    var actual_decl_id = decl_id
+    if type_params.len() > 0:
+        # Infer type arguments from argument values
+        val type_args_str = infer_type_args_from_values(arg_values)
+        # Check cache for existing monomorphic instance
+        val cached_decl = mono_cache_lookup(fn_name, type_args_str)
+        if cached_decl >= 0:
+            actual_decl_id = cached_decl
+        else:
+            # For now, use the generic function as-is
+            # Full monomorphization would clone and specialize the function
+            # Register this type instantiation
+            mono_cache_register(fn_name, type_args_str, decl_id)
+            actual_decl_id = decl_id
+
+    # Type check arguments if parameter types are specified
+    if param_types.len() > 0:
+        var pi: i64 = 0
+        for av in arg_values:
+            if pi < param_types.len():
+                val expected_type = param_types[pi]
+                if expected_type != 0:  # 0 = TYPE_VOID means no type annotation
+                    val type_matches = type_check_value(av, expected_type)
+                    if not type_matches:
+                        val param_name = param_names[pi]
+                        eval_set_error("type error: argument '" + param_name + "' in function '" + fn_name + "' type mismatch")
+                        return -1
+            pi = pi + 1
 
     # Try JIT execution if function is compiled
     if jit_is_compiled(fn_name):

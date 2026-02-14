@@ -1158,6 +1158,57 @@ fn parse_statement() -> i64:
     val expression = parse_expr()
     stmt_expr_stmt(expression, 0)
 
+# ===== Type Inference Support =====
+
+fn infer_expr_type_from_parse(expr_id: i64) -> i64:
+    # Simple type inference based on expression kind
+    # Returns TYPE_VOID (0) if type cannot be inferred
+    if expr_id < 0:
+        return 0
+    val e = expr_get(expr_id)
+    val tag = e.tag
+
+    # Literal types
+    if tag == EXPR_INT_LIT:
+        return TYPE_I64
+    if tag == EXPR_FLOAT_LIT:
+        return TYPE_F64
+    if tag == EXPR_STRING_LIT:
+        return TYPE_TEXT
+    if tag == EXPR_BOOL_LIT:
+        return TYPE_BOOL
+    if tag == EXPR_NIL_LIT:
+        return TYPE_NIL
+    if tag == EXPR_ARRAY_LIT:
+        return TYPE_ARRAY_ANY
+
+    # Binary operations - infer from operator
+    if tag == EXPR_BINARY:
+        val op = e.s_val
+        if op == "+" or op == "-" or op == "*" or op == "/":
+            # Could be i64 or f64, default to i64
+            return TYPE_I64
+        if (op == "==" or op == "!=" or op == "<" or op == ">" or
+            op == "<=" or op == ">=" or op == "and" or op == "or"):
+            return TYPE_BOOL
+        return 0
+
+    # Unary operations
+    if tag == EXPR_UNARY:
+        val op = e.s_val
+        if op == "not":
+            return TYPE_BOOL
+        if op == "-":
+            return TYPE_I64
+        return 0
+
+    # Function calls - cannot infer without function signature
+    if tag == EXPR_CALL:
+        return 0
+
+    # Default: cannot infer
+    0
+
 fn parse_val_decl_stmt() -> i64:
     parser_advance()
     val name = par_text
@@ -1171,6 +1222,11 @@ fn parse_val_decl_stmt() -> i64:
 
     parser_expect(TOK_ASSIGN)
     val init = parse_expr()
+
+    # Type inference: if no explicit type, try to infer from initializer
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
     stmt_val_decl(name, type_tag, init, 0)
 
 fn parse_var_decl_stmt() -> i64:
@@ -1182,6 +1238,8 @@ fn parse_var_decl_stmt() -> i64:
     if par_kind == TOK_COLON:
         parser_advance()
         type_tag = parser_parse_type()
+
+    # Type inference for var declarations handled after initialization
 
     parser_expect(TOK_ASSIGN)
     val init = parse_expr()
