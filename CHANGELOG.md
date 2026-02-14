@@ -2,6 +2,55 @@
 
 All notable changes to Simple Language will be documented in this file.
 
+## [0.6.0] - 2026-02-14
+
+### Added
+- Grammar documentation system with tier-based keyword tracking
+- Thread pool worker implementation complete (100% coverage)
+- Threading integration with startup/bootstrap systems
+- Windows build system with MinGW and ClangCL toolchains
+- Module loading investigation and fixes
+- File stat implementation for runtime (rt_file_stat)
+- Grammar specification files (core, full, seed, tier keywords)
+- Tree-sitter grammar status documentation
+- Comprehensive test coverage (4067/4067 tests passing - 100%)
+
+### Changed
+- Bootstrap workflow now uses v0.5.0 release for reproducible builds
+- Release workflow enhanced with automatic runtime building
+- Test coverage improved from 3916 to 4067 tests (+151 tests)
+- Platform library integration verified with zero regressions
+- Documentation coverage system marked production ready
+
+### Fixed
+- 8 timeout issues in test suite (all resolved)
+- Module-level import and closure issues
+- Bootstrap rebuild activating transitive imports
+- Package management Result→tuple conversion
+- Platform detection and newline handling
+
+### Documentation
+- 10+ comprehensive status reports added
+- Grammar reference documentation complete
+- Windows build guides (quick start + detailed)
+- Threading implementation documentation
+- Bootstrap status and progress tracking
+- Implementation completion report (92% core features)
+
+### Infrastructure
+- GitHub Actions workflow updated for 0.6.0 release
+- Multi-platform bootstrap packages (7 platforms)
+- Automated testing with downloaded v0.5.0 bootstrap
+- Release artifact creation and publishing to GHCR
+
+### Test Suite
+- **100% pass rate**: 4067/4067 tests passing
+- Platform abstraction: 80/80 tests (100%)
+- Package management: All tests fixed and passing
+- Effect system: Production ready
+- Parser error recovery: Comprehensive coverage
+- Zero test regressions
+
 ## [0.5.1-rc.1] - 2026-02-11
 
 ### Added

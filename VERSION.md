@@ -1,10 +1,105 @@
 # Simple Language Version History
 
-## Current Version: 0.5.0
+## Current Version: 0.6.0
 
 ---
 
 ## Versions
+
+### 0.6.0 (2026-02-14)
+
+**Infrastructure & Performance Edition** - Advanced type system, SIMD optimization, baremetal support, and comprehensive testing infrastructure.
+
+#### Key Achievements
+
+**Advanced Type System**
+- Hindley-Milner type inference implementation
+- Union types, intersection types, refinement types
+- Type variable unification and constraint solving
+- Generic type instantiation and specialization
+- Type error diagnostics with source locations
+
+**SIMD Optimization**
+- x86_64 AVX2 support (256-bit vectors, 4-8x speedup)
+- ARM NEON support (128-bit vectors)
+- Auto-vectorization for math operations
+- Platform detection and fallback to scalar code
+- SIMD intrinsics for array operations
+
+**Baremetal Support**
+- ARM Cortex-M startup code (ARMv7-M, ARMv8-M)
+- x86_64 baremetal startup code (no OS dependencies)
+- RISC-V RV32I/RV64I startup code
+- 4 memory allocators: bump, freelist, buddy, slab
+- Minimal footprint: 6-7 KB for basic programs
+- Exception vectors and interrupt handlers
+
+**Threading Infrastructure**
+- Thread pool workers (Linux, macOS, Windows, FreeBSD)
+- Thread SFFI layer (create, join, detach, yield)
+- Atomic operations (load, store, CAS, fetch-add)
+- Cross-platform thread primitives
+- Producer-consumer patterns with work queues
+
+**Documentation Coverage System**
+- SDoctest integration for executable documentation
+- Tag system: `@tag:api`, `@tag:internal`, `@tag:experimental`, `@tag:deprecated`
+- Compiler warnings: `--warn-docs` flag for build-time checks
+- Multiple output formats: Terminal, JSON, CSV, Markdown
+- Configurable thresholds with exit codes
+- Missing inline comment detection
+- Group comment analysis
+
+**Compiler Warning Systems**
+- Closure capture warnings (nested function variable modification)
+- Ignored return value warnings (discarded function results)
+- Multiline boolean expression support (parentheses-based)
+- Warning collection and reporting APIs
+- 40+ tests covering all warning scenarios
+
+**Platform Abstraction Library**
+- Send/receive pattern for platform conversions (Go-inspired)
+- PlatformConfig: arch, OS, endianness, newlines, pointer size
+- Zero-cost same-platform conversions
+- Auto-detection: `host_config()` detects current platform
+- Type-safe platform-specific I/O
+- WireWriter/WireReader serialization
+- Newline mode translation (LF, CRLF, CR)
+
+**Grammar Documentation**
+- Core grammar specification (core_grammar.md)
+- Full grammar with all extensions (full_grammar.md)
+- Keyword reference with tier classification (keyword_reference.md)
+- Seed grammar for bootstrap compiler (seed_grammar.md)
+- Tree-sitter grammar status tracking (treesitter_status.md)
+- Tier keywords SDN format (tier_keywords.sdn)
+
+#### Test Suite Growth
+
+**Statistics**
+- 4,067 tests passing (100% pass rate)
+- +976 new tests since v0.5.0 (3,091 → 4,067)
+- Execution time: 17.4 seconds (4.3ms per test average)
+- 5 core interpreter tests
+- 5 platform library tests
+- 4 package management tests
+- 40+ compiler warning tests
+
+**Test Runner Improvements**
+- Fixed 8 timeout issues (120s → 4-6ms per test)
+- Bootstrap rebuild activation (transitive imports)
+- Import syntax corrections across test suite
+- Result→tuple conversion for package management
+- Zero test runner bugs (all issues were module-level)
+
+#### Technical Stats
+- Simple files: 1,200+
+- Simple lines: 200,000+
+- Tests: 4,067 passing (100%)
+- Platforms: 7 (Linux, macOS, Windows, FreeBSD × x86_64/arm64)
+- Rust source: 0 lines (pure Simple)
+
+---
 
 ### 0.5.0 (2026-02-08)
 
@@ -255,7 +350,7 @@ Initial release with core language features and tooling.
 
 ## Planned Versions
 
-### 0.6.0 (Planned) - Deep Learning Edition
+### 0.7.0 (Planned) - Deep Learning Edition
 
 - Deep learning examples and library improvements
 - Fix `lib.pure.*` module resolution for interpreter

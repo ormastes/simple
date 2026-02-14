@@ -17,7 +17,7 @@ use app.io.mod (rt_debug_stack_trace_lines)
 fn format_runtime_error_message(msg: text) -> text:
     var message = "Runtime error: {msg}"
     val frames = rt_debug_stack_trace_lines()
-    if frames_len(frames) > 0:
+    if frames.len() > 0:
         message = message + NL + "Call stack:"
         for frame in frames:
             message = message + NL + "  " + frame
@@ -45,7 +45,8 @@ struct CliArgs:
         CliArgs(
             mode: CompileMode.Interpret,
             input_files: [],
-            #  # DESUGARED: output_file: nil
+            has_output_file: false,
+            output_file: "",
             optimize: false,
             debug_info: true,
             verbose: false,
@@ -59,12 +60,21 @@ struct CliArgs:
         CompileOptions(
             mode: self.mode,
             input_files: self.input_files,
+            has_output_file: self.has_output_file,
             output_file: self.output_file,
+            output_format: OutputFormat.Native,
             optimize: self.optimize,
+            has_opt_level: false,
+            opt_level: 0,
+            release: false,
             debug_info: self.debug_info,
             verbose: self.verbose,
             log_level: self.log_level,
-            profile: self.profile
+            profile: self.profile,
+            no_borrow_check: false,
+            backend: "auto",
+            interpreter_mode: "classic",
+            gc_off: false
         )
 
 # ------------------------------------------------------------------------------
@@ -94,18 +104,16 @@ class ArgParser:
         self.args[self.pos]
 
     me parse() -> text:
-        var result = cliargs_default()
+        var result = CliArgs.default()
 
         while self.has_next():
-            val arg = self.next().unwrap()
+            val arg = self.next()
 
             if arg == "--":
                 # End of options marker - rest are positional args
                 while self.has_next():
-                    val file = self.next().unwrap()
-                    var files = result.input_files
-                    files_push(files, file)
-                    result.input_files = files
+                    val file = self.next()
+                    result.input_files = result.input_files + [file]
             elif arg.starts_with("--"):
                 # Long option
                 match self.parse_long_option(arg, result):
@@ -118,14 +126,12 @@ class ArgParser:
                     case Err(e): return Err(e)
             else:
                 # Input file
-                var files = result.input_files
-                files_push(files, arg)
-                result.input_files = files
+                result.input_files = result.input_files + [arg]
 
         Ok(result)
 
     me parse_long_option(arg: text, result: CliArgs) -> text:
-        val opt = arg_slice(arg, 2, arg.len())
+        val opt = arg[2:arg.len()]
 
         # Options with values (--option=value or --option value)
         if opt.contains("="):
@@ -195,42 +201,46 @@ class ArgParser:
 
         # Options requiring a value
         val value = self.next()
-        if value_is_none(value):
+        if value == nil:
             return Err("Option --{opt} requires a value")
 
-        self.apply_option(opt, value_value, result)
+        self.apply_option(opt, value, result)
 
     fn apply_option(name: text, value: text, result: CliArgs) -> text:
         match name:
             case "mode":
-                val mode = CompileMode__from_text(value)
-                if mode_is_none(mode):
-                    return Err("Unknown mode: {value}")
-                result.mode = mode_value
+                match value:
+                    case "interpret": result.mode = CompileMode.Interpret
+                    case "jit": result.mode = CompileMode.Jit
+                    case "aot": result.mode = CompileMode.Aot
+                    case "check": result.mode = CompileMode.Check
+                    case "sdn": result.mode = CompileMode.Sdn
+                    case _: return Err("Unknown mode: {value}")
 
             case "m":
-                val mode = CompileMode__from_text(value)
-                if mode_is_none(mode):
-                    return Err("Unknown mode: {value}")
-                result.mode = mode_value
+                match value:
+                    case "interpret": result.mode = CompileMode.Interpret
+                    case "jit": result.mode = CompileMode.Jit
+                    case "aot": result.mode = CompileMode.Aot
+                    case "check": result.mode = CompileMode.Check
+                    case "sdn": result.mode = CompileMode.Sdn
+                    case _: return Err("Unknown mode: {value}")
 
             case "output":
                 result.output_file = value
+                result.has_output_file = true
 
             case "o":
                 result.output_file = value
+                result.has_output_file = true
 
             case "log-level":
-                val level = value_parse_int(value)
-                if level_is_none(level):
-                    return Err("Invalid log level: {value}")
-                result.log_level = level_value
+                val level = int(value)
+                result.log_level = level
 
             case "l":
-                val level = value_parse_int(value)
-                if level_is_none(level):
-                    return Err("Invalid log level: {value}")
-                result.log_level = level_value
+                val level = int(value)
+                result.log_level = level
 
             case "profile":
                 result.profile = value
@@ -244,10 +254,10 @@ class ArgParser:
         Ok(result)
 
     me parse_short_option(arg: text, result: CliArgs) -> text:
-        val opts = arg_slice(arg, 1, arg.len())
+        val opts = arg[1:arg.len()]
         var i = 0
-        while i < opts_len(opts):
-            val c = opts_char_at(opts, i)
+        while i < opts.len():
+            val c = opts[i]
             match c:
                 case 'h':
                     result.help = true
@@ -271,35 +281,38 @@ class ArgParser:
                     result.mode = CompileMode.Sdn
                 case 'o':
                     # -o requires a value (rest of arg or next arg)
-                    if i + 1 < opts_len(opts):
-                        result.output_file = opts_slice(opts, i + 1, opts.len())
+                    if i + 1 < opts.len():
+                        result.output_file = opts[i + 1:opts.len()]
+                        result.has_output_file = true
                         return Ok(result)
                     else:
                         match self.next():
                             case v:
                                 result.output_file = v
+                                result.has_output_file = true
                                 return Ok(result)
                             case nil:
                                 return Err("Option -o requires a value")
                 case 'm':
                     # -m requires a value
                     val value = self.next()
-                    if value_is_none(value):
+                    if value == nil:
                         return Err("Option -m requires a value")
-                    val mode = CompileMode__from_text(value_value)
-                    if mode_is_none(mode):
-                        return Err("Unknown mode: {value_value}")
-                    result.mode = mode_value
+                    match value:
+                        case "interpret": result.mode = CompileMode.Interpret
+                        case "jit": result.mode = CompileMode.Jit
+                        case "aot": result.mode = CompileMode.Aot
+                        case "check": result.mode = CompileMode.Check
+                        case "sdn": result.mode = CompileMode.Sdn
+                        case _: return Err("Unknown mode: {value}")
                     return Ok(result)
                 case 'l':
                     # -l requires a value
                     val value = self.next()
-                    if value_is_none(value):
+                    if value == nil:
                         return Err("Option -l requires a value")
-                    val level = value_value_parse_int(value_value)
-                    if level_is_none(level):
-                        return Err("Invalid log level")
-                    result.log_level = level_value
+                    val level = int(value)
+                    result.log_level = level
                     return Ok(result)
                 case _:
                     return Err("Unknown option: -{c}")
@@ -397,8 +410,8 @@ fn main() -> i32:
                 return exit_code
 
     # Parse arguments
-    var parser = argparser_create(program_args)
-    val parsed = parser_parse(parser)
+    var parser = ArgParser.create(program_args)
+    val parsed = parser.parse()
 
     match parsed:
         case Err(e):
@@ -417,7 +430,7 @@ fn main() -> i32:
                 return 0
 
             # Check for input files
-            if cli_args.input_files_is_empty(input_files):
+            if cli_args.input_files.len() == 0:
                 print "Error: No input files"
                 print "Try 'simple-compiler --help' for usage"
                 return 1
@@ -427,36 +440,36 @@ fn main() -> i32:
             for f in cli_args.input_files:
                 print "[main]   file: {f}"
 
-            val options = cli_args_to_options(cli_args)
-            var driver = compilerdriver_create(options)
-            val result = driver_compile(driver)
+            val options = cli_args.to_options()
+            var driver = CompilerDriver.create(options)
+            val result = driver.compile()
 
             match result:
-                case compileresult_Success(value):
+                case CompileResult.Success(value):
                     if cli_args.verbose:
-                        if value_is_some(value):
-                            print "Result: {value_value}"
+                        if value != nil:
+                            print "Result: {value}"
                         else:
                             print "Compilation successful"
                     return 0
 
-                case compileresult_ParseError(errors):
+                case CompileResult.ParseError(errors):
                     print "Parse errors:"
                     for e in errors:
                         print "  {e}"
                     return 1
 
-                case compileresult_TypeError(errors):
+                case CompileResult.TypeError(errors):
                     print "Type errors:"
                     for e in errors:
                         print "  {e}"
                     return 1
 
-                case compileresult_CodegenError(msg):
+                case CompileResult.CodegenError(msg):
                     print "Codegen error: {msg}"
                     return 1
 
-                case compileresult_RuntimeError(msg):
+                case CompileResult.RuntimeError(msg):
                     print format_runtime_error_message(msg)
                     return 1
 
