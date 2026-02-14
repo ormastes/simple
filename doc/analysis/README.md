@@ -1,6 +1,7 @@
 # Code Duplication Analysis Series
 
 **Last Updated:** 2026-02-14
+**Phase:** Complete Phase 2 Analysis (all 4 major subsystems)
 
 This directory contains comprehensive duplication analysis for the Simple language compiler codebase, with recommendations for consolidation and prevention.
 
@@ -8,7 +9,28 @@ This directory contains comprehensive duplication analysis for the Simple langua
 
 ## Reports in This Series
 
-### Phase 2: Standard Library Analysis (Feb 2026)
+### Phase 2.4: App Layer Analysis - COMPREHENSIVE (Feb 2026) ⭐ LATEST
+
+**Primary Files:**
+- [`PHASE2_SUMMARY.md`](PHASE2_SUMMARY.md) - Executive summary (352 lines) **START HERE**
+- [`phase2_app_duplicates.md`](phase2_app_duplicates.md) - Full analysis (791 lines)
+- [`phase2_duplication_examples.md`](phase2_duplication_examples.md) - Code examples (688 lines)
+
+**Scope:** src/app/ directory (543 files, 115.7K LOC)
+**Analysis Depth:** 18 duplication categories, 4,500+ lines of duplicate code
+
+**Key Findings:**
+- **115 main() functions** (no centralized CLI framework)
+- **46 print_help() functions** (duplicate help patterns)
+- **4,671-line test runner monolith** (46 coupled files)
+- **11,489 lines** in compile/build system
+- **500-800 lines** LSP/DAP protocol duplication
+
+**Refactoring Impact:** 2,500-4,500 LOC consolidated, 4-phase roadmap
+
+---
+
+### Phase 2.3: Standard Library Analysis (Feb 2026)
 
 **Files:**
 - [`phase2_std_duplicates.md`](phase2_std_duplicates.md) - Full analysis (583 lines)

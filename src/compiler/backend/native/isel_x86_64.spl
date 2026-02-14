@@ -11,202 +11,16 @@ use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_i
 use compiler.backend.native.mach_inst.{X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15}
 use compiler.backend.native.mach_inst.{X86_ARG_REGS, X86_ARG_REG_COUNT, X86_CALLEE_SAVED}
 use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT}
+use compiler.backend.common.ascii_utils.{char_to_ascii}
+use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 
 # ============================================================================
-# ISel Context
+# String Data Handling (x86_64-specific wrapper)
 # ============================================================================
 
-struct ISelContext:
-    next_vreg: i64
-    frame_slots: Dict<i64, i64>
-    next_frame_offset: i64
-    extern_symbols: [text]
-    data_entries: [DataEntry]
-    string_counter: i64
-
-fn new_isel_context() -> ISelContext:
-    ISelContext(
-        next_vreg: 0,
-        frame_slots: {},
-        next_frame_offset: 0,
-        extern_symbols: [],
-        data_entries: [],
-        string_counter: 0
-    )
-
-fn isel_alloc_vreg(ctx: ISelContext) -> ISelContext:
-    ISelContext(
-        next_vreg: ctx.next_vreg + 1,
-        frame_slots: ctx.frame_slots,
-        next_frame_offset: ctx.next_frame_offset,
-        extern_symbols: ctx.extern_symbols,
-        data_entries: ctx.data_entries,
-        string_counter: ctx.string_counter
-    )
-
-fn isel_get_vreg(ctx: ISelContext) -> i64:
-    ctx.next_vreg - 1
-
-fn isel_alloc_frame_slot(ctx: ISelContext, local_id: i64, size: i64) -> ISelContext:
-    val aligned_size = if size < 8: 8 else: size
-    val offset = ctx.next_frame_offset + aligned_size
-    var slots = ctx.frame_slots
-    slots[local_id] = offset
-    ISelContext(
-        next_vreg: ctx.next_vreg,
-        frame_slots: slots,
-        next_frame_offset: offset,
-        extern_symbols: ctx.extern_symbols,
-        data_entries: ctx.data_entries,
-        string_counter: ctx.string_counter
-    )
-
-fn isel_frame_offset(ctx: ISelContext, local_id: i64) -> i64:
-    if ctx.frame_slots.contains(local_id):
-        return ctx.frame_slots[local_id]
-    0
-
-fn isel_add_extern(ctx: ISelContext, name: text) -> ISelContext:
-    # Check if already added (avoid duplicates that break symbol indexing)
-    var already_added = false
-    for existing in ctx.extern_symbols:
-        if existing == name:
-            already_added = true
-    if already_added:
-        return ctx
-    var new_ext = ctx.extern_symbols
-    new_ext = new_ext + [name]
-    ISelContext(
-        next_vreg: ctx.next_vreg,
-        frame_slots: ctx.frame_slots,
-        next_frame_offset: ctx.next_frame_offset,
-        extern_symbols: new_ext,
-        data_entries: ctx.data_entries,
-        string_counter: ctx.string_counter
-    )
-
-fn isel_add_string_data(ctx: ISelContext, s: text) -> ISelContext:
-    val label = ".LC{ctx.string_counter}"
-    var str_bytes: [i64] = []
-    for i in 0..s.len():
-        val ch = s[i]
-        var ascii = char_to_ascii(ch)
-        str_bytes = str_bytes + [ascii]
-    str_bytes = str_bytes + [0]
-    val entry = DataEntry(name: label, data: str_bytes, is_readonly: true)
-    var new_data = ctx.data_entries
-    new_data = new_data + [entry]
-    ISelContext(
-        next_vreg: ctx.next_vreg,
-        frame_slots: ctx.frame_slots,
-        next_frame_offset: ctx.next_frame_offset,
-        extern_symbols: ctx.extern_symbols,
-        data_entries: new_data,
-        string_counter: ctx.string_counter + 1
-    )
-
-fn isel_last_string_label(ctx: ISelContext) -> text:
-    ".LC{ctx.string_counter - 1}"
-
-fn char_to_ascii(ch: text) -> i64:
-    if ch == "a": 97
-    elif ch == "b": 98
-    elif ch == "c": 99
-    elif ch == "d": 100
-    elif ch == "e": 101
-    elif ch == "f": 102
-    elif ch == "g": 103
-    elif ch == "h": 104
-    elif ch == "i": 105
-    elif ch == "j": 106
-    elif ch == "k": 107
-    elif ch == "l": 108
-    elif ch == "m": 109
-    elif ch == "n": 110
-    elif ch == "o": 111
-    elif ch == "p": 112
-    elif ch == "q": 113
-    elif ch == "r": 114
-    elif ch == "s": 115
-    elif ch == "t": 116
-    elif ch == "u": 117
-    elif ch == "v": 118
-    elif ch == "w": 119
-    elif ch == "x": 120
-    elif ch == "y": 121
-    elif ch == "z": 122
-    elif ch == "A": 65
-    elif ch == "B": 66
-    elif ch == "C": 67
-    elif ch == "D": 68
-    elif ch == "E": 69
-    elif ch == "F": 70
-    elif ch == "G": 71
-    elif ch == "H": 72
-    elif ch == "I": 73
-    elif ch == "J": 74
-    elif ch == "K": 75
-    elif ch == "L": 76
-    elif ch == "M": 77
-    elif ch == "N": 78
-    elif ch == "O": 79
-    elif ch == "P": 80
-    elif ch == "Q": 81
-    elif ch == "R": 82
-    elif ch == "S": 83
-    elif ch == "T": 84
-    elif ch == "U": 85
-    elif ch == "V": 86
-    elif ch == "W": 87
-    elif ch == "X": 88
-    elif ch == "Y": 89
-    elif ch == "Z": 90
-    elif ch == "0": 48
-    elif ch == "1": 49
-    elif ch == "2": 50
-    elif ch == "3": 51
-    elif ch == "4": 52
-    elif ch == "5": 53
-    elif ch == "6": 54
-    elif ch == "7": 55
-    elif ch == "8": 56
-    elif ch == "9": 57
-    elif ch == "_": 95
-    elif ch == ".": 46
-    elif ch == " ": 32
-    elif ch == "\n": 10
-    elif ch == "\t": 9
-    elif ch == "-": 45
-    elif ch == "+": 43
-    elif ch == "*": 42
-    elif ch == "/": 47
-    elif ch == "=": 61
-    elif ch == "(": 40
-    elif ch == ")": 41
-    elif ch == "[": 91
-    elif ch == "]": 93
-    elif ch == "{": 123
-    elif ch == "}": 125
-    elif ch == ":": 58
-    elif ch == ";": 59
-    elif ch == ",": 44
-    elif ch == "!": 33
-    elif ch == "?": 63
-    elif ch == "@": 64
-    elif ch == "#": 35
-    elif ch == "$": 36
-    elif ch == "%": 37
-    elif ch == "&": 38
-    elif ch == "|": 124
-    elif ch == "\\": 92
-    elif ch == "'": 39
-    elif ch == "\"": 34
-    elif ch == "<": 60
-    elif ch == ">": 62
-    elif ch == "~": 126
-    elif ch == "^": 94
-    elif ch == "`": 96
-    else: 63
+fn x86_add_string_data(ctx: ISelContext, s: text) -> ISelContext:
+    """x86_64-specific string data wrapper using shared context."""
+    isel_add_string_data(ctx, s, char_to_ascii)
 
 # ============================================================================
 # Local to Virtual Register Mapping
@@ -252,7 +66,7 @@ fn lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lowere
             val inst = new_mach_inst(X86_OP_MOV_REG_IMM, [dest, op_imm(imm_val)])
             LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
         case Str(s):
-            var new_ctx = isel_add_string_data(ctx, s)
+            var new_ctx = x86_add_string_data(ctx, s)
             val label = isel_last_string_label(new_ctx)
             new_ctx = isel_alloc_vreg(new_ctx)
             val vreg = isel_get_vreg(new_ctx)
@@ -851,6 +665,5 @@ fn isel_simd_unary(ctx: ISelContext, opcode: i64, dest: LocalId, a: MirOperand) 
 # Exports
 # ============================================================================
 
-export ISelContext, new_isel_context
 export isel_module
 export LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult

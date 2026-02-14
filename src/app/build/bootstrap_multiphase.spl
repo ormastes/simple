@@ -824,12 +824,12 @@ struct PipelineConfig:
     cmake_path: text             # cmake path
     compiler_core_dir: text      # src/compiler_core/
     seed_include_dir: text       # seed/ (for runtime.h)
-    from_stage: PipelineStage    # Start from this stage (default: Check)
-    to_stage: PipelineStage      # Stop after this stage (default: Full2)
+    to_stage_idx: i64            # Stop after this stage index (7 = Full2)
+    from_stage_idx: i64          # Start from this stage index (0 = Check)
 
 # Stage result
 struct StageResult:
-    stage: PipelineStage
+    stage_idx: i64
     success: bool
     binary_path: text
     binary_size: i64
@@ -840,7 +840,8 @@ struct StageResult:
 impl StageResult:
     fn summary() -> text:
         val status = if self.success: "OK" else: "FAIL"
-        "{status} [{stage_name(self.stage)}]: {self.binary_size} bytes, {self.duration_ms}ms"
+        val stage = index_to_stage(self.stage_idx)
+        "{status} [{stage_name(stage)}]: {self.binary_size} bytes, {self.duration_ms}ms"
 
 # Pipeline result
 struct PipelineResult:
@@ -874,6 +875,7 @@ fn stage_name(stage: PipelineStage) -> text:
         case PipelineStage.Core2: "core2"
         case PipelineStage.Full1: "full1"
         case PipelineStage.Full2: "full2"
+        case _: "unknown"
 
 fn stage_index(stage: PipelineStage) -> i64:
     match stage:
@@ -885,6 +887,18 @@ fn stage_index(stage: PipelineStage) -> i64:
         case PipelineStage.Core2: 5
         case PipelineStage.Full1: 6
         case PipelineStage.Full2: 7
+        case _: -1
+
+fn index_to_stage(idx: i64) -> PipelineStage:
+    if idx == 0: return PipelineStage.Check
+    if idx == 1: return PipelineStage.Bootstrap
+    if idx == 2: return PipelineStage.Build
+    if idx == 3: return PipelineStage.Seed
+    if idx == 4: return PipelineStage.Core1
+    if idx == 5: return PipelineStage.Core2
+    if idx == 6: return PipelineStage.Full1
+    if idx == 7: return PipelineStage.Full2
+    PipelineStage.Check
 
 fn parse_stage(name: text) -> PipelineStage:
     match name:
@@ -898,10 +912,8 @@ fn parse_stage(name: text) -> PipelineStage:
         case "full2": PipelineStage.Full2
         case _: PipelineStage.Check
 
-fn stage_in_range(stage: PipelineStage, from: PipelineStage, to: PipelineStage) -> bool:
+fn stage_in_range(stage: PipelineStage, from_idx: i64, to_idx: i64) -> bool:
     val idx = stage_index(stage)
-    val from_idx = stage_index(from)
-    val to_idx = stage_index(to)
     idx >= from_idx and idx <= to_idx
 
 fn empty_stage_result(stage: PipelineStage) -> StageResult:
@@ -983,7 +995,7 @@ fn run_check(config: PipelineConfig) -> StageResult:
         return fail_stage(PipelineStage.Check, start_time)
 
     StageResult(
-        stage: PipelineStage.Check,
+        stage_idx: 0,
         success: true,
         binary_path: "",
         binary_size: 0,
@@ -1005,7 +1017,7 @@ fn run_bootstrap(config: PipelineConfig) -> StageResult:
     print "  OK bin/release/simple ({size} bytes, hash: {hash})"
 
     StageResult(
-        stage: PipelineStage.Bootstrap,
+        stage_idx: 1,
         success: true,
         binary_path: "bin/release/simple",
         binary_size: size,
@@ -1061,7 +1073,7 @@ fn run_build(config: PipelineConfig) -> StageResult:
     print "  OK seed_cpp built ({size} bytes)"
 
     StageResult(
-        stage: PipelineStage.Build,
+        stage_idx: 2,
         success: true,
         binary_path: seed_cpp_path,
         binary_size: size,
@@ -1109,7 +1121,7 @@ fn run_seed(config: PipelineConfig) -> StageResult:
     val hash = file_hash_sha256(core1_cpp)
 
     StageResult(
-        stage: PipelineStage.Seed,
+        stage_idx: 3,
         success: true,
         binary_path: core1_cpp,
         binary_size: cpp_size,
@@ -1165,7 +1177,7 @@ fn run_core1(config: PipelineConfig) -> StageResult:
     val hash = file_hash_sha256(core1_bin)
 
     StageResult(
-        stage: PipelineStage.Core1,
+        stage_idx: 4,
         success: true,
         binary_path: core1_bin,
         binary_size: bin_size,
@@ -1210,7 +1222,7 @@ fn run_core2(config: PipelineConfig, core1_result: StageResult) -> StageResult:
     print "  Core2 binary: {bin_size} bytes"
 
     StageResult(
-        stage: PipelineStage.Core2,
+        stage_idx: 5,
         success: true,
         binary_path: core2_bin,
         binary_size: bin_size,
@@ -1257,7 +1269,7 @@ fn run_full1(config: PipelineConfig, core2_result: StageResult) -> StageResult:
         print "  Smoke test: {output_text}"
 
     StageResult(
-        stage: PipelineStage.Full1,
+        stage_idx: 6,
         success: true,
         binary_path: full1_bin,
         binary_size: bin_size,
@@ -1297,7 +1309,7 @@ fn run_full2(config: PipelineConfig, full1_result: StageResult) -> StageResult:
     print "  Full2 binary: {bin_size} bytes"
 
     StageResult(
-        stage: PipelineStage.Full2,
+        stage_idx: 7,
         success: true,
         binary_path: full2_bin,
         binary_size: bin_size,
@@ -1333,12 +1345,19 @@ fn verify_stages(stage_a: StageResult, stage_b: StageResult) -> bool:
 
 class Pipeline:
     static fn run(config: PipelineConfig) -> PipelineResult:
+        print "@@@ LOADED FIXED VERSION @@@"
+        print "@@@ from_stage_idx: {config.from_stage_idx} @@@"
+        print "@@@ to_stage_idx: {config.to_stage_idx} @@@"
+        val from_stage = index_to_stage(config.from_stage_idx)
+        val to_stage = index_to_stage(config.to_stage_idx)
+        print "@@@ from_stage after conversion: {from_stage} @@@"
+        print "@@@ to_stage after conversion: {to_stage} @@@"
         print "================================================================"
         print "    8-Stage Build Pipeline"
         print "================================================================"
         print ""
         print "Stages: check -> bootstrap -> build -> seed -> core1 -> core2 -> full1 -> full2"
-        print "Range:  {stage_name(config.from_stage)} -> {stage_name(config.to_stage)}"
+        print "Range:  {stage_name(from_stage)} -> {stage_name(to_stage)}"
         print ""
 
         dir_create(config.output_dir, true)
@@ -1353,7 +1372,7 @@ class Pipeline:
         var full1_result = empty_stage_result(PipelineStage.Full1)
 
         # Stage: check
-        if stage_in_range(PipelineStage.Check, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Check, config.from_stage_idx, config.to_stage_idx):
             print "[check] Verifying prerequisites"
             print "----------------------------------------------------------------"
             val result = run_check(config)
@@ -1364,7 +1383,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
 
         # Stage: bootstrap
-        if stage_in_range(PipelineStage.Bootstrap, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Bootstrap, config.from_stage_idx, config.to_stage_idx):
             print "[bootstrap] Verifying pre-built binary"
             print "----------------------------------------------------------------"
             val result = run_bootstrap(config)
@@ -1375,7 +1394,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
 
         # Stage: build
-        if stage_in_range(PipelineStage.Build, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Build, config.from_stage_idx, config.to_stage_idx):
             print "[build] Building seed_cpp via cmake"
             print "----------------------------------------------------------------"
             val result = run_build(config)
@@ -1386,7 +1405,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
 
         # Stage: seed
-        if stage_in_range(PipelineStage.Seed, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Seed, config.from_stage_idx, config.to_stage_idx):
             print "[seed] Transpiling compiler_core to C++"
             print "----------------------------------------------------------------"
             val result = run_seed(config)
@@ -1397,7 +1416,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
 
         # Stage: core1
-        if stage_in_range(PipelineStage.Core1, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Core1, config.from_stage_idx, config.to_stage_idx):
             print "[core1] Compiling core1.cpp to native binary"
             print "----------------------------------------------------------------"
             val result = run_core1(config)
@@ -1409,7 +1428,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: false, verified_full: false, overall_success: false)
 
         # Stage: core2
-        if stage_in_range(PipelineStage.Core2, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Core2, config.from_stage_idx, config.to_stage_idx):
             print "[core2] Core1 recompiles compiler_core"
             print "----------------------------------------------------------------"
             val result = run_core2(config, core1_result)
@@ -1432,7 +1451,7 @@ class Pipeline:
                 print ""
 
         # Stage: full1
-        if stage_in_range(PipelineStage.Full1, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Full1, config.from_stage_idx, config.to_stage_idx):
             print "[full1] Core2 compiles full compiler"
             print "----------------------------------------------------------------"
             val result = run_full1(config, core2_result)
@@ -1444,7 +1463,7 @@ class Pipeline:
                 return PipelineResult(stages: stages, verified_core: verified_core, verified_full: false, overall_success: false)
 
         # Stage: full2
-        if stage_in_range(PipelineStage.Full2, config.from_stage, config.to_stage):
+        if stage_in_range(PipelineStage.Full2, config.from_stage_idx, config.to_stage_idx):
             print "[full2] Full1 recompiles itself"
             print "----------------------------------------------------------------"
             val result = run_full2(config, full1_result)
@@ -1505,8 +1524,9 @@ class Pipeline:
 # ============================================================================
 
 fn default_pipeline_config() -> PipelineConfig:
+    val bootstrap_profile = BuildProfile.Bootstrap
     PipelineConfig(
-        profile: BuildProfile.Bootstrap,
+        profile: bootstrap_profile,
         verify_reproducibility: true,
         keep_artifacts: true,
         workspace_root: ".",
@@ -1517,8 +1537,8 @@ fn default_pipeline_config() -> PipelineConfig:
         cmake_path: "cmake",
         compiler_core_dir: "src/compiler_core",
         seed_include_dir: "seed",
-        from_stage: PipelineStage.Check,
-        to_stage: PipelineStage.Full2
+        to_stage_idx: 7,
+        from_stage_idx: 0
     )
 
 fn parse_pipeline_args(args: [text]) -> PipelineConfig:
@@ -1527,9 +1547,11 @@ fn parse_pipeline_args(args: [text]) -> PipelineConfig:
     while i < args.len():
         val arg = args[i]
         if arg.starts_with("--from="):
-            config.from_stage = parse_stage(arg.substring(7))
+            val stage = parse_stage(arg.substring(7))
+            config.from_stage_idx = stage_index(stage)
         elif arg.starts_with("--to="):
-            config.to_stage = parse_stage(arg.substring(5))
+            val stage = parse_stage(arg.substring(5))
+            config.to_stage_idx = stage_index(stage)
         elif arg.starts_with("--output="):
             config.output_dir = arg.substring(9)
         elif arg.starts_with("--clang="):
