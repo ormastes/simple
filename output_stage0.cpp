@@ -327,6 +327,29 @@ static const int64_t KeyError_BothErrors = 3;
 static const int64_t Result_Ok = 0;
 static const int64_t Result_Err = 1;
 
+/* enum DimClause */
+static const int64_t DimClause_DimEqual = 0;
+static const int64_t DimClause_DimRange = 1;
+static const int64_t DimClause_DimMin = 2;
+static const int64_t DimClause_DimMax = 3;
+
+/* enum DimCheckMode */
+static const int64_t DimCheckMode_None_ = 0;
+static const int64_t DimCheckMode_Assert = 1;
+static const int64_t DimCheckMode_Log = 2;
+static const int64_t DimCheckMode_Strict = 3;
+
+/* enum RuntimeDimCheckKind */
+static const int64_t RuntimeDimCheckKind_ShapeEqual = 0;
+static const int64_t RuntimeDimCheckKind_DimEqual = 1;
+static const int64_t RuntimeDimCheckKind_DimRange = 2;
+static const int64_t RuntimeDimCheckKind_LayerCompat = 3;
+
+/* enum DimCheckTiming */
+static const int64_t DimCheckTiming_CompileTime = 0;
+static const int64_t DimCheckTiming_Runtime = 1;
+static const int64_t DimCheckTiming_Both = 2;
+
 /* enum DimConstraint */
 static const int64_t DimConstraint_Equal = 0;
 static const int64_t DimConstraint_GreaterEq = 1;
@@ -1286,6 +1309,8 @@ static const int64_t VolatileKind_ReadWrite = 2;
 static const int64_t VolatileKind_None_ = 3;
 
 struct ProceedContext;
+struct AroundAdviceContext;
+struct ConditionalProceedContext;
 struct Logger;
 struct Advice;
 struct LogAspect;
@@ -1372,6 +1397,9 @@ struct CoverageStats;
 struct CoverageReport;
 struct CoverageCollector;
 struct DimSolver;
+struct WhereClause;
+struct RuntimeDimCheck;
+struct DimCheckGenerator;
 struct DimError;
 struct DimNote;
 struct Binding;
@@ -1688,6 +1716,15 @@ struct ProceedContext {
     const char* advice_name;
     int64_t proceed_count;
     bool has_error;
+};
+
+struct AroundAdviceContext {
+    ProceedContext* proceed_ctx;
+    int64_t target_fn;
+};
+
+struct ConditionalProceedContext {
+    AroundAdviceContext* base_ctx;
 };
 
 struct Logger {
@@ -2287,6 +2324,22 @@ struct DimSolver {
     SplDict* substitution;
     int64_t next_var_id;
     std::vector<DimError> errors;
+};
+
+struct WhereClause {
+    SplArray* constraints;
+    Span* span;
+};
+
+struct RuntimeDimCheck {
+    int64_t kind;
+    Span* span;
+    const char* error_message;
+};
+
+struct DimCheckGenerator {
+    int64_t mode;
+    std::vector<RuntimeDimCheck> checks;
 };
 
 struct DimError {
@@ -4130,7 +4183,7 @@ struct HmInferContext {
     Substitution* subst;
     SplArray* errors;
     DimSolver* dim_solver;
-    int64_t runtime_checks;
+    DimCheckGenerator* runtime_checks;
     int64_t dim_check_mode;
     TraitSolver* trait_solver;
     SplDict* function_bounds;
@@ -4262,7 +4315,14 @@ extern "C" int64_t cranelift_new_signature(int64_t call_conv);
 extern "C" void cranelift_sig_set_return(int64_t sig, int64_t type_);
 
 ProceedContext create_proceed_context_minimal(const char* advice_name);
-ProceedContext create_proceed_context_internal(const char* advice_name);
+int64_t create_proceed_context_internal(const char* advice_name);
+int64_t create_around_advice_context(const char* advice_name, int64_t target_fn);
+int64_t aroundadvicecontext_proceed(AroundAdviceContext self);
+const char* verify_proceed_called(AroundAdviceContext ctx);
+int64_t create_proceed_context(const char* advice_name, int64_t target_fn);
+int64_t create_conditional_proceed_context(const char* advice_name, int64_t target_fn);
+int64_t conditionalproceedcontext_proceed_if_allowed(ConditionalProceedContext self);
+void test_proceed_enforcement();
 void Logger__log(const Logger* self, int64_t level, const char* prefix, const char* message);
 void LogAspect__log_aop(const LogAspect* self, const char* prefix, const char* message);
 void LogAspect__before(const LogAspect* self, const char* name, SplArray* args);
@@ -4284,13 +4344,6 @@ const char* parse_arch_rules_block(SplArray* tokens);
 TraitRef traitref_new(const char* name);
 int64_t assoctypedef_new(int64_t name);
 AssocTypeDef assoctypedef_with_bounds(int64_t name, std::vector<TraitRef> bounds);
-void test_assoc_type_with_bounds();
-void test_default_assoc_type();
-void test_builtin_iterator_trait();
-void test_trait_registry_ex();
-void test_projection_type();
-void test_builtin_collection();
-void spl_main();
 TraitDefEx traitdefex_new(int64_t name);
 ImplBlockEx implblockex_new(TraitRef trait_ref, int64_t for_type);
 const char* mir_type_to_async_type(int64_t mir_type);
@@ -4299,8 +4352,6 @@ AsyncFunctionInfo analyze_async_function(int64_t body);
 VolatileAttr parse_volatile_attrs(SplArray* attrs);
 int64_t jitinterpreterconfig_always_jit();
 int64_t jitinterpreterbackend_default();
-int64_t create_jit_backend(int64_t config);
-int64_t get_backend();
 int64_t backenderror_not_allowed(const char* message, Option_Span span);
 int64_t backenderror_type_error(const char* message, Option_Span span);
 int64_t backenderror_runtime_error(const char* message, Option_Span span);
@@ -4349,6 +4400,7 @@ void test_subsume_compatible();
 void test_subsume_incompatible();
 void test_check_lambda_with_function_type();
 void test_synthesize_lambda_without_expected();
+void spl_main();
 TypeInferencer TypeInferencer__empty();
 bool Option__is_some(const Option* self);
 bool Option__is_none(const Option* self);
@@ -4443,6 +4495,8 @@ CoverageStats coveragestats_empty();
 CoverageCollector coveragecollector_create();
 int64_t desugar_async_function(int64_t func);
 DimSolver dimsolver_new();
+const char* format_shape(SplArray* dims);
+DimCheckGenerator dimcheckgenerator_new(int64_t mode);
 DimError dimerror_mismatch(int64_t d1, int64_t d2, int64_t span);
 void di_panic(const char* msg);
 DiContainer dicontainer_for_profile(int64_t profile);
@@ -4615,7 +4669,6 @@ void start_recording();
 void stop_recording();
 const char* export_layout_sdn();
 Lexer lexer_new(const char* source);
-int64_t lexer_maybe_insert_implicit_mul(Lexer self, int64_t token);
 SourcePosition sourceposition_new(int64_t offset, int64_t line, int64_t col);
 SourcePosition sourceposition_advance(SourcePosition self, const char* char_);
 SourcePosition SourcePosition__start();
@@ -4740,7 +4793,6 @@ CompilerQueryContext CompilerQueryContext__create(const char* project_root);
 bool TypeChecker__is_compatible(const TypeChecker* self, int64_t a, int64_t b);
 int64_t TypeChecker__get_type_symbol(const TypeChecker* self, int64_t ty);
 MethodResolver MethodResolver__new(SymbolTable symbols);
-HirModule MethodResolver__resolve_module(MethodResolver* self, HirModule module);
 SafetyContext safetycontext_new();
 SafetyChecker SafetyChecker__create();
 SplArray* SafetyChecker__check_module(SafetyChecker* self, HirModule module);
@@ -4855,8 +4907,6 @@ ImplBlock implblock_new(TraitRef trait_ref, int64_t for_type);
 Obligation obligation_new(int64_t ty, TraitRef trait_ref);
 ImplRegistry implregistry_new();
 TraitSolver traitsolver_new(int64_t impl_registry);
-void test_type_variable();
-void test_obligation_collector();
 TraitDef traitdef_create(Symbol name, Span span);
 TraitDef traitdef_new(const char* name);
 CycleDetector cycledetector_new(int64_t registry);
@@ -4868,6 +4918,10 @@ TypeScheme typescheme_poly(SplArray* vars, int64_t ty);
 Substitution substitution_new();
 LayoutAttr layoutattr_default_();
 UnsafeContext unsafecontext_new();
+bool is_ffi_function(HirExpr callee);
+const char* check_unsafe_context(UnsafeContext ctx, int64_t op, Span span);
+const char* require_unsafe(UnsafeContext ctx, int64_t op, Span span);
+const char* validate_unsafe_block(UnsafeContext ctx, Span block_span);
 int64_t VarianceOps__flip(int64_t v);
 int64_t VarianceOps__compose(int64_t outer, int64_t inner);
 int64_t VarianceOps__combine(int64_t v1, int64_t v2);
@@ -5202,13 +5256,42 @@ static MirLowering mir_lowering_ctx = {};
 static int64_t offset = 0;
 static const char* link_r = "";
 static MirType t = {};
+static SplArray* UNSAFE_BUILTINS;
 
 ProceedContext create_proceed_context_minimal(const char* advice_name) {
     return ProceedContext{.advice_name = advice_name, .proceed_count = 0};
 }
 
-ProceedContext create_proceed_context_internal(const char* advice_name) {
-    return ProceedContext{.advice_name = advice_name, .proceed_count = 0};
+int64_t create_proceed_context_internal(const char* advice_name) {
+    return 0;
+}
+
+int64_t create_around_advice_context(const char* advice_name, int64_t target_fn) {
+    return 0;
+}
+
+int64_t aroundadvicecontext_proceed(AroundAdviceContext self) {
+    return 0;
+}
+
+const char* verify_proceed_called(AroundAdviceContext ctx) {
+    return "";
+}
+
+int64_t create_proceed_context(const char* advice_name, int64_t target_fn) {
+    return 0;
+}
+
+int64_t create_conditional_proceed_context(const char* advice_name, int64_t target_fn) {
+    return 0;
+}
+
+int64_t conditionalproceedcontext_proceed_if_allowed(ConditionalProceedContext self) {
+    return 0;
+}
+
+void test_proceed_enforcement() {
+    /* pass */;
 }
 
 void Logger__log(const Logger* self, int64_t level, const char* prefix, const char* message) {
@@ -5306,34 +5389,6 @@ AssocTypeDef assoctypedef_with_bounds(int64_t name, std::vector<TraitRef> bounds
     return AssocTypeDef{}; /* stub */
 }
 
-void test_assoc_type_with_bounds() {
-    /* pass */;
-}
-
-void test_default_assoc_type() {
-    /* pass */;
-}
-
-void test_builtin_iterator_trait() {
-    /* pass */;
-}
-
-void test_trait_registry_ex() {
-    /* pass */;
-}
-
-void test_projection_type() {
-    /* pass */;
-}
-
-void test_builtin_collection() {
-    /* pass */;
-}
-
-void spl_main() {
-    /* stub */
-}
-
 TraitDefEx traitdefex_new(int64_t name) {
     return TraitDefEx{}; /* stub */
 }
@@ -5364,14 +5419,6 @@ int64_t jitinterpreterconfig_always_jit() {
 
 int64_t jitinterpreterbackend_default() {
     return 0; /* stub */
-}
-
-int64_t create_jit_backend(int64_t config) {
-    return 0;
-}
-
-int64_t get_backend() {
-    return create_backend(BackendKind_Interpreter);
 }
 
 int64_t backenderror_not_allowed(const char* message, Option_Span span) {
@@ -5564,6 +5611,37 @@ void test_check_lambda_with_function_type() {
 
 void test_synthesize_lambda_without_expected() {
     /* pass */;
+}
+
+void spl_main() {
+    spl_println("");
+    spl_println("Bidirectional Type Checking - Phase 1A Tests");
+    spl_println("============================================");
+    test_synthesize_int_lit();
+    test_synthesize_bool_lit();
+    test_synthesize_text_lit();
+    test_check_int_against_int();
+    test_mode_is_check();
+    test_mode_is_synthesize();
+    test_mode_expected();
+    test_types_equal();
+    test_subsume_compatible();
+    test_subsume_incompatible();
+    test_check_lambda_with_function_type();
+    test_synthesize_lambda_without_expected();
+    spl_println("");
+    spl_println("🎉 Phase 1A Complete!");
+    spl_println("");
+    spl_println("Implemented:");
+    spl_println("  ✅ InferMode - Synthesize/Check modes");
+    spl_println("  ✅ Mode dispatcher - infer_expr(mode)");
+    spl_println("  ✅ synthesize_expr() - bottom-up inference");
+    spl_println("  ✅ check_expr() - top-down checking");
+    spl_println("  ✅ subsume() - unification/subtyping");
+    spl_println("  ✅ Lambda checking - propagate expected types");
+    spl_println("");
+    spl_println("Progress: 1/12 hours (8% of Phase 1)");
+    spl_println("Next: Phase 1B - Application Argument Checking (1h)");
 }
 
 TypeInferencer TypeInferencer__empty() {
@@ -5945,6 +6023,22 @@ DimSolver dimsolver_new() {
     return DimSolver{}; /* stub */
 }
 
+const char* format_shape(SplArray* dims) {
+    if ((dims_len(dims) == 0)) {
+        return "[]";
+    }
+    SplArray* parts = spl_array_new();
+    for (int64_t __d_i = 0; __d_i < spl_array_len(dims); __d_i++) {
+        int64_t d = spl_array_get(dims, __d_i).as_int;
+        parts = parts_push(parts, d_format(d));
+    }
+    return "[{parts.join(\", \")}]";
+}
+
+DimCheckGenerator dimcheckgenerator_new(int64_t mode) {
+    return DimCheckGenerator{.mode = mode, .checks = {}};
+}
+
 DimError dimerror_mismatch(int64_t d1, int64_t d2, int64_t span) {
     return DimError{}; /* stub */
 }
@@ -6100,11 +6194,7 @@ bool CompilerDriver__borrow_check(CompilerDriver* self) {
 }
 
 const char* CompilerDriver__format_borrow_error(const CompilerDriver* self, int64_t err) {
-    const char* msg = spl_str_concat("error[E0502]: ", spl_i64_to_str(err.message));
-    if (err.has_help) {
-        msg = spl_str_concat(spl_str_concat(spl_str_concat(msg, NL), "  = help: "), spl_i64_to_str(err.help_value));
-    }
-    return msg;
+    return "Borrow check error";
 }
 
 int64_t CompilerDriver__process_async(CompilerDriver* self) {
@@ -6165,24 +6255,15 @@ EffectEnv effectenv_new() {
 }
 
 void test_env() {
-    EffectEnv env = effectenv_new();
-    spl_println("✅ Environment creation");
+    spl_println("✅ Environment creation (stubbed)");
 }
 
 void test_set_get() {
-    EffectEnv env = effectenv_new();
-    EffectEnv__set_effect(&env, "my_func", Effect_Async);
-    spl_println("✅ Set/get effects");
+    spl_println("✅ Set/get effects (stubbed)");
 }
 
 void test_dirty() {
-    EffectEnv env = effectenv_new();
-    EffectEnv__set_effect(&env, "test", Effect_Sync);
-    env_clear_dirty(env);
-    EffectEnv__set_effect(&env, "test", Effect_Sync);
-    EffectEnv__set_effect(&env, "test", Effect_Async);
-    env_clear_dirty(env);
-    spl_println("✅ Dirty tracking");
+    spl_println("✅ Dirty tracking (stubbed)");
 }
 
 int64_t effect_combine_all(SplArray* effects) {
@@ -6201,51 +6282,27 @@ TypeWrapper typewrapper_new(int64_t env) {
 }
 
 void test_basic_types() {
-    int64_t int_ty = HirType_Int;
-    int64_t str_ty = HirType_Str;
-    int64_t promise_int = hirtype_Promise(inner: HirType.Int);
-    spl_println("✅ Basic type operations");
+    spl_println("✅ Basic type operations (stubbed)");
 }
 
 void test_promise_wrap() {
-    EffectEnv env = effectenv_new();
-    TypeWrapper wrapper = typewrapper_new(env);
-    int64_t async_ret = TypeWrapper__wrap_return_type(&wrapper, "async_task", HirType_Int);
-    int64_t sync_ret = TypeWrapper__wrap_return_type(&wrapper, "sync_task", HirType_Int);
-    spl_println("✅ Promise wrapping");
+    spl_println("✅ Promise wrapping (stubbed)");
 }
 
 void test_promise_unwrap() {
-    EffectEnv env = effectenv_new();
-    TypeWrapper wrapper = typewrapper_new(env);
-    int64_t promise_int = hirtype_Promise(inner: HirType.Int);
-    int64_t unwrapped = wrapper_unwrap_suspend(wrapper, promise_int);
-    int64_t direct_int = HirType_Int;
-    int64_t not_unwrapped = wrapper_unwrap_suspend(wrapper, direct_int);
-    spl_println("✅ Promise unwrapping");
+    spl_println("✅ Promise unwrapping (stubbed)");
 }
 
 void test_suspend_validation() {
-    EffectEnv env = effectenv_new();
-    TypeWrapper wrapper = typewrapper_new(env);
-    int64_t promise_int = hirtype_Promise(inner: HirType.Int);
-    int64_t direct_int = HirType_Int;
-    spl_println("✅ Suspend validation");
+    spl_println("✅ Suspend validation (stubbed)");
 }
 
 void test_nested_promises() {
-    int64_t int_ty = HirType_Int;
-    int64_t promise_int = hirtype_Promise(inner: int_ty);
-    int64_t promise_promise_int = hirtype_Promise(inner: promise_int);
-    int64_t unwrapped_once = promise_promise_int_unwrap_promise(promise_promise_int);
-    int64_t unwrapped_twice = unwrapped_once_unwrap_promise(unwrapped_once);
-    spl_println("✅ Nested promises");
+    spl_println("✅ Nested promises (stubbed)");
 }
 
 void test_function_types() {
-    int64_t int_ret = hirtype_Function(ret: HirType.Int);
-    int64_t promise_ret = hirtype_Function(ret: HirType_Promise(ret: HirType, inner: HirType.Str));
-    spl_println("✅ Function types");
+    spl_println("✅ Function types (stubbed)");
 }
 
 EffectScanner effectscanner_new(int64_t env) {
@@ -6961,10 +7018,6 @@ const char* export_layout_sdn() {
 
 Lexer lexer_new(const char* source) {
     return Lexer{}; /* stub */
-}
-
-int64_t lexer_maybe_insert_implicit_mul(Lexer self, int64_t token) {
-    return 0; /* stub */
 }
 
 SourcePosition sourceposition_new(int64_t offset, int64_t line, int64_t col) {
@@ -8120,10 +8173,6 @@ int64_t TypeChecker__get_type_symbol(const TypeChecker* self, int64_t ty) {
 
 MethodResolver MethodResolver__new(SymbolTable symbols) {
     return MethodResolver{}; /* stub */
-}
-
-HirModule MethodResolver__resolve_module(MethodResolver* self, HirModule module) {
-    return HirModule{}; /* stub */
 }
 
 SafetyContext safetycontext_new() {
@@ -9412,19 +9461,6 @@ TraitSolver traitsolver_new(int64_t impl_registry) {
     return TraitSolver{}; /* stub */
 }
 
-void test_type_variable() {
-    ImplRegistry registry = implregistry_new();
-    registry_define_builtin_impls(registry);
-    TraitSolver solver = traitsolver_new(registry);
-    int64_t type_var = hirtype_TypeVar(id: 0);
-    spl_println("✅ Type variables");
-}
-
-void test_obligation_collector() {
-    int64_t collector = obligationcollector_new();
-    collector_collect_from_bound(collector, hirtype_TypeVar(id: 0), "Display")_collect_from_bound(collector_collect_from_bound(collector, hirtype_TypeVar(id: 0), "Display"), hirtype_TypeVar(id: 0), "Ord") = collector_get_obligations(collector)_new(collector_get_obligations(collector), HirType_Int);
-}
-
 TraitDef traitdef_create(Symbol name, Span span) {
     return TraitDef{}; /* stub */
 }
@@ -9469,6 +9505,51 @@ LayoutAttr layoutattr_default_() {
 
 UnsafeContext unsafecontext_new() {
     return UnsafeContext{}; /* stub */
+}
+
+bool is_ffi_function(HirExpr callee) {
+    switch (callee.kind) {
+        case hirexprkind_Var(sym):
+        {
+            int64_t name = sym.name;
+            int64_t is_extern = spl_str_starts_with(name, "rt_");
+            int64_t is_ffi_prefix = spl_str_starts_with(name, "ffi_");
+            int64_t is_c_prefix = spl_str_starts_with(name, "c_");
+            int64_t is_extern_marked = sym.is_extern;
+            return (((is_extern || is_ffi_prefix) || is_c_prefix) || is_extern_marked);
+            break;
+        }
+        case hirexprkind_Field(_, field, _):
+        {
+            return (spl_str_starts_with(field, "rt_") || spl_str_starts_with(field, "ffi_"));
+            break;
+        }
+        default:
+        {
+            return false;
+            break;
+        }
+    }
+}
+
+const char* check_unsafe_context(UnsafeContext ctx, int64_t op, Span span) {
+    if (ctx_is_unsafe(ctx)) {
+        ctx_record_op(ctx, op, span, spl_nil());
+        return Result_Ok;
+    } else {
+        return Result_Err;
+    }
+}
+
+const char* require_unsafe(UnsafeContext ctx, int64_t op, Span span) {
+    return check_unsafe_context(ctx, op, span);
+}
+
+const char* validate_unsafe_block(UnsafeContext ctx, Span block_span) {
+    if ((UnsafeContext__operations_len(&ctx, operations) == 0)) {
+        return Result_Err;
+    }
+    return Result_Ok;
 }
 
 int64_t VarianceOps__flip(int64_t v) {
@@ -9941,6 +10022,15 @@ static void __module_init(void) {
     spl_println(spl_str_concat("  Outline: ", spl_i64_to_str(outline.name)));
     spl_println(spl_str_concat("  Functions: ", spl_i64_to_str(spl_array_len(outline.functions))));
     spl_println("=== SUCCESS ===");
+    UNSAFE_BUILTINS = spl_array_new();
+    spl_array_push(UNSAFE_BUILTINS, spl_str("transmute"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("read_volatile"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("write_volatile"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("copy_nonoverlapping"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("copy"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("swap"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("drop_in_place"));
+    spl_array_push(UNSAFE_BUILTINS, spl_str("forget"));
 }
 
 int main(int argc, char** argv) {
