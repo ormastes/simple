@@ -4,6 +4,12 @@ set(CMAKE_SYSTEM_PROCESSOR x86_64)
 
 set(CMAKE_C_COMPILER clang)
 set(CMAKE_CXX_COMPILER clang++)
+set(CMAKE_ASM_COMPILER clang)
+
+# FreeBSD version (configurable, default 14)
+if(NOT DEFINED SPL_FREEBSD_VERSION)
+    set(SPL_FREEBSD_VERSION 14)
+endif()
 
 # Sysroot: /opt/sysroots/freebsd-x86_64 (local) or /tmp/freebsd-sysroot (CI)
 if(EXISTS /opt/sysroots/freebsd-x86_64/usr/include)
@@ -14,10 +20,10 @@ else()
     message(FATAL_ERROR "FreeBSD x86_64 sysroot not found. Install at /opt/sysroots/freebsd-x86_64 or /tmp/freebsd-sysroot")
 endif()
 
-set(CMAKE_C_FLAGS "--target=x86_64-unknown-freebsd14 --sysroot=${FREEBSD_SYSROOT}")
-set(CMAKE_CXX_FLAGS "--target=x86_64-unknown-freebsd14 --sysroot=${FREEBSD_SYSROOT}")
-set(CMAKE_ASM_FLAGS "--target=x86_64-unknown-freebsd14 --sysroot=${FREEBSD_SYSROOT}")
-set(CMAKE_EXE_LINKER_FLAGS "--target=x86_64-unknown-freebsd14 --sysroot=${FREEBSD_SYSROOT} -fuse-ld=lld")
+set(CMAKE_C_FLAGS "--target=x86_64-unknown-freebsd${SPL_FREEBSD_VERSION} --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_CXX_FLAGS "--target=x86_64-unknown-freebsd${SPL_FREEBSD_VERSION} --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_ASM_FLAGS "--target=x86_64-unknown-freebsd${SPL_FREEBSD_VERSION} --sysroot=${FREEBSD_SYSROOT}")
+set(CMAKE_EXE_LINKER_FLAGS "--target=x86_64-unknown-freebsd${SPL_FREEBSD_VERSION} --sysroot=${FREEBSD_SYSROOT} -fuse-ld=lld")
 
 set(CMAKE_FIND_ROOT_PATH "${FREEBSD_SYSROOT}")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

@@ -291,8 +291,31 @@ find_cxx_compiler() {
         fi
     done
 
+    # Try Homebrew LLVM paths on macOS
+    for homebrew_path in /opt/homebrew/opt/llvm/bin/clang++ /usr/local/opt/llvm/bin/clang++; do
+        if [ -x "$homebrew_path" ]; then
+            CXX="$homebrew_path"
+            log "Found Homebrew LLVM: $CXX"
+            return 0
+        fi
+    done
+
+    # Warn if only Apple Clang is available (insufficient C++20 support)
+    if command -v clang++ >/dev/null 2>&1; then
+        local version_info
+        version_info=$(clang++ --version 2>/dev/null | head -1)
+        if echo "$version_info" | grep -q "Apple clang"; then
+            err "Only Apple Clang found: $version_info"
+            err "Apple Clang may lack full C++20 support needed for seed_cpp."
+            err "Install LLVM via Homebrew: brew install llvm"
+            err "Then re-run with: --cc=/opt/homebrew/opt/llvm/bin/clang++"
+            return 1
+        fi
+    fi
+
     err "No Clang C++ compiler found. Install clang++ version 20 or newer."
     err "Visit: https://apt.llvm.org/ for installation instructions"
+    err "On macOS: brew install llvm"
     return 1
 }
 
