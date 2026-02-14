@@ -2,10 +2,16 @@
 # Bootstrap Simple Compiler From Scratch
 #
 # Builds the Simple compiler on a machine with NO pre-existing Simple binary.
-# Only requires: cmake, clang++ (or g++), and standard POSIX tools.
+# Requirements: cmake 3.15+, clang-20+ (C/C++ compilers), ninja, POSIX tools
+#
+# Compiler Requirements:
+#   - Clang family only (clang/clang++)
+#   - Version 20 or newer recommended
+#   - C++20 standard support required
+#   - Build system: CMake + Ninja
 #
 # Bootstrap chain:
-#   1. cmake builds seed_cpp from seed/seed.cpp (C++ transpiler)
+#   1. cmake/ninja builds seed_cpp from seed/seed.cpp (C++ transpiler)
 #   2. seed_cpp transpiles src/compiler_core/*.spl → C++
 #   3. clang++ compiles C++ + runtime → Core1 (minimal native compiler)
 #   4. Core1 compiles compiler_core → Core2 (self-hosting check)
@@ -23,7 +29,7 @@
 # Options:
 #   --skip-verify     Skip reproducibility checks
 #   --jobs=N          Parallel build jobs (default: auto-detect)
-#   --cc=PATH         C++ compiler path (default: clang++)
+#   --cc=PATH         C++ compiler path (default: clang++-20, fallback clang++)
 #   --output=PATH     Final binary location (default: bin/simple)
 #   --keep-artifacts  Keep build/bootstrap/ directory
 #   --verbose         Show detailed command output
@@ -277,14 +283,16 @@ find_cxx_compiler() {
         return 1
     fi
 
-    for candidate in clang++ g++ c++; do
+    # Try Clang 20+ first, then any clang++
+    for candidate in clang++-20 clang++; do
         if command -v "$candidate" >/dev/null 2>&1; then
             CXX="$candidate"
             return 0
         fi
     done
 
-    err "No C++ compiler found. Install clang++ or g++."
+    err "No Clang C++ compiler found. Install clang++ version 20 or newer."
+    err "Visit: https://apt.llvm.org/ for installation instructions"
     return 1
 }
 
@@ -342,11 +350,28 @@ step1_build_seed() {
 
     mkdir -p "$SEED_DIR/build"
 
+    # Derive C compiler from C++ compiler (clang++ -> clang)
+    local CC
+    CC="$(echo "$CXX" | sed 's/clang++/clang/' | sed 's/-[0-9][0-9]*$//')"
+
+    # Prefer Ninja if available, fallback to Make
+    local GENERATOR=""
+    if command -v ninja >/dev/null 2>&1; then
+        GENERATOR="-G Ninja"
+        log "Build system: Ninja"
+    else
+        log "Build system: Make (install ninja for faster builds)"
+    fi
+
     # Configure with cmake
-    log "Configuring with cmake..."
+    log "Configuring with cmake (C++20 standard)..."
     run cmake -S "$SEED_DIR" -B "$SEED_DIR/build" \
+        $GENERATOR \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DCMAKE_C_COMPILER="$(echo "$CXX" | sed 's/clang++$/clang/' | sed 's/g++$/gcc/' | sed 's/c++$/cc/')" \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DCMAKE_C_STANDARD=11 \
+        -DCMAKE_BUILD_TYPE=Release \
         ${VERBOSE:+-DCMAKE_VERBOSE_MAKEFILE=ON} \
         >/dev/null 2>&1 || run cmake -S "$SEED_DIR" -B "$SEED_DIR/build"
 

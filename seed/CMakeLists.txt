@@ -21,13 +21,20 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Warnings (MSVC uses different flags)
-if(MSVC)
+# Warnings and compilation flags
+if(MSVC OR CMAKE_C_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")
+    # MSVC or ClangCL (MSVC ABI mode)
     add_compile_options(/W3)
+    # Enable structured exception handling for C++
+    add_compile_options(/EHsc)
 else()
+    # GCC-style compilers (Clang with MinGW, GCC)
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
     # Use large code model for seed_cpp to handle massive static arrays
-    add_compile_options(-mcmodel=large)
+    # Note: Not supported on Windows MinGW, skip if building for Windows
+    if(NOT WIN32 OR CMAKE_CROSSCOMPILING)
+        add_compile_options(-mcmodel=large)
+    endif()
 endif()
 
 # Coverage option: -DCOVERAGE=ON (requires Clang)
@@ -46,11 +53,15 @@ add_library(spl_runtime STATIC runtime.c runtime_thread.c)
 target_include_directories(spl_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spl_runtime PUBLIC ${CMAKE_DL_LIBS})
 
-# Link pthread on Unix systems
-if(UNIX AND NOT APPLE)
-    target_link_libraries(spl_runtime PUBLIC pthread)
+# Platform-specific libraries
+if(WIN32)
+    # Windows: No pthread, no dl (use native Windows API)
+    # Runtime functions use Windows API directly (see platform/platform_win.h)
 elseif(APPLE)
-    # macOS includes pthread in libSystem
+    # macOS: pthread included in libSystem
+    target_link_libraries(spl_runtime PUBLIC pthread)
+elseif(UNIX)
+    # Linux/BSD: link pthread and dl
     target_link_libraries(spl_runtime PUBLIC pthread)
 endif()
 

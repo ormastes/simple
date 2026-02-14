@@ -4,6 +4,8 @@
 
 A comprehensive reference for Simple's syntax features. All features listed here are **implemented and working**.
 
+**See also:** [Tier-based grammar docs](../spec/grammar/keyword_reference.md) — keywords organized by compilation tier (seed/core/full).
+
 ---
 
 ## Table of Contents

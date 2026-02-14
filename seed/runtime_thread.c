@@ -66,6 +66,16 @@ static void init_handle_lock(void) {
 #endif
 }
 
+/* Public initialization function - called at startup */
+void spl_thread_init(void) {
+    init_handle_lock();
+    /* Initialize handle array to zeros */
+    for (int i = 0; i < MAX_HANDLES; i++) {
+        g_handles[i].type = HANDLE_FREE;
+        g_handles[i].ptr = NULL;
+    }
+}
+
 static int64_t alloc_handle(HandleType type, void* ptr) {
     init_handle_lock();
 
@@ -540,5 +550,81 @@ int64_t spl_thread_cpu_count(void) {
     SYSTEM_INFO sysinfo;
     GetSystemInfo(&sysinfo);
     return (int64_t)sysinfo.dwNumberOfProcessors;
+#endif
+}
+
+/* ================================================================
+ * Thread Pool Worker Spawn Helper
+ * ================================================================ */
+
+/*
+ * Forward declaration for Simple worker_loop_entry function.
+ * This function is defined in thread_pool.spl and compiled to C.
+ * In interpreter mode, this function may not be available.
+ */
+extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
+
+/* Thread worker wrapper for pthread */
+#ifdef SPL_THREAD_PTHREAD
+static void* worker_thread_wrapper(void* arg) {
+    int64_t pool_id = (int64_t)(intptr_t)arg;
+
+    /* Call Simple worker function if linked */
+    if (worker_loop_entry) {
+        worker_loop_entry(pool_id);
+    }
+
+    return NULL;
+}
+#else  /* Windows */
+static DWORD WINAPI worker_thread_wrapper(LPVOID arg) {
+    int64_t pool_id = (int64_t)(intptr_t)arg;
+
+    /* Call Simple worker function if linked */
+    if (worker_loop_entry) {
+        worker_loop_entry(pool_id);
+    }
+
+    return 0;
+}
+#endif
+
+spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id) {
+    /* Check if worker function is available (compiled mode only) */
+    if (!worker_loop_entry) {
+        return 0;  /* Not available in interpreter mode */
+    }
+
+    /* Use standard thread creation with wrapper */
+#ifdef SPL_THREAD_PTHREAD
+    pthread_t* thread = (pthread_t*)malloc(sizeof(pthread_t));
+    if (!thread) {
+        return 0;
+    }
+
+    int result = pthread_create(thread, NULL, worker_thread_wrapper,
+                                (void*)(intptr_t)pool_id);
+    if (result != 0) {
+        free(thread);
+        return 0;
+    }
+
+    return alloc_handle(HANDLE_THREAD, thread);
+
+#else  /* Windows */
+    HANDLE thread = CreateThread(
+        NULL,                       /* default security attributes */
+        0,                          /* default stack size */
+        worker_thread_wrapper,      /* thread function */
+        (LPVOID)(intptr_t)pool_id, /* argument to thread function */
+        0,                          /* default creation flags */
+        NULL                        /* thread identifier not needed */
+    );
+
+    if (thread == NULL) {
+        return 0;
+    }
+
+    return alloc_handle(HANDLE_THREAD, thread);
 #endif
 }

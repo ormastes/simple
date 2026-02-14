@@ -1,4 +1,5 @@
 file(REMOVE_RECURSE
+  "CMakeFiles/seed_test.dir/link.d"
   "CMakeFiles/seed_test.dir/seed_test.cpp.o"
   "CMakeFiles/seed_test.dir/seed_test.cpp.o.d"
   "seed_test"

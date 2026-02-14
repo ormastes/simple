@@ -9,6 +9,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/ormastes/dev/pub/simple/seed/c_runtime_test.c" "CMakeFiles/c_runtime_test.dir/c_runtime_test.c.o" "gcc" "CMakeFiles/c_runtime_test.dir/c_runtime_test.c.o.d"
+  "" "c_runtime_test" "gcc" "CMakeFiles/c_runtime_test.dir/link.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

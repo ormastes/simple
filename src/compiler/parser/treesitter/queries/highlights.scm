@@ -1,6 +1,10 @@
 ;; highlights.scm - Syntax Highlighting for Simple Language
 ;; Tree-sitter query file for semantic token highlighting
 ;; Covers 100+ keywords, operators, literals, and language constructs
+;;
+;; Keyword tiers: seed (bootstrap), core (self-hosting), full (runtime)
+;; Aspirational keywords are marked with ;; aspirational
+;; Source of truth: doc/spec/grammar/tier_keywords.sdn
 
 ;; ============================================================================
 ;; Keywords - Core Language
@@ -8,42 +12,43 @@
 
 ;; Variables and Constants
 [
-  "val"
-  "var"
-  "let"    ; legacy
-  "const"
-  "static"
+  "val"       ; tier: seed
+  "var"       ; tier: seed
+  "let"       ; aspirational (legacy)
+  "const"     ; tier: full
+  "static"    ; tier: core
 ] @keyword.variable
 
 ;; Functions and Methods
 [
-  "fn"
-  "me"     ; mutable method
+  "fn"       ; tier: seed
+  "me"       ; tier: core — mutable method
 ] @keyword.function
 
 ;; Types and Definitions
 [
-  "class"
-  "struct"
-  "enum"
-  "union"
-  "trait"
-  "mixin"
-  "impl"
-  "type"
-  "actor"
-  "unit"
+  "class"      ; tier: seed
+  "struct"     ; tier: seed
+  "enum"       ; tier: seed
+  "union"      ; aspirational
+  "trait"      ; tier: core
+  "mixin"      ; aspirational
+  "impl"       ; tier: seed
+  "type"       ; tier: core
+  "actor"      ; tier: full
+  "unit"       ; tier: full
+  "implements" ; tier: core
 ] @keyword.type
 
 ;; Module System
 [
-  "mod"
-  "use"
-  "import"
-  "export"
-  "common"
-  "pub"
-  "priv"
+  "mod"        ; tier: full
+  "use"        ; tier: seed
+  "import"     ; tier: seed (deprecated)
+  "export"     ; tier: seed
+  "common"     ; aspirational
+  "pub"        ; tier: core
+  "priv"       ; aspirational (not a keyword, use pub for visibility)
 ] @keyword.module
 
 ;; ============================================================================
@@ -52,35 +57,43 @@
 
 ;; Conditionals
 [
-  "if"
-  "elif"
-  "else"
-  "match"
-  "case"
+  "if"         ; tier: seed
+  "elif"       ; tier: seed
+  "else"       ; tier: seed
+  "match"      ; tier: seed
+  "case"       ; tier: seed
 ] @keyword.control.conditional
 
 ;; Loops
 [
-  "for"
-  "while"
-  "loop"
-  "break"
-  "continue"
+  "for"        ; tier: seed
+  "while"      ; tier: seed
+  "loop"       ; tier: core
+  "break"      ; tier: seed
+  "continue"   ; tier: seed
 ] @keyword.control.repeat
 
 ;; Returns and Jumps
 [
-  "return"
-  "yield"
+  "return"     ; tier: seed
+  "yield"      ; tier: core
 ] @keyword.control.return
+
+;; Pass Variants (no-op placeholders)
+[
+  "pass"            ; tier: core
+  "pass_todo"       ; tier: core
+  "pass_do_nothing" ; tier: core
+  "pass_dn"         ; tier: core
+] @keyword.control
 
 ;; Exception Handling
 [
-  "try"
-  "catch"
-  "finally"
-  "throw"
-  "panic"
+  "try"        ; tier: full
+  "catch"      ; tier: full
+  "finally"    ; tier: full
+  "throw"      ; tier: full
+  "panic"      ; tier: full
 ] @keyword.control.exception
 
 ;; ============================================================================
@@ -88,22 +101,22 @@
 ;; ============================================================================
 
 [
-  "if~"
-  "while~"
-  "and~"
-  "or~"
-  "not~"
-  "match~"
-  "for~"
+  "if~"        ; aspirational
+  "while~"     ; aspirational
+  "and~"       ; aspirational
+  "or~"        ; aspirational
+  "not~"       ; aspirational
+  "match~"     ; aspirational
+  "for~"       ; aspirational
 ] @keyword.control.suspension
 
 ;; Async/Await/Concurrency
 [
-  "async"
-  "await"
-  "spawn"
-  "send"
-  "receive"
+  "async"      ; tier: core
+  "await"      ; tier: core
+  "spawn"      ; tier: core
+  "send"       ; aspirational
+  "receive"    ; aspirational
 ] @keyword.control.async
 
 ;; ============================================================================
@@ -112,19 +125,19 @@
 
 ;; Type Modifiers
 [
-  "extends"
-  "where"
-  "self"
-  "Self"
+  "extends"    ; aspirational
+  "where"      ; aspirational
+  "self"       ; tier: core
+  "Self"       ; aspirational
 ] @keyword.type.modifier
 
 ;; Capabilities
 [
-  "iso"    ; isolated
-  "mut"    ; mutable
-  "ref"    ; reference
-  "val"    ; value (when used as capability)
-  "dyn"    ; dynamic
+  "iso"        ; aspirational — isolated
+  "mut"        ; aspirational — mutable
+  "ref"        ; aspirational — reference
+  "val"        ; tier: seed (also used as capability)
+  "dyn"        ; aspirational — dynamic
 ] @keyword.capability
 
 ;; ============================================================================
@@ -132,79 +145,79 @@
 ;; ============================================================================
 
 [
-  "vec"
-  "shared"
-  "gpu"
-  "bounds"
-  "kernel"
-  "grid"
-  "block"
-  "simd"
+  "vec"        ; aspirational
+  "shared"     ; tier: full
+  "gpu"        ; aspirational
+  "bounds"     ; aspirational
+  "kernel"     ; tier: full
+  "grid"       ; aspirational
+  "block"      ; aspirational
+  "simd"       ; aspirational
 ] @keyword.gpu
 
 ;; ============================================================================
-;; Keywords - AOP (Aspect-Oriented Programming)
+;; Keywords - AOP (Aspect-Oriented Programming) — all aspirational
 ;; ============================================================================
 
 [
-  "on"       ; advice binding
-  "bind"     ; dependency injection
-  "forbid"   ; architecture rule
-  "allow"    ; architecture rule
-  "mock"     ; mock definition
-  "aspect"   ; aspect definition
+  "on"       ; aspirational — advice binding
+  "bind"     ; aspirational — dependency injection
+  "forbid"   ; aspirational — architecture rule
+  "allow"    ; aspirational — architecture rule
+  "mock"     ; aspirational — mock definition
+  "aspect"   ; aspirational — aspect definition
 ] @keyword.aop
 
-;; Pointcut keywords (inside pc{...})
+;; Pointcut keywords (inside pc{...}) — all aspirational
 [
-  "call"
-  "execution"
-  "within"
-  "args"
-  "target"
-  "this"
-  "cflow"
+  "call"       ; aspirational
+  "execution"  ; aspirational
+  "within"     ; aspirational
+  "args"       ; aspirational
+  "target"     ; aspirational
+  "this"       ; aspirational
+  "cflow"      ; aspirational
 ] @keyword.aop.pointcut
 
 ;; ============================================================================
-;; Keywords - Contracts
+;; Keywords - Contracts — all aspirational
 ;; ============================================================================
 
 [
-  "requires"   ; precondition
-  "ensures"    ; postcondition
-  "invariant"  ; class invariant
-  "out"        ; output specification
-  "out_err"    ; error output specification
-  "calc"       ; calculation proof
-  "assert"     ; assertion
-  "assume"     ; assumption
-  "check"      ; runtime check
+  "requires"   ; aspirational — precondition
+  "ensures"    ; aspirational — postcondition
+  "invariant"  ; aspirational — class invariant
+  "out"        ; aspirational — output specification
+  "out_err"    ; aspirational — error output specification
+  "calc"       ; aspirational — calculation proof
+  "assert"     ; aspirational — assertion (reserved keyword in runtime)
+  "assume"     ; aspirational — assumption
+  "check"      ; aspirational — runtime check
 ] @keyword.contract
 
-;; Quantifiers
+;; Quantifiers — aspirational
 [
-  "forall"
-  "exists"
+  "forall"     ; aspirational
+  "exists"     ; aspirational
 ] @keyword.contract.quantifier
 
 ;; ============================================================================
-;; Keywords - BDD/Testing
+;; Keywords - BDD/Testing — built-in to runtime (not parser keywords)
 ;; ============================================================================
 
 [
-  "feature"
-  "scenario"
-  "given"
-  "when"
-  "then"
-  "and_then"
-  "but"
-  "examples"
-  "it"
-  "slow_it"
-  "describe"
-  "context"
+  "feature"    ; aspirational
+  "scenario"   ; aspirational
+  "given"      ; aspirational
+  "when"       ; aspirational
+  "then"       ; aspirational
+  "and_then"   ; aspirational
+  "but"        ; aspirational
+  "examples"   ; aspirational
+  "it"         ; built-in function (not keyword)
+  "slow_it"    ; built-in function (not keyword)
+  "describe"   ; built-in function (not keyword)
+  "context"    ; built-in function (not keyword)
 ] @keyword.test
 
 ;; ============================================================================
