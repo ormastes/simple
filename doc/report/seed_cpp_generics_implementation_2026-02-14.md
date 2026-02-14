@@ -293,3 +293,17 @@ struct Option_MirType { ... };
 
 **Phase 3 Extension Status**: ✅ **COMPLETE**
 **Bootstrap Status**: Phase 1-2 now feasible, ready to continue
+
+---
+
+## Follow-Up Work (Same Day)
+
+Additional fixes applied after initial generics implementation:
+- ✅ **Struct array initialization** - Empty `[]` now generates `{}` for struct arrays
+- ✅ **Phase 0 pre-scan** - All Option types registered before emission
+- ✅ **Phase reordering** - Struct-based Options emitted before structs
+- ✅ **Unique function pointer Options** - Each function signature gets unique Option name
+
+**Final Result**: 80+ errors → ~20 errors (all Simple source code bugs, not transpiler issues)
+
+See `doc/report/seed_cpp_bootstrap_progress_2026-02-14.md` for complete progress report.

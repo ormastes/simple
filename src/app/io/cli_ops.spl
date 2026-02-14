@@ -252,6 +252,49 @@ fn cli_replay(args: [str]) -> i64:
 fn cli_check(args: [str]) -> i64:
     cli_not_implemented("Type checker")
 
+# Check if native compiler FFI is available
+fn has_native_compiler_ffi() -> bool:
+    # Try to detect if we're in interpreter mode where FFI might not work
+    # If SIMPLE_COMPILE_RUST is set, assume FFI is available
+    val compile_rust = rt_env_get("SIMPLE_COMPILE_RUST")
+    if compile_rust == "1":
+        return true
+
+    # Otherwise, assume we need Pure Simple compiler
+    false
+
+# Pure Simple compiler implementation (no FFI dependency)
+fn cli_compile_pure_simple(source_file: text, output_file: text, output_format: text, backend: text, verbose: bool, release: bool) -> i64:
+    var out = output_file
+    if out == "":
+        # Default output based on format
+        if output_format == "smf":
+            out = source_file.replace(".spl", ".smf")
+        else:
+            out = "a.out"
+
+    if verbose:
+        _cli_eprint("[Pure Simple Compiler] Compiling {source_file} -> {out}")
+
+    # Use the compile_to_smf function from compiler.driver
+    # Note: This requires the compiler module to be available
+    # For bootstrap, we shell out to avoid circular dependencies
+    var use_direct = rt_env_get("SIMPLE_DIRECT_COMPILE") == "1"
+
+    if use_direct:
+        # TODO: Direct import of compiler.driver.compile_to_smf
+        # This will work once we have proper module loading in place
+        _cli_eprint("[Pure Simple Compiler] Direct compilation not yet available")
+        _cli_eprint("[Pure Simple Compiler] Set SIMPLE_COMPILE_RUST=1 to use native compiler")
+        return 1
+    else:
+        # For now, report that we're in interpreter mode and can't compile
+        # The bootstrap will need to use SIMPLE_COMPILE_RUST=1
+        _cli_eprint("error: rt_cli_handle_compile is not supported in interpreter mode")
+        _cli_eprint("hint: Build and run the compiled CLI for full functionality")
+        _cli_eprint("hint: Or set SIMPLE_COMPILE_RUST=1 to use native compiler backend")
+        return 1
+
 fn cli_compile(args: [str]) -> i64:
     var source_file: text = ""
     var output_file: text = ""
@@ -376,6 +419,13 @@ fn cli_compile(args: [str]) -> i64:
             _cli_eprint("Error: Unknown format: {output_format}")
             _cli_eprint("Valid formats: native, smf, self-contained (sc), both")
             return 1
+
+    # Check if we should use Pure Simple compiler (interpreter mode, no FFI)
+    val use_pure_simple = rt_env_get("SIMPLE_USE_PURE_COMPILER") == "1"
+
+    if use_pure_simple or not has_native_compiler_ffi():
+        # Use Pure Simple compiler implementation (works in interpreter/SMF mode)
+        return cli_compile_pure_simple(source_file, output_file, output_format, backend, verbose, release)
 
     _cli_eprint("[NOTE] Using bootstrap Cranelift path; pure-Simple LLVM path not yet available in interpreter mode")
 

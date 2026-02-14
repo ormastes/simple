@@ -208,13 +208,14 @@ fn run_stage1(config: BootstrapConfig) -> StageResult:
 fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Stage 2: Use stage1 binary to compile the compiler source to stage2 SMF.
+    # Stage 2: Use stage1 binary to compile the compiler to a native executable.
     # SIMPLE_COMPILE_RUST=1 tells the binary to use its native Cranelift backend.
-    val stage2_path = "{config.output_dir}/simple_new2.smf"
+    # Building as native executable (not SMF) so it includes the full compiler.
+    val stage2_path = "{config.output_dir}/simple_new2"
     val stage1_binary = stage1.binary_path
 
-    # Use stage1 binary to compile the compiler
-    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage1_binary} compile src/app/cli/main.spl -o {stage2_path}"
+    # Use stage1 binary to compile the compiler to native executable
+    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage1_binary} compile src/app/cli/main.spl --format=native -o {stage2_path}"
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -246,14 +247,16 @@ fn run_stage2(config: BootstrapConfig, stage1: StageResult) -> StageResult:
 fn run_stage3(config: BootstrapConfig, stage2: StageResult) -> StageResult:
     val start_time = current_time_ms()
 
-    # Stage 3: Use stage2 SMF (run through bootstrap runtime) to compile again.
+    # Stage 3: Use stage2 binary to compile again.
     # If stage2 == stage3 (hash match), the compiler is reproducible.
-    val stage3_path = "{config.output_dir}/simple_new3.smf"
+    val stage3_path = "{config.output_dir}/simple_new3"
     val stage2_binary = stage2.binary_path
 
-    # Use stage2 (run through bootstrap runtime) to compile the compiler
-    val bootstrap_binary = "bin/release/simple"
-    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {bootstrap_binary} {stage2_binary} compile src/app/cli/main.spl -o {stage3_path}"
+    # Make stage2 binary executable
+    shell("chmod +x {stage2_binary}")
+
+    # Use stage2 binary directly to compile the compiler
+    val compile_cmd = "SIMPLE_COMPILE_RUST=1 {stage2_binary} compile src/app/cli/main.spl --format=native -o {stage3_path}"
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:

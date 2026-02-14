@@ -44,7 +44,18 @@ find src/compiler_core -name '*.spl' -type f | \
     grep -v '^src/compiler_core/monomorphize' | \
     grep -v '^src/compiler_core/module_resolver' | \
     grep -v '/main\.spl$' | \
-    sort > /tmp/core_files_bootstrap.txt
+    grep -v 'config\.spl$' | \
+    grep -v 'aop' | \
+    sort > /tmp/core_files_bootstrap_tmp.txt
+
+# Put config.spl first (defines Logger and other types used by AOP)
+echo "src/compiler_core/config.spl" > /tmp/core_files_bootstrap.txt
+
+# Add AOP files after config (they depend on Logger from config)
+find src/compiler_core -name '*aop*.spl' -type f | sort >> /tmp/core_files_bootstrap.txt
+
+# Add rest of files
+cat /tmp/core_files_bootstrap_tmp.txt >> /tmp/core_files_bootstrap.txt
 
 # Add bootstrap_main.spl at the end (must come after dependencies)
 echo "src/compiler_core/bootstrap_main.spl" >> /tmp/core_files_bootstrap.txt
