@@ -7,11 +7,11 @@ ASM_DEFINES =
 
 ASM_INCLUDES = -I/home/ormastes/dev/pub/simple/seed/startup/common
 
-ASM_FLAGS = -Wall -Wextra -Wno-unused-parameter -mcmodel=large
+ASM_FLAGS = -O3 -DNDEBUG -Wall -Wextra -Wno-unused-parameter -mcmodel=large
 
 C_DEFINES = 
 
 C_INCLUDES = -I/home/ormastes/dev/pub/simple/seed/startup/common
 
-C_FLAGS = -std=gnu11 -Wall -Wextra -Wno-unused-parameter -mcmodel=large
+C_FLAGS = -O3 -DNDEBUG -std=gnu11 -Wall -Wextra -Wno-unused-parameter -mcmodel=large
 

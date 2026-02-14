@@ -14,7 +14,7 @@ use app.build.metrics (MetricsTracker, print_metrics)
 use app.build.watch (WatchOrchestrator, default_watch_config, print_watch_result)
 use app.build.incremental (IncrementalBuild, default_incremental_config, print_incremental_result)
 use app.build.cargo (Cargo, print_build_result, print_test_result)
-use app.build.baremetal (BaremetalConfig, BaremetalBuilder, QemuRunner)
+use app.build.baremetal.{BaremetalConfig, BaremetalBuilder, QemuRunner, baremetal_config_arm, baremetal_config_x86_64, baremetal_config_riscv}
 
 fn print_help():
     print "Simple Build System"
@@ -44,9 +44,9 @@ fn print_help():
     print "  simple build rust clean         Clean Rust build artifacts"
     print ""
     print "Bare-Metal Development:"
-    print "  simple build baremetal          Build for bare-metal target"
-    print "  simple build baremetal --board=<board>  Build for specific board"
-    print "  simple build baremetal --list-boards    List available boards"
+    print "  simple build baremetal --target=<arch>  Build for bare-metal target"
+    print "  simple build baremetal --list-targets   List available targets"
+    print "  Targets: arm, x86_64, riscv"
     print ""
     print "Pipeline (8-stage bootstrap):"
     print "  simple build pipeline                    Full 8-stage pipeline"
@@ -186,65 +186,64 @@ use app.io.mod (file_exists, file_size_raw, dir_list)
 
 # Handle `simple build baremetal` command
 fn handle_baremetal_build(args: [text]) -> i64:
-    var board_name = "qemu_x86"
+    var target_name = "x86_64"
     var source_files: [text] = []
-    var list_boards = false
+    var list_targets = false
     var verbose = false
 
     # Parse arguments
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg.starts_with("--board="):
-            board_name = arg.substring(8)
-        elif arg == "--list-boards":
-            list_boards = true
+        if arg.starts_with("--target="):
+            target_name = arg[9:]
+        elif arg == "--list-targets":
+            list_targets = true
         elif arg == "-v" or arg == "--verbose":
             verbose = true
         elif not arg.starts_with("-"):
             source_files.push(arg)
         i = i + 1
 
-    # List available boards
-    if list_boards:
-        print "Available bare-metal boards:"
-        val files = dir_list("boards")
-        if files.?:
-            for f in files:
-                if f.ends_with(".sdn"):
-                    val name = f.replace(".sdn", "")
-                    print "  {name}"
-        else:
-            print "  (no boards directory found)"
+    # List available targets
+    if list_targets:
+        print "Available bare-metal targets:"
+        print "  arm      - ARM Cortex-M (QEMU versatilepb)"
+        print "  x86_64   - x86_64 with multiboot2 (QEMU)"
+        print "  riscv    - RISC-V 64-bit (QEMU virt)"
         return 0
 
-    # Determine board file
-    val board_file = "boards/{board_name}.sdn"
-    if not file_exists(board_file):
-        print "Error: Board file not found: {board_file}"
-        print "Run 'simple build baremetal --list-boards' to see available boards."
+    # Create configuration based on target
+    var config: BaremetalConfig = baremetal_config_x86_64()
+    if target_name == "arm":
+        config = baremetal_config_arm()
+    elif target_name == "x86_64":
+        config = baremetal_config_x86_64()
+    elif target_name == "riscv":
+        config = baremetal_config_riscv()
+    else:
+        print "Error: Unknown target: {target_name}"
+        print "Run 'simple build baremetal --list-targets' to see available targets."
         return 1
 
     print "=== Building for Bare-Metal Target ==="
-    print "Board: {board_name}"
-    print "Board file: {board_file}"
+    print "Target: {target_name}"
+    print "Linker script: {config.linker_script}"
+    print "Startup code: {config.crt0_path}"
     print ""
 
-    # Create configuration
-    var config = BaremetalConfig__qemu_x86()
-    config.board_file = board_file
-
     # Build
-    val builder = BaremetalBuilder__new(config)
+    val builder = BaremetalBuilder.new(config)
     val result = builder.build(source_files)
 
     if result.success:
-        print "✓ Bare-metal build succeeded"
+        print "Build succeeded"
         print "  Output: {config.output_dir}"
-        print "  Linker script: {config.linker_script}"
+        if result.stdout != "":
+            print "  {result.stdout}"
         return 0
     else:
-        print "✗ Bare-metal build failed"
+        print "Build failed"
         if result.stderr != "":
             print "Error: {result.stderr}"
         return result.exit_code
