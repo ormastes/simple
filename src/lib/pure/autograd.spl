@@ -5,11 +5,14 @@
 export Tensor, backward
 export tensor_add, tensor_sub, tensor_mul, tensor_matmul, tensor_relu
 export tensor_sum, tensor_mean, tensor_mul_scalar
+export tensor_div, tensor_sigmoid, tensor_tanh
+export tensor_exp_op, tensor_log_op, tensor_neg, tensor_softmax
+export tensor_div_scalar, tensor_add_scalar
 export detach, requires_grad
 export tensor_from_data, tensor_from_value, tensor_zeros, tensor_ones
 
 use lib.pure.tensor_f64 (TensorF64, from_data, zeros, ones)
-use lib.pure.tensor_f64_ops (add, sub, mul, matmul, transpose, mul_scalar, add_scalar)
+use lib.pure.tensor_f64_ops (add, sub, mul, matmul, transpose, mul_scalar, add_scalar, div, neg, tensor_exp, tensor_log, tensor_sqrt, sigmoid, tanh, softmax, div_scalar)
 
 # ============================================================================
 # Operation Type (replaces function pointers)
@@ -24,6 +27,16 @@ enum OpType:
     Sum
     Mean
     MulScalar
+    Div
+    Sigmoid
+    Tanh
+    Exp
+    Log
+    Neg
+    Pow
+    Softmax
+    DivScalar
+    AddScalar
 
 # ============================================================================
 # Tensor with Gradient Tracking
@@ -254,6 +267,114 @@ fn propagate_grads(t: Tensor, grad_out: TensorF64):
                 if inputs[0].inputs.?:
                     propagate_grads(inputs[0], grad_x)
 
+        OpType.Div:
+            # d(a/b)/da = 1/b, d(a/b)/db = -a/b²
+            if inputs[0].requires_grad:
+                # grad_a = grad_out / b
+                val grad_a = div(grad_out, inputs[1].value)
+                inputs[0].backward_step(grad_a)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_a)
+            if inputs[1].requires_grad:
+                # grad_b = -grad_out * a / b²
+                val neg_grad = mul_scalar(grad_out, -1.0)
+                val a_over_b2 = div(inputs[0].value, mul(inputs[1].value, inputs[1].value))
+                val grad_b = mul(neg_grad, a_over_b2)
+                inputs[1].backward_step(grad_b)
+                if inputs[1].inputs.?:
+                    propagate_grads(inputs[1], grad_b)
+
+        OpType.Sigmoid:
+            # d(sigmoid)/dx = sigmoid(x) * (1 - sigmoid(x))
+            if inputs[0].requires_grad:
+                val sig = t.value
+                val one_minus_sig = add_scalar(mul_scalar(sig, -1.0), 1.0)
+                val grad_x = mul(grad_out, mul(sig, one_minus_sig))
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Tanh:
+            # d(tanh)/dx = 1 - tanh²(x)
+            if inputs[0].requires_grad:
+                val tanh_val = t.value
+                val tanh_sq = mul(tanh_val, tanh_val)
+                val one_minus_sq = add_scalar(mul_scalar(tanh_sq, -1.0), 1.0)
+                val grad_x = mul(grad_out, one_minus_sq)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Exp:
+            # d(exp(x))/dx = exp(x)
+            if inputs[0].requires_grad:
+                val grad_x = mul(grad_out, t.value)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Log:
+            # d(log(x))/dx = 1/x
+            if inputs[0].requires_grad:
+                val ones_t = ones(inputs[0].value.shape)
+                val inv_x = div(ones_t, inputs[0].value)
+                val grad_x = mul(grad_out, inv_x)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Neg:
+            # d(-x)/dx = -1
+            if inputs[0].requires_grad:
+                val grad_x = mul_scalar(grad_out, -1.0)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Pow:
+            # d(x^n)/dx = n * x^(n-1), stored scalar in op
+            if inputs[0].requires_grad:
+                # Reconstruct power from result (approximate)
+                # For now: use chain rule with stored result
+                val grad_x = mul(grad_out, t.value)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.Softmax:
+            # Softmax backward: diag(s) - s*s^T simplified
+            if inputs[0].requires_grad:
+                val s = t.value
+                # Simplified: grad_x = s * (grad_out - sum(grad_out * s))
+                val gs = mul(grad_out, s)
+                var dot_sum = 0.0
+                var idx = 0
+                while idx < gs.data.len():
+                    dot_sum = dot_sum + gs.data[idx]
+                    idx = idx + 1
+                val grad_x = mul(s, add_scalar(grad_out, -dot_sum))
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.DivScalar:
+            if inputs[0].requires_grad:
+                # Reconstruct scalar from result/input
+                val scalar = if inputs[0].value.data[0] != 0.0:
+                    inputs[0].value.data[0] / t.value.data[0]
+                else:
+                    1.0
+                val grad_x = div_scalar(grad_out, scalar)
+                inputs[0].backward_step(grad_x)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_x)
+
+        OpType.AddScalar:
+            if inputs[0].requires_grad:
+                inputs[0].backward_step(grad_out)
+                if inputs[0].inputs.?:
+                    propagate_grads(inputs[0], grad_out)
+
 
 # ============================================================================
 # Operations with Autograd
@@ -378,6 +499,98 @@ fn tensor_mul_scalar(x: Tensor, scalar: f64) -> Tensor:
     result.op_type = Some(OpType.MulScalar)
     result.inputs = Some([x])
     result.op_name = "mul_scalar"
+    result
+
+
+fn tensor_div(a: Tensor, b: Tensor) -> Tensor:
+    val result_value = div(a.value, b.value)
+    val rg = a.requires_grad or b.requires_grad
+    if not rg:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Div)
+    result.inputs = Some([a, b])
+    result.op_name = "div"
+    result
+
+fn tensor_sigmoid(x: Tensor) -> Tensor:
+    val result_value = sigmoid(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Sigmoid)
+    result.inputs = Some([x])
+    result.op_name = "sigmoid"
+    result
+
+fn tensor_tanh(x: Tensor) -> Tensor:
+    val result_value = tanh(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Tanh)
+    result.inputs = Some([x])
+    result.op_name = "tanh"
+    result
+
+fn tensor_exp_op(x: Tensor) -> Tensor:
+    val result_value = tensor_exp(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Exp)
+    result.inputs = Some([x])
+    result.op_name = "exp"
+    result
+
+fn tensor_log_op(x: Tensor) -> Tensor:
+    val result_value = tensor_log(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Log)
+    result.inputs = Some([x])
+    result.op_name = "log"
+    result
+
+fn tensor_neg(x: Tensor) -> Tensor:
+    val result_value = neg(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Neg)
+    result.inputs = Some([x])
+    result.op_name = "neg"
+    result
+
+fn tensor_softmax(x: Tensor) -> Tensor:
+    val result_value = softmax(x.value)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.Softmax)
+    result.inputs = Some([x])
+    result.op_name = "softmax"
+    result
+
+fn tensor_div_scalar(x: Tensor, scalar: f64) -> Tensor:
+    val result_value = div_scalar(x.value, scalar)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.DivScalar)
+    result.inputs = Some([x])
+    result.op_name = "div_scalar"
+    result
+
+fn tensor_add_scalar(x: Tensor, scalar: f64) -> Tensor:
+    val result_value = add_scalar(x.value, scalar)
+    if not x.requires_grad:
+        return Tensor.from_value(result_value, requires_grad: false)
+    var result = Tensor.from_value(result_value, requires_grad: true)
+    result.op_type = Some(OpType.AddScalar)
+    result.inputs = Some([x])
+    result.op_name = "add_scalar"
     result
 
 

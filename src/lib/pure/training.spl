@@ -7,7 +7,22 @@
 # and will only work in compiled mode, not in the interpreter.
 
 use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros_like}
-use lib.pure.tensor_ops.{sub, mul, add, mean, sum, tensor_log, tensor_mul_scalar, tensor_add_scalar, tensor_sqrt, tensor_div}
+use lib.pure.tensor_ops.{sub, mul, add, mean, sum, tensor_log, tensor_mul_scalar, tensor_add_scalar, tensor_sqrt, tensor_div, tensor_sub, tensor_div_scalar}
+
+# ============================================================================
+# Gradient Control
+# ============================================================================
+
+var _grad_enabled = true
+
+fn no_grad_begin():
+    _grad_enabled = false
+
+fn no_grad_end():
+    _grad_enabled = true
+
+fn is_grad_enabled() -> bool:
+    _grad_enabled
 
 # ============================================================================
 # Loss Functions
@@ -56,6 +71,83 @@ fn binary_cross_entropy_loss(pred: any, target: any) -> any:
     val sum_terms = tensor_add(term1, term2)
     val neg_mean = tensor_mul_scalar(tensor_mean(sum_terms), -1.0)
     neg_mean
+
+fn cross_entropy_loss(pred: any, target: any) -> any:
+    """Cross-Entropy loss for multi-class classification.
+
+    L = -sum(target * log(softmax(pred))) / N
+    """
+    # Numerically stable softmax: subtract max first
+    val pred_data = pred.value.data
+    var max_val = pred_data[0]
+    var i = 0
+    while i < pred_data.len():
+        if pred_data[i] > max_val:
+            max_val = pred_data[i]
+        i = i + 1
+
+    # exp(x - max) for stability
+    var exp_data: [f64] = []
+    var exp_sum = 0.0
+    i = 0
+    while i < pred_data.len():
+        # Taylor series exp (20 terms)
+        val x = pred_data[i] - max_val
+        var exp_val = 1.0
+        var term = 1.0
+        var k = 1
+        while k < 20:
+            term = term * x / k
+            exp_val = exp_val + term
+            k = k + 1
+        exp_data.push(exp_val)
+        exp_sum = exp_sum + exp_val
+        i = i + 1
+
+    # log(softmax) = (x - max) - log(sum(exp(x - max)))
+    var log_sum = 0.0
+    # compute log(exp_sum) via Newton: ln(s) ~ series
+    val s = exp_sum
+    val z = (s - 1.0) / (s + 1.0)
+    var log_s = 0.0
+    var z_power = z
+    var j = 0
+    while j < 20:
+        log_s = log_s + z_power / (2 * j + 1)
+        z_power = z_power * z * z
+        j = j + 1
+    log_s = 2.0 * log_s
+
+    # NLL: -sum(target * log_softmax) / N
+    var loss_sum = 0.0
+    val target_data = target.value.data
+    i = 0
+    while i < pred_data.len():
+        val log_softmax_i = (pred_data[i] - max_val) - log_s
+        loss_sum = loss_sum - target_data[i] * log_softmax_i
+        i = i + 1
+
+    loss_sum / pred_data.len()
+
+fn huber_loss(pred: any, target: any, delta: f64) -> any:
+    """Huber loss (smooth L1 with configurable delta)."""
+    val pred_data = pred.value.data
+    val target_data = target.value.data
+    var loss_sum = 0.0
+    var i = 0
+    while i < pred_data.len():
+        val diff = pred_data[i] - target_data[i]
+        val abs_diff = if diff < 0.0: -diff else: diff
+        if abs_diff < delta:
+            loss_sum = loss_sum + 0.5 * diff * diff
+        else:
+            loss_sum = loss_sum + delta * (abs_diff - 0.5 * delta)
+        i = i + 1
+    loss_sum / pred_data.len()
+
+fn smooth_l1_loss(pred: any, target: any) -> any:
+    """Smooth L1 loss (Huber with delta=1.0)."""
+    huber_loss(pred, target, 1.0)
 
 # ============================================================================
 # Simple Linear Model (for demos)
@@ -236,6 +328,175 @@ class Adam:
         """String representation."""
         "Adam(lr={self.lr}, betas={self.betas}, eps={self.eps}, t={self.t})"
 
+class RMSprop:
+    """RMSprop optimizer."""
+    parameters: [any]
+    lr: f64
+    alpha: f64
+    eps: f64
+    v: [any]
+
+    static fn create(parameters: [any], lr: f64, alpha: f64, eps: f64) -> RMSprop:
+        var v: [any] = []
+        for param in parameters:
+            v.push(tensor_zeros_like(param.value))
+        RMSprop(parameters: parameters, lr: lr, alpha: alpha, eps: eps, v: v)
+
+    me step():
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+            if param.grad.?:
+                val grad = param.grad.unwrap()
+                val v_old = self.v[i]
+                val grad_sq = tensor_mul(grad, grad)
+                val v_new = tensor_add(
+                    tensor_mul_scalar(v_old, self.alpha),
+                    tensor_mul_scalar(grad_sq, 1.0 - self.alpha)
+                )
+                self.v[i] = v_new
+                val denom = tensor_add_scalar(tensor_sqrt(v_new), self.eps)
+                val update = tensor_div(grad, denom)
+                param.value = tensor_sub(param.value, tensor_mul_scalar(update, self.lr))
+            i = i + 1
+
+    me zero_grad():
+        for param in self.parameters:
+            param.grad = nil
+
+    fn to_string() -> text:
+        "RMSprop(lr={self.lr}, alpha={self.alpha}, eps={self.eps})"
+
+class AdamW:
+    """AdamW optimizer (Adam with decoupled weight decay)."""
+    parameters: [any]
+    lr: f64
+    betas: (f64, f64)
+    eps: f64
+    weight_decay: f64
+    t: i64
+    m: [any]
+    v: [any]
+
+    static fn create(parameters: [any], lr: f64, betas: (f64, f64), eps: f64, weight_decay: f64) -> AdamW:
+        var m: [any] = []
+        var v: [any] = []
+        for param in parameters:
+            m.push(tensor_zeros_like(param.value))
+            v.push(tensor_zeros_like(param.value))
+        AdamW(parameters: parameters, lr: lr, betas: betas, eps: eps, weight_decay: weight_decay, t: 0, m: m, v: v)
+
+    me step():
+        self.t = self.t + 1
+        var i = 0
+        while i < self.parameters.len():
+            val param = self.parameters[i]
+            if param.grad.?:
+                # Decoupled weight decay FIRST
+                param.value = tensor_sub(param.value, tensor_mul_scalar(param.value, self.weight_decay * self.lr))
+
+                val grad = param.grad.unwrap()
+                val beta1 = self.betas.0
+                val beta2 = self.betas.1
+
+                val m_new = tensor_add(tensor_mul_scalar(self.m[i], beta1), tensor_mul_scalar(grad, 1.0 - beta1))
+                self.m[i] = m_new
+
+                val grad_sq = tensor_mul(grad, grad)
+                val v_new = tensor_add(tensor_mul_scalar(self.v[i], beta2), tensor_mul_scalar(grad_sq, 1.0 - beta2))
+                self.v[i] = v_new
+
+                val m_hat = tensor_div_scalar(m_new, 1.0 - (beta1 ** self.t))
+                val v_hat = tensor_div_scalar(v_new, 1.0 - (beta2 ** self.t))
+
+                val denom = tensor_add_scalar(tensor_sqrt(v_hat), self.eps)
+                val update = tensor_div(m_hat, denom)
+                param.value = tensor_sub(param.value, tensor_mul_scalar(update, self.lr))
+            i = i + 1
+
+    me zero_grad():
+        for param in self.parameters:
+            param.grad = nil
+
+    fn to_string() -> text:
+        "AdamW(lr={self.lr}, weight_decay={self.weight_decay})"
+
+# ============================================================================
+# Learning Rate Schedulers
+# ============================================================================
+
+class StepLR:
+    """Step learning rate scheduler."""
+    optimizer: any
+    step_size: i64
+    gamma: f64
+    current_epoch: i64
+    base_lr: f64
+
+    static fn create(optimizer: any, step_size: i64, gamma: f64) -> StepLR:
+        StepLR(optimizer: optimizer, step_size: step_size, gamma: gamma, current_epoch: 0, base_lr: optimizer.lr)
+
+    me step():
+        self.current_epoch = self.current_epoch + 1
+        if self.current_epoch % self.step_size == 0:
+            self.optimizer.lr = self.optimizer.lr * self.gamma
+
+    fn get_lr() -> f64:
+        self.optimizer.lr
+
+    fn to_string() -> text:
+        "StepLR(step_size={self.step_size}, gamma={self.gamma}, epoch={self.current_epoch})"
+
+class ExponentialLR:
+    """Exponential learning rate scheduler."""
+    optimizer: any
+    gamma: f64
+    current_epoch: i64
+    base_lr: f64
+
+    static fn create(optimizer: any, gamma: f64) -> ExponentialLR:
+        ExponentialLR(optimizer: optimizer, gamma: gamma, current_epoch: 0, base_lr: optimizer.lr)
+
+    me step():
+        self.current_epoch = self.current_epoch + 1
+        self.optimizer.lr = self.base_lr * (self.gamma ** self.current_epoch)
+
+    fn get_lr() -> f64:
+        self.optimizer.lr
+
+    fn to_string() -> text:
+        "ExponentialLR(gamma={self.gamma}, epoch={self.current_epoch})"
+
+class CosineAnnealingLR:
+    """Cosine annealing learning rate scheduler."""
+    optimizer: any
+    t_max: i64
+    eta_min: f64
+    current_epoch: i64
+    base_lr: f64
+
+    static fn create(optimizer: any, t_max: i64, eta_min: f64) -> CosineAnnealingLR:
+        CosineAnnealingLR(optimizer: optimizer, t_max: t_max, eta_min: eta_min, current_epoch: 0, base_lr: optimizer.lr)
+
+    me step():
+        self.current_epoch = self.current_epoch + 1
+        # cos(pi * epoch / t_max) via Taylor series
+        val x = 3.14159265358979 * self.current_epoch / self.t_max
+        # cos(x) = 1 - x^2/2 + x^4/24 - x^6/720 + x^8/40320 - x^10/3628800
+        val x2 = x * x
+        val x4 = x2 * x2
+        val x6 = x4 * x2
+        val x8 = x6 * x2
+        val x10 = x8 * x2
+        val cos_val = 1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0 - x10 / 3628800.0
+        self.optimizer.lr = self.eta_min + (self.base_lr - self.eta_min) * (1.0 + cos_val) / 2.0
+
+    fn get_lr() -> f64:
+        self.optimizer.lr
+
+    fn to_string() -> text:
+        "CosineAnnealingLR(t_max={self.t_max}, eta_min={self.eta_min}, epoch={self.current_epoch})"
+
 # ============================================================================
 # Metrics
 # ============================================================================
@@ -376,7 +637,10 @@ class Trainer:
 # ============================================================================
 
 export mse_loss, mae_loss, binary_cross_entropy_loss, compute_mse
-export SGD, Adam
+export cross_entropy_loss, huber_loss, smooth_l1_loss
+export SGD, Adam, RMSprop, AdamW
+export StepLR, ExponentialLR, CosineAnnealingLR
 export accuracy, accuracy_from_logits
 export TrainingHistory, Trainer
 export LinearModel, compute_gradients
+export no_grad_begin, no_grad_end, is_grad_enabled
