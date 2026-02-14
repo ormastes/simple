@@ -1,0 +1,615 @@
+# RISC-V 32-bit Instruction Selection
+#
+# Translates MIR instructions to RISC-V 32-bit (RV32I+M) MachInst sequences.
+# Pattern-matches on MirInstKind to produce low-level machine instructions.
+# Follows the RISC-V ILP32 calling convention for function calls.
+#
+# RISC-V 32-bit conventions:
+# - x0 = zero (hardwired zero), x1 = ra (return address), x2 = sp
+# - x3 = gp, x4 = tp, x5-x7 = t0-t2 (temporaries)
+# - x8 = s0/fp (frame pointer), x9 = s1
+# - x10-x17 = a0-a7 (arguments, a0-a1 = return values)
+# - x18-x27 = s2-s11 (callee-saved)
+# - x28-x31 = t3-t6 (temporaries)
+# - All instructions are 32-bit fixed width (RV32I base + M extension)
+# - All registers are 32-bit wide
+# - No W-suffix instructions (those are RV64-only)
+# - Pointer-sized loads/stores use LW/SW (not LD/SD)
+#
+# Pipeline: MIR -> ISel (this module) -> RegAlloc -> Encode -> ELF
+
+use compiler.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirBinOp, MirUnaryOp, MirOperand, MirOperandKind, MirConstValue, MirTerminator, MirType, MirTypeKind, LocalId, LocalKind, BlockId, SwitchCase}
+use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_id, Operand, OperandKind, op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym, operand_get_reg, MachInst, new_mach_inst, MachBlock, new_mach_block, mach_block_add_inst, MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size, MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern}
+use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
+use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
+use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
+use compiler.backend.common.ascii_utils.{char_to_ascii}
+use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
+
+# ============================================================================
+# RV32 Constants
+# ============================================================================
+
+# RV32 word size: 4 bytes (32-bit registers and pointers)
+val RV32_WORD_SIZE = 4
+
+# ============================================================================
+# String Data Handling (RISC-V-specific wrapper)
+# ============================================================================
+
+fn rv32_add_string_data(ctx: ISelContext, s: text) -> ISelContext:
+    """RISC-V 32-bit string data wrapper using shared context."""
+    isel_add_string_data(ctx, s, char_to_ascii)
+
+# ============================================================================
+# Local to Virtual Register Mapping
+# ============================================================================
+
+fn rv32_local_to_vreg(local_id: i64) -> MachReg:
+    virtual_reg(local_id)
+
+fn rv32_local_vreg_op(local_id: i64) -> Operand:
+    op_reg(virtual_reg(local_id))
+
+# ============================================================================
+# Operand Lowering
+# ============================================================================
+
+struct Rv32LoweredOperand:
+    insts: [MachInst]
+    result: Operand
+    ctx: ISelContext
+
+fn rv32_lower_operand(ctx: ISelContext, operand: MirOperand) -> Rv32LoweredOperand:
+    match operand.kind:
+        case Copy(local):
+            Rv32LoweredOperand(insts: [], result: rv32_local_vreg_op(local.id), ctx: ctx)
+        case Move(local):
+            Rv32LoweredOperand(insts: [], result: rv32_local_vreg_op(local.id), ctx: ctx)
+        case Const(value, type_):
+            rv32_lower_const(ctx, value, type_)
+
+fn rv32_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Rv32LoweredOperand:
+    match value:
+        case Int(v):
+            rv32_lower_const_int(ctx, v)
+        case Bool(v):
+            val imm_val = if v: 1 else: 0
+            var new_ctx = isel_alloc_vreg(ctx)
+            val vreg = isel_get_vreg(new_ctx)
+            val dest = op_reg(virtual_reg(vreg))
+            # LI is a pseudo-instruction that loads an immediate
+            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(imm_val)])
+            Rv32LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+        case Str(s):
+            var new_ctx = rv32_add_string_data(ctx, s)
+            val label = isel_last_string_label(new_ctx)
+            new_ctx = isel_alloc_vreg(new_ctx)
+            val vreg = isel_get_vreg(new_ctx)
+            val dest = op_reg(virtual_reg(vreg))
+            # AUIPC + ADDI for PC-relative address loading (32-bit address space)
+            val auipc_inst = new_mach_inst(RV_OP_AUIPC, [dest, op_sym(label)])
+            val addi_inst = new_mach_inst(RV_OP_ADDI, [dest, dest, op_sym(label)])
+            Rv32LoweredOperand(insts: [auipc_inst, addi_inst], result: dest, ctx: new_ctx)
+        case Zero:
+            # MV rd, x0 (zero register)
+            var new_ctx = isel_alloc_vreg(ctx)
+            val vreg = isel_get_vreg(new_ctx)
+            val dest = op_reg(virtual_reg(vreg))
+            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(0)])
+            Rv32LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+        case _:
+            var new_ctx = isel_alloc_vreg(ctx)
+            val vreg = isel_get_vreg(new_ctx)
+            val dest = op_reg(virtual_reg(vreg))
+            val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(0)])
+            Rv32LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+
+fn rv32_lower_const_int(ctx: ISelContext, v: i64) -> Rv32LoweredOperand:
+    # RISC-V LI is a pseudo-instruction that the assembler/encoder expands
+    # to LUI + ADDI as needed. For RV32, values are 32-bit.
+    # Truncate to 32-bit range by masking.
+    var imm32 = v and 0xFFFFFFFF
+    # Sign-extend if the 32-bit value has bit 31 set
+    if imm32 >= 2147483648:
+        imm32 = imm32 - 4294967296
+    var new_ctx = isel_alloc_vreg(ctx)
+    val vreg = isel_get_vreg(new_ctx)
+    val dest = op_reg(virtual_reg(vreg))
+    val inst = new_mach_inst(RV_OP_LI, [dest, op_imm(imm32)])
+    Rv32LoweredOperand(insts: [inst], result: dest, ctx: new_ctx)
+
+# ============================================================================
+# Instruction Selection - Core Entry Point
+# ============================================================================
+
+fn isel_module_riscv32(module: MirModule) -> MachModule:
+    var mach_module = new_mach_module(module.name)
+    var ctx = new_isel_context()
+
+    val func_keys = module.functions.keys()
+    for key in func_keys:
+        val func = module.functions[key]
+        var result = rv32_isel_function(ctx, func)
+        ctx = result.ctx
+        mach_module = mach_module_add_func(mach_module, result.func)
+
+    # Add data entries from string constants
+    for entry in ctx.data_entries:
+        mach_module = mach_module_add_data(mach_module, entry)
+
+    # Add extern symbols
+    for sym in ctx.extern_symbols:
+        mach_module = mach_module_add_extern(mach_module, sym)
+
+    mach_module
+
+struct Rv32ISelFuncResult:
+    func: MachFunction
+    ctx: ISelContext
+
+fn rv32_isel_function(ctx: ISelContext, func: MirFunction) -> Rv32ISelFuncResult:
+    var mach_func = new_mach_function(func.name)
+
+    # Reset vreg counter - use local IDs directly, start high for temps
+    var local_ctx = ISelContext(
+        next_vreg: func.locals.len() + 100,
+        frame_slots: ctx.frame_slots,
+        next_frame_offset: 0,
+        extern_symbols: ctx.extern_symbols,
+        data_entries: ctx.data_entries,
+        string_counter: ctx.string_counter
+    )
+
+    # Allocate frame slots for locals that need stack space
+    for local in func.locals:
+        val size = local.type_.size_bytes()
+        local_ctx = isel_alloc_frame_slot(local_ctx, local.id.id, size)
+
+    # Generate prologue block
+    # RV32 prologue:
+    #   ADDI sp, sp, -framesize
+    #   SW   ra, framesize-4(sp)    (4-byte stores, not 8)
+    #   SW   s0, framesize-8(sp)
+    #   ADDI s0, sp, framesize
+    var prologue_block = new_mach_block("prologue", -1)
+
+    # ADDI sp, sp, -framesize (placeholder, will be patched after frame size is known)
+    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_ADDI, [op_phys(RV_X2), op_phys(RV_X2), op_imm(0)]))
+    # SW ra, offset(sp) - save return address (32-bit store)
+    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_SW, [op_phys(RV_X1), op_mem(physical_reg(RV_X2), 0)]))
+    # SW s0, offset(sp) - save frame pointer (32-bit store)
+    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_SW, [op_phys(RV_X8), op_mem(physical_reg(RV_X2), 0)]))
+    # ADDI s0, sp, framesize (set frame pointer, placeholder)
+    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_ADDI, [op_phys(RV_X8), op_phys(RV_X2), op_imm(0)]))
+
+    # Move arguments from ABI registers (a0-a7) to virtual registers
+    for local in func.locals:
+        match local.kind:
+            case Arg(index):
+                if index < RV_ARG_REGS.len():
+                    val arg_reg = RV_ARG_REGS[index]
+                    prologue_block = mach_block_add_inst(prologue_block, new_mach_inst(RV_OP_MV, [rv32_local_vreg_op(local.id.id), op_phys(arg_reg)]))
+            case _: ()
+
+    mach_func = mach_func_add_block(mach_func, prologue_block)
+
+    # Translate each MIR block
+    for block in func.blocks:
+        var result = rv32_isel_block(local_ctx, block)
+        local_ctx = result.ctx
+        mach_func = mach_func_add_block(mach_func, result.block)
+
+    # Set frame size (aligned to 16 as required by RISC-V ABI)
+    var frame_size = local_ctx.next_frame_offset
+    # Add space for ra and s0 (8 bytes: 2 x 4-byte registers on RV32)
+    frame_size = frame_size + 8
+    if frame_size % 16 != 0:
+        frame_size = frame_size + (16 - (frame_size % 16))
+    mach_func = mach_func_set_frame_size(mach_func, frame_size)
+
+    # Propagate context back
+    val out_ctx = ISelContext(
+        next_vreg: ctx.next_vreg,
+        frame_slots: ctx.frame_slots,
+        next_frame_offset: ctx.next_frame_offset,
+        extern_symbols: local_ctx.extern_symbols,
+        data_entries: local_ctx.data_entries,
+        string_counter: local_ctx.string_counter
+    )
+
+    Rv32ISelFuncResult(func: mach_func, ctx: out_ctx)
+
+struct Rv32ISelBlockResult:
+    block: MachBlock
+    ctx: ISelContext
+
+fn rv32_isel_block(ctx: ISelContext, block: MirBlock) -> Rv32ISelBlockResult:
+    val label = if block.label.?: block.label.unwrap() else: "bb{block.id.id}"
+    var mach_block = new_mach_block(label, block.id.id)
+    var current_ctx = ctx
+
+    # Lower instructions
+    for inst in block.instructions:
+        var result = rv32_isel_inst(current_ctx, inst)
+        current_ctx = result.ctx
+        for mi in result.insts:
+            mach_block = mach_block_add_inst(mach_block, mi)
+
+    # Lower terminator
+    var term_result = rv32_isel_terminator(current_ctx, block.terminator)
+    current_ctx = term_result.ctx
+    for mi in term_result.insts:
+        mach_block = mach_block_add_inst(mach_block, mi)
+
+    Rv32ISelBlockResult(block: mach_block, ctx: current_ctx)
+
+# ============================================================================
+# Instruction Selection - Instructions
+# ============================================================================
+
+struct Rv32ISelInstResult:
+    insts: [MachInst]
+    ctx: ISelContext
+
+fn rv32_isel_inst(ctx: ISelContext, inst: MirInst) -> Rv32ISelInstResult:
+    match inst.kind:
+        case Const(dest, value, type_):
+            rv32_isel_const(ctx, dest, value, type_)
+        case Copy(dest, src):
+            rv32_isel_copy(ctx, dest, src)
+        case Move(dest, src):
+            rv32_isel_copy(ctx, dest, src)
+        case BinOp(dest, op, left, right):
+            rv32_isel_binop(ctx, dest, op, left, right)
+        case UnaryOp(dest, op, operand):
+            rv32_isel_unaryop(ctx, dest, op, operand)
+        case Load(dest, ptr):
+            rv32_isel_load(ctx, dest, ptr)
+        case Store(ptr, value):
+            rv32_isel_store(ctx, ptr, value)
+        case Call(dest, func_op, args):
+            rv32_isel_call(ctx, dest, func_op, args)
+        case GetField(dest, base, field):
+            rv32_isel_get_field(ctx, dest, base, field)
+        case SetField(base, field, value):
+            rv32_isel_set_field(ctx, base, field, value)
+        case Alloc(dest, type_):
+            rv32_isel_alloc(ctx, dest, type_)
+        case Cast(dest, operand, target):
+            rv32_isel_cast(ctx, dest, operand, target)
+        case Nop:
+            Rv32ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+        case _:
+            # Unsupported instruction - emit NOP
+            Rv32ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+
+fn rv32_isel_const(ctx: ISelContext, dest: LocalId, value: MirConstValue, type_: MirType) -> Rv32ISelInstResult:
+    val lowered = rv32_lower_const(ctx, value, type_)
+    val dest_op = rv32_local_vreg_op(dest.id)
+    # Move the const result to the destination vreg
+    var insts = lowered.insts
+    insts = insts + [new_mach_inst(RV_OP_MV, [dest_op, lowered.result])]
+    Rv32ISelInstResult(insts: insts, ctx: lowered.ctx)
+
+fn rv32_isel_copy(ctx: ISelContext, dest: LocalId, src: LocalId) -> Rv32ISelInstResult:
+    # MV rd, rs (pseudo: ADDI rd, rs, 0)
+    val inst = new_mach_inst(RV_OP_MV, [rv32_local_vreg_op(dest.id), rv32_local_vreg_op(src.id)])
+    Rv32ISelInstResult(insts: [inst], ctx: ctx)
+
+# ============================================================================
+# Binary Operations
+# ============================================================================
+
+fn rv32_isel_binop(ctx: ISelContext, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand) -> Rv32ISelInstResult:
+    val left_low = rv32_lower_operand(ctx, left)
+    val right_low = rv32_lower_operand(left_low.ctx, right)
+    var current_ctx = right_low.ctx
+    val dest_op = rv32_local_vreg_op(dest.id)
+    var insts: [MachInst] = []
+    insts = insts + left_low.insts
+    insts = insts + right_low.insts
+
+    # RV32I base instructions - no W-suffix variants needed (those are RV64 only).
+    # ADD, SUB, MUL, DIV, REM etc. operate on the full 32-bit register width.
+    match op:
+        case Add:
+            insts = insts + [new_mach_inst(RV_OP_ADD, [dest_op, left_low.result, right_low.result])]
+        case Sub:
+            insts = insts + [new_mach_inst(RV_OP_SUB, [dest_op, left_low.result, right_low.result])]
+        case Mul:
+            # RV32M extension: MUL rd, rs1, rs2 (lower 32 bits of product)
+            insts = insts + [new_mach_inst(RV_OP_MUL, [dest_op, left_low.result, right_low.result])]
+        case Div:
+            # RV32M extension: DIV rd, rs1, rs2 (signed division)
+            insts = insts + [new_mach_inst(RV_OP_DIV, [dest_op, left_low.result, right_low.result])]
+        case Rem:
+            # RV32M extension: REM rd, rs1, rs2 (signed remainder)
+            insts = insts + [new_mach_inst(RV_OP_REM, [dest_op, left_low.result, right_low.result])]
+        case BitAnd:
+            insts = insts + [new_mach_inst(RV_OP_AND, [dest_op, left_low.result, right_low.result])]
+        case BitOr:
+            insts = insts + [new_mach_inst(RV_OP_OR, [dest_op, left_low.result, right_low.result])]
+        case BitXor:
+            insts = insts + [new_mach_inst(RV_OP_XOR, [dest_op, left_low.result, right_low.result])]
+        case Shl:
+            insts = insts + [new_mach_inst(RV_OP_SLL, [dest_op, left_low.result, right_low.result])]
+        case Shr:
+            # Arithmetic shift right (sign-extending)
+            insts = insts + [new_mach_inst(RV_OP_SRA, [dest_op, left_low.result, right_low.result])]
+        case Eq:
+            insts = insts + rv32_isel_cmp_eq(dest_op, left_low.result, right_low.result, current_ctx)
+        case Ne:
+            insts = insts + rv32_isel_cmp_ne(dest_op, left_low.result, right_low.result, current_ctx)
+        case Lt:
+            # SLT rd, rs1, rs2 (rd = 1 if rs1 < rs2, signed)
+            insts = insts + [new_mach_inst(RV_OP_SLT, [dest_op, left_low.result, right_low.result])]
+        case Le:
+            # LE: NOT (rs2 < rs1) => SLT tmp, rs2, rs1; SEQZ dest, tmp
+            insts = insts + rv32_isel_cmp_le(dest_op, left_low.result, right_low.result, current_ctx)
+        case Gt:
+            # GT: SLT rd, rs2, rs1 (swap operands)
+            insts = insts + [new_mach_inst(RV_OP_SLT, [dest_op, right_low.result, left_low.result])]
+        case Ge:
+            # GE: NOT (rs1 < rs2) => SLT tmp, rs1, rs2; SEQZ dest, tmp
+            insts = insts + rv32_isel_cmp_ge(dest_op, left_low.result, right_low.result, current_ctx)
+        case _:
+            # Unsupported binop - zero result
+            insts = insts + [new_mach_inst(RV_OP_LI, [dest_op, op_imm(0)])]
+
+    Rv32ISelInstResult(insts: insts, ctx: current_ctx)
+
+# RISC-V comparison helpers using SLT/SEQZ/SNEZ/SUB + XOR patterns.
+# RISC-V has no flags register; comparisons are done via SLT and branches.
+# These are identical for RV32 and RV64 since the instructions are the same.
+
+fn rv32_isel_cmp_eq(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
+    # EQ: SUB tmp, rs1, rs2; SEQZ dest, tmp
+    # SEQZ is pseudo for SLTIU rd, rs, 1
+    var insts: [MachInst] = []
+    var tmp_ctx = isel_alloc_vreg(ctx)
+    val tmp_vreg = isel_get_vreg(tmp_ctx)
+    val tmp_op = op_reg(virtual_reg(tmp_vreg))
+    insts = insts + [new_mach_inst(RV_OP_SUB, [tmp_op, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts
+
+fn rv32_isel_cmp_ne(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
+    # NE: SUB tmp, rs1, rs2; SNEZ dest, tmp
+    # SNEZ is pseudo for SLTU rd, x0, rs
+    var insts: [MachInst] = []
+    var tmp_ctx = isel_alloc_vreg(ctx)
+    val tmp_vreg = isel_get_vreg(tmp_ctx)
+    val tmp_op = op_reg(virtual_reg(tmp_vreg))
+    insts = insts + [new_mach_inst(RV_OP_SUB, [tmp_op, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SNEZ, [dest, tmp_op])]
+    insts
+
+fn rv32_isel_cmp_le(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
+    # LE: NOT (right < left) => SLT tmp, right, left; SEQZ dest, tmp
+    var insts: [MachInst] = []
+    var tmp_ctx = isel_alloc_vreg(ctx)
+    val tmp_vreg = isel_get_vreg(tmp_ctx)
+    val tmp_op = op_reg(virtual_reg(tmp_vreg))
+    insts = insts + [new_mach_inst(RV_OP_SLT, [tmp_op, right, left])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts
+
+fn rv32_isel_cmp_ge(dest: Operand, left: Operand, right: Operand, ctx: ISelContext) -> [MachInst]:
+    # GE: NOT (left < right) => SLT tmp, left, right; SEQZ dest, tmp
+    var insts: [MachInst] = []
+    var tmp_ctx = isel_alloc_vreg(ctx)
+    val tmp_vreg = isel_get_vreg(tmp_ctx)
+    val tmp_op = op_reg(virtual_reg(tmp_vreg))
+    insts = insts + [new_mach_inst(RV_OP_SLT, [tmp_op, left, right])]
+    insts = insts + [new_mach_inst(RV_OP_SEQZ, [dest, tmp_op])]
+    insts
+
+# ============================================================================
+# Unary Operations
+# ============================================================================
+
+fn rv32_isel_unaryop(ctx: ISelContext, dest: LocalId, op: MirUnaryOp, operand: MirOperand) -> Rv32ISelInstResult:
+    val low = rv32_lower_operand(ctx, operand)
+    val dest_op = rv32_local_vreg_op(dest.id)
+    var insts = low.insts
+
+    match op:
+        case Neg:
+            # NEG rd, rs (pseudo: SUB rd, x0, rs)
+            insts = insts + [new_mach_inst(RV_OP_NEG, [dest_op, low.result])]
+        case Not:
+            # NOT rd, rs (pseudo: XORI rd, rs, -1)
+            insts = insts + [new_mach_inst(RV_OP_NOT, [dest_op, low.result])]
+        case BitNot:
+            # Same as Not for integers: XORI rd, rs, -1
+            insts = insts + [new_mach_inst(RV_OP_NOT, [dest_op, low.result])]
+        case _:
+            insts = insts + [new_mach_inst(RV_OP_MV, [dest_op, low.result])]
+
+    Rv32ISelInstResult(insts: insts, ctx: low.ctx)
+
+# ============================================================================
+# Memory Operations
+# ============================================================================
+
+fn rv32_isel_load(ctx: ISelContext, dest: LocalId, ptr: MirOperand) -> Rv32ISelInstResult:
+    val low = rv32_lower_operand(ctx, ptr)
+    val dest_op = rv32_local_vreg_op(dest.id)
+    var insts = low.insts
+    # LW dest, 0(base) - load word (32-bit) for pointer-sized data on RV32
+    insts = insts + [new_mach_inst(RV_OP_LW, [dest_op, op_mem(operand_get_reg(low.result), 0)])]
+    Rv32ISelInstResult(insts: insts, ctx: low.ctx)
+
+fn rv32_isel_store(ctx: ISelContext, ptr: MirOperand, value: MirOperand) -> Rv32ISelInstResult:
+    val ptr_low = rv32_lower_operand(ctx, ptr)
+    val val_low = rv32_lower_operand(ptr_low.ctx, value)
+    var insts = ptr_low.insts
+    insts = insts + val_low.insts
+    # SW value, 0(base) - store word (32-bit) for pointer-sized data on RV32
+    insts = insts + [new_mach_inst(RV_OP_SW, [val_low.result, op_mem(operand_get_reg(ptr_low.result), 0)])]
+    Rv32ISelInstResult(insts: insts, ctx: val_low.ctx)
+
+fn rv32_isel_get_field(ctx: ISelContext, dest: LocalId, base: MirOperand, field: i64) -> Rv32ISelInstResult:
+    val base_low = rv32_lower_operand(ctx, base)
+    val dest_op = rv32_local_vreg_op(dest.id)
+    # RV32: fields are 4 bytes apart (32-bit word size)
+    val offset = field * RV32_WORD_SIZE
+    var insts = base_low.insts
+    # LW dest, offset(base) - 32-bit field load
+    insts = insts + [new_mach_inst(RV_OP_LW, [dest_op, op_mem(operand_get_reg(base_low.result), offset)])]
+    Rv32ISelInstResult(insts: insts, ctx: base_low.ctx)
+
+fn rv32_isel_set_field(ctx: ISelContext, base: MirOperand, field: i64, value: MirOperand) -> Rv32ISelInstResult:
+    val base_low = rv32_lower_operand(ctx, base)
+    val val_low = rv32_lower_operand(base_low.ctx, value)
+    # RV32: fields are 4 bytes apart (32-bit word size)
+    val offset = field * RV32_WORD_SIZE
+    var insts = base_low.insts
+    insts = insts + val_low.insts
+    # SW value, offset(base) - 32-bit field store
+    insts = insts + [new_mach_inst(RV_OP_SW, [val_low.result, op_mem(operand_get_reg(base_low.result), offset)])]
+    Rv32ISelInstResult(insts: insts, ctx: val_low.ctx)
+
+fn rv32_isel_alloc(ctx: ISelContext, dest: LocalId, type_: MirType) -> Rv32ISelInstResult:
+    val size = type_.size_bytes()
+    val aligned = if size < 16: 16 else: size
+    # Round up to multiple of 16 (RISC-V ABI stack alignment)
+    var alloc_size = aligned
+    if alloc_size % 16 != 0:
+        alloc_size = alloc_size + (16 - (alloc_size % 16))
+    val dest_op = rv32_local_vreg_op(dest.id)
+    var insts: [MachInst] = []
+    # ADDI sp, sp, -size (decrement stack)
+    val neg_size = 0 - alloc_size
+    insts = insts + [new_mach_inst(RV_OP_ADDI, [op_phys(RV_X2), op_phys(RV_X2), op_imm(neg_size)])]
+    # MV dest, sp (capture the address)
+    insts = insts + [new_mach_inst(RV_OP_MV, [dest_op, op_phys(RV_X2)])]
+    Rv32ISelInstResult(insts: insts, ctx: ctx)
+
+fn rv32_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: MirType) -> Rv32ISelInstResult:
+    val low = rv32_lower_operand(ctx, operand)
+    val dest_op = rv32_local_vreg_op(dest.id)
+    var insts = low.insts
+    # Simple move - on RV32 all values are already 32-bit, no truncation needed
+    insts = insts + [new_mach_inst(RV_OP_MV, [dest_op, low.result])]
+    Rv32ISelInstResult(insts: insts, ctx: low.ctx)
+
+# ============================================================================
+# Function Calls
+# ============================================================================
+
+fn rv32_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> Rv32ISelInstResult:
+    var insts: [MachInst] = []
+    var current_ctx = ctx
+
+    # Lower arguments into ABI registers (a0-a7 = x10-x17)
+    for i in 0..args.len():
+        val arg_low = rv32_lower_operand(current_ctx, args[i])
+        current_ctx = arg_low.ctx
+        insts = insts + arg_low.insts
+        if i < RV_ARG_REGS.len():
+            val arg_reg = RV_ARG_REGS[i]
+            insts = insts + [new_mach_inst(RV_OP_MV, [op_phys(arg_reg), arg_low.result])]
+        else:
+            # Stack argument: SW value, offset(sp) - 4-byte slots on RV32
+            val stack_offset = (i - RV_ARG_REGS.len()) * RV32_WORD_SIZE
+            insts = insts + [new_mach_inst(RV_OP_SW, [arg_low.result, op_mem(physical_reg(RV_X2), stack_offset)])]
+
+    # Emit call
+    match func_op.kind:
+        case Const(MirConstValue.Str(name), _):
+            # Direct call to named function: CALL symbol (pseudo: AUIPC ra + JALR ra)
+            current_ctx = isel_add_extern(current_ctx, name)
+            insts = insts + [new_mach_inst(RV_OP_CALL, [op_sym(name)])]
+        case Copy(local):
+            # Indirect call through register: JALR ra, 0(rs)
+            insts = insts + [new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), rv32_local_vreg_op(local.id), op_imm(0)])]
+        case Move(local):
+            insts = insts + [new_mach_inst(RV_OP_JALR, [op_phys(RV_X1), rv32_local_vreg_op(local.id), op_imm(0)])]
+        case _:
+            insts = insts + [new_mach_inst(RV_OP_NOP, [])]
+
+    # Move return value from a0 (x10)
+    if dest.?:
+        val d = dest.unwrap()
+        insts = insts + [new_mach_inst(RV_OP_MV, [rv32_local_vreg_op(d.id), op_phys(RV_X10)])]
+
+    Rv32ISelInstResult(insts: insts, ctx: current_ctx)
+
+# ============================================================================
+# Instruction Selection - Terminators
+# ============================================================================
+
+fn rv32_isel_terminator(ctx: ISelContext, term: MirTerminator) -> Rv32ISelInstResult:
+    match term:
+        case Goto(target):
+            # JAL x0, target_label (unconditional jump, discard return address)
+            val inst = new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(target.id)])
+            Rv32ISelInstResult(insts: [inst], ctx: ctx)
+        case Return(value):
+            rv32_isel_return(ctx, value)
+        case If(cond, then_, else_):
+            rv32_isel_if(ctx, cond, then_, else_)
+        case Switch(value, targets, default_target):
+            rv32_isel_switch(ctx, value, targets, default_target)
+        case Unreachable:
+            Rv32ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+        case _:
+            Rv32ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+
+fn rv32_isel_return(ctx: ISelContext, value: MirOperand?) -> Rv32ISelInstResult:
+    var insts: [MachInst] = []
+    if value.?:
+        val v = value.unwrap()
+        val low = rv32_lower_operand(ctx, v)
+        insts = insts + low.insts
+        # MV a0, result (move return value to a0 = x10)
+        insts = insts + [new_mach_inst(RV_OP_MV, [op_phys(RV_X10), low.result])]
+    # Epilogue: restore ra, s0, adjust sp, return
+    # LW ra, offset(sp) - 32-bit restore on RV32
+    insts = insts + [new_mach_inst(RV_OP_LW, [op_phys(RV_X1), op_mem(physical_reg(RV_X2), 0)])]
+    # LW s0, offset(sp) - 32-bit restore on RV32
+    insts = insts + [new_mach_inst(RV_OP_LW, [op_phys(RV_X8), op_mem(physical_reg(RV_X2), 0)])]
+    # ADDI sp, sp, framesize (restore stack, placeholder)
+    insts = insts + [new_mach_inst(RV_OP_ADDI, [op_phys(RV_X2), op_phys(RV_X2), op_imm(0)])]
+    # RET (pseudo: JALR x0, 0(ra))
+    insts = insts + [new_mach_inst(RV_OP_RET, [])]
+    Rv32ISelInstResult(insts: insts, ctx: ctx)
+
+fn rv32_isel_if(ctx: ISelContext, cond: MirOperand, then_: BlockId, else_: BlockId) -> Rv32ISelInstResult:
+    val cond_low = rv32_lower_operand(ctx, cond)
+    var insts = cond_low.insts
+    # BNE cond, x0, then_label (branch if cond != 0, i.e. true)
+    insts = insts + [new_mach_inst(RV_OP_BNE, [cond_low.result, op_phys(RV_X0), op_label(then_.id)])]
+    # JAL x0, else_label (unconditional jump to else block)
+    insts = insts + [new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(else_.id)])]
+    Rv32ISelInstResult(insts: insts, ctx: cond_low.ctx)
+
+fn rv32_isel_switch(ctx: ISelContext, value: MirOperand, targets: [SwitchCase], default_target: BlockId) -> Rv32ISelInstResult:
+    val val_low = rv32_lower_operand(ctx, value)
+    var insts = val_low.insts
+    var current_ctx = val_low.ctx
+
+    # Generate LI + BEQ chain for each case
+    for i in 0..targets.len():
+        val target = targets[i]
+        # Load case value into temp vreg
+        current_ctx = isel_alloc_vreg(current_ctx)
+        val case_vreg = isel_get_vreg(current_ctx)
+        val case_op = op_reg(virtual_reg(case_vreg))
+        insts = insts + [new_mach_inst(RV_OP_LI, [case_op, op_imm(target.value)])]
+        # BEQ value, case_value, target_label
+        insts = insts + [new_mach_inst(RV_OP_BEQ, [val_low.result, case_op, op_label(target.target.id)])]
+
+    # JAL x0, default_label (fall through to default)
+    insts = insts + [new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(default_target.id)])]
+    Rv32ISelInstResult(insts: insts, ctx: current_ctx)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export RV32_WORD_SIZE
+export isel_module_riscv32
+export Rv32LoweredOperand, Rv32ISelFuncResult, Rv32ISelBlockResult, Rv32ISelInstResult

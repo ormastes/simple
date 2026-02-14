@@ -1,0 +1,295 @@
+# Advanced Breakpoint Manager
+# Wraps GDB MI breakpoint operations with rich breakpoint support.
+# Manages conditional, function, and temporary breakpoints with
+# hit counts, enable/disable state, and log messages.
+
+use remote.protocol.gdb_mi.GdbMiClient
+use remote.protocol.gdb_mi_parser.{GdbMiParser, parse_hex_value}
+
+# Information about a single breakpoint
+class BreakpointInfo:
+    id: i64
+    file: text
+    line: i64
+    condition: text
+    enabled: bool
+    hit_count: i64
+    is_temporary: bool
+    log_message: text
+    func_name: text
+    address: i64
+
+    static fn of(id: i64, file: text, line: i64) -> BreakpointInfo:
+        BreakpointInfo(
+            id: id,
+            file: file,
+            line: line,
+            condition: "",
+            enabled: true,
+            hit_count: 0,
+            is_temporary: false,
+            log_message: "",
+            func_name: "",
+            address: 0
+        )
+
+    static fn function_bp(id: i64, func_name: text) -> BreakpointInfo:
+        BreakpointInfo(
+            id: id,
+            file: "",
+            line: 0,
+            condition: "",
+            enabled: true,
+            hit_count: 0,
+            is_temporary: false,
+            log_message: "",
+            func_name: func_name,
+            address: 0
+        )
+
+    fn to_string() -> text:
+        var parts: [text] = []
+        parts.push("bp#{self.id}")
+        if self.file.len() > 0:
+            parts.push("{self.file}:{self.line}")
+        if self.func_name.len() > 0:
+            parts.push("fn:{self.func_name}")
+        if not self.enabled:
+            parts.push("[disabled]")
+        if self.condition.len() > 0:
+            parts.push("if:{self.condition}")
+        if self.hit_count > 0:
+            parts.push("hits:{self.hit_count}")
+        if self.is_temporary:
+            parts.push("[temp]")
+        if self.log_message.len() > 0:
+            parts.push("log:{self.log_message}")
+        parts.join(" ")
+
+    # Serialize to a compact text format for storage/transport
+    fn serialize() -> text:
+        var enabled_str = "1"
+        if not self.enabled:
+            enabled_str = "0"
+        var temp_str = "0"
+        if self.is_temporary:
+            temp_str = "1"
+        "{self.id}|{self.file}|{self.line}|{self.condition}|{enabled_str}|{self.hit_count}|{temp_str}|{self.log_message}|{self.func_name}|{self.address}"
+
+# Breakpoint manager wrapping GDB MI breakpoint operations
+class BreakpointManager:
+    gdb: GdbMiClient
+    breakpoints: Dict<i64, BreakpointInfo>
+    next_local_id: i64
+
+impl BreakpointManager:
+    # Create a new breakpoint manager for a GDB MI client
+    static fn create(gdb: GdbMiClient) -> BreakpointManager:
+        BreakpointManager(
+            gdb: gdb,
+            breakpoints: {},
+            next_local_id: 1
+        )
+
+    # Add a line breakpoint at file:line.
+    # Returns breakpoint ID on success, or error text.
+    me add_breakpoint(file: text, line: i64) -> Result<i64, text>:
+        val location = "{file}:{line}"
+        val gdb_id = self.gdb.set_breakpoint(location)?
+        val bp_id = gdb_id
+
+        val info = BreakpointInfo.of(bp_id, file, line)
+        self.breakpoints["{bp_id}"] = info
+
+        Ok(bp_id)
+
+    # Add a conditional breakpoint at file:line with a condition expression.
+    # The condition is evaluated by GDB each time the breakpoint is hit.
+    me add_conditional_breakpoint(file: text, line: i64, condition: text) -> Result<i64, text>:
+        val location = "{file}:{line}"
+
+        # Insert breakpoint with condition flag
+        val data = self.gdb.send_command("break-insert -c \"{condition}\" {location}")?
+        val bkpt_raw = data.get("bkpt") ?? "{}"
+        val bkpt = GdbMiParser.parse_key_values(bkpt_raw)
+        val bp_id_val = (bkpt.get("number") ?? "0").parse_int() ?? 0
+        val bp_id = bp_id_val
+
+        var info = BreakpointInfo.of(bp_id, file, line)
+        info.condition = condition
+        self.breakpoints["{bp_id}"] = info
+
+        Ok(bp_id)
+
+    # Add a breakpoint at the start of a named function.
+    me add_function_breakpoint(func_name: text) -> Result<i64, text>:
+        val gdb_id = self.gdb.set_breakpoint(func_name)?
+        val bp_id = gdb_id
+
+        val info = BreakpointInfo.function_bp(bp_id, func_name)
+        self.breakpoints["{bp_id}"] = info
+
+        Ok(bp_id)
+
+    # Add a temporary breakpoint that auto-deletes after first hit.
+    me add_temporary_breakpoint(file: text, line: i64) -> Result<i64, text>:
+        val location = "{file}:{line}"
+
+        # -t flag creates a temporary breakpoint
+        val data = self.gdb.send_command("break-insert -t {location}")?
+        val bkpt_raw = data.get("bkpt") ?? "{}"
+        val bkpt = GdbMiParser.parse_key_values(bkpt_raw)
+        val bp_id_val = (bkpt.get("number") ?? "0").parse_int() ?? 0
+        val bp_id = bp_id_val
+
+        var info = BreakpointInfo.of(bp_id, file, line)
+        info.is_temporary = true
+        self.breakpoints["{bp_id}"] = info
+
+        Ok(bp_id)
+
+    # Remove a breakpoint by ID.
+    me remove_breakpoint(bp_id: i64) -> Result<text, text>:
+        self.gdb.delete_breakpoint(bp_id)?
+        self.breakpoints.remove("{bp_id}")
+        Ok("breakpoint {bp_id} removed")
+
+    # Enable a previously disabled breakpoint.
+    me enable_breakpoint(bp_id: i64) -> Result<text, text>:
+        self.gdb.send_command("break-enable {bp_id}")?
+        val info = self.breakpoints.get("{bp_id}")
+        if info != nil:
+            info.enabled = true
+            self.breakpoints["{bp_id}"] = info
+        Ok("breakpoint {bp_id} enabled")
+
+    # Disable a breakpoint without removing it.
+    me disable_breakpoint(bp_id: i64) -> Result<text, text>:
+        self.gdb.send_command("break-disable {bp_id}")?
+        val info = self.breakpoints.get("{bp_id}")
+        if info != nil:
+            info.enabled = false
+            self.breakpoints["{bp_id}"] = info
+        Ok("breakpoint {bp_id} disabled")
+
+    # List all managed breakpoints.
+    fn list_breakpoints() -> [BreakpointInfo]:
+        var result: [BreakpointInfo] = []
+        for key in self.breakpoints.keys():
+            val info = self.breakpoints[key]
+            result.push(info)
+        result
+
+    # Refresh breakpoint info from GDB (sync hit counts, addresses, etc.)
+    me refresh_breakpoints() -> Result<text, text>:
+        val data = self.gdb.send_command("break-list")?
+        val body_raw = data.get("BreakpointTable") ?? "{}"
+        val body = GdbMiParser.parse_key_values(body_raw)
+        val bp_list_raw = body.get("body") ?? "[]"
+        val bp_tuples = GdbMiParser.parse_tuple_list(bp_list_raw)
+
+        for bp in bp_tuples:
+            val bkpt_raw = bp.get("bkpt") ?? ""
+            var bkpt = bp
+            if bkpt_raw.len() > 0:
+                bkpt = GdbMiParser.parse_key_values(bkpt_raw)
+
+            val id_str = bkpt.get("number") ?? "0"
+            val bp_id = id_str.parse_int() ?? 0
+
+            val existing = self.breakpoints.get("{bp_id}")
+            if existing != nil:
+                var info = existing
+                # Update hit count
+                val hits = (bkpt.get("times") ?? "0").parse_int() ?? 0
+                info.hit_count = hits
+                # Update enabled state
+                val enabled_str = bkpt.get("enabled") ?? "y"
+                info.enabled = enabled_str == "y"
+                # Update address
+                val addr_str = bkpt.get("addr") ?? "0x0"
+                info.address = parse_hex_value(addr_str)
+                # Update file/line if available
+                val file = bkpt.get("fullname") ?? bkpt.get("file") ?? ""
+                if file.len() > 0:
+                    info.file = file
+                val line = (bkpt.get("line") ?? "0").parse_int() ?? 0
+                if line > 0:
+                    info.line = line
+                # Update condition
+                val cond = bkpt.get("cond") ?? ""
+                if cond.len() > 0:
+                    info.condition = cond
+                self.breakpoints["{bp_id}"] = info
+
+        Ok("refreshed")
+
+    # Set a hit count condition on a breakpoint.
+    # The breakpoint will only stop after being hit `count` times.
+    me set_hit_condition(bp_id: i64, count: i64) -> Result<text, text>:
+        # GDB uses -break-after to set ignore count (ignore first N-1 hits)
+        val ignore_count = count - 1
+        if ignore_count < 0:
+            return Err("hit count must be at least 1")
+        self.gdb.send_command("break-after {bp_id} {ignore_count}")?
+        Ok("breakpoint {bp_id} will stop after {count} hits")
+
+    # Set a log message on a breakpoint (GDB "commands" for a breakpoint).
+    # When hit, GDB prints the message instead of stopping.
+    me set_log_message(bp_id: i64, message: text) -> Result<text, text>:
+        # Use GDB's dprintf-style: make the breakpoint a log point
+        # We use break-commands to attach print + continue commands
+        val info = self.breakpoints.get("{bp_id}")
+        if info != nil:
+            info.log_message = message
+            self.breakpoints["{bp_id}"] = info
+
+        # Set commands on the breakpoint via console interpreter
+        self.gdb.send_command("interpreter-exec console \"commands {bp_id}\nprintf \\\"{message}\\\\n\\\"\ncontinue\nend\"")?
+        Ok("log message set on breakpoint {bp_id}")
+
+    # Modify the condition expression on an existing breakpoint.
+    me set_condition(bp_id: i64, condition: text) -> Result<text, text>:
+        self.gdb.send_command("break-condition {bp_id} {condition}")?
+        val info = self.breakpoints.get("{bp_id}")
+        if info != nil:
+            info.condition = condition
+            self.breakpoints["{bp_id}"] = info
+        Ok("condition set on breakpoint {bp_id}")
+
+    # Get info about a specific breakpoint by ID.
+    fn get_breakpoint(bp_id: i64) -> BreakpointInfo:
+        self.breakpoints.get("{bp_id}")
+
+    # Get total number of managed breakpoints.
+    fn count() -> i64:
+        var n = 0
+        for key in self.breakpoints.keys():
+            n = n + 1
+        n
+
+    # Remove all breakpoints.
+    me clear_all() -> Result<text, text>:
+        var ids: [i64] = []
+        for key in self.breakpoints.keys():
+            val info = self.breakpoints[key]
+            ids.push(info.id)
+
+        for bp_id in ids:
+            self.gdb.delete_breakpoint(bp_id)?
+        self.breakpoints = {}
+
+        Ok("all breakpoints cleared")
+
+    # Serialize all breakpoints to text for transport.
+    fn serialize_all() -> text:
+        var parts: [text] = []
+        for key in self.breakpoints.keys():
+            val info = self.breakpoints[key]
+            parts.push(info.serialize())
+        parts.join(";")
+
+# --- Exports ---
+
+export BreakpointInfo
+export BreakpointManager
