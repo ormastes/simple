@@ -6,6 +6,7 @@
 # Phase C4: Query/Filter Engine (query command)
 
 use app.cli_util (get_cli_args, parse_csv_fields)
+use app.cli_parser.{cli_spec, cli_spec_program, cli_spec_flag, cli_spec_option, cli_spec_positional, parse_cli_args, parsed_flag, parsed_option, parsed_positional, parsed_positionals, generate_help}
 use app.io.mod (file_exists, file_read, file_write, dir_create_all, file_remove, file_modified_time, shell_int, shell_output_trimmed, shell_bool, shell_output, shell)
 use std.string.{to_int_or}
 use std.string.{NL}
@@ -446,10 +447,10 @@ fn run_collect(args: [text]):
     """Collect metrics from sources."""
     ensure_dirs()
 
-    var mode = "full"
-    for arg in args:
-        if arg.starts_with("--mode="):
-            mode = arg.replace("--mode=", "")
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "mode", "m", "Collection mode", default: "full", choices: ["full", "quick", "incremental"])
+    val parsed = parse_cli_args(spec2, args)
+    val mode = parsed_option(parsed, "mode")
 
     print "Collecting dashboard metrics (mode={mode})..."
 
@@ -772,10 +773,10 @@ fn run_coverage(args: [text]):
     print "Coverage: {coverage_pct}%"
 
 fn run_export(args: [text]):
-    var format = "html"
-    for arg in args:
-        if arg.starts_with("--format="):
-            format = arg.replace("--format=", "")
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "format", "f", "Export format", default: "html", choices: ["html", "json"])
+    val parsed = parse_cli_args(spec2, args)
+    val format = parsed_option(parsed, "format")
 
     if format == "json":
         print export_json()
@@ -931,10 +932,10 @@ fn export_html() -> text:
     html
 
 fn run_serve(args: [text]):
-    var port = 3000
-    for arg in args:
-        if arg.starts_with("--port="):
-            port = to_int_or(arg.replace("--port=", ""), 3000)
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "port", "p", "Server port", default: "3000", choices: [])
+    val parsed = parse_cli_args(spec2, args)
+    val port = to_int_or(parsed_option(parsed, "port"), 3000)
 
     ensure_dirs()
     file_write("{DASHBOARD_DIR}/index.html", export_html())
@@ -988,17 +989,18 @@ fn print_phase_6_overview():
 fn run_notify_test(args: [text]):
     print "{NL}=== C1 Notification Testing ==={NL}"
 
-    var channel = "all"
-    var dry_run = true
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "channel", "c", "Channel to test", default: "all", choices: ["slack", "webhook", "email", "all"])
+    val spec3 = cli_spec_flag(spec2, "dry-run", "d", "Validate without sending (default)")
+    val spec4 = cli_spec_flag(spec3, "all", "a", "Test all channels")
+    val parsed = parse_cli_args(spec4, args)
 
-    # Parse arguments
-    for arg in args:
-        if arg.starts_with("--channel="):
-            channel = arg.replace("--channel=", "")
-        elif arg == "--dry-run":
-            dry_run = true
-        elif arg == "--all":
-            channel = "all"
+    var channel = parsed_option(parsed, "channel")
+    val dry_run = parsed_flag(parsed, "dry-run")
+    val all_flag = parsed_flag(parsed, "all")
+
+    if all_flag:
+        channel = "all"
 
     print "Configuration:"
     print "  Channel: {channel}"
@@ -1051,18 +1053,18 @@ fn run_notify_test(args: [text]):
 fn run_alert_add(args: [text]):
     print "{NL}=== C2 Alert Rules: Add ==={NL}"
 
-    if args.len() == 0:
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "level", "l", "Alert level", default: "warning", choices: ["info", "warning", "critical"])
+    val spec3 = cli_spec_positional(spec2, "expression", "Alert rule expression", required: true)
+    val parsed = parse_cli_args(spec3, args)
+
+    val rule_expr = parsed_positional(parsed, 0)
+    if rule_expr == "":
         print "Error: specify alert rule expression"
         print "Example: alert-add 'coverage < 75.0' --level=critical"
         return
 
-    val rule_expr = args[0]
-    var level = "warning"
-
-    # Parse level argument
-    for arg in args.slice(1, args.len()):
-        if arg.starts_with("--level="):
-            level = arg.replace("--level=", "")
+    val level = parsed_option(parsed, "level")
 
     print "Adding alert rule..."
     print "  Expression: {rule_expr}"
@@ -1098,23 +1100,20 @@ fn run_alert_remove(args: [text]):
 fn run_compare(args: [text]):
     print "{NL}=== C3 Comparative Analysis ==={NL}"
 
-    var baseline_date = ""
-    var current_date = ""
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "baseline", "b", "Baseline date (YYYY-MM-DD)", default: "", choices: [])
+    val spec3 = cli_spec_option(spec2, "current", "c", "Current date (YYYY-MM-DD)", default: "2026-01-21", choices: [])
+    val spec4 = cli_spec_option(spec3, "metric", "m", "Specific metric to compare", default: "", choices: [])
+    val spec5 = cli_spec_option(spec4, "format", "f", "Output format", default: "table", choices: ["table", "json"])
+    val parsed = parse_cli_args(spec5, args)
 
-    # Parse arguments
-    for arg in args:
-        if arg.starts_with("--baseline="):
-            baseline_date = arg.replace("--baseline=", "")
-        elif arg.starts_with("--current="):
-            current_date = arg.replace("--current=", "")
-
+    val baseline_date = parsed_option(parsed, "baseline")
     if baseline_date.len() == 0:
         print "Error: specify baseline date"
         print "Usage: compare --baseline=YYYY-MM-DD [--current=YYYY-MM-DD]"
         return
 
-    if current_date.len() == 0:
-        current_date = "2026-01-21"
+    val current_date = parsed_option(parsed, "current")
 
     print "Comparing metrics: {baseline_date} vs {current_date}{NL}"
 
@@ -1138,7 +1137,13 @@ fn run_compare(args: [text]):
 fn run_query(args: [text]):
     print "{NL}=== C4 Query/Filter Engine ==={NL}"
 
-    if args.len() == 0:
+    val spec = cli_spec()
+    val spec2 = cli_spec_option(spec, "format", "f", "Output format", default: "table", choices: ["table", "json"])
+    val spec3 = cli_spec_positional(spec2, "query", "Query expression", required: true)
+    val parsed = parse_cli_args(spec3, args)
+
+    val query_str = parsed_positional(parsed, 0)
+    if query_str.len() == 0:
         print "Error: specify query"
         print "Usage: query <query> [--format=table|json]"
         print "Examples:"
@@ -1147,13 +1152,7 @@ fn run_query(args: [text]):
         print "  query 'coverage where percent < 80'"
         return
 
-    val query_str = args[0]
-    var format_opt = "table"
-
-    # Parse format argument
-    for arg in args.slice(1, args.len()):
-        if arg.starts_with("--format="):
-            format_opt = arg.replace("--format=", "")
+    val format_opt = parsed_option(parsed, "format")
 
     print "Executing query: {query_str}"
     print "Format: {format_opt}{NL}"

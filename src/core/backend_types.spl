@@ -143,6 +143,234 @@ val CoreCodegenTarget = CodegenTarget
 val CoreOptLevel = OptLevel
 val CoreOutputFormat = OutputFormat
 
+# ===== Impl blocks for compiled mode (not available at runtime) =====
+
+impl BackendKind:
+    fn to_text() -> text:
+        backend_kind_name(self)
+
+    fn supports_target(target: i64) -> bool:
+        if self == BACKEND_CRANELIFT:
+            return target_is_64bit(target)
+        if self == BACKEND_LLVM:
+            return true
+        if self == BACKEND_NATIVE:
+            if target == TARGET_X86_64 or target == TARGET_AARCH64 or target == TARGET_RISCV64:
+                return true
+            if target == TARGET_AARCH64_MACOS or target == TARGET_X86_64_MACOS:
+                return true
+            if target == TARGET_HOST:
+                return true
+            return false
+        if self == BACKEND_WASM:
+            return target == TARGET_WASM32
+        if self == BACKEND_LEAN:
+            return true
+        if self == BACKEND_INTERPRETER:
+            return true
+        if self == BACKEND_CUDA:
+            return false
+        if self == BACKEND_VULKAN:
+            return false
+        if self == BACKEND_VHDL:
+            return true
+        false
+
+impl CodegenTarget:
+    fn to_text() -> text:
+        target_name(self)
+
+    fn is_64bit() -> bool:
+        target_is_64bit(self)
+
+    fn is_macos() -> bool:
+        target_is_macos(self)
+
+impl OptLevel:
+    fn to_text() -> text:
+        opt_level_name(self)
+
+# ===== Build Mode =====
+
+enum BuildMode:
+    Debug
+    Release
+    Test
+    Bootstrap
+
+impl BuildMode:
+    fn to_text() -> text:
+        match self:
+            case Debug: "debug"
+            case Release: "release"
+            case Test: "test"
+            case Bootstrap: "bootstrap"
+
+    fn default_optimization() -> i64:
+        match self:
+            case Debug: OPT_DEBUG
+            case Release: OPT_SPEED
+            case Test: OPT_NONE
+            case Bootstrap: OPT_SIZE
+
+# ===== Optimization Level (semantic alias) =====
+# OptimizationLevel is the modern name, OptLevel is the legacy/seed name
+val OptimizationLevel = OptLevel
+
+# ===== Compilation Options =====
+
+struct CompileOptions:
+    target: i64
+    opt_level: i64
+    debug_info: bool
+    emit_assembly: bool
+    emit_llvm_ir: bool
+    emit_mir: bool
+    verify_output: bool
+
+fn compile_options_default() -> CompileOptions:
+    CompileOptions(
+        target: TARGET_HOST,
+        opt_level: OPT_SPEED,
+        debug_info: false,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true
+    )
+
+fn compile_options_debug() -> CompileOptions:
+    CompileOptions(
+        target: TARGET_HOST,
+        opt_level: OPT_DEBUG,
+        debug_info: true,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: true,
+        verify_output: true
+    )
+
+fn compile_options_release() -> CompileOptions:
+    CompileOptions(
+        target: TARGET_HOST,
+        opt_level: OPT_SPEED,
+        debug_info: false,
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true
+    )
+
+impl CompileOptions:
+    static fn default_options() -> CompileOptions:
+        compile_options_default()
+
+    static fn debug_options() -> CompileOptions:
+        compile_options_debug()
+
+    static fn release_options() -> CompileOptions:
+        compile_options_release()
+
+    fn with_target(target: i64) -> CompileOptions:
+        CompileOptions(
+            target: target,
+            opt_level: self.opt_level,
+            debug_info: self.debug_info,
+            emit_assembly: self.emit_assembly,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_mir: self.emit_mir,
+            verify_output: self.verify_output
+        )
+
+    fn with_optimization(opt_level: i64) -> CompileOptions:
+        CompileOptions(
+            target: self.target,
+            opt_level: opt_level,
+            debug_info: self.debug_info,
+            emit_assembly: self.emit_assembly,
+            emit_llvm_ir: self.emit_llvm_ir,
+            emit_mir: self.emit_mir,
+            verify_output: self.verify_output
+        )
+
+# ===== Compilation Result =====
+
+struct CompiledModule:
+    name: text
+    symbols: [text]
+    compile_time_ms: i64
+
+struct CompiledSymbol:
+    name: text
+    kind: i64
+    address: i64
+    size: i64
+
+val SYMBOL_FUNCTION = 0
+val SYMBOL_DATA = 1
+val SYMBOL_CONST = 2
+
+enum CompiledSymbolKind:
+    Function
+    Data
+    Const
+
+fn symbol_kind_name(kind: i64) -> text:
+    if kind == SYMBOL_FUNCTION: return "function"
+    if kind == SYMBOL_DATA: return "data"
+    if kind == SYMBOL_CONST: return "const"
+    "unknown"
+
+impl CompiledSymbolKind:
+    fn to_text() -> text:
+        match self:
+            case Function: "function"
+            case Data: "data"
+            case Const: "const"
+
+# ===== Compilation Error =====
+
+struct CompileError:
+    message: text
+    phase: text
+    location: text
+
+fn compile_error_new(message: text, phase: text, location: text) -> CompileError:
+    CompileError(message: message, phase: phase, location: location)
+
+fn compile_error_backend(backend: i64, message: text) -> CompileError:
+    val backend_name = backend_kind_name(backend)
+    CompileError(
+        message: message,
+        phase: "backend ({backend_name})",
+        location: ""
+    )
+
+fn compile_error_target_unsupported(backend: i64, target: i64) -> CompileError:
+    val backend_name = backend_kind_name(backend)
+    val target_name_str = target_name(target)
+    CompileError(
+        message: "Backend {backend_name} does not support target {target_name_str}",
+        phase: "target selection",
+        location: ""
+    )
+
+fn compile_error_to_text(err: CompileError) -> text:
+    var result = "Compile error in {err.phase}: {err.message}"
+    if err.location != "":
+        result = "{result} at {err.location}"
+    result
+
+impl CompileError:
+    static fn backend_error(backend: i64, message: text) -> CompileError:
+        compile_error_backend(backend, message)
+
+    static fn target_unsupported(backend: i64, target: i64) -> CompileError:
+        compile_error_target_unsupported(backend, target)
+
+    fn to_text() -> text:
+        compile_error_to_text(self)
+
 export BackendKind, CodegenTarget, OptLevel, OutputFormat
 export CoreBackendKind, CoreCodegenTarget, CoreOptLevel, CoreOutputFormat
 export BACKEND_CRANELIFT, BACKEND_LLVM, BACKEND_NATIVE, BACKEND_WASM
@@ -154,3 +382,9 @@ export OUTPUT_EXECUTABLE, OUTPUT_SHARED_LIB, OUTPUT_STATIC_LIB
 export OUTPUT_OBJECT_FILE, OUTPUT_ASSEMBLY, OUTPUT_IR
 export backend_kind_name, target_name, opt_level_name
 export target_is_macos, target_is_64bit
+export BuildMode, OptimizationLevel
+export CompileOptions, compile_options_default, compile_options_debug, compile_options_release
+export CompiledModule, CompiledSymbol, CompiledSymbolKind
+export SYMBOL_FUNCTION, SYMBOL_DATA, SYMBOL_CONST, symbol_kind_name
+export CompileError, compile_error_new, compile_error_backend
+export compile_error_target_unsupported, compile_error_to_text
