@@ -1,0 +1,369 @@
+# Group Comment Detection Spec
+#
+# Tests for variable group detection and comment suggestions
+
+use std.spec.{describe, it, expect}
+use doc_coverage.analysis.group_comment_detection.{
+    detect_variable_groups,
+    suggest_group_comment,
+    emit_group_comment_warnings,
+    classify_variable_group,
+    VariableGroup
+}
+
+describe("Variable Group Detection"):
+    it("detects consecutive var declarations"):
+        val source = "var count = 0\nvar total = 0\nvar sum = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.var_count).to_equal(3)
+        expect(group.var_names[0]).to_equal("count")
+        expect(group.var_names[1]).to_equal("total")
+        expect(group.var_names[2]).to_equal("sum")
+
+    it("detects consecutive val declarations"):
+        val source = "val name = 'Alice'\nval age = 30\nval city = 'NYC'"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.var_count).to_equal(3)
+
+    it("detects mixed var and val declarations"):
+        val source = "var x = 1\nval y = 2\nvar z = 3"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        expect(groups[0].var_count).to_equal(3)
+
+    it("ignores single variable declarations"):
+        val source = "var count = 0\n\nfn foo(): pass\n\nvar total = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(0)
+
+    it("handles empty lines within groups"):
+        val source = "var x = 1\n\nvar y = 2\n\nvar z = 3"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        expect(groups[0].var_count).to_equal(3)
+
+    it("handles comments within groups"):
+        val source = "var x = 1\n# intermediate comment\nvar y = 2\nvar z = 3"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        expect(groups[0].var_count).to_equal(3)
+
+    it("splits groups on non-empty, non-comment lines"):
+        val source = "var a = 1\nvar b = 2\nfn foo(): pass\nvar c = 3\nvar d = 4"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(2)
+        expect(groups[0].var_count).to_equal(2)
+        expect(groups[1].var_count).to_equal(2)
+
+    it("extracts variable names with type annotations"):
+        val source = "var count: i64 = 0\nvar total: i64 = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.var_names[0]).to_equal("count")
+        expect(group.var_names[1]).to_equal("total")
+
+    it("extracts variable names with array types"):
+        val source = "var items: [text] = []\nvar names: [text] = []"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.var_names[0]).to_equal("items")
+        expect(group.var_names[1]).to_equal("names")
+
+describe("Group Comment Detection"):
+    it("detects comment immediately before group"):
+        val source = "# Counter variables\nvar count = 0\nvar total = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.has_group_comment).to_equal(true)
+
+    it("detects comment 2 lines before group"):
+        val source = "# Counter variables\n\nvar count = 0\nvar total = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.has_group_comment).to_equal(true)
+
+    it("marks group without comment"):
+        val source = "var count = 0\nvar total = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.has_group_comment).to_equal(false)
+
+    it("does not detect comment too far before"):
+        val source = "# Some comment\n\n\n\nvar count = 0\nvar total = 0"
+        val groups = detect_variable_groups("test.spl", source)
+
+        expect(groups.len()).to_equal(1)
+        val group = groups[0]
+        expect(group.has_group_comment).to_equal(false)
+
+describe("Comment Suggestion"):
+    it("suggests 'Constants' for UPPER_CASE variables"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 3,
+            var_names: ["MAX_SIZE", "MIN_SIZE", "DEFAULT_SIZE"],
+            var_count: 3,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# Constants")
+
+    it("suggests prefix pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 3,
+            var_names: ["config_name", "config_port", "config_host"],
+            var_count: 3,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# config_* variables")
+
+    it("suggests suffix pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 3,
+            var_names: ["item_count", "total_count", "error_count"],
+            var_count: 3,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# *_count variables")
+
+    it("suggests 'Configuration variables' for config pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["server_config", "client_config"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# Configuration variables")
+
+    it("suggests 'State variables' for state pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["parser_state", "lexer_state"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# State variables")
+
+    it("suggests 'Counter variables' for count pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["test_count", "failure_count"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# Counter variables")
+
+    it("suggests 'Flag variables' for flag pattern"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["is_valid", "has_error"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# Flag variables")
+
+    it("suggests default message for generic groups"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["x", "y"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val suggestion = suggest_group_comment(group)
+
+        expect(suggestion).to_equal("# Group of 2 related variables")
+
+describe("Warning Generation"):
+    it("emits warnings for groups without comments"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 10,
+            end_line: 12,
+            var_names: ["count", "total", "sum"],
+            var_count: 3,
+            has_group_comment: false,
+            suggested_comment: "# Counter variables"
+        )
+        val groups = [group]
+        val warnings = emit_group_comment_warnings(groups)
+
+        expect(warnings.len()).to_equal(2)
+        val first = warnings[0]
+        val second = warnings[1]
+        expect(first.contains("test.spl:10")).to_equal(true)
+        expect(first.contains("Group of 3 variables")).to_equal(true)
+        expect(second.contains("Suggestion:")).to_equal(true)
+        expect(second.contains("Counter variables")).to_equal(true)
+
+    it("does not emit warnings for groups with comments"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 10,
+            end_line: 12,
+            var_names: ["count", "total"],
+            var_count: 2,
+            has_group_comment: true,
+            suggested_comment: ""
+        )
+        val groups = [group]
+        val warnings = emit_group_comment_warnings(groups)
+
+        expect(warnings.len()).to_equal(0)
+
+    it("formats variable names in warnings"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["x", "y"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: "# Variables"
+        )
+        val groups = [group]
+        val warnings = emit_group_comment_warnings(groups)
+
+        val msg = warnings[0]
+        expect(msg.contains("x, y")).to_equal(true)
+
+describe("Tag Classification"):
+    it("tags group with comment as present"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["x", "y"],
+            var_count: 2,
+            has_group_comment: true,
+            suggested_comment: ""
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[0]).to_equal("group_comment:present")
+
+    it("tags group without comment as missing"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["x", "y"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[0]).to_equal("group_comment:missing")
+
+    it("tags config groups"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["server_config", "client_config"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: "# Configuration variables"
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[1]).to_equal("var_group:config")
+
+    it("tags state groups"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["parser_state", "lexer_state"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: "# State variables"
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[1]).to_equal("var_group:state")
+
+    it("tags constant groups"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["MAX_SIZE", "MIN_SIZE"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: "# Constants"
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[1]).to_equal("var_group:constants")
+
+    it("tags general groups"):
+        val group = VariableGroup(
+            file_path: "test.spl",
+            start_line: 1,
+            end_line: 2,
+            var_names: ["x", "y"],
+            var_count: 2,
+            has_group_comment: false,
+            suggested_comment: "# Group of 2 related variables"
+        )
+        val tags = classify_variable_group(group)
+
+        expect(tags[1]).to_equal("var_group:general")

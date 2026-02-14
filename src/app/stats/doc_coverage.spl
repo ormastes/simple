@@ -1,0 +1,520 @@
+# Documentation Coverage Aggregation
+#
+# Provides unified coverage reporting across:
+# - Public function documentation
+# - SDoctest examples
+# - Inline comments
+# - Group comments
+# - Per-kind and per-module breakdowns
+
+use doc_coverage.types.doc_item.{DocItem, DocKind}
+use doc_coverage.types.coverage_result.{FileCoverage}
+use doc_coverage.scanner.mod (discover_source_files, scan_file_for_docs)
+use doc_coverage.scanner.file_scanner (filter_public_only)
+use doc_coverage.analysis.sdoctest_coverage (load_sdoctest_blocks, compute_sdoctest_coverage)
+use doc_coverage.analysis.inline_comment_coverage (compute_inline_comment_coverage, InlineCommentResult)
+use doc_coverage.analysis.group_comment_detection (detect_variable_groups, VariableGroup)
+use app.stats.types.{DocCoverageStats, KindStats, ModuleStats, InlineCommentStats, GroupCommentStats}
+use app.stats.tag_classifier (classify_doc_item, count_sdoctest_examples)
+use app.io.mod (file_read, file_exists)
+use std.string.{NL}
+
+# Main aggregation function - compute comprehensive coverage stats
+fn aggregate_doc_coverage(files: [text]) -> DocCoverageStats:
+    # Load SDoctest blocks from documentation
+    val sdoctest_data = load_sdoctest_blocks()
+    val block_names = sdoctest_data.0
+    val block_codes = sdoctest_data.1
+
+    # Scan all files for documentation items
+    var all_items: [DocItem] = []
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        val file_items = scan_file_for_docs(file_path)
+        var j = 0
+        while j < file_items.len():
+            all_items.push(file_items[j])
+            j = j + 1
+        i = i + 1
+
+    # Filter to public items only
+    val public_items = filter_public_only(all_items)
+
+    # Compute basic metrics
+    val total_public = public_items.len()
+    var functions_with_docs = 0
+    var functions_with_sdoctest = 0
+
+    var k = 0
+    while k < public_items.len():
+        val item = public_items[k]
+        val is_documented = item.is_documented()
+        if is_documented:
+            functions_with_docs = functions_with_docs + 1
+        val has_sdoc = _check_has_sdoctest(item.name, block_codes)
+        if has_sdoc:
+            functions_with_sdoctest = functions_with_sdoctest + 1
+        k = k + 1
+
+    val functions_without_sdoctest = total_public - functions_with_sdoctest
+
+    # Calculate percentages
+    var coverage_percent = 0
+    var sdoctest_percent = 0
+    if total_public > 0:
+        coverage_percent = (functions_with_docs * 100) / total_public
+        sdoctest_percent = (functions_with_sdoctest * 100) / total_public
+
+    # Find missing sdoctest functions
+    val missing_sdoc = find_missing_sdoctest(public_items, block_codes)
+
+    # Compute by-kind stats
+    val by_kind_data = compute_by_kind_stats(public_items, block_codes)
+
+    # Compute by-module stats
+    val by_module_data = compute_by_module_stats(public_items, block_codes)
+
+    DocCoverageStats(
+        total_public_functions: total_public,
+        functions_with_docs: functions_with_docs,
+        functions_with_sdoctest: functions_with_sdoctest,
+        functions_without_sdoctest: functions_without_sdoctest,
+        coverage_percent: coverage_percent,
+        sdoctest_percent: sdoctest_percent,
+        missing_sdoctest: missing_sdoc,
+        by_kind: by_kind_data,
+        by_module: by_module_data
+    )
+
+# Check if item has sdoctest coverage
+fn _check_has_sdoctest(item_name: text, sdoctest_blocks: [text]) -> bool:
+    var i = 0
+    while i < sdoctest_blocks.len():
+        val block = sdoctest_blocks[i]
+        val contains_name = block.contains(item_name)
+        if contains_name:
+            return true
+        i = i + 1
+    false
+
+# Find functions missing sdoctest examples
+fn find_missing_sdoctest(items: [DocItem], blocks: [text]) -> [text]:
+    var missing: [text] = []
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        # Only check public functions
+        val is_function = item.kind == DocKind.Function
+        val is_public = item.is_public
+        if is_function:
+            if is_public:
+                val has_sdoc = _check_has_sdoctest(item.name, blocks)
+                if not has_sdoc:
+                    val full_name = "{item.file}:{item.name}"
+                    missing.push(full_name)
+        i = i + 1
+    missing
+
+# Compute statistics grouped by item kind
+fn compute_by_kind_stats(items: [DocItem], blocks: [text]) -> [[text]]:
+    # Group items by kind
+    var function_total = 0
+    var function_doc = 0
+    var function_sdoc = 0
+    var struct_total = 0
+    var struct_doc = 0
+    var struct_sdoc = 0
+    var class_total = 0
+    var class_doc = 0
+    var class_sdoc = 0
+    var enum_total = 0
+    var enum_doc = 0
+    var enum_sdoc = 0
+    var const_total = 0
+    var const_doc = 0
+    var const_sdoc = 0
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val kind = item.kind
+        val is_doc = item.is_documented()
+        val has_sdoc = _check_has_sdoctest(item.name, blocks)
+
+        # Functions
+        val is_function = kind == DocKind.Function
+        if is_function:
+            function_total = function_total + 1
+            if is_doc:
+                function_doc = function_doc + 1
+            if has_sdoc:
+                function_sdoc = function_sdoc + 1
+
+        # Structs
+        val is_struct = kind == DocKind.Struct
+        if is_struct:
+            struct_total = struct_total + 1
+            if is_doc:
+                struct_doc = struct_doc + 1
+            if has_sdoc:
+                struct_sdoc = struct_sdoc + 1
+
+        # Classes
+        val is_class = kind == DocKind.Class
+        if is_class:
+            class_total = class_total + 1
+            if is_doc:
+                class_doc = class_doc + 1
+            if has_sdoc:
+                class_sdoc = class_sdoc + 1
+
+        # Enums
+        val is_enum = kind == DocKind.Enum
+        if is_enum:
+            enum_total = enum_total + 1
+            if is_doc:
+                enum_doc = enum_doc + 1
+            if has_sdoc:
+                enum_sdoc = enum_sdoc + 1
+
+        # Constants
+        val is_const = kind == DocKind.Constant
+        if is_const:
+            const_total = const_total + 1
+            if is_doc:
+                const_doc = const_doc + 1
+            if has_sdoc:
+                const_sdoc = const_sdoc + 1
+
+        i = i + 1
+
+    # Build result as array of arrays (CSV-like)
+    var result: [[text]] = []
+    if function_total > 0:
+        var func_row: [text] = []
+        func_row.push("function")
+        func_row.push("{function_total}")
+        func_row.push("{function_doc}")
+        func_row.push("{function_sdoc}")
+        result.push(func_row)
+
+    if struct_total > 0:
+        var struct_row: [text] = []
+        struct_row.push("struct")
+        struct_row.push("{struct_total}")
+        struct_row.push("{struct_doc}")
+        struct_row.push("{struct_sdoc}")
+        result.push(struct_row)
+
+    if class_total > 0:
+        var class_row: [text] = []
+        class_row.push("class")
+        class_row.push("{class_total}")
+        class_row.push("{class_doc}")
+        class_row.push("{class_sdoc}")
+        result.push(class_row)
+
+    if enum_total > 0:
+        var enum_row: [text] = []
+        enum_row.push("enum")
+        enum_row.push("{enum_total}")
+        enum_row.push("{enum_doc}")
+        enum_row.push("{enum_sdoc}")
+        result.push(enum_row)
+
+    if const_total > 0:
+        var const_row: [text] = []
+        const_row.push("constant")
+        const_row.push("{const_total}")
+        const_row.push("{const_doc}")
+        const_row.push("{const_sdoc}")
+        result.push(const_row)
+
+    result
+
+# Compute statistics grouped by module category
+fn compute_by_module_stats(items: [DocItem], blocks: [text]) -> [[text]]:
+    # Group items by module (stdlib, core, compiler, app, lib)
+    var stdlib_total = 0
+    var stdlib_doc = 0
+    var stdlib_sdoc = 0
+    var core_total = 0
+    var core_doc = 0
+    var core_sdoc = 0
+    var compiler_total = 0
+    var compiler_doc = 0
+    var compiler_sdoc = 0
+    var app_total = 0
+    var app_doc = 0
+    var app_sdoc = 0
+    var lib_total = 0
+    var lib_doc = 0
+    var lib_sdoc = 0
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val file_path = item.file
+        val is_doc = item.is_documented()
+        val has_sdoc = _check_has_sdoctest(item.name, blocks)
+
+        # Stdlib
+        val is_stdlib = file_path.contains("/src/std/")
+        if is_stdlib:
+            stdlib_total = stdlib_total + 1
+            if is_doc:
+                stdlib_doc = stdlib_doc + 1
+            if has_sdoc:
+                stdlib_sdoc = stdlib_sdoc + 1
+
+        # Core
+        val is_core = file_path.contains("/src/core/")
+        if is_core:
+            core_total = core_total + 1
+            if is_doc:
+                core_doc = core_doc + 1
+            if has_sdoc:
+                core_sdoc = core_sdoc + 1
+
+        # Compiler
+        val is_compiler = file_path.contains("/src/compiler/")
+        if is_compiler:
+            compiler_total = compiler_total + 1
+            if is_doc:
+                compiler_doc = compiler_doc + 1
+            if has_sdoc:
+                compiler_sdoc = compiler_sdoc + 1
+
+        # App
+        val is_app = file_path.contains("/src/app/")
+        if is_app:
+            app_total = app_total + 1
+            if is_doc:
+                app_doc = app_doc + 1
+            if has_sdoc:
+                app_sdoc = app_sdoc + 1
+
+        # Lib
+        val is_lib = file_path.contains("/src/lib/")
+        if is_lib:
+            lib_total = lib_total + 1
+            if is_doc:
+                lib_doc = lib_doc + 1
+            if has_sdoc:
+                lib_sdoc = lib_sdoc + 1
+
+        i = i + 1
+
+    # Build result as array of arrays
+    var result: [[text]] = []
+    if stdlib_total > 0:
+        var stdlib_row: [text] = []
+        stdlib_row.push("stdlib")
+        stdlib_row.push("{stdlib_total}")
+        stdlib_row.push("{stdlib_doc}")
+        stdlib_row.push("{stdlib_sdoc}")
+        result.push(stdlib_row)
+
+    if core_total > 0:
+        var core_row: [text] = []
+        core_row.push("core")
+        core_row.push("{core_total}")
+        core_row.push("{core_doc}")
+        core_row.push("{core_sdoc}")
+        result.push(core_row)
+
+    if compiler_total > 0:
+        var compiler_row: [text] = []
+        compiler_row.push("compiler")
+        compiler_row.push("{compiler_total}")
+        compiler_row.push("{compiler_doc}")
+        compiler_row.push("{compiler_sdoc}")
+        result.push(compiler_row)
+
+    if app_total > 0:
+        var app_row: [text] = []
+        app_row.push("app")
+        app_row.push("{app_total}")
+        app_row.push("{app_doc}")
+        app_row.push("{app_sdoc}")
+        result.push(app_row)
+
+    if lib_total > 0:
+        var lib_row: [text] = []
+        lib_row.push("lib")
+        lib_row.push("{lib_total}")
+        lib_row.push("{lib_doc}")
+        lib_row.push("{lib_sdoc}")
+        result.push(lib_row)
+
+    result
+
+# Aggregate inline comment statistics
+fn aggregate_inline_coverage(files: [text]) -> InlineCommentStats:
+    val results = compute_inline_comment_coverage(files)
+
+    var total_items = results.len()
+    var with_inline = 0
+    var with_docstring = 0
+    var with_both = 0
+    var with_neither = 0
+    var error_count = 0
+    var warn_count = 0
+    var info_count = 0
+
+    var i = 0
+    while i < results.len():
+        val result = results[i]
+
+        val has_inline = result.has_inline_comment
+        val has_doc = result.has_docstring
+        val warning = result.warning_level
+
+        if has_inline:
+            with_inline = with_inline + 1
+        if has_doc:
+            with_docstring = with_docstring + 1
+
+        val has_both_types = has_inline and has_doc
+        if has_both_types:
+            with_both = with_both + 1
+
+        val has_none = not has_inline
+        val also_no_doc = not has_doc
+        if has_none:
+            if also_no_doc:
+                with_neither = with_neither + 1
+
+        # Count warning levels
+        if warning == "error":
+            error_count = error_count + 1
+        if warning == "warn":
+            warn_count = warn_count + 1
+        if warning == "info":
+            info_count = info_count + 1
+
+        i = i + 1
+
+    InlineCommentStats(
+        total_items: total_items,
+        with_inline_comment: with_inline,
+        with_docstring: with_docstring,
+        with_both: with_both,
+        with_neither: with_neither,
+        error_count: error_count,
+        warn_count: warn_count,
+        info_count: info_count
+    )
+
+# Aggregate group comment statistics
+fn aggregate_group_coverage(files: [text]) -> GroupCommentStats:
+    var all_groups: [VariableGroup] = []
+
+    # Scan each file for variable groups
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        val file_exists_check = file_exists(file_path)
+        if file_exists_check:
+            val source = file_read(file_path)
+            val groups = detect_variable_groups(file_path, source)
+            var j = 0
+            while j < groups.len():
+                all_groups.push(groups[j])
+                j = j + 1
+        i = i + 1
+
+    # Aggregate stats
+    val total_groups = all_groups.len()
+    var with_comment = 0
+    var missing_comment = 0
+
+    # Pattern counters
+    var config_count = 0
+    var state_count = 0
+    var constants_count = 0
+    var cache_count = 0
+    var buffer_count = 0
+    var counter_count = 0
+    var flag_count = 0
+
+    var k = 0
+    while k < all_groups.len():
+        val group = all_groups[k]
+        val has_comment_val = group.has_group_comment
+        if has_comment_val:
+            with_comment = with_comment + 1
+        else:
+            missing_comment = missing_comment + 1
+
+        # Classify pattern
+        val suggestion = group.suggested_comment
+        if suggestion.contains("Configuration"):
+            config_count = config_count + 1
+        elif suggestion.contains("State"):
+            state_count = state_count + 1
+        elif suggestion.contains("Constants"):
+            constants_count = constants_count + 1
+        elif suggestion.contains("Cache"):
+            cache_count = cache_count + 1
+        elif suggestion.contains("Buffer"):
+            buffer_count = buffer_count + 1
+        elif suggestion.contains("Counter"):
+            counter_count = counter_count + 1
+        elif suggestion.contains("Flag"):
+            flag_count = flag_count + 1
+
+        k = k + 1
+
+    # Build by_pattern array
+    var by_pattern: [[text]] = []
+    if config_count > 0:
+        var row: [text] = []
+        row.push("config")
+        row.push("{config_count}")
+        by_pattern.push(row)
+    if state_count > 0:
+        var row: [text] = []
+        row.push("state")
+        row.push("{state_count}")
+        by_pattern.push(row)
+    if constants_count > 0:
+        var row: [text] = []
+        row.push("constants")
+        row.push("{constants_count}")
+        by_pattern.push(row)
+    if cache_count > 0:
+        var row: [text] = []
+        row.push("cache")
+        row.push("{cache_count}")
+        by_pattern.push(row)
+    if buffer_count > 0:
+        var row: [text] = []
+        row.push("buffer")
+        row.push("{buffer_count}")
+        by_pattern.push(row)
+    if counter_count > 0:
+        var row: [text] = []
+        row.push("counter")
+        row.push("{counter_count}")
+        by_pattern.push(row)
+    if flag_count > 0:
+        var row: [text] = []
+        row.push("flag")
+        row.push("{flag_count}")
+        by_pattern.push(row)
+
+    GroupCommentStats(
+        total_groups: total_groups,
+        with_comment: with_comment,
+        missing_comment: missing_comment,
+        by_pattern: by_pattern
+    )
+
+export aggregate_doc_coverage
+export find_missing_sdoctest
+export compute_by_kind_stats
+export compute_by_module_stats
+export aggregate_inline_coverage
+export aggregate_group_coverage

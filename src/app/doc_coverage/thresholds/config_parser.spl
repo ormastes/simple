@@ -1,0 +1,139 @@
+# Doc Coverage Config Parser
+#
+# Line-based SDN parser for doc_coverage.sdn config files.
+# Avoids std.sdn.parser (broken at runtime).
+
+use app.doc_coverage.thresholds.types.{ThresholdConfig, threshold_config_default}
+use app.io.mod.{file_exists, file_read}
+
+fn parse_threshold_config(file_path: text) -> ThresholdConfig:
+    # Return defaults if file doesn't exist
+    val exists = file_exists(file_path)
+    if not exists:
+        return threshold_config_default()
+
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+
+    var config = threshold_config_default()
+    var in_thresholds = false
+    var in_exclude = false
+    var bracket_depth = 0
+
+    var idx = 0
+    val line_count = lines.len()
+    while idx < line_count:
+        val raw_line = lines[idx]
+        val line = raw_line.trim()
+
+        # Skip empty lines and comments
+        if line.len() == 0:
+            idx = idx + 1
+            pass_do_nothing
+        if line.starts_with("#"):
+            idx = idx + 1
+            pass_do_nothing
+
+        # Track brace depth
+        if line.contains("{"):
+            bracket_depth = bracket_depth + 1
+        if line.contains("}"):
+            bracket_depth = bracket_depth - 1
+            if bracket_depth == 1:
+                in_thresholds = false
+                in_exclude = false
+
+        # Parse top-level fields
+        if line.starts_with("default_threshold "):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                val value_str = parts[1]
+                config.default_threshold = int(value_str)
+
+        if line.starts_with("enforce "):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                val value = parts[1]
+                config.enforce = value == "true"
+
+        if line.starts_with("fail_on_below_threshold "):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                val value = parts[1]
+                config.fail_on_below = value == "true"
+
+        # Detect thresholds section
+        if line.starts_with("thresholds {"):
+            in_thresholds = true
+            idx = idx + 1
+            pass_do_nothing
+
+        # Detect exclude section
+        if line.starts_with("exclude ["):
+            in_exclude = true
+            idx = idx + 1
+            pass_do_nothing
+
+        # Parse threshold entries
+        if in_thresholds:
+            if bracket_depth == 2:
+                if line.contains("\""):
+                    val parsed = parse_threshold_entry(line)
+                    val scope_name = parsed[0]
+                    val scope_value = parsed[1]
+                    if scope_name.len() > 0:
+                        config.scope_names = config.scope_names + ([scope_name])
+                        config.scope_values = config.scope_values + ([int(scope_value)])
+
+        # Parse exclusions
+        if in_exclude:
+            if line.contains("\""):
+                val exclusion = parse_string_literal(line)
+                if exclusion.len() > 0:
+                    config.exclusions = config.exclusions + ([exclusion])
+
+        idx = idx + 1
+
+    return config
+
+fn parse_threshold_entry(line: text) -> [text]:
+    # Parse: "src/std/" 90
+    # Returns: [scope_name, threshold_value]
+
+    var result = ["", "0"]
+
+    # Extract quoted string
+    val q1 = line.index_of("\"")
+    if q1 < 0:
+        return result
+
+    val after_q1 = line[q1 + 1:line.len()]
+    val q2 = after_q1.index_of("\"")
+    if q2 < 0:
+        return result
+
+    val scope = after_q1[0:q2]
+
+    # Extract number after closing quote
+    val after_scope = after_q1[q2 + 1:after_q1.len()]
+    val parts = after_scope.trim().split(" ")
+    if parts.len() > 0:
+        val value = parts[0]
+        result = [scope, value]
+
+    return result
+
+fn parse_string_literal(line: text) -> text:
+    # Extract string from line like: "test/**"
+    val q1 = line.index_of("\"")
+    if q1 < 0:
+        return ""
+
+    val after_q1 = line[q1 + 1:line.len()]
+    val q2 = after_q1.index_of("\"")
+    if q2 < 0:
+        return ""
+
+    return after_q1[0:q2]
+
+export parse_threshold_config

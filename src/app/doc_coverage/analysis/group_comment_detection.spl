@@ -1,0 +1,472 @@
+# Group Comment Detection for Variable Groups
+#
+# Detects consecutive var/val declarations and checks for group comments.
+# Provides suggestions for missing group documentation.
+
+use std.string.{NL}
+
+# ============================================================================
+# Variable Group Detection
+# ============================================================================
+
+struct VariableGroup:
+    file_path: text
+    start_line: i64
+    end_line: i64
+    var_names: [text]
+    var_count: i64
+    has_group_comment: bool
+    suggested_comment: text
+
+impl VariableGroup:
+    static fn create(file: text, start: i64, end_val: i64, names: [text]) -> VariableGroup:
+        val count = names.len()
+        VariableGroup(
+            file_path: file,
+            start_line: start,
+            end_line: end_val,
+            var_names: names,
+            var_count: count,
+            has_group_comment: false,
+            suggested_comment: ""
+        )
+
+fn detect_variable_groups(file_path: text, source: text) -> [VariableGroup]:
+    # Detect consecutive var/val declarations
+    # Group those without empty lines between
+    # Check for comment before first line
+
+    val lines = source.split(NL)
+    var groups: [VariableGroup] = []
+
+    var current_group_names: [text] = []
+    var current_group_start = -1
+    var prev_line_was_var = false
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        val trimmed = line.trim()
+
+        # Check if line is a var/val declaration
+        val is_var_decl = _is_variable_declaration(trimmed)
+
+        if is_var_decl:
+            val var_name = _extract_variable_name(trimmed)
+
+            if prev_line_was_var:
+                # Continue existing group
+                current_group_names.push(var_name)
+            else:
+                # Start new group
+                if current_group_names.len() >= 2:
+                    # Save previous group (only if 2+ vars)
+                    val group_end = line_num - 1
+                    val prev_group = VariableGroup__create(
+                        file_path,
+                        current_group_start,
+                        group_end,
+                        current_group_names
+                    )
+                    groups.push(prev_group)
+
+                # Start fresh
+                current_group_names = []
+                current_group_names.push(var_name)
+                current_group_start = line_num
+
+            prev_line_was_var = true
+        else:
+            # Check if empty line (allows grouping)
+            val is_empty = trimmed.len() == 0
+            val is_comment = trimmed.starts_with("#")
+
+            val allows_grouping = is_empty or is_comment
+            if not allows_grouping:
+                # Non-empty, non-comment line breaks group
+                if current_group_names.len() >= 2:
+                    val group_end = line_num - 1
+                    val group = VariableGroup__create(
+                        file_path,
+                        current_group_start,
+                        group_end,
+                        current_group_names
+                    )
+                    groups.push(group)
+
+                current_group_names = []
+                current_group_start = -1
+                prev_line_was_var = false
+
+    # Handle final group
+    if current_group_names.len() >= 2:
+        val group = VariableGroup__create(
+            file_path,
+            current_group_start,
+            line_num,
+            current_group_names
+        )
+        groups.push(group)
+
+    # Check for comments and suggest
+    val enhanced_groups = _enhance_groups_with_comments(groups, source)
+    enhanced_groups
+
+fn _is_variable_declaration(line: text) -> bool:
+    # Check if line starts with var or val
+    val has_var = line.starts_with("var ")
+    val has_val = line.starts_with("val ")
+    has_var or has_val
+
+fn _extract_variable_name(line: text) -> text:
+    # Extract variable name from "var name = ..." or "val name: type"
+    var after_keyword = ""
+
+    if line.starts_with("var "):
+        after_keyword = line[4:]
+    elif line.starts_with("val "):
+        after_keyword = line[4:]
+    else:
+        return ""
+
+    # Find first space, colon, or equals
+    var name_end = -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+    val colon_idx = after_keyword.index_of(":") ?? -1
+    val equals_idx = after_keyword.index_of("=") ?? -1
+
+    # Find minimum positive index
+    if space_idx >= 0:
+        name_end = space_idx
+    if colon_idx >= 0:
+        val check_colon = name_end < 0 or colon_idx < name_end
+        if check_colon:
+            name_end = colon_idx
+    if equals_idx >= 0:
+        val check_equals = name_end < 0 or equals_idx < name_end
+        if check_equals:
+            name_end = equals_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    name.trim()
+
+fn _enhance_groups_with_comments(groups: [VariableGroup], source: text) -> [VariableGroup]:
+    # Check each group for preceding comment
+    # Generate suggestion if missing
+
+    val lines = source.split(NL)
+    var enhanced: [VariableGroup] = []
+
+    for group in groups:
+        val has_comment = _check_for_group_comment(group, lines)
+        val suggestion = suggest_group_comment(group)
+
+        val enhanced_group = VariableGroup(
+            file_path: group.file_path,
+            start_line: group.start_line,
+            end_line: group.end_line,
+            var_names: group.var_names,
+            var_count: group.var_count,
+            has_group_comment: has_comment,
+            suggested_comment: suggestion
+        )
+        enhanced.push(enhanced_group)
+
+    enhanced
+
+fn _check_for_group_comment(group: VariableGroup, lines: [text]) -> bool:
+    # Check if there's a comment 1-2 lines before start_line
+    val start_idx = group.start_line - 1
+
+    # Check line immediately before
+    if start_idx > 0:
+        val prev_idx = start_idx - 1
+        val prev_line = lines[prev_idx]
+        val prev_trimmed = prev_line.trim()
+
+        if prev_trimmed.starts_with("#"):
+            # Has comment before group
+            return true
+
+    # Check 2 lines before
+    if start_idx > 1:
+        val prev2_idx = start_idx - 2
+        val prev2_line = lines[prev2_idx]
+        val prev2_trimmed = prev2_line.trim()
+
+        if prev2_trimmed.starts_with("#"):
+            return true
+
+    false
+
+# ============================================================================
+# Comment Suggestion
+# ============================================================================
+
+fn suggest_group_comment(group: VariableGroup) -> text:
+    # Heuristics: common prefix, UPPER_CASE constants, naming patterns
+
+    val names = group.var_names
+    if names.len() == 0:
+        return ""
+
+    # Check if all UPPER_CASE (constants)
+    val all_upper = _all_uppercase(names)
+    if all_upper:
+        return "# Constants"
+
+    # Check for common prefix
+    val prefix = _find_common_prefix(names)
+    if prefix.len() >= 3:
+        val suggestion = "# {prefix}* variables"
+        return suggestion
+
+    # Check for common suffix
+    val suffix = _find_common_suffix(names)
+    if suffix.len() >= 3:
+        val suggestion = "# *{suffix} variables"
+        return suggestion
+
+    # Check for naming patterns
+    val pattern = _detect_naming_pattern(names)
+    if pattern != "":
+        return pattern
+
+    # Default suggestion
+    val count = group.var_count
+    "# Group of {count} related variables"
+
+fn _all_uppercase(names: [text]) -> bool:
+    for name in names:
+        val is_upper = _is_uppercase(name)
+        if not is_upper:
+            return false
+    true
+
+fn _is_uppercase(name: text) -> bool:
+    # Check if name is UPPER_CASE (allowing underscores)
+    var i = 0
+    while i < name.len():
+        val ch = name[i:i + 1]
+        val is_upper_ch = ch >= "A" and ch <= "Z"
+        val is_underscore = ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+
+        val is_valid = is_upper_ch or is_underscore or is_digit
+        if not is_valid:
+            return false
+
+        i = i + 1
+    true
+
+fn _find_common_prefix(names: [text]) -> text:
+    if names.len() < 2:
+        return ""
+
+    val first = names[0]
+    var prefix_len = first.len()
+
+    var i = 1
+    while i < names.len():
+        val name = names[i]
+        val common_len = _common_prefix_length(first, name)
+        if common_len < prefix_len:
+            prefix_len = common_len
+        i = i + 1
+
+    if prefix_len < 3:
+        return ""
+
+    first[0:prefix_len]
+
+fn _common_prefix_length(a: text, b: text) -> i64:
+    var len = 0
+    val max_len_a = a.len()
+    val max_len_b = b.len()
+    var max_len = max_len_a
+    if max_len_b < max_len:
+        max_len = max_len_b
+
+    var i = 0
+    while i < max_len:
+        val ch_a = a[i:i + 1]
+        val ch_b = b[i:i + 1]
+        if ch_a == ch_b:
+            len = len + 1
+        else:
+            return len
+        i = i + 1
+
+    len
+
+fn _find_common_suffix(names: [text]) -> text:
+    if names.len() < 2:
+        return ""
+
+    val first = names[0]
+    var suffix_len = first.len()
+
+    var i = 1
+    while i < names.len():
+        val name = names[i]
+        val common_len = _common_suffix_length(first, name)
+        if common_len < suffix_len:
+            suffix_len = common_len
+        i = i + 1
+
+    if suffix_len < 3:
+        return ""
+
+    val start = first.len() - suffix_len
+    first[start:]
+
+fn _common_suffix_length(a: text, b: text) -> i64:
+    var len = 0
+    val max_len_a = a.len()
+    val max_len_b = b.len()
+    var max_len = max_len_a
+    if max_len_b < max_len:
+        max_len = max_len_b
+
+    var i = 1
+    while i <= max_len:
+        val ch_a = a[max_len_a - i:max_len_a - i + 1]
+        val ch_b = b[max_len_b - i:max_len_b - i + 1]
+        if ch_a == ch_b:
+            len = len + 1
+        else:
+            return len
+        i = i + 1
+
+    len
+
+fn _detect_naming_pattern(names: [text]) -> text:
+    # Detect common naming patterns
+
+    var has_config = false
+    var has_state = false
+    var has_cache = false
+    var has_buffer = false
+    var has_count = false
+    var has_flag = false
+
+    for name in names:
+        val lower = name.to_lower()
+        if lower.contains("config"):
+            has_config = true
+        if lower.contains("state"):
+            has_state = true
+        if lower.contains("cache"):
+            has_cache = true
+        if lower.contains("buffer") or lower.contains("buf"):
+            has_buffer = true
+        if lower.contains("count") or lower.contains("cnt"):
+            has_count = true
+        if lower.contains("flag") or lower.contains("is_") or lower.contains("has_"):
+            has_flag = true
+
+    if has_config:
+        return "# Configuration variables"
+    if has_state:
+        return "# State variables"
+    if has_cache:
+        return "# Cache variables"
+    if has_buffer:
+        return "# Buffer variables"
+    if has_count:
+        return "# Counter variables"
+    if has_flag:
+        return "# Flag variables"
+
+    ""
+
+# ============================================================================
+# Warning Generation
+# ============================================================================
+
+fn emit_group_comment_warnings(groups: [VariableGroup]) -> [text]:
+    # Generate info messages with suggestions
+    var warnings: [text] = []
+
+    for group in groups:
+        if not group.has_group_comment:
+            val file = group.file_path
+            val line = group.start_line
+            val count = group.var_count
+            val suggestion = group.suggested_comment
+
+            val names_str = _format_var_names(group.var_names)
+            val msg = "{file}:{line}: Group of {count} variables without comment: {names_str}"
+            val suggest_msg = "{file}:{line}:   Suggestion: {suggestion}"
+
+            warnings.push(msg)
+            warnings.push(suggest_msg)
+
+    warnings
+
+fn _format_var_names(names: [text]) -> text:
+    # Format variable names for display
+    if names.len() == 0:
+        return ""
+
+    if names.len() == 1:
+        return names[0]
+
+    if names.len() == 2:
+        return "{names[0]}, {names[1]}"
+
+    # Show first 3 and "..."
+    if names.len() > 3:
+        return "{names[0]}, {names[1]}, {names[2]}, ..."
+
+    # Exactly 3
+    "{names[0]}, {names[1]}, {names[2]}"
+
+# ============================================================================
+# Tag Generation
+# ============================================================================
+
+fn classify_variable_group(group: VariableGroup) -> [text]:
+    # Generate tag names for a variable group
+    var tags: [text] = []
+
+    # Check comment status
+    if group.has_group_comment:
+        tags.push("group_comment:present")
+    else:
+        tags.push("group_comment:missing")
+
+    # Classify by pattern
+    val suggestion = group.suggested_comment
+
+    if suggestion.contains("Configuration"):
+        tags.push("var_group:config")
+    elif suggestion.contains("State"):
+        tags.push("var_group:state")
+    elif suggestion.contains("Constants"):
+        tags.push("var_group:constants")
+    elif suggestion.contains("Cache"):
+        tags.push("var_group:cache")
+    elif suggestion.contains("Buffer"):
+        tags.push("var_group:buffer")
+    elif suggestion.contains("Counter"):
+        tags.push("var_group:counter")
+    elif suggestion.contains("Flag"):
+        tags.push("var_group:flag")
+    else:
+        tags.push("var_group:general")
+
+    tags
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export VariableGroup
+export detect_variable_groups
+export suggest_group_comment
+export emit_group_comment_warnings
+export classify_variable_group

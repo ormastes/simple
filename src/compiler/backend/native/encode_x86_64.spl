@@ -532,6 +532,10 @@ fn encode_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
         code = code + [0xff]
         code = code + [modrm_direct(2, src)]
 
+    # SIMD Instructions (delegate to helper)
+    elif inst.opcode >= X86_OP_VADDPS_128 and inst.opcode <= X86_OP_VMINPS:
+        return encode_simd_inst(ectx, inst)
+
     else:
         # Unknown opcode - emit NOP
         code = code + [0x90]
@@ -574,6 +578,97 @@ fn encode_mem_operand(code: [i64], reg: i64, base: i64, offset: i64) -> [i64]:
             result = emit_i32(result, offset)
 
     result
+
+# ============================================================================
+# VEX Prefix Encoding for AVX/AVX2
+# ============================================================================
+
+fn vex_3byte(l: i64, pp: i64, mmmmm: i64, w: i64, vvvv: i64, r: i64, x: i64, b: i64) -> [i64]:
+    """
+    Encode 3-byte VEX prefix for AVX instructions.
+    Format: C4 RXB.mmmmm WvvvvLpp
+    """
+    val byte1 = 0xc4
+    val byte2 = ((r ^ 1) * 128) + ((x ^ 1) * 64) + ((b ^ 1) * 32) + mmmmm
+    val byte3 = (w * 128) + ((vvvv ^ 15) * 8) + (l * 4) + pp
+    [byte1, byte2, byte3]
+
+fn vex_2byte(l: i64, pp: i64, vvvv: i64, r: i64) -> [i64]:
+    """
+    Encode 2-byte VEX prefix (simplified, for 0F opcodes only).
+    Format: C5 RvvvvLpp
+    """
+    val byte1 = 0xc5
+    val byte2 = ((r ^ 1) * 128) + ((vvvv ^ 15) * 8) + (l * 4) + pp
+    [byte1, byte2]
+
+# ============================================================================
+# SIMD Instruction Encoding
+# ============================================================================
+
+fn encode_simd_inst(ectx: EncodeContext, inst: MachInst) -> EncodeContext:
+    """Encode AVX/AVX2 SIMD instructions with VEX prefixes."""
+    var code = ectx.code
+
+    # Extract operands (most SIMD ops have 3 operands: dest, src1, src2)
+    val dst = if inst.operands.len() > 0: get_phys_reg_id(inst.operands[0]) else: 0
+    val src1 = if inst.operands.len() > 1: get_phys_reg_id(inst.operands[1]) else: 0
+    val src2 = if inst.operands.len() > 2: get_phys_reg_id(inst.operands[2]) else: 0
+
+    # XMM registers are encoded as 0-15 (physical IDs 16-31 -> subtract 16)
+    # YMM registers are encoded as 0-15 (physical IDs 32-47 -> subtract 32)
+    val dst_xmm = dst % 16
+    val src1_xmm = src1 % 16
+    val src2_xmm = src2 % 16
+
+    # VEX R/X/B bits (inverted)
+    val vex_r = if dst_xmm >= 8: 0 else: 1
+    val vex_x = 1  # Unused in register-register encoding
+    val vex_b = if src2_xmm >= 8: 0 else: 1
+    val vex_vvvv = src1_xmm  # Source 1 goes in vvvv field
+
+    # Determine L bit (0 for 128-bit, 1 for 256-bit)
+    val is_256bit = inst.opcode >= X86_OP_VADDPS_256 and inst.opcode < X86_OP_VPADDD_128
+    val vex_l = if is_256bit: 1 else: 0
+
+    # Encode specific instructions
+    if inst.opcode == X86_OP_VADDPS_128 or inst.opcode == X86_OP_VADDPS_256:
+        # VADDPS: VEX.NDS.L.0F.WIG 58 /r
+        val vex = vex_3byte(vex_l, 0, 1, 0, vex_vvvv, vex_r, vex_x, vex_b)
+        code = code + vex
+        code = code + [0x58]  # Opcode
+        code = code + [modrm_direct(dst_xmm % 8, src2_xmm % 8)]
+
+    elif inst.opcode == X86_OP_VSUBPS_128 or inst.opcode == X86_OP_VSUBPS_256:
+        # VSUBPS: VEX.NDS.L.0F.WIG 5C /r
+        val vex = vex_3byte(vex_l, 0, 1, 0, vex_vvvv, vex_r, vex_x, vex_b)
+        code = code + vex
+        code = code + [0x5c]
+        code = code + [modrm_direct(dst_xmm % 8, src2_xmm % 8)]
+
+    elif inst.opcode == X86_OP_VMULPS_128 or inst.opcode == X86_OP_VMULPS_256:
+        # VMULPS: VEX.NDS.L.0F.WIG 59 /r
+        val vex = vex_3byte(vex_l, 0, 1, 0, vex_vvvv, vex_r, vex_x, vex_b)
+        code = code + vex
+        code = code + [0x59]
+        code = code + [modrm_direct(dst_xmm % 8, src2_xmm % 8)]
+
+    elif inst.opcode == X86_OP_VDIVPS_128 or inst.opcode == X86_OP_VDIVPS_256:
+        # VDIVPS: VEX.NDS.L.0F.WIG 5E /r
+        val vex = vex_3byte(vex_l, 0, 1, 0, vex_vvvv, vex_r, vex_x, vex_b)
+        code = code + vex
+        code = code + [0x5e]
+        code = code + [modrm_direct(dst_xmm % 8, src2_xmm % 8)]
+
+    # Similar patterns for PD (double), integer ops would follow
+    # Simplified version - production would have all variations
+
+    EncodeContext(
+        code: code,
+        relocations: ectx.relocations,
+        pending_jumps: ectx.pending_jumps,
+        label_offsets: ectx.label_offsets
+    )
 
 # ============================================================================
 # SetCC Encoding Helper

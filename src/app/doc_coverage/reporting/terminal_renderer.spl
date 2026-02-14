@@ -1,0 +1,207 @@
+# Terminal renderer for documentation coverage
+#
+# Renders colorized, human-readable table output for terminal display.
+
+use doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
+use std.string.{NL}
+
+# Render coverage report for terminal
+fn render_coverage_terminal(coverage: CoverageReport) -> text:
+    var output = ""
+
+    # Header
+    output = "{output}{_render_header()}{NL}"
+
+    # Summary section
+    output = "{output}{_render_summary(coverage)}{NL}"
+
+    # Scope breakdown table
+    output = "{output}{_render_scope_table(coverage)}{NL}"
+
+    # Footer
+    output = "{output}{_render_footer()}{NL}"
+
+    output
+
+fn _render_header() -> text:
+    var header = "========================================={NL}"
+    header = "{header}📊 Documentation Coverage Report{NL}"
+    header = "{header}========================================={NL}"
+    header
+
+fn _render_summary(coverage: CoverageReport) -> text:
+    val total = coverage.total_items
+    val documented = coverage.documented_items
+    val overall_pct = coverage.overall_percent()
+    val sdoc_pct = coverage.sdoctest_percent()
+
+    val status_indicator = _get_status_indicator(overall_pct)
+
+    var summary = "{NL}Overall Status: {status_indicator}{NL}{NL}"
+    summary = "{summary}  Total Items:       {total}{NL}"
+    summary = "{summary}  Documented:        {documented} ({overall_pct}%){NL}"
+    summary = "{summary}  SDoctest Coverage: {coverage.sdoctest_coverage} ({sdoc_pct}%){NL}"
+    summary = "{summary}{NL}"
+
+    summary
+
+fn _render_scope_table(coverage: CoverageReport) -> text:
+    # Group files by scope
+    val scopes = _group_by_scope(coverage.files)
+    val scope_names = scopes.0
+    val scope_files = scopes.1
+
+    var table = "Coverage by Scope:{NL}{NL}"
+    table = "{table}┌────────────────┬─────────┬─────────┬────────────┬─────────────┐{NL}"
+    table = "{table}│ Scope          │ Files   │ Items   │ Documented │ Coverage    │{NL}"
+    table = "{table}├────────────────┼─────────┼─────────┼────────────┼─────────────┤{NL}"
+
+    var i = 0
+    while i < scope_names.len():
+        val scope_name = scope_names[i]
+        val files = scope_files[i]
+
+        # Calculate scope totals
+        val totals = _calculate_scope_totals(files)
+        val file_count = files.len()
+        val total_items = totals.0
+        val documented = totals.1
+        var coverage_pct = 0
+
+        if total_items > 0:
+            coverage_pct = (documented * 100) / total_items
+
+        val indicator = _get_status_indicator(coverage_pct)
+
+        # Format row with padding
+        val scope_padded = _pad_right(scope_name, 14)
+        val files_padded = _pad_left("{file_count}", 7)
+        val items_padded = _pad_left("{total_items}", 7)
+        val doc_padded = _pad_left("{documented}", 10)
+        val pct_str = "{coverage_pct}%"
+        val pct_with_indicator = "{pct_str} {indicator}"
+        val pct_padded = _pad_left(pct_with_indicator, 11)
+
+        table = "{table}│ {scope_padded} │ {files_padded} │ {items_padded} │ {doc_padded} │ {pct_padded} │{NL}"
+
+        i = i + 1
+
+    table = "{table}└────────────────┴─────────┴─────────┴────────────┴─────────────┘{NL}"
+
+    table
+
+fn _render_footer() -> text:
+    var footer = "{NL}Legend:{NL}"
+    footer = "{footer}  ✅ Excellent (≥90%)  ⚠️  Acceptable (60-89%)  ❌ Needs Work (<60%){NL}"
+    footer = "{footer}========================================={NL}"
+    footer
+
+# Helper: Get status indicator emoji
+fn _get_status_indicator(pct: f64) -> text:
+    var pct_int = pct
+    if pct_int >= 90:
+        "✅"
+    elif pct_int >= 60:
+        "⚠️"
+    else:
+        "❌"
+
+# Helper: Pad string to the right
+fn _pad_right(s: text, width: i64) -> text:
+    val len = s.len()
+    if len >= width:
+        return s
+
+    var result = s
+    var spaces_needed = width - len
+    var i = 0
+    while i < spaces_needed:
+        result = "{result} "
+        i = i + 1
+
+    result
+
+# Helper: Pad string to the left
+fn _pad_left(s: text, width: i64) -> text:
+    val len = s.len()
+    if len >= width:
+        return s
+
+    var result = ""
+    var spaces_needed = width - len
+    var i = 0
+    while i < spaces_needed:
+        result = "{result} "
+        i = i + 1
+
+    result = "{result}{s}"
+    result
+
+# Helper: Group files by scope
+fn _group_by_scope(files: [FileCoverage]) -> ([text], [[FileCoverage]]):
+    var scope_names: [text] = []
+    var scope_files_arrays: [[FileCoverage]] = []
+
+    var i = 0
+    while i < files.len():
+        val file_cov = files[i]
+        val scope = _extract_scope(file_cov.file_path)
+
+        # Find existing scope or create new one
+        val scope_idx = _find_scope_index(scope_names, scope)
+
+        if scope_idx < 0:
+            # New scope
+            scope_names.push(scope)
+            var new_array: [FileCoverage] = []
+            new_array.push(file_cov)
+            scope_files_arrays.push(new_array)
+        else:
+            # Existing scope
+            var existing_array = scope_files_arrays[scope_idx]
+            existing_array.push(file_cov)
+            scope_files_arrays[scope_idx] = existing_array
+
+        i = i + 1
+
+    (scope_names, scope_files_arrays)
+
+fn _extract_scope(file_path: text) -> text:
+    # Extract scope from file path
+    if file_path.starts_with("src/std/"):
+        "src/std"
+    elif file_path.starts_with("src/core/"):
+        "src/core"
+    elif file_path.starts_with("src/lib/"):
+        "src/lib"
+    elif file_path.starts_with("src/app/"):
+        "src/app"
+    elif file_path.starts_with("src/compiler/"):
+        "src/compiler"
+    else:
+        "other"
+
+fn _find_scope_index(scope_names: [text], target: text) -> i64:
+    var i = 0
+    while i < scope_names.len():
+        if scope_names[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _calculate_scope_totals(files: [FileCoverage]) -> (i64, i64):
+    # Returns (total_items, documented_items)
+    var total_items = 0
+    var documented_items = 0
+
+    var i = 0
+    while i < files.len():
+        val file_cov = files[i]
+        total_items = total_items + file_cov.total_items
+        documented_items = documented_items + file_cov.documented_items
+
+        i = i + 1
+
+    (total_items, documented_items)
+
+export render_coverage_terminal

@@ -1,6 +1,6 @@
 # Dynamic stats implementation using shell commands
 
-use app.io.mod (process_run, file_exists)
+use app.io.mod (process_run, file_exists, file_read)
 use app.stats.json_formatter (format_json)
 
 # Helper to run shell command and get output
@@ -58,6 +58,103 @@ fn has_flag(args: [text], flag: text) -> bool:
             return true
         i = i + 1
     false
+
+# Compute enhanced documentation coverage statistics
+fn compute_doc_coverage() -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64):
+    # Returns tuple of coverage metrics:
+    # (total_public, documented, with_sdoctest,
+    #  inline_coverage, group_coverage,
+    #  std_total, std_documented,
+    #  core_total, core_documented,
+    #  lib_total)
+    # Simplified to 10 values for performance
+
+    # Use simple file discovery instead of full scanner
+    var src_files: [text] = []
+
+    # Gather only key source directories to avoid timeout
+    val src_dirs = ["src/std", "src/core", "src/lib", "src/app"]
+
+    var dir_idx = 0
+    while dir_idx < src_dirs.len():
+        val dir = src_dirs[dir_idx]
+        val cmd = "find {dir} -name '*.spl' 2>/dev/null"
+        val result = process_run("sh", ["-c", cmd])
+        val stdout = result.0
+
+        val files = stdout.split("\n")
+        var f_idx = 0
+        while f_idx < files.len():
+            val f = files[f_idx]
+            val trimmed = f.trim()
+            if trimmed.len() > 0:
+                src_files.push(trimmed)
+            f_idx = f_idx + 1
+
+        dir_idx = dir_idx + 1
+
+    # Simple counting using grep instead of full analysis
+    var total_public = 0
+    var documented = 0
+    var with_inline = 0
+    var with_docstring = 0
+
+    var std_total = 0
+    var std_documented = 0
+    var core_total = 0
+    var core_documented = 0
+    var lib_total = 0
+    var lib_documented = 0
+
+    # Count functions with grep
+    var i = 0
+    while i < src_files.len():
+        val file_path = src_files[i]
+
+        if file_exists(file_path):
+            # Count function declarations
+            val fn_cmd = "grep -c '^fn\\|^    fn\\|^        fn' {file_path} 2>/dev/null || echo 0"
+            val fn_result = process_run("sh", ["-c", fn_cmd])
+            val fn_count_str = fn_result.0
+            val fn_count_trimmed = fn_count_str.trim()
+            val fn_count = fn_count_trimmed.to_int()
+
+            # Count comments before functions (simple heuristic)
+            val doc_cmd = "grep -B1 '^fn\\|^    fn\\|^        fn' {file_path} 2>/dev/null | grep -c '#' || echo 0"
+            val doc_result = process_run("sh", ["-c", doc_cmd])
+            val doc_count_str = doc_result.0
+            val doc_count_trimmed = doc_count_str.trim()
+            val doc_count = doc_count_trimmed.to_int()
+
+            total_public = total_public + fn_count
+            documented = documented + doc_count
+            with_inline = with_inline + doc_count
+
+            # Per-scope counting
+            if file_path.contains("/src/std/"):
+                std_total = std_total + fn_count
+                std_documented = std_documented + doc_count
+            elif file_path.contains("/src/core/"):
+                core_total = core_total + fn_count
+                core_documented = core_documented + doc_count
+            elif file_path.contains("/src/lib/"):
+                lib_total = lib_total + fn_count
+                lib_documented = lib_documented + doc_count
+
+        i = i + 1
+
+    # Simple sdoctest count
+    var with_sdoctest = 0
+    if file_exists("doc"):
+        val sdoc_cmd = "find doc -name '*.md' -exec grep -l '```simple' {{}} \\; 2>/dev/null | wc -l"
+        val sdoc_result = process_run("sh", ["-c", sdoc_cmd])
+        val sdoc_str = sdoc_result.0
+        val sdoc_trimmed = sdoc_str.trim()
+        with_sdoctest = sdoc_trimmed.to_int()
+
+    # Return comprehensive metrics
+    (total_public, documented, with_sdoctest, with_inline, with_docstring,
+     std_total, std_documented, core_total, core_documented, lib_total)
 
 # Main entry point
 fn run_stats(args: [text]):
@@ -131,12 +228,73 @@ fn run_stats(args: [text]):
             print "  Planned:     {feat_planned}"
             print ""
 
+    # Documentation coverage (skip if --quick)
+    var total_public = 0
+    var documented = 0
+    var with_sdoctest = 0
+    var with_inline = 0
+    var with_docstring = 0
+    var std_total = 0
+    var std_documented = 0
+    var core_total = 0
+    var core_documented = 0
+    var lib_total = 0
+
+    if not is_quick:
+        val doc_stats = compute_doc_coverage()
+        total_public = doc_stats.0
+        documented = doc_stats.1
+        with_sdoctest = doc_stats.2
+        with_inline = doc_stats.3
+        with_docstring = doc_stats.4
+        std_total = doc_stats.5
+        std_documented = doc_stats.6
+        core_total = doc_stats.7
+        core_documented = doc_stats.8
+        lib_total = doc_stats.9
+
     if not is_brief and not is_json:
         print "Documentation:"
         print "  Features:   doc/feature/feature.md"
         print "  Tests:      doc/test/test_result.md"
         print "  Bugs:       doc/bug/bug_report.md"
         print "  Pending:    doc/feature/pending_feature.md"
+
+        # Show doc coverage if we computed it
+        if total_public > 0:
+            val doc_percent = (documented * 100) / total_public
+            val sdoc_percent = (with_sdoctest * 100) / total_public
+            var inline_percent = 0
+            var docstring_percent = 0
+            if total_public > 0:
+                inline_percent = (with_inline * 100) / total_public
+                docstring_percent = (with_docstring * 100) / total_public
+
+            print ""
+            print "Coverage:"
+            print "  Public Functions:    {total_public}"
+            print "  Documented:          {documented} ({doc_percent}%)"
+            print "  With Inline Comment: {with_inline} ({inline_percent}%)"
+            print "  With Docstring:      {with_docstring} ({docstring_percent}%)"
+            print "  With SDoctest:       {with_sdoctest} ({sdoc_percent}%)"
+
+            # Per-scope breakdown
+            if std_total > 0 or core_total > 0 or lib_total > 0:
+                print ""
+                print "Per-Scope Breakdown:"
+
+                if std_total > 0:
+                    val std_percent = (std_documented * 100) / std_total
+                    print "  std/:  {std_documented}/{std_total} ({std_percent}%)"
+
+                if core_total > 0:
+                    val core_percent = (core_documented * 100) / core_total
+                    print "  core/: {core_documented}/{core_total} ({core_percent}%)"
+
+                if lib_total > 0:
+                    val lib_percent = (lib_documented * 100) / lib_total
+                    print "  lib/:  {lib_documented}/{lib_total} ({lib_percent}%)"
+
         print ""
 
     if not is_json:
@@ -150,11 +308,27 @@ fn run_stats(args: [text]):
 
         print "========================================="
     else:
-        # JSON output
+        # JSON output - compute doc coverage if not already done
+        if is_quick:
+            if total_public == 0:
+                val doc_stats = compute_doc_coverage()
+                total_public = doc_stats.0
+                documented = doc_stats.1
+                with_sdoctest = doc_stats.2
+                with_inline = doc_stats.3
+                with_docstring = doc_stats.4
+                std_total = doc_stats.5
+                std_documented = doc_stats.6
+                core_total = doc_stats.7
+                core_documented = doc_stats.8
+                lib_total = doc_stats.9
+
         val json = format_json(
             total_src, app_files, lib_files, std_files, test_files,
             total_lines, test_count, pass_count,
-            feat_total, feat_complete, feat_progress, feat_planned
+            feat_total, feat_complete, feat_progress, feat_planned,
+            total_public, documented, with_sdoctest, with_inline, with_docstring,
+            std_total, std_documented, core_total, core_documented, lib_total
         )
         print json
 

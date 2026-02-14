@@ -1,0 +1,142 @@
+# Core Simple — Ignored Return Value Warning Tests
+
+use core.lexer.{lex_init}
+use core.parser.{parse_module, parser_has_errors}
+use core.ast.{ast_reset}
+use core.interpreter.eval.{eval_reset, eval_module, eval_get_warnings}
+use core.interpreter.env.{env_init}
+use core.interpreter.value.{val_reset}
+
+describe "ignored return value warnings":
+    describe "function calls that should warn":
+        it "warns when function returning i64 is ignored":
+            val code = "fn get_value() -> i64: 42\nget_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(1)
+            val has_get_value = warnings[0].contains("get_value")
+            val has_i64 = warnings[0].contains("i64")
+            val has_ignored = warnings[0].contains("ignored")
+            expect(has_get_value).to_equal(true)
+            expect(has_i64).to_equal(true)
+            expect(has_ignored).to_equal(true)
+
+        it "warns when function returning text is ignored":
+            val code = "fn get_name() -> text: \"Alice\"\nget_name()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(1)
+            val has_get_name = warnings[0].contains("get_name")
+            val has_text = warnings[0].contains("text")
+            expect(has_get_name).to_equal(true)
+            expect(has_text).to_equal(true)
+
+        it "warns when function returning bool is ignored":
+            val code = "fn is_ready() -> bool: true\nis_ready()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(1)
+            val has_is_ready = warnings[0].contains("is_ready")
+            val has_bool = warnings[0].contains("bool")
+            expect(has_is_ready).to_equal(true)
+            expect(has_bool).to_equal(true)
+
+        it "warns when function returning f64 is ignored":
+            val code = "fn get_pi() -> f64: 3.14\nget_pi()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(1)
+            val has_get_pi = warnings[0].contains("get_pi")
+            val has_f64 = warnings[0].contains("f64")
+            expect(has_get_pi).to_equal(true)
+            expect(has_f64).to_equal(true)
+
+    describe "function calls that should NOT warn":
+        it "does not warn when return value is assigned to val":
+            val code = "fn get_value() -> i64: 42\nval x = get_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when return value is assigned to var":
+            val code = "fn get_value() -> i64: 42\nvar x = 0\nx = get_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when function returns void":
+            val code = "fn do_work(): print \"working\"\ndo_work()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when function returns unit explicitly":
+            val code = "fn do_work() -> (): print \"working\"\ndo_work()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when return value is used in expression":
+            val code = "fn get_value() -> i64: 42\nval x = get_value() + 1"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when return value is returned":
+            val code = "fn get_value() -> i64: 42\nfn wrapper() -> i64: return get_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when return value is used in if condition":
+            val code = "fn is_ready() -> bool: true\nif is_ready(): print \"ready\""
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+        it "does not warn when return value is used in while condition":
+            val code = "fn is_running() -> bool: false\nwhile is_running(): print \"running\""
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(0)
+
+    describe "multiple warnings":
+        it "warns for each ignored return value":
+            val code = "fn get_value() -> i64: 42\nget_value()\nget_value()\nget_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(3)
+
+        it "warns only for ignored calls, not used ones":
+            val code = "fn get_value() -> i64: 42\nget_value()\nval x = get_value()\nget_value()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(2)
+
+    describe "external functions":
+        it "warns when extern function return value is ignored":
+            val code = "extern fn compute() -> i64\ncompute()"
+            val warnings = check_warnings(code)
+            expect(warnings.len()).to_equal(1)
+            val has_compute = warnings[0].contains("compute")
+            expect(has_compute).to_equal(true)
+
+    describe "warning format":
+        it "includes function name in warning message":
+            val code = "fn calculate() -> i64: 100\ncalculate()"
+            val warnings = check_warnings(code)
+            val has_calculate = warnings[0].contains("calculate")
+            expect(has_calculate).to_equal(true)
+
+        it "includes return type in warning message":
+            val code = "fn get_status() -> text: \"ok\"\nget_status()"
+            val warnings = check_warnings(code)
+            val has_text = warnings[0].contains("text")
+            expect(has_text).to_equal(true)
+
+        it "starts with 'warning:' prefix":
+            val code = "fn get_value() -> i64: 42\nget_value()"
+            val warnings = check_warnings(code)
+            val starts_with_warning = warnings[0].starts_with("warning:")
+            expect(starts_with_warning).to_equal(true)
+
+# Helper function to parse, evaluate, and collect warnings
+fn check_warnings(code: text) -> [text]:
+    ast_reset()
+    val_reset()
+    env_init()
+    eval_reset()
+
+    parse_module(code, "test.spl")
+    if parser_has_errors():
+        return []
+
+    eval_module()
+
+    eval_get_warnings()

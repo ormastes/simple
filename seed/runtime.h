@@ -24,6 +24,9 @@ extern "C" {
 #include <stddef.h>
 #include <stdbool.h>
 
+/* Include threading library */
+#include "runtime_thread.h"
+
 /* ===== Tagged Value System ===== */
 
 typedef enum {
@@ -244,7 +247,7 @@ const char* spl_get_arg(int64_t idx);
 
 const char* rt_file_read_text(const char* path);
 int         rt_file_exists(const char* path);
-int         rt_file_write(const char* path, const char* content);
+void        rt_file_write(const char* path, const char* content);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);

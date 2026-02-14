@@ -1,0 +1,222 @@
+# Tag Generation for Documentation Coverage
+#
+# Generates tags for documentation items based on coverage level,
+# documentation status, scope, and API visibility.
+
+use doc_coverage.types.doc_item.{DocItem, DocKind}
+
+# ============================================================================
+# Coverage Level Tags
+# ============================================================================
+
+fn generate_coverage_tag(percentage: i64) -> text:
+    # Generate coverage tag based on percentage
+    # coverage:excellent  - ≥95%
+    # coverage:good       - 80-94%
+    # coverage:acceptable - 60-79%
+    # coverage:poor       - 40-59%
+    # coverage:insufficient - <40%
+
+    if percentage >= 95:
+        return "coverage:excellent"
+    if percentage >= 80:
+        return "coverage:good"
+    if percentage >= 60:
+        return "coverage:acceptable"
+    if percentage >= 40:
+        return "coverage:poor"
+    "coverage:insufficient"
+
+# ============================================================================
+# Documentation Status Tags
+# ============================================================================
+
+fn generate_doc_status_tags(item: DocItem) -> [text]:
+    # Generate documentation status tags for an item
+    var tags: [text] = []
+
+    val has_inline = item.has_inline_comment
+    val has_doc = item.has_docstring
+    val has_test = item.has_sdoctest
+
+    # Check if needs sdoctest (public functions)
+    val needs_test = item.needs_sdoctest()
+
+    # Determine completeness
+    var is_complete = false
+    if needs_test:
+        # Public function - needs inline, docstring, and sdoctest
+        val has_all_three = has_inline and has_doc and has_test
+        is_complete = has_all_three
+    else:
+        # Non-public or non-function - needs inline or docstring
+        val has_either = has_inline or has_doc
+        is_complete = has_either
+
+    if is_complete:
+        tags.push("doc:complete")
+    else:
+        tags.push("doc:incomplete")
+
+        # Add specific missing tags
+        if not has_inline:
+            tags.push("doc:missing_inline_comment")
+        if not has_doc:
+            val is_public = item.is_public
+            if is_public:
+                tags.push("doc:missing_docstring")
+        if needs_test:
+            if not has_test:
+                tags.push("doc:missing_sdoctest")
+
+    tags
+
+# ============================================================================
+# Scope Tags
+# ============================================================================
+
+fn generate_scope_tag(file_path: text) -> text:
+    # Generate scope tag based on file path
+    # scope:stdlib   - src/std/
+    # scope:core     - src/core/
+    # scope:lib      - src/lib/
+    # scope:app      - src/app/
+    # scope:compiler - src/compiler/
+
+    if file_path.contains("/src/std/"):
+        return "scope:stdlib"
+    if file_path.contains("/src/core/"):
+        return "scope:core"
+    if file_path.contains("/src/lib/"):
+        return "scope:lib"
+    if file_path.contains("/src/app/"):
+        return "scope:app"
+    if file_path.contains("/src/compiler/"):
+        return "scope:compiler"
+    "scope:unknown"
+
+# ============================================================================
+# API Visibility Tags
+# ============================================================================
+
+fn generate_api_tag(is_exported: bool) -> text:
+    # Generate API visibility tag
+    # api:public   - Exported in mod.spl
+    # api:internal - Not exported
+
+    if is_exported:
+        "api:public"
+    else:
+        "api:internal"
+
+# ============================================================================
+# Aggregate Tag Generation
+# ============================================================================
+
+fn generate_all_tags(item: DocItem) -> [text]:
+    # Generate all applicable tags for a documentation item
+    var tags: [text] = []
+
+    # Add scope tag
+    val scope_tag = generate_scope_tag(item.file)
+    tags.push(scope_tag)
+
+    # Add API visibility tag
+    val api_tag = generate_api_tag(item.is_exported)
+    tags.push(api_tag)
+
+    # Add doc status tags
+    val doc_tags = generate_doc_status_tags(item)
+    var i = 0
+    while i < doc_tags.len():
+        tags.push(doc_tags[i])
+        i = i + 1
+
+    # Add kind tag
+    val kind_tag = _generate_kind_tag(item.kind)
+    tags.push(kind_tag)
+
+    tags
+
+fn _generate_kind_tag(kind: DocKind) -> text:
+    # Generate tag based on item kind
+    match kind:
+        DocKind.Function: "kind:function"
+        DocKind.Struct: "kind:struct"
+        DocKind.Class: "kind:class"
+        DocKind.Enum: "kind:enum"
+        DocKind.EnumVariant: "kind:variant"
+        DocKind.Constant: "kind:constant"
+        DocKind.Variable: "kind:variable"
+        DocKind.Module: "kind:module"
+        DocKind.ImplBlock: "kind:impl"
+
+# ============================================================================
+# Tag Filtering and Querying
+# ============================================================================
+
+fn filter_items_by_tag(items: [DocItem], tag: text) -> [DocItem]:
+    # Filter items that have a specific tag
+    var filtered: [DocItem] = []
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val item_tags = generate_all_tags(item)
+
+        # Check if tag is in item_tags
+        var has_tag = false
+        var j = 0
+        while j < item_tags.len():
+            if item_tags[j] == tag:
+                has_tag = true
+            j = j + 1
+
+        if has_tag:
+            filtered.push(item)
+
+        i = i + 1
+
+    filtered
+
+fn get_unique_tags(items: [DocItem]) -> [text]:
+    # Get all unique tags from a list of items
+    var all_tags: [text] = []
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val item_tags = generate_all_tags(item)
+
+        var j = 0
+        while j < item_tags.len():
+            val tag = item_tags[j]
+
+            # Check if tag already exists
+            var exists = false
+            var k = 0
+            while k < all_tags.len():
+                if all_tags[k] == tag:
+                    exists = true
+                k = k + 1
+
+            if not exists:
+                all_tags.push(tag)
+
+            j = j + 1
+
+        i = i + 1
+
+    all_tags
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export generate_coverage_tag
+export generate_doc_status_tags
+export generate_scope_tag
+export generate_api_tag
+export generate_all_tags
+export filter_items_by_tag
+export get_unique_tags

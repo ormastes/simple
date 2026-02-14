@@ -1,0 +1,307 @@
+# Doc Coverage Command Implementation
+#
+# Provides CLI interface for documentation coverage analysis and SDoctest reporting.
+
+use app.io.mod (file_write, file_exists, cwd)
+use app.doc_coverage.scanner.mod.{scan_file_for_docs, discover_source_files, DocItem}
+use app.doc_coverage.scanner.file_scanner (filter_public_only)
+use app.doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks, suggest_missing_tags, compute_sdoctest_coverage}
+use app.doc_coverage.reporting.mod (export_coverage_json, export_coverage_csv, generate_coverage_markdown, render_coverage_terminal)
+use app.doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
+use std.string.{NL}
+
+# =========================================================================
+# CLI Entry Point
+# =========================================================================
+
+fn handle_doc_coverage_command(args: [text]) -> i64:
+    """
+    Handle doc-coverage command.
+
+    Flags:
+        --sdoctest-report  Generate SDoctest coverage report
+        --tag-file=FILE    Export missing tags to file
+        --format=text|json|csv|md|terminal  Output format
+        --missing          Show only missing documentation
+        --tag=X            Filter by tag
+
+    Returns: Exit code (0 = success, 1 = error)
+    """
+    var sdoctest_report = false
+    var tag_file = ""
+    var format = "terminal"
+    var root = cwd()
+    var show_missing = false
+    var tag_filter = ""
+
+    # Parse arguments
+    var i = 1
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--sdoctest-report":
+            sdoctest_report = true
+        elif arg == "--missing":
+            show_missing = true
+        elif arg.starts_with("--tag-file="):
+            tag_file = arg[11:]
+        elif arg.starts_with("--format="):
+            format = arg[9:]
+        elif arg.starts_with("--tag="):
+            tag_filter = arg[6:]
+        elif not arg.starts_with("-"):
+            root = arg
+        i = i + 1
+
+    # Discover source files
+    val patterns: [text] = []
+    val all_files = discover_source_files(root, patterns)
+    val files = filter_public_only(all_files)
+
+    if files.len() == 0:
+        print "No source files found in {root}"
+        return 1
+
+    # Load sdoctest blocks
+    val sdoctest_result = load_sdoctest_blocks()
+    val sdoctest_blocks = sdoctest_result.1
+
+    # Scan files for documentation items
+    if format == "terminal":
+        print "Scanning {files.len()} source files..."
+
+    var all_items: [DocItem] = []
+
+    var j = 0
+    while j < files.len():
+        val file_path = files[j]
+        val items = scan_file_for_docs(file_path)
+        var k = 0
+        while k < items.len():
+            all_items.push(items[k])
+            k = k + 1
+        j = j + 1
+
+    # Compute full coverage report
+    val coverage = compute_sdoctest_coverage(all_items, sdoctest_blocks)
+
+    # Generate SDoctest coverage report if requested (legacy format)
+    if sdoctest_report:
+        return generate_sdoctest_report(all_items, files, tag_file, format)
+
+    # New reporting system: handle different formats
+    match format:
+        "json":
+            val json_output = export_coverage_json(coverage, true)
+            print json_output
+            return 0
+
+        "csv":
+            val csv_output = generate_csv_output(coverage)
+            print csv_output
+            return 0
+
+        "md":
+            val md_output = generate_coverage_markdown(coverage)
+            print md_output
+            return 0
+
+        "terminal":
+            val terminal_output = render_coverage_terminal(coverage)
+            print terminal_output
+            return 0
+
+        _:
+            # Default: terminal output
+            val terminal_output = render_coverage_terminal(coverage)
+            print terminal_output
+            return 0
+
+    0
+
+# =========================================================================
+# SDoctest Report Generation
+# =========================================================================
+
+fn generate_sdoctest_report(items: [DocItem], files: [text], tag_file: text, format: text) -> i64:
+    """
+    Generate SDoctest coverage report.
+
+    Args:
+        items: All documented items
+        files: Source file paths
+        tag_file: Path to export tags (empty = no export)
+        format: Output format (text only)
+
+    Returns: Exit code
+    """
+    print "Loading SDoctest blocks..."
+    val blocks_result = load_sdoctest_blocks()
+    val block_names = blocks_result.0
+    val block_codes = blocks_result.1
+
+    print "Found {block_codes.len()} SDoctest blocks"
+    print ""
+
+    # Count functions with sdoctest coverage
+    var public_funcs = 0
+    var covered_funcs = 0
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val is_func = item.kind == "fn"
+        val is_static = item.kind == "static fn"
+        if is_func or is_static:
+            public_funcs = public_funcs + 1
+
+            # Check if function name appears in any block
+            val func_name = item.name
+            val in_blocks = function_in_blocks(func_name, block_codes)
+            if in_blocks:
+                covered_funcs = covered_funcs + 1
+        i = i + 1
+
+    val missing = public_funcs - covered_funcs
+    val percent = compute_percent(covered_funcs, public_funcs)
+
+    # Display report
+    print "SDoctest Coverage Report"
+    print "========================"
+    print "Total public functions: {public_funcs}"
+    print "With sdoctest: {covered_funcs} ({percent}%)"
+    print "Missing: {missing}"
+    print ""
+
+    # Show missing tags if requested
+    if tag_file != "":
+        val export_result = export_missing_tags(files, tag_file)
+        if export_result == 0:
+            print ""
+            print "Missing tags exported to: {tag_file}"
+
+    0
+
+fn function_in_blocks(func_name: text, blocks: [text]) -> bool:
+    """Check if function name appears in any SDoctest block."""
+    var i = 0
+    while i < blocks.len():
+        val block = blocks[i]
+        if block.contains(func_name):
+            return true
+        i = i + 1
+    false
+
+# =========================================================================
+# Coverage Summary Display
+# =========================================================================
+
+fn print_coverage_summary(items: [DocItem]):
+    """Display overall coverage summary for all items."""
+    var total = items.len()
+    var documented = 0
+    var public_funcs = 0
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val has_doc = item.has_inline_comment or item.has_docstring
+        if has_doc:
+            documented = documented + 1
+        val is_func = item.kind == "fn"
+        val is_static = item.kind == "static fn"
+        if is_func or is_static:
+            public_funcs = public_funcs + 1
+        i = i + 1
+
+    val missing = total - documented
+    val percent = compute_percent(documented, total)
+
+    print "Documentation Coverage Summary"
+    print "=============================="
+    print "Total items: {total}"
+    print "Documented: {documented} ({percent}%)"
+    print "Missing: {missing}"
+    print ""
+    print "Public functions: {public_funcs}"
+
+# =========================================================================
+# Tag Export
+# =========================================================================
+
+fn export_missing_tags(files: [text], output_path: text) -> i64:
+    """
+    Export missing SDoctest tags to a file.
+
+    Args:
+        files: Source file paths
+        output_path: Path to write tags
+
+    Returns: Exit code
+    """
+    var tags: [text] = []
+
+    # Generate suggested tags for each file
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        val suggested = suggest_missing_tags(file_path)
+        var j = 0
+        while j < suggested.len():
+            tags.push(suggested[j])
+            j = j + 1
+        i = i + 1
+
+    # Write to file
+    var content = "# Missing SDoctest Tags{NL}# Auto-generated tag suggestions{NL}{NL}"
+    var k = 0
+    while k < tags.len():
+        content = content + tags[k] + NL
+        k = k + 1
+
+    val write_ok = file_write(output_path, content)
+    if not write_ok:
+        print "Error: Failed to write tags to {output_path}"
+        return 1
+
+    0
+
+# =========================================================================
+# New Reporting System Helpers
+# =========================================================================
+
+fn generate_csv_output(coverage: CoverageReport) -> text:
+    """Generate CSV output from coverage report."""
+    # Collect all items from all files
+    var all_items: [DocItem] = []
+
+    val files = coverage.files
+    var i = 0
+    while i < files.len():
+        val file_cov = files[i]
+        val items = file_cov.items
+
+        var j = 0
+        while j < items.len():
+            all_items.push(items[j])
+            j = j + 1
+
+        i = i + 1
+
+    export_coverage_csv(all_items)
+
+# =========================================================================
+# Utility Functions
+# =========================================================================
+
+fn compute_percent(count: i64, total: i64) -> i64:
+    """Compute percentage as integer."""
+    if total == 0:
+        return 100
+    val ratio = count * 100 / total
+    ratio
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export handle_doc_coverage_command

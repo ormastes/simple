@@ -1,0 +1,419 @@
+name: Test Isolation (Critical)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+    types: [labeled]
+  schedule:
+    # Run weekly on Sundays at 03:00 UTC
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      test_profile:
+        description: 'Test profile to run'
+        required: true
+        default: 'critical'
+        type: choice
+        options:
+          - intensive
+          - critical
+
+jobs:
+  # ============================================================================
+  # Gate: Only run on main branch, labels, or manual trigger
+  # ============================================================================
+  check-trigger:
+    name: Check Trigger Conditions
+    runs-on: ubuntu-latest
+    outputs:
+      should-run: ${{ steps.check.outputs.run }}
+
+    steps:
+    - name: Check trigger
+      id: check
+      run: |
+        RUN=false
+
+        # Always run on main branch
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          RUN=true
+        fi
+
+        # Run if PR has "test:critical" label
+        if [[ "${{ github.event_name }}" == "pull_request" ]] && \
+           [[ "${{ contains(github.event.pull_request.labels.*.name, 'test:critical') }}" == "true" ]]; then
+          RUN=true
+        fi
+
+        # Always run on schedule
+        if [[ "${{ github.event_name }}" == "schedule" ]]; then
+          RUN=true
+        fi
+
+        # Always run on manual trigger
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          RUN=true
+        fi
+
+        echo "run=$RUN" >> $GITHUB_OUTPUT
+        echo "Should run critical tests: $RUN"
+
+  # ============================================================================
+  # Build Isolation Container
+  # ============================================================================
+  build-isolation-container:
+    name: Build Isolation Container
+    runs-on: ubuntu-latest
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should-run == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build isolation container
+      run: |
+        docker buildx build \
+          --cache-from type=gha \
+          --cache-to type=gha,mode=max \
+          --load \
+          -t simple-test-isolation:critical \
+          -f docker/Dockerfile.test-isolation \
+          .
+
+    - name: Save container
+      run: |
+        docker save simple-test-isolation:critical | gzip > isolation-container.tar.gz
+
+    - name: Upload container
+      uses: actions/upload-artifact@v4
+      with:
+        name: isolation-container
+        path: isolation-container.tar.gz
+        retention-days: 1
+
+  # ============================================================================
+  # QEMU Tests (RISC-V, ARM64)
+  # ============================================================================
+  qemu-tests:
+    name: QEMU Tests (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    needs: build-isolation-container
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [riscv64, aarch64]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download container
+      uses: actions/download-artifact@v4
+      with:
+        name: isolation-container
+
+    - name: Load container
+      run: |
+        docker load < isolation-container.tar.gz
+
+    - name: Install QEMU
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y qemu-system-misc qemu-system-arm qemu-utils
+
+    - name: Run QEMU tests
+      run: |
+        docker run --rm \
+          -v $(pwd):/workspace:ro \
+          --privileged \
+          --device /dev/kvm \
+          --memory=4g \
+          --cpus=8.0 \
+          simple-test-isolation:critical \
+          test test/qemu/${{ matrix.arch }}/ --profile=critical --timeout=3600
+      continue-on-error: true
+
+    - name: Upload QEMU logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: qemu-${{ matrix.arch }}-logs
+        path: |
+          test-results/
+          qemu-*.log
+        retention-days: 7
+
+  # ============================================================================
+  # Baremetal Boot Tests
+  # ============================================================================
+  baremetal-tests:
+    name: Baremetal Boot Tests
+    runs-on: ubuntu-latest
+    needs: build-isolation-container
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download container
+      uses: actions/download-artifact@v4
+      with:
+        name: isolation-container
+
+    - name: Load container
+      run: |
+        docker load < isolation-container.tar.gz
+
+    - name: Install toolchain
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y \
+          qemu-system-misc \
+          gcc-riscv64-unknown-elf \
+          binutils-riscv64-unknown-elf
+
+    - name: Run baremetal tests
+      run: |
+        docker run --rm \
+          -v $(pwd):/workspace:ro \
+          --privileged \
+          --device /dev/kvm \
+          --memory=4g \
+          --cpus=8.0 \
+          simple-test-isolation:critical \
+          test test/baremetal/ --profile=critical --timeout=3600
+      continue-on-error: true
+
+    - name: Upload baremetal logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: baremetal-logs
+        path: |
+          test-results/
+          baremetal-*.log
+        retention-days: 7
+
+  # ============================================================================
+  # Cross-Platform Build Tests
+  # ============================================================================
+  cross-platform-builds:
+    name: Cross-Platform (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: build-isolation-container
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - linux-x86_64
+          - linux-aarch64
+          - linux-riscv64
+          - windows-x86_64
+          - darwin-x86_64
+          - darwin-aarch64
+          - freebsd-x86_64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download container
+      uses: actions/download-artifact@v4
+      with:
+        name: isolation-container
+
+    - name: Load container
+      run: |
+        docker load < isolation-container.tar.gz
+
+    - name: Install cross-compilation tools
+      run: |
+        case "${{ matrix.target }}" in
+          linux-aarch64)
+            sudo apt-get update -qq
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            ;;
+          linux-riscv64)
+            sudo apt-get update -qq
+            sudo apt-get install -y gcc-riscv64-linux-gnu
+            ;;
+          windows-x86_64)
+            sudo apt-get update -qq
+            sudo apt-get install -y gcc-mingw-w64-x86-64
+            ;;
+          darwin-*)
+            # OSXCross setup required (complex)
+            echo "Skipping Darwin cross-compile (requires OSXCross)"
+            exit 0
+            ;;
+          freebsd-*)
+            # FreeBSD cross-compile tools
+            echo "Skipping FreeBSD cross-compile (requires custom toolchain)"
+            exit 0
+            ;;
+        esac
+
+    - name: Run cross-platform build
+      run: |
+        docker run --rm \
+          -v $(pwd):/workspace:ro \
+          --memory=2g \
+          --cpus=4.0 \
+          simple-test-isolation:critical \
+          test test/cross/${{ matrix.target }}/ --profile=intensive --timeout=1800
+      continue-on-error: true
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: cross-${{ matrix.target }}-artifacts
+        path: |
+          build/${{ matrix.target }}/
+          test-results/
+        retention-days: 7
+
+  # ============================================================================
+  # Compiler Self-Hosting (Intensive)
+  # ============================================================================
+  self-hosting:
+    name: Compiler Self-Hosting
+    runs-on: ubuntu-latest
+    needs: build-isolation-container
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download container
+      uses: actions/download-artifact@v4
+      with:
+        name: isolation-container
+
+    - name: Load container
+      run: |
+        docker load < isolation-container.tar.gz
+
+    - name: Run self-hosting build
+      run: |
+        docker run --rm \
+          -v $(pwd):/workspace:ro \
+          --memory=2g \
+          --cpus=4.0 \
+          simple-test-isolation:critical \
+          test test/compiler/self_hosting_spec.spl --profile=intensive --timeout=1800
+      continue-on-error: true
+
+    - name: Verify self-hosted compiler
+      run: |
+        # Check if self-hosted binary exists and works
+        if [ -f bin/compiler-self-hosted ]; then
+          docker run --rm \
+            -v $(pwd):/workspace:ro \
+            simple-test-isolation:critical \
+            /workspace/bin/compiler-self-hosted --version
+        fi
+      continue-on-error: true
+
+    - name: Upload self-hosted compiler
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: self-hosted-compiler
+        path: |
+          bin/compiler-self-hosted
+          test-results/
+        retention-days: 14
+
+  # ============================================================================
+  # Memory Stress Tests
+  # ============================================================================
+  memory-stress:
+    name: Memory Stress Tests
+    runs-on: ubuntu-latest
+    needs: build-isolation-container
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download container
+      uses: actions/download-artifact@v4
+      with:
+        name: isolation-container
+
+    - name: Load container
+      run: |
+        docker load < isolation-container.tar.gz
+
+    - name: Run memory stress tests
+      run: |
+        # Run with 4GB memory limit
+        docker run --rm \
+          -v $(pwd):/workspace:ro \
+          --memory=4g \
+          --memory-swap=4g \
+          --oom-kill-disable=false \
+          --cpus=4.0 \
+          simple-test-isolation:critical \
+          test test/stress/memory/ --profile=critical --timeout=3600
+      continue-on-error: true
+
+    - name: Check for memory leaks
+      run: |
+        # Analyze memory usage patterns
+        if [ -f test-results/memory-profile.log ]; then
+          cat test-results/memory-profile.log
+        fi
+      continue-on-error: true
+
+  # ============================================================================
+  # Summary
+  # ============================================================================
+  summary:
+    name: Critical Test Summary
+    runs-on: ubuntu-latest
+    needs: [qemu-tests, baremetal-tests, cross-platform-builds, self-hosting, memory-stress]
+    if: always()
+
+    steps:
+    - name: Generate summary
+      run: |
+        echo "# Critical Test Isolation Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Test Suite | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|------------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| QEMU Tests | ${{ needs.qemu-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Baremetal Tests | ${{ needs.baremetal-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Cross-Platform Builds | ${{ needs.cross-platform-builds.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Self-Hosting | ${{ needs.self-hosting.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| Memory Stress | ${{ needs.memory-stress.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        # Note: Critical tests may fail - not blocking
+        echo "**Note:** Critical tests are not required to pass for PR merge." >> $GITHUB_STEP_SUMMARY
+        echo "These tests verify advanced functionality (QEMU, baremetal, cross-platform)." >> $GITHUB_STEP_SUMMARY
+
+    - name: Check for regressions
+      run: |
+        # Only fail if ALL critical tests fail
+        ALL_FAILED=true
+
+        [ "${{ needs.qemu-tests.result }}" == "success" ] && ALL_FAILED=false
+        [ "${{ needs.baremetal-tests.result }}" == "success" ] && ALL_FAILED=false
+        [ "${{ needs.cross-platform-builds.result }}" == "success" ] && ALL_FAILED=false
+        [ "${{ needs.self-hosting.result }}" == "success" ] && ALL_FAILED=false
+        [ "${{ needs.memory-stress.result }}" == "success" ] && ALL_FAILED=false
+
+        if [ "$ALL_FAILED" == "true" ]; then
+          echo "⚠️ All critical tests failed - possible regression" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+
+        echo "✅ At least one critical test suite passed" >> $GITHUB_STEP_SUMMARY

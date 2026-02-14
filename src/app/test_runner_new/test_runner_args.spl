@@ -49,6 +49,16 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var no_db = false
     var verbose = false
     var coverage = false
+    var execution_mode = ""
+    var container_sequential = false
+    var self_protect = true  # Enable by default to prevent system resource exhaustion
+    var resume = false
+    var cpu_threshold = 80.0  # Stop at 80% CPU to leave more headroom (was 90%)
+    var mem_threshold = 80.0  # Stop at 80% RAM to prevent OOM killer (was 90%)
+    var parallel = false  # ALWAYS false - parallel execution permanently disabled
+    var max_workers = 0
+    var parallel_timeout = 300
+    var closure_warnings = false
 
     var i = 0
     while i < args.len():
@@ -100,6 +110,48 @@ fn parse_test_args(args: [text]) -> TestOptions:
             no_db = true
         elif arg == "--coverage":
             coverage = true
+        elif arg == "--execution-mode":
+            i = i + 1
+            if i < args.len():
+                execution_mode = args[i]
+        elif arg.starts_with("--execution-mode="):
+            execution_mode = arg[17:]
+        elif arg == "--container-sequential" or arg == "--container-seq":
+            container_sequential = true
+            execution_mode = "container-seq"
+        elif arg == "--self-protect":
+            self_protect = true
+        elif arg == "--resume":
+            resume = true
+        elif arg == "--cpu-threshold":
+            i = i + 1
+            if i < args.len():
+                cpu_threshold = parse_f64(args[i])
+        elif arg.starts_with("--cpu-threshold="):
+            cpu_threshold = parse_f64(arg[16:])
+        elif arg == "--mem-threshold":
+            i = i + 1
+            if i < args.len():
+                mem_threshold = parse_f64(args[i])
+        elif arg.starts_with("--mem-threshold="):
+            mem_threshold = parse_f64(arg[16:])
+        elif arg == "--parallel":
+            # Parallel execution disabled - always run one by one
+            parallel = false
+        elif arg == "--max-workers":
+            i = i + 1
+            if i < args.len():
+                max_workers = to_int(args[i])
+        elif arg.starts_with("--max-workers="):
+            max_workers = to_int(arg[14:])
+        elif arg == "--parallel-timeout":
+            i = i + 1
+            if i < args.len():
+                parallel_timeout = to_int(args[i])
+        elif arg.starts_with("--parallel-timeout="):
+            parallel_timeout = to_int(arg[19:])
+        elif arg == "--closure-warnings":
+            closure_warnings = true
         elif arg == "--sdoctest":
             sdoctest = true
         elif arg == "--sdoctest-force":
@@ -173,8 +225,60 @@ fn parse_test_args(args: [text]) -> TestOptions:
         sdoctest_force: sdoctest_force,
         no_db: no_db,
         verbose: verbose,
-        coverage: coverage
+        coverage: coverage,
+        execution_mode: execution_mode,
+        container_sequential: container_sequential,
+        self_protect: self_protect,
+        resume: resume,
+        cpu_threshold: cpu_threshold,
+        mem_threshold: mem_threshold,
+        parallel: parallel,
+        max_workers: max_workers,
+        parallel_timeout: parallel_timeout,
+        closure_warnings: closure_warnings
     )
+
+# =========================================================================
+# Helper Functions
+# =========================================================================
+
+fn parse_f64(s: text) -> f64:
+    """Parse float from string (simple implementation)"""
+    var result = 0.0
+    var decimal_part = 0.0
+    var decimal_divisor = 1.0
+    var seen_dot = false
+
+    for i in s.len():
+        val ch = s[i:i + 1]
+
+        if ch == ".":
+            seen_dot = true
+        else:
+            val is_digit = ch >= "0" and ch <= "9"
+            if is_digit:
+                var digit = 0
+                if ch == "0": digit = 0
+                if ch == "1": digit = 1
+                if ch == "2": digit = 2
+                if ch == "3": digit = 3
+                if ch == "4": digit = 4
+                if ch == "5": digit = 5
+                if ch == "6": digit = 6
+                if ch == "7": digit = 7
+                if ch == "8": digit = 8
+                if ch == "9": digit = 9
+
+                if seen_dot:
+                    decimal_divisor = decimal_divisor * 10.0
+                    decimal_part = decimal_part + (digit * 1.0)
+                else:
+                    result = result * 10.0 + (digit * 1.0)
+
+    if seen_dot:
+        result = result + (decimal_part / decimal_divisor)
+
+    result
 
 # =========================================================================
 # Exports

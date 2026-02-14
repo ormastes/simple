@@ -1,0 +1,339 @@
+# Async Test Execution - True Parallel Test Running
+#
+# Implements parallel test execution using process_spawn_async + process_wait.
+# Manages worker pool, stdout/stderr capture via temp files, and result collection.
+
+use app.io.mod.{process_spawn_async, process_wait, process_kill, process_is_running}
+use app.io.mod.{file_write, file_read, file_delete, file_exists, time_now_unix_micros}
+use app.test_runner_new.test_runner_types.{TestFileResult, TestOptions}
+use app.test_runner_new.test_runner_execute.{find_simple_binary, build_child_args, make_result_from_output}
+use app.test_runner_new.runner_lifecycle.{spawn_tracked_process, untrack_process}
+use std.string.{NL}
+
+# ============================================================================
+# Async Test Execution State
+# ============================================================================
+
+struct AsyncTestRun:
+    pid: i64
+    file_path: text
+    start_time: i64          # microseconds
+    stdout_file: text
+    stderr_file: text
+    timeout_ms: i64
+
+# ============================================================================
+# Temp File Management
+# ============================================================================
+
+fn create_temp_files(file_path: text) -> (text, text):
+    """
+    Create temp files for stdout/stderr capture.
+
+    Returns: (stdout_file, stderr_file)
+    """
+    val timestamp = time_now_unix_micros()
+
+    # Replace path separators (chained replace breaks in runtime)
+    var base = file_path
+    var temp = ""
+    var i = 0
+    while i < base.len():
+        val ch = base[i:i + 1]
+        if ch == "/":
+            temp = temp + "_"
+        elif ch == ".":
+            temp = temp + "_"
+        else:
+            temp = temp + ch
+        i = i + 1
+    base = temp
+
+    val stdout_file = "/tmp/simple_test_{base}_{timestamp}_out.txt"
+    val stderr_file = "/tmp/simple_test_{base}_{timestamp}_err.txt"
+
+    # Initialize empty files
+    file_write(stdout_file, "")
+    file_write(stderr_file, "")
+
+    (stdout_file, stderr_file)
+
+fn cleanup_temp_files(stdout_file: text, stderr_file: text):
+    """Delete temp files after result collection"""
+    if file_exists(stdout_file):
+        file_delete(stdout_file)
+    if file_exists(stderr_file):
+        file_delete(stderr_file)
+
+# ============================================================================
+# Async Test Spawning
+# ============================================================================
+
+fn spawn_async_test(file_path: text, options: TestOptions) -> AsyncTestRun:
+    """
+    Spawn test as async process with stdout/stderr redirect.
+
+    Args:
+        file_path: Path to test file
+        options: Test options
+
+    Returns: AsyncTestRun tracking structure
+    """
+    val binary = find_simple_binary()
+    val child_args = build_child_args(file_path, options)
+    val timeout_ms = options.timeout * 1000
+
+    # Create temp files for stdout/stderr
+    val (stdout_file, stderr_file) = create_temp_files(file_path)
+
+    # Build redirected command (shell wrapper)
+    # NOTE: process_spawn_async doesn't support redirection directly,
+    # so we wrap in shell command
+    var args_str = ""
+    for arg in child_args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+
+    val shell_cmd = "{binary} {args_str} > {stdout_file} 2> {stderr_file}"
+
+    # Spawn via shell
+    val pid = process_spawn_async("/bin/sh", ["-c", shell_cmd])
+
+    val start_time = time_now_unix_micros()
+
+    AsyncTestRun(
+        pid: pid,
+        file_path: file_path,
+        start_time: start_time,
+        stdout_file: stdout_file,
+        stderr_file: stderr_file,
+        timeout_ms: timeout_ms
+    )
+
+# ============================================================================
+# Result Collection
+# ============================================================================
+
+fn collect_async_result(run: AsyncTestRun) -> TestFileResult:
+    """
+    Wait for async test to complete and collect results.
+
+    Args:
+        run: AsyncTestRun tracking structure
+
+    Returns: TestFileResult
+    """
+    # Wait for process to complete (with timeout)
+    val exit_code = process_wait(run.pid, run.timeout_ms)
+
+    val end_time = time_now_unix_micros()
+    val duration_ms = (end_time - run.start_time) / 1000
+
+    # Read stdout/stderr from temp files
+    var stdout = ""
+    var stderr = ""
+
+    if file_exists(run.stdout_file):
+        stdout = file_read(run.stdout_file)
+
+    if file_exists(run.stderr_file):
+        stderr = file_read(run.stderr_file)
+
+    # Cleanup temp files
+    cleanup_temp_files(run.stdout_file, run.stderr_file)
+
+    # Build result using same logic as sync execution
+    make_result_from_output(
+        run.file_path,
+        stdout,
+        stderr,
+        exit_code,
+        duration_ms,
+        run.timeout_ms / 1000
+    )
+
+# ============================================================================
+# Wait for Any Process
+# ============================================================================
+
+fn wait_for_any_process(runs: [AsyncTestRun]) -> i64:
+    """
+    Wait for any process to complete (polling-based).
+
+    Args:
+        runs: List of active AsyncTestRun structures
+
+    Returns: Index of completed run, or -1 if timeout
+
+    NOTE: Uses polling (100ms interval) since rt_process_wait_any doesn't exist
+    """
+    val max_iterations = 3000  # 300 seconds max wait
+
+    for iteration in max_iterations:
+        var idx = 0
+        while idx < runs.len():
+            val run = runs[idx]
+
+            # Check if process still running
+            if not process_is_running(run.pid):
+                return idx
+
+            idx = idx + 1
+
+        # Sleep 100ms (would use rt_sleep if available)
+        # For now, busy-wait is acceptable for testing
+
+    -1  # Timeout
+
+# ============================================================================
+# Parallel Test Execution
+# ============================================================================
+
+fn run_tests_parallel(
+    files: [text],
+    options: TestOptions,
+    max_workers: i64
+) -> [TestFileResult]:
+    """
+    Run tests in parallel with worker pool.
+
+    Args:
+        files: List of test file paths
+        options: Test options
+        max_workers: Maximum parallel workers
+
+    Returns: List of TestFileResult (in completion order)
+    """
+    var results: [TestFileResult] = []
+    var active_runs: [AsyncTestRun] = []
+    var next_file_idx = 0
+
+    while next_file_idx < files.len() or active_runs.len() > 0:
+        # Spawn new tests up to max_workers
+        while active_runs.len() < max_workers and next_file_idx < files.len():
+            val file_path = files[next_file_idx]
+
+            # Spawn async test
+            val run = spawn_async_test(file_path, options)
+            active_runs.push(run)
+
+            next_file_idx = next_file_idx + 1
+
+        # Wait for any process to complete
+        if active_runs.len() > 0:
+            val completed_idx = wait_for_any_process(active_runs)
+
+            if completed_idx >= 0:
+                # Collect result
+                val run = active_runs[completed_idx]
+                val result = collect_async_result(run)
+                results.push(result)
+
+                # Remove from active runs
+                var new_runs: [AsyncTestRun] = []
+                var idx = 0
+                while idx < active_runs.len():
+                    if idx != completed_idx:
+                        new_runs.push(active_runs[idx])
+                    idx = idx + 1
+                active_runs = new_runs
+
+    results
+
+# ============================================================================
+# Parallel Execution with Timeout Check
+# ============================================================================
+
+fn run_tests_parallel_with_monitoring(
+    files: [text],
+    options: TestOptions,
+    max_workers: i64
+) -> [TestFileResult]:
+    """
+    Run tests in parallel with timeout monitoring.
+
+    Checks each active process for timeout and kills if exceeded.
+
+    Args:
+        files: List of test file paths
+        options: Test options
+        max_workers: Maximum parallel workers
+
+    Returns: List of TestFileResult
+    """
+    var results: [TestFileResult] = []
+    var active_runs: [AsyncTestRun] = []
+    var next_file_idx = 0
+
+    while next_file_idx < files.len() or active_runs.len() > 0:
+        # Spawn new tests
+        while active_runs.len() < max_workers and next_file_idx < files.len():
+            val file_path = files[next_file_idx]
+            val run = spawn_async_test(file_path, options)
+            active_runs.push(run)
+            next_file_idx = next_file_idx + 1
+
+        # Check for timeouts and completions
+        var new_runs: [AsyncTestRun] = []
+        val current_time = time_now_unix_micros()
+
+        for run in active_runs:
+            val elapsed_ms = (current_time - run.start_time) / 1000
+
+            # Check timeout
+            if elapsed_ms > run.timeout_ms:
+                # Kill process
+                process_kill(run.pid)
+
+                # Collect result (will show as timeout)
+                val result = collect_async_result(run)
+                results.push(result)
+            elif not process_is_running(run.pid):
+                # Completed normally
+                val result = collect_async_result(run)
+                results.push(result)
+            else:
+                # Still running
+                new_runs.push(run)
+
+        active_runs = new_runs
+
+        # Small sleep to avoid busy-wait (would use rt_sleep)
+        # For now, acceptable for testing
+
+    results
+
+# ============================================================================
+# Helper: CPU Count Detection
+# ============================================================================
+
+fn get_cpu_count() -> i64:
+    """
+    Detect number of CPU cores.
+
+    Returns: CPU count, or 1 if detection fails
+    """
+    # Linux: /proc/cpuinfo
+    # macOS: sysctl -n hw.ncpu
+    # Windows: wmic cpu get NumberOfCores
+
+    # Simplified for now - return 4 as default
+    # TODO: Implement platform-specific detection
+
+    4
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AsyncTestRun
+export create_temp_files
+export cleanup_temp_files
+export spawn_async_test
+export collect_async_result
+export wait_for_any_process
+export run_tests_parallel
+export run_tests_parallel_with_monitoring
+export get_cpu_count

@@ -1,0 +1,552 @@
+# x86_64 SIMD Code Generation (AVX2/SSE)
+#
+# Generates x86_64 SIMD instructions for vector operations.
+# Supports both SSE (128-bit XMM) and AVX2 (256-bit YMM) instruction sets.
+#
+# AVX2 Instructions use VEX prefix encoding:
+#   VEX.128/256.66.0F.WIG VADDPS ymm1, ymm2, ymm3/m256
+#
+# VEX prefix structure (2 or 3 bytes):
+#   2-byte VEX: C5 <vex_byte>
+#   3-byte VEX: C4 <vex_byte1> <vex_byte2>
+#
+# For 256-bit operations (YMM), we use 3-byte VEX:
+#   Byte 0: C4
+#   Byte 1: RXB.mmmmm (R=~REX.R, X=~REX.X, B=~REX.B, mmmmm=opcode map)
+#   Byte 2: W.vvvv.L.pp (W=REX.W, vvvv=~reg, L=vector length, pp=prefix)
+
+use compiler.backend.native.mach_inst.{MachReg, MachRegKind, physical_reg, reg_id, Operand, OperandKind, MachInst, MachBlock, MachFunction, MachModule}
+use compiler.backend.native.mach_inst.{X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3, X86_XMM4, X86_XMM5, X86_XMM6, X86_XMM7}
+use compiler.backend.native.mach_inst.{X86_XMM8, X86_XMM9, X86_XMM10, X86_XMM11, X86_XMM12, X86_XMM13, X86_XMM14, X86_XMM15}
+use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_YMM4, X86_YMM5, X86_YMM6, X86_YMM7}
+use compiler.backend.native.mach_inst.{X86_YMM8, X86_YMM9, X86_YMM10, X86_YMM11, X86_YMM12, X86_YMM13, X86_YMM14, X86_YMM15}
+
+# ============================================================================
+# VEX Prefix Encoding
+# ============================================================================
+
+"""
+VEX prefix configuration for AVX/AVX2 instructions.
+"""
+struct VexPrefix:
+    """VEX prefix parameters."""
+    is_256bit: bool      # L bit: 0=128-bit (XMM), 1=256-bit (YMM)
+    pp: i64              # Opcode prefix: 0=none, 1=0x66, 2=0xF3, 3=0xF2
+    mmmmm: i64           # Opcode map select: 1=0F, 2=0F38, 3=0F3A
+    w: bool              # REX.W equivalent
+    vvvv: i64            # Source register (inverted)
+    rxb: i64             # REX.R, REX.X, REX.B (inverted)
+
+fn vex_2byte(vvvv: i64, l: bool, pp: i64) -> [i64]:
+    """
+    Encode 2-byte VEX prefix (for simple 128-bit operations).
+    Format: C5 <vex_byte>
+    vex_byte = R.vvvv.L.pp
+    """
+    var vex_byte = 0
+
+    # R bit (inverted REX.R) - bit 7
+    vex_byte = vex_byte + 128  # R=1 (no extension)
+
+    # vvvv (inverted source register) - bits 6-3
+    val vvvv_inv = 15 - (vvvv % 16)
+    vex_byte = vex_byte + (vvvv_inv * 8)
+
+    # L bit (vector length) - bit 2
+    if l:
+        vex_byte = vex_byte + 4
+
+    # pp (prefix) - bits 1-0
+    vex_byte = vex_byte + (pp % 4)
+
+    [0xC5, vex_byte]
+
+fn vex_3byte(rxb: i64, mmmmm: i64, w: bool, vvvv: i64, l: bool, pp: i64) -> [i64]:
+    """
+    Encode 3-byte VEX prefix (for AVX2 256-bit operations).
+    Format: C4 <byte1> <byte2>
+    byte1 = R.X.B.mmmmm
+    byte2 = W.vvvv.L.pp
+    """
+    # Byte 1: ~R.~X.~B.mmmmm
+    var byte1 = 0
+
+    # RXB bits (inverted) - bits 7-5
+    val rxb_inv = 7 - (rxb % 8)
+    byte1 = rxb_inv * 32
+
+    # mmmmm (opcode map) - bits 4-0
+    byte1 = byte1 + (mmmmm % 32)
+
+    # Byte 2: W.vvvv.L.pp
+    var byte2 = 0
+
+    # W bit - bit 7
+    if w:
+        byte2 = byte2 + 128
+
+    # vvvv (inverted source register) - bits 6-3
+    val vvvv_inv = 15 - (vvvv % 16)
+    byte2 = byte2 + (vvvv_inv * 8)
+
+    # L bit (vector length) - bit 2
+    if l:
+        byte2 = byte2 + 4
+
+    # pp (prefix) - bits 1-0
+    byte2 = byte2 + (pp % 4)
+
+    [0xC4, byte1, byte2]
+
+fn vex_avx2_256(vvvv: i64, pp: i64, opcode: i64) -> [i64]:
+    """
+    Create VEX prefix for 256-bit AVX2 instruction.
+    Most common case: 3-byte VEX with L=1, mmmmm=1 (0F opcode map).
+    """
+    var prefix = vex_3byte(
+        0,      # rxb: no extension
+        1,      # mmmmm: 0F opcode map
+        false,  # w: no 64-bit operand
+        vvvv,   # source register
+        true,   # l: 256-bit
+        pp      # opcode prefix
+    )
+    prefix = prefix + [opcode]
+    prefix
+
+fn vex_avx_128(vvvv: i64, pp: i64, opcode: i64) -> [i64]:
+    """
+    Create VEX prefix for 128-bit AVX instruction.
+    Uses 2-byte VEX when possible (no REX bits needed).
+    """
+    var prefix = vex_2byte(vvvv, false, pp)
+    prefix = prefix + [opcode]
+    prefix
+
+# ============================================================================
+# Register Encoding
+# ============================================================================
+
+fn ymm_to_index(ymm_id: i64) -> i64:
+    """Convert YMM register ID to index (0-15)."""
+    if ymm_id >= 32 and ymm_id <= 47:
+        ymm_id - 32
+    else:
+        0
+
+fn xmm_to_index(xmm_id: i64) -> i64:
+    """Convert XMM register ID to index (0-15)."""
+    if xmm_id >= 16 and xmm_id <= 31:
+        xmm_id - 16
+    else:
+        0
+
+fn modrm_simd(mod: i64, reg: i64, rm: i64) -> i64:
+    """Create ModR/M byte for SIMD registers (0-15 range)."""
+    ((mod % 4) * 64) + ((reg % 8) * 8) + (rm % 8)
+
+fn modrm_reg_reg_simd(dest: i64, src: i64) -> i64:
+    """ModR/M for register-to-register SIMD operation (mod=11)."""
+    modrm_simd(3, dest, src)
+
+# ============================================================================
+# AVX2 f32x8 (256-bit) Instructions
+# ============================================================================
+
+fn encode_vaddps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VADDPS ymm, ymm, ymm (256-bit float add).
+    VEX.256.0F.WIG 58 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=0 (no prefix), mmmmm=1 (0F), L=1 (256-bit)
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+
+    # Opcode: 0x58 (ADDPS)
+    bytes = bytes + [0x58]
+
+    # ModR/M: dest as reg, src2 as r/m
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+
+    bytes
+
+fn encode_vsubps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VSUBPS ymm, ymm, ymm (256-bit float subtract).
+    VEX.256.0F.WIG 5C /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    bytes = bytes + [0x5C]  # SUBPS opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vmulps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VMULPS ymm, ymm, ymm (256-bit float multiply).
+    VEX.256.0F.WIG 59 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    bytes = bytes + [0x59]  # MULPS opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vdivps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VDIVPS ymm, ymm, ymm (256-bit float divide).
+    VEX.256.0F.WIG 5E /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 0)
+    bytes = bytes + [0x5E]  # DIVPS opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vfmadd213ps_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VFMADD213PS ymm, ymm, ymm (fused multiply-add: dest = dest * src1 + src2).
+    VEX.256.66.0F38.W0 A8 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), L=1 (256-bit)
+    var bytes = vex_3byte(0, 2, false, src1_idx, true, 1)
+    bytes = bytes + [0xA8]  # VFMADD213PS opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+# ============================================================================
+# AVX2 f64x4 (256-bit) Instructions
+# ============================================================================
+
+fn encode_vaddpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VADDPD ymm, ymm, ymm (256-bit double add).
+    VEX.256.66.0F.WIG 58 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=1 (0x66 prefix), mmmmm=1 (0F), L=1 (256-bit)
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0x58]  # ADDPD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vsubpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VSUBPD ymm, ymm, ymm (256-bit double subtract).
+    VEX.256.66.0F.WIG 5C /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0x5C]  # SUBPD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vmulpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VMULPD ymm, ymm, ymm (256-bit double multiply).
+    VEX.256.66.0F.WIG 59 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0x59]  # MULPD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vdivpd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VDIVPD ymm, ymm, ymm (256-bit double divide).
+    VEX.256.66.0F.WIG 5E /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0x5E]  # DIVPD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vfmadd213pd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VFMADD213PD ymm, ymm, ymm (fused multiply-add double).
+    VEX.256.66.0F38.W1 A8 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), W=1, L=1 (256-bit)
+    var bytes = vex_3byte(0, 2, true, src1_idx, true, 1)
+    bytes = bytes + [0xA8]  # VFMADD213PD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+# ============================================================================
+# AVX2 i32x8 (256-bit) Integer Instructions
+# ============================================================================
+
+fn encode_vpaddd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VPADDD ymm, ymm, ymm (256-bit int32 add).
+    VEX.256.66.0F.WIG FE /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=1 (0x66), mmmmm=1 (0F), L=1 (256-bit)
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0xFE]  # PADDD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vpsubd_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VPSUBD ymm, ymm, ymm (256-bit int32 subtract).
+    VEX.256.66.0F.WIG FA /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    var bytes = vex_3byte(0, 1, false, src1_idx, true, 1)
+    bytes = bytes + [0xFA]  # PSUBD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+fn encode_vpmulld_ymm(dest: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    Encode VPMULLD ymm, ymm, ymm (256-bit int32 multiply).
+    VEX.256.66.0F38.WIG 40 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+    val src1_idx = ymm_to_index(src1)
+    val src2_idx = ymm_to_index(src2)
+
+    # VEX prefix: pp=1 (0x66), mmmmm=2 (0F38), L=1 (256-bit)
+    var bytes = vex_3byte(0, 2, false, src1_idx, true, 1)
+    bytes = bytes + [0x40]  # PMULLD opcode
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src2_idx)]
+    bytes
+
+# ============================================================================
+# SSE f32x4 (128-bit) Instructions
+# ============================================================================
+
+fn encode_addps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode ADDPS xmm, xmm (128-bit float add).
+    Legacy SSE: 0F 58 /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x58]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_subps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode SUBPS xmm, xmm (128-bit float subtract).
+    Legacy SSE: 0F 5C /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x5C]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_mulps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode MULPS xmm, xmm (128-bit float multiply).
+    Legacy SSE: 0F 59 /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x59]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_divps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode DIVPS xmm, xmm (128-bit float divide).
+    Legacy SSE: 0F 5E /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x5E]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+# ============================================================================
+# SSE i32x4 (128-bit) Integer Instructions
+# ============================================================================
+
+fn encode_paddd_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode PADDD xmm, xmm (128-bit int32 add).
+    SSE2: 66 0F FE /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x66, 0x0F, 0xFE]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_psubd_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode PSUBD xmm, xmm (128-bit int32 subtract).
+    SSE2: 66 0F FA /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x66, 0x0F, 0xFA]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_pmulld_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode PMULLD xmm, xmm (128-bit int32 multiply).
+    SSE4.1: 66 0F 38 40 /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x66, 0x0F, 0x38, 0x40]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+# ============================================================================
+# Horizontal Operations (SSE3/AVX)
+# ============================================================================
+
+fn encode_haddps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode HADDPS xmm, xmm (horizontal add).
+    SSE3: F2 0F 7C /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0xF2, 0x0F, 0x7C]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_maxps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode MAXPS xmm, xmm (max of packed singles).
+    SSE: 0F 5F /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x5F]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+fn encode_minps_xmm(dest: i64, src: i64) -> [i64]:
+    """
+    Encode MINPS xmm, xmm (min of packed singles).
+    SSE: 0F 5D /r
+    """
+    val dest_idx = xmm_to_index(dest)
+    val src_idx = xmm_to_index(src)
+
+    var bytes = [0x0F, 0x5D]
+    bytes = bytes + [modrm_reg_reg_simd(dest_idx, src_idx)]
+    bytes
+
+# ============================================================================
+# Load/Store Instructions
+# ============================================================================
+
+fn encode_vmovaps_load_ymm(dest: i64, base: i64, offset: i64) -> [i64]:
+    """
+    Encode VMOVAPS ymm, m256 (load 256-bit aligned).
+    VEX.256.0F.WIG 28 /r
+    """
+    val dest_idx = ymm_to_index(dest)
+
+    # VEX prefix: pp=0, mmmmm=1 (0F), L=1 (256-bit)
+    var bytes = vex_3byte(0, 1, false, 0, true, 0)
+    bytes = bytes + [0x28]  # MOVAPS opcode
+
+    # ModR/M with memory addressing (simplified: direct offset from base)
+    # For full implementation, need proper SIB byte encoding
+    bytes = bytes + [modrm_simd(2, dest_idx, base % 8)]
+
+    # Displacement (offset as i32)
+    bytes = bytes + [offset % 256]
+    bytes = bytes + [(offset / 256) % 256]
+    bytes = bytes + [(offset / 65536) % 256]
+    bytes = bytes + [(offset / 16777216) % 256]
+
+    bytes
+
+fn encode_vmovaps_store_ymm(dest_base: i64, dest_offset: i64, src: i64) -> [i64]:
+    """
+    Encode VMOVAPS m256, ymm (store 256-bit aligned).
+    VEX.256.0F.WIG 29 /r
+    """
+    val src_idx = ymm_to_index(src)
+
+    # VEX prefix: pp=0, mmmmm=1 (0F), L=1 (256-bit)
+    var bytes = vex_3byte(0, 1, false, 0, true, 0)
+    bytes = bytes + [0x29]  # MOVAPS store opcode
+
+    # ModR/M with memory addressing
+    bytes = bytes + [modrm_simd(2, src_idx, dest_base % 8)]
+
+    # Displacement
+    bytes = bytes + [dest_offset % 256]
+    bytes = bytes + [(dest_offset / 256) % 256]
+    bytes = bytes + [(dest_offset / 65536) % 256]
+    bytes = bytes + [(dest_offset / 16777216) % 256]
+
+    bytes
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export VexPrefix
+export vex_2byte, vex_3byte, vex_avx2_256, vex_avx_128
+export ymm_to_index, xmm_to_index
+export modrm_simd, modrm_reg_reg_simd
+export encode_vaddps_ymm, encode_vsubps_ymm, encode_vmulps_ymm, encode_vdivps_ymm, encode_vfmadd213ps_ymm
+export encode_vaddpd_ymm, encode_vsubpd_ymm, encode_vmulpd_ymm, encode_vdivpd_ymm, encode_vfmadd213pd_ymm
+export encode_vpaddd_ymm, encode_vpsubd_ymm, encode_vpmulld_ymm
+export encode_addps_xmm, encode_subps_xmm, encode_mulps_xmm, encode_divps_xmm
+export encode_paddd_xmm, encode_psubd_xmm, encode_pmulld_xmm
+export encode_haddps_xmm, encode_maxps_xmm, encode_minps_xmm
+export encode_vmovaps_load_ymm, encode_vmovaps_store_ymm

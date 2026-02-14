@@ -27,6 +27,12 @@ var eval_continuing: bool = false
 var eval_had_error: bool = false
 var eval_error_msg: text = ""
 
+# ===== Warning Tracking =====
+var eval_warnings: [text] = []
+
+fn eval_get_warnings() -> [text]:
+    eval_warnings
+
 fn eval_reset():
     eval_returning = false
     eval_return_value = -1
@@ -34,6 +40,7 @@ fn eval_reset():
     eval_continuing = false
     eval_had_error = false
     eval_error_msg = ""
+    eval_warnings = []
 
 fn eval_set_error(msg: text):
     eval_had_error = true
@@ -50,9 +57,13 @@ fn eval_has_error() -> bool:
 var func_table_names: [text] = []
 var func_table_decls: [i64] = []
 
+# Maps function name -> return type tag
+var func_return_types: [(text, i64)] = []
+
 fn func_table_reset():
     func_table_names = []
     func_table_decls = []
+    func_return_types = []
 
 fn func_table_register(name: text, decl_id: i64):
     # Check for existing
@@ -71,6 +82,17 @@ fn func_table_lookup(name: text) -> i64:
         if fn_name == name:
             return func_table_decls[i]
         i = i + 1
+    -1
+
+fn func_register_return_type(name: text, ret_type: i64):
+    func_return_types.push((name, ret_type))
+
+fn func_lookup_return_type(name: text) -> i64:
+    for entry in func_return_types:
+        val fn_name = entry[0]
+        val ret_type = entry[1]
+        if fn_name == name:
+            return ret_type
     -1
 
 # ===== Struct Definition Table =====
@@ -1177,7 +1199,27 @@ fn eval_stmt(sid: i64) -> i64:
     -1
 
 fn eval_stmt_expr(sid: i64) -> i64:
-    eval_expr(stmt_get(sid).expr_idx)
+    val eid = stmt_get(sid).expr_idx
+
+    # Check if this is a function call with ignored return value
+    if eid >= 0:
+        val e_node = expr_get(eid)
+        val e_tag = e_node.tag
+        if e_tag == EXPR_CALL:
+            val callee_eid = e_node.left
+            val callee_node = expr_get(callee_eid)
+            val callee_tag = callee_node.tag
+            if callee_tag == EXPR_IDENT:
+                val fn_name = callee_node.s_val
+                val ret_type = func_lookup_return_type(fn_name)
+                val is_void = ret_type == 0
+                val is_unknown = ret_type == -1
+                if is_void == false and is_unknown == false:
+                    val type_name = type_tag_name(ret_type)
+                    val warning = "warning: return value of type '" + type_name + "' from function '" + fn_name + "' is ignored"
+                    eval_warnings.push(warning)
+
+    eval_expr(eid)
 
 fn eval_stmt_val_decl(sid: i64) -> i64:
     val s_node = stmt_get(sid)
@@ -1486,7 +1528,9 @@ fn eval_decl(did: i64) -> i64:
 
     if tag == DECL_FN:
         val name = d_node.name
+        val ret_type = d_node.ret_type
         func_table_register(name, did)
+        func_register_return_type(name, ret_type)
         return val_make_nil()
 
     if tag == DECL_STRUCT:
@@ -1524,7 +1568,32 @@ fn eval_decl(did: i64) -> i64:
             vi = vi + 1
         return val_make_nil()
 
-    # DECL_USE, DECL_EXPORT, DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
+    if tag == DECL_USE:
+        # Load module and register its exports
+        val module_path = d_node.name
+        val imported_names = d_node.imports
+        val current_file = module_get_path()
+
+        # If imports list is empty, load full module
+        # Otherwise, load selective imports
+        var load_result: i64 = 0
+        if imported_names.len() == 0:
+            load_result = load_module(module_path, current_file)
+        else:
+            load_result = load_module_selective(module_path, imported_names, current_file)
+
+        if load_result == 0:
+            eval_set_error("failed to load module: " + module_path)
+            return -1
+
+        return val_make_nil()
+
+    if tag == DECL_EXPORT:
+        # Export declarations - handled during module loading
+        # No runtime action needed
+        return val_make_nil()
+
+    # DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
     val_make_nil()
 
 # ===== Module Evaluation =====
@@ -1538,6 +1607,9 @@ fn eval_module() -> i64:
         val tag = d_node.tag
         if tag == DECL_FN:
             func_table_register(d_node.name, did)
+            func_register_return_type(d_node.name, d_node.ret_type)
+        if tag == DECL_EXTERN_FN:
+            func_register_return_type(d_node.name, d_node.ret_type)
         if tag == DECL_STRUCT:
             struct_table_register(d_node.name, did)
 
@@ -1569,6 +1641,7 @@ fn eval_init():
     func_table_reset()
     struct_table_reset()
     eval_reset()
+    module_loader_init()
 
 # ===== Async/Await Expressions (Basic Stubs) =====
 # TODO: Full state machine support requires desugaring to state machines
@@ -1613,7 +1686,7 @@ fn eval_spawn_expr(eid: i64) -> i64:
     if eval_had_error: return -1
     result
 
-export eval_reset, eval_set_error, eval_get_error, eval_has_error
+export eval_reset, eval_set_error, eval_get_error, eval_has_error, eval_get_warnings
 export eval_returning, eval_return_value, eval_breaking, eval_continuing
 export func_table_reset, func_table_register, func_table_lookup
 export struct_table_reset, struct_table_register, struct_table_lookup

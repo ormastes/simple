@@ -1,0 +1,749 @@
+# Inline Comment Coverage Analysis
+#
+# Analyzes source files to determine which functions, classes, structs, and enums
+# have inline comments, docstrings, or sdoctest blocks.
+
+use app.io.mod (file_read, file_exists)
+use doc_coverage.types.doc_item.{DocItem, DocKind}
+use std.string.{NL}
+
+# =========================================================================
+# Data Structures
+# =========================================================================
+
+struct InlineCommentResult:
+    item_name: text
+    item_kind: text
+    file_path: text
+    line: i64
+    has_inline_comment: bool
+    has_docstring: bool
+    has_sdoctest: bool
+    warning_level: text
+
+impl InlineCommentResult:
+    static fn create(item_name: text, item_kind: text, file_path: text, line: i64) -> InlineCommentResult:
+        InlineCommentResult(
+            item_name: item_name,
+            item_kind: item_kind,
+            file_path: file_path,
+            line: line,
+            has_inline_comment: false,
+            has_docstring: false,
+            has_sdoctest: false,
+            warning_level: "none"
+        )
+
+# =========================================================================
+# Main Analysis Function
+# =========================================================================
+
+fn compute_inline_comment_coverage(files: [text]) -> [InlineCommentResult]:
+    # Analyze each file for inline comment coverage
+    var results: [InlineCommentResult] = []
+
+    var i = 0
+    while i < files.len():
+        val file_path = files[i]
+        val file_results = _analyze_file(file_path)
+
+        var j = 0
+        while j < file_results.len():
+            results.push(file_results[j])
+            j = j + 1
+
+        i = i + 1
+
+    results
+
+fn _analyze_file(file_path: text) -> [InlineCommentResult]:
+    # Analyze a single file for inline comments
+    if not file_exists(file_path):
+        return []
+
+    val source = file_read(file_path)
+    val lines = source.split(NL)
+
+    var results: [InlineCommentResult] = []
+
+    # Scan for declarations
+    var line_num = 0
+    while line_num < lines.len():
+        val line = lines[line_num]
+        val trimmed = line.trim()
+
+        # Check for function declaration
+        val fn_result = _check_function_line(trimmed, file_path, line_num, lines)
+        if fn_result.0:
+            results.push(fn_result.1)
+
+        # Check for class declaration
+        val class_result = _check_class_line(trimmed, file_path, line_num, lines)
+        if class_result.0:
+            results.push(class_result.1)
+
+        # Check for struct declaration
+        val struct_result = _check_struct_line(trimmed, file_path, line_num, lines)
+        if struct_result.0:
+            results.push(struct_result.1)
+
+        # Check for enum declaration
+        val enum_result = _check_enum_line(trimmed, file_path, line_num, lines)
+        if enum_result.0:
+            results.push(enum_result.1)
+
+        line_num = line_num + 1
+
+    results
+
+# =========================================================================
+# Declaration Checkers
+# =========================================================================
+
+fn _check_function_line(line: text, file_path: text, line_num: i64, lines: [text]) -> (bool, InlineCommentResult):
+    # Check if line is a function declaration
+    var is_fn = line.starts_with("fn ")
+    if not is_fn:
+        is_fn = line.contains(" fn ")
+    if not is_fn:
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    val fn_name = _extract_fn_name(line)
+    if fn_name == "":
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    # Create result
+    var result = InlineCommentResult.create(fn_name, "function", file_path, line_num + 1)
+
+    # Check for inline comment on same line
+    val has_same_line = _has_comment_on_line(line)
+    if has_same_line:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: true,
+            has_docstring: result.has_docstring,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    # Check for comment on line before
+    if not result.has_inline_comment:
+        val has_prev = _has_comment_before(line_num, lines)
+        if has_prev:
+            result = InlineCommentResult(
+                item_name: result.item_name,
+                item_kind: result.item_kind,
+                file_path: result.file_path,
+                line: result.line,
+                has_inline_comment: true,
+                has_docstring: result.has_docstring,
+                has_sdoctest: result.has_sdoctest,
+                warning_level: result.warning_level
+            )
+
+    # Check for docstring after declaration
+    val has_doc = _has_docstring_after(line_num, lines)
+    if has_doc:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: result.has_inline_comment,
+            has_docstring: true,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    # Determine warning level
+    val warning = _determine_warning_level(result)
+    result = InlineCommentResult(
+        item_name: result.item_name,
+        item_kind: result.item_kind,
+        file_path: result.file_path,
+        line: result.line,
+        has_inline_comment: result.has_inline_comment,
+        has_docstring: result.has_docstring,
+        has_sdoctest: result.has_sdoctest,
+        warning_level: warning
+    )
+
+    (true, result)
+
+fn _check_class_line(line: text, file_path: text, line_num: i64, lines: [text]) -> (bool, InlineCommentResult):
+    # Check if line is a class declaration
+    if not line.starts_with("class "):
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    val class_name = _extract_class_name(line)
+    if class_name == "":
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    var result = InlineCommentResult.create(class_name, "class", file_path, line_num + 1)
+
+    # Check for comments
+    val has_same_line = _has_comment_on_line(line)
+    if has_same_line:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: true,
+            has_docstring: result.has_docstring,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    if not result.has_inline_comment:
+        val has_prev = _has_comment_before(line_num, lines)
+        if has_prev:
+            result = InlineCommentResult(
+                item_name: result.item_name,
+                item_kind: result.item_kind,
+                file_path: result.file_path,
+                line: result.line,
+                has_inline_comment: true,
+                has_docstring: result.has_docstring,
+                has_sdoctest: result.has_sdoctest,
+                warning_level: result.warning_level
+            )
+
+    val has_doc = _has_docstring_after(line_num, lines)
+    if has_doc:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: result.has_inline_comment,
+            has_docstring: true,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    val warning = _determine_warning_level(result)
+    result = InlineCommentResult(
+        item_name: result.item_name,
+        item_kind: result.item_kind,
+        file_path: result.file_path,
+        line: result.line,
+        has_inline_comment: result.has_inline_comment,
+        has_docstring: result.has_docstring,
+        has_sdoctest: result.has_sdoctest,
+        warning_level: warning
+    )
+
+    (true, result)
+
+fn _check_struct_line(line: text, file_path: text, line_num: i64, lines: [text]) -> (bool, InlineCommentResult):
+    # Check if line is a struct declaration
+    if not line.starts_with("struct "):
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    val struct_name = _extract_struct_name(line)
+    if struct_name == "":
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    var result = InlineCommentResult.create(struct_name, "struct", file_path, line_num + 1)
+
+    val has_same_line = _has_comment_on_line(line)
+    if has_same_line:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: true,
+            has_docstring: result.has_docstring,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    if not result.has_inline_comment:
+        val has_prev = _has_comment_before(line_num, lines)
+        if has_prev:
+            result = InlineCommentResult(
+                item_name: result.item_name,
+                item_kind: result.item_kind,
+                file_path: result.file_path,
+                line: result.line,
+                has_inline_comment: true,
+                has_docstring: result.has_docstring,
+                has_sdoctest: result.has_sdoctest,
+                warning_level: result.warning_level
+            )
+
+    val has_doc = _has_docstring_after(line_num, lines)
+    if has_doc:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: result.has_inline_comment,
+            has_docstring: true,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    val warning = _determine_warning_level(result)
+    result = InlineCommentResult(
+        item_name: result.item_name,
+        item_kind: result.item_kind,
+        file_path: result.file_path,
+        line: result.line,
+        has_inline_comment: result.has_inline_comment,
+        has_docstring: result.has_docstring,
+        has_sdoctest: result.has_sdoctest,
+        warning_level: warning
+    )
+
+    (true, result)
+
+fn _check_enum_line(line: text, file_path: text, line_num: i64, lines: [text]) -> (bool, InlineCommentResult):
+    # Check if line is an enum declaration
+    if not line.starts_with("enum "):
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    val enum_name = _extract_enum_name(line)
+    if enum_name == "":
+        return (false, InlineCommentResult.create("", "", "", 0))
+
+    var result = InlineCommentResult.create(enum_name, "enum", file_path, line_num + 1)
+
+    val has_same_line = _has_comment_on_line(line)
+    if has_same_line:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: true,
+            has_docstring: result.has_docstring,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    if not result.has_inline_comment:
+        val has_prev = _has_comment_before(line_num, lines)
+        if has_prev:
+            result = InlineCommentResult(
+                item_name: result.item_name,
+                item_kind: result.item_kind,
+                file_path: result.file_path,
+                line: result.line,
+                has_inline_comment: true,
+                has_docstring: result.has_docstring,
+                has_sdoctest: result.has_sdoctest,
+                warning_level: result.warning_level
+            )
+
+    val has_doc = _has_docstring_after(line_num, lines)
+    if has_doc:
+        result = InlineCommentResult(
+            item_name: result.item_name,
+            item_kind: result.item_kind,
+            file_path: result.file_path,
+            line: result.line,
+            has_inline_comment: result.has_inline_comment,
+            has_docstring: true,
+            has_sdoctest: result.has_sdoctest,
+            warning_level: result.warning_level
+        )
+
+    val warning = _determine_warning_level(result)
+    result = InlineCommentResult(
+        item_name: result.item_name,
+        item_kind: result.item_kind,
+        file_path: result.file_path,
+        line: result.line,
+        has_inline_comment: result.has_inline_comment,
+        has_docstring: result.has_docstring,
+        has_sdoctest: result.has_sdoctest,
+        warning_level: warning
+    )
+
+    (true, result)
+
+# =========================================================================
+# Comment Detection Helpers
+# =========================================================================
+
+fn _has_comment_on_line(line: text) -> bool:
+    # Check if line has a # comment
+    val hash_idx = line.index_of("#") ?? -1
+    if hash_idx < 0:
+        return false
+
+    # Check if it's inside a string literal (simple heuristic)
+    val before_hash = line[0:hash_idx]
+    val quote_count = _count_char(before_hash, "\"")
+    val is_in_string = quote_count % 2 == 1
+    not is_in_string
+
+fn _has_comment_before(line_num: i64, lines: [text]) -> bool:
+    # Check if there's a comment within 2 lines before
+    if line_num == 0:
+        return false
+
+    # Check line immediately before
+    val prev_idx = line_num - 1
+    val prev_line = lines[prev_idx]
+    val prev_trimmed = prev_line.trim()
+
+    if prev_trimmed.starts_with("#"):
+        return true
+
+    # Check 2 lines before
+    if line_num > 1:
+        val prev2_idx = line_num - 2
+        val prev2_line = lines[prev2_idx]
+        val prev2_trimmed = prev2_line.trim()
+
+        if prev2_trimmed.starts_with("#"):
+            # Check if line before is blank
+            if prev_trimmed == "":
+                return true
+
+    false
+
+fn _has_docstring_after(line_num: i64, lines: [text]) -> bool:
+    # Check if there's a docstring (triple-quoted string) after the declaration
+    # Check same line first
+    if line_num >= lines.len():
+        return false
+
+    val same_line = lines[line_num]
+    if same_line.contains("\"\"\""):
+        return true
+
+    # Check next line
+    val next_idx = line_num + 1
+    if next_idx >= lines.len():
+        return false
+
+    val next_line = lines[next_idx]
+    val next_trimmed = next_line.trim()
+
+    next_trimmed.starts_with("\"\"\"")
+
+# =========================================================================
+# Name Extraction (from sdoctest_coverage.spl pattern)
+# =========================================================================
+
+fn _extract_fn_name(line: text) -> text:
+    # Extract function name from "fn name(" or "fn name:"
+    val fn_idx = line.index_of("fn ") ?? -1
+    if fn_idx < 0:
+        return ""
+
+    val after_fn = line[fn_idx + 3:]
+
+    # Extract name until '(' or ':'
+    var name_end = after_fn.index_of("(") ?? -1
+    val colon_idx = after_fn.index_of(":") ?? -1
+
+    if name_end < 0:
+        name_end = colon_idx
+    elif colon_idx >= 0:
+        val colon_before_paren = colon_idx < name_end
+        if colon_before_paren:
+            name_end = colon_idx
+
+    if name_end < 0:
+        return ""
+
+    val name = after_fn[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _extract_class_name(line: text) -> text:
+    # Extract class name from "class Name" or "class Name:"
+    val after_keyword = line[6:]
+
+    # Extract name until ':' or whitespace
+    var name_end = after_keyword.index_of(":") ?? -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+
+    if name_end < 0:
+        name_end = space_idx
+    elif space_idx >= 0:
+        val space_before_colon = space_idx < name_end
+        if space_before_colon:
+            name_end = space_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _extract_struct_name(line: text) -> text:
+    # Extract struct name from "struct Name" or "struct Name:"
+    val after_keyword = line[7:]
+
+    # Extract name until ':' or whitespace
+    var name_end = after_keyword.index_of(":") ?? -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+
+    if name_end < 0:
+        name_end = space_idx
+    elif space_idx >= 0:
+        val space_before_colon = space_idx < name_end
+        if space_before_colon:
+            name_end = space_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _extract_enum_name(line: text) -> text:
+    # Extract enum name from "enum Name"
+    val after_keyword = line[5:]
+
+    # Extract name until ':' or whitespace
+    var name_end = after_keyword.index_of(":") ?? -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+
+    if name_end < 0:
+        name_end = space_idx
+    elif space_idx >= 0:
+        val space_before_colon = space_idx < name_end
+        if space_before_colon:
+            name_end = space_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _count_char(s: text, ch: text) -> i64:
+    # Count occurrences of a character in a string
+    var count = 0
+    var i = 0
+    while i < s.len():
+        val c = s[i:i + 1]
+        if c == ch:
+            count = count + 1
+        i = i + 1
+    count
+
+# =========================================================================
+# Warning Level Determination
+# =========================================================================
+
+fn _determine_warning_level(result: InlineCommentResult) -> text:
+    # Determine warning level based on documentation status
+    # Priority: error > warn > info > none
+
+    val has_inline = result.has_inline_comment
+    val has_doc = result.has_docstring
+    val has_test = result.has_sdoctest
+
+    # No documentation at all - ERROR
+    val has_no_docs = not has_inline
+    val also_no_docstring = not has_doc
+    if has_no_docs:
+        if also_no_docstring:
+            return "error"
+
+    # Has inline but no docstring - WARN (for public APIs)
+    if has_inline:
+        if not has_doc:
+            val is_public = _is_public_item(result)
+            if is_public:
+                return "warn"
+
+    # Has docstring but no inline comment - INFO
+    if has_doc:
+        if not has_inline:
+            return "info"
+
+    # Has both inline and docstring - NONE
+    "none"
+
+fn _is_public_item(result: InlineCommentResult) -> bool:
+    # Simple heuristic: functions in src/std or src/core are public
+    val path = result.file_path
+    var is_public = path.contains("/src/std/")
+    if path.contains("/src/core/"):
+        is_public = true
+    if path.contains("/src/lib/"):
+        is_public = true
+    is_public
+
+# =========================================================================
+# Warning Generation
+# =========================================================================
+
+fn emit_missing_comment_warnings(results: [InlineCommentResult]) -> [text]:
+    # Generate warning messages for items missing comments
+    var warnings: [text] = []
+
+    var i = 0
+    while i < results.len():
+        val result = results[i]
+        val level = result.warning_level
+
+        if level != "none":
+            val msg = _format_warning_message(result)
+            warnings.push(msg)
+
+        i = i + 1
+
+    warnings
+
+fn _format_warning_message(result: InlineCommentResult) -> text:
+    # Format a warning message
+    val level_upper = _uppercase(result.warning_level)
+    val kind = result.item_kind
+    val name = result.item_name
+    val file = result.file_path
+    val line = result.line
+
+    val has_inline = result.has_inline_comment
+    val has_doc = result.has_docstring
+
+    var reason = ""
+    if not has_inline:
+        val also_no_docstring = not has_doc
+        if also_no_docstring:
+            reason = "missing inline comment and docstring"
+        else:
+            reason = "missing inline comment"
+    elif not has_doc:
+        reason = "missing docstring"
+    else:
+        reason = "incomplete documentation"
+
+    "{level_upper}: {file}:{line} - {kind} '{name}' {reason}"
+
+fn _uppercase(s: text) -> text:
+    # Convert string to uppercase (simple implementation)
+    if s == "error":
+        return "ERROR"
+    if s == "warn":
+        return "WARN"
+    if s == "info":
+        return "INFO"
+    "NONE"
+
+# =========================================================================
+# Coverage Report Generation
+# =========================================================================
+
+fn generate_coverage_report(results: [InlineCommentResult]) -> text:
+    # Generate a markdown coverage report
+    var total = results.len()
+    var with_inline = 0
+    var with_docstring = 0
+    var with_both = 0
+    var with_none = 0
+
+    var i = 0
+    while i < results.len():
+        val result = results[i]
+
+        val has_inline = result.has_inline_comment
+        val has_doc = result.has_docstring
+
+        if has_inline:
+            with_inline = with_inline + 1
+
+        if has_doc:
+            with_docstring = with_docstring + 1
+
+        val has_both_docs = has_inline and has_doc
+        if has_both_docs:
+            with_both = with_both + 1
+
+        val has_neither = not has_inline
+        val also_no_docstring = not has_doc
+        val has_none_at_all = has_neither and also_no_docstring
+        if has_none_at_all:
+            with_none = with_none + 1
+
+        i = i + 1
+
+    # Calculate percentages
+    var inline_pct = 0
+    var docstring_pct = 0
+    var both_pct = 0
+    var none_pct = 0
+
+    if total > 0:
+        inline_pct = with_inline * 100 / total
+        docstring_pct = with_docstring * 100 / total
+        both_pct = with_both * 100 / total
+        none_pct = with_none * 100 / total
+
+    # Build report
+    var report = "# Inline Comment Coverage Report\n\n"
+    report = report + "## Summary\n\n"
+    report = report + "- **Total Items:** {total}\n"
+    report = report + "- **With Inline Comments:** {with_inline} ({inline_pct}%)\n"
+    report = report + "- **With Docstrings:** {with_docstring} ({docstring_pct}%)\n"
+    report = report + "- **With Both:** {with_both} ({both_pct}%)\n"
+    report = report + "- **With Neither:** {with_none} ({none_pct}%)\n\n"
+
+    # Add details section
+    report = report + "## Details by Warning Level\n\n"
+
+    val errors = _filter_by_level(results, "error")
+    val warnings = _filter_by_level(results, "warn")
+    val infos = _filter_by_level(results, "info")
+
+    report = report + "### Errors ({errors.len()})\n\n"
+    var j = 0
+    while j < errors.len():
+        val err = errors[j]
+        report = report + "- {err.file_path}:{err.line} - {err.item_kind} '{err.item_name}'\n"
+        j = j + 1
+
+    report = report + "\n### Warnings ({warnings.len()})\n\n"
+    var k = 0
+    while k < warnings.len():
+        val warn = warnings[k]
+        report = report + "- {warn.file_path}:{warn.line} - {warn.item_kind} '{warn.item_name}'\n"
+        k = k + 1
+
+    report = report + "\n### Info ({infos.len()})\n\n"
+    var m = 0
+    while m < infos.len():
+        val info = infos[m]
+        report = report + "- {info.file_path}:{info.line} - {info.item_kind} '{info.item_name}'\n"
+        m = m + 1
+
+    report
+
+fn _filter_by_level(results: [InlineCommentResult], level: text) -> [InlineCommentResult]:
+    # Filter results by warning level
+    var filtered: [InlineCommentResult] = []
+
+    var i = 0
+    while i < results.len():
+        val result = results[i]
+        if result.warning_level == level:
+            filtered.push(result)
+        i = i + 1
+
+    filtered
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export InlineCommentResult
+export compute_inline_comment_coverage
+export emit_missing_comment_warnings
+export generate_coverage_report
