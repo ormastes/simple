@@ -251,6 +251,7 @@ void        rt_file_write(const char* path, const char* content);
 int         rt_file_delete(const char* path);
 int         rt_file_copy(const char* src, const char* dst);
 int64_t     rt_file_size(const char* path);
+int64_t     rt_file_stat(const char* path);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
 

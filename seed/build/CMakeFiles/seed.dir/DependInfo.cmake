@@ -9,7 +9,6 @@ set(CMAKE_DEPENDS_LANGUAGES
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/ormastes/dev/pub/simple/seed/seed.c" "CMakeFiles/seed.dir/seed.c.o" "gcc" "CMakeFiles/seed.dir/seed.c.o.d"
-  "" "seed" "gcc" "CMakeFiles/seed.dir/link.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

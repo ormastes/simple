@@ -938,6 +938,14 @@ int         rt_file_copy(const char* src, const char* dst) {
 int         rt_file_delete(const char* path)    { return spl_file_delete(path); }
 int64_t     rt_file_size(const char* path)      { return spl_file_size(path); }
 
+int64_t rt_file_stat(const char* path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return (int64_t)st.st_mtime;
+    }
+    return 0;
+}
+
 const char* rt_shell_output(const char* cmd) { return spl_shell_output(cmd); }
 
 SplArray* rt_cli_get_args(void) {

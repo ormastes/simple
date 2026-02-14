@@ -1,5 +1,4 @@
 file(REMOVE_RECURSE
-  "CMakeFiles/runtime_branch_test.dir/link.d"
   "CMakeFiles/runtime_branch_test.dir/runtime.c.o"
   "CMakeFiles/runtime_branch_test.dir/runtime.c.o.d"
   "CMakeFiles/runtime_branch_test.dir/runtime_branch_test.c.o"
