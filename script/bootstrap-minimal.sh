@@ -47,6 +47,16 @@ find src/compiler_core -name '*.spl' -type f | \
     grep -v '^src/compiler_core/monomorphize' | \
     grep -v '^src/compiler_core/module_resolver' | \
     grep -v '^src/compiler_core/backend/lean_borrow' | \
+    grep -v '^src/compiler_core/linker' | \
+    grep -v '^src/compiler_core/blocks' | \
+    grep -v '^src/compiler_core/codegen' | \
+    grep -v '^src/compiler_core/backend/llvm_backend' | \
+    grep -v '^src/compiler_core/backend/sdn' | \
+    grep -v '^src/compiler_core/backend/cuda_backend' | \
+    grep -v '^src/compiler_core/backend/vulkan_backend' | \
+    grep -v 'bitfield\.spl$' | \
+    grep -v 'init\.spl$' | \
+    grep -v 'predicate_parser\.spl$' | \
     grep -v '/main\.spl$' | \
     sort > /tmp/core_files_minimal_bs.txt
 

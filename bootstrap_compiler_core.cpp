@@ -2144,7 +2144,6 @@ struct ConstructorInfo;
 struct DiValidator;
 struct CheckBackendImpl;
 struct CompilerDriver;
-struct CompileOptions;
 struct EffectCacheConfig;
 struct EffectCacheStats;
 struct FunctionEffectInfo;
@@ -2339,6 +2338,8 @@ struct MethodSig;
 struct MethodImpl;
 struct ImplBlock;
 struct Obligation;
+struct ImplRegistry;
+struct TraitSolver;
 struct CycleDetector;
 struct OutlineModule;
 struct BlockOutline;
@@ -2389,6 +2390,7 @@ struct BackendFactory;
 struct CompilationResult;
 struct BackendCapability;
 struct BackendOptions;
+struct CompileOptions;
 struct InstructionSupport;
 struct CapabilityTracker;
 struct CompilerBackendImpl;
@@ -2583,8 +2585,8 @@ struct EdgePair;
 struct LoopInfo;
 struct LoopDetector;
 struct LoopInvariantMotion;
+struct StrengthReduction;
 struct PassManager;
-struct DirectoryManifest;
 struct CallSite;
 struct CallSiteAnalyzer;
 struct InterfaceBinding;
@@ -2601,7 +2603,11 @@ struct Monomorphizer;
 struct HotReloadConfig;
 struct MonomorphizationMetadata;
 struct BuildMetadata;
+struct DependencyEdge;
+struct CircularWarning;
+struct CircularError;
 struct GenericTemplates;
+struct SpecializedInstances;
 struct CallRewrite;
 struct ModuleRewriter;
 struct TypeSubstitution;
@@ -3407,26 +3413,6 @@ struct CheckBackendImpl {
 
 struct CompilerDriver {
     int64_t ctx;
-};
-
-struct CompileOptions {
-    int64_t mode;
-    SplArray* input_files;
-    bool has_output_file;
-    const char* output_file;
-    int64_t output_format;
-    bool optimize;
-    bool has_opt_level;
-    int64_t opt_level;
-    bool release;
-    bool debug_info;
-    bool verbose;
-    int64_t log_level;
-    const char* profile;
-    bool no_borrow_check;
-    const char* backend;
-    const char* interpreter_mode;
-    bool gc_off;
 };
 
 struct EffectCacheConfig {
@@ -4765,7 +4751,7 @@ struct MethodResolver {
     TypeChecker* type_checker;
     SplArray* errors;
     SplDict* trait_impls;
-    int64_t trait_solver;
+    TraitSolver* trait_solver;
 };
 
 struct SafetyContext {
@@ -4953,6 +4939,15 @@ struct Obligation {
     const char* ty;
     const char* trait_ref;
     const char* span;
+};
+
+struct ImplRegistry {
+    const char* impls;
+};
+
+struct TraitSolver {
+    const char* impl_registry;
+    int64_t max_depth;
 };
 
 struct CycleDetector {
@@ -5200,7 +5195,7 @@ struct HmInferContext {
     DimSolver* dim_solver;
     int64_t runtime_checks;
     int64_t dim_check_mode;
-    int64_t trait_solver;
+    TraitSolver* trait_solver;
     SplDict* function_bounds;
 };
 
@@ -5357,6 +5352,16 @@ struct BackendOptions {
     bool enable_coverage;
     bool is_pic;
     const char* interpreter_mode;
+};
+
+struct CompileOptions {
+    int64_t target;
+    int64_t opt_level;
+    bool debug_info;
+    bool emit_assembly;
+    bool emit_llvm_ir;
+    bool emit_mir;
+    bool verify_output;
 };
 
 struct InstructionSupport {
@@ -6658,20 +6663,13 @@ struct LoopInvariantMotion {
     int64_t hoisted_count;
 };
 
+struct StrengthReduction {
+    int64_t reduced_count;
+};
+
 struct PassManager {
     SplArray* passes;
     int64_t stats;
-};
-
-struct DirectoryManifest {
-    const char* name;
-    std::vector<Attribute> attributes;
-    SplArray* child_modules;
-    SplArray* common_uses;
-    SplArray* exports;
-    SplArray* auto_imports;
-    SplArray* capabilities;
-    bool is_bypass;
 };
 
 struct CallSite {
@@ -6726,8 +6724,8 @@ struct MonoCache {
 };
 
 struct CycleDetectionResult {
-    SplArray* errors;
-    SplArray* warnings;
+    std::vector<CircularError> errors;
+    std::vector<CircularWarning> warnings;
     SplArray* all_cycles;
 };
 
@@ -6785,12 +6783,35 @@ struct BuildMetadata {
     const char* build_timestamp;
 };
 
+struct DependencyEdge {
+    const char* from_inst;
+    const char* to_inst;
+    int64_t dep_kind;
+};
+
+struct CircularWarning {
+    const char* cycle_path;
+    const char* severity;
+};
+
+struct CircularError {
+    const char* cycle_path;
+    const char* error_code;
+};
+
 struct GenericTemplates {
     std::vector<FunctionDef> functions;
     std::vector<StructDef> structs;
     std::vector<ClassDef> classes;
     std::vector<EnumDef> enums;
     std::vector<TraitDef> traits;
+};
+
+struct SpecializedInstances {
+    std::vector<FunctionDef> functions;
+    std::vector<StructDef> structs;
+    std::vector<ClassDef> classes;
+    std::vector<EnumDef> enums;
 };
 
 struct CallRewrite {
@@ -7152,10 +7173,6 @@ int64_t hirexpr_return_expr(HirExpr value);
 int64_t hirexpr_tuple(std::vector<HirExpr> elems);
 int64_t hirexpr_array(std::vector<HirExpr> elems);
 int64_t hirexpr_if_expr(HirExpr cond, HirExpr then_expr, HirExpr else_expr);
-void test_if_expression_checking();
-void test_nested_lambda();
-void test_higher_order_function();
-void test_complex_expression();
 int64_t bitwise_not_i64(int64_t n);
 BitLayout bitlayout_unsigned(int64_t bits);
 void bootstrap_hello();
@@ -7169,6 +7186,7 @@ int64_t linker_link(Linker self, SplArray* smf_files);
 BuildConfig buildconfig_default(const char* entry, const char* output);
 int64_t get_abi(int64_t arch, int64_t conv);
 AbiInfo get_avr_abi(int64_t conv);
+AbiInfo get_msp430_abi(int64_t conv);
 CodegenEnhanced codegenenhanced_create(bool enable_opts);
 Codegen codegen_new(int64_t target, int64_t mode);
 CompilabilityAnalyzer compilabilityanalyzer_create();
@@ -7230,7 +7248,8 @@ void test_find_missing_keys();
 void test_find_extra_keys();
 void test_key_error_to_string();
 void test_typo_detection();
-TemplateKey templatekey_required(const char* name, int64_t position);
+int64_t templatekey_required(const char* name, int64_t position);
+TemplateKey templatekey_optional(const char* name, int64_t position, const char* default_val);
 SymbolUsage symbolusage_empty();
 ContextPack contextpack_create(const char* target);
 CoverageStats coveragestats_empty();
@@ -7241,7 +7260,7 @@ DimError dimerror_mismatch(int64_t d1, int64_t d2, int64_t span);
 void di_panic(const char* msg);
 DiContainer dicontainer_for_profile(int64_t profile);
 void set_container(DiContainer container);
-DiContainer get_container();
+int64_t get_container();
 ParamInfo paraminfo_create(const char* name, const char* type_name, bool has_inject);
 DiValidator divalidator_create();
 const char* validate_constructor(ConstructorInfo ctor);
@@ -7291,8 +7310,6 @@ int64_t parse_sdn_file(const char* path);
 const char* compile_to_smf(const char* path, const char* output);
 Config create_config();
 int64_t create_block_resolver();
-int64_t OutputFormat__from_text(const char* s);
-CompileOptions CompileOptions__default();
 EffectCacheConfig effectcacheconfig_default_config();
 EffectCacheStats effectcachestats_empty();
 FunctionEffectInfo functioneffectinfo_empty(const char* name);
@@ -7347,6 +7364,7 @@ bool is_codegen(const char* code);
 bool is_runtime(const char* code);
 Color color_new();
 ErrorContext errorcontext_empty();
+int64_t compileerror_ghost_error(const char* message);
 void gc_init();
 int64_t gc_malloc(int64_t size);
 void gc_collect();
@@ -7393,6 +7411,11 @@ TypeVar tyvar_new(int64_t id, int64_t name, int64_t kind);
 TypeVar typevar_new(int64_t id, int64_t name, int64_t kind);
 QuantifierLevel quantifierlevel_new(int64_t level, bool is_rigid);
 QuantifierContext quantifiercontext_new();
+int64_t higherrankunifier_instantiate(int64_t self, int64_t ty);
+int64_t higherrankunifier_skolemize(int64_t self, int64_t ty);
+int64_t higherrankunifier_deep_skolemize(int64_t self, int64_t ty);
+int64_t higherrankunifier_deep_instantiate(int64_t self, int64_t ty);
+void test_instantiate_basic();
 SymbolId symbolid_new(int64_t id);
 SymbolTable symboltable_new();
 HydrationManifest hydrationmanifest_create();
@@ -7409,6 +7432,13 @@ int64_t compilermode_from_text(const char* mode);
 const char* init_compiler();
 const char* init_compiler_with_file(const char* config_path);
 const char* init_compiler_with_config(int64_t config);
+const char* get_context();
+const char* get_engine();
+const char* run(const char* source);
+const char* run_file(const char* path);
+const char* compile(const char* source);
+const char* parse_sdn_safe(const char* source);
+SdnValue sdnvalue_empty();
 InlineAsm inlineasm_new(SplArray* template, int64_t span);
 void mangle(int64_t template_name, int64_t type_args);
 void TemplateInstantiator__instantiate(TemplateInstantiator* self, int64_t template_name, int64_t type_args);
@@ -7455,6 +7485,7 @@ CliArgs CliArgs__default();
 bool is_bitfield_type(int64_t type_);
 int64_t get_bitfield_info(int64_t type_);
 BitfieldMirLower bitfieldmirlower_new(int64_t builder);
+int64_t lower_bitfield_get(int64_t builder, int64_t base, const char* field_name, int64_t bitfield);
 ContractContext contractcontext_empty(const char* func_name, bool is_public);
 MirType mirtype_i64();
 MirType mirtype_f64();
@@ -7492,6 +7523,10 @@ int64_t optimizationconfig_debug();
 int64_t optimizationconfig_size();
 int64_t optimizationconfig_speed();
 int64_t optimizationconfig_aggressive();
+MirModule optimize_mir_debug(MirModule mir);
+MirModule optimize_mir_size(MirModule mir);
+MirModule optimize_mir_speed(MirModule mir);
+MirModule optimize_mir_aggressive(MirModule mir);
 const char* serialize_mir_module(MirModule module);
 const char* serialize_local_kind(int64_t kind);
 const char* serialize_mir_inst(MirInst inst);
@@ -7657,8 +7692,9 @@ MethodImpl methodimpl_new(Symbol name);
 MethodSig methodsig_inherent(Symbol name);
 MethodSig methodsig_from_trait(Symbol name, Symbol trait_name);
 ImplBlock implblock_new(TraitRef trait_ref, int64_t for_type);
-void test_validation();
 Obligation obligation_new(int64_t ty, TraitRef trait_ref);
+ImplRegistry implregistry_new();
+TraitSolver traitsolver_new(int64_t impl_registry);
 TraitDef traitdef_create(Symbol name, Span span);
 TraitDef traitdef_new(const char* name);
 CycleDetector cycledetector_new(int64_t registry);
@@ -7695,10 +7731,10 @@ const char* filename_to_type_name(const char* filename);
 bool type_matches_filename(const char* type_name, const char* filename);
 VolatileAccess volatileaccess_read(int64_t addr, int64_t size, int64_t type_, Span span);
 ArmRegisterAllocator armregisterallocator_new(int64_t arch);
-int64_t BackendFactory__create(int64_t target, CompileOptions options);
+int64_t BackendFactory__create(int64_t target, int64_t options);
 int64_t BackendFactory__auto_select(int64_t target, int64_t mode);
-void BackendFactory__create_specific(int64_t kind, int64_t target, CompileOptions options);
-void BackendFactory__try_create(int64_t target, CompileOptions options);
+void BackendFactory__create_specific(int64_t kind, int64_t target, int64_t options);
+void BackendFactory__try_create(int64_t target, int64_t options);
 bool BackendFactory__supports_target(int64_t kind, int64_t target);
 SplArray* BackendFactory__available_backends();
 BackendCapability get_cranelift_capability();
@@ -7941,12 +7977,6 @@ NativeLinkConfig NativeLinkConfig__default();
 int64_t link_native_cc(SplArray* object_files, const char* output, NativeLinkConfig config);
 int64_t link_native_windows(SplArray* object_files, const char* output, NativeLinkConfig config);
 int64_t find_crt_files(bool pie, bool verbose);
-int64_t link_to_self_contained(SplArray* smf_data, const char* output, int64_t config);
-int64_t detect_self_contained(const char* exe_path);
-int64_t find_runtime_binary();
-SplArray* build_trailer(int64_t smf_offset, int64_t smf_size, int64_t checksum);
-int64_t fnv1a_hash(SplArray* data);
-SplArray* i64_to_le_bytes(int64_t value);
 LinkConfig linkconfig_default();
 const char* find_mold_path();
 const char* find_lld_path();
@@ -7969,9 +7999,6 @@ SplArray* u64_to_bytes(uint64_t value);
 const char* parse_header_from_bytes(SplArray* data);
 NoteSdnMetadata stub_new_note_sdn();
 SmfHeader smfheader_from_raw(SmfHeaderRaw raw);
-const char* char_from_byte(uint8_t b);
-const char* bytes_to_string(SplArray* bytes);
-NoteSdnMetadata parse_note_sdn(const char* sdn_text);
 SmfWriter smfwriter_create();
 int64_t smfwriter_add_string(SmfWriter self, const char* s);
 int64_t smfwriter_add_code_section(SmfWriter self, const char* name, SplArray* code);
@@ -8030,6 +8057,7 @@ uint8_t ptr_read_u8(int64_t ptr, int64_t offset);
 void ptr_write_u8(int64_t ptr, int64_t offset, uint8_t value);
 SplArray* slice_from_raw_parts(int64_t ptr, int64_t len);
 const char* str_from_utf8_lossy(SplArray* bytes);
+const char* char_from_byte(uint8_t b);
 SyntaxMark syntaxmark_create(int64_t expansion_id);
 MarkedIdent markedident_from_name(const char* name);
 MarkedIdent markedident_add_mark(MarkedIdent self, SyntaxMark mark);
@@ -8042,6 +8070,7 @@ TemplateError templateerror_create(const char* message);
 TemplateError templateerror_at(const char* message, int64_t pos);
 TemplateValidator TemplateValidator__create();
 GhostErasureStats ghosterasurestats_new();
+int64_t erase_ghost_from_function(MirFunction func);
 ConstantEvaluator constantevaluator_new();
 AlgebraicSimplifier algebraicsimplifier_new();
 ConstantFolding constantfolding_new();
@@ -8053,10 +8082,15 @@ InlineCostAnalyzer inlinecostanalyzer_new(int64_t threshold);
 FunctionInliner functioninliner_new(int64_t next_local_id);
 LoopDetector loopdetector_new();
 LoopInvariantMotion loopinvariantmotion_new();
+StrengthReduction strengthreduction_new();
+MirFunction strengthreduction_optimize_function(StrengthReduction self, MirFunction func);
+MirBlock strengthreduction_reduce_block(StrengthReduction self, MirBlock block);
 PassManager passmanager_new();
 const char* path_join(const char* base, const char* segment);
 const char* path_basename(const char* path);
-DirectoryManifest directorymanifest_new(const char* name);
+const char* path_parent(const char* path);
+bool path_exists(const char* path);
+bool is_file(const char* path);
 CallSiteAnalyzer callsiteanalyzer_create(SplArray* generic_function_names);
 BindingSpecializer bindingspecializer_create();
 BindingSpecializer bindingspecializer_from_bindings(std::vector<InterfaceBinding> bindings);
@@ -8078,7 +8112,12 @@ const char* mangle_type(int64_t ty);
 HotReloadConfig hotreloadconfig_default();
 MonomorphizationMetadata monomorphizationmetadata_new();
 BuildMetadata buildmetadata_new(const char* target, const char* cpu, const char* optimization, SplArray* features, SplArray* linker_flags, const char* compiler_version, const char* build_timestamp);
+DependencyEdge dependencyedge_new(const char* from_inst, const char* to_inst, int64_t dep_kind);
+CircularWarning circularwarning_new(const char* cycle_path, const char* severity);
+CircularError circularerror_new(const char* cycle_path, const char* error_code);
+NoteSdnMetadata notesdnmetadata_new();
 GenericTemplates generictemplates_new();
+SpecializedInstances specializedinstances_new();
 ModuleRewriter modulerewriter_create();
 int64_t monomorphize_module(SplArray* generic_names, std::vector<CallSite> call_sites);
 MonomorphizationTable monomorphizationtable_new();
@@ -8257,6 +8296,7 @@ const char* register_static(TypeChecker checker, int64_t static_stmt);
 const char* check_definition(TypeChecker checker, int64_t item);
 const char* check_function_body(TypeChecker checker, FunctionDef func);
 WeavingConfig weavingconfig_disabled();
+WeavingConfig weavingconfig_from_aop_config(int64_t aop_config);
 
 static int64_t CL_TYPE_I8 = 1;
 static int64_t CL_TYPE_I16 = 2;
@@ -8497,6 +8537,7 @@ static HirLowering hir_lowering = {};
 static int64_t hir_module = 0;
 static MirLowering mir_ctx = {};
 static int64_t mir_module = 0;
+static MirLocal local_return = {};
 static SplArray* code;
 static int64_t code_size = 0;
 static SplArray* rodata;
@@ -9027,22 +9068,6 @@ int64_t hirexpr_if_expr(HirExpr cond, HirExpr then_expr, HirExpr else_expr) {
     return 0;
 }
 
-void test_if_expression_checking() {
-    /* pass */;
-}
-
-void test_nested_lambda() {
-    /* pass */;
-}
-
-void test_higher_order_function() {
-    /* pass */;
-}
-
-void test_complex_expression() {
-    /* pass */;
-}
-
 int64_t bitwise_not_i64(int64_t n) {
     return ((0 - n) - 1);
 }
@@ -9093,6 +9118,10 @@ int64_t get_abi(int64_t arch, int64_t conv) {
 }
 
 AbiInfo get_avr_abi(int64_t conv) {
+    return AbiInfo{}; /* stub */
+}
+
+AbiInfo get_msp430_abi(int64_t conv) {
     return AbiInfo{}; /* stub */
 }
 
@@ -9217,125 +9246,63 @@ bool templatetypeinference_is_template(const char* value) {
 }
 
 SplArray* KeyExtractor__extract_keys(const char* tmpl) {
-    SplArray* keys = spl_array_new();
-    bool in_brace = false;
-    const char* current_key = "";
-    int64_t i = 0;
-    while ((i < tmpl_len(tmpl))) {
-        int64_t char = spl_str_index_char(tmpl, i..i+1);
-        if (spl_str_eq(char, "{")) {
-            in_brace = true;
-            current_key = "";
-        } else if (spl_str_eq(char, "}")) {
-            if (in_brace) {
-                if ((current_key_len(current_key) > 0)) {
-                }
-                return keys_push(keys, current_key);
-            }
-            in_brace = false;
-            current_key = "";
-        } else if (in_brace) {
-            current_key = spl_str_concat(current_key, char);
-        }
-        i = (i + 1);
-    }
-    return keys;
+    return spl_array_new();
 }
 
 void test_const_key_set_type() {
-    /* stub */
+    /* pass */;
 }
 
 void test_get_keys() {
-    /* stub */
+    /* pass */;
 }
 
 void test_get_keys_empty() {
-    int64_t str_ty = HirType_Str;
-    int64_t keys = str_ty_get_keys(str_ty);
-    spl_println("✅ Get keys empty for non-ConstKeySet");
+    /* pass */;
 }
 
 void test_has_key() {
-    /* stub */
+    /* pass */;
 }
 
 void test_type_equality_const_key_set() {
-    /* stub */
+    /* pass */;
 }
 
 void test_type_equality_other() {
-    int64_t int_ty = HirType_Int;
-    int64_t str_ty = HirType_Str;
-    int64_t arr_ty = hirtype_Array(elem_ty: HirType.Int);
-    spl_println("✅ Type equality for other types");
+    /* pass */;
 }
 
 void test_infer_template_with_keys() {
-    const char* tmpl = spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat("Hello ", spl_i64_to_str(name)), ", you are "), spl_i64_to_str(age)), " years old");
-    int64_t ty = templatetypeinference_infer_template(tmpl);
-    int64_t keys = ty_get_keys(ty);
-    spl_str_eq(assert keys[0], "name");
-    spl_str_eq(assert keys[1], "age");
-    spl_println("✅ Infer template with keys");
+    /* pass */;
 }
 
 void test_infer_plain_string() {
-    const char* plain = "Hello world";
-    int64_t ty = templatetypeinference_infer_template(plain);
-    spl_println("✅ Infer plain string");
+    /* pass */;
 }
 
 void test_is_template() {
-    const char* tmpl = spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat("User ", spl_i64_to_str(id)), " has "), spl_i64_to_str(points)), " points");
-    const char* plain = "No keys here";
-    spl_println("✅ Template detection");
+    /* pass */;
 }
 
 void test_const_key_set_to_string() {
-    /* stub */
+    /* pass */;
 }
 
 void test_dependent_keys_type() {
-    int64_t ty = HirType__DependentKeys(source: "user_input");
-    int64_t str_repr = ty_to_string(ty);
-    spl_str_eq(assert str_repr, "DependentKeys<user_input>");
-    spl_println("✅ DependentKeys type");
+    /* pass */;
 }
 
 const char* format_key_list(SplArray* keys) {
-    if ((keys_len(keys) == 0)) {
-        return "";
-    }
-    const char* result = spl_str_concat(spl_str_concat("\"", spl_i64_to_str(keys[0])), "\"");
-    int64_t i = 1;
-    while ((i < keys_len(keys))) {
-        result = spl_str_concat(result, spl_str_concat(spl_str_concat(", \"", spl_i64_to_str(keys[i])), "\""));
-        i = (i + 1);
-    }
-    return result;
+    return "";
 }
 
 SplArray* find_missing_keys(SplArray* required, SplArray* provided) {
-    SplArray* missing = spl_array_new();
-    for (size_t __key_i = 0; __key_i < required.size(); __key_i++) {
-        Symbol key = required[__key_i];
-        if (!(spl_str_contains(provided, key))) {
-            return missing_push(missing, key);
-        }
-    }
-    return missing;
+    return spl_array_new();
 }
 
 SplArray* find_extra_keys(SplArray* required, SplArray* provided) {
-    SplArray* extra = spl_array_new();
-    for (size_t __key_i = 0; __key_i < provided.size(); __key_i++) {
-        Symbol key = provided[__key_i];
-        if (!(spl_str_contains(required, key))) {
-            return extra_push(extra, key);
-        }
-    }
-    return extra;
+    return spl_array_new();
 }
 
 bool Result__is_ok(const Result* self) {
@@ -9373,107 +9340,59 @@ int64_t Result__unwrap_err(const Result* self) {
 }
 
 void test_validate_with_call_success() {
-    /* stub */
+    /* pass */;
 }
 
 void test_validate_with_call_missing_keys() {
-    /* stub */
+    /* pass */;
 }
 
 void test_validate_with_call_extra_keys() {
-    int64_t tmpl_ty = HirType__ConstKeySet(keys:["name"]);
-    SplArray* provided = spl_array_new();
-    spl_array_push(provided, spl_str("name"));
-    spl_array_push(provided, spl_str("age"));
-    spl_array_push(provided, spl_str("unknown"));
-    int64_t result = constkeyvalidator_validate_with_call(tmpl_ty, provided);
-    int64_t err = result_unwrap_err(result);
-    spl_println("✅ Extra keys detected");
+    /* pass */;
 }
 
 void test_validate_with_call_both_errors() {
-    /* stub */
+    /* pass */;
 }
 
 void test_validate_with_call_not_const_key_set() {
-    int64_t str_ty = HirType_Str;
-    SplArray* provided = spl_array_new();
-    spl_array_push(provided, spl_str("name"));
-    int64_t result = constkeyvalidator_validate_with_call(str_ty, provided);
-    int64_t err = result_unwrap_err(result);
-    switch (err) {
-    }
-    spl_println("✅ Not ConstKeySet detected");
+    /* pass */;
 }
 
 void test_validate_keys_match() {
-    /* stub */
+    /* pass */;
 }
 
 void test_has_missing_keys() {
-    SplArray* required = spl_array_new();
-    spl_array_push(required, spl_str("name"));
-    spl_array_push(required, spl_str("age"));
-    spl_array_push(required, spl_str("email"));
-    SplArray* provided1 = spl_array_new();
-    spl_array_push(provided1, spl_str("name"));
-    spl_array_push(provided1, spl_str("age"));
-    spl_array_push(provided1, spl_str("email"));
-    SplArray* provided2 = spl_array_new();
-    spl_array_push(provided2, spl_str("name"));
-    spl_array_push(provided2, spl_str("age"));
-    spl_println("✅ Has missing keys");
+    /* pass */;
 }
 
 void test_has_extra_keys() {
-    SplArray* required = spl_array_new();
-    spl_array_push(required, spl_str("name"));
-    SplArray* provided1 = spl_array_new();
-    spl_array_push(provided1, spl_str("name"));
-    SplArray* provided2 = spl_array_new();
-    spl_array_push(provided2, spl_str("name"));
-    spl_array_push(provided2, spl_str("age"));
-    spl_println("✅ Has extra keys");
+    /* pass */;
 }
 
 void test_find_missing_keys() {
-    SplArray* required = spl_array_new();
-    spl_array_push(required, spl_str("name"));
-    spl_array_push(required, spl_str("age"));
-    spl_array_push(required, spl_str("email"));
-    SplArray* provided = spl_array_new();
-    spl_array_push(provided, spl_str("name"));
-    spl_array_push(provided, spl_str("age"));
-    std::vector<Symbol> missing = find_missing_keys(required, provided);
-    spl_str_eq(assert missing[0], "email");
-    spl_println("✅ Find missing keys");
+    /* pass */;
 }
 
 void test_find_extra_keys() {
-    SplArray* required = spl_array_new();
-    spl_array_push(required, spl_str("name"));
-    spl_array_push(required, spl_str("age"));
-    SplArray* provided = spl_array_new();
-    spl_array_push(provided, spl_str("name"));
-    spl_array_push(provided, spl_str("age"));
-    spl_array_push(provided, spl_str("unknown"));
-    spl_array_push(provided, spl_str("extra"));
-    std::vector<Symbol> extra = find_extra_keys(required, provided);
-    spl_str_eq(assert extra[0], "unknown");
-    spl_str_eq(assert extra[1], "extra");
-    spl_println("✅ Find extra keys");
+    /* pass */;
 }
 
 void test_key_error_to_string() {
-    /* stub */
+    /* pass */;
 }
 
 void test_typo_detection() {
-    /* stub */
+    /* pass */;
 }
 
-TemplateKey templatekey_required(const char* name, int64_t position) {
-    TemplateKey{.name = name, .position = position, .is_optional = false} = spl_array_new();
+int64_t templatekey_required(const char* name, int64_t position) {
+    return 0;
+}
+
+TemplateKey templatekey_optional(const char* name, int64_t position, const char* default_val) {
+    TemplateKey{.name = name, .position = position, .is_optional = true, .default_value = default_val} = spl_array_new();
 }
 
 SymbolUsage symbolusage_empty() {
@@ -9516,13 +9435,8 @@ void set_container(DiContainer container) {
     _global_container = container;
 }
 
-DiContainer get_container() {
-    if (has__global_container) {
-        return _global_container_value;
-    }
-    DiContainer default = dicontainer_for_profile(CompilerProfile_Dev);
-    _global_container = default;
-    return default;
+int64_t get_container() {
+    return 0;
 }
 
 ParamInfo paraminfo_create(const char* name, const char* type_name, bool has_inject) {
@@ -9534,8 +9448,7 @@ DiValidator divalidator_create() {
 }
 
 const char* validate_constructor(ConstructorInfo ctor) {
-    DiValidator validator = divalidator_create();
-    return validator_validate_constructor(validator, ctor);
+    return "";
 }
 
 const char* validate_class_injection(const char* class_name, bool has_sys_inject, SplArray* field_types) {
@@ -10183,14 +10096,14 @@ const char* find_simple_old_binary() {
 }
 
 int64_t compile_file(const char* path) {
-    CompileOptions options = CompileOptions__default();
+    int64_t options = CompileOptions__default();
     options.input_files = spl_array_new();
     CompilerDriver driver = CompilerDriver__create(options);
     return driver_compile(driver);
 }
 
 int64_t compile_files(SplArray* paths, int64_t mode) {
-    CompileOptions options = CompileOptions__default();
+    int64_t options = CompileOptions__default();
     options.input_files = paths;
     options.mode = mode;
     CompilerDriver driver = CompilerDriver__create(options);
@@ -10206,7 +10119,7 @@ int64_t jit_file(const char* path) {
 }
 
 int64_t aot_file(const char* path, const char* output) {
-    CompileOptions options = CompileOptions__default();
+    int64_t options = CompileOptions__default();
     options.input_files = spl_array_new();
     options.mode = CompileMode.Aot;
     options.output_file = output;
@@ -10232,15 +10145,6 @@ Config create_config() {
 
 int64_t create_block_resolver() {
     return 0; /* stub */
-}
-
-int64_t OutputFormat__from_text(const char* s) {
-    switch (s) {
-    }
-}
-
-CompileOptions CompileOptions__default() {
-    return CompileOptions{}; /* stub */
 }
 
 EffectCacheConfig effectcacheconfig_default_config() {
@@ -10563,6 +10467,10 @@ Color color_new() {
 
 ErrorContext errorcontext_empty() {
     return ErrorContext{}; /* stub */
+}
+
+int64_t compileerror_ghost_error(const char* message) {
+    return 0; /* stub */
 }
 
 void gc_init() {
@@ -10923,6 +10831,94 @@ QuantifierContext quantifiercontext_new() {
     return QuantifierContext{}; /* stub */
 }
 
+int64_t higherrankunifier_instantiate(int64_t self, int64_t ty) {
+    switch (ty) {
+        case Forall(quantifiers, body):
+        {
+            Substitution subst = substitution_new();
+            for (int64_t type_var = 0; type_var < quantifiers; type_var++) {
+                int64_t fresh_var = self_ctx_fresh_inference_var(self, ctx);
+                return subst_add(subst, type_var.id, HirType__TypeVariable(id: fresh_var));
+            }
+            return subst_apply(subst, body);
+            break;
+        }
+        default:
+        {
+            return ty;
+            break;
+        }
+    }
+}
+
+int64_t higherrankunifier_skolemize(int64_t self, int64_t ty) {
+    switch (ty) {
+        case Forall(quantifiers, body):
+        {
+            Substitution subst = substitution_new();
+            for (int64_t type_var = 0; type_var < quantifiers; type_var++) {
+                int64_t skolem_id = self_ctx_fresh_skolem(self, ctx);
+                return subst_add(subst, type_var.id, HirType__Skolem(id: skolem_id));
+            }
+            return subst_apply(subst, body);
+            break;
+        }
+        default:
+        {
+            return ty;
+            break;
+        }
+    }
+}
+
+int64_t higherrankunifier_deep_skolemize(int64_t self, int64_t ty) {
+    switch (ty) {
+        case Arrow(from, to):
+        {
+            int64_t from_skolem = self_deep_skolemize(self, from);
+            int64_t to_inst = self_deep_instantiate(self, to);
+            return hirtype_Arrow(from: from_skolem, to: to_inst);
+            break;
+        }
+        case Forall(quantifiers, body):
+        {
+            return self_skolemize(self, ty);
+            break;
+        }
+        default:
+        {
+            return ty;
+            break;
+        }
+    }
+}
+
+int64_t higherrankunifier_deep_instantiate(int64_t self, int64_t ty) {
+    switch (ty) {
+        case Arrow(from, to):
+        {
+            int64_t from_skolem = self_deep_skolemize(self, from);
+            int64_t to_inst = self_deep_instantiate(self, to);
+            return hirtype_Arrow(from: from_skolem, to: to_inst);
+            break;
+        }
+        case Forall(quantifiers, body):
+        {
+            return self_instantiate(self, ty);
+            break;
+        }
+        default:
+        {
+            return ty;
+            break;
+        }
+    }
+}
+
+void test_instantiate_basic() {
+    /* stub */
+}
+
 SymbolId symbolid_new(int64_t id) {
     return SymbolId{.id = id};
 }
@@ -11002,6 +10998,45 @@ const char* init_compiler_with_file(const char* config_path) {
 
 const char* init_compiler_with_config(int64_t config) {
     return ""; /* stub */
+}
+
+const char* get_context() {
+    if (global_context_is_none(global_context)) {
+        return Result_Err;
+    }
+    return Result_Ok;
+}
+
+const char* get_engine() {
+    const char* ctx = get_context();
+    int64_t resolved = ctx.container_resolve_any(ctx.container, "ExecutionEngine");
+    if (resolved_is_err(resolved)) {
+        return Result_Err;
+    }
+    return Result_Ok;
+}
+
+const char* run(const char* source) {
+    const char* engine = get_engine();
+    return engine_execute(engine, source);
+}
+
+const char* run_file(const char* path) {
+    const char* engine = get_engine();
+    return engine_execute_file(engine, path);
+}
+
+const char* compile(const char* source) {
+    const char* engine = get_engine();
+    return engine_compile(engine, source);
+}
+
+const char* parse_sdn_safe(const char* source) {
+    return ""; /* stub */
+}
+
+SdnValue sdnvalue_empty() {
+    return SdnValue{}; /* stub */
 }
 
 InlineAsm inlineasm_new(SplArray* template, int64_t span) {
@@ -11260,6 +11295,16 @@ BitfieldMirLower bitfieldmirlower_new(int64_t builder) {
     return BitfieldMirLower{.builder = builder};
 }
 
+int64_t lower_bitfield_get(int64_t builder, int64_t base, const char* field_name, int64_t bitfield) {
+    int64_t field = bitfield_get_field(bitfield, field_name);
+    if (!(has_field)) {
+        return base;
+    }
+    int64_t f = field_value;
+    BitfieldMirLower lowerer = BitfieldMirLower{.builder = builder};
+    return lowerer_lower_get(lowerer, base, f);
+}
+
 ContractContext contractcontext_empty(const char* func_name, bool is_public) {
     return func_name: func_name, is_public: is_public);
 }
@@ -11499,6 +11544,22 @@ int64_t optimizationconfig_speed() {
 
 int64_t optimizationconfig_aggressive() {
     return optimizationconfig_Enabled(level: OptLevel.Aggressive);
+}
+
+MirModule optimize_mir_debug(MirModule mir) {
+    return optimize_mir_module(mir, OptimizationConfig__debug());
+}
+
+MirModule optimize_mir_size(MirModule mir) {
+    return optimize_mir_module(mir, OptimizationConfig__size());
+}
+
+MirModule optimize_mir_speed(MirModule mir) {
+    return optimize_mir_module(mir, OptimizationConfig__speed());
+}
+
+MirModule optimize_mir_aggressive(MirModule mir) {
+    return optimize_mir_module(mir, OptimizationConfig__aggressive());
 }
 
 const char* serialize_mir_module(MirModule module) {
@@ -13512,13 +13573,16 @@ ImplBlock implblock_new(TraitRef trait_ref, int64_t for_type) {
     return ImplBlock{}; /* stub */
 }
 
-void test_validation() {
-    int64_t registry = implregistry_new();
-    int64_t impl_block = ImplBlock__new(TraitRef__new("Display"))_add_method(ImplBlock__new(TraitRef__new("Display")), "to_string");
+Obligation obligation_new(int64_t ty, TraitRef trait_ref) {
+    return Obligation{.ty = ty, .trait_ref = trait_ref, .span = "unknown"};
 }
 
-Obligation obligation_new(int64_t ty, TraitRef trait_ref) {
-    return Obligation{}; /* stub */
+ImplRegistry implregistry_new() {
+    return ImplRegistry{.impls = spl_array_new()};
+}
+
+TraitSolver traitsolver_new(int64_t impl_registry) {
+    return TraitSolver{}; /* stub */
 }
 
 TraitDef traitdef_create(Symbol name, Span span) {
@@ -13758,7 +13822,7 @@ ArmRegisterAllocator armregisterallocator_new(int64_t arch) {
     return ArmRegisterAllocator{}; /* stub */
 }
 
-int64_t BackendFactory__create(int64_t target, CompileOptions options) {
+int64_t BackendFactory__create(int64_t target, int64_t options) {
     return BackendFactory__create_specific(BackendKind_Cranelift);
 }
 
@@ -13787,11 +13851,11 @@ int64_t BackendFactory__auto_select(int64_t target, int64_t mode) {
     }
 }
 
-void BackendFactory__create_specific(int64_t kind, int64_t target, CompileOptions options) {
+void BackendFactory__create_specific(int64_t kind, int64_t target, int64_t options) {
     /* stub */
 }
 
-void BackendFactory__try_create(int64_t target, CompileOptions options) {
+void BackendFactory__try_create(int64_t target, int64_t options) {
     /* stub */
 }
 
@@ -14572,18 +14636,7 @@ int64_t block_info(const char* kind) {
 }
 
 const char* parse_json(const char* text) {
-    switch (json_parse(text_trim(text))) {
-        case Ok(json_value):
-        {
-            return Result_Ok;
-            break;
-        }
-        case Err(error):
-        {
-            return Result_Err;
-            break;
-        }
-    }
+    return "";
 }
 
 const char* parse_yaml(const char* text) {
@@ -15851,6 +15904,99 @@ const char* extract_basename(const char* path) {
 
 NativeLinkConfig NativeLinkConfig__default() {
     NativeLinkConfig{.libraries = spl_array_new(), .library_paths = spl_array_new(), .runtime_path = "", .pie = true, .debug = false, .verbose = false, .extra_flags = spl_array_new()} = spl_array_new();
+    SplArray* args = spl_array_new();
+    spl_array_push(args, spl_str("-o"));
+    return args_push(args, output);
+    if (spl_str_eq(os, "linux")) {
+        if (spl_str_eq(arch, "x86_64")) {
+            spl_array_push(args, spl_str("-m"));
+            return spl_array_push(args, spl_str("elf_x86_64"));
+        } else if (spl_str_eq(arch, "aarch64")) {
+            spl_array_push(args, spl_str("-m"));
+            return spl_array_push(args, spl_str("aarch64linux"));
+        }
+    }
+    if ((!spl_str_eq(crt.dynamic_linker, ""))) {
+        spl_array_push(args, spl_str("-dynamic-linker"));
+        return args_push(args, crt.dynamic_linker);
+    }
+    spl_array_push(args, spl_str("--eh-frame-hdr"));
+    spl_array_push(args, spl_str("--build-id"));
+    spl_array_push(args, spl_str("--hash-style=gnu"));
+    spl_array_push(args, spl_str("-z"));
+    spl_array_push(args, spl_str("relro"));
+    spl_array_push(args, spl_str("-z"));
+    return spl_array_push(args, spl_str("now"));
+    if (config.pie) {
+        return spl_array_push(args, spl_str("-pie"));
+    }
+    args_push(args, crt.crt1);
+    args_push(args, crt.crti);
+    return args_push(args, crt.crtbegin);
+    for (int64_t obj = 0; obj < object_files; obj++) {
+        return args_push(args, obj);
+    }
+    for (int64_t __dir_i = 0; __dir_i < spl_array_len(crt.lib_dirs); __dir_i++) {
+        int64_t dir = spl_array_get(crt.lib_dirs, __dir_i).as_int;
+        spl_array_push(args, spl_str("-L"));
+        return args_push(args, dir);
+    }
+    for (int64_t __lp_i = 0; __lp_i < spl_array_len(config.library_paths); __lp_i++) {
+        int64_t lp = spl_array_get(config.library_paths, __lp_i).as_int;
+        spl_array_push(args, spl_str("-L"));
+        return args_push(args, lp);
+    }
+    int64_t runtime_dir = config.runtime_path;
+    if (spl_str_eq(runtime_dir, "")) {
+        runtime_dir = find_runtime_lib_dir();
+    }
+    if ((!spl_str_eq(runtime_dir, ""))) {
+        spl_array_push(args, spl_str("-L"));
+        args_push(args, runtime_dir);
+        spl_array_push(args, spl_str("-lsimple_compiler"));
+        spl_array_push(args, spl_str("-rpath"));
+        return args_push(args, runtime_dir);
+    }
+    if (spl_str_eq(os, "linux")) {
+        spl_array_push(args, spl_str("-lc"));
+        spl_array_push(args, spl_str("-lpthread"));
+        spl_array_push(args, spl_str("-ldl"));
+        return spl_array_push(args, spl_str("-lm"));
+    } else if (spl_str_eq(os, "macos")) {
+        spl_array_push(args, spl_str("-lc"));
+        spl_array_push(args, spl_str("-lpthread"));
+        spl_array_push(args, spl_str("-lm"));
+        return spl_array_push(args, spl_str("-lSystem"));
+    } else if (spl_str_eq(os, "freebsd")) {
+        spl_array_push(args, spl_str("-lc"));
+        spl_array_push(args, spl_str("-lpthread"));
+        return spl_array_push(args, spl_str("-lm"));
+    }
+    for (int64_t __lib_i = 0; __lib_i < spl_array_len(config.libraries); __lib_i++) {
+        int64_t lib = spl_array_get(config.libraries, __lib_i).as_int;
+        spl_array_push(args, spl_str("-l"));
+        return args_push(args, lib);
+    }
+    if (config.debug) {
+        return spl_array_push(args, spl_str("-g"));
+    }
+    for (int64_t __flag_i = 0; __flag_i < spl_array_len(config.extra_flags); __flag_i++) {
+        int64_t flag = spl_array_get(config.extra_flags, __flag_i).as_int;
+        return args_push(args, flag);
+    }
+    args_push(args, crt.crtend);
+    return args_push(args, crt.crtn);
+    const char* exec_result = execute_linker(linker_path, args);
+    if (exec_result_is_err(exec_result)) {
+        if (config.verbose) {
+            spl_println(spl_str_concat("[linker-wrapper] Direct linker failed, falling back to cc: ", spl_i64_to_str(exec_result_unwrap_err(exec_result))));
+        }
+        return link_native_cc(object_files, output, config);
+    }
+    if (config.verbose) {
+        int64_t size = linker_file_size(output);
+        spl_println(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat("[linker-wrapper] Native binary: ", spl_i64_to_str(output)), " ("), spl_i64_to_str(size)), " bytes)"));
+    }
     return Result_Ok;
 }
 
@@ -15936,131 +16082,6 @@ int64_t link_native_windows(SplArray* object_files, const char* output, NativeLi
 
 int64_t find_crt_files(bool pie, bool verbose) {
     return 0; /* stub */
-}
-
-int64_t link_to_self_contained(SplArray* smf_data, const char* output, int64_t config) {
-    if ((smf_data_len(smf_data) == 0)) {
-        return Result_Err;
-    }
-    int64_t runtime_path = config.runtime_binary;
-    if (spl_str_eq(runtime_path, "")) {
-        int64_t found = find_runtime_binary();
-        if (found_is_err(found)) {
-            return Result_Err;
-        }
-        runtime_path = found_value;
-    }
-    if (config.verbose) {
-        spl_println(spl_str_concat("[linker-wrapper] Runtime binary: ", spl_i64_to_str(runtime_path)));
-    }
-    if (!(file_copy(runtime_path, output))) {
-        return Result_Err;
-    }
-    int64_t runtime_size = file_size_raw(output);
-    if ((runtime_size <= 0)) {
-        file_delete(output);
-        return Result_Err;
-    }
-    int64_t append_ok = append_bytes_to_file(output, smf_data);
-    if (!(append_ok)) {
-        file_delete(output);
-        return Result_Err;
-    }
-    int64_t smf_offset = runtime_size;
-    int64_t smf_size = smf_data_len(smf_data);
-    int64_t checksum = fnv1a_hash(smf_data);
-    SplArray* trailer = build_trailer(smf_offset, smf_size, checksum);
-    int64_t trailer_ok = append_bytes_to_file(output, trailer);
-    if (!(trailer_ok)) {
-        file_delete(output);
-        return Result_Err;
-    }
-    int64_t os = host_os();
-    if ((!spl_str_eq(os, "windows"))) {
-        return shell(spl_str_concat(spl_str_concat("chmod +x '", output), "'"));
-    }
-    int64_t total_size = file_size_raw(output);
-    if (config.verbose) {
-        spl_println(spl_str_concat("[linker-wrapper] Self-contained binary: ", output));
-        spl_println(spl_str_concat(spl_str_concat("[linker-wrapper]   Runtime: ", spl_i64_to_str(runtime_size)), " bytes"));
-        spl_println(spl_str_concat(spl_str_concat("[linker-wrapper]   SMF data: ", spl_i64_to_str(smf_size)), " bytes"));
-        spl_println(spl_str_concat(spl_str_concat("[linker-wrapper]   Trailer: ", spl_i64_to_str(SMFE_TRAILER_SIZE)), " bytes"));
-        spl_println(spl_str_concat(spl_str_concat("[linker-wrapper]   Total: ", spl_i64_to_str(total_size)), " bytes"));
-    }
-    return Result_Ok;
-}
-
-int64_t detect_self_contained(const char* exe_path) {
-    int64_t total_size = file_size_raw(exe_path);
-    if ((total_size < SMFE_TRAILER_SIZE)) {
-        return Result_Err;
-    }
-    int64_t trailer_offset = (total_size - SMFE_TRAILER_SIZE);
-    int64_t hex_result = shell(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat("dd if='", exe_path), "' bs=1 skip="), spl_i64_to_str(trailer_offset)), " count="), spl_i64_to_str(SMFE_TRAILER_SIZE)), " 2>/dev/null | od -A n -t x1 | tr -d ' \\n'"));
-    if ((hex_result.exit_code != 0)) {
-        return Result_Err;
-    }
-    int64_t hex = hex_result.stdout;
-    if ((hex_len(hex) < 8)) {
-        return Result_Err;
-    }
-    const char* magic_hex = spl_str_slice(hex, 0, 8);
-    if ((!spl_str_eq(magic_hex, "534d4645"))) {
-        return Result_Err;
-    }
-    int64_t smf_offset = parse_hex_u64(hex, 8);
-    int64_t smf_size = parse_hex_u64(hex, 24);
-    return Result_Ok;
-}
-
-int64_t find_runtime_binary() {
-    int64_t env_path = env_get("SIMPLE_RUNTIME_BINARY");
-    if ((!spl_str_eq(env_path, ""))) {
-        if (file_exists(env_path)) {
-        }
-        return Result_Ok;
-    }
-    int64_t current_dir = cwd();
-    int64_t os = host_os();
-    int64_t arch = host_arch();
-    int64_t platform_name = (spl_str_concat(os, "-") + arch);
-    const char* platform_path = spl_str_concat(spl_str_concat(spl_str_concat(spl_i64_to_str(current_dir), "/bin/release/"), spl_i64_to_str(platform_name)), "/simple");
-    if (file_exists(platform_path)) {
-        return Result_Ok;
-    }
-    const char* generic_path = spl_str_concat(spl_i64_to_str(current_dir), "/bin/release/simple");
-    if (file_exists(generic_path)) {
-        return Result_Ok;
-    }
-    if (file_exists("./bin/release/simple")) {
-        return Result_Ok;
-    }
-    return Result_Err;
-}
-
-SplArray* build_trailer(int64_t smf_offset, int64_t smf_size, int64_t checksum) {
-    SplArray* buf = spl_array_new();
-    buf = (buf + (SMFE_MAGIC));
-    buf = (buf + (i64_to_le_bytes(smf_offset)));
-    buf = (buf + (i64_to_le_bytes(smf_size)));
-    buf = (buf + (i64_to_le_bytes(checksum)));
-    buf = (buf + (i32_to_le_bytes(SMFE_VERSION)));
-    return buf;
-}
-
-int64_t fnv1a_hash(SplArray* data) {
-    int64_t hash = -3750763034362895579;
-    for (int64_t __byte_i = 0; __byte_i < spl_array_len(data); __byte_i++) {
-        int64_t byte = spl_array_get(data, __byte_i).as_int;
-        int64_t b = byte;
-        hash = hash xor b;
-        hash = (hash * 1099511628211);
-    }
-    return hash;
-}
-
-SplArray* i64_to_le_bytes(int64_t value) {
-    return spl_array_new();
 }
 
 LinkConfig linkconfig_default() {
@@ -16203,26 +16224,6 @@ NoteSdnMetadata stub_new_note_sdn() {
 
 SmfHeader smfheader_from_raw(SmfHeaderRaw raw) {
     return SmfHeader{}; /* stub */
-}
-
-const char* char_from_byte(uint8_t b) {
-    return ""; /* stub */
-}
-
-const char* bytes_to_string(SplArray* bytes) {
-    SplArray* chars = spl_array_new();
-    for (int64_t __b_i = 0; __b_i < spl_array_len(bytes); __b_i++) {
-        int64_t b = spl_array_get(bytes, __b_i).as_int;
-        if ((b == 0)) {
-            return chars_join(chars, "");
-        }
-        return chars_push(chars, char_from_byte(b));
-    }
-    return chars_join(chars, "");
-}
-
-NoteSdnMetadata parse_note_sdn(const char* sdn_text) {
-    return stub_new_note_sdn();
 }
 
 SmfWriter smfwriter_create() {
@@ -16561,6 +16562,10 @@ const char* str_from_utf8_lossy(SplArray* bytes) {
     return chars_join(chars, "");
 }
 
+const char* char_from_byte(uint8_t b) {
+    return spl_i64_to_str(b as char);
+}
+
 SyntaxMark syntaxmark_create(int64_t expansion_id) {
     return SyntaxMark{.id = expansion_id, .expansion_id = expansion_id};
 }
@@ -16613,7 +16618,25 @@ TemplateValidator TemplateValidator__create() {
 }
 
 GhostErasureStats ghosterasurestats_new() {
-    return GhostErasureStats{}; /* stub */
+    return GhostErasureStats{.ghost_params_erased = 0, .ghost_locals_erased = 0, .instructions_erased = 0, .functions_processed = 0};
+    GhostErasureStats stats = ghosterasurestats_new();
+    SplArray* errors = spl_array_new();
+    for (int64_t __func_i = 0; __func_i < spl_array_len(module.functions); __func_i++) {
+        int64_t func = spl_array_get(module.functions, __func_i).as_int;
+        int64_t _destruct_0 = erase_ghost_from_function(func);
+        int64_t func_stats = _destruct_0[0];
+        int64_t func_errors = _destruct_0[1];
+        stats.ghost_params_erased = (stats.ghost_params_erased + func_stats.ghost_params_erased);
+        stats.ghost_locals_erased = (stats.ghost_locals_erased + func_stats.ghost_locals_erased);
+        stats.instructions_erased = (stats.instructions_erased + func_stats.instructions_erased);
+        stats.functions_processed = (stats.functions_processed + 1);
+        errors = errors_concat(errors, func_errors);
+    }
+    return spl_array_new();
+}
+
+int64_t erase_ghost_from_function(MirFunction func) {
+    return 0; /* stub */
 }
 
 ConstantEvaluator constantevaluator_new() {
@@ -16660,6 +16683,24 @@ LoopInvariantMotion loopinvariantmotion_new() {
     return LoopInvariantMotion{}; /* stub */
 }
 
+StrengthReduction strengthreduction_new() {
+    return StrengthReduction{.reduced_count = 0};
+}
+
+MirFunction strengthreduction_optimize_function(StrengthReduction self, MirFunction func) {
+    std::vector<MirBlock> optimized_blocks = {};
+    for (size_t __block_i = 0; __block_i < func.blocks.size(); __block_i++) {
+        MirBlock block = func.blocks[__block_i];
+        int64_t optimized = StrengthReduction__reduce_block(self, block);
+        return optimized_blocks_push(optimized_blocks, optimized);
+    }
+    return copy_mir_function_with_blocks(func, optimized_blocks);
+}
+
+MirBlock strengthreduction_reduce_block(StrengthReduction self, MirBlock block) {
+    return MirBlock{}; /* stub */
+}
+
 PassManager passmanager_new() {
     return PassManager{}; /* stub */
 }
@@ -16680,8 +16721,16 @@ const char* path_basename(const char* path) {
     return parts[parts_len(parts);
 }
 
-DirectoryManifest directorymanifest_new(const char* name) {
-    return DirectoryManifest{}; /* stub */
+const char* path_parent(const char* path) {
+    return rt_path_parent(path);
+}
+
+bool path_exists(const char* path) {
+    return (rt_file_exists(path) || rt_dir_exists(path));
+}
+
+bool is_file(const char* path) {
+    return (rt_file_exists(path) && !(rt_dir_exists(path)));
 }
 
 CallSiteAnalyzer callsiteanalyzer_create(SplArray* generic_function_names) {
@@ -16777,11 +16826,37 @@ MonomorphizationMetadata monomorphizationmetadata_new() {
 }
 
 BuildMetadata buildmetadata_new(const char* target, const char* cpu, const char* optimization, SplArray* features, SplArray* linker_flags, const char* compiler_version, const char* build_timestamp) {
-    return BuildMetadata{}; /* stub */
+    return BuildMetadata{.target = target, .cpu = cpu, .optimization = optimization, .features = features, .linker_flags = linker_flags, .compiler_version = compiler_version, .build_timestamp = build_timestamp};
+    inferred_type: text;
+    expr: text;
+    ctx: text;
+    from_file: text;
+    return from_loc: text;
+}
+
+DependencyEdge dependencyedge_new(const char* from_inst, const char* to_inst, int64_t dep_kind) {
+    return DependencyEdge{.from_inst = from_inst, .to_inst = to_inst, .dep_kind = dep_kind};
+}
+
+CircularWarning circularwarning_new(const char* cycle_path, const char* severity) {
+    return CircularWarning{.cycle_path = cycle_path, .severity = severity};
+}
+
+CircularError circularerror_new(const char* cycle_path, const char* error_code) {
+    return CircularError{.cycle_path = cycle_path, .error_code = error_code};
+}
+
+NoteSdnMetadata notesdnmetadata_new() {
+    return NoteSdnMetadata{}; /* stub */
 }
 
 GenericTemplates generictemplates_new() {
-    return GenericTemplates{}; /* stub */
+    return GenericTemplates{.functions = {}, .structs = {}, .classes = {}, .enums = {}, .traits = {}};
+    return generictemplates_new();
+}
+
+SpecializedInstances specializedinstances_new() {
+    return SpecializedInstances{}; /* stub */
 }
 
 ModuleRewriter modulerewriter_create() {
@@ -19120,6 +19195,10 @@ const char* check_function_body(TypeChecker checker, FunctionDef func) {
 }
 
 WeavingConfig weavingconfig_disabled() {
+    return WeavingConfig{.enabled = false, .before_advices = {}, .after_success_advices = {}, .after_error_advices = {}, .around_advices = {}};
+}
+
+WeavingConfig weavingconfig_from_aop_config(int64_t aop_config) {
     return WeavingConfig{}; /* stub */
 }
 
@@ -19195,6 +19274,7 @@ static void __module_init(void) {
     spl_println("");
     spl_println("Step 1: Constructing MirModule...");
     i64_type = MirType{.kind = MirTypeKind_I64};
+    main_sig = MirSignature{.params = {}, .return_type = i64_type, .is_variadic = false};
     spl_println("types ok");
     spl_println("=== Native Binary Generation Proof of Concept ===");
     spl_println("");
