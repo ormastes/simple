@@ -6,7 +6,7 @@
 # NOTE: This module uses generics (PureTensor<f64>) and will only work
 # in compiled mode, not in the interpreter (runtime parser limitation).
 
-use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_randn}
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros, tensor_ones, tensor_randn}
 use lib.pure.tensor_ops.{add, mul, mul_scalar, relu, sigmoid, tanh, softmax, tensor_exp, tensor_sum, tensor_div_scalar}
 
 # ============================================================================
@@ -257,6 +257,223 @@ class Sequential:
             s = s + "  " + layer.to_string() + "\n"
         s + ")"
 
+class LeakyReLU:
+    """Leaky Rectified Linear Unit: max(negative_slope * x, x)"""
+    negative_slope: f64
+    training: bool
+
+    static fn create(negative_slope: f64) -> LeakyReLU:
+        LeakyReLU(negative_slope: negative_slope, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        var result_data: [f64] = []
+        for v in x.data:
+            val activated = if v > 0.0: v else: self.negative_slope * v
+            result_data.push(activated)
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "LeakyReLU(negative_slope={self.negative_slope})"
+
+class ELU:
+    """Exponential Linear Unit: x if x > 0, alpha * (exp(x) - 1) if x <= 0"""
+    alpha: f64
+    training: bool
+
+    static fn create(alpha: f64) -> ELU:
+        ELU(alpha: alpha, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        var result_data: [f64] = []
+        for v in x.data:
+            if v > 0.0:
+                result_data.push(v)
+            else:
+                # Compute exp(v) using Taylor series (20 terms)
+                var exp_val = 1.0
+                var term = 1.0
+                var k = 1
+                while k <= 20:
+                    term = term * v / k
+                    exp_val = exp_val + term
+                    k = k + 1
+                result_data.push(self.alpha * (exp_val - 1.0))
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "ELU(alpha={self.alpha})"
+
+class GELU:
+    """Gaussian Error Linear Unit: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))"""
+    training: bool
+
+    static fn create() -> GELU:
+        GELU(training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        val sqrt_2_over_pi = 0.7978845608
+        var result_data: [f64] = []
+        for v in x.data:
+            # Compute inner = sqrt(2/pi) * (x + 0.044715 * x^3)
+            val inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v)
+            # Compute tanh(inner) using (exp(2z)-1)/(exp(2z)+1) with Taylor exp
+            val z2 = 2.0 * inner
+            # Compute exp(z2) using Taylor series (20 terms)
+            var exp_val = 1.0
+            var term = 1.0
+            var k = 1
+            while k <= 20:
+                term = term * z2 / k
+                exp_val = exp_val + term
+                k = k + 1
+            val tanh_val = (exp_val - 1.0) / (exp_val + 1.0)
+            result_data.push(0.5 * v * (1.0 + tanh_val))
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        []
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "GELU()"
+
+class BatchNorm1d:
+    """Batch Normalization over 1D inputs"""
+    num_features: i64
+    eps: f64
+    momentum: f64
+    weight: PureTensor<f64>
+    bias: PureTensor<f64>
+    running_mean: PureTensor<f64>
+    running_var: PureTensor<f64>
+    training: bool
+
+    static fn create(num_features: i64, eps: f64, momentum: f64) -> BatchNorm1d:
+        val weight = tensor_ones([num_features])
+        val bias = tensor_zeros([num_features])
+        val running_mean = tensor_zeros([num_features])
+        val running_var = tensor_ones([num_features])
+        BatchNorm1d(num_features: num_features, eps: eps, momentum: momentum, weight: weight, bias: bias, running_mean: running_mean, running_var: running_var, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Normalize using running_mean/running_var, then scale and shift."""
+        var result_data: [f64] = []
+        var i = 0
+        while i < x.data.len():
+            val feature_idx = i % self.num_features
+            val mean_val = self.running_mean.data[feature_idx]
+            val var_val = self.running_var.data[feature_idx]
+            # Compute sqrt(var + eps) using Newton's method
+            val var_eps = var_val + self.eps
+            var sqrt_val = var_eps
+            var iter = 0
+            while iter < 20:
+                sqrt_val = 0.5 * (sqrt_val + var_eps / sqrt_val)
+                iter = iter + 1
+            val normalized = (x.data[i] - mean_val) / sqrt_val
+            val scaled = normalized * self.weight.data[feature_idx] + self.bias.data[feature_idx]
+            result_data.push(scaled)
+            i = i + 1
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        [self.weight, self.bias]
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "BatchNorm1d(num_features={self.num_features}, eps={self.eps}, momentum={self.momentum})"
+
+class LayerNorm:
+    """Layer Normalization"""
+    normalized_shape: i64
+    eps: f64
+    weight: PureTensor<f64>
+    bias: PureTensor<f64>
+    training: bool
+
+    static fn create(normalized_shape: i64, eps: f64) -> LayerNorm:
+        val weight = tensor_ones([normalized_shape])
+        val bias = tensor_zeros([normalized_shape])
+        LayerNorm(normalized_shape: normalized_shape, eps: eps, weight: weight, bias: bias, training: true)
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Compute mean and variance across all elements, normalize, scale and shift."""
+        # Compute mean
+        var sum = 0.0
+        var i = 0
+        while i < x.data.len():
+            sum = sum + x.data[i]
+            i = i + 1
+        val mean_val = sum / x.data.len()
+
+        # Compute variance
+        var var_sum = 0.0
+        i = 0
+        while i < x.data.len():
+            val diff = x.data[i] - mean_val
+            var_sum = var_sum + diff * diff
+            i = i + 1
+        val var_val = var_sum / x.data.len()
+
+        # Compute sqrt(var + eps) using Newton's method
+        val var_eps = var_val + self.eps
+        var sqrt_val = var_eps
+        var iter = 0
+        while iter < 20:
+            sqrt_val = 0.5 * (sqrt_val + var_eps / sqrt_val)
+            iter = iter + 1
+
+        # Normalize, scale and shift
+        var result_data: [f64] = []
+        i = 0
+        while i < x.data.len():
+            val feature_idx = i % self.normalized_shape
+            val normalized = (x.data[i] - mean_val) / sqrt_val
+            val scaled = normalized * self.weight.data[feature_idx] + self.bias.data[feature_idx]
+            result_data.push(scaled)
+            i = i + 1
+        tensor_from_data(result_data, x.shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        [self.weight, self.bias]
+
+    me train():
+        self.training = true
+
+    me eval():
+        self.training = false
+
+    fn to_string() -> text:
+        "LayerNorm(normalized_shape={self.normalized_shape}, eps={self.eps})"
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -306,5 +523,6 @@ fn linear_create(in_features: i64, out_features: i64, use_bias: bool) -> Linear:
 # ============================================================================
 
 export Linear, ReLU, Sigmoid, Tanh, Softmax, Dropout, Sequential
+export LeakyReLU, ELU, GELU, BatchNorm1d, LayerNorm
 export count_parameters, zero_grad
 export linear_create  # Legacy API
