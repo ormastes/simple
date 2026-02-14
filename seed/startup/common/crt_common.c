@@ -41,6 +41,9 @@ void __spl_zero_bss(void) {
 void __spl_start(int argc, char **argv, char **envp) {
     (void)envp; /* available for future use */
 
+    /* Initialize threading subsystem before constructors run */
+    spl_thread_init();
+
     run_init();
     spl_init_args(argc, argv);
 

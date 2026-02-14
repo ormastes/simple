@@ -27,9 +27,6 @@
 
 .SUFFIXES: .hpux_make_needs_suffix_list
 
-# Produce verbose output by default.
-VERBOSE = 1
-
 # Command-line flag to silence nested $(MAKE).
 $(VERBOSE)MAKESILENT = -s
 
@@ -98,6 +95,7 @@ seed_test_EXTERNAL_OBJECTS =
 
 seed_test: CMakeFiles/seed_test.dir/seed_test.cpp.o
 seed_test: CMakeFiles/seed_test.dir/build.make
+seed_test: CMakeFiles/seed_test.dir/compiler_depend.ts
 seed_test: CMakeFiles/seed_test.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/ormastes/dev/pub/simple/seed/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable seed_test"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/seed_test.dir/link.txt --verbose=$(VERBOSE)

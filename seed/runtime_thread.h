@@ -77,6 +77,13 @@ int64_t spl_thread_current_id(void);
 void spl_thread_sleep(int64_t millis);
 
 /**
+ * Initialize threading subsystem.
+ * Called once at startup before any threads are created.
+ * Safe to call multiple times (idempotent).
+ */
+void spl_thread_init(void);
+
+/**
  * Yield CPU to other threads.
  */
 void spl_thread_yield(void);
@@ -206,6 +213,26 @@ void spl_condvar_destroy(spl_condvar_handle handle);
  *   Number of logical CPU cores
  */
 int64_t spl_thread_cpu_count(void);
+
+/* ===== Thread Pool Helper ===== */
+
+/**
+ * Spawn thread pool worker thread.
+ *
+ * Helper function for thread pool implementation.
+ * Spawns a worker thread that calls worker_loop_entry(pool_id).
+ *
+ * Args:
+ *   pool_id: Thread pool identifier passed to worker function
+ *
+ * Returns:
+ *   Thread handle (> 0) on success, 0 on failure
+ *
+ * Note:
+ *   Only works in compiled mode (not interpreter).
+ *   Requires worker_loop_entry function to be linked.
+ */
+spl_thread_handle spl_thread_pool_spawn_worker(int64_t pool_id);
 
 #ifdef __cplusplus
 }

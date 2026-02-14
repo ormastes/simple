@@ -9,6 +9,9 @@ use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 # Direct import of thread creation SFFI
 extern fn spl_thread_create(entry_point: i64, arg: i64) -> i64
 
+# Thread pool worker spawn helper (C wrapper)
+extern fn spl_thread_pool_spawn_worker(pool_id: i64) -> i64
+
 class ThreadPool:
     """Thread pool for parallel task execution.
 
@@ -74,15 +77,15 @@ class ThreadPool:
         # When runtime is rebuilt, workers will spawn automatically
         var handles: [ThreadHandle] = []
 
-        # Spawn workers (will fail gracefully if runtime not rebuilt)
+        # Spawn workers using C helper function
+        # Note: This only works in compiled mode (not interpreter)
         for i in 0..workers:
-            # TODO: Pass function pointer to worker_loop_entry
-            # Current blocker: No way to get function address in Simple
-            # Workaround needed: Either C helper or compiler support
-            #
-            # Expected: val handle_id = spl_thread_create(worker_loop_entry_addr, pool_id)
-            # For now, skip spawning - tests will still pass for infrastructure
-            pass_do_nothing
+            val handle_id = spl_thread_pool_spawn_worker(pool_id)
+            if handle_id > 0:
+                val handle = ThreadHandle.from_raw(handle_id)
+                handles = handles.push(handle)
+            # If handle_id is 0, worker spawn failed (interpreter mode or error)
+            # Continue anyway - pool can still work without threads for testing
 
         pool.worker_handles = handles
         pool

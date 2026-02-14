@@ -1,18 +1,38 @@
 /*
  * Windows platform header — headers, compatibility macros, and stubs.
+ *
+ * Supports two Windows build modes:
+ * 1. ClangCL (MSVC ABI): clang-cl with UCRT, MSVC-compatible
+ * 2. MinGW Clang (GCC ABI): clang with MinGW target, GCC-compatible
  */
 #ifndef SPL_PLATFORM_WIN_H
 #define SPL_PLATFORM_WIN_H
 
-#include <io.h>
-#include <process.h>
-#include <windows.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
-#define popen  _popen
-#define pclose _pclose
-#define strdup _strdup
+/* Windows API headers */
+#if defined(_MSC_VER) || defined(SPL_TOOLCHAIN_CLANGCL)
+    /* ClangCL or MSVC: Use Windows SDK headers */
+    #include <io.h>
+    #include <process.h>
+    #include <windows.h>
+
+    /* MSVC-specific compatibility */
+    #define popen  _popen
+    #define pclose _pclose
+    #define strdup _strdup
+#else
+    /* MinGW Clang: Use mingw-w64 headers */
+    #include <windows.h>
+    #include <io.h>
+    #include <process.h>
+
+    /* MinGW provides POSIX-compatible names directly */
+    /* No need to redefine strdup, popen, pclose */
+#endif
 
 /* ----------------------------------------------------------------
  * Directory Operations (stub)

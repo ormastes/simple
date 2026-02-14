@@ -47,6 +47,22 @@ The grammar uses:
 - Spread expressions
 - Comments
 
+## Tier-Based Grammar Docs
+
+Generated reference docs organized by compilation tier:
+
+| Doc | Description |
+|-----|-------------|
+| [Seed Grammar](../grammar/seed_grammar.md) | C++ bootstrap compiler — minimal subset |
+| [Core Grammar](../grammar/core_grammar.md) | Simple-in-Simple compiler — self-hosting |
+| [Full Grammar](../grammar/full_grammar.md) | Complete runtime — all features |
+| [Keyword Reference](../grammar/keyword_reference.md) | All keywords in one table |
+| [Tree-sitter Status](../grammar/treesitter_status.md) | highlights.scm consistency report |
+
+Source of truth: [`doc/spec/grammar/tier_keywords.sdn`](../grammar/tier_keywords.sdn)
+
+Generate with: `bin/simple grammar-doc`
+
 ---
 
 Next: [Part 1: Definitions](lexer_parser_grammar_definitions.md)

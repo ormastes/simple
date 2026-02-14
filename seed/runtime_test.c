@@ -9,15 +9,24 @@
  *   --verbose      Show test names as they run
  */
 
+/* Platform detection */
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 
 #include "runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+
+/* Platform-specific headers */
+#ifndef _WIN32
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+/* Windows doesn't need these for runtime tests */
+#endif
 
 static int tests_run = 0;
 
@@ -1557,8 +1566,10 @@ TEST(args_null_entry) {
 
 /* ================================================================
  * Branch Coverage: Panic (via fork)
+ * Note: Skip on Windows (no fork())
  * ================================================================ */
 
+#ifndef _WIN32
 TEST(panic_exits) {
     pid_t pid = fork();
     if (pid == 0) {
@@ -1584,6 +1595,7 @@ TEST(panic_null_msg) {
     ASSERT(WIFEXITED(status));
     ASSERT_EQ_INT(WEXITSTATUS(status), 1);
 }
+#endif /* _WIN32 */
 
 /* ================================================================
  * Coverage: Directory Operations
@@ -2340,8 +2352,10 @@ int main(void) {
     RUN(args_null_entry);
 
     printf("\n--- Branch Coverage: Panic ---\n");
+#ifndef _WIN32
     RUN(panic_exits);
     RUN(panic_null_msg);
+#endif
 
     printf("\n--- Coverage: Directory Operations ---\n");
     RUN(dir_remove_all);

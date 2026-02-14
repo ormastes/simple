@@ -17,6 +17,9 @@ extern int main(int argc, char **argv);
 /* Runtime initialization (defined in runtime.c) */
 extern void spl_init_args(int argc, char **argv);
 
+/* Threading subsystem initialization (defined in runtime_thread.c) */
+extern void spl_thread_init(void);
+
 /* Init/fini arrays (linker-provided) */
 typedef void (*init_fn)(void);
 extern init_fn __init_array_start[];

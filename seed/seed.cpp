@@ -50,8 +50,14 @@
 #include <cmath>
 #include <vector>
 
+/* ===== Windows Compatibility ===== */
 #ifdef _WIN32
-#define strdup _strdup
+  /* ClangCL (MSVC ABI) uses UCRT with _strdup */
+  #if defined(_MSC_VER) || defined(SPL_TOOLCHAIN_CLANGCL)
+    #define strdup _strdup
+    #define snprintf _snprintf
+  #endif
+  /* MinGW Clang provides POSIX strdup directly */
 #endif
 
 /* ===== Configuration ===== */
