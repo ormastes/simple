@@ -2,7 +2,8 @@
 #
 # Validate coverage results against thresholds and generate reports.
 
-use app.doc_coverage.thresholds.types.{ScopeCoverage, scope_coverage_to_text}
+use app.doc_coverage.thresholds.types.{ScopeCoverage, scope_coverage_to_text, ThresholdConfig}
+use app.stats.types.{PublicApiStats}
 
 fn validate_thresholds(coverages: [ScopeCoverage]) -> (bool, [text]):
     # Returns: (all_passed, failed_scope_names)
@@ -104,6 +105,74 @@ fn get_overall_coverage(coverages: [ScopeCoverage]) -> i64:
     val pct = (covered * 100) / total
     return pct
 
+fn validate_public_api_coverage(stats: PublicApiStats, config: ThresholdConfig) -> (bool, text):
+    """
+    Validate public API SDoctest coverage against thresholds.
+
+    Args:
+        stats: Public API coverage statistics
+        config: Threshold configuration
+
+    Returns:
+        Tuple of (passed, report_message)
+
+    Example:
+        val stats = compute_public_api_stats("src")
+        val config = parse_threshold_config("doc_coverage.sdn")
+        val result = validate_public_api_coverage(stats, config)
+        val passed = result.0
+        val report = result.1
+    """
+    var report = ""
+    var all_passed = true
+
+    # Check group coverage
+    val group_threshold = config.public_api_group_threshold
+    val group_actual = stats.group_coverage_pct
+    val group_passed = group_actual >= group_threshold
+
+    if not group_passed:
+        all_passed = false
+
+    # Check item coverage
+    val item_threshold = config.public_api_item_threshold
+    val item_actual = stats.item_coverage_pct
+    val item_passed = item_actual >= item_threshold
+
+    if not item_passed:
+        all_passed = false
+
+    # Build report
+    report = report + "Public API SDoctest Coverage Validation\n"
+    report = report + "=========================================\n\n"
+
+    # Group coverage
+    val group_status = if group_passed: "PASS" else: "FAIL"
+    report = report + "[{group_status}] Groups: {group_actual}% (threshold: {group_threshold}%)\n"
+    report = report + "        {stats.covered_groups}/{stats.total_groups} groups have coverage\n"
+
+    # Item coverage
+    val item_status = if item_passed: "PASS" else: "FAIL"
+    report = report + "[{item_status}] Items: {item_actual}% (threshold: {item_threshold}%)\n"
+    report = report + "        {stats.covered_items}/{stats.total_items} items have coverage\n"
+
+    report = report + "\n"
+
+    # Overall result
+    if all_passed:
+        report = report + "Result: ALL PUBLIC API THRESHOLDS PASSED ✅\n"
+    else:
+        report = report + "Result: PUBLIC API COVERAGE BELOW THRESHOLD ⚠️\n"
+        if not group_passed:
+            val missing = stats.total_groups - stats.covered_groups
+            report = report + "  - {missing} groups need coverage\n"
+        if not item_passed:
+            val missing = stats.total_items - stats.covered_items
+            report = report + "  - {missing} items need coverage\n"
+
+    (all_passed, report)
+
 export validate_thresholds
 export generate_threshold_report
 export get_overall_coverage
+export validate_public_api_coverage

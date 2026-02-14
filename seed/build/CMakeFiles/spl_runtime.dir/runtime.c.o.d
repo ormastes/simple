@@ -130,6 +130,7 @@ CMakeFiles/spl_runtime.dir/runtime.c.o: \
   /usr/lib/llvm-20/lib/clang/20/include/__stddef_ptrdiff_t.h \
   /usr/lib/llvm-20/lib/clang/20/include/__stddef_max_align_t.h \
   /usr/lib/llvm-20/lib/clang/20/include/__stddef_offsetof.h \
+  /home/ormastes/dev/pub/simple/seed/runtime_thread.h \
   /usr/lib/llvm-20/lib/clang/20/include/__stdarg_header_macro.h \
   /usr/lib/llvm-20/lib/clang/20/include/__stdarg_va_list.h \
   /usr/lib/llvm-20/lib/clang/20/include/__stdarg_va_arg.h \

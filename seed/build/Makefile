@@ -380,6 +380,30 @@ runtime_test.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/runtime_test.dir/build.make CMakeFiles/runtime_test.dir/runtime_test.c.s
 .PHONY : runtime_test.c.s
 
+runtime_thread.o: runtime_thread.c.o
+.PHONY : runtime_thread.o
+
+# target to build an object file
+runtime_thread.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/spl_runtime.dir/build.make CMakeFiles/spl_runtime.dir/runtime_thread.c.o
+.PHONY : runtime_thread.c.o
+
+runtime_thread.i: runtime_thread.c.i
+.PHONY : runtime_thread.i
+
+# target to preprocess a source file
+runtime_thread.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/spl_runtime.dir/build.make CMakeFiles/spl_runtime.dir/runtime_thread.c.i
+.PHONY : runtime_thread.c.i
+
+runtime_thread.s: runtime_thread.c.s
+.PHONY : runtime_thread.s
+
+# target to generate assembly for a file
+runtime_thread.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/spl_runtime.dir/build.make CMakeFiles/spl_runtime.dir/runtime_thread.c.s
+.PHONY : runtime_thread.c.s
+
 seed.o: seed.c.o
 .PHONY : seed.o
 
@@ -509,6 +533,9 @@ help:
 	@echo "... runtime_test.o"
 	@echo "... runtime_test.i"
 	@echo "... runtime_test.s"
+	@echo "... runtime_thread.o"
+	@echo "... runtime_thread.i"
+	@echo "... runtime_thread.s"
 	@echo "... seed.o"
 	@echo "... seed.i"
 	@echo "... seed.s"

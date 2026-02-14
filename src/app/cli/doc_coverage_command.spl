@@ -2,10 +2,12 @@
 #
 # Provides CLI interface for documentation coverage analysis and SDoctest reporting.
 
-use app.io.mod (file_write, file_exists, cwd)
+use app.io.mod (file_write, file_exists, cwd, shell)
 use app.doc_coverage.scanner.mod.{scan_file_for_docs, discover_source_files, DocItem}
 use app.doc_coverage.scanner.file_scanner (filter_public_only)
 use app.doc_coverage.analysis.sdoctest_coverage.{load_sdoctest_blocks, suggest_missing_tags, compute_sdoctest_coverage}
+use app.doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, PublicApiItem}
+use app.doc_coverage.analysis.group_sdoctest.{check_group_sdoctest}
 use app.doc_coverage.reporting.mod (export_coverage_json, export_coverage_csv, generate_coverage_markdown, render_coverage_terminal)
 use app.doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
 use std.string.{NL}
@@ -19,6 +21,7 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
     Handle doc-coverage command.
 
     Flags:
+        --check-public-api Check public API SDoctest coverage
         --sdoctest-report  Generate SDoctest coverage report
         --tag-file=FILE    Export missing tags to file
         --format=text|json|csv|md|terminal  Output format
@@ -27,6 +30,7 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
 
     Returns: Exit code (0 = success, 1 = error)
     """
+    var check_public_api = false
     var sdoctest_report = false
     var tag_file = ""
     var format = "terminal"
@@ -38,7 +42,9 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
     var i = 1
     while i < args.len():
         val arg = args[i]
-        if arg == "--sdoctest-report":
+        if arg == "--check-public-api":
+            check_public_api = true
+        elif arg == "--sdoctest-report":
             sdoctest_report = true
         elif arg == "--missing":
             show_missing = true
@@ -51,6 +57,10 @@ fn handle_doc_coverage_command(args: [text]) -> i64:
         elif not arg.starts_with("-"):
             root = arg
         i = i + 1
+
+    # Handle public API checking
+    if check_public_api:
+        return handle_public_api_check(root, show_missing)
 
     # Discover source files
     val patterns: [text] = []
@@ -299,6 +309,112 @@ fn compute_percent(count: i64, total: i64) -> i64:
         return 100
     val ratio = count * 100 / total
     ratio
+
+# =========================================================================
+# Public API Coverage Checking
+# =========================================================================
+
+fn handle_public_api_check(root: text, show_missing: bool) -> i64:
+    """
+    Check public API SDoctest coverage.
+
+    Args:
+        root: Root directory to scan
+        show_missing: Show only missing coverage
+
+    Returns: Exit code (0 = all covered, 1 = missing coverage)
+    """
+    print "Checking public API SDoctest coverage..."
+    print ""
+
+    # Find all __init__.spl files
+    val init_files = find_init_files(root)
+
+    if init_files.len() == 0:
+        print "No __init__.spl files found in {root}"
+        return 0
+
+    # Load SDoctest blocks
+    val blocks_result = load_sdoctest_blocks()
+    val sdoctest_blocks = blocks_result.1
+
+    # Track totals
+    var total_groups = 0
+    var covered_groups = 0
+    var total_items = 0
+    var covered_items = 0
+
+    # Check each __init__.spl file
+    for init_file in init_files:
+        val result = parse_init_file(init_file)
+        val groups = result.0
+        val items = result.1
+
+        # Check groups
+        for group in groups:
+            total_groups = total_groups + 1
+            val has_coverage = check_group_sdoctest(group, sdoctest_blocks)
+            if has_coverage:
+                covered_groups = covered_groups + 1
+            else:
+                if show_missing or not has_coverage:
+                    print "❌ Group '{group.group_name}' missing SDoctest"
+                    print "   File: {group.file_path}:{group.group_line}"
+                    print "   Items: {group.items.len()} functions"
+                    print ""
+
+        # Check individual items
+        for item in items:
+            total_items = total_items + 1
+            val has_coverage = item_in_blocks(item.name, sdoctest_blocks)
+            if has_coverage:
+                covered_items = covered_items + 1
+            else:
+                if show_missing or not has_coverage:
+                    print "❌ Item '{item.name}' missing SDoctest"
+                    print "   File: {item.file_path}:{item.line}"
+                    print ""
+
+    # Print summary
+    val group_pct = compute_percent(covered_groups, total_groups)
+    val item_pct = compute_percent(covered_items, total_items)
+
+    print "Public API SDoctest Coverage Summary"
+    print "===================================="
+    print "Groups: {covered_groups}/{total_groups} ({group_pct}%)"
+    print "Individual items: {covered_items}/{total_items} ({item_pct}%)"
+    print ""
+
+    # Return exit code
+    val all_covered = covered_groups == total_groups and covered_items == total_items
+    if all_covered:
+        print "✅ All public APIs have SDoctest coverage"
+        return 0
+    else:
+        val missing_groups = total_groups - covered_groups
+        val missing_items = total_items - covered_items
+        print "⚠️  Missing coverage for {missing_groups} groups and {missing_items} items"
+        return 1
+
+fn find_init_files(root: text) -> [text]:
+    """Find all __init__.spl files under root directory."""
+    val result = shell("find {root} -name '__init__.spl' -type f 2>/dev/null || true")
+    val stdout = result.stdout
+    val trimmed = stdout.trim()
+
+    if trimmed == "":
+        var empty: [text] = []
+        return empty
+
+    val lines = trimmed.split(NL)
+    lines
+
+fn item_in_blocks(name: text, blocks: [text]) -> bool:
+    """Check if item name appears in any SDoctest block."""
+    for block in blocks:
+        if block.contains(name):
+            return true
+    false
 
 # =========================================================================
 # Exports
