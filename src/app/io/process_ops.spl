@@ -10,6 +10,11 @@ extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
@@ -46,27 +51,78 @@ fn process_run(cmd: text, args: [text]) -> (text, text, i64):
                 resolved_cmd = check.0.trim()
     rt_process_run(resolved_cmd, args)
 
-fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Unix implementation using 'timeout' command"""
     val timeout_secs = if timeout_ms <= 0:
         120
     else:
         val secs = timeout_ms / 1000
         if secs < 1: 1 else: secs
 
-    if _is_windows_platform():
-        eprint("[WARNING] Windows timeout not implemented; running without timeout enforcement")
-        val (out, err, code) = process_run(cmd, args)
-        (out, err, code)
+    var timeout_args: [text] = ["{timeout_secs}", cmd]
+    timeout_args.merge(args)
+
+    val (out, err, code) = rt_process_run("timeout", timeout_args)
+
+    if code == 124:
+        (out, err + "{NL}[TIMEOUT: Process killed after {timeout_secs}s]", -1)
     else:
-        var timeout_args: [text] = ["{timeout_secs}", cmd]
-        timeout_args.merge(args)
+        (out, err, code)
 
-        val (out, err, code) = rt_process_run("timeout", timeout_args)
+fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Windows implementation using async spawn + temp files"""
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
-        if code == 124:
-            (out, err + "{NL}[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    var temp_dir = rt_env_get("TEMP")
+    if temp_dir == "":
+        temp_dir = rt_env_get("TMP")
+    if temp_dir == "":
+        temp_dir = "C:\\Windows\\Temp"
+
+    val pid_str = "{rt_getpid()}"
+    val time_str = "{rt_time_now_unix_micros()}"
+    val stdout_file = "{temp_dir}\\simple_out_{pid_str}_{time_str}.txt"
+    val stderr_file = "{temp_dir}\\simple_err_{pid_str}_{time_str}.txt"
+
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
         else:
-            (out, err, code)
+            args_str = args_str + " " + arg
+
+    val full_cmd = if args_str == "":
+        "{cmd} > \"{stdout_file}\" 2> \"{stderr_file}\""
+    else:
+        "{cmd} {args_str} > \"{stdout_file}\" 2> \"{stderr_file}\""
+
+    val pid = rt_process_spawn_async("cmd", ["/c", full_cmd])
+    val exit_code = rt_process_wait(pid, effective_timeout)
+
+    var stdout = ""
+    var stderr = ""
+
+    if rt_file_exists(stdout_file):
+        stdout = rt_file_read_text(stdout_file)
+        rt_file_delete(stdout_file)
+
+    if rt_file_exists(stderr_file):
+        stderr = rt_file_read_text(stderr_file)
+        rt_file_delete(stderr_file)
+
+    if exit_code == -2:
+        rt_process_kill(pid)
+        val timeout_secs = effective_timeout / 1000
+        (stdout, stderr + "{NL}[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    else:
+        (stdout, stderr, exit_code)
+
+fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """Platform-agnostic timeout wrapper"""
+    if _is_windows_platform():
+        process_run_timeout_windows(cmd, args, timeout_ms)
+    else:
+        process_run_timeout_unix(cmd, args, timeout_ms)
 
 fn process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64) -> (text, text, i32):
     if memory_bytes > 0:
