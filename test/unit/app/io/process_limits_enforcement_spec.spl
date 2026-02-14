@@ -1,0 +1,151 @@
+# Test specification for process_run_with_limits enforcement
+#
+# Tests actual resource limit enforcement via ulimit and timeout.
+# Note: Some tests may be slow or require specific system permissions.
+
+use std.spec.{describe, it, expect, slow_it}
+use app.io.mod.{process_run_with_limits, ProcessResult}
+use std.platform.{is_windows}
+
+describe "process_run_with_limits basic functionality":
+    it "succeeds with simple command within limits":
+        val result = process_run_with_limits(
+            "echo",
+            ["hello"],
+            5000,
+            100000000,
+            5,
+            100,
+            10
+        )
+        expect(result.exit_code).to_equal(0)
+        expect(result.limit_exceeded).to_equal(false)
+        expect(result.limit_type).to_equal("")
+        expect(result.stdout).to_contain("hello")
+
+    it "returns ProcessResult with all fields":
+        val result = process_run_with_limits("pwd", [], 5000, 100000000, 5, 100, 10)
+        expect(result.stdout.len()).to_be_greater_than(0)
+        expect(result.exit_code).to_equal(0)
+        expect(result.limit_exceeded).to_equal(false)
+
+describe "process_run_with_limits timeout enforcement":
+    slow_it "detects timeout violation with sleep command":
+        val result = process_run_with_limits(
+            "sleep",
+            ["10"],
+            1000,
+            100000000,
+            20,
+            100,
+            10
+        )
+        expect(result.limit_exceeded).to_equal(true)
+        expect(result.limit_type).to_equal("timeout")
+
+    slow_it "detects timeout with infinite loop":
+        val result = process_run_with_limits(
+            "bash",
+            ["-c", "while true; do :; done"],
+            2000,
+            100000000,
+            30,
+            100,
+            10
+        )
+        expect(result.limit_exceeded).to_equal(true)
+        expect(result.limit_type).to_equal("timeout")
+
+describe "process_run_with_limits CPU limit enforcement":
+    slow_it "detects CPU time limit violation":
+        if is_windows():
+            pass_do_nothing
+        else:
+            val result = process_run_with_limits(
+                "bash",
+                ["-c", "yes > /dev/null"],
+                30000,
+                100000000,
+                2,
+                100,
+                10
+            )
+            expect(result.limit_exceeded).to_equal(true)
+            val limit_ok = result.limit_type == "cpu" or result.limit_type == "timeout"
+            expect(limit_ok).to_equal(true)
+
+describe "process_run_with_limits memory limit enforcement":
+    slow_it "detects memory limit violation with large allocation":
+        if is_windows():
+            pass_do_nothing
+        else:
+            val result = process_run_with_limits(
+                "python3",
+                ["-c", "x = [0] * 100000000"],
+                10000,
+                10485760,
+                10,
+                100,
+                10
+            )
+            val exceeded = result.limit_exceeded
+            val is_mem_or_timeout = result.limit_type == "memory" or result.exit_code != 0
+            expect(is_mem_or_timeout).to_equal(true)
+
+describe "process_run_with_limits file descriptor enforcement":
+    it "allows command within fd limits":
+        if is_windows():
+            pass_do_nothing
+        else:
+            val result = process_run_with_limits(
+                "bash",
+                ["-c", "exec 3< /dev/null; exec 3>&-"],
+                5000,
+                100000000,
+                5,
+                100,
+                10
+            )
+            expect(result.exit_code).to_equal(0)
+
+describe "process_run_with_limits process count enforcement":
+    it "allows command within process limits":
+        if is_windows():
+            pass_do_nothing
+        else:
+            val result = process_run_with_limits(
+                "bash",
+                ["-c", "echo test"],
+                5000,
+                100000000,
+                5,
+                100,
+                10
+            )
+            expect(result.exit_code).to_equal(0)
+
+describe "process_run_with_limits edge cases":
+    it "handles zero limits as unlimited":
+        val result = process_run_with_limits("echo", ["test"], 0, 0, 0, 0, 0)
+        expect(result.exit_code).to_equal(0)
+
+    it "handles command with no arguments":
+        val result = process_run_with_limits("pwd", [], 5000, 100000000, 5, 100, 10)
+        expect(result.exit_code).to_equal(0)
+
+    it "handles command with multiple arguments":
+        val result = process_run_with_limits("ls", ["-la", "/tmp"], 5000, 100000000, 5, 100, 10)
+        expect(result.exit_code).to_equal(0)
+
+    it "detects failing command correctly":
+        val result = process_run_with_limits("ls", ["/nonexistent/path/12345"], 5000, 100000000, 5, 100, 10)
+        expect(result.exit_code).to_be_greater_than(0)
+        expect(result.limit_exceeded).to_equal(false)
+
+describe "process_run_with_limits Windows fallback":
+    it "uses timeout-only mode on Windows":
+        if is_windows():
+            val result = process_run_with_limits("cmd", ["/c", "echo test"], 5000, 100000000, 5, 100, 10)
+            expect(result.exit_code).to_equal(0)
+        else:
+            val dummy = 1

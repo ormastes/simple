@@ -1,0 +1,176 @@
+# Closure Variable Capture Warning Specification
+#
+# Tests for detecting and warning about closure variable capture bugs.
+# Runtime limitation: Closures can READ outer vars but CANNOT MODIFY them.
+
+use std.spec
+use core.lexer.{lex}
+use core.parser.{parse}
+use core.ast.{ast_reset}
+use core.closure_analysis.{analyze_closure_capture, closure_warnings_get, closure_warnings_clear}
+
+# Helper function to analyze code and get warnings
+fn analyze_code(code: text) -> [text]:
+    ast_reset()
+    closure_warnings_clear()
+    val tokens = lex(code)
+    parse(tokens)
+    analyze_closure_capture()
+    closure_warnings_get()
+
+describe "Closure Capture Warning - Simple Cases":
+    it "warns on simple outer var modification":
+        val code = "var count = 0\nfn increment():\n    count = count + 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_count_warning = warnings[0].contains("count")
+        expect(has_count_warning).to_equal(true)
+
+    it "warns on string outer var modification":
+        val code = "var name = \"\"\nfn set_name():\n    name = \"Alice\"\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_name_warning = warnings[0].contains("name")
+        expect(has_name_warning).to_equal(true)
+
+    it "warns on array outer var modification":
+        val code = "var items = []\nfn add_item():\n    items = [1, 2, 3]\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_items_warning = warnings[0].contains("items")
+        expect(has_items_warning).to_equal(true)
+
+describe "Closure Capture Warning - Compound Assignments":
+    it "warns on += operator":
+        val code = "var total = 0\nfn add(x: i64):\n    total += x\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_total_warning = warnings[0].contains("total")
+        expect(has_total_warning).to_equal(true)
+
+    it "warns on -= operator":
+        val code = "var balance = 100\nfn subtract(x: i64):\n    balance -= x\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_balance_warning = warnings[0].contains("balance")
+        expect(has_balance_warning).to_equal(true)
+
+    it "warns on *= operator":
+        val code = "var factor = 1\nfn multiply(x: i64):\n    factor *= x\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_factor_warning = warnings[0].contains("factor")
+        expect(has_factor_warning).to_equal(true)
+
+describe "Closure Capture Warning - Multiple Variables":
+    it "warns on multiple different variables":
+        val code = "var x = 0\nvar y = 0\nfn update():\n    x = 1\n    y = 2\n"
+        val warnings = analyze_code(code)
+        var has_x_warning = false
+        var has_y_warning = false
+        for warning in warnings:
+            if warning.contains("x"):
+                has_x_warning = true
+            if warning.contains("y"):
+                has_y_warning = true
+        expect(has_x_warning).to_equal(true)
+        expect(has_y_warning).to_equal(true)
+
+    it "warns on same variable modified twice":
+        val code = "var counter = 0\nfn increment_twice():\n    counter = counter + 1\n    counter = counter + 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_counter_warning = warnings[0].contains("counter")
+        expect(has_counter_warning).to_equal(true)
+
+describe "Closure Capture Warning - Nested Functions":
+    it "warns on modification in nested function":
+        val code = "var outer = 0\nfn level1():\n    fn level2():\n        outer = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_outer_warning = warnings[0].contains("outer")
+        expect(has_outer_warning).to_equal(true)
+
+    it "warns on modification in deeply nested function":
+        val code = "var deep = 0\nfn level1():\n    fn level2():\n        fn level3():\n            deep = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_deep_warning = warnings[0].contains("deep")
+        expect(has_deep_warning).to_equal(true)
+
+    it "warns on modification at different nesting levels":
+        val code = "var shared = 0\nfn outer():\n    shared = 1\n    fn inner():\n        shared = 2\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_shared_warning = warnings[0].contains("shared")
+        expect(has_shared_warning).to_equal(true)
+
+describe "Closure Capture Warning - No False Positives":
+    it "does not warn on local variable modification":
+        val code = "fn test():\n    var local = 0\n    local = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "does not warn on parameter modification":
+        val code = "fn test(param: i64):\n    param = param + 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "does not warn on reading outer variable":
+        val code = "var value = 10\nfn read():\n    var result = value + 5\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "does not warn on local var with same name":
+        val code = "var count = 0\nfn test():\n    var count = 1\n    count = count + 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+describe "Closure Capture Warning - Warning Message Format":
+    it "includes variable name in warning":
+        val code = "var myvar = 0\nfn modify():\n    myvar = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_myvar = warnings[0].contains("myvar")
+        expect(has_myvar).to_equal(true)
+
+    it "includes function name in warning":
+        val code = "var data = 0\nfn update_data():\n    data = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_function_name = warnings[0].contains("update_data")
+        expect(has_function_name).to_equal(true)
+
+    it "includes workaround suggestion":
+        val code = "var state = 0\nfn change():\n    state = 1\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(1)
+        var has_workaround = warnings[1].contains("return")
+        var has_class_hint = warnings[1].contains("class")
+        val combined = has_workaround or has_class_hint
+        expect(combined).to_equal(true)
+
+describe "Closure Capture Warning - Edge Cases":
+    it "handles empty function body":
+        val code = "var x = 0\nfn empty():\n    pass\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "handles function with only return":
+        val code = "var x = 0\nfn get_x() -> i64:\n    x\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_equal(0)
+
+    it "handles multiple functions with same outer var":
+        val code = "var shared = 0\nfn fn1():\n    shared = 1\nfn fn2():\n    shared = 2\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_shared_warning = warnings[0].contains("shared")
+        expect(has_shared_warning).to_equal(true)
+
+    it "handles assignment in conditional":
+        val code = "var flag = false\nfn set_flag():\n    if true:\n        flag = true\n"
+        val warnings = analyze_code(code)
+        expect(warnings.len()).to_be_greater_than(0)
+        val has_flag_warning = warnings[0].contains("flag")
+        expect(has_flag_warning).to_equal(true)

@@ -425,6 +425,62 @@ fn isel_inst(ctx: ISelContext, inst: MirInst) -> ISelInstResult:
             isel_cast(ctx, dest, operand, target)
         case GetElementPtr(dest, base, indices):
             isel_get_element_ptr(ctx, dest, base, indices)
+
+        # SIMD Instructions
+        case SimdAddF32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VADDPS_128, dest, a, b)
+        case SimdSubF32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VSUBPS_128, dest, a, b)
+        case SimdMulF32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VMULPS_128, dest, a, b)
+        case SimdDivF32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VDIVPS_128, dest, a, b)
+        case SimdFmaF32x4(dest, a, b, c):
+            isel_simd_fma(ctx, X86_OP_VFMADD231PS_128, dest, a, b, c)
+
+        case SimdAddF32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VADDPS_256, dest, a, b)
+        case SimdSubF32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VSUBPS_256, dest, a, b)
+        case SimdMulF32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VMULPS_256, dest, a, b)
+        case SimdDivF32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VDIVPS_256, dest, a, b)
+        case SimdFmaF32x8(dest, a, b, c):
+            isel_simd_fma(ctx, X86_OP_VFMADD231PS_256, dest, a, b, c)
+
+        case SimdAddF64x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VADDPD_256, dest, a, b)
+        case SimdSubF64x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VSUBPD_256, dest, a, b)
+        case SimdMulF64x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VMULPD_256, dest, a, b)
+        case SimdDivF64x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VDIVPD_256, dest, a, b)
+        case SimdFmaF64x4(dest, a, b, c):
+            isel_simd_fma(ctx, X86_OP_VFMADD231PD_256, dest, a, b, c)
+
+        case SimdAddI32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPADDD_128, dest, a, b)
+        case SimdSubI32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPSUBD_128, dest, a, b)
+        case SimdMulI32x4(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPMULLD_128, dest, a, b)
+
+        case SimdAddI32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPADDD_256, dest, a, b)
+        case SimdSubI32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPSUBD_256, dest, a, b)
+        case SimdMulI32x8(dest, a, b):
+            isel_simd_binop(ctx, X86_OP_VPMULLD_256, dest, a, b)
+
+        case SimdHaddF32x4(dest, a):
+            isel_simd_unary(ctx, X86_OP_VHADDPS, dest, a)
+        case SimdHmaxF32x4(dest, a):
+            isel_simd_unary(ctx, X86_OP_VMAXPS, dest, a)
+        case SimdHminF32x4(dest, a):
+            isel_simd_unary(ctx, X86_OP_VMINPS, dest, a)
+
         case Nop:
             ISelInstResult(insts: [new_mach_inst(X86_OP_NOP, [])], ctx: ctx)
         case _:
@@ -741,6 +797,55 @@ fn operand_get_reg(op: Operand) -> MachReg:
     match op.kind:
         case Reg(r): r
         case _: virtual_reg(0)
+
+# ============================================================================
+# SIMD Instruction Selection Helpers
+# ============================================================================
+
+fn isel_simd_binop(ctx: ISelContext, opcode: i64, dest: LocalId, a: MirOperand, b: MirOperand) -> ISelInstResult:
+    """
+    Select a SIMD binary operation (add, sub, mul, div).
+    Pattern: dest = op(a, b)
+    """
+    val a_low = lower_operand(ctx, a)
+    val b_low = lower_operand(a_low.ctx, b)
+    val dest_op = local_vreg_op(dest.id)
+
+    var insts = a_low.insts
+    insts = insts + b_low.insts
+    insts = insts + [new_mach_inst(opcode, [dest_op, a_low.result, b_low.result])]
+
+    ISelInstResult(insts: insts, ctx: b_low.ctx)
+
+fn isel_simd_fma(ctx: ISelContext, opcode: i64, dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand) -> ISelInstResult:
+    """
+    Select a SIMD fused multiply-add operation.
+    Pattern: dest = a * b + c
+    """
+    val a_low = lower_operand(ctx, a)
+    val b_low = lower_operand(a_low.ctx, b)
+    val c_low = lower_operand(b_low.ctx, c)
+    val dest_op = local_vreg_op(dest.id)
+
+    var insts = a_low.insts
+    insts = insts + b_low.insts
+    insts = insts + c_low.insts
+    insts = insts + [new_mach_inst(opcode, [dest_op, a_low.result, b_low.result, c_low.result])]
+
+    ISelInstResult(insts: insts, ctx: c_low.ctx)
+
+fn isel_simd_unary(ctx: ISelContext, opcode: i64, dest: LocalId, a: MirOperand) -> ISelInstResult:
+    """
+    Select a SIMD unary operation (horizontal add, max, min).
+    Pattern: dest = op(a)
+    """
+    val a_low = lower_operand(ctx, a)
+    val dest_op = local_vreg_op(dest.id)
+
+    var insts = a_low.insts
+    insts = insts + [new_mach_inst(opcode, [dest_op, a_low.result])]
+
+    ISelInstResult(insts: insts, ctx: a_low.ctx)
 
 # ============================================================================
 # Exports

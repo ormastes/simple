@@ -1,0 +1,545 @@
+# SDoctest Coverage Analysis
+#
+# Analyzes coverage of public API items in sdoctest documentation blocks.
+
+use app.io.mod (file_read, file_exists, shell)
+use app.test_runner_new.sdoctest.extractor (extract_sdoctest_blocks)
+use doc_coverage.types.doc_item.{DocItem, DocKind}
+use doc_coverage.types.coverage_result.{FileCoverage, CoverageReport}
+use std.string.{NL}
+
+# =========================================================================
+# Load SDoctest Blocks from Documentation
+# =========================================================================
+
+fn load_sdoctest_blocks() -> ([text], [text]):
+    # Load all sdoctest code blocks from README.md and doc/guide/*.md
+    # Returns parallel arrays: (block_names, block_code)
+
+    var block_names: [text] = []
+    var block_codes: [text] = []
+
+    # Extract from README.md
+    val readme_blocks = _load_blocks_from_file("README.md")
+    val readme_names = readme_blocks.0
+    val readme_codes = readme_blocks.1
+
+    var i = 0
+    while i < readme_names.len():
+        block_names.push(readme_names[i])
+        block_codes.push(readme_codes[i])
+        i = i + 1
+
+    # Extract from doc/guide/*.md files
+    val guide_files = _find_guide_markdown_files()
+    var j = 0
+    while j < guide_files.len():
+        val guide_file = guide_files[j]
+        val guide_blocks = _load_blocks_from_file(guide_file)
+        val guide_names = guide_blocks.0
+        val guide_codes = guide_blocks.1
+
+        var k = 0
+        while k < guide_names.len():
+            block_names.push(guide_names[k])
+            block_codes.push(guide_codes[k])
+            k = k + 1
+
+        j = j + 1
+
+    (block_names, block_codes)
+
+fn _load_blocks_from_file(file_path: text) -> ([text], [text]):
+    # Extract blocks from a single markdown file
+    if not file_exists(file_path):
+        return ([], [])
+
+    val blocks = extract_sdoctest_blocks(file_path)
+    var names: [text] = []
+    var codes: [text] = []
+
+    var i = 0
+    while i < blocks.len():
+        val block = blocks[i]
+        val source = block.source_file
+        val line = block.line_number
+        val name = "{source}:{line}"
+        names.push(name)
+        codes.push(block.code)
+        i = i + 1
+
+    (names, codes)
+
+fn _find_guide_markdown_files() -> [text]:
+    # Find all .md files in doc/guide/
+    val result = shell("find doc/guide -name '*.md' -type f 2>/dev/null || true")
+    val stdout = result.stdout
+    val trimmed = stdout.trim()
+    if trimmed == "":
+        return []
+    val lines = trimmed.split(NL)
+    lines
+
+# =========================================================================
+# Function Name Extraction from Code Blocks
+# =========================================================================
+
+fn extract_function_names_from_code(code: text) -> [text]:
+    # Extract function names mentioned in code block
+    # Looks for: "fn name(", "def name(", "class Name", etc.
+    var names: [text] = []
+    val lines = code.split(NL)
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Match "fn function_name(" or "fn function_name:"
+        val fn_extracted = _extract_fn_name(trimmed)
+        if fn_extracted != "":
+            names.push(fn_extracted)
+
+        # Match "class ClassName" or "struct StructName"
+        val class_extracted = _extract_class_name(trimmed)
+        if class_extracted != "":
+            names.push(class_extracted)
+
+        # Match "enum EnumName"
+        val enum_extracted = _extract_enum_name(trimmed)
+        if enum_extracted != "":
+            names.push(enum_extracted)
+
+        i = i + 1
+
+    names
+
+fn _extract_fn_name(line: text) -> text:
+    # Extract function name from "fn name(" or "fn name:"
+    var has_fn = line.starts_with("fn ")
+    if not has_fn:
+        has_fn = line.contains(" fn ")
+    if not has_fn:
+        return ""
+
+    # Find "fn " position
+    val fn_idx = line.index_of("fn ") ?? -1
+    if fn_idx < 0:
+        return ""
+
+    val after_fn = line[fn_idx + 3:]
+
+    # Extract name until '(' or ':'
+    var name_end = after_fn.index_of("(") ?? -1
+    val colon_idx = after_fn.index_of(":") ?? -1
+
+    if name_end < 0:
+        name_end = colon_idx
+    elif colon_idx >= 0 and colon_idx < name_end:
+        name_end = colon_idx
+
+    if name_end < 0:
+        return ""
+
+    val name = after_fn[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _extract_class_name(line: text) -> text:
+    # Extract class/struct name from "class Name" or "struct Name"
+    var prefix = ""
+    var has_class = line.starts_with("class ")
+    var has_struct = line.starts_with("struct ")
+
+    if has_class:
+        prefix = "class "
+    elif has_struct:
+        prefix = "struct "
+    else:
+        return ""
+
+    val after_keyword = line[prefix.len():]
+
+    # Extract name until ':' or whitespace
+    var name_end = after_keyword.index_of(":") ?? -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+
+    if name_end < 0:
+        name_end = space_idx
+    elif space_idx >= 0 and space_idx < name_end:
+        name_end = space_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+fn _extract_enum_name(line: text) -> text:
+    # Extract enum name from "enum Name"
+    var has_enum = line.starts_with("enum ")
+    if not has_enum:
+        return ""
+
+    val after_keyword = line[5:]
+
+    # Extract name until ':' or whitespace
+    var name_end = after_keyword.index_of(":") ?? -1
+    val space_idx = after_keyword.index_of(" ") ?? -1
+
+    if name_end < 0:
+        name_end = space_idx
+    elif space_idx >= 0 and space_idx < name_end:
+        name_end = space_idx
+
+    if name_end < 0:
+        name_end = after_keyword.len()
+
+    val name = after_keyword[0:name_end]
+    val name_trimmed = name.trim()
+    name_trimmed
+
+# =========================================================================
+# Match Functions to SDoctest Coverage
+# =========================================================================
+
+fn match_functions_to_sdoctest(public_funcs: [text], sdoctest_blocks: [text]) -> ([text], [text]):
+    # Returns (matched_funcs, missing_funcs)
+    # Simple contains() check: if any block contains func_name, it's documented
+
+    var matched: [text] = []
+    var missing: [text] = []
+
+    var i = 0
+    while i < public_funcs.len():
+        val func_name = public_funcs[i]
+        val is_matched = _is_function_in_blocks(func_name, sdoctest_blocks)
+
+        if is_matched:
+            matched.push(func_name)
+        else:
+            missing.push(func_name)
+
+        i = i + 1
+
+    (matched, missing)
+
+fn _is_function_in_blocks(func_name: text, blocks: [text]) -> bool:
+    # Check if function name appears in any block
+    var i = 0
+    while i < blocks.len():
+        val block = blocks[i]
+        val contains_func = block.contains(func_name)
+        if contains_func:
+            return true
+        i = i + 1
+    false
+
+# =========================================================================
+# Compute SDoctest Coverage Report
+# =========================================================================
+
+fn compute_sdoctest_coverage(doc_items: [DocItem], sdoctest_blocks: [text]) -> CoverageReport:
+    # Build coverage report by matching doc_items to sdoctest blocks
+
+    # Group items by file
+    val files_dict = _group_items_by_file(doc_items)
+    val file_paths = files_dict.0
+    val file_items_arrays = files_dict.1
+
+    var file_coverages: [FileCoverage] = []
+
+    var i = 0
+    while i < file_paths.len():
+        val file_path = file_paths[i]
+        val items = file_items_arrays[i]
+
+        val file_cov = _compute_file_coverage(file_path, items, sdoctest_blocks)
+        file_coverages.push(file_cov)
+
+        i = i + 1
+
+    # Aggregate totals
+    var total_items = 0
+    var documented_items = 0
+    var missing_docs = 0
+    var sdoctest_coverage = 0
+    var missing_sdoctest = 0
+
+    var j = 0
+    while j < file_coverages.len():
+        val fc = file_coverages[j]
+        total_items = total_items + fc.total_items
+        documented_items = documented_items + fc.documented_items
+        missing_docs = missing_docs + fc.missing_docs
+        sdoctest_coverage = sdoctest_coverage + fc.has_sdoctest
+        missing_sdoctest = missing_sdoctest + fc.missing_sdoctest
+        j = j + 1
+
+    CoverageReport(
+        files: file_coverages,
+        total_items: total_items,
+        documented_items: documented_items,
+        missing_docs: missing_docs,
+        sdoctest_coverage: sdoctest_coverage,
+        missing_sdoctest: missing_sdoctest,
+        timestamp: 0
+    )
+
+fn _group_items_by_file(doc_items: [DocItem]) -> ([text], [[DocItem]]):
+    # Group doc items by file path
+    # Returns parallel arrays: (file_paths, items_per_file)
+
+    var file_paths: [text] = []
+    var file_items: [[DocItem]] = []
+
+    var i = 0
+    while i < doc_items.len():
+        val item = doc_items[i]
+        val file_path = item.file
+
+        # Find if file already exists in array
+        val existing_idx = _find_file_index(file_paths, file_path)
+
+        if existing_idx < 0:
+            # New file
+            file_paths.push(file_path)
+            var new_array: [DocItem] = []
+            new_array.push(item)
+            file_items.push(new_array)
+        else:
+            # Existing file - append to array
+            var existing_array = file_items[existing_idx]
+            existing_array.push(item)
+            file_items[existing_idx] = existing_array
+
+        i = i + 1
+
+    (file_paths, file_items)
+
+fn _find_file_index(file_paths: [text], target: text) -> i64:
+    var i = 0
+    while i < file_paths.len():
+        val path = file_paths[i]
+        if path == target:
+            return i
+        i = i + 1
+    -1
+
+fn _compute_file_coverage(file_path: text, items: [DocItem], sdoctest_blocks: [text]) -> FileCoverage:
+    var total_items = items.len()
+    var documented_items = 0
+    var missing_docs = 0
+    var has_sdoctest = 0
+    var missing_sdoctest = 0
+
+    # Update items with sdoctest coverage
+    var updated_items: [DocItem] = []
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+
+        # Check if documented
+        val is_documented = item.is_documented()
+        if is_documented:
+            documented_items = documented_items + 1
+        else:
+            missing_docs = missing_docs + 1
+
+        # Check if has sdoctest
+        val item_name = item.name
+        val has_test = _is_function_in_blocks(item_name, sdoctest_blocks)
+
+        var updated_item = item
+        if has_test:
+            updated_item = DocItem(
+                kind: item.kind,
+                name: item.name,
+                file: item.file,
+                line: item.line,
+                col: item.col,
+                visibility: item.visibility,
+                signature: item.signature,
+                has_inline_comment: item.has_inline_comment,
+                inline_comment: item.inline_comment,
+                has_docstring: item.has_docstring,
+                docstring: item.docstring,
+                has_sdoctest: true,
+                sdoctest_tags: item.sdoctest_tags,
+                parent: item.parent,
+                is_public: item.is_public
+            )
+
+        updated_items.push(updated_item)
+
+        # Count sdoctest for public functions
+        val needs_test = item.needs_sdoctest()
+        if needs_test:
+            if has_test:
+                has_sdoctest = has_sdoctest + 1
+            else:
+                missing_sdoctest = missing_sdoctest + 1
+
+        i = i + 1
+
+    FileCoverage(
+        file_path: file_path,
+        total_items: total_items,
+        documented_items: documented_items,
+        missing_docs: missing_docs,
+        has_sdoctest: has_sdoctest,
+        missing_sdoctest: missing_sdoctest,
+        items: updated_items
+    )
+
+# =========================================================================
+# Tag Suggestion and Validation
+# =========================================================================
+
+fn suggest_missing_tags(file_path: text) -> [text]:
+    # Auto-suggest tags based on file path
+    # Examples:
+    #   "src/std/string.spl" → ["stdlib:string"]
+    #   "src/core/parser.spl" → ["core:parser"]
+    #   "src/app/io/mod.spl" → ["stdlib:io"]
+
+    var tags: [text] = []
+
+    # Extract category from path
+    var category = ""
+    var name = ""
+
+    if file_path.starts_with("src/std/"):
+        category = "stdlib"
+        val after_std = file_path[8:]
+        name = _extract_module_name(after_std)
+    elif file_path.starts_with("src/core/"):
+        category = "core"
+        val after_core = file_path[9:]
+        name = _extract_module_name(after_core)
+    elif file_path.starts_with("src/compiler/"):
+        category = "compiler"
+        val after_compiler = file_path[13:]
+        name = _extract_module_name(after_compiler)
+    elif file_path.starts_with("src/app/"):
+        category = "feature"
+        val after_app = file_path[8:]
+        name = _extract_module_name(after_app)
+    elif file_path.starts_with("src/lib/"):
+        category = "stdlib"
+        val after_lib = file_path[8:]
+        name = _extract_module_name(after_lib)
+    else:
+        # Default to feature category
+        category = "feature"
+        name = _extract_module_name(file_path)
+
+    if category != "" and name != "":
+        val tag = "{category}:{name}"
+        tags.push(tag)
+
+    tags
+
+fn _extract_module_name(path: text) -> text:
+    # Extract module name from path
+    # "string.spl" → "string"
+    # "io/mod.spl" → "io"
+
+    # Remove .spl extension
+    var name = path
+    if name.ends_with(".spl"):
+        val len_without_ext = name.len() - 4
+        name = name[0:len_without_ext]
+
+    # Handle mod.spl case - use parent directory name
+    if name.ends_with("/mod"):
+        val len_without_mod = name.len() - 4
+        name = name[0:len_without_mod]
+
+        # Get last path component
+        val last_slash = name.last_index_of("/") ?? -1
+        if last_slash >= 0:
+            name = name[last_slash + 1:]
+    elif name.contains("/"):
+        # Get last path component
+        val last_slash = name.last_index_of("/") ?? -1
+        if last_slash >= 0:
+            name = name[last_slash + 1:]
+
+    name
+
+fn validate_tag_format(tag: text) -> bool:
+    # Check tag follows naming convention: category:name
+    # Valid categories: stdlib, core, compiler, feature, example, status
+    # Valid name: lowercase letters, underscores only
+
+    val colon_idx = tag.index_of(":") ?? -1
+    if colon_idx < 0:
+        return false
+
+    val category = tag[0:colon_idx]
+    val name = tag[colon_idx + 1:]
+
+    # Validate category
+    var valid_category = false
+    if category == "stdlib":
+        valid_category = true
+    if category == "core":
+        valid_category = true
+    if category == "compiler":
+        valid_category = true
+    if category == "feature":
+        valid_category = true
+    if category == "example":
+        valid_category = true
+    if category == "status":
+        valid_category = true
+
+    if not valid_category:
+        return false
+
+    # Validate name (lowercase, underscores only)
+    val name_valid = _is_valid_tag_name(name)
+    name_valid
+
+fn _is_valid_tag_name(name: text) -> bool:
+    # Check if name contains only lowercase letters and underscores
+    if name.len() == 0:
+        return false
+
+    var i = 0
+    while i < name.len():
+        val ch = name[i:i + 1]
+        var is_valid_ch = false
+
+        # Check if lowercase letter
+        if ch >= "a" and ch <= "z":
+            is_valid_ch = true
+
+        # Check if underscore
+        if ch == "_":
+            is_valid_ch = true
+
+        # Check if digit
+        if ch >= "0" and ch <= "9":
+            is_valid_ch = true
+
+        if not is_valid_ch:
+            return false
+
+        i = i + 1
+
+    true
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export load_sdoctest_blocks
+export extract_function_names_from_code
+export match_functions_to_sdoctest
+export compute_sdoctest_coverage
+export suggest_missing_tags
+export validate_tag_format

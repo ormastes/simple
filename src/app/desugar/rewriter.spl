@@ -1,9 +1,10 @@
 # Call Rewriter - Source-Level Static Call Transformation
 #
-# Rewrites Type.method(args) calls to TypeName__method(args) in source text.
+# Rewrites Type.method(args) and Type.CONSTANT to TypeName__method(args) and
+# TypeName__CONSTANT in source text.
 # Works at the text level (not AST) for compatibility with the current runtime.
 #
-# Detection: Any UppercaseWord.method( pattern is treated as a static call.
+# Detection: Any UppercaseWord.identifier pattern is treated as a static member.
 # No need for pre-collected type definitions.
 #
 # Patterns handled:
@@ -11,6 +12,8 @@
 #   Type.method(a, b)            -> Type__method(a, b)
 #   Type.method(Other.factory()) -> Type__method(Other__factory())
 #   val x = Type.method()        -> val x = Type__method()
+#   Type.CONSTANT                -> Type__CONSTANT
+#   val y = Type.MAX_VALUE       -> val y = Type__MAX_VALUE
 #
 # NOT rewritten (preserved):
 #   obj.method()                 -> obj.method()      (instance method, lowercase receiver)
@@ -94,7 +97,8 @@ fn rewrite_line(line: text) -> text:
     # Scan for Uppercase.method( patterns
     rewrite_static_patterns(line)
 
-# Scan line and rewrite all UppercaseWord.method( to UppercaseWord__method(
+# Scan line and rewrite all UppercaseWord.member to UppercaseWord__member
+# Handles both Type.method( and Type.CONSTANT
 fn rewrite_static_patterns(line: text) -> text:
     val llen = line.len()
     if llen < 3:
@@ -120,26 +124,31 @@ fn rewrite_static_patterns(line: text) -> text:
                 at_boundary = not is_ident_char(line[ci - 1:ci])
 
             if at_boundary:
-                # Extract the full identifier
+                # Extract the full identifier (Type name)
                 val ident = extract_word(line[ci:])
                 val ident_len = ident.len()
                 val after_ident = ci + ident_len
 
-                # Check if followed by .lowercase_method(
+                # Check if followed by .identifier
                 if after_ident + 2 < llen and line[after_ident:after_ident + 1] == ".":
                     val after_dot = after_ident + 1
                     val next_ch = line[after_dot:after_dot + 1]
 
-                    if is_lower_or_underscore(next_ch):
-                        val method_name = extract_word(line[after_dot:])
-                        val after_method = after_dot + method_name.len()
+                    # Check for lowercase method or uppercase constant
+                    if is_lower_or_underscore(next_ch) or is_upper(next_ch):
+                        val member_name = extract_word(line[after_dot:])
+                        val after_member = after_dot + member_name.len()
 
-                        # Must be followed by ( to be a method call
-                        if after_method < llen and line[after_method:after_method + 1] == "(":
-                            # Rewrite: Type.method( -> Type__method(
-                            result = result + ident + "__" + method_name
-                            ci = after_method
-                            continue
+                        # Distinguish between method call and constant access
+                        var is_method_call = false
+                        if after_member < llen and line[after_member:after_member + 1] == "(":
+                            is_method_call = true
+
+                        # Rewrite both cases: Type.member -> Type__member
+                        # The parenthesis check helps distinguish, but we rewrite both
+                        result = result + ident + "__" + member_name
+                        ci = after_member
+                        continue
 
         result = result + line[ci:ci + 1]
         ci = ci + 1

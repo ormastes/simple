@@ -2068,7 +2068,7 @@ TEST(contains_str_empty_array) {
 
 TEST(rt_file_aliases) {
     const char* path = "/tmp/_spl_rt_alias_test.tmp";
-    ASSERT(rt_file_write(path, "test123"));
+    rt_file_write(path, "test123");
     ASSERT(rt_file_exists(path));
     const char* content = rt_file_read_text(path);
     ASSERT_EQ_STR(content, "test123");

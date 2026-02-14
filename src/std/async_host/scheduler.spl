@@ -1,10 +1,11 @@
 # HostScheduler - Work-Stealing Scheduler
 #
-# Multi-threaded work-stealing scheduler with priority support.
+# Work-stealing scheduler with optional multi-threading support.
 
 use std.async_core.*
 use std.async_host.waker.{Waker}
 use std.async_host.future.{HostFuture}
+use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 
 struct WorkStealingQueue:
     """Lock-free work-stealing deque.
@@ -48,14 +49,20 @@ struct WorkStealingQueue:
 # HostScheduler - Work-Stealing Scheduler
 # ============================================================================
 
+enum SchedulerMode:
+    """Scheduler execution mode."""
+    SingleThreaded    # Single-threaded work-stealing
+    MultiThreaded     # Multi-threaded with OS threads
+
 class HostScheduler:
     """Work-stealing scheduler for host applications.
 
     Features:
-    - Multiple worker threads
+    - Multiple worker queues
     - Work stealing for load balancing
     - Priority scheduling
     - Waker integration
+    - Optional multi-threading (OS threads)
     """
     workers: [WorkStealingQueue]
     global_queue: [usize]
@@ -63,6 +70,8 @@ class HostScheduler:
     next_id: usize
     worker_count: usize
     is_running: bool
+    mode: SchedulerMode
+    thread_safe_queues: [ThreadSafeQueue]
 
 struct HostTask:
     id: usize
@@ -73,7 +82,14 @@ struct HostTask:
 
 impl HostScheduler:
     static fn new(worker_count: usize) -> HostScheduler:
-        """Create scheduler with specified worker count."""
+        """Create single-threaded scheduler with specified worker count.
+
+        Args:
+            worker_count: Number of work-stealing queues
+
+        Returns:
+            Single-threaded scheduler
+        """
         var workers: [WorkStealingQueue] = []
         for _ in 0..worker_count:
             workers = workers.push(WorkStealingQueue.new())
@@ -84,12 +100,53 @@ impl HostScheduler:
             tasks: {},
             next_id: 0,
             worker_count: worker_count,
-            is_running: false
+            is_running: false,
+            mode: SchedulerMode.SingleThreaded,
+            thread_safe_queues: []
+        )
+
+    static fn new_multi_threaded(worker_count: usize) -> HostScheduler:
+        """Create multi-threaded scheduler with OS threads.
+
+        Args:
+            worker_count: Number of OS worker threads
+
+        Returns:
+            Multi-threaded scheduler
+
+        Note: Each worker thread gets a thread-safe queue.
+        """
+        var workers: [WorkStealingQueue] = []
+        var thread_queues: [ThreadSafeQueue] = []
+
+        for _ in 0..worker_count:
+            workers = workers.push(WorkStealingQueue.new())
+            thread_queues = thread_queues.push(ThreadSafeQueue.new())
+
+        HostScheduler(
+            workers: workers,
+            global_queue: [],
+            tasks: {},
+            next_id: 0,
+            worker_count: worker_count,
+            is_running: false,
+            mode: SchedulerMode.MultiThreaded,
+            thread_safe_queues: thread_queues
         )
 
     static fn default() -> HostScheduler:
         """Create scheduler with default worker count (4)."""
         HostScheduler.new(4)
+
+    fn is_multi_threaded() -> bool:
+        """Check if scheduler uses OS threads.
+
+        Returns:
+            true if multi-threaded, false otherwise
+        """
+        match self.mode:
+            case SchedulerMode.MultiThreaded: true
+            case SchedulerMode.SingleThreaded: false
 
     me schedule(priority: Priority, poll_fn: fn() -> Poll<()>) -> usize:
         """Schedule task with priority."""
@@ -218,4 +275,4 @@ impl HostScheduler:
 # Note: HostScheduler implements SchedulerCore via duck typing
 
 
-export WorkStealingQueue, HostScheduler, HostTask
+export WorkStealingQueue, HostScheduler, HostTask, SchedulerMode

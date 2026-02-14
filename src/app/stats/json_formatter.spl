@@ -2,6 +2,7 @@
 
 # Format statistics as JSON
 use std.string.{NL}
+use app.stats.types.{DocCoverageStats, InlineCommentStats, GroupCommentStats}
 
 fn format_json(
     total_src: i64,
@@ -15,7 +16,17 @@ fn format_json(
     feat_total: i64,
     feat_complete: i64,
     feat_progress: i64,
-    feat_planned: i64
+    feat_planned: i64,
+    total_public: i64,
+    documented: i64,
+    with_sdoctest: i64,
+    with_inline: i64,
+    with_docstring: i64,
+    std_total: i64,
+    std_documented: i64,
+    core_total: i64,
+    core_documented: i64,
+    lib_total: i64
 ) -> text:
     var json = "{{NL}"
     json = "{json}  \"files\": {{NL}"
@@ -43,9 +54,300 @@ fn format_json(
     json = "{json}    \"complete\": {feat_complete},{NL}"
     json = "{json}    \"in_progress\": {feat_progress},{NL}"
     json = "{json}    \"planned\": {feat_planned}{NL}"
+    json = "{json}  },{NL}"
+
+    # Documentation coverage stats
+    json = "{json}  \"documentation\": {{NL}"
+    json = "{json}    \"total_public\": {total_public},{NL}"
+    json = "{json}    \"documented\": {documented},{NL}"
+    json = "{json}    \"with_sdoctest\": {with_sdoctest},{NL}"
+    json = "{json}    \"with_inline_comment\": {with_inline},{NL}"
+    json = "{json}    \"with_docstring\": {with_docstring}"
+
+    # Calculate percentages
+    var doc_percent = 0
+    var sdoc_percent = 0
+    var inline_percent = 0
+    var docstring_percent = 0
+
+    if total_public > 0:
+        doc_percent = (documented * 100) / total_public
+        sdoc_percent = (with_sdoctest * 100) / total_public
+        inline_percent = (with_inline * 100) / total_public
+        docstring_percent = (with_docstring * 100) / total_public
+
+    json = "{json},{NL}"
+    json = "{json}    \"doc_percent\": {doc_percent},{NL}"
+    json = "{json}    \"sdoctest_percent\": {sdoc_percent},{NL}"
+    json = "{json}    \"inline_percent\": {inline_percent},{NL}"
+    json = "{json}    \"docstring_percent\": {docstring_percent},{NL}"
+
+    # Per-scope breakdown
+    json = "{json}    \"per_scope\": {{NL}"
+    json = "{json}      \"std\": {{NL}"
+    json = "{json}        \"total\": {std_total},{NL}"
+    json = "{json}        \"documented\": {std_documented}"
+
+    var std_percent = 0
+    if std_total > 0:
+        std_percent = (std_documented * 100) / std_total
+
+    json = "{json},{NL}"
+    json = "{json}        \"percent\": {std_percent}{NL}"
+    json = "{json}      },{NL}"
+
+    json = "{json}      \"core\": {{NL}"
+    json = "{json}        \"total\": {core_total},{NL}"
+    json = "{json}        \"documented\": {core_documented}"
+
+    var core_percent = 0
+    if core_total > 0:
+        core_percent = (core_documented * 100) / core_total
+
+    json = "{json},{NL}"
+    json = "{json}        \"percent\": {core_percent}{NL}"
+    json = "{json}      },{NL}"
+
+    json = "{json}      \"lib\": {{NL}"
+    json = "{json}        \"total\": {lib_total},{NL}"
+    json = "{json}        \"documented\": {lib_total}"
+
+    var lib_percent = 0
+    if lib_total > 0:
+        lib_percent = (lib_total * 100) / lib_total
+
+    json = "{json},{NL}"
+    json = "{json}        \"percent\": {lib_percent}{NL}"
+    json = "{json}      }{NL}"
+    json = "{json}    }{NL}"
     json = "{json}  }{NL}"
     json = "{json}}"
 
     json
 
+# Format DocCoverageStats as JSON
+fn format_doc_coverage_json(stats: DocCoverageStats) -> text:
+    var json = "{{NL}"
+    json = "{json}  \"total_public_functions\": {stats.total_public_functions},{NL}"
+    json = "{json}  \"functions_with_docs\": {stats.functions_with_docs},{NL}"
+    json = "{json}  \"functions_with_sdoctest\": {stats.functions_with_sdoctest},{NL}"
+    json = "{json}  \"functions_without_sdoctest\": {stats.functions_without_sdoctest},{NL}"
+    json = "{json}  \"coverage_percent\": {stats.coverage_percent},{NL}"
+    json = "{json}  \"sdoctest_percent\": {stats.sdoctest_percent},{NL}"
+
+    # Missing sdoctest array
+    json = "{json}  \"missing_sdoctest\": [{NL}"
+    var i = 0
+    while i < stats.missing_sdoctest.len():
+        val item = stats.missing_sdoctest[i]
+        json = "{json}    \"{item}\""
+        val is_last = i == stats.missing_sdoctest.len() - 1
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+        i = i + 1
+    json = "{json}  ]{NL}"
+
+    json = "{json}}"
+    json
+
+# Format by-kind stats as JSON
+fn format_by_kind_json(by_kind: [[text]]) -> text:
+    var json = "{{NL}"
+    var i = 0
+    while i < by_kind.len():
+        val row = by_kind[i]
+        val kind = row[0]
+        val total = row[1]
+        val documented = row[2]
+        val with_sdoc = row[3]
+
+        json = "{json}    \"{kind}\": {{NL}"
+        json = "{json}      \"total\": {total},{NL}"
+        json = "{json}      \"documented\": {documented},{NL}"
+        json = "{json}      \"with_sdoctest\": {with_sdoc}{NL}"
+        json = "{json}    }"
+
+        val is_last = i == by_kind.len() - 1
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+        i = i + 1
+    json = "{json}  }"
+    json
+
+# Format by-module stats as JSON
+fn format_by_module_json(by_module: [[text]]) -> text:
+    var json = "{{NL}"
+    var i = 0
+    while i < by_module.len():
+        val row = by_module[i]
+        val module = row[0]
+        val total = row[1]
+        val documented = row[2]
+        val with_sdoc = row[3]
+
+        json = "{json}    \"{module}\": {{NL}"
+        json = "{json}      \"total\": {total},{NL}"
+        json = "{json}      \"documented\": {documented},{NL}"
+        json = "{json}      \"with_sdoctest\": {with_sdoc}{NL}"
+        json = "{json}    }"
+
+        val is_last = i == by_module.len() - 1
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+        i = i + 1
+    json = "{json}  }"
+    json
+
+# Format InlineCommentStats as JSON
+fn format_inline_coverage_json(stats: InlineCommentStats) -> text:
+    var json = "{{NL}"
+    json = "{json}  \"total_items\": {stats.total_items},{NL}"
+    json = "{json}  \"with_inline_comment\": {stats.with_inline_comment},{NL}"
+    json = "{json}  \"with_docstring\": {stats.with_docstring},{NL}"
+    json = "{json}  \"with_both\": {stats.with_both},{NL}"
+    json = "{json}  \"with_neither\": {stats.with_neither},{NL}"
+    json = "{json}  \"error_count\": {stats.error_count},{NL}"
+    json = "{json}  \"warn_count\": {stats.warn_count},{NL}"
+    json = "{json}  \"info_count\": {stats.info_count}{NL}"
+    json = "{json}}"
+    json
+
+# Format GroupCommentStats as JSON
+fn format_group_coverage_json(stats: GroupCommentStats) -> text:
+    var json = "{{NL}"
+    json = "{json}  \"total_groups\": {stats.total_groups},{NL}"
+    json = "{json}  \"with_comment\": {stats.with_comment},{NL}"
+    json = "{json}  \"missing_comment\": {stats.missing_comment},{NL}"
+
+    # By pattern object
+    json = "{json}  \"by_pattern\": {{NL}"
+    var i = 0
+    while i < stats.by_pattern.len():
+        val row = stats.by_pattern[i]
+        val pattern = row[0]
+        val count = row[1]
+
+        json = "{json}    \"{pattern}\": {count}"
+        val is_last = i == stats.by_pattern.len() - 1
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+        i = i + 1
+    json = "{json}  }{NL}"
+    json = "{json}}"
+    json
+
+# Enhanced JSON export with all coverage types
+fn format_enhanced_json(
+    total_src: i64,
+    app_files: i64,
+    lib_files: i64,
+    std_files: i64,
+    test_files: i64,
+    total_lines: i64,
+    test_count: i64,
+    pass_count: i64,
+    feat_total: i64,
+    feat_complete: i64,
+    feat_progress: i64,
+    feat_planned: i64,
+    doc_coverage: DocCoverageStats,
+    inline_coverage: InlineCommentStats,
+    group_coverage: GroupCommentStats
+) -> text:
+    var json = "{{NL}"
+
+    # Files section
+    json = "{json}  \"files\": {{NL}"
+    json = "{json}    \"total\": {total_src},{NL}"
+    json = "{json}    \"app\": {app_files},{NL}"
+    json = "{json}    \"lib\": {lib_files},{NL}"
+    json = "{json}    \"std\": {std_files},{NL}"
+    json = "{json}    \"tests\": {test_files}{NL}"
+    json = "{json}  },{NL}"
+
+    # Lines section
+    json = "{json}  \"lines\": {{NL}"
+    json = "{json}    \"total\": {total_lines}{NL}"
+    json = "{json}  },{NL}"
+
+    # Tests section
+    json = "{json}  \"tests\": {{NL}"
+    json = "{json}    \"total\": {test_count},{NL}"
+    json = "{json}    \"passed\": {pass_count},{NL}"
+
+    var pass_rate = 0
+    if test_count > 0:
+        pass_rate = (pass_count * 100) / test_count
+
+    json = "{json}    \"pass_rate\": {pass_rate}{NL}"
+    json = "{json}  },{NL}"
+
+    # Features section
+    json = "{json}  \"features\": {{NL}"
+    json = "{json}    \"total\": {feat_total},{NL}"
+    json = "{json}    \"complete\": {feat_complete},{NL}"
+    json = "{json}    \"in_progress\": {feat_progress},{NL}"
+    json = "{json}    \"planned\": {feat_planned}{NL}"
+    json = "{json}  },{NL}"
+
+    # Documentation section (enhanced)
+    json = "{json}  \"documentation\": {{NL}"
+    json = "{json}    \"total_public_items\": {doc_coverage.total_public_functions},{NL}"
+    json = "{json}    \"documented_items\": {doc_coverage.functions_with_docs},{NL}"
+    json = "{json}    \"with_sdoctest\": {doc_coverage.functions_with_sdoctest},{NL}"
+    json = "{json}    \"doc_percent\": {doc_coverage.coverage_percent},{NL}"
+    json = "{json}    \"sdoctest_percent\": {doc_coverage.sdoctest_percent},{NL}"
+
+    # By-kind breakdown
+    json = "{json}    \"by_kind\": "
+    val by_kind_json = format_by_kind_json(doc_coverage.by_kind)
+    json = "{json}{by_kind_json},{NL}"
+
+    # By-module breakdown
+    json = "{json}    \"by_module\": "
+    val by_module_json = format_by_module_json(doc_coverage.by_module)
+    json = "{json}{by_module_json}{NL}"
+
+    json = "{json}  },{NL}"
+
+    # Inline comments section
+    json = "{json}  \"inline_comments\": "
+    val inline_json = format_inline_coverage_json(inline_coverage)
+    json = "{json}{inline_json},{NL}"
+
+    # Group comments section
+    json = "{json}  \"group_comments\": "
+    val group_json = format_group_coverage_json(group_coverage)
+    json = "{json}{group_json},{NL}"
+
+    # Warnings section
+    val error_total = inline_coverage.error_count
+    val warn_total = inline_coverage.warn_count
+    val info_total = inline_coverage.info_count
+    val missing_sdoc = doc_coverage.functions_without_sdoctest
+
+    json = "{json}  \"warnings\": {{NL}"
+    json = "{json}    \"critical\": {error_total},{NL}"
+    json = "{json}    \"high\": {warn_total},{NL}"
+    json = "{json}    \"medium\": {missing_sdoc},{NL}"
+    json = "{json}    \"low\": {info_total}{NL}"
+    json = "{json}  }{NL}"
+
+    json = "{json}}"
+    json
+
 export format_json
+export format_doc_coverage_json
+export format_inline_coverage_json
+export format_group_coverage_json
+export format_enhanced_json
+export format_by_kind_json
+export format_by_module_json

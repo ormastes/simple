@@ -97,10 +97,38 @@ bin/simple test path/to/spec.spl   # Single file
 bin/simple test --list              # List tests
 bin/simple test --only-slow         # Slow tests
 
+# Container Testing (isolated, reproducible)
+docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .
+docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
+  simple-test-isolation:latest test                   # All tests in container
+docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
+  simple-test-isolation:latest test test/unit/        # Unit tests only
+
+# Docker Compose (easiest for local development)
+docker-compose up unit-tests         # Unit tests
+docker-compose up integration-tests  # Integration tests
+docker-compose up system-tests       # System tests
+docker-compose up all-tests          # All tests parallel
+docker-compose run dev-shell         # Interactive shell
+
+# Helper Scripts
+script/local-container-test.sh unit        # Unit tests in container
+script/local-container-test.sh quick path/to/spec.spl  # Single test
+script/local-container-test.sh shell       # Interactive debugging
+script/ci-test.sh                          # CI-style execution
+
 # Quality
 bin/simple build lint               # Linter
 bin/simple build fmt                # Formatter
 bin/simple build check              # All checks
+bin/simple build --warn-docs        # Check documentation coverage
+
+# Documentation Coverage
+bin/simple stats                    # Show doc coverage in stats
+bin/simple stats --json             # JSON with doc metrics
+bin/simple doc-coverage             # Terminal coverage report
+bin/simple doc-coverage --format=md # Markdown report
+bin/simple doc-coverage --missing   # Show undocumented items
 
 # Tools
 bin/simple fix file.spl --dry-run   # Preview fixes
@@ -207,8 +235,63 @@ Main module: `src/app/io/mod.spl`. See `/sffi` skill.
 See MEMORY.md and code agent for full list. Key issues:
 - **NO try/catch/throw** - use Option pattern (`var error = nil`)
 - **NO generics at runtime** - `<>` syntax fails in interpreter
-- **NO multi-line booleans** - use intermediate variables
-- **Closure capture broken** - can READ outer vars, CANNOT MODIFY
-- **Module closures broken** - imported fns can't access module state
+- **Multi-line booleans** - wrap in parentheses: `if (a and\n   b):` works
+- **Nested closure capture** - can READ outer vars, CANNOT MODIFY (module closures work fine)
 - **Chained methods broken** - use intermediate `var`
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
+
+---
+
+## Container Testing Troubleshooting
+
+### Quick Fixes
+
+**Container not found:** `docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .`
+**Permission denied:** `chmod +x bin/release/simple` or `sudo usermod -aG docker $USER && newgrp docker`
+**Out of memory:** Increase `--memory=512m` to `--memory=1g` or `--memory=2g`
+**Timeout errors:** Use correct profile: `--profile=slow` (10 min) or `--profile=intensive` (30 min)
+**Tests pass locally, fail in CI:** Run exact CI command: `script/ci-test.sh test/unit/`
+
+### Common Issues
+
+1. **Volume mount not working (Windows):**
+   - PowerShell: `docker run -v ${PWD}:/workspace:ro ...`
+   - CMD: `docker run -v %cd%:/workspace:ro ...`
+
+2. **Container build fails:**
+   - Check runtime exists: `ls -lh bin/release/simple` (should be ~33MB)
+   - If missing: `script/install.sh` or download from releases
+
+3. **jq not installed (parse errors):**
+   - Ubuntu: `sudo apt install jq`
+   - macOS: `brew install jq`
+
+4. **Docker daemon not running:**
+   - Linux: `sudo systemctl start docker`
+   - macOS/Windows: Start Docker Desktop
+
+### Docker Compose Quick Reference
+
+```bash
+# Run specific test tier
+docker-compose up unit-tests
+docker-compose up integration-tests
+docker-compose up system-tests
+
+# Interactive debugging
+docker-compose run dev-shell
+# Inside: simple test test/unit/failing_spec.spl --verbose
+
+# Rebuild after Dockerfile changes
+docker-compose build --no-cache
+
+# Clean up
+docker-compose down
+docker system prune -a  # Remove all containers/images
+```
+
+### See Also
+
+- **Full Guide:** `doc/guide/container_testing.md`
+- **Resource Limits:** `doc/guide/resource_limits.md`
+- **Test Config:** `simple.test.sdn`

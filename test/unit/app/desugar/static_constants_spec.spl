@@ -1,0 +1,221 @@
+# Static Constants Desugaring Tests
+#
+# Tests for Pass 0: static constant extraction and hoisting
+
+use std.string.{NL}
+use app.desugar.static_constants.{desugar_static_constants}
+
+describe "static constant desugaring":
+    it "extracts simple static val from impl block":
+        val input = "impl Point:{NL}    static val ORIGIN = Point(x: 0, y: 0)"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN = Point(x: 0, y: 0)")
+        expect(output).to_contain("impl Point:")
+
+    it "extracts multiple static constants":
+        val input = "impl Config:{NL}    static val MAX_SIZE = 1000{NL}    static val MIN_SIZE = 10"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Config__MAX_SIZE = 1000")
+        expect(output).to_contain("val Config__MIN_SIZE = 10")
+
+    it "preserves instance methods when extracting constants":
+        val input = "impl Point:{NL}    static val ORIGIN = Point(x: 0, y: 0){NL}    fn distance() -> f64:{NL}        0.0"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN")
+        expect(output).to_contain("impl Point:")
+        expect(output).to_contain("fn distance() -> f64:")
+
+    it "preserves static methods when extracting constants":
+        val input = "impl Point:{NL}    static val ORIGIN = Point(x: 0, y: 0){NL}    static fn new(x: i64, y: i64) -> Point:{NL}        Point(x: x, y: y)"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN")
+        expect(output).to_contain("static fn new(x: i64, y: i64)")
+
+    it "handles static var as constant":
+        val input = "impl Counter:{NL}    static var instance_count = 0"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Counter__instance_count = 0")
+
+    it "handles constants with type annotations":
+        val input = "impl Math:{NL}    static val PI: f64 = 3.14159"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Math__PI: f64 = 3.14159")
+
+    it "handles constants with uppercase names":
+        val input = "impl Color:{NL}    static val RED = 0xFF0000{NL}    static val GREEN = 0x00FF00{NL}    static val BLUE = 0x0000FF"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Color__RED = 0xFF0000")
+        expect(output).to_contain("val Color__GREEN = 0x00FF00")
+        expect(output).to_contain("val Color__BLUE = 0x0000FF")
+
+    it "handles constants with mixed case names":
+        val input = "impl Config:{NL}    static val default_timeout = 30{NL}    static val MAX_RETRIES = 3"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Config__default_timeout = 30")
+        expect(output).to_contain("val Config__MAX_RETRIES = 3")
+
+    it "preserves impl block structure with mixed content":
+        val input = "impl Point:{NL}    static val ZERO = 0{NL}    fn get_x() -> i64:{NL}        self.x{NL}    static val ONE = 1{NL}    fn get_y() -> i64:{NL}        self.y"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ZERO = 0")
+        expect(output).to_contain("val Point__ONE = 1")
+        expect(output).to_contain("impl Point:")
+        expect(output).to_contain("fn get_x()")
+        expect(output).to_contain("fn get_y()")
+
+    it "handles impl blocks with no static constants":
+        val input = "impl Point:{NL}    fn distance() -> f64:{NL}        0.0"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_equal(input)
+
+    it "handles empty impl blocks":
+        val input = "impl Empty:{NL}    pass"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_equal(input)
+
+    it "handles multiple impl blocks":
+        val input = "impl Point:{NL}    static val ORIGIN = Point(0, 0){NL}{NL}impl Color:{NL}    static val RED = 0xFF0000"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN")
+        expect(output).to_contain("val Color__RED")
+
+    it "handles impl blocks with trait implementations":
+        val input = "impl Display for Point:{NL}    static val FORMAT = \"({x}, {y})\"{NL}    fn to_string() -> text:{NL}        \"point\""
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__FORMAT")
+        expect(output).to_contain("impl Display for Point:")
+        expect(output).to_contain("fn to_string()")
+
+    it "handles impl blocks with generic type parameters":
+        val input = "impl Option<T>:{NL}    static val NONE_SENTINEL = -1"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Option__NONE_SENTINEL = -1")
+
+    it "removes impl block if only static constants remain":
+        val input = "impl Constants:{NL}    static val A = 1{NL}    static val B = 2"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Constants__A = 1")
+        expect(output).to_contain("val Constants__B = 2")
+        # The impl block should be removed since it's now empty
+        val lines = output.split(NL)
+        var has_empty_impl = false
+        for line in lines:
+            if line.trim() == "impl Constants:":
+                has_empty_impl = true
+        expect(has_empty_impl).to_equal(false)
+
+    it "handles constants with complex expressions":
+        val input = "impl Math:{NL}    static val TAU = 2.0 * 3.14159"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Math__TAU = 2.0 * 3.14159")
+
+    it "handles constants with constructor calls":
+        val input = "impl Point:{NL}    static val UNIT_X = Point(x: 1, y: 0){NL}    static val UNIT_Y = Point(x: 0, y: 1)"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__UNIT_X = Point(x: 1, y: 0)")
+        expect(output).to_contain("val Point__UNIT_Y = Point(x: 0, y: 1)")
+
+    it "handles constants with array values":
+        val input = "impl Defaults:{NL}    static val EMPTY_LIST = []"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Defaults__EMPTY_LIST = []")
+
+    it "handles constants with string values":
+        val input = "impl Messages:{NL}    static val GREETING = \"Hello, World!\""
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Messages__GREETING = \"Hello, World!\"")
+
+    it "preserves indentation for module-level constants":
+        val input = "impl Point:{NL}    static val ORIGIN = Point(x: 0, y: 0)"
+        val output = desugar_static_constants(input)
+
+        # Module-level constants should have no indentation
+        expect(output).to_contain("val Point__ORIGIN")
+        val has_leading_space = output.starts_with(" ")
+        expect(has_leading_space).to_equal(false)
+
+    it "handles nested impl blocks correctly":
+        # NOTE: Simple doesn't support nested impl, but we should handle gracefully
+        val input = "impl Outer:{NL}    static val X = 1{NL}    fn method():{NL}        impl Inner:{NL}            static val Y = 2"
+        val output = desugar_static_constants(input)
+
+        # Both constants should be extracted
+        expect(output).to_contain("val Outer__X = 1")
+        expect(output).to_contain("val Inner__Y = 2")
+
+    it "handles blank lines between static constants":
+        val input = "impl Config:{NL}    static val A = 1{NL}{NL}    static val B = 2"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Config__A = 1")
+        expect(output).to_contain("val Config__B = 2")
+
+    it "handles comments before static constants":
+        val input = "impl Point:{NL}    # Origin point{NL}    static val ORIGIN = Point(0, 0)"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN")
+        # Comment should be preserved in impl block
+        expect(output).to_contain("# Origin point")
+
+    it "handles multi-line constant values":
+        val input = "impl Config:{NL}    static val SETTINGS = Settings({NL}        timeout: 30,{NL}        retries: 3{NL}    )"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Config__SETTINGS = Settings(")
+        expect(output).to_contain("timeout: 30")
+        expect(output).to_contain("retries: 3")
+
+    it "preserves non-static val declarations":
+        val input = "impl Counter:{NL}    static val MAX = 100{NL}    val instance_var = 0"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Counter__MAX = 100")
+        expect(output).to_contain("val instance_var = 0")
+
+    it "handles constants in impl blocks without methods":
+        val input = "impl Constants:{NL}    static val PI = 3.14159{NL}    static val E = 2.71828"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Constants__PI = 3.14159")
+        expect(output).to_contain("val Constants__E = 2.71828")
+
+    it "preserves decorators on impl blocks":
+        val input = "@public{NL}impl Point:{NL}    static val ORIGIN = Point(0, 0)"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Point__ORIGIN")
+        expect(output).to_contain("@public")
+
+    it "handles underscores in constant names":
+        val input = "impl Config:{NL}    static val MAX_BUFFER_SIZE = 4096{NL}    static val DEFAULT_TIMEOUT_MS = 1000"
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Config__MAX_BUFFER_SIZE = 4096")
+        expect(output).to_contain("val Config__DEFAULT_TIMEOUT_MS = 1000")
+
+    it "handles numeric constant names correctly":
+        val input = "impl Error:{NL}    static val E404 = \"Not Found\"{NL}    static val E500 = \"Server Error\""
+        val output = desugar_static_constants(input)
+
+        expect(output).to_contain("val Error__E404")
+        expect(output).to_contain("val Error__E500")

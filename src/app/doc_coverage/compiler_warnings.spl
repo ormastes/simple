@@ -1,0 +1,188 @@
+# Compiler Integration for Documentation Warnings
+#
+# Provides compile-time warnings for missing documentation.
+# Integrates with `simple build --warn-docs` to emit warnings during compilation.
+
+use app.io.mod (file_exists)
+use app.doc_coverage.scanner.mod.{scan_file_for_docs, DocItem}
+use std.string.{NL}
+
+# =========================================================================
+# Warning Generation
+# =========================================================================
+
+fn check_file_documentation(file_path: text) -> [text]:
+    """
+    Check a single file for missing documentation.
+
+    Args:
+        file_path: Path to source file to check
+
+    Returns:
+        Array of warning messages (empty if fully documented)
+
+    Example:
+        val warnings = check_file_documentation("src/std/string.spl")
+        for warning in warnings:
+            print warning
+    """
+    if not file_exists(file_path):
+        return []
+
+    val items = scan_file_for_docs(file_path)
+    var warnings: [text] = []
+
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+
+        # Check if item needs documentation
+        val has_any_doc = item.has_inline_comment or item.has_docstring
+        if not has_any_doc:
+            val warning = format_warning(item)
+            warnings.push(warning)
+
+        i = i + 1
+
+    warnings
+
+fn format_warning(item: DocItem) -> text:
+    """
+    Format a documentation warning message.
+
+    Args:
+        item: Undocumented item
+
+    Returns:
+        Formatted warning string
+
+    Format: "warning: missing documentation for <kind> `<name>`"
+            "  --> <file>:<line>"
+    """
+    val kind = item.kind
+    val name = item.name
+    val file = item.file
+    val line = item.line
+
+    val msg = "warning: missing documentation for {kind} `{name}`"
+    val location = "  --> {file}:{line}"
+
+    "{msg}{NL}{location}"
+
+# =========================================================================
+# Warning Emission
+# =========================================================================
+
+fn emit_doc_warnings(warnings: [text], level: text):
+    """
+    Emit documentation warnings to stderr.
+
+    Args:
+        warnings: Array of warning messages
+        level: Warning level ("warn", "error", "note")
+
+    Example:
+        val warnings = check_file_documentation("src/std/string.spl")
+        emit_doc_warnings(warnings, "warn")
+    """
+    if warnings.len() == 0:
+        return
+
+    # Print header
+    val count = warnings.len()
+    val plural = if count == 1: "" else: "s"
+    print "Found {count} documentation warning{plural}:{NL}"
+
+    # Print each warning
+    var i = 0
+    while i < warnings.len():
+        val warning = warnings[i]
+        print warning
+        print ""
+        i = i + 1
+
+fn emit_doc_warnings_for_file(file_path: text, level: text):
+    """
+    Check file and emit warnings in one step.
+
+    Args:
+        file_path: Path to source file
+        level: Warning level
+
+    Example:
+        emit_doc_warnings_for_file("src/std/string.spl", "warn")
+    """
+    val warnings = check_file_documentation(file_path)
+    emit_doc_warnings(warnings, level)
+
+# =========================================================================
+# Multi-File Warning Support
+# =========================================================================
+
+fn check_multiple_files(file_paths: [text]) -> ([text], [text]):
+    """
+    Check multiple files for documentation warnings.
+
+    Args:
+        file_paths: Array of file paths to check
+
+    Returns:
+        Tuple of (all_warnings, files_with_warnings)
+
+    Example:
+        val files = ["src/std/string.spl", "src/std/math.spl"]
+        val result = check_multiple_files(files)
+        val warnings = result.0
+        val bad_files = result.1
+    """
+    var all_warnings: [text] = []
+    var files_with_warnings: [text] = []
+
+    var i = 0
+    while i < file_paths.len():
+        val file_path = file_paths[i]
+        val warnings = check_file_documentation(file_path)
+
+        if warnings.len() > 0:
+            files_with_warnings.push(file_path)
+
+            var j = 0
+            while j < warnings.len():
+                all_warnings.push(warnings[j])
+                j = j + 1
+
+        i = i + 1
+
+    (all_warnings, files_with_warnings)
+
+fn emit_summary(total_files: i64, files_with_warnings: [text], total_warnings: i64):
+    """
+    Emit summary of documentation warnings across all files.
+
+    Args:
+        total_files: Total number of files checked
+        files_with_warnings: Files that had warnings
+        total_warnings: Total warning count
+
+    Example:
+        emit_summary(10, ["file1.spl", "file2.spl"], 5)
+    """
+    val warned_count = files_with_warnings.len()
+    val clean_count = total_files - warned_count
+
+    print "Documentation check complete:"
+    print "  {total_files} files checked"
+    print "  {clean_count} files fully documented"
+    print "  {warned_count} files with missing docs"
+    print "  {total_warnings} warnings total"
+
+# =========================================================================
+# Exports
+# =========================================================================
+
+export check_file_documentation
+export emit_doc_warnings
+export emit_doc_warnings_for_file
+export check_multiple_files
+export emit_summary
+export format_warning

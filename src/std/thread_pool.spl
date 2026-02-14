@@ -1,0 +1,206 @@
+# ThreadPool - High-Level Thread Pool
+#
+# Simple thread pool for parallel task execution.
+# Built on top of SFFI threading primitives.
+
+use std.thread_sffi.{thread_cpu_count, thread_sleep}
+use std.async_host.thread_safe_queue.{ThreadSafeQueue}
+
+class ThreadPool:
+    """Thread pool for parallel task execution.
+
+    High-level abstraction over OS threads.
+    Manages worker threads and distributes tasks.
+
+    Example:
+        val pool = ThreadPool.new(4)
+        pool.submit(task_id: 1)
+        pool.submit(task_id: 2)
+        pool.shutdown()
+
+    Features:
+    - Fixed number of worker threads
+    - Thread-safe task queue
+    - Graceful shutdown
+    - Auto-detection of CPU count
+    """
+    num_workers: usize
+    task_queue: ThreadSafeQueue
+    shutdown_requested: bool
+    tasks_completed: usize
+
+    static fn new(num_workers: usize) -> ThreadPool:
+        """Create thread pool with specified workers.
+
+        Args:
+            num_workers: Number of worker threads (0 = auto-detect)
+
+        Returns:
+            Thread pool instance
+
+        Example:
+            val pool = ThreadPool.new(4)  # 4 workers
+            val pool_auto = ThreadPool.new(0)  # CPU count workers
+        """
+        var workers = num_workers
+        if workers == 0:
+            workers = thread_cpu_count()
+            if workers < 1:
+                workers = 4  # fallback
+
+        ThreadPool(
+            num_workers: workers,
+            task_queue: ThreadSafeQueue.new(),
+            shutdown_requested: false,
+            tasks_completed: 0
+        )
+
+    static fn default() -> ThreadPool:
+        """Create thread pool with default size (CPU count).
+
+        Returns:
+            Thread pool with auto-detected CPU count
+        """
+        ThreadPool.new(0)
+
+    me submit(task_id: usize):
+        """Submit task for execution.
+
+        Args:
+            task_id: Task identifier
+
+        Note: Task is queued and will be executed by next available worker.
+        """
+        if not self.shutdown_requested:
+            self.task_queue.push(task_id)
+
+    me submit_batch(task_ids: [usize]):
+        """Submit multiple tasks.
+
+        Args:
+            task_ids: Array of task identifiers
+        """
+        if self.shutdown_requested:
+            return
+
+        for task_id in task_ids:
+            self.task_queue.push(task_id)
+
+    me shutdown():
+        """Shutdown thread pool and wait for completion.
+
+        Prevents new tasks from being submitted.
+        Waits for all queued tasks to complete.
+        """
+        self.shutdown_requested = true
+
+        # Wait for queue to drain
+        while not self.task_queue.is_empty():
+            thread_sleep(10)
+
+    me shutdown_now():
+        """Immediate shutdown (drop pending tasks).
+
+        Clears task queue and stops accepting new tasks.
+        """
+        self.shutdown_requested = true
+        self.task_queue.clear()
+
+    fn pending_tasks() -> usize:
+        """Get number of pending tasks.
+
+        Returns:
+            Number of tasks in queue
+        """
+        self.task_queue.len()
+
+    fn is_idle() -> bool:
+        """Check if pool is idle (no pending tasks).
+
+        Returns:
+            true if no tasks queued, false otherwise
+        """
+        self.task_queue.is_empty()
+
+    fn is_shutdown() -> bool:
+        """Check if shutdown requested.
+
+        Returns:
+            true if shutdown, false otherwise
+        """
+        self.shutdown_requested
+
+    me wait_until_idle(timeout_ms: i64) -> bool:
+        """Wait until all tasks complete.
+
+        Args:
+            timeout_ms: Timeout in milliseconds (0 = wait forever)
+
+        Returns:
+            true if idle, false on timeout
+        """
+        if timeout_ms == 0:
+            # Wait forever
+            while not self.is_idle():
+                thread_sleep(10)
+            return true
+        else:
+            # Wait with timeout
+            var elapsed = 0
+            while not self.is_idle():
+                if elapsed >= timeout_ms:
+                    return false
+                thread_sleep(10)
+                elapsed = elapsed + 10
+            return true
+
+    me destroy():
+        """Destroy thread pool and free resources."""
+        self.shutdown_now()
+        self.task_queue.destroy()
+
+# ============================================================================
+# Task Execution Result
+# ============================================================================
+
+enum TaskResult:
+    """Result of task execution."""
+    Completed(usize)        # Task completed with ID
+    Failed(usize, text)     # Task failed with ID and error
+    Timeout(usize)          # Task timed out with ID
+    Cancelled(usize)        # Task cancelled with ID
+
+impl TaskResult:
+    fn task_id() -> usize:
+        """Get task ID from result.
+
+        Returns:
+            Task identifier
+        """
+        match self:
+            case Completed(id): id
+            case Failed(id, _): id
+            case Timeout(id): id
+            case Cancelled(id): id
+
+    fn is_completed() -> bool:
+        """Check if task completed successfully.
+
+        Returns:
+            true if completed, false otherwise
+        """
+        match self:
+            case Completed(_): true
+            case _: false
+
+    fn is_failed() -> bool:
+        """Check if task failed.
+
+        Returns:
+            true if failed, false otherwise
+        """
+        match self:
+            case Failed(_, _): true
+            case _: false
+
+export ThreadPool, TaskResult

@@ -1,0 +1,386 @@
+# x86_64 SIMD Encoding Tests
+#
+# Tests for AVX2 and SSE SIMD instruction encoding.
+# Verifies correct VEX prefix generation and opcode encoding.
+
+use compiler.backend.native.x86_64_simd.{vex_2byte, vex_3byte, vex_avx2_256, vex_avx_128}
+use compiler.backend.native.x86_64_simd.{ymm_to_index, xmm_to_index}
+use compiler.backend.native.x86_64_simd.{modrm_simd, modrm_reg_reg_simd}
+use compiler.backend.native.x86_64_simd.{encode_vaddps_ymm, encode_vsubps_ymm, encode_vmulps_ymm, encode_vdivps_ymm, encode_vfmadd213ps_ymm}
+use compiler.backend.native.x86_64_simd.{encode_vaddpd_ymm, encode_vsubpd_ymm, encode_vmulpd_ymm, encode_vdivpd_ymm, encode_vfmadd213pd_ymm}
+use compiler.backend.native.x86_64_simd.{encode_vpaddd_ymm, encode_vpsubd_ymm, encode_vpmulld_ymm}
+use compiler.backend.native.x86_64_simd.{encode_addps_xmm, encode_subps_xmm, encode_mulps_xmm, encode_divps_xmm}
+use compiler.backend.native.x86_64_simd.{encode_paddd_xmm, encode_psubd_xmm, encode_pmulld_xmm}
+use compiler.backend.native.x86_64_simd.{encode_haddps_xmm, encode_maxps_xmm, encode_minps_xmm}
+use compiler.backend.native.x86_64_simd.{encode_vmovaps_load_ymm, encode_vmovaps_store_ymm}
+use compiler.backend.native.mach_inst.{X86_YMM0, X86_YMM1, X86_YMM2, X86_YMM3, X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3}
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn bytes_to_hex(bytes: [i64]) -> text:
+    """Convert byte array to hex string for comparison."""
+    var result = ""
+    for b in bytes:
+        val hex = int_to_hex_2digit(b)
+        result = result + hex + " "
+    result
+
+fn int_to_hex_2digit(n: i64) -> text:
+    """Convert int to 2-digit hex string."""
+    val hex_chars = "0123456789ABCDEF"
+    val hi = (n / 16) % 16
+    val lo = n % 16
+    text_from_chars([hex_chars[hi], hex_chars[lo]])
+
+fn text_from_chars(chars: [i64]) -> text:
+    """Create text from character codes."""
+    var result = ""
+    for c in chars:
+        result = result + char_to_text(c)
+    result
+
+fn char_to_text(code: i64) -> text:
+    """Convert character code to text (simplified)."""
+    if code == 48: "0"
+    elif code == 49: "1"
+    elif code == 50: "2"
+    elif code == 51: "3"
+    elif code == 52: "4"
+    elif code == 53: "5"
+    elif code == 54: "6"
+    elif code == 55: "7"
+    elif code == 56: "8"
+    elif code == 57: "9"
+    elif code == 65: "A"
+    elif code == 66: "B"
+    elif code == 67: "C"
+    elif code == 68: "D"
+    elif code == 69: "E"
+    elif code == 70: "F"
+    else: "?"
+
+# ============================================================================
+# VEX Prefix Tests
+# ============================================================================
+
+describe "VEX Prefix Encoding":
+    it "encodes 2-byte VEX prefix correctly":
+        # vvvv=0, L=0 (128-bit), pp=0
+        val vex = vex_2byte(0, false, 0)
+        expect(vex.len()).to_equal(2)
+        expect(vex[0]).to_equal(0xC5)  # 2-byte VEX prefix
+        # Byte 1: R=1, vvvv=1111 (inverted 0), L=0, pp=00 = 11111000 = 0xF8
+        expect(vex[1]).to_equal(0xF8)
+
+    it "encodes 2-byte VEX with L=1 (256-bit)":
+        # vvvv=0, L=1, pp=0
+        val vex = vex_2byte(0, true, 0)
+        expect(vex[0]).to_equal(0xC5)
+        # Byte 1: R=1, vvvv=1111, L=1, pp=00 = 11111100 = 0xFC
+        expect(vex[1]).to_equal(0xFC)
+
+    it "encodes 2-byte VEX with pp=1 (0x66 prefix)":
+        # vvvv=0, L=0, pp=1
+        val vex = vex_2byte(0, false, 1)
+        expect(vex[0]).to_equal(0xC5)
+        # Byte 1: R=1, vvvv=1111, L=0, pp=01 = 11111001 = 0xF9
+        expect(vex[1]).to_equal(0xF9)
+
+    it "encodes 3-byte VEX prefix correctly":
+        # rxb=0, mmmmm=1 (0F), w=false, vvvv=0, l=false, pp=0
+        val vex = vex_3byte(0, 1, false, 0, false, 0)
+        expect(vex.len()).to_equal(3)
+        expect(vex[0]).to_equal(0xC4)  # 3-byte VEX prefix
+
+        # Byte 1: RXB=111 (inverted 000), mmmmm=00001 = 11100001 = 0xE1
+        expect(vex[1]).to_equal(0xE1)
+
+        # Byte 2: W=0, vvvv=1111, L=0, pp=00 = 01111000 = 0x78
+        expect(vex[2]).to_equal(0x78)
+
+    it "encodes 3-byte VEX with L=1 (256-bit)":
+        # rxb=0, mmmmm=1, w=false, vvvv=0, l=true, pp=0
+        val vex = vex_3byte(0, 1, false, 0, true, 0)
+        expect(vex[0]).to_equal(0xC4)
+        expect(vex[1]).to_equal(0xE1)
+        # Byte 2: W=0, vvvv=1111, L=1, pp=00 = 01111100 = 0x7C
+        expect(vex[2]).to_equal(0x7C)
+
+    it "encodes 3-byte VEX with W=1":
+        # rxb=0, mmmmm=1, w=true, vvvv=0, l=false, pp=0
+        val vex = vex_3byte(0, 1, true, 0, false, 0)
+        expect(vex[0]).to_equal(0xC4)
+        expect(vex[1]).to_equal(0xE1)
+        # Byte 2: W=1, vvvv=1111, L=0, pp=00 = 11111000 = 0xF8
+        expect(vex[2]).to_equal(0xF8)
+
+    it "encodes 3-byte VEX with vvvv=1":
+        # rxb=0, mmmmm=1, w=false, vvvv=1, l=false, pp=0
+        val vex = vex_3byte(0, 1, false, 1, false, 0)
+        expect(vex[0]).to_equal(0xC4)
+        expect(vex[1]).to_equal(0xE1)
+        # Byte 2: W=0, vvvv=1110 (inverted 1), L=0, pp=00 = 01110000 = 0x70
+        expect(vex[2]).to_equal(0x70)
+
+    it "encodes 3-byte VEX with mmmmm=2 (0F38)":
+        # rxb=0, mmmmm=2, w=false, vvvv=0, l=false, pp=0
+        val vex = vex_3byte(0, 2, false, 0, false, 0)
+        expect(vex[0]).to_equal(0xC4)
+        # Byte 1: RXB=111, mmmmm=00010 = 11100010 = 0xE2
+        expect(vex[1]).to_equal(0xE2)
+        expect(vex[2]).to_equal(0x78)
+
+# ============================================================================
+# Register Encoding Tests
+# ============================================================================
+
+describe "Register Encoding":
+    it "converts YMM register IDs to indices":
+        expect(ymm_to_index(X86_YMM0)).to_equal(0)
+        expect(ymm_to_index(X86_YMM1)).to_equal(1)
+        expect(ymm_to_index(X86_YMM2)).to_equal(2)
+        expect(ymm_to_index(X86_YMM3)).to_equal(3)
+
+    it "converts XMM register IDs to indices":
+        expect(xmm_to_index(X86_XMM0)).to_equal(0)
+        expect(xmm_to_index(X86_XMM1)).to_equal(1)
+        expect(xmm_to_index(X86_XMM2)).to_equal(2)
+        expect(xmm_to_index(X86_XMM3)).to_equal(3)
+
+    it "creates ModR/M byte for SIMD registers":
+        # mod=3 (register), reg=0, rm=1
+        val modrm = modrm_reg_reg_simd(0, 1)
+        # 11 000 001 = 0xC1
+        expect(modrm).to_equal(0xC1)
+
+    it "creates ModR/M byte for different register combinations":
+        # mod=3, reg=2, rm=3
+        val modrm = modrm_reg_reg_simd(2, 3)
+        # 11 010 011 = 0xD3
+        expect(modrm).to_equal(0xD3)
+
+# ============================================================================
+# AVX2 f32x8 (256-bit Float) Tests
+# ============================================================================
+
+describe "AVX2 f32x8 Instructions":
+    it "encodes VADDPS ymm0, ymm1, ymm2":
+        val bytes = encode_vaddps_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.0F.WIG VADDPS ymm0, ymm1, ymm2
+        # Expected: C4 E1 74 58 C2
+        # C4 = 3-byte VEX
+        # E1 = RXB=111, mmmmm=00001
+        # 74 = W=0, vvvv=1110 (inv 1), L=1, pp=00
+        # 58 = ADDPS opcode
+        # C2 = mod=11, reg=0, rm=2
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[1]).to_equal(0xE1)
+        expect(bytes[2]).to_equal(0x74)
+        expect(bytes[3]).to_equal(0x58)
+        expect(bytes[4]).to_equal(0xC2)
+
+    it "encodes VSUBPS ymm0, ymm1, ymm2":
+        val bytes = encode_vsubps_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[3]).to_equal(0x5C)  # SUBPS opcode
+
+    it "encodes VMULPS ymm0, ymm1, ymm2":
+        val bytes = encode_vmulps_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[3]).to_equal(0x59)  # MULPS opcode
+
+    it "encodes VDIVPS ymm0, ymm1, ymm2":
+        val bytes = encode_vdivps_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[3]).to_equal(0x5E)  # DIVPS opcode
+
+    it "encodes VFMADD213PS ymm0, ymm1, ymm2":
+        val bytes = encode_vfmadd213ps_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.66.0F38.W0 A8 /r
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[1]).to_equal(0xE2)  # mmmmm=2 (0F38)
+        expect(bytes[2]).to_equal(0x75)  # pp=1 (0x66)
+        expect(bytes[3]).to_equal(0xA8)  # FMA opcode
+
+    it "encodes VADDPS with different registers":
+        val bytes = encode_vaddps_ymm(X86_YMM3, X86_YMM2, X86_YMM1)
+        # VEX vvvv should be inverted src1 (ymm2 = 2, inv = 13 = 0xD)
+        # ModR/M: dest=3, rm=1
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[2]).to_equal(0x6C)  # vvvv=1101 (inv 2)
+        expect(bytes[4]).to_equal(0xD9)  # mod=11, reg=3, rm=1
+
+# ============================================================================
+# AVX2 f64x4 (256-bit Double) Tests
+# ============================================================================
+
+describe "AVX2 f64x4 Instructions":
+    it "encodes VADDPD ymm0, ymm1, ymm2":
+        val bytes = encode_vaddpd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.66.0F.WIG 58 /r
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[2]).to_equal(0x75)  # pp=1 (0x66 prefix)
+        expect(bytes[3]).to_equal(0x58)  # ADDPD opcode
+
+    it "encodes VSUBPD ymm0, ymm1, ymm2":
+        val bytes = encode_vsubpd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[3]).to_equal(0x5C)  # SUBPD opcode
+
+    it "encodes VMULPD ymm0, ymm1, ymm2":
+        val bytes = encode_vmulpd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[3]).to_equal(0x59)  # MULPD opcode
+
+    it "encodes VDIVPD ymm0, ymm1, ymm2":
+        val bytes = encode_vdivpd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[3]).to_equal(0x5E)  # DIVPD opcode
+
+    it "encodes VFMADD213PD ymm0, ymm1, ymm2":
+        val bytes = encode_vfmadd213pd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.66.0F38.W1 A8 /r (note W=1 for double)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[1]).to_equal(0xE2)  # mmmmm=2 (0F38)
+        expect(bytes[2]).to_equal(0xF5)  # W=1, pp=1
+        expect(bytes[3]).to_equal(0xA8)
+
+# ============================================================================
+# AVX2 i32x8 (256-bit Integer) Tests
+# ============================================================================
+
+describe "AVX2 i32x8 Instructions":
+    it "encodes VPADDD ymm0, ymm1, ymm2":
+        val bytes = encode_vpaddd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.66.0F.WIG FE /r
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[2]).to_equal(0x75)  # pp=1 (0x66)
+        expect(bytes[3]).to_equal(0xFE)  # PADDD opcode
+
+    it "encodes VPSUBD ymm0, ymm1, ymm2":
+        val bytes = encode_vpsubd_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[3]).to_equal(0xFA)  # PSUBD opcode
+
+    it "encodes VPMULLD ymm0, ymm1, ymm2":
+        val bytes = encode_vpmulld_ymm(X86_YMM0, X86_YMM1, X86_YMM2)
+        # VEX.256.66.0F38.WIG 40 /r
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[1]).to_equal(0xE2)  # mmmmm=2 (0F38)
+        expect(bytes[3]).to_equal(0x40)  # PMULLD opcode
+
+# ============================================================================
+# SSE f32x4 (128-bit Float) Tests
+# ============================================================================
+
+describe "SSE f32x4 Instructions":
+    it "encodes ADDPS xmm0, xmm1":
+        val bytes = encode_addps_xmm(X86_XMM0, X86_XMM1)
+        # Legacy SSE: 0F 58 /r
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[0]).to_equal(0x0F)
+        expect(bytes[1]).to_equal(0x58)
+        expect(bytes[2]).to_equal(0xC1)  # mod=11, reg=0, rm=1
+
+    it "encodes SUBPS xmm0, xmm1":
+        val bytes = encode_subps_xmm(X86_XMM0, X86_XMM1)
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[1]).to_equal(0x5C)  # SUBPS opcode
+
+    it "encodes MULPS xmm0, xmm1":
+        val bytes = encode_mulps_xmm(X86_XMM0, X86_XMM1)
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[1]).to_equal(0x59)  # MULPS opcode
+
+    it "encodes DIVPS xmm0, xmm1":
+        val bytes = encode_divps_xmm(X86_XMM0, X86_XMM1)
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[1]).to_equal(0x5E)  # DIVPS opcode
+
+# ============================================================================
+# SSE i32x4 (128-bit Integer) Tests
+# ============================================================================
+
+describe "SSE i32x4 Instructions":
+    it "encodes PADDD xmm0, xmm1":
+        val bytes = encode_paddd_xmm(X86_XMM0, X86_XMM1)
+        # SSE2: 66 0F FE /r
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0x66)
+        expect(bytes[1]).to_equal(0x0F)
+        expect(bytes[2]).to_equal(0xFE)
+        expect(bytes[3]).to_equal(0xC1)
+
+    it "encodes PSUBD xmm0, xmm1":
+        val bytes = encode_psubd_xmm(X86_XMM0, X86_XMM1)
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[2]).to_equal(0xFA)  # PSUBD opcode
+
+    it "encodes PMULLD xmm0, xmm1":
+        val bytes = encode_pmulld_xmm(X86_XMM0, X86_XMM1)
+        # SSE4.1: 66 0F 38 40 /r
+        expect(bytes.len()).to_equal(5)
+        expect(bytes[0]).to_equal(0x66)
+        expect(bytes[1]).to_equal(0x0F)
+        expect(bytes[2]).to_equal(0x38)
+        expect(bytes[3]).to_equal(0x40)
+        expect(bytes[4]).to_equal(0xC1)
+
+# ============================================================================
+# Horizontal Operations Tests
+# ============================================================================
+
+describe "Horizontal Operations":
+    it "encodes HADDPS xmm0, xmm1":
+        val bytes = encode_haddps_xmm(X86_XMM0, X86_XMM1)
+        # SSE3: F2 0F 7C /r
+        expect(bytes.len()).to_equal(4)
+        expect(bytes[0]).to_equal(0xF2)
+        expect(bytes[1]).to_equal(0x0F)
+        expect(bytes[2]).to_equal(0x7C)
+        expect(bytes[3]).to_equal(0xC1)
+
+    it "encodes MAXPS xmm0, xmm1":
+        val bytes = encode_maxps_xmm(X86_XMM0, X86_XMM1)
+        # SSE: 0F 5F /r
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[0]).to_equal(0x0F)
+        expect(bytes[1]).to_equal(0x5F)
+        expect(bytes[2]).to_equal(0xC1)
+
+    it "encodes MINPS xmm0, xmm1":
+        val bytes = encode_minps_xmm(X86_XMM0, X86_XMM1)
+        # SSE: 0F 5D /r
+        expect(bytes.len()).to_equal(3)
+        expect(bytes[0]).to_equal(0x0F)
+        expect(bytes[1]).to_equal(0x5D)
+        expect(bytes[2]).to_equal(0xC1)
+
+# ============================================================================
+# Load/Store Tests
+# ============================================================================
+
+describe "Load/Store Instructions":
+    it "encodes VMOVAPS ymm0, [base+offset]":
+        val bytes = encode_vmovaps_load_ymm(X86_YMM0, 5, 64)
+        # VEX.256.0F.WIG 28 /r with memory operand
+        expect(bytes.len()).to_be_greater_than(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[3]).to_equal(0x28)  # MOVAPS load opcode
+
+    it "encodes VMOVAPS [base+offset], ymm0":
+        val bytes = encode_vmovaps_store_ymm(5, 64, X86_YMM0)
+        # VEX.256.0F.WIG 29 /r with memory operand
+        expect(bytes.len()).to_be_greater_than(5)
+        expect(bytes[0]).to_equal(0xC4)
+        expect(bytes[3]).to_equal(0x29)  # MOVAPS store opcode

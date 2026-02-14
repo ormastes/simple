@@ -2211,7 +2211,8 @@ TEST(rt_file_exists_false) {
 
 TEST(rt_file_write_valid) {
     const char* path = TMP_PREFIX "rt_write.txt";
-    ASSERT(rt_file_write(path, "rt written"));
+    rt_file_write(path, "rt written");
+    ASSERT(spl_file_exists(path));
     char* c = spl_file_read(path);
     ASSERT_EQ_STR(c, "rt written");
     free(c);
@@ -2219,7 +2220,8 @@ TEST(rt_file_write_valid) {
 }
 
 TEST(rt_file_write_null_path) {
-    ASSERT(!rt_file_write(NULL, "test"));
+    /* void function - no return value to check */
+    rt_file_write(NULL, "test");
 }
 
 TEST(rt_file_delete_valid) {

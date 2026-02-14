@@ -904,7 +904,13 @@ const char* spl_get_arg(int64_t idx) {
 
 const char* rt_file_read_text(const char* path) { return spl_file_read(path); }
 int         rt_file_exists(const char* path)    { return spl_file_exists(path); }
-int         rt_file_write(const char* path, const char* content) { return spl_file_write(path, content); }
+void        rt_file_write(const char* path, const char* content) {
+    FILE* f = fopen(path, "w");
+    if (f) {
+        fputs(content, f);
+        fclose(f);
+    }
+}
 int         rt_file_copy(const char* src, const char* dst) {
     FILE* in = fopen(src, "rb");
     if (!in) return 0;

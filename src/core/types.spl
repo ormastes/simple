@@ -228,6 +228,10 @@ val TYPE_RESULT = 19
 val TYPE_FUTURE = 20
 val TYPE_POLL = 21
 val TYPE_TASK = 22
+val TYPE_GENERIC_ERASED = 23
+val TYPE_UNION = 24
+val TYPE_INTERSECTION = 25
+val TYPE_REFINEMENT = 26
 val TYPE_NAMED_BASE = 1000
 
 fn type_tag_name(tag: i64) -> text:
@@ -283,6 +287,14 @@ fn type_tag_name(tag: i64) -> text:
         return "Poll"
     if tag == TYPE_TASK:
         return "Task"
+    if tag == TYPE_GENERIC_ERASED:
+        return "Generic"
+    if tag == TYPE_UNION:
+        return "Union"
+    if tag == TYPE_INTERSECTION:
+        return "Intersection"
+    if tag == TYPE_REFINEMENT:
+        return "Refinement"
     "unknown"
 
 fn type_tag_to_c(tag: i64) -> text:
@@ -332,6 +344,14 @@ fn type_tag_to_c(tag: i64) -> text:
         return "SplPoll*"
     if tag == TYPE_TASK:
         return "SplTask*"
+    if tag == TYPE_GENERIC_ERASED:
+        return "SplValue"
+    if tag == TYPE_UNION:
+        return "SplValue"
+    if tag == TYPE_INTERSECTION:
+        return "SplValue"
+    if tag == TYPE_REFINEMENT:
+        return "SplValue"
     if tag >= TYPE_NAMED_BASE:
         val nid = tag - TYPE_NAMED_BASE
         val nm = named_type_name(nid)
@@ -415,6 +435,89 @@ fn fn_sig_get_param_names(sig_id: i64) -> [text]:
 fn fn_sig_get_param_types(sig_id: i64) -> [i64]:
     fn_sig_param_types[sig_id]
 
+# ===== Generic Parameter Registry =====
+# Tracks type parameters for generic classes and functions.
+# Each entry represents a type parameter (T, U, K, V, etc.)
+
+var generic_param_names: [text] = []
+var generic_param_contexts: [text] = []
+var generic_param_ids: [i64] = []
+
+fn generic_param_register(name: text, context: text) -> i64:
+    val idx = generic_param_names.len()
+    generic_param_names.push(name)
+    generic_param_contexts.push(context)
+    generic_param_ids.push(idx)
+    idx
+
+fn generic_param_find(name: text, context: text) -> i64:
+    for i in range(0, generic_param_names.len()):
+        if (generic_param_names[i] == name and
+            generic_param_contexts[i] == context):
+            return i
+    -1
+
+fn generic_param_name(param_id: i64) -> text:
+    generic_param_names[param_id]
+
+fn generic_param_context(param_id: i64) -> text:
+    generic_param_contexts[param_id]
+
+fn generic_param_count() -> i64:
+    generic_param_names.len()
+
+# ===== Union Type Registry =====
+# Tracks union types (A | B | C)
+
+var union_type_members: [[i64]] = []
+
+fn union_type_register(member_types: [i64]) -> i64:
+    val idx = union_type_members.len()
+    union_type_members.push(member_types)
+    TYPE_UNION
+
+fn union_type_get_members(union_id: i64) -> [i64]:
+    if union_id < union_type_members.len():
+        return union_type_members[union_id]
+    []
+
+# ===== Intersection Type Registry =====
+# Tracks intersection types (A & B & C)
+
+var intersection_type_members: [[i64]] = []
+
+fn intersection_type_register(member_types: [i64]) -> i64:
+    val idx = intersection_type_members.len()
+    intersection_type_members.push(member_types)
+    TYPE_INTERSECTION
+
+fn intersection_type_get_members(inter_id: i64) -> [i64]:
+    if inter_id < intersection_type_members.len():
+        return intersection_type_members[inter_id]
+    []
+
+# ===== Refinement Type Registry =====
+# Tracks refinement types (x: i64 where x > 0)
+
+var refinement_base_types: [i64] = []
+var refinement_predicates: [text] = []
+
+fn refinement_type_register(base_type: i64, predicate: text) -> i64:
+    val idx = refinement_base_types.len()
+    refinement_base_types.push(base_type)
+    refinement_predicates.push(predicate)
+    TYPE_REFINEMENT
+
+fn refinement_type_base(ref_id: i64) -> i64:
+    if ref_id < refinement_base_types.len():
+        return refinement_base_types[ref_id]
+    TYPE_ANY
+
+fn refinement_type_predicate(ref_id: i64) -> text:
+    if ref_id < refinement_predicates.len():
+        return refinement_predicates[ref_id]
+    ""
+
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -441,6 +544,13 @@ fn reset_all_pools():
     fn_sig_param_types = []
     fn_sig_ret_types = []
     fn_sig_is_extern = []
+    generic_param_names = []
+    generic_param_contexts = []
+    generic_param_ids = []
+    union_type_members = []
+    intersection_type_members = []
+    refinement_base_types = []
+    refinement_predicates = []
 
 export str_concat, str_len, str_eq, str_slice, str_char_at
 export str_contains, str_starts_with, str_ends_with
@@ -457,10 +567,16 @@ export TYPE_DICT, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NIL, TYPE_NAMED_BASE
 export TYPE_OPTION, TYPE_OPTION_I64, TYPE_OPTION_F64, TYPE_OPTION_TEXT, TYPE_OPTION_BOOL
 export TYPE_RESULT
 export TYPE_FUTURE, TYPE_POLL, TYPE_TASK
+export TYPE_GENERIC_ERASED, TYPE_UNION, TYPE_INTERSECTION, TYPE_REFINEMENT
 export type_tag_name, type_tag_to_c
 export named_type_register, named_type_update, named_type_find, named_type_name
 export named_type_fields, named_type_field_type_tags
 export fn_sig_register, fn_sig_find, fn_sig_name, fn_sig_ret_type
 export fn_sig_param_count, fn_sig_is_extern_fn
 export fn_sig_get_param_names, fn_sig_get_param_types
+export generic_param_register, generic_param_find, generic_param_name
+export generic_param_context, generic_param_count
+export union_type_register, union_type_get_members
+export intersection_type_register, intersection_type_get_members
+export refinement_type_register, refinement_type_base, refinement_type_predicate
 export reset_all_pools

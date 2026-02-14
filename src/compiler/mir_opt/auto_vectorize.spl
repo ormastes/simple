@@ -1,0 +1,292 @@
+# Auto-Vectorization Pass
+#
+# Automatically vectorizes simple loops into SIMD operations.
+# Detects vectorizable patterns and transforms scalar loops to use SIMD instructions.
+#
+# Vectorizable pattern:
+#   for i in 0..n:
+#       c[i] = a[i] + b[i]
+#
+# Transformed to:
+#   var i = 0
+#   while i + 8 <= n:
+#       c_vec = simd_add_f32x8(load_vec(a, i), load_vec(b, i))
+#       store_vec(c, i, c_vec)
+#       i = i + 8
+#   while i < n:  # Remainder loop
+#       c[i] = a[i] + b[i]
+#       i = i + 1
+#
+# Requirements for vectorization:
+# - Simple loop with known bounds
+# - Stride-1 array access (consecutive elements)
+# - No loop-carried dependencies (except induction variable)
+# - Operations that map to SIMD instructions (add, sub, mul, etc.)
+
+use compiler.mir_data.{MirModule, MirFunction, MirBlock, MirInst, MirInstKind, MirTerminator, MirOperand, MirOperandKind, MirBinOp, LocalId, BlockId, copy_mir_function_with_blocks}
+
+# ============================================================================
+# Loop Analysis
+# ============================================================================
+
+struct LoopInfo:
+    """Information about a detected loop."""
+    header_block: BlockId
+    body_blocks: [BlockId]
+    exit_block: BlockId
+    induction_var: LocalId
+    start_value: i64
+    end_value: i64
+    step: i64
+
+struct ArrayAccess:
+    """Array access pattern."""
+    base_array: LocalId
+    index_expr: LocalId
+    is_load: bool
+
+fn is_simple_loop(func: MirFunction, header: BlockId) -> LoopInfo?:
+    """
+    Detect if a block is the header of a simple loop.
+    Returns loop information if it matches vectorizable pattern.
+    """
+    # Simplified: Return nil for now
+    # Full implementation would:
+    # 1. Check for loop back-edge (terminator jumps to header)
+    # 2. Identify induction variable (phi node or simple counter)
+    # 3. Extract bounds (start, end, step)
+    # 4. Verify single exit condition
+    nil
+
+fn detect_array_accesses(block: MirBlock) -> [ArrayAccess]:
+    """Detect array load/store operations in a block."""
+    var accesses: [ArrayAccess] = []
+
+    for inst in block.instructions:
+        match inst.kind:
+            case Load(dest, ptr):
+                # Check if ptr is array element pointer (GEP result)
+                # Extract base array and index
+                pass_do_nothing
+
+            case Store(ptr, value):
+                # Similar for stores
+                pass_do_nothing
+
+            case _:
+                pass_do_nothing
+
+    accesses
+
+fn has_loop_carried_deps(body: [MirBlock], induction: LocalId) -> bool:
+    """
+    Check if loop has dependencies between iterations (other than induction var).
+    Returns true if non-vectorizable dependencies exist.
+    """
+    # Simplified: conservatively return true
+    # Full implementation would check for:
+    # - Read-after-write on same iteration
+    # - Reduction operations
+    # - Reductions are vectorizable but need special handling
+    true
+
+# ============================================================================
+# Vectorization Transform
+# ============================================================================
+
+struct VectorizeContext:
+    """Context for vectorization transformation."""
+    vector_width: i64     # 4 for SSE, 8 for AVX2
+    element_type: text    # "f32", "f64", "i32"
+    next_local: i64
+
+fn create_vector_loop(
+    ctx: VectorizeContext,
+    loop: LoopInfo,
+    body_insts: [MirInst]
+) -> [MirBlock]:
+    """
+    Transform scalar loop to vector + remainder loops.
+    Returns new basic blocks for the vectorized code.
+    """
+    var new_blocks: [MirBlock] = []
+
+    # Create vector loop block
+    var vector_insts: [MirInst] = []
+
+    # Transform each scalar instruction to SIMD equivalent
+    for inst in body_insts:
+        val simd_inst = vectorize_instruction(ctx, inst)
+        if simd_inst.is_some():
+            vector_insts = vector_insts + [simd_inst.unwrap()]
+
+    # Create remainder loop block (unchanged scalar code)
+    # This handles the last few iterations when count not multiple of vector width
+
+    new_blocks
+
+fn vectorize_instruction(ctx: VectorizeContext, inst: MirInst) -> MirInst?:
+    """
+    Transform a scalar instruction to its SIMD equivalent.
+    Returns nil if instruction cannot be vectorized.
+    """
+    match inst.kind:
+        case BinOp(dest, op, left, right):
+            # Map scalar binop to SIMD operation
+            match op:
+                case Add:
+                    # Create SimdAdd instruction
+                    if ctx.element_type == "f32" and ctx.vector_width == 4:
+                        val new_kind = MirInstKind.SimdAddF32x4(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    elif ctx.element_type == "f32" and ctx.vector_width == 8:
+                        val new_kind = MirInstKind.SimdAddF32x8(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    else:
+                        nil
+
+                case Sub:
+                    if ctx.element_type == "f32" and ctx.vector_width == 4:
+                        val new_kind = MirInstKind.SimdSubF32x4(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    elif ctx.element_type == "f32" and ctx.vector_width == 8:
+                        val new_kind = MirInstKind.SimdSubF32x8(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    else:
+                        nil
+
+                case Mul:
+                    if ctx.element_type == "f32" and ctx.vector_width == 4:
+                        val new_kind = MirInstKind.SimdMulF32x4(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    elif ctx.element_type == "f32" and ctx.vector_width == 8:
+                        val new_kind = MirInstKind.SimdMulF32x8(dest, left, right)
+                        return MirInst(kind: new_kind, span: inst.span)
+                    else:
+                        nil
+
+                case _:
+                    nil
+
+        case _:
+            nil
+
+fn create_vector_load(ctx: VectorizeContext, base: LocalId, offset: LocalId) -> MirInst:
+    """Create a vector load instruction."""
+    # Simplified placeholder
+    # Real implementation would create GEP + Load with vector type
+    val kind = MirInstKind.Nop
+    MirInst(kind: kind, span: Span.default())
+
+fn create_vector_store(ctx: VectorizeContext, base: LocalId, offset: LocalId, value: LocalId) -> MirInst:
+    """Create a vector store instruction."""
+    # Simplified placeholder
+    val kind = MirInstKind.Nop
+    MirInst(kind: kind, span: Span.default())
+
+# ============================================================================
+# Vectorization Decision
+# ============================================================================
+
+fn should_vectorize_loop(loop: LoopInfo, body: [MirBlock]) -> bool:
+    """
+    Decide if loop should be vectorized based on cost model.
+
+    Factors:
+    - Loop trip count (must be >= 4 to benefit)
+    - Operation types (floating point benefits more)
+    - Memory access patterns (stride-1 is best)
+    - Complexity (simple loops only)
+    """
+    val trip_count = loop.end_value - loop.start_value
+
+    # Need at least 4 iterations to benefit from SSE
+    if trip_count < 4:
+        return false
+
+    # Check if operations are SIMD-friendly
+    var has_vectorizable_ops = false
+    for block in body:
+        for inst in block.instructions:
+            match inst.kind:
+                case BinOp(_, op, _, _):
+                    match op:
+                        case Add | Sub | Mul:
+                            has_vectorizable_ops = true
+                        case _:
+                            pass_do_nothing
+                case _:
+                    pass_do_nothing
+
+    has_vectorizable_ops
+
+# ============================================================================
+# Main Auto-Vectorization Pass
+# ============================================================================
+
+fn run_auto_vectorization(module: MirModule) -> MirModule:
+    """
+    Run auto-vectorization pass on entire module.
+
+    This is a simplified implementation showing the structure.
+    A production version would:
+    - Perform full loop detection and analysis
+    - Build dependency graphs
+    - Cost model for vectorization decisions
+    - Handle reductions, conditionals, complex patterns
+    """
+    var new_functions: Dict<SymbolId, MirFunction> = {}
+
+    for symbol_id in module.functions.keys():
+        val func = module.functions[symbol_id]
+        val vectorized = try_vectorize_function(func)
+        new_functions[symbol_id] = vectorized
+
+    MirModule(
+        name: module.name,
+        functions: new_functions,
+        statics: module.statics,
+        constants: module.constants,
+        types: module.types
+    )
+
+fn try_vectorize_function(func: MirFunction) -> MirFunction:
+    """
+    Attempt to vectorize loops in a function.
+    Returns modified function with vectorized loops.
+    """
+    # For now, return unchanged
+    # Full implementation would:
+    # 1. Identify all loops (via back-edges in CFG)
+    # 2. Analyze each loop for vectorizability
+    # 3. Transform vectorizable loops
+    # 4. Keep scalar loops unchanged
+    func
+
+# ============================================================================
+# Utility: Platform SIMD Width
+# ============================================================================
+
+fn get_simd_width(element_type: text) -> i64:
+    """
+    Get optimal SIMD width for target platform.
+    This would query target features in real implementation.
+    """
+    # Simplified: assume AVX2 available
+    if element_type == "f32":
+        8  # 8x f32 = 256 bits
+    elif element_type == "f64":
+        4  # 4x f64 = 256 bits
+    elif element_type == "i32":
+        8  # 8x i32 = 256 bits
+    else:
+        4  # Conservative fallback
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export run_auto_vectorization
+export try_vectorize_function
+export should_vectorize_loop
+export get_simd_width

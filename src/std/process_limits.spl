@@ -1,0 +1,202 @@
+# Process Resource Limits - Resource Profile System
+#
+# Defines resource profiles for process execution with CPU, memory, timeout,
+# file descriptor, and process count limits.
+#
+# Profiles:
+# - Fast: Quick unit tests (1s CPU, 128MB RAM)
+# - Standard: Regular tests (5s CPU, 512MB RAM)
+# - Slow: Integration tests (30s CPU, 1GB RAM)
+# - Intensive: Heavy tests (2m CPU, 4GB RAM)
+# - Critical: Critical infrastructure tests (10m CPU, 8GB RAM)
+
+struct ResourceProfile:
+    name: text
+    cpu_ms: i64
+    mem_mb: i64
+    timeout_ms: i64
+    max_fds: i64
+    max_procs: i64
+
+# ============================================================================
+# Profile Definitions
+# ============================================================================
+
+fn profile_fast() -> ResourceProfile:
+    """Fast profile for quick unit tests."""
+    ResourceProfile(
+        name: "fast",
+        cpu_ms: 1000,
+        mem_mb: 128,
+        timeout_ms: 2000,
+        max_fds: 100,
+        max_procs: 10
+    )
+
+fn profile_standard() -> ResourceProfile:
+    """Standard profile for regular tests."""
+    ResourceProfile(
+        name: "standard",
+        cpu_ms: 5000,
+        mem_mb: 512,
+        timeout_ms: 10000,
+        max_fds: 500,
+        max_procs: 50
+    )
+
+fn profile_slow() -> ResourceProfile:
+    """Slow profile for integration tests."""
+    ResourceProfile(
+        name: "slow",
+        cpu_ms: 30000,
+        mem_mb: 1024,
+        timeout_ms: 60000,
+        max_fds: 1000,
+        max_procs: 100
+    )
+
+fn profile_intensive() -> ResourceProfile:
+    """Intensive profile for heavy tests (QEMU, compiler, etc.)."""
+    ResourceProfile(
+        name: "intensive",
+        cpu_ms: 120000,
+        mem_mb: 4096,
+        timeout_ms: 300000,
+        max_fds: 2000,
+        max_procs: 200
+    )
+
+fn profile_critical() -> ResourceProfile:
+    """Critical profile for infrastructure tests (database, baremetal, etc.)."""
+    ResourceProfile(
+        name: "critical",
+        cpu_ms: 600000,
+        mem_mb: 8192,
+        timeout_ms: 900000,
+        max_fds: 4000,
+        max_procs: 500
+    )
+
+# ============================================================================
+# Profile Selection
+# ============================================================================
+
+fn profile_from_name(name: text) -> ResourceProfile:
+    """Get profile by name, returns standard if unknown."""
+    match name:
+        case "fast": profile_fast()
+        case "standard": profile_standard()
+        case "slow": profile_slow()
+        case "intensive": profile_intensive()
+        case "critical": profile_critical()
+        case _: profile_standard()
+
+fn profile_from_test_markers(markers: [text]) -> ResourceProfile:
+    """
+    Select resource profile based on test markers.
+
+    Markers checked (in priority order):
+    1. "critical" -> critical profile
+    2. "intensive" -> intensive profile
+    3. "slow_it" -> slow profile
+    4. "fast" -> fast profile
+    5. default -> standard profile
+    """
+    if markers.contains("critical"):
+        return profile_critical()
+    if markers.contains("intensive"):
+        return profile_intensive()
+    if markers.contains("slow_it"):
+        return profile_slow()
+    if markers.contains("fast"):
+        return profile_fast()
+    profile_standard()
+
+fn get_profile_for_test(test_file: text, markers: [text]) -> ResourceProfile:
+    """
+    Get appropriate resource profile for a test file.
+
+    Uses both file path patterns and markers for detection.
+    """
+    if markers.len() > 0:
+        return profile_from_test_markers(markers)
+
+    if test_file.contains("/qemu/"):
+        return profile_intensive()
+    if test_file.contains("/baremetal/"):
+        return profile_intensive()
+    if test_file.contains("/database/"):
+        return profile_slow()
+    if test_file.contains("/integration/"):
+        return profile_slow()
+    if test_file.contains("/compiler/"):
+        return profile_slow()
+    if test_file.contains("/unit/"):
+        return profile_fast()
+
+    profile_standard()
+
+# ============================================================================
+# Apply Limits Helper
+# ============================================================================
+
+fn apply_limits(cmd: text, args: [text], profile: ResourceProfile) -> (text, text, i64, i64, i64, i64, i64):
+    """
+    Prepare arguments for process_run_with_limits from a ResourceProfile.
+
+    Returns: (cmd, args_str, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
+
+    Note: This is a helper that converts profile to parameters, not the actual executor.
+    Use with app.io.mod.process_run_with_limits().
+    """
+    var args_str = ""
+    for arg in args:
+        if args_str == "":
+            args_str = arg
+        else:
+            args_str = args_str + " " + arg
+
+    val timeout_ms = profile.timeout_ms
+    val memory_bytes = profile.mem_mb * 1024 * 1024
+    val cpu_seconds = profile.cpu_ms / 1000
+    val max_fds = profile.max_fds
+    val max_procs = profile.max_procs
+
+    (cmd, args_str, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs)
+
+# ============================================================================
+# Profile Comparison and Validation
+# ============================================================================
+
+fn profile_is_sufficient(required: ResourceProfile, available: ResourceProfile) -> bool:
+    """
+    Check if available profile can satisfy required profile limits.
+
+    Returns true if all available limits >= required limits.
+    """
+    val cpu_ok = available.cpu_ms >= required.cpu_ms
+    val mem_ok = available.mem_mb >= required.mem_mb
+    val timeout_ok = available.timeout_ms >= required.timeout_ms
+    val fds_ok = available.max_fds >= required.max_fds
+    val procs_ok = available.max_procs >= required.max_procs
+
+    val combined1 = cpu_ok and mem_ok
+    val combined2 = timeout_ok and fds_ok
+    val combined3 = combined1 and combined2
+    val result = combined3 and procs_ok
+    result
+
+fn profile_describe(profile: ResourceProfile) -> text:
+    """Generate human-readable description of profile."""
+    val cpu_sec = profile.cpu_ms / 1000
+    val timeout_sec = profile.timeout_ms / 1000
+    "Profile: {profile.name}, CPU: {cpu_sec}s, Memory: {profile.mem_mb}MB, Timeout: {timeout_sec}s, FDs: {profile.max_fds}, Procs: {profile.max_procs}"
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ResourceProfile
+export profile_fast, profile_standard, profile_slow, profile_intensive, profile_critical
+export profile_from_name, profile_from_test_markers, get_profile_for_test
+export apply_limits, profile_is_sufficient, profile_describe

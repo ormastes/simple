@@ -1,6 +1,11 @@
 # Test Runner Execution
 #
 # Test execution functions for interpreter, SMF, and native modes.
+#
+# NOTE: PID tracking for self-protection would require refactoring to use
+# rt_process_spawn_async + rt_process_wait instead of process_run_timeout.
+# Current implementation uses synchronous execution which doesn't expose PIDs.
+# This is a future enhancement for Week 1 completion.
 
 use test_runner_types.*
 use test_runner_files.{strip_ansi, read_file_content}
@@ -543,13 +548,25 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
     if options.gc_off:
         run_args.push("--gc=off")
 
-    val (stdout, stderr, exit_code) = process_run_with_limits(
+    val result = process_run_with_limits(
         binary, run_args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs
     )
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
 
-    make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, options.timeout)
+    if result.limit_exceeded:
+        return TestFileResult(
+            path: file_path,
+            passed: 0,
+            failed: 1,
+            skipped: 0,
+            pending: 0,
+            duration_ms: duration_ms,
+            error: "Resource limit exceeded: {result.limit_type}",
+            timed_out: result.limit_type.contains("timeout")
+        )
+
+    make_result_from_output(file_path, result.stdout, result.stderr, result.exit_code, duration_ms, options.timeout)
 
 # =========================================================================
 # G3: Static test listing (parse source without execution)
