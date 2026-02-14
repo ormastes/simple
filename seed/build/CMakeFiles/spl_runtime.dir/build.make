@@ -86,17 +86,33 @@ CMakeFiles/spl_runtime.dir/runtime.c.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/spl_runtime.dir/runtime.c.s"
 	/usr/bin/clang $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S /home/ormastes/dev/pub/simple/seed/runtime.c -o CMakeFiles/spl_runtime.dir/runtime.c.s
 
+CMakeFiles/spl_runtime.dir/runtime_thread.c.o: CMakeFiles/spl_runtime.dir/flags.make
+CMakeFiles/spl_runtime.dir/runtime_thread.c.o: /home/ormastes/dev/pub/simple/seed/runtime_thread.c
+CMakeFiles/spl_runtime.dir/runtime_thread.c.o: CMakeFiles/spl_runtime.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/ormastes/dev/pub/simple/seed/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building C object CMakeFiles/spl_runtime.dir/runtime_thread.c.o"
+	/usr/bin/clang $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT CMakeFiles/spl_runtime.dir/runtime_thread.c.o -MF CMakeFiles/spl_runtime.dir/runtime_thread.c.o.d -o CMakeFiles/spl_runtime.dir/runtime_thread.c.o -c /home/ormastes/dev/pub/simple/seed/runtime_thread.c
+
+CMakeFiles/spl_runtime.dir/runtime_thread.c.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing C source to CMakeFiles/spl_runtime.dir/runtime_thread.c.i"
+	/usr/bin/clang $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -E /home/ormastes/dev/pub/simple/seed/runtime_thread.c > CMakeFiles/spl_runtime.dir/runtime_thread.c.i
+
+CMakeFiles/spl_runtime.dir/runtime_thread.c.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/spl_runtime.dir/runtime_thread.c.s"
+	/usr/bin/clang $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S /home/ormastes/dev/pub/simple/seed/runtime_thread.c -o CMakeFiles/spl_runtime.dir/runtime_thread.c.s
+
 # Object files for target spl_runtime
 spl_runtime_OBJECTS = \
-"CMakeFiles/spl_runtime.dir/runtime.c.o"
+"CMakeFiles/spl_runtime.dir/runtime.c.o" \
+"CMakeFiles/spl_runtime.dir/runtime_thread.c.o"
 
 # External object files for target spl_runtime
 spl_runtime_EXTERNAL_OBJECTS =
 
 libspl_runtime.a: CMakeFiles/spl_runtime.dir/runtime.c.o
+libspl_runtime.a: CMakeFiles/spl_runtime.dir/runtime_thread.c.o
 libspl_runtime.a: CMakeFiles/spl_runtime.dir/build.make
 libspl_runtime.a: CMakeFiles/spl_runtime.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/ormastes/dev/pub/simple/seed/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking C static library libspl_runtime.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/ormastes/dev/pub/simple/seed/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Linking C static library libspl_runtime.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/spl_runtime.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/spl_runtime.dir/link.txt --verbose=$(VERBOSE)
 

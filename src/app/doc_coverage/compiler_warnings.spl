@@ -3,8 +3,11 @@
 # Provides compile-time warnings for missing documentation.
 # Integrates with `simple build --warn-docs` to emit warnings during compilation.
 
-use app.io.mod (file_exists)
+use app.io.mod (file_exists, shell)
 use app.doc_coverage.scanner.mod.{scan_file_for_docs, DocItem}
+use app.doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, PublicApiItem}
+use app.doc_coverage.analysis.group_sdoctest (check_group_sdoctest)
+use app.doc_coverage.analysis.sdoctest_coverage (load_sdoctest_blocks)
 use std.string.{NL}
 
 # =========================================================================
@@ -177,6 +180,117 @@ fn emit_summary(total_files: i64, files_with_warnings: [text], total_warnings: i
     print "  {total_warnings} warnings total"
 
 # =========================================================================
+# Public API SDoctest Warnings
+# =========================================================================
+
+fn generate_public_api_warnings(root: text) -> [text]:
+    """
+    Generate warnings for missing public API SDoctest coverage.
+
+    Scans all __init__.spl files and generates warnings for:
+    - Groups without SDoctest coverage
+    - Individual items without SDoctest coverage
+
+    Args:
+        root: Root directory to scan (e.g., "src")
+
+    Returns:
+        Array of warning messages
+
+    Example:
+        val warnings = generate_public_api_warnings("src")
+        for warning in warnings:
+            print warning
+    """
+    var warnings: [text] = []
+
+    # Find all __init__.spl files
+    val result = shell("find {root} -name '__init__.spl' -type f 2>/dev/null || true")
+    val stdout = result.stdout
+    val trimmed = stdout.trim()
+
+    if trimmed == "":
+        return warnings
+
+    val init_files = trimmed.split(NL)
+
+    # Load SDoctest blocks
+    val sdoctest_data = load_sdoctest_blocks()
+    val sdoctest_blocks = sdoctest_data.1
+
+    # Check each __init__.spl file
+    for init_file in init_files:
+        val parse_result = parse_init_file(init_file)
+        val groups = parse_result.0
+        val items = parse_result.1
+
+        # Check groups
+        for group in groups:
+            val has_coverage = check_group_sdoctest(group, sdoctest_blocks)
+            if not has_coverage:
+                val warning = format_group_warning(group)
+                warnings.push(warning)
+
+        # Check individual items
+        for item in items:
+            val has_coverage = check_item_in_blocks(item.name, sdoctest_blocks)
+            if not has_coverage:
+                val warning = format_item_warning(item)
+                warnings.push(warning)
+
+    warnings
+
+fn format_group_warning(group: PublicApiGroup) -> text:
+    """
+    Format warning for missing group SDoctest.
+
+    Args:
+        group: Public API group without coverage
+
+    Returns:
+        Formatted warning message
+    """
+    val file = group.file_path
+    val line = group.group_line
+    val name = group.group_name
+    val count = group.items.len()
+
+    val msg = "warning: public API group '{name}' missing SDoctest coverage"
+    val location = "  --> {file}:{line}"
+    val note = "  = note: group contains {count} items, needs at least 1 SDoctest example"
+    val help = "  = help: add usage example in README.md or doc/guide/*.md"
+
+    "{msg}{NL}{location}{NL}{note}{NL}{help}"
+
+fn format_item_warning(item: PublicApiItem) -> text:
+    """
+    Format warning for missing individual item SDoctest.
+
+    Args:
+        item: Public API item without coverage
+
+    Returns:
+        Formatted warning message
+    """
+    val file = item.file_path
+    val line = item.line
+    val name = item.name
+
+    val msg = "warning: public API item '{name}' missing SDoctest coverage"
+    val location = "  --> {file}:{line}"
+    val note = "  = note: individual items require their own SDoctest example"
+    val help = "  = help: add usage example in README.md or doc/guide/*.md"
+
+    "{msg}{NL}{location}{NL}{note}{NL}{help}"
+
+fn check_item_in_blocks(name: text, blocks: [text]) -> bool:
+    """Check if item name appears in any SDoctest block."""
+    for block in blocks:
+        if block.contains(name):
+            return true
+    false
+
+# =========================================================================
 # Exports
 # =========================================================================
 
@@ -186,3 +300,4 @@ export emit_doc_warnings_for_file
 export check_multiple_files
 export emit_summary
 export format_warning
+export generate_public_api_warnings

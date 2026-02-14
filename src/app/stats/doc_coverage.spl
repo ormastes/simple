@@ -14,9 +14,11 @@ use doc_coverage.scanner.file_scanner (filter_public_only)
 use doc_coverage.analysis.sdoctest_coverage (load_sdoctest_blocks, compute_sdoctest_coverage)
 use doc_coverage.analysis.inline_comment_coverage (compute_inline_comment_coverage, InlineCommentResult)
 use doc_coverage.analysis.group_comment_detection (detect_variable_groups, VariableGroup)
-use app.stats.types.{DocCoverageStats, KindStats, ModuleStats, InlineCommentStats, GroupCommentStats}
+use doc_coverage.analysis.init_parser.{parse_init_file, PublicApiGroup, PublicApiItem}
+use doc_coverage.analysis.group_sdoctest (check_group_sdoctest)
+use app.stats.types.{DocCoverageStats, KindStats, ModuleStats, InlineCommentStats, GroupCommentStats, PublicApiStats}
 use app.stats.tag_classifier (classify_doc_item, count_sdoctest_examples)
-use app.io.mod (file_read, file_exists)
+use app.io.mod (file_read, file_exists, shell)
 use std.string.{NL}
 
 # Main aggregation function - compute comprehensive coverage stats
@@ -512,9 +514,101 @@ fn aggregate_group_coverage(files: [text]) -> GroupCommentStats:
         by_pattern: by_pattern
     )
 
+fn compute_public_api_stats(root: text) -> PublicApiStats:
+    """
+    Compute Public API SDoctest coverage statistics.
+
+    Scans all __init__.spl files and checks coverage for:
+    - Grouped API items (need >= 1 SDoctest)
+    - Individual API items (each needs 1 SDoctest)
+
+    Returns: PublicApiStats with metrics and missing items
+    """
+    # Find all __init__.spl files
+    val init_files = find_all_init_files(root)
+
+    # Load SDoctest blocks
+    val sdoctest_data = load_sdoctest_blocks()
+    val sdoctest_blocks = sdoctest_data.1
+
+    # Track totals
+    var total_groups = 0
+    var covered_groups = 0
+    var total_items = 0
+    var covered_items = 0
+    var missing_groups: [text] = []
+    var missing_items: [text] = []
+
+    # Check each __init__.spl file
+    for init_file in init_files:
+        val result = parse_init_file(init_file)
+        val groups = result.0
+        val items = result.1
+
+        # Check groups
+        for group in groups:
+            total_groups = total_groups + 1
+            val has_coverage = check_group_sdoctest(group, sdoctest_blocks)
+            if has_coverage:
+                covered_groups = covered_groups + 1
+            else:
+                val missing = "{init_file}:{group.group_line} - {group.group_name}"
+                missing_groups.push(missing)
+
+        # Check individual items
+        for item in items:
+            total_items = total_items + 1
+            val has_coverage = check_item_coverage(item.name, sdoctest_blocks)
+            if has_coverage:
+                covered_items = covered_items + 1
+            else:
+                val missing = "{init_file}:{item.line} - {item.name}"
+                missing_items.push(missing)
+
+    # Compute percentages
+    var group_pct = 100
+    if total_groups > 0:
+        group_pct = covered_groups * 100 / total_groups
+
+    var item_pct = 100
+    if total_items > 0:
+        item_pct = covered_items * 100 / total_items
+
+    PublicApiStats(
+        total_groups: total_groups,
+        covered_groups: covered_groups,
+        total_items: total_items,
+        covered_items: covered_items,
+        group_coverage_pct: group_pct,
+        item_coverage_pct: item_pct,
+        missing_groups: missing_groups,
+        missing_items: missing_items
+    )
+
+fn find_all_init_files(root: text) -> [text]:
+    """Find all __init__.spl files under root directory."""
+    val result = shell("find {root} -name '__init__.spl' -type f 2>/dev/null || true")
+    val stdout = result.stdout
+    val trimmed = stdout.trim()
+
+    if trimmed == "":
+        var empty: [text] = []
+        return empty
+
+    val lines = trimmed.split(NL)
+    lines
+
+fn check_item_coverage(name: text, blocks: [text]) -> bool:
+    """Check if item name appears in any SDoctest block."""
+    for block in blocks:
+        if block.contains(name):
+            return true
+    false
+
 export aggregate_doc_coverage
 export find_missing_sdoctest
 export compute_by_kind_stats
 export compute_by_module_stats
 export aggregate_inline_coverage
 export aggregate_group_coverage
+export compute_public_api_stats

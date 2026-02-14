@@ -42,9 +42,17 @@ if(COVERAGE)
 endif()
 
 # Runtime static library
-add_library(spl_runtime STATIC runtime.c)
+add_library(spl_runtime STATIC runtime.c runtime_thread.c)
 target_include_directories(spl_runtime PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(spl_runtime PUBLIC ${CMAKE_DL_LIBS})
+
+# Link pthread on Unix systems
+if(UNIX AND NOT APPLE)
+    target_link_libraries(spl_runtime PUBLIC pthread)
+elseif(APPLE)
+    # macOS includes pthread in libSystem
+    target_link_libraries(spl_runtime PUBLIC pthread)
+endif()
 
 # Seed compiler (C)
 add_executable(seed seed.c)
