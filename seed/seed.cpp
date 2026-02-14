@@ -460,6 +460,26 @@ static const char *simple_type_to_cpp(const char *stype) {
             strcpy(oi->cpp_base, simple_type_to_cpp(base));
             if (base[0] == '[')
                 snprintf(oi->option_name, MAX_IDENT, "Option_array");
+            else if (strncmp(base, "fn(", 3) == 0 || strncmp(base, "Fn<", 3) == 0)
+                /* Use cpp_base for unique function pointer Option names */
+                snprintf(oi->option_name, MAX_IDENT, "Option_%s", oi->cpp_base);
+            else if (base[0] == '(') {
+                /* Tuple type: sanitize name by replacing invalid chars */
+                char sanitized[MAX_IDENT];
+                int j = 0;
+                for (int k = 0; base[k] && j < MAX_IDENT - 1; k++) {
+                    char c = base[k];
+                    if (c == '(' || c == ')' || c == ',' || c == ' ')
+                        sanitized[j++] = '_';
+                    else
+                        sanitized[j++] = c;
+                }
+                sanitized[j] = '\0';
+                snprintf(oi->option_name, MAX_IDENT, "Option%s", sanitized);
+            }
+            else if (strchr(base, '<'))
+                /* Nested generic: use cpp_base to avoid angle brackets */
+                snprintf(oi->option_name, MAX_IDENT, "Option_%s", oi->cpp_base);
             else
                 snprintf(oi->option_name, MAX_IDENT, "Option_%s", base);
             num_option_types++;
@@ -468,7 +488,30 @@ static const char *simple_type_to_cpp(const char *stype) {
         static char option_buf[MAX_IDENT];
         if (base[0] == '[')
             snprintf(option_buf, sizeof(option_buf), "Option_array");
-        else
+        else if (base[0] == '(') {
+            /* Tuple type: sanitize name by replacing invalid chars */
+            char sanitized[MAX_IDENT];
+            int j = 0;
+            for (int k = 0; base[k] && j < MAX_IDENT - 1; k++) {
+                char c = base[k];
+                if (c == '(' || c == ')' || c == ',' || c == ' ')
+                    sanitized[j++] = '_';
+                else
+                    sanitized[j++] = c;
+            }
+            sanitized[j] = '\0';
+            snprintf(option_buf, sizeof(option_buf), "Option%s", sanitized);
+        }
+        else if (strncmp(base, "fn(", 3) == 0 || strncmp(base, "Fn<", 3) == 0 || strchr(base, '<')) {
+            /* Look up the cpp_base from registered option (handles fn, Result, other generics) */
+            for (int i = 0; i < num_option_types; i++) {
+                if (strcmp(option_types[i].simple_base, base) == 0) {
+                    snprintf(option_buf, sizeof(option_buf), "Option_%s", option_types[i].cpp_base);
+                    return option_buf;
+                }
+            }
+            snprintf(option_buf, sizeof(option_buf), "Option_fn_ptr");  /* Fallback */
+        } else
             snprintf(option_buf, sizeof(option_buf), "Option_%s", base);
         return option_buf;
     }
@@ -521,8 +564,29 @@ static const char *simple_type_to_cpp(const char *stype) {
                 strcpy(oi->simple_base, param);
                 /* Recursive call for base type */
                 strcpy(oi->cpp_base, simple_type_to_cpp(param));
+                /* Generate valid C++ struct name using cpp_base (converted type) */
                 if (param[0] == '[')
                     snprintf(oi->option_name, MAX_IDENT, "Option_array");
+                else if (strncmp(param, "fn(", 3) == 0 || strncmp(param, "Fn<", 3) == 0)
+                    /* Use cpp_base to create unique names: Option_FnPtr_array, Option_FnPtr_ConstValue, etc. */
+                    snprintf(oi->option_name, MAX_IDENT, "Option_%s", oi->cpp_base);
+                else if (param[0] == '(') {
+                    /* Tuple type: sanitize name by replacing invalid chars */
+                    char sanitized[MAX_IDENT];
+                    int j = 0;
+                    for (int k = 0; param[k] && j < MAX_IDENT - 1; k++) {
+                        char c = param[k];
+                        if (c == '(' || c == ')' || c == ',' || c == ' ')
+                            sanitized[j++] = '_';
+                        else
+                            sanitized[j++] = c;
+                    }
+                    sanitized[j] = '\0';
+                    snprintf(oi->option_name, MAX_IDENT, "Option%s", sanitized);
+                }
+                else if (strchr(param, '<'))
+                    /* Nested generic like Result<T,E>: use cpp_base instead of param to avoid angle brackets */
+                    snprintf(oi->option_name, MAX_IDENT, "Option_%s", oi->cpp_base);
                 else
                     snprintf(oi->option_name, MAX_IDENT, "Option_%s", param);
                 num_option_types++;
@@ -531,7 +595,30 @@ static const char *simple_type_to_cpp(const char *stype) {
             static char option_buf[MAX_IDENT];
             if (param[0] == '[')
                 snprintf(option_buf, sizeof(option_buf), "Option_array");
-            else
+            else if (param[0] == '(') {
+                /* Tuple type: sanitize name by replacing invalid chars */
+                char sanitized[MAX_IDENT];
+                int j = 0;
+                for (int k = 0; param[k] && j < MAX_IDENT - 1; k++) {
+                    char c = param[k];
+                    if (c == '(' || c == ')' || c == ',' || c == ' ')
+                        sanitized[j++] = '_';
+                    else
+                        sanitized[j++] = c;
+                }
+                sanitized[j] = '\0';
+                snprintf(option_buf, sizeof(option_buf), "Option%s", sanitized);
+            }
+            else if (strncmp(param, "fn(", 3) == 0 || strncmp(param, "Fn<", 3) == 0 || strchr(param, '<')) {
+                /* Look up the cpp_base from registered option (handles fn, Result, other generics) */
+                for (int i = 0; i < num_option_types; i++) {
+                    if (strcmp(option_types[i].simple_base, param) == 0) {
+                        snprintf(option_buf, sizeof(option_buf), "Option_%s", option_types[i].cpp_base);
+                        return option_buf;
+                    }
+                }
+                snprintf(option_buf, sizeof(option_buf), "Option_fn_ptr");  /* Fallback */
+            } else
                 snprintf(option_buf, sizeof(option_buf), "Option_%s", param);
             return option_buf;
         }
@@ -556,6 +643,7 @@ static const char *simple_type_to_cpp(const char *stype) {
                 strcpy(ri->cpp_ok, simple_type_to_cpp(ok_type));
                 strcpy(ri->cpp_err, simple_type_to_cpp(err_type));
                 snprintf(ri->result_name, MAX_IDENT, "Result_%s_%s", ok_type, err_type);
+                fprintf(stderr, "Registered Result type: %s\n", ri->result_name);
                 num_result_types++;
             }
             /* Return result struct name */
@@ -570,7 +658,68 @@ static const char *simple_type_to_cpp(const char *stype) {
     if (strncmp(stype, "Effect<", 7) == 0 || strcmp(stype, "Effect") == 0) return "int64_t";
     if (strcmp(stype, "Any") == 0) return "int64_t";
     if (strncmp(stype, "Iterator<", 9) == 0) return "int64_t";
-    if (strncmp(stype, "Fn<", 3) == 0 || strncmp(stype, "fn(", 3) == 0) return "int64_t";
+    /* Function types: fn() -> T or fn(A, B) -> T */
+    /* Use typedef names to avoid C++ function pointer syntax issues */
+    if (strncmp(stype, "fn(", 3) == 0) {
+        const char *arrow = strstr(stype, "->");
+        const char *rparen = strchr(stype, ')');
+
+        if (rparen && arrow && arrow > rparen) {
+            /* Extract return type after -> */
+            const char *ret_start = arrow + 2;
+            while (*ret_start == ' ') ret_start++;
+            char ret_type[MAX_IDENT];
+            int ret_len = 0;
+            int angle_depth = 0;
+            /* Parse return type, handling nested generics like Option<Result<T, E>> */
+            const char *p = ret_start;
+            while (*p && ret_len < MAX_IDENT - 1) {
+                char c = *p;
+                if (c == '<') {
+                    angle_depth++;
+                    ret_type[ret_len++] = c;
+                } else if (c == '>') {
+                    angle_depth--;
+                    ret_type[ret_len++] = c;
+                    if (angle_depth == 0) break; /* End of return type */
+                } else if (c == ' ' && angle_depth == 0) {
+                    break; /* Space outside brackets ends type */
+                } else {
+                    ret_type[ret_len++] = c;
+                }
+                p++;
+            }
+            ret_type[ret_len] = '\0';
+
+            /* Convert return type through type system first for proper Option/Result handling */
+            const char *cpp_ret_type = simple_type_to_cpp(ret_type);
+
+            /* Use typedef name: FnPtr_RetType */
+            static char fn_typedef_buf[MAX_IDENT * 2];
+            if (strcmp(ret_type, "Any") == 0 || strcmp(ret_type, "i64") == 0 || strcmp(cpp_ret_type, "int64_t") == 0)
+                return "FnPtr_i64";
+            else if (strcmp(ret_type, "text") == 0 || strcmp(cpp_ret_type, "const char*") == 0)
+                return "FnPtr_text";
+            else if (strcmp(ret_type, "void") == 0)
+                return "FnPtr_void";
+            else if (strcmp(ret_type, "bool") == 0)
+                return "FnPtr_bool";
+            else if (ret_type[0] == '[' || strcmp(cpp_ret_type, "SplArray*") == 0) {
+                /* Array return type: fn() -> [T] */
+                return "FnPtr_array";
+            } else if (strstr(cpp_ret_type, "Option_") || strstr(cpp_ret_type, "Result_")) {
+                /* Complex generic types: use int64_t fallback (all fn pointers are int64_t at runtime) */
+                return "int64_t";
+            } else {
+                /* Use cpp_ret_type which is already sanitized */
+                snprintf(fn_typedef_buf, sizeof(fn_typedef_buf), "FnPtr_%s", cpp_ret_type);
+                return fn_typedef_buf;
+            }
+        }
+        /* Fallback */
+        return "FnPtr_i64";
+    }
+    if (strncmp(stype, "Fn<", 3) == 0) return "FnPtr_i64"; /* Generic Fn<...> */
     /* Default */
     return "int64_t";
 }
@@ -770,6 +919,22 @@ static const char *struct_field_stype(const char *struct_name, const char *field
     return nullptr;
 }
 
+/* Check if a type is a struct array: [StructName] */
+static bool is_struct_array_type(const char *stype) {
+    if (!stype || stype[0] != '[') return false;
+    /* Extract element type from [ElementType] */
+    const char *elem_start = stype + 1;
+    const char *elem_end = strchr(elem_start, ']');
+    if (!elem_end) return false;
+    char elem_type[MAX_IDENT] = "";
+    int len = elem_end - elem_start;
+    if (len >= MAX_IDENT) return false;
+    strncpy(elem_type, elem_start, len);
+    elem_type[len] = '\0';
+    /* Check if element type is a struct */
+    return find_struct(trim(elem_type)) != nullptr;
+}
+
 /* Check if a dot expression (obj.field) refers to an Option struct field */
 static bool dot_expr_is_option(const char *e) {
     const char *dot = strchr(e, '.');
@@ -830,6 +995,7 @@ static bool is_upper_ident(const char *s) {
 static bool expr_is_text(const char *e) {
     e = skip_spaces(e);
     if (*e == '"') return true;
+    if (strcmp(e, "NL") == 0) return true;  /* NL is always text */
     if (var_is_text(e)) return true;
     /* Check for struct field access: obj.field where field is text */
     const char *dot = strrchr(e, '.');
@@ -1123,7 +1289,7 @@ static void translate_expr(const char *expr, char *out, int outsz) {
 
                     char as_str[MAX_LINE];
                     char *trimmed_expr = trim(expr_buf);
-                    if (var_is_text(trimmed_expr) || trimmed_expr[0] == '"' || expr_is_text(trimmed_expr)) {
+                    if (var_is_text(trimmed_expr) || trimmed_expr[0] == '"' || expr_is_text(trimmed_expr) || strcmp(trimmed_expr, "NL") == 0) {
                         snprintf(as_str, sizeof(as_str), "%s", inner_c);
                     } else {
                         snprintf(as_str, sizeof(as_str), "spl_i64_to_str(%s)", inner_c);
@@ -1888,7 +2054,21 @@ static void translate_expr(const char *expr, char *out, int outsz) {
                         val_buf[vbi] = '\0';
 
                         char val_c[MAX_LINE];
-                        translate_expr(trim(val_buf), val_c, sizeof(val_c));
+                        const char *trimmed_val = trim(val_buf);
+
+                        /* Check if this is an empty array for a struct array field */
+                        if (strcmp(trimmed_val, "[]") == 0) {
+                            const char *field_stype = struct_field_stype(func_name, trim(fname));
+                            if (field_stype && is_struct_array_type(field_stype)) {
+                                /* Use empty C++ initializer {} for struct arrays */
+                                snprintf(val_c, sizeof(val_c), "{}");
+                            } else {
+                                /* Regular dynamic array */
+                                translate_expr(trimmed_val, val_c, sizeof(val_c));
+                            }
+                        } else {
+                            translate_expr(trimmed_val, val_c, sizeof(val_c));
+                        }
 
                         if (!first_field) rpos += snprintf(result + rpos, sizeof(result) - rpos, ", ");
                         rpos += snprintf(result + rpos, sizeof(result) - rpos,
@@ -3296,13 +3476,15 @@ static void process_file(void) {
         const char *line = source_lines[i];
         int ind = indent_level(line);
         const char *t = trim(line);
-        if (i >= 365 && i <= 375) {
-            fprintf(stderr, "[seed_cpp] DEBUG: Line %d, ind=%d, raw: %.60s | trimmed: %.60s\n", i, ind, line, t);
+        if (i >= 123 && i <= 140) {
+            fprintf(stderr, "[seed_cpp] DEBUG: Line %d (0-idx), ind=%d, in_docstring=%s, raw: %.60s | trimmed: %.60s\n",
+                    i, ind, (strstr(line, "\"\"\"") ? "YES" : "no"), line, t);
         }
         if (t[0] == '\0' || t[0] == '#') continue;
 
         /* Top-level struct or class */
         if (ind == 0 && (starts_with(t, "struct ") || starts_with(t, "class ")) && ends_with(t, ":")) {
+            fprintf(stderr, "[seed_cpp] DEBUG: Found struct/class at line %d: %.50s\n", i, t);
             bool is_class = starts_with(t, "class ");
             char sname[MAX_IDENT] = "";
             const char *p = t + (is_class ? 6 : 7);
@@ -3387,6 +3569,7 @@ static void process_file(void) {
                 j++;
             }
             num_structs++;
+            fprintf(stderr, "[seed_cpp] DEBUG: Registered struct '%s' at line %d\n", sname, i);
 
             /* For class/struct: also register inline methods (as if impl ClassName:) */
             {
@@ -3403,6 +3586,10 @@ static void process_file(void) {
                     }
                     j++;
                 }
+                /* Update outer loop counter to skip past struct body */
+                fprintf(stderr, "[seed_cpp] DEBUG: Struct '%s' ended at line %d, updating i from %d to %d\n",
+                        sname, j, i, j - 1);
+                i = j - 1;  /* -1 because for loop will do i++ */
             }
         }
 
@@ -3578,6 +3765,17 @@ static void process_file(void) {
     emit("typedef float f32;\n");
     emit("typedef uint8_t u8;\n");
     emit("typedef uint32_t u32;\n");
+    /* Function pointer typedefs */
+    emit("typedef int64_t (*FnPtr_i64)();\n");
+    emit("typedef const char* (*FnPtr_text)();\n");
+    emit("typedef void (*FnPtr_void)();\n");
+    emit("typedef bool (*FnPtr_bool)();\n");
+    emit("typedef int64_t (*FnPtr_Any)();\n");
+    emit("typedef int64_t (*FnPtr_ConstValue)();\n");
+    emit("typedef int64_t (*FnPtr_BlockValue)();\n");
+    emit("typedef SplArray* (*FnPtr_array)();\n");
+    emit("typedef int64_t (*FnPtr_HoverInfo)();\n");
+    /* Note: Option_fn_ptr and Option_Symbol are now auto-generated by Option<T> registry */
     emit("typedef uint64_t u64;\n\n");
     emit("/* Common constants from stdlib */\n");
     emit("static const char* NL = \"\\n\";\n\n");
@@ -3627,6 +3825,17 @@ static void process_file(void) {
     }
 
     /* ===== Emit Option + struct definitions in correct order ===== */
+
+    /* Phase 0: Pre-scan all struct fields to register Option/Result types */
+    /* This ensures forward declarations include ALL Option types before any struct uses them */
+    for (int i = 0; i < num_structs; i++) {
+        StructInfo *si = &structs[i];
+        for (int j = 0; j < si->field_count; j++) {
+            /* Calling simple_type_to_cpp() registers the type if it's Option<T> or Result<T,E> */
+            (void)simple_type_to_cpp(si->field_stypes[j]);
+        }
+    }
+
     /* Phase A: Forward-declare all structs and Option structs (deduplicated) */
     {
         static const char *emitted_structs[MAX_STRUCTS];
@@ -3650,10 +3859,26 @@ static void process_file(void) {
     }
     if (num_structs > 0 || num_option_types > 0 || num_result_types > 0) emit("\n");
 
-    /* Phase B: Emit primitive Option structs (base type is NOT a user struct) */
+    /* Phase B: Emit primitive Option structs (base type is NOT a user struct or Result) */
     for (int i = 0; i < num_option_types; i++) {
         OptionTypeInfo *oi = &option_types[i];
-        if (find_struct(oi->simple_base)) continue; /* skip struct-based Options */
+        fprintf(stderr, "Phase B: Option<%s> (cpp_base=%s)\n", oi->simple_base, oi->cpp_base);
+        if (find_struct(oi->simple_base)) {
+            fprintf(stderr, "  -> Skipping (struct-based)\n");
+            continue; /* skip struct-based Options */
+        }
+        /* Skip Result-based Options (they need int64_t) */
+        bool is_result_based = strncmp(oi->simple_base, "Result<", 7) == 0;
+        if (is_result_based) {
+            fprintf(stderr, "  -> Skipping Result-based Option (starts with Result<)\n");
+            continue;
+        }
+        /* Skip tuple-based Options (they need int64_t) */
+        bool is_tuple_based = oi->simple_base[0] == '(';
+        if (is_tuple_based) {
+            fprintf(stderr, "  -> Skipping tuple-based Option (starts with '(')\n");
+            continue;
+        }
         emit("/* Option<%s> */\n", oi->simple_base);
         emit("struct %s {\n", oi->option_name);
         emit("    bool has_value;\n");
@@ -3661,6 +3886,40 @@ static void process_file(void) {
         emit("    %s() : has_value(false), value{} {}\n", oi->option_name);
         emit("    %s(%s v) : has_value(true), value(v) {}\n", oi->option_name, oi->cpp_base);
         emit("    %s(SplValue) : has_value(false), value{} {}\n", oi->option_name);
+        emit("};\n\n");
+    }
+
+    /* Phase D: Emit struct-based, Result-based, and tuple-based Option structs */
+    /* Moved BEFORE Phase C so that structs can use these Option types */
+    /* Use int64_t for struct/Result/tuple values (pointers) to avoid circular dependencies */
+    for (int i = 0; i < num_option_types; i++) {
+        OptionTypeInfo *oi = &option_types[i];
+        fprintf(stderr, "Phase D: Option<%s>\n", oi->simple_base);
+        bool is_struct_based = find_struct(oi->simple_base) != NULL;
+        bool is_result_based = strncmp(oi->simple_base, "Result<", 7) == 0;
+        bool is_tuple_based = oi->simple_base[0] == '(';
+
+        if (is_result_based) {
+            fprintf(stderr, "  -> Result-based! Will use int64_t\n");
+        }
+        if (is_struct_based) {
+            fprintf(stderr, "  -> Struct-based, using int64_t\n");
+        }
+        if (is_tuple_based) {
+            fprintf(stderr, "  -> Tuple-based, using int64_t\n");
+        }
+
+        if (!is_struct_based && !is_result_based && !is_tuple_based) {
+            fprintf(stderr, "  -> Primitive, skipping\n");
+            continue; /* skip primitive Options */
+        }
+        emit("/* Option<%s> */\n", oi->simple_base);
+        emit("struct %s {\n", oi->option_name);
+        emit("    bool has_value;\n");
+        emit("    int64_t value;  /* struct/Result/tuple pointer as int64_t */\n");
+        emit("    %s() : has_value(false), value(0) {}\n", oi->option_name);
+        emit("    %s(int64_t v) : has_value(true), value(v) {}\n", oi->option_name);
+        emit("    %s(SplValue) : has_value(false), value(0) {}\n", oi->option_name);
         emit("};\n\n");
     }
 
@@ -3693,20 +3952,6 @@ static void process_file(void) {
                 emitted_structs[num_emitted++] = si->name;
             }
         }
-    }
-
-    /* Phase D: Emit struct-based Option structs (base type IS a user struct) */
-    for (int i = 0; i < num_option_types; i++) {
-        OptionTypeInfo *oi = &option_types[i];
-        if (!find_struct(oi->simple_base)) continue; /* skip primitive Options */
-        emit("/* Option<%s> */\n", oi->simple_base);
-        emit("struct %s {\n", oi->option_name);
-        emit("    bool has_value;\n");
-        emit("    %s value;\n", oi->cpp_base);
-        emit("    %s() : has_value(false), value{} {}\n", oi->option_name);
-        emit("    %s(%s v) : has_value(true), value(v) {}\n", oi->option_name, oi->cpp_base);
-        emit("    %s(SplValue) : has_value(false), value{} {}\n", oi->option_name);
-        emit("};\n\n");
     }
 
     /* Phase E: Emit Result<T, E> structs */
