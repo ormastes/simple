@@ -361,6 +361,20 @@ typedef struct {
 static OptionTypeInfo option_types[MAX_OPTION_TYPES];
 static int num_option_types = 0;
 
+/* ===== Result Type Registry ===== */
+/* Tracks which Result<T, E> types are needed, generates C++ structs */
+#define MAX_RESULT_TYPES 128
+typedef struct {
+    char ok_type[MAX_IDENT];    /* Success type T */
+    char err_type[MAX_IDENT];   /* Error type E */
+    char cpp_ok[MAX_IDENT];     /* C++ ok type */
+    char cpp_err[MAX_IDENT];    /* C++ err type */
+    char result_name[MAX_IDENT]; /* C++ struct name: "Result_T_E" */
+} ResultTypeInfo;
+
+static ResultTypeInfo result_types[MAX_RESULT_TYPES];
+static int num_result_types = 0;
+
 static bool type_is_option(const char *stype) {
     int len = strlen(stype);
     return len > 1 && stype[len-1] == '?';
@@ -377,6 +391,51 @@ static void option_base_stype(const char *stype, char *base, int basesz) {
         strncpy(base, stype, basesz - 1);
         base[basesz - 1] = '\0';
     }
+}
+
+/* Extract type parameter from generic syntax like Option<T> → T */
+static bool extract_generic_param(const char *stype, char *param, int param_sz) {
+    const char *lt = strchr(stype, '<');
+    const char *gt = strrchr(stype, '>');
+    if (!lt || !gt || gt <= lt) return false;
+
+    int param_len = gt - lt - 1;
+    if (param_len <= 0 || param_len >= param_sz) return false;
+
+    strncpy(param, lt + 1, param_len);
+    param[param_len] = '\0';
+    return true;
+}
+
+/* Extract two type parameters from generic syntax like Result<T, E> → T, E */
+static bool extract_two_generic_params(const char *stype, char *param1, int p1sz, char *param2, int p2sz) {
+    const char *lt = strchr(stype, '<');
+    const char *gt = strrchr(stype, '>');
+    if (!lt || !gt || gt <= lt) return false;
+
+    /* Find comma separator */
+    const char *comma = strchr(lt, ',');
+    if (!comma || comma >= gt) return false;
+
+    /* Extract first parameter */
+    int p1_len = comma - lt - 1;
+    if (p1_len <= 0 || p1_len >= p1sz) return false;
+    strncpy(param1, lt + 1, p1_len);
+    param1[p1_len] = '\0';
+    /* Trim spaces */
+    while (p1_len > 0 && param1[p1_len-1] == ' ') param1[--p1_len] = '\0';
+
+    /* Extract second parameter */
+    const char *p2_start = comma + 1;
+    while (*p2_start == ' ') p2_start++;
+    int p2_len = gt - p2_start;
+    if (p2_len <= 0 || p2_len >= p2sz) return false;
+    strncpy(param2, p2_start, p2_len);
+    param2[p2_len] = '\0';
+    /* Trim spaces */
+    while (p2_len > 0 && param2[p2_len-1] == ' ') param2[--p2_len] = '\0';
+
+    return true;
 }
 
 /* ===== Type Conversion ===== */
@@ -448,9 +507,66 @@ static const char *simple_type_to_cpp(const char *stype) {
     /* Generic container types */
     if (strncmp(stype, "List<", 5) == 0 || strncmp(stype, "Set<", 4) == 0 ||
         strncmp(stype, "Map<", 4) == 0) return "SplArray*";
+    /* Option<T> generic syntax - monomorphize to Option_T */
+    if (strncmp(stype, "Option<", 7) == 0) {
+        char param[MAX_IDENT];
+        if (extract_generic_param(stype, param, sizeof(param))) {
+            /* Register this option type if not already registered */
+            bool found = false;
+            for (int i = 0; i < num_option_types; i++) {
+                if (strcmp(option_types[i].simple_base, param) == 0) { found = true; break; }
+            }
+            if (!found && num_option_types < MAX_OPTION_TYPES) {
+                OptionTypeInfo *oi = &option_types[num_option_types];
+                strcpy(oi->simple_base, param);
+                /* Recursive call for base type */
+                strcpy(oi->cpp_base, simple_type_to_cpp(param));
+                if (param[0] == '[')
+                    snprintf(oi->option_name, MAX_IDENT, "Option_array");
+                else
+                    snprintf(oi->option_name, MAX_IDENT, "Option_%s", param);
+                num_option_types++;
+            }
+            /* Return option struct name */
+            static char option_buf[MAX_IDENT];
+            if (param[0] == '[')
+                snprintf(option_buf, sizeof(option_buf), "Option_array");
+            else
+                snprintf(option_buf, sizeof(option_buf), "Option_%s", param);
+            return option_buf;
+        }
+    }
+    /* Result<T, E> generic syntax - monomorphize to Result_T_E */
+    if (strncmp(stype, "Result<", 7) == 0) {
+        char ok_type[MAX_IDENT], err_type[MAX_IDENT];
+        if (extract_two_generic_params(stype, ok_type, sizeof(ok_type), err_type, sizeof(err_type))) {
+            /* Register this result type if not already registered */
+            bool found = false;
+            for (int i = 0; i < num_result_types; i++) {
+                if (strcmp(result_types[i].ok_type, ok_type) == 0 &&
+                    strcmp(result_types[i].err_type, err_type) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && num_result_types < MAX_RESULT_TYPES) {
+                ResultTypeInfo *ri = &result_types[num_result_types];
+                strcpy(ri->ok_type, ok_type);
+                strcpy(ri->err_type, err_type);
+                strcpy(ri->cpp_ok, simple_type_to_cpp(ok_type));
+                strcpy(ri->cpp_err, simple_type_to_cpp(err_type));
+                snprintf(ri->result_name, MAX_IDENT, "Result_%s_%s", ok_type, err_type);
+                num_result_types++;
+            }
+            /* Return result struct name */
+            static char result_buf[MAX_IDENT];
+            snprintf(result_buf, sizeof(result_buf), "Result_%s_%s", ok_type, err_type);
+            return result_buf;
+        }
+    }
     /* Common generic types that Simple uses but aren't structs */
-    if (strncmp(stype, "Result<", 7) == 0 || strcmp(stype, "Result") == 0) return "int64_t";
-    if (strncmp(stype, "Option<", 7) == 0 || strcmp(stype, "Option") == 0) return "int64_t";
+    if (strcmp(stype, "Result") == 0) return "int64_t"; /* bare Result without type params */
+    if (strcmp(stype, "Option") == 0) return "int64_t"; /* bare Option without type param */
     if (strncmp(stype, "Effect<", 7) == 0 || strcmp(stype, "Effect") == 0) return "int64_t";
     if (strcmp(stype, "Any") == 0) return "int64_t";
     if (strncmp(stype, "Iterator<", 9) == 0) return "int64_t";
@@ -3529,7 +3645,10 @@ static void process_file(void) {
     for (int i = 0; i < num_option_types; i++) {
         emit("struct %s;\n", option_types[i].option_name);
     }
-    if (num_structs > 0 || num_option_types > 0) emit("\n");
+    for (int i = 0; i < num_result_types; i++) {
+        emit("struct %s;\n", result_types[i].result_name);
+    }
+    if (num_structs > 0 || num_option_types > 0 || num_result_types > 0) emit("\n");
 
     /* Phase B: Emit primitive Option structs (base type is NOT a user struct) */
     for (int i = 0; i < num_option_types; i++) {
@@ -3587,6 +3706,22 @@ static void process_file(void) {
         emit("    %s() : has_value(false), value{} {}\n", oi->option_name);
         emit("    %s(%s v) : has_value(true), value(v) {}\n", oi->option_name, oi->cpp_base);
         emit("    %s(SplValue) : has_value(false), value{} {}\n", oi->option_name);
+        emit("};\n\n");
+    }
+
+    /* Phase E: Emit Result<T, E> structs */
+    for (int i = 0; i < num_result_types; i++) {
+        ResultTypeInfo *ri = &result_types[i];
+        emit("/* Result<%s, %s> */\n", ri->ok_type, ri->err_type);
+        emit("struct %s {\n", ri->result_name);
+        emit("    bool is_ok;\n");
+        emit("    %s ok_value;\n", ri->cpp_ok);
+        emit("    %s err_value;\n", ri->cpp_err);
+        emit("    %s() : is_ok(false), ok_value{}, err_value{} {}\n", ri->result_name);
+        emit("    static %s Ok(%s v) { %s r; r.is_ok = true; r.ok_value = v; return r; }\n",
+             ri->result_name, ri->cpp_ok, ri->result_name);
+        emit("    static %s Err(%s e) { %s r; r.is_ok = false; r.err_value = e; return r; }\n",
+             ri->result_name, ri->cpp_err, ri->result_name);
         emit("};\n\n");
     }
 
