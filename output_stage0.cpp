@@ -327,29 +327,6 @@ static const int64_t KeyError_BothErrors = 3;
 static const int64_t Result_Ok = 0;
 static const int64_t Result_Err = 1;
 
-/* enum DimClause */
-static const int64_t DimClause_DimEqual = 0;
-static const int64_t DimClause_DimRange = 1;
-static const int64_t DimClause_DimMin = 2;
-static const int64_t DimClause_DimMax = 3;
-
-/* enum DimCheckMode */
-static const int64_t DimCheckMode_None_ = 0;
-static const int64_t DimCheckMode_Assert = 1;
-static const int64_t DimCheckMode_Log = 2;
-static const int64_t DimCheckMode_Strict = 3;
-
-/* enum RuntimeDimCheckKind */
-static const int64_t RuntimeDimCheckKind_ShapeEqual = 0;
-static const int64_t RuntimeDimCheckKind_DimEqual = 1;
-static const int64_t RuntimeDimCheckKind_DimRange = 2;
-static const int64_t RuntimeDimCheckKind_LayerCompat = 3;
-
-/* enum DimCheckTiming */
-static const int64_t DimCheckTiming_CompileTime = 0;
-static const int64_t DimCheckTiming_Runtime = 1;
-static const int64_t DimCheckTiming_Both = 2;
-
 /* enum DimConstraint */
 static const int64_t DimConstraint_Equal = 0;
 static const int64_t DimConstraint_GreaterEq = 1;
@@ -568,6 +545,28 @@ static const int64_t CompilerMode_Jit = 1;
 static const int64_t CompilerMode_Aot = 2;
 static const int64_t CompilerMode_Sdn = 3;
 static const int64_t CompilerMode_Check = 4;
+
+/* enum CpuException */
+static const int64_t CpuException_DivideError = 0;
+static const int64_t CpuException_Debug = 1;
+static const int64_t CpuException_Nmi = 2;
+static const int64_t CpuException_Breakpoint = 3;
+static const int64_t CpuException_Overflow = 4;
+static const int64_t CpuException_BoundRange = 5;
+static const int64_t CpuException_InvalidOpcode = 6;
+static const int64_t CpuException_DeviceNotAvail = 7;
+static const int64_t CpuException_DoubleFault = 8;
+static const int64_t CpuException_CoprocessorOverrun = 9;
+static const int64_t CpuException_InvalidTss = 10;
+static const int64_t CpuException_SegmentNotPresent = 11;
+static const int64_t CpuException_StackFault = 12;
+static const int64_t CpuException_GeneralProtection = 13;
+static const int64_t CpuException_PageFault = 14;
+static const int64_t CpuException_Reserved15 = 15;
+static const int64_t CpuException_FloatingPoint = 16;
+static const int64_t CpuException_AlignmentCheck = 17;
+static const int64_t CpuException_MachineCheck = 18;
+static const int64_t CpuException_SimdException = 19;
 
 /* enum LayoutPhase */
 static const int64_t LayoutPhase_Startup = 0;
@@ -1397,9 +1396,6 @@ struct CoverageStats;
 struct CoverageReport;
 struct CoverageCollector;
 struct DimSolver;
-struct WhereClause;
-struct RuntimeDimCheck;
-struct DimCheckGenerator;
 struct DimError;
 struct DimNote;
 struct Binding;
@@ -1410,6 +1406,7 @@ struct ConstructorInfo;
 struct DiValidator;
 struct CheckBackendImpl;
 struct CompilerDriver;
+struct CompileOptions;
 struct EffectCacheConfig;
 struct EffectCacheStats;
 struct FunctionEffectInfo;
@@ -1472,6 +1469,7 @@ struct CompilerContext;
 struct InlineAsm;
 struct TemplateInstantiator;
 struct InterruptAttr;
+struct InterruptVector;
 struct FunctionRecord;
 struct RecordingSession;
 struct Lexer;
@@ -1607,6 +1605,7 @@ struct Obligation;
 struct ImplRegistry;
 struct TraitSolver;
 struct CycleDetector;
+struct SupertraitResolver;
 struct OutlineModule;
 struct BlockOutline;
 struct ImportOutline;
@@ -1654,8 +1653,8 @@ struct VolatileAccess;
 struct Option_Span;
 struct Option_BuildOutput;
 struct Option_text;
-struct Option_FunctionAttr;
 struct Option_HirType;
+struct Option_FunctionAttr;
 struct Option_Symbol;
 
 /* Option<text> */
@@ -1667,15 +1666,6 @@ struct Option_text {
     Option_text(SplValue) : has_value(false), value{} {}
 };
 
-/* Option<FunctionAttr> */
-struct Option_FunctionAttr {
-    bool has_value;
-    int64_t value;
-    Option_FunctionAttr() : has_value(false), value{} {}
-    Option_FunctionAttr(int64_t v) : has_value(true), value(v) {}
-    Option_FunctionAttr(SplValue) : has_value(false), value{} {}
-};
-
 /* Option<HirType> */
 struct Option_HirType {
     bool has_value;
@@ -1683,6 +1673,15 @@ struct Option_HirType {
     Option_HirType() : has_value(false), value{} {}
     Option_HirType(int64_t v) : has_value(true), value(v) {}
     Option_HirType(SplValue) : has_value(false), value{} {}
+};
+
+/* Option<FunctionAttr> */
+struct Option_FunctionAttr {
+    bool has_value;
+    int64_t value;
+    Option_FunctionAttr() : has_value(false), value{} {}
+    Option_FunctionAttr(int64_t v) : has_value(true), value(v) {}
+    Option_FunctionAttr(SplValue) : has_value(false), value{} {}
 };
 
 /* Option<Span> */
@@ -2326,22 +2325,6 @@ struct DimSolver {
     std::vector<DimError> errors;
 };
 
-struct WhereClause {
-    SplArray* constraints;
-    Span* span;
-};
-
-struct RuntimeDimCheck {
-    int64_t kind;
-    Span* span;
-    const char* error_message;
-};
-
-struct DimCheckGenerator {
-    int64_t mode;
-    std::vector<RuntimeDimCheck> checks;
-};
-
 struct DimError {
     const char* message;
     int64_t kind;
@@ -2403,6 +2386,26 @@ struct CheckBackendImpl {
 
 struct CompilerDriver {
     int64_t ctx;
+};
+
+struct CompileOptions {
+    int64_t mode;
+    SplArray* input_files;
+    bool has_output_file;
+    const char* output_file;
+    int64_t output_format;
+    bool optimize;
+    bool has_opt_level;
+    int64_t opt_level;
+    bool release;
+    bool debug_info;
+    bool verbose;
+    int64_t log_level;
+    const char* profile;
+    bool no_borrow_check;
+    const char* backend;
+    const char* interpreter_mode;
+    bool gc_off;
 };
 
 struct EffectCacheConfig {
@@ -2916,6 +2919,14 @@ struct InterruptAttr {
     bool is_fast;
     bool is_noreturn;
     bool is_reentrant;
+};
+
+struct InterruptVector {
+    int64_t number;
+    int64_t handler_addr;
+    int64_t segment;
+    int64_t type_attr;
+    int64_t dpl;
 };
 
 struct FunctionRecord {
@@ -3946,6 +3957,11 @@ struct CycleDetector {
     const char* rec_stack;
 };
 
+struct SupertraitResolver {
+    const char* registry;
+    const char* cache;
+};
+
 struct OutlineModule {
     const char* name;
     std::vector<ImportOutline> imports;
@@ -4183,7 +4199,7 @@ struct HmInferContext {
     Substitution* subst;
     SplArray* errors;
     DimSolver* dim_solver;
-    DimCheckGenerator* runtime_checks;
+    int64_t runtime_checks;
     int64_t dim_check_mode;
     TraitSolver* trait_solver;
     SplDict* function_bounds;
@@ -4495,8 +4511,6 @@ CoverageStats coveragestats_empty();
 CoverageCollector coveragecollector_create();
 int64_t desugar_async_function(int64_t func);
 DimSolver dimsolver_new();
-const char* format_shape(SplArray* dims);
-DimCheckGenerator dimcheckgenerator_new(int64_t mode);
 DimError dimerror_mismatch(int64_t d1, int64_t d2, int64_t span);
 void di_panic(const char* msg);
 DiContainer dicontainer_for_profile(int64_t profile);
@@ -4541,6 +4555,8 @@ void CompilerDriver__optimize_mir(CompilerDriver* self, int64_t config);
 int64_t CompilerDriver__get_optimization_config(const CompilerDriver* self);
 Config create_config();
 int64_t create_block_resolver();
+int64_t OutputFormat__from_text(const char* s);
+CompileOptions CompileOptions__default();
 EffectCacheConfig effectcacheconfig_default_config();
 EffectCacheStats effectcachestats_empty();
 FunctionEffectInfo functioneffectinfo_empty(const char* name);
@@ -4554,20 +4570,20 @@ void test_env();
 void test_set_get();
 void test_dirty();
 int64_t effect_combine_all(SplArray* effects);
-TypeWrapper typewrapper_new(int64_t env);
+int64_t typewrapper_new(int64_t env);
 void test_basic_types();
 void test_promise_wrap();
 void test_promise_unwrap();
 void test_suspend_validation();
 void test_nested_promises();
 void test_function_types();
-EffectScanner effectscanner_new(int64_t env);
+int64_t effectscanner_new(int64_t env);
 EffectEnv effectenv_new_for_test();
-HirExpr make_int(int64_t n);
-HirExpr make_str(const char* s);
-HirExpr make_call(int64_t func, std::vector<HirExpr> args);
-HirExpr make_suspend(HirExpr expr);
-HirExpr make_block(std::vector<HirExpr> exprs);
+int64_t make_int(int64_t n);
+int64_t make_str(const char* s);
+int64_t make_call(int64_t func, std::vector<HirExpr> args);
+int64_t make_suspend(HirExpr expr);
+int64_t make_block(std::vector<HirExpr> exprs);
 void test_literals();
 void test_suspend_operators();
 void test_function_calls();
@@ -4641,6 +4657,9 @@ TypeVar tyvar_new(int64_t id, int64_t name, int64_t kind);
 TypeVar typevar_new(int64_t id, int64_t name, int64_t kind);
 QuantifierLevel quantifierlevel_new(int64_t level, bool is_rigid);
 QuantifierContext quantifiercontext_new();
+bool higherrankunifier_unify(int64_t self, int64_t ty1, int64_t ty2);
+bool higherrankunifier_subsumes(int64_t self, int64_t poly1, int64_t poly2);
+void test_unify_forall_left();
 SymbolId symbolid_new(int64_t id);
 SymbolTable symboltable_new();
 HydrationManifest hydrationmanifest_create();
@@ -4663,6 +4682,9 @@ void TemplateInstantiator__instantiate(TemplateInstantiator* self, int64_t templ
 void TemplateInstantiator__is_cached(const TemplateInstantiator* self, int64_t template_name, int64_t type_args);
 void TemplateInstantiator__cache_size(const TemplateInstantiator* self);
 InterruptAttr interruptattr_default_(int64_t vector);
+const char* generate_x86_prologue(InterruptAttr attr, bool has_error_code);
+const char* generate_x86_epilogue(InterruptAttr attr);
+int64_t compile_interrupt_handler(HirFunction func, InterruptAttr attr);
 FunctionRecord functionrecord_create(const char* name);
 RecordingSession recordingsession_create();
 void start_recording();
@@ -4910,6 +4932,7 @@ TraitSolver traitsolver_new(int64_t impl_registry);
 TraitDef traitdef_create(Symbol name, Span span);
 TraitDef traitdef_new(const char* name);
 CycleDetector cycledetector_new(int64_t registry);
+SupertraitResolver supertraitresolver_new(int64_t registry);
 int64_t treesitter_parse_outline(int64_t self);
 SplDict* empty_subst_map();
 SplDict* empty_type_env();
@@ -4918,6 +4941,8 @@ TypeScheme typescheme_poly(SplArray* vars, int64_t ty);
 Substitution substitution_new();
 LayoutAttr layoutattr_default_();
 UnsafeContext unsafecontext_new();
+int64_t is_unsafe_op(HirExpr expr);
+bool is_raw_pointer_type(Option_HirType type_);
 bool is_ffi_function(HirExpr callee);
 const char* check_unsafe_context(UnsafeContext ctx, int64_t op, Span span);
 const char* require_unsafe(UnsafeContext ctx, int64_t op, Span span);
@@ -5162,7 +5187,7 @@ static SplDict* BITFIELD_REGISTRY = 0;
 static const char* source = spl_str_concat(spl_str_concat(spl_str_concat("fn main() -> i64:", NL), "    0"), NL);
 static int64_t parser = 0;
 static int64_t ast_module = 0;
-static int64_t options = 0;
+static CompileOptions options = {};
 static int64_t v1 = 0;
 static int64_t v2 = 0;
 static int64_t lowering = 0;
@@ -5179,7 +5204,9 @@ static int64_t else_block = 0;
 static int64_t exit_block = 0;
 static int64_t x_local = 0;
 static int64_t y_local = 0;
-static const char* z_local = "";
+static int64_t z_local = 0;
+static int64_t str_then = 0;
+static int64_t str_else = 0;
 static SplArray* locals;
 static MirBlock entry_block = {};
 static int64_t hir_lowering = 0;
@@ -6023,22 +6050,6 @@ DimSolver dimsolver_new() {
     return DimSolver{}; /* stub */
 }
 
-const char* format_shape(SplArray* dims) {
-    if ((dims_len(dims) == 0)) {
-        return "[]";
-    }
-    SplArray* parts = spl_array_new();
-    for (int64_t __d_i = 0; __d_i < spl_array_len(dims); __d_i++) {
-        int64_t d = spl_array_get(dims, __d_i).as_int;
-        parts = parts_push(parts, d_format(d));
-    }
-    return "[{parts.join(\", \")}]";
-}
-
-DimCheckGenerator dimcheckgenerator_new(int64_t mode) {
-    return DimCheckGenerator{.mode = mode, .checks = {}};
-}
-
 DimError dimerror_mismatch(int64_t d1, int64_t d2, int64_t span) {
     return DimError{}; /* stub */
 }
@@ -6217,6 +6228,15 @@ int64_t create_block_resolver() {
     return 0; /* stub */
 }
 
+int64_t OutputFormat__from_text(const char* s) {
+    switch (s) {
+    }
+}
+
+CompileOptions CompileOptions__default() {
+    return CompileOptions{}; /* stub */
+}
+
 EffectCacheConfig effectcacheconfig_default_config() {
     return EffectCacheConfig{.max_entries = 5000, .validate_on_lookup = true};
 }
@@ -6277,8 +6297,8 @@ int64_t effect_combine_all(SplArray* effects) {
     return result;
 }
 
-TypeWrapper typewrapper_new(int64_t env) {
-    return TypeWrapper{.env = env};
+int64_t typewrapper_new(int64_t env) {
+    return 0;
 }
 
 void test_basic_types() {
@@ -6305,70 +6325,70 @@ void test_function_types() {
     spl_println("✅ Function types (stubbed)");
 }
 
-EffectScanner effectscanner_new(int64_t env) {
-    return EffectScanner{.env = env};
+int64_t effectscanner_new(int64_t env) {
+    return 0;
 }
 
 EffectEnv effectenv_new_for_test() {
     return EffectEnv{}; /* stub */
 }
 
-HirExpr make_int(int64_t n) {
-    return hirexpr_IntLit(value: n);
+int64_t make_int(int64_t n) {
+    return 0;
 }
 
-HirExpr make_str(const char* s) {
-    return hirexpr_StrLit(value: s);
+int64_t make_str(const char* s) {
+    return 0;
 }
 
-HirExpr make_call(int64_t func, std::vector<HirExpr> args) {
-    return hirexpr_Call(func: func, args: args);
+int64_t make_call(int64_t func, std::vector<HirExpr> args) {
+    return 0;
 }
 
-HirExpr make_suspend(HirExpr expr) {
-    return hirexpr_Suspend(expr: expr);
+int64_t make_suspend(HirExpr expr) {
+    return 0;
 }
 
-HirExpr make_block(std::vector<HirExpr> exprs) {
-    return hirexpr_Block(exprs: exprs);
+int64_t make_block(std::vector<HirExpr> exprs) {
+    return 0;
 }
 
 void test_literals() {
     EffectEnv env = effectenv_new_for_test();
-    EffectScanner scanner = effectscanner_new(env);
+    int64_t scanner = effectscanner_new(env);
     spl_println("✅ Literals are sync");
 }
 
 void test_suspend_operators() {
     EffectEnv env = effectenv_new_for_test();
-    EffectScanner scanner = effectscanner_new(env);
-    HirExpr suspended = make_suspend(make_int(42));
+    int64_t scanner = effectscanner_new(env);
+    int64_t suspended = make_suspend(make_int(42));
     int64_t suspend_assign = HirExpr__SuspendAssign(name: "x");
     spl_println("✅ Suspension operators are async");
 }
 
 void test_function_calls() {
     EffectEnv env = effectenv_new_for_test();
-    EffectScanner scanner = effectscanner_new(env);
-    HirExpr sync_call = make_call("print", spl_array_new());
-    HirExpr async_call = make_call("http.get", spl_array_new());
+    int64_t scanner = effectscanner_new(env);
+    int64_t sync_call = make_call("print", spl_array_new());
+    int64_t async_call = make_call("http.get", spl_array_new());
     spl_println("✅ Function call effects propagate");
 }
 
 void test_control_flow() {
     EffectEnv env = effectenv_new_for_test();
-    EffectScanner scanner = effectscanner_new(env);
-    HirExpr sync_block = make_block(spl_array_new());
-    HirExpr async_expr = make_call("http.get", spl_array_new());
-    HirExpr async_block = make_block(spl_array_new());
+    int64_t scanner = effectscanner_new(env);
+    int64_t sync_block = make_block(spl_array_new());
+    int64_t async_expr = make_call("http.get", spl_array_new());
+    int64_t async_block = make_block(spl_array_new());
     spl_println("✅ Control flow combines effects");
 }
 
 void test_nested() {
     EffectEnv env = effectenv_new_for_test();
-    EffectScanner scanner = effectscanner_new(env);
-    HirExpr suspended = make_suspend(make_int(42));
-    HirExpr nested = make_block(spl_array_new());
+    int64_t scanner = effectscanner_new(env);
+    int64_t suspended = make_suspend(make_int(42));
+    int64_t nested = make_block(spl_array_new());
     spl_println("✅ Nested async expressions detected");
 }
 
@@ -6864,6 +6884,75 @@ QuantifierContext quantifiercontext_new() {
     return QuantifierContext{}; /* stub */
 }
 
+bool higherrankunifier_unify(int64_t self, int64_t ty1, int64_t ty2) {
+    switch ((ty1, ty2)) {
+        case (Forall(_, _), _):
+        {
+            int64_t inst = self_instantiate(self, ty1);
+            return self_unify(self, inst, ty2);
+            break;
+        }
+        case (_, Forall(_, _)):
+        {
+            int64_t skolem = self_skolemize(self, ty2);
+            return self_unify(self, ty1, skolem);
+            break;
+        }
+        case (Skolem(id1), Skolem(id2)):
+        {
+            return (id1 == id2);
+            break;
+        }
+        case (Skolem(_), TypeVariable(_)):
+        {
+            return false;
+            break;
+        }
+        case (TypeVariable(_), Skolem(_)):
+        {
+            return false;
+            break;
+        }
+        case (TypeVariable(id1), TypeVariable(id2)):
+        {
+            return true;
+            break;
+        }
+        case (TypeVariable(_), _):
+        {
+            return true;
+            break;
+        }
+        case (_, TypeVariable(_)):
+        {
+            return true;
+            break;
+        }
+        case (Arrow(from1, to1), Arrow(from2, to2)):
+        {
+            int64_t from_unifies = self_unify(self, from1, from2);
+            int64_t to_unifies = self_unify(self, to1, to2);
+            return (from_unifies && to_unifies);
+            break;
+        }
+        default:
+        {
+            return false;
+            break;
+        }
+    }
+}
+
+bool higherrankunifier_subsumes(int64_t self, int64_t poly1, int64_t poly2) {
+    int64_t inst2 = self_instantiate(self, poly2);
+    int64_t skolem1 = self_skolemize(self, poly1);
+    return self_unify(self, skolem1, inst2);
+}
+
+void test_unify_forall_left() {
+    /* stub */
+}
+
 SymbolId symbolid_new(int64_t id) {
     return SymbolId{.id = id};
 }
@@ -6989,7 +7078,69 @@ void TemplateInstantiator__cache_size(const TemplateInstantiator* self) {
 }
 
 InterruptAttr interruptattr_default_(int64_t vector) {
-    return InterruptAttr{}; /* stub */
+    return InterruptAttr{.vector = vector, .priority = 7, .is_naked = false, .is_fast = false, .is_noreturn = false, .is_reentrant = false};
+    function: HirFunction;
+    attr: InterruptAttr;
+    vector_entry: InterruptVector;
+    prologue: text;
+    return epilogue: text;
+}
+
+const char* generate_x86_prologue(InterruptAttr attr, bool has_error_code) {
+    if (attr.is_naked) {
+        return "";
+    }
+    const char* prologue = "";
+    if ((attr.vector < 32)) {
+        if (!(has_error_code)) {
+        }
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push 0"), NL);
+    }
+    prologue = spl_str_concat(spl_str_concat(prologue, spl_str_concat("    push ", spl_i64_to_str(attr.vector))), NL);
+    if (attr.is_fast) {
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push eax"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push ecx"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push edx"), NL);
+    } else {
+        prologue = spl_str_concat(spl_str_concat(prologue, "    pusha"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push ds"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push es"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push fs"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    push gs"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    mov ax, 0x10"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    mov ds, ax"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    mov es, ax"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    mov fs, ax"), NL);
+        prologue = spl_str_concat(spl_str_concat(prologue, "    mov gs, ax"), NL);
+    }
+    return prologue;
+}
+
+const char* generate_x86_epilogue(InterruptAttr attr) {
+    if ((attr.is_naked || attr.is_noreturn)) {
+        return "";
+    }
+    const char* epilogue = "";
+    if (attr.is_fast) {
+        epilogue = spl_str_concat("    pop edx", NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    pop ecx"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    pop eax"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    add esp, 8"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    iret"), NL);
+    } else {
+        epilogue = spl_str_concat("    pop gs", NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    pop fs"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    pop es"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    pop ds"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    popa"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    add esp, 8"), NL);
+        epilogue = spl_str_concat(spl_str_concat(epilogue, "    iret"), NL);
+    }
+    return epilogue;
+}
+
+int64_t compile_interrupt_handler(HirFunction func, InterruptAttr attr) {
+    return 0; /* stub */
 }
 
 FunctionRecord functionrecord_create(const char* name) {
@@ -7093,7 +7244,7 @@ TypeEnv typeenv_empty() {
 }
 
 MacroTypeChecker macrotypechecker_new_checker(MacroRegistry registry) {
-    MacroTypeChecker{.registry = registry, .type_env = typeenv_empty()} = spl_array_new();
+    return MacroTypeChecker{}; /* stub */
 }
 
 SubstitutionMap substitutionmap_empty() {
@@ -9473,6 +9624,10 @@ CycleDetector cycledetector_new(int64_t registry) {
     return CycleDetector{}; /* stub */
 }
 
+SupertraitResolver supertraitresolver_new(int64_t registry) {
+    return SupertraitResolver{}; /* stub */
+}
+
 int64_t treesitter_parse_outline(int64_t self) {
     return 0; /* stub */
 }
@@ -9504,7 +9659,62 @@ LayoutAttr layoutattr_default_() {
 }
 
 UnsafeContext unsafecontext_new() {
-    return UnsafeContext{}; /* stub */
+    return UnsafeContext{.unsafe_depth = 0, .operations = {}, .function_unsafe = false, .allow_implicit_unsafe = false};
+    return RequiresUnsafe(op: UnsafeOp, span: Span);
+    return UnnecessaryUnsafe(span: Span);
+    return UnsafeFnCall(fn_name: text, span: Span);
+}
+
+int64_t is_unsafe_op(HirExpr expr) {
+    switch (expr.kind) {
+        case hirexprkind_Unary(op, operand):
+        {
+            switch (op) {
+                case HirUnaryOp_Deref:
+                {
+                    if (is_raw_pointer_type(operand.type_)) {
+                        return UnsafeOp_PointerDeref;
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+        case hirexprkind_InlineAsm(_):
+        {
+            return UnsafeOp_InlineAssembly;
+            break;
+        }
+        case hirexprkind_Cast(_, target_type):
+        {
+            if (is_raw_pointer_type(target_type)) {
+                return UnsafeOp_PointerCast;
+            }
+            break;
+        }
+        case hirexprkind_Call(callee, _, _):
+        {
+            if (is_ffi_function(callee)) {
+                return UnsafeOp_FfiCall;
+            }
+            break;
+        }
+        default:
+        {
+            /* pass */;
+            break;
+        }
+    }
+    return spl_nil();
+}
+
+bool is_raw_pointer_type(Option_HirType type_) {
+    if (!(has_type_)) {
+        return false;
+    }
+    int64_t t = type__value;
+    int64_t name = t_to_text(t);
+    return (spl_str_starts_with(name, "*") || spl_str_starts_with(name, "ptr<"));
 }
 
 bool is_ffi_function(HirExpr callee) {
@@ -9783,6 +9993,9 @@ static void __module_init(void) {
     spl_println(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat(spl_str_concat("  Blocks created: then=", spl_i64_to_str(then_block.id)), " else="), spl_i64_to_str(else_block.id)), " exit="), spl_i64_to_str(exit_block.id)));
     x_local = builder_new_temp(builder, i64_type);
     y_local = builder_new_temp(builder, i64_type);
+    builder_switch_to_block(builder, then_block);
+    str_then = builder_new_temp(builder, i64_type);
+    str_else = builder_new_temp(builder, i64_type);
     spl_println("=== Complex MIR -> Native Backend Test ===");
     i64_type = MirType{.kind = MirTypeKind_I64};
     bool_type = MirType{.kind = MirTypeKind_Bool};
