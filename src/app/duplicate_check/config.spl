@@ -1,7 +1,7 @@
 # Configuration handling for duplication detection
 
 use app.io.mod.{file_exists, file_read}
-use std.string.{NL}
+use std.config_parser.{parse_sdn_config, find_section, get_config_int, get_config_bool, get_config_field, get_config_float}
 
 struct DuplicationConfig:
     min_tokens: i64
@@ -52,98 +52,79 @@ fn default_config() -> DuplicationConfig:
 fn parse_config_file(content: text) -> DuplicationConfig:
     var config = default_config()
 
-    val lines = content.split(NL)
-    var in_section = false
-    var in_exclude = false
+    val result = parse_sdn_config(content)
+    val section_opt = find_section(result, "duplicate-check")
 
-    for line in lines:
-        val trimmed = line.trim()
+    if not section_opt.?:
+        return config
 
-        if trimmed == "duplicate-check:":
-            in_section = true
-            continue
+    val section = section_opt ?? default_section()
 
-        if not in_section:
-            continue
+    # Parse simple key-value fields
+    config.min_tokens = get_config_int(section, "min-tokens", config.min_tokens)
+    config.min_lines = get_config_int(section, "min-lines", config.min_lines)
+    config.max_allowed = get_config_int(section, "max-allowed", config.max_allowed)
+    config.min_impact = get_config_int(section, "min-impact", config.min_impact)
 
-        if trimmed.starts_with("exclude:"):
-            in_exclude = true
-            config.exclude_patterns = []
-            continue
+    config.ignore_identifiers = get_config_bool(section, "ignore-identifiers", config.ignore_identifiers)
+    config.ignore_literals = get_config_bool(section, "ignore-literals", config.ignore_literals)
+    config.ignore_comments = get_config_bool(section, "ignore-comments", config.ignore_comments)
+    config.ignore_whitespace = get_config_bool(section, "ignore-whitespace", config.ignore_whitespace)
+    config.use_ast_features = get_config_bool(section, "use-ast-features", config.use_ast_features)
+    config.use_cosine_similarity = get_config_bool(section, "use-cosine-similarity", config.use_cosine_similarity)
 
-        if in_exclude:
-            if trimmed.starts_with("-"):
-                var pattern = trimmed[1:].trim()
-                var cleaned = ""
-                var i = 0
-                while i < pattern.len():
-                    val ch = pattern[i:i+1]
-                    if ch != "\"" and ch != "'":
-                        cleaned = cleaned + ch
-                    i = i + 1
-                config.exclude_patterns = config.exclude_patterns + [cleaned]
-            elif trimmed.contains(":"):
-                in_exclude = false
-            else:
-                continue
+    config.similarity_threshold = get_config_float(section, "similarity-threshold", config.similarity_threshold)
 
-        if trimmed.contains(":") and not in_exclude:
-            val parts = trimmed.split(":")
-            if parts.len() < 2:
-                continue
+    config.output_format = get_config_field(section, "output-format", config.output_format)
+    config.report_path = get_config_field(section, "report-path", config.report_path)
 
-            val key = parts[0].trim()
-            var value = parts[1].trim()
-
-            var clean_value = ""
-            var i = 0
-            while i < value.len():
-                val ch = value[i:i+1]
-                if ch != "\"" and ch != "'":
-                    clean_value = clean_value + ch
-                i = i + 1
-
-            if key == "min-tokens":
-                config.min_tokens = int(clean_value)
-            elif key == "min-lines":
-                config.min_lines = int(clean_value)
-            elif key == "ignore-identifiers":
-                config.ignore_identifiers = clean_value == "true"
-            elif key == "ignore-literals":
-                config.ignore_literals = clean_value == "true"
-            elif key == "ignore-comments":
-                config.ignore_comments = clean_value == "true"
-            elif key == "ignore-whitespace":
-                config.ignore_whitespace = clean_value == "true"
-            elif key == "similarity-threshold":
-                if clean_value == "0.80":
-                    config.similarity_threshold = 0.80
-                elif clean_value == "0.85":
-                    config.similarity_threshold = 0.85
-                elif clean_value == "0.90":
-                    config.similarity_threshold = 0.90
-                elif clean_value == "0.75":
-                    config.similarity_threshold = 0.75
-                elif clean_value == "0.70":
-                    config.similarity_threshold = 0.70
-                elif clean_value == "1.0" or clean_value == "1.00" or clean_value == "1":
-                    config.similarity_threshold = 1.0
-                else:
-                    config.similarity_threshold = 0.85
-            elif key == "output-format":
-                config.output_format = clean_value
-            elif key == "report-path":
-                config.report_path = clean_value
-            elif key == "max-allowed":
-                config.max_allowed = int(clean_value)
-            elif key == "min-impact":
-                config.min_impact = int(clean_value)
-            elif key == "use-ast-features":
-                config.use_ast_features = clean_value == "true"
-            elif key == "use-cosine-similarity":
-                config.use_cosine_similarity = clean_value == "true"
+    # Parse exclude patterns (list field)
+    val exclude_str = get_config_field(section, "exclude", "")
+    if exclude_str.len() > 0:
+        config.exclude_patterns = parse_exclude_patterns(exclude_str)
 
     config
+
+fn default_section():
+    # Helper for unwrapping Optional - never called
+    val fields = {}
+    val sec = ConfigSection(name: "", fields: fields)
+    sec
+
+fn parse_exclude_patterns(patterns_str: text) -> [text]:
+    """Parse exclude patterns from comma-separated string or array format."""
+    var result = []
+
+    # Remove brackets if present: ["pattern1", "pattern2"] -> pattern1", "pattern2
+    var cleaned = patterns_str
+    if cleaned.starts_with("["):
+        cleaned = cleaned[1:]
+    if cleaned.ends_with("]"):
+        val end_idx = cleaned.len() - 1
+        cleaned = cleaned[0:end_idx]
+
+    # Split by comma
+    val parts = cleaned.split(",")
+    for part in parts:
+        var trimmed = part.trim()
+
+        # Remove quotes
+        if trimmed.len() >= 2:
+            val first = trimmed[0:1]
+            val last_idx = trimmed.len() - 1
+            val last = trimmed[last_idx:]
+            val both_double = (first == "\"" and last == "\"")
+            val both_single = (first == "'" and last == "'")
+            if both_double or both_single:
+                trimmed = trimmed[1:last_idx]
+
+        if trimmed.len() > 0:
+            result = result + [trimmed]
+
+    result
+
+# Need to import ConfigSection type for default_section helper
+use std.config_parser.{ConfigSection}
 
 fn load_config() -> DuplicationConfig:
     val config_path = "simple.duplicate-check.sdn"

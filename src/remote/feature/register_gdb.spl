@@ -1,9 +1,14 @@
 # GDB Feature Registration
 # Registers all GDB MI handlers at rank 0 (native).
+# Also registers ptrace, DWARF, breakpoint management, and frame inspection features.
 
 use remote.feature.features.{FeatureId, FeatureRank}
 use remote.feature.registry.{FeatureHandler, FeatureRegistry}
 use remote.protocol.gdb_mi.GdbMiClient
+use remote.breakpoint_manager.BreakpointManager
+use remote.frame_inspector.FrameInspector
+use remote.ptrace.PtraceSession
+use remote.dwarf.DwarfInfo
 use app.debug.coordinator.VarInfo
 
 # Register all GDB MI features at rank 0
@@ -59,7 +64,7 @@ fn register_gdb_features(registry: FeatureRegistry, gdb: GdbMiClient):
         "GDB -data-list-register-values x"
     ))
 
-    # Breakpoints
+    # Breakpoints (basic)
     registry.register(FeatureHandler.of(
         FeatureId.SetBreakpoint, FeatureRank.NATIVE(), "gdb",
         \args: gdb_set_breakpoint(gdb, args),
@@ -103,7 +108,117 @@ fn register_gdb_features(registry: FeatureRegistry, gdb: GdbMiClient):
         "GDB -stack-list-frames"
     ))
 
-# --- Handler adapters (convert [text] args to typed calls) ---
+    # --- Advanced breakpoint management (via BreakpointManager) ---
+    var bp_mgr = BreakpointManager.create(gdb)
+    register_breakpoint_features(registry, bp_mgr)
+
+    # --- Frame inspection (via FrameInspector) ---
+    var frame_insp = FrameInspector.create(gdb)
+    register_frame_features(registry, frame_insp)
+
+# Register advanced breakpoint management features
+fn register_breakpoint_features(registry: FeatureRegistry, bp_mgr: BreakpointManager):
+    registry.register(FeatureHandler.of(
+        FeatureId.ConditionalBreakpoint, FeatureRank.NATIVE(), "gdb-bp-mgr",
+        \args: handler_conditional_breakpoint(bp_mgr, args),
+        "GDB -break-insert -c (conditional breakpoint)"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.FunctionBreakpoint, FeatureRank.NATIVE(), "gdb-bp-mgr",
+        \args: handler_function_breakpoint(bp_mgr, args),
+        "GDB -break-insert (function breakpoint)"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.EnableBreakpoint, FeatureRank.NATIVE(), "gdb-bp-mgr",
+        \args: handler_enable_breakpoint(bp_mgr, args),
+        "GDB -break-enable"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.DisableBreakpoint, FeatureRank.NATIVE(), "gdb-bp-mgr",
+        \args: handler_disable_breakpoint(bp_mgr, args),
+        "GDB -break-disable"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.ListBreakpoints, FeatureRank.NATIVE(), "gdb-bp-mgr",
+        \args: handler_list_breakpoints(bp_mgr),
+        "GDB -break-list (list all breakpoints)"
+    ))
+
+# Register frame inspection features
+fn register_frame_features(registry: FeatureRegistry, frame_insp: FrameInspector):
+    registry.register(FeatureHandler.of(
+        FeatureId.SelectFrame, FeatureRank.NATIVE(), "gdb-frame",
+        \args: handler_select_frame(frame_insp, args),
+        "GDB -stack-select-frame"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.FrameLocals, FeatureRank.NATIVE(), "gdb-frame",
+        \args: handler_frame_locals(frame_insp, args),
+        "GDB -stack-list-locals --frame N"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.FrameArguments, FeatureRank.NATIVE(), "gdb-frame",
+        \args: handler_frame_arguments(frame_insp, args),
+        "GDB -stack-list-arguments --frame N"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.SetVariable, FeatureRank.NATIVE(), "gdb-frame",
+        \args: handler_set_variable(frame_insp, args),
+        "GDB -data-evaluate-expression (variable assignment)"
+    ))
+
+# Register ptrace features for native Linux process debugging
+fn register_ptrace_features(registry: FeatureRegistry, session: PtraceSession):
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceAttach, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_attach(session, args),
+        "ptrace PTRACE_ATTACH"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceDetach, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_detach(session),
+        "ptrace PTRACE_DETACH"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceContinue, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_continue(session),
+        "ptrace PTRACE_CONT"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceSingleStep, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_single_step(session),
+        "ptrace PTRACE_SINGLESTEP"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceReadMemory, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_read_memory(session, args),
+        "ptrace PTRACE_PEEKDATA"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.PtraceWriteMemory, FeatureRank.NATIVE(), "ptrace",
+        \args: handler_ptrace_write_memory(session, args),
+        "ptrace PTRACE_POKEDATA"
+    ))
+
+# Register DWARF debug info features
+fn register_dwarf_features(registry: FeatureRegistry, dwarf: DwarfInfo):
+    registry.register(FeatureHandler.of(
+        FeatureId.DwarfAddrToSource, FeatureRank.NATIVE(), "dwarf",
+        \args: handler_dwarf_addr_to_source(dwarf, args),
+        "DWARF address to source location"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.DwarfSourceToAddr, FeatureRank.NATIVE(), "dwarf",
+        \args: handler_dwarf_source_to_addr(dwarf, args),
+        "DWARF source location to address"
+    ))
+    registry.register(FeatureHandler.of(
+        FeatureId.DwarfFunctionName, FeatureRank.NATIVE(), "dwarf",
+        \args: handler_dwarf_function_name(dwarf, args),
+        "DWARF function name at address"
+    ))
+
+# --- Original handler adapters (convert [text] args to typed calls) ---
 
 fn gdb_read_memory(gdb: GdbMiClient, args: [text]) -> Result<text, text>:
     if args.len() < 2:
@@ -190,3 +305,173 @@ fn serialize_vars(vars: [VarInfo]) -> text:
     for v in vars:
         parts.push("{v.name}={v.value}:{v.type_name}")
     parts.join(";")
+
+# --- Breakpoint management handler adapters ---
+
+fn handler_conditional_breakpoint(bp_mgr: BreakpointManager, args: [text]) -> Result<text, text>:
+    if args.len() < 3:
+        return Err("ConditionalBreakpoint requires [file, line, condition]")
+    val file = args[0]
+    val line = args[1].parse_int() ?? 0
+    val condition = args[2]
+    val bp_id = bp_mgr.add_conditional_breakpoint(file, line, condition)?
+    Ok("{bp_id}")
+
+fn handler_function_breakpoint(bp_mgr: BreakpointManager, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("FunctionBreakpoint requires [func_name]")
+    val bp_id = bp_mgr.add_function_breakpoint(args[0])?
+    Ok("{bp_id}")
+
+fn handler_enable_breakpoint(bp_mgr: BreakpointManager, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("EnableBreakpoint requires [bp_id]")
+    val bp_id = args[0].parse_int() ?? 0
+    bp_mgr.enable_breakpoint(bp_id)
+
+fn handler_disable_breakpoint(bp_mgr: BreakpointManager, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("DisableBreakpoint requires [bp_id]")
+    val bp_id = args[0].parse_int() ?? 0
+    bp_mgr.disable_breakpoint(bp_id)
+
+fn handler_list_breakpoints(bp_mgr: BreakpointManager) -> Result<text, text>:
+    val bps = bp_mgr.list_breakpoints()
+    var parts: [text] = []
+    for bp in bps:
+        parts.push(bp.serialize())
+    Ok(parts.join(";"))
+
+# --- Frame inspection handler adapters ---
+
+fn handler_select_frame(frame_insp: FrameInspector, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("SelectFrame requires [index]")
+    val index = args[0].parse_int() ?? 0
+    frame_insp.select_frame(index)
+
+fn handler_frame_locals(frame_insp: FrameInspector, args: [text]) -> Result<text, text>:
+    val frame_index = if args.len() > 0: args[0].parse_int() ?? 0 else: 0
+    val vars = frame_insp.get_frame_locals(frame_index)?
+    var parts: [text] = []
+    for v in vars:
+        parts.push(v.serialize())
+    Ok(parts.join(";"))
+
+fn handler_frame_arguments(frame_insp: FrameInspector, args: [text]) -> Result<text, text>:
+    val frame_index = if args.len() > 0: args[0].parse_int() ?? 0 else: 0
+    val vars = frame_insp.get_frame_arguments(frame_index)?
+    var parts: [text] = []
+    for v in vars:
+        parts.push(v.serialize())
+    Ok(parts.join(";"))
+
+fn handler_set_variable(frame_insp: FrameInspector, args: [text]) -> Result<text, text>:
+    if args.len() < 3:
+        return Err("SetVariable requires [name, value, frame_index]")
+    val name = args[0]
+    val value = args[1]
+    val frame_index = args[2].parse_int() ?? 0
+    val ok = frame_insp.set_variable(name, value, frame_index)?
+    if ok:
+        Ok("variable {name} set to {value}")
+    else:
+        Err("failed to set variable {name}")
+
+# --- Ptrace handler adapters ---
+
+fn handler_ptrace_attach(session: PtraceSession, args: [text]) -> Result<text, text>:
+    val err = session.attach()
+    if err.len() > 0:
+        Err(err)
+    else:
+        Ok("attached to pid {session.get_pid()}")
+
+fn handler_ptrace_detach(session: PtraceSession) -> Result<text, text>:
+    val err = session.detach()
+    if err.len() > 0:
+        Err(err)
+    else:
+        Ok("detached from pid {session.get_pid()}")
+
+fn handler_ptrace_continue(session: PtraceSession) -> Result<text, text>:
+    val err = session.continue_exec()
+    if err.len() > 0:
+        Err(err)
+    else:
+        Ok("continued pid {session.get_pid()}")
+
+fn handler_ptrace_single_step(session: PtraceSession) -> Result<text, text>:
+    val err = session.single_step()
+    if err.len() > 0:
+        Err(err)
+    else:
+        Ok("single-stepped pid {session.get_pid()}")
+
+fn handler_ptrace_read_memory(session: PtraceSession, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("PtraceReadMemory requires [addr, size]")
+    val addr = args[0].parse_int() ?? 0
+    val size = args[1].parse_int() ?? 0
+    val data = session.read_memory(addr, size)
+    if data.len() == 0:
+        return Err("ptrace read_memory failed at 0x{addr}")
+    var parts: [text] = []
+    for word in data:
+        parts.push("{word}")
+    Ok(parts.join(","))
+
+fn handler_ptrace_write_memory(session: PtraceSession, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("PtraceWriteMemory requires [addr, data...]")
+    val addr = args[0].parse_int() ?? 0
+    var data: [i64] = []
+    for i in 1..args.len():
+        data.push(args[i].parse_int() ?? 0)
+    val result = session.write_memory(addr, data)
+    if result < 0:
+        Err("ptrace write_memory failed at 0x{addr}: error {result}")
+    else:
+        Ok("wrote {data.len()} words to 0x{addr}")
+
+# --- DWARF handler adapters ---
+
+fn handler_dwarf_addr_to_source(dwarf: DwarfInfo, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("DwarfAddrToSource requires [addr]")
+    val addr = args[0].parse_int() ?? 0
+    val loc = dwarf.addr_to_source(addr)
+    if loc == nil:
+        Err("no source location for address 0x{addr}")
+    else:
+        Ok(loc.to_string())
+
+fn handler_dwarf_source_to_addr(dwarf: DwarfInfo, args: [text]) -> Result<text, text>:
+    if args.len() < 2:
+        return Err("DwarfSourceToAddr requires [file, line]")
+    val file = args[0]
+    val line = args[1].parse_int() ?? 0
+    val addr = dwarf.source_to_addr(file, line)
+    if addr == 0:
+        Err("no address for {file}:{line}")
+    else:
+        Ok("{addr}")
+
+fn handler_dwarf_function_name(dwarf: DwarfInfo, args: [text]) -> Result<text, text>:
+    if args.len() < 1:
+        return Err("DwarfFunctionName requires [addr]")
+    val addr = args[0].parse_int() ?? 0
+    val name = dwarf.function_name_at(addr)
+    if name.len() == 0:
+        Err("no function name at address 0x{addr}")
+    else:
+        Ok(name)
+
+# --- Exports ---
+
+export register_gdb_features
+export register_breakpoint_features
+export register_frame_features
+export register_ptrace_features
+export register_dwarf_features
+export serialize_vars
