@@ -59,6 +59,28 @@ fn add_scalar(t: PureTensor<f64>, scalar: f64) -> PureTensor<f64>:
         result_data.push(v + scalar)
     tensor_from_data(result_data, t.shape)
 
+fn div_scalar(t: PureTensor<f64>, scalar: f64) -> PureTensor<f64>:
+    """Divide tensor by scalar."""
+    var result_data: [f64] = []
+    for v in t.data:
+        result_data.push(v / scalar)
+    tensor_from_data(result_data, t.shape)
+
+fn neg(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Element-wise negation."""
+    var result_data: [f64] = []
+    for v in t.data:
+        result_data.push(0.0 - v)
+    tensor_from_data(result_data, t.shape)
+
+fn abs_val(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Element-wise absolute value."""
+    var result_data: [f64] = []
+    for v in t.data:
+        val a = if v < 0.0: 0.0 - v else: v
+        result_data.push(a)
+    tensor_from_data(result_data, t.shape)
+
 # ============================================================================
 # Matrix Operations
 # ============================================================================
@@ -182,10 +204,133 @@ fn tanh(x: PureTensor<f64>) -> PureTensor<f64>:
     tensor_from_data(result_data, x.shape)
 
 # ============================================================================
+# Advanced Math Functions
+# ============================================================================
+
+fn tensor_exp(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Element-wise exponential using Taylor series (20 terms)."""
+    var result_data: [f64] = []
+    for x in t.data:
+        result_data.push(exp(x))
+    tensor_from_data(result_data, t.shape)
+
+fn tensor_log(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Element-wise natural logarithm.
+
+    Uses series: ln(x) = 2 * atanh((x-1)/(x+1))
+    where atanh(z) = z + z^3/3 + z^5/5 + ... (20 terms)
+    For x <= 0, returns -999999.0 as sentinel.
+    """
+    var result_data: [f64] = []
+    for x in t.data:
+        var log_val = -999999.0
+        if x > 0.0:
+            val z = (x - 1.0) / (x + 1.0)
+            var sum = 0.0
+            var z_pow = z
+            var i = 0
+            while i < 20:
+                val denom = 2 * i + 1
+                sum = sum + z_pow / denom
+                z_pow = z_pow * z * z
+                i = i + 1
+            log_val = 2.0 * sum
+        result_data.push(log_val)
+    tensor_from_data(result_data, t.shape)
+
+fn tensor_sqrt(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Element-wise square root via Newton's method (15 iterations).
+
+    For x <= 0, returns 0.0.
+    """
+    var result_data: [f64] = []
+    for x in t.data:
+        var sqrt_val = 0.0
+        if x > 0.0:
+            var guess = x / 2.0
+            var i = 0
+            while i < 15:
+                guess = (guess + x / guess) / 2.0
+                i = i + 1
+            sqrt_val = guess
+        result_data.push(sqrt_val)
+    tensor_from_data(result_data, t.shape)
+
+fn clamp(t: PureTensor<f64>, min_val: f64, max_val: f64) -> PureTensor<f64>:
+    """Clamp tensor elements to [min_val, max_val] range."""
+    var result_data: [f64] = []
+    for v in t.data:
+        val clamped = if v < min_val: min_val elif v > max_val: max_val else: v
+        result_data.push(clamped)
+    tensor_from_data(result_data, t.shape)
+
+fn softmax(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Numerically stable softmax over all elements.
+
+    Subtracts max before exp to prevent overflow.
+    """
+    var max_v = t.data[0]
+    for v in t.data:
+        if v > max_v:
+            max_v = v
+
+    var exp_data: [f64] = []
+    var exp_sum = 0.0
+    for v in t.data:
+        val x = v - max_v
+        val exp_val = exp(x)
+        exp_data.push(exp_val)
+        exp_sum = exp_sum + exp_val
+
+    var result_data: [f64] = []
+    for e in exp_data:
+        result_data.push(e / exp_sum)
+    tensor_from_data(result_data, t.shape)
+
+fn pow_scalar(t: PureTensor<f64>, power: f64) -> PureTensor<f64>:
+    """Raise each element to the given power.
+
+    Uses exp(power * log(x)) for positive values.
+    For x <= 0, returns 0.0.
+    """
+    var result_data: [f64] = []
+    for x in t.data:
+        var pow_val = 0.0
+        if x > 0.0:
+            val z = (x - 1.0) / (x + 1.0)
+            var log_sum = 0.0
+            var z_pow = z
+            var k = 0
+            while k < 20:
+                val denom = 2 * k + 1
+                log_sum = log_sum + z_pow / denom
+                z_pow = z_pow * z * z
+                k = k + 1
+            val log_x = 2.0 * log_sum
+            val y = power * log_x
+            pow_val = exp(y)
+        result_data.push(pow_val)
+    tensor_from_data(result_data, t.shape)
+
+# ============================================================================
+# Reduction Operations (return tensors)
+# ============================================================================
+
+fn tensor_sum_to_scalar(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Sum all elements into a [1] shape tensor."""
+    tensor_from_data([sum(t)], [1])
+
+fn tensor_mean_to_scalar(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Mean of all elements into a [1] shape tensor."""
+    tensor_from_data([mean(t)], [1])
+
+# ============================================================================
 # Exports
 # ============================================================================
 
-export add, sub, mul, div, mul_scalar, add_scalar
+export add, sub, mul, div, mul_scalar, add_scalar, div_scalar, neg, abs_val
 export matmul, transpose
 export sum, mean, max, min
 export relu, sigmoid, tanh
+export tensor_exp, tensor_log, tensor_sqrt, clamp, softmax, pow_scalar
+export tensor_sum_to_scalar, tensor_mean_to_scalar

@@ -1,30 +1,213 @@
-# Async Runtime Module
-#
-# Core async/await runtime for Simple language.
-# Provides futures, tasks, executors, and async I/O primitives.
-#
-# Features:
-#   - Future-based async execution
-#   - Task spawning and scheduling
-#   - Async I/O operations
-#   - Promise/future combinators
-#   - Multi-executor support
-#
-# Public API:
-#   - use std.async.future.{Future, async_fn}
-#   - use std.async.task.{Task, spawn_task}
-#   - use std.async.runtime.{AsyncRuntime, run_async}
-#   - use std.async.executor.{Executor}
-#   - use std.async.promise.{Promise, PromiseResolver}
-#
-# Components:
-#   - Future: Core async abstraction
-#   - Task: Unit of async work
-#   - Executor: Task scheduler
-#   - Runtime: Complete async environment
-#   - Poll: Polling mechanism
-#   - Combinators: Future composition (map, then, join)
-#   - I/O: Async file/network operations
-#   - FFI: Native async integration
+"""Async runtime module for asynchronous programming in Simple.
+
+@tag:stdlib
+@tag:api
+
+This module provides a complete async/await runtime system based on the Rust async model.
+It enables non-blocking I/O, concurrent task execution, and composable async operations
+without threads or callbacks.
+
+Architecture
+------------
+
+The async system consists of four core components:
+
+1. **Future** - Lazy async computation that may not be complete yet
+2. **Task** - Schedulable unit of async work with metadata
+3. **Executor** - Cooperative task scheduler (single-threaded)
+4. **Runtime** - Complete event loop with task management
+
+How Async Works
+---------------
+
+Async functions return Futures that represent values not yet available.
+The executor polls futures repeatedly until they complete:
+
+- **Poll.Ready(value)** - Future completed with value
+- **Poll.Pending** - Future not ready, will be woken later
+
+When a future is Pending, it registers a waker callback. When the awaited
+resource becomes ready (I/O completes, timer expires, etc.), the waker
+is called to reschedule the task.
+
+This cooperative approach allows thousands of concurrent operations
+without thread overhead.
+
+Public API
+----------
+
+**Core types:**
+- use std.async.future.{Future}
+- use std.async.task.{Task, TaskState}
+- use std.async.executor.{Executor}
+- use std.async.runtime.{Runtime, spawn, block_on}
+- use std.async.promise.{Promise}
+- use std.async.poll.{Poll}
+
+**I/O operations:**
+- use std.async.io.{AsyncIO}
+
+**Combinators:**
+- use std.async.combinators.{gather, race, timeout}
+
+Examples
+--------
+
+Basic async function:
+
+```simple
+use std.async.future.{Future}
+use std.async.runtime.{Runtime}
+
+fn fetch_data() -> Future<i64>:
+    Future.from_value(42)
+
+val runtime = Runtime.new()
+val result = runtime.block_on(fetch_data())
+print "Got: {result}"  # Got: 42
+```
+
+Task spawning and joining:
+
+```simple
+use std.async.future.{Future}
+use std.async.task.{Task}
+use std.async.executor.{Executor}
+
+fn async_work() -> Future<()>:
+    Future.from_value(())
+
+val executor = Executor.new()
+
+# Spawn multiple tasks
+val task1 = Task.new(\: async_work())
+val task2 = Task.new(\: async_work())
+
+executor.spawn(task1)
+executor.spawn(task2)
+
+# Run until all complete
+executor.run()
+print "All tasks done"
+```
+
+Async I/O operations:
+
+```simple
+use std.async.io.{AsyncIO}
+use std.async.runtime.{Runtime}
+
+fn read_config() -> Future<[u8]>:
+    val io = AsyncIO.new()
+    io.read_file("config.txt")
+
+val runtime = Runtime.new()
+var data_result = nil
+# In real code: data_result = runtime.block_on(read_config())
+print "Read {data_result.len()} bytes"
+```
+
+Error handling with Option pattern:
+
+```simple
+use std.async.future.{Future}
+use std.async.runtime.{Runtime}
+
+fn may_fail() -> Future<i64?>:
+    # Simulate error case
+    var error = nil
+    if true:
+        Future.from_value(nil)  # Error occurred
+    else:
+        Future.from_value(42)   # Success
+
+val runtime = Runtime.new()
+val result = runtime.block_on(may_fail())
+
+match result:
+    case nil:
+        print "Operation failed"
+    case value:
+        print "Got: {value}"
+```
+
+Submodules
+----------
+
+- **future** - Core Future type and operations
+- **task** - Task abstraction and scheduling metadata
+- **executor** - Single-threaded cooperative scheduler
+- **runtime** - Event loop and task management
+- **promise** - Write side of futures (Promise/Future pair)
+- **poll** - Polling mechanism and waker system
+- **io** - Async I/O operations (files, sleep, yield)
+- **combinators** - Future composition (map, then, join, race)
+- **scheduler** - Task prioritization and scheduling
+- **ffi** - Native async integration layer
+
+Common Patterns
+---------------
+
+**Chaining futures** - Transform results with map/then:
+
+```simple
+val result = future
+    .map(\x: x * 2)      # Transform value
+    .then(\x: Future.from_value(x + 1))  # Chain another future
+```
+
+**Concurrent operations** - Run multiple tasks:
+
+```simple
+val futures = [fetch1(), fetch2(), fetch3()]
+val results = runtime.block_on(gather(futures))
+```
+
+**Timeouts** - Prevent hanging:
+
+```simple
+val result = runtime.block_on(timeout(slow_op(), 5000))
+match result:
+    case nil: print "Timed out"
+    case value: print "Completed: {value}"
+```
+
+**Promise pattern** - Manual completion:
+
+```simple
+val (future, promise) = Promise.new()
+
+# Complete from another context
+promise.complete(42)
+
+# Future now ready
+val value = runtime.block_on(future)  # 42
+```
+
+Limitations
+-----------
+
+1. **No exceptions** - Use Option/Result patterns for errors
+2. **Single-threaded** - Executor runs on one thread (use multiple executors for parallelism)
+3. **No async syntax** - Manual Future construction (async/await keywords are future work)
+4. **Runtime-only** - Async code requires the runtime, can't be used in compiled contexts yet
+
+Performance Notes
+-----------------
+
+- Futures are zero-cost until polled
+- Task spawning is O(1)
+- Executor overhead is minimal (just polling)
+- No heap allocation for ready futures
+- Wakers use function pointers (no closures)
+
+See Also
+--------
+
+- doc/guide/async_programming.md - Async programming guide
+- doc/design/async_runtime.md - Runtime architecture
+- test/unit/std/async/ - Async test examples
+"""
 
 # All submodules are automatically available through the module system.
+# Import them explicitly for type checking and IDE support.

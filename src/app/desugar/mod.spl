@@ -1,12 +1,110 @@
-# Desugar Module - Source-Level Transformation
+# @tag:compiler
+# @tag:internal
 #
-# Orchestrates desugaring passes that transform Simple code into forms
-# the current runtime can execute. Primary use case: transform static
-# method definitions and calls into module-level functions.
+# Desugar Module - Source-Level AST Transformation Pipeline
 #
-# NOTE: This module runs on the Rust runtime, so it MUST NOT use any
-# static fn patterns. All functions are module-level.
-# BUG workarounds from doc/report/runtime_parser_bugs_2026-02-06.md applied.
+# Orchestrates multi-pass desugaring that transforms high-level Simple code
+# into forms the current runtime can execute. This module implements a
+# four-pass pipeline that rewrites source text to remove syntax features
+# not yet supported by the runtime (static methods, static constants, enum
+# constructors).
+#
+# Pipeline Stages:
+#   Pass 0: Static constant extraction - hoist static consts from impl blocks
+#   Pass 1: Static method extraction - transform Type::method -> Type__method
+#   Pass 2: Enum constructor generation - create factory functions for variants
+#   Pass 3: Call site rewriting - rewrite Type.method() -> Type__method()
+#
+# Each pass operates on source text (not AST) for compatibility with the
+# current runtime parser. The transformations are purely syntactic - no
+# type checking or semantic analysis.
+#
+# Architecture:
+#   - desugar_module: Main entry point, coordinates passes
+#   - static_constants: Extracts static consts from impl blocks
+#   - static_methods: Extracts static methods from impl blocks
+#   - enum_constructors: Generates factory functions for enum variants
+#   - rewriter: Rewrites call sites to use desugared names
+#
+# Transformation Example:
+#   Input:
+#     impl Point:
+#         static val ORIGIN = Point(x: 0, y: 0)
+#         static fn distance(p1: Point, p2: Point) -> f64:
+#             ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2).sqrt()
+#     val d = Point.distance(Point.ORIGIN, p)
+#
+#   Output:
+#     val Point__ORIGIN = Point(x: 0, y: 0)
+#     fn Point__distance(p1: Point, p2: Point) -> f64:
+#         ((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2).sqrt()
+#     val d = Point__distance(Point__ORIGIN, p)
+#
+# SDoctest Examples:
+#
+# Example 1: Basic static method desugaring
+# ```simple
+# use app.desugar.mod.{desugar_source}
+#
+# val input = """impl Counter:
+#     static fn zero() -> i64:
+#         0
+# """
+#
+# val output = desugar_source(input)
+# # Expect: "fn Counter__zero() -> i64:\n    0"
+# print output.contains("fn Counter__zero()")
+# # Output: true
+# ```
+#
+# Example 2: Static constant extraction
+# ```simple
+# use app.desugar.mod.{desugar_source}
+#
+# val input = """impl Math:
+#     static val PI = 3.14159
+# """
+#
+# val output = desugar_source(input)
+# # Constant hoisted to module level
+# print output.contains("val Math__PI = 3.14159")
+# # Output: true
+# ```
+#
+# Example 3: Full pipeline with call site rewriting
+# ```simple
+# use app.desugar.mod.{desugar_source}
+#
+# val input = """impl Point:
+#     static fn origin() -> Point:
+#         Point(x: 0, y: 0)
+#
+# val p = Point.origin()
+# """
+#
+# val output = desugar_source(input)
+# # Method definition rewritten
+# print output.contains("fn Point__origin()")
+# # Output: true
+# # Call site rewritten
+# print output.contains("Point__origin()")
+# # Output: true
+# ```
+#
+# Runtime Compatibility:
+#   - NO exceptions (try/catch/throw) - Simple does not support them
+#   - NO generics at runtime - <> syntax fails in interpreter
+#   - NO static fn patterns - this module must run in current runtime
+#   - Workarounds from doc/report/runtime_parser_bugs_2026-02-06.md applied
+#
+# Usage:
+#   simple desugar <file.spl> [-o <output.spl>]
+#
+# See Also:
+#   - static_methods.spl - Static method extraction logic
+#   - static_constants.spl - Static constant extraction logic
+#   - enum_constructors.spl - Enum variant factory generation
+#   - rewriter.spl - Call site rewriting logic
 
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -18,7 +116,24 @@ use app.desugar.rewriter (rewrite_static_calls)
 
 export desugar_file, desugar_source
 
-# Desugar a source file in-place or to an output path
+# Desugar a source file in-place or to an output path.
+#
+# Reads the source file, applies all desugaring passes, and writes the
+# transformed output to the specified path. Returns true on success,
+# false on file I/O errors.
+#
+# Parameters:
+#   input_path: Path to the source .spl file to desugar
+#   output_path: Path where desugared output will be written
+#
+# Returns:
+#   true if file was successfully read, desugared, and written
+#   false if file read/write failed
+#
+# Example:
+#   val ok = desugar_file("src/example.spl", "build/example.desugared.spl")
+#   if ok:
+#       print "desugared successfully"
 fn desugar_file(input_path: text, output_path: text) -> bool:
     val source = rt_file_read_text(input_path)
     val source = source ?? ""
@@ -30,32 +145,83 @@ fn desugar_file(input_path: text, output_path: text) -> bool:
     val ok = rt_file_write_text(output_path, result)
     ok
 
-# Desugar source text, returning transformed source
+# Desugar source text, returning transformed source.
+#
+# Applies all four desugaring passes in sequence:
+#   1. Extract static constants from impl blocks
+#   2. Extract static methods from impl blocks
+#   3. Generate enum variant factory functions
+#   4. Rewrite call sites to use desugared names
+#
+# Each pass operates on the output of the previous pass, building up
+# the complete transformation. The passes are order-dependent: extraction
+# must happen before rewriting.
+#
+# Parameters:
+#   source: Original Simple source code as text
+#
+# Returns:
+#   Transformed source code with all static patterns desugared
+#
+# Example:
+#   val original = "impl Foo:\n    static fn bar() -> i64:\n        42\n"
+#   val desugared = desugar_source(original)
+#   # desugared now contains: "fn Foo__bar() -> i64:\n    42\n"
 fn desugar_source(source: text) -> text:
     # Pass 0: Extract static constant definitions from impl blocks,
     #         hoist them as module-level values named TypeName__CONSTANT
+    #
+    # Example: "impl Math:\n    static val PI = 3.14159"
+    #       -> "val Math__PI = 3.14159"
     val pass0 = desugar_static_constants(source)
 
     # Pass 1: Extract static method definitions from impl blocks,
     #         hoist them as module-level functions named TypeName__method_name
+    #
+    # Example: "impl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)"
+    #       -> "fn Point__origin() -> Point:\n    Point(x: 0, y: 0)"
     val pass1 = desugar_static_methods(pass0)
 
     # Pass 2: Extract enum variants and generate factory functions
     #         named EnumName__VariantName
+    #
+    # Example: "enum Option:\n    Some(val)\n    None"
+    #       -> "fn Option__Some(val):\n    ...\nfn Option__None():\n    ..."
     val pass2 = desugar_enum_constructors(pass1)
 
     # Pass 3: Rewrite Type.method(args) and Type.CONSTANT calls to
     #         TypeName__method_name(args) and TypeName__CONSTANT
     #         This handles static methods, constants, and enum constructors
+    #
+    # Example: "val p = Point.origin()"
+    #       -> "val p = Point__origin()"
+    # Example: "val pi = Math.PI"
+    #       -> "val pi = Math__PI"
     val pass3 = rewrite_static_calls(pass2)
 
     pass3
 
 # Main entry point for CLI: simple desugar <file> [-o <output>]
+#
+# Command-line interface for the desugar tool. Reads a .spl source file,
+# applies all desugaring passes, and either prints to stdout or writes
+# to an output file.
+#
+# Usage:
+#   simple desugar <file.spl>              # Print desugared source to stdout
+#   simple desugar <file.spl> -o <out.spl> # Write desugared source to file
+#
+# Exit Codes:
+#   0 - Success
+#   1 - File not found, invalid arguments, or I/O error
+#
+# Example:
+#   simple desugar src/point.spl -o build/point.desugared.spl
 fn main() -> i64:
     extern fn rt_cli_args() -> [text]
     val args = rt_cli_args()
     # BUG-01 workaround: use explicit 0:len instead of [:len]
+    # Runtime parser fails on [:var] - always use [0:var] for prefix slicing
 
     if args.len() < 2:
         print "Usage: simple desugar <file.spl> [-o <output.spl>]"
@@ -67,7 +233,9 @@ fn main() -> i64:
     val input = args[1]
     var output = ""
 
-    # Parse -o flag
+    # Parse -o flag to determine output destination
+    # If no -o flag, output goes to stdout
+    # If -o <path>, output is written to the specified file
     var i = 2
     while i < args.len():
         if args[i] == "-o" and i + 1 < args.len():
@@ -77,7 +245,8 @@ fn main() -> i64:
             i = i + 1
 
     if output == "":
-        # Default: print to stdout
+        # Default: print to stdout (no -o flag provided)
+        # This is useful for piping to other tools or quick inspection
         val source = rt_file_read_text(input)
         val source = source ?? ""
         if source == "":
