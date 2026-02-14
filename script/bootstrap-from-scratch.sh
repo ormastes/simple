@@ -346,7 +346,7 @@ step1_build_seed() {
     log "Configuring with cmake..."
     run cmake -S "$SEED_DIR" -B "$SEED_DIR/build" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DCMAKE_C_COMPILER="$(echo "$CXX" | sed 's/++$//' | sed 's/clang$/clang/' | sed 's/g$/gcc/')" \
+        -DCMAKE_C_COMPILER="$(echo "$CXX" | sed 's/clang++$/clang/' | sed 's/g++$/gcc/' | sed 's/c++$/cc/')" \
         ${VERBOSE:+-DCMAKE_VERBOSE_MAKEFILE=ON} \
         >/dev/null 2>&1 || run cmake -S "$SEED_DIR" -B "$SEED_DIR/build"
 

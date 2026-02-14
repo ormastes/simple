@@ -27,6 +27,9 @@
 
 .SUFFIXES: .hpux_make_needs_suffix_list
 
+# Produce verbose output by default.
+VERBOSE = 1
+
 # Command-line flag to silence nested $(MAKE).
 $(VERBOSE)MAKESILENT = -s
 
@@ -95,7 +98,6 @@ c_runtime_test_EXTERNAL_OBJECTS =
 
 c_runtime_test: CMakeFiles/c_runtime_test.dir/c_runtime_test.c.o
 c_runtime_test: CMakeFiles/c_runtime_test.dir/build.make
-c_runtime_test: CMakeFiles/c_runtime_test.dir/compiler_depend.ts
 c_runtime_test: CMakeFiles/c_runtime_test.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/ormastes/dev/pub/simple/seed/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking C executable c_runtime_test"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/c_runtime_test.dir/link.txt --verbose=$(VERBOSE)
