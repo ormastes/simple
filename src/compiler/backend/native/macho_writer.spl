@@ -1,0 +1,621 @@
+# Mach-O 64-bit Object File Writer
+#
+# Pure-Simple Mach-O 64-bit relocatable object file (.o) emitter for macOS.
+# Produces valid Mach-O files that can be linked with ld64 or lld.
+#
+# Supported features:
+# - CPU types: ARM64 (Apple Silicon), x86_64 (Intel Mac)
+# - Sections: __TEXT/__text, __TEXT/__const, __DATA/__data
+# - Symbols: local + global, function + data, extern (undefined)
+# - Relocations: ARM64 (BRANCH26, PAGE21, PAGEOFF12), x86_64 (BRANCH, SIGNED, UNSIGNED)
+# - LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_BUILD_VERSION load commands
+#
+# Reuses ByteBuffer and StringTable from elf_writer.spl
+
+use compiler.backend.native.elf_writer.{ByteBuffer, StringTable, new_byte_buffer, buf_len, buf_write_u8, buf_write_u16_le, buf_write_u32_le, buf_write_u64_le, buf_write_bytes, buf_write_zeroes, buf_align_to, new_string_table, strtab_add, strtab_get_offset, align_offset, pad_to}
+
+# ============================================================================
+# Mach-O Constants
+# ============================================================================
+
+# Mach-O magic numbers
+val MH_MAGIC_64 = 0xfeedfacf  # 64-bit Mach-O magic (little-endian)
+
+# CPU types
+val CPU_TYPE_X86_64 = 0x01000007  # x86_64 = CPU_TYPE_X86 | CPU_ARCH_ABI64
+val CPU_TYPE_ARM64 = 0x0100000c   # ARM64 = CPU_TYPE_ARM | CPU_ARCH_ABI64
+
+# CPU subtypes
+val CPU_SUBTYPE_X86_64_ALL = 3
+val CPU_SUBTYPE_ARM64_ALL = 0
+val CPU_SUBTYPE_ARM64_V8 = 1
+
+# File types
+val MH_OBJECT = 1  # Relocatable object file
+
+# Header flags
+val MH_SUBSECTIONS_VIA_SYMBOLS = 0x2000
+
+# Load command types
+val LC_SEGMENT_64 = 0x19
+val LC_SYMTAB = 0x02
+val LC_DYSYMTAB = 0x0b
+val LC_BUILD_VERSION = 0x32
+
+# Section types
+val S_REGULAR = 0x0
+val S_CSTRING_LITERALS = 0x2
+
+# Section attributes
+val S_ATTR_PURE_INSTRUCTIONS = 0x80000000
+val S_ATTR_SOME_INSTRUCTIONS = 0x00000400
+
+# Symbol types (n_type field)
+val N_UNDF = 0x0   # Undefined symbol
+val N_ABS = 0x2     # Absolute symbol
+val N_SECT = 0xe    # Defined in section
+val N_EXT = 0x01    # External (global) bit
+
+# Symbol description (n_desc bits)
+val N_WEAK_REF = 0x0040
+val N_WEAK_DEF = 0x0080
+
+# ARM64 relocation types
+val ARM64_RELOC_UNSIGNED = 0
+val ARM64_RELOC_SUBTRACTOR = 1
+val ARM64_RELOC_BRANCH26 = 2
+val ARM64_RELOC_PAGE21 = 3
+val ARM64_RELOC_PAGEOFF12 = 4
+val ARM64_RELOC_GOT_LOAD_PAGE21 = 5
+val ARM64_RELOC_GOT_LOAD_PAGEOFF12 = 6
+val ARM64_RELOC_POINTER_TO_GOT = 7
+val ARM64_RELOC_TLVP_LOAD_PAGE21 = 8
+val ARM64_RELOC_TLVP_LOAD_PAGEOFF12 = 9
+val ARM64_RELOC_ADDEND = 10
+
+# x86_64 relocation types
+val X86_64_RELOC_UNSIGNED = 0
+val X86_64_RELOC_SIGNED = 1
+val X86_64_RELOC_BRANCH = 2
+val X86_64_RELOC_GOT_LOAD = 3
+val X86_64_RELOC_GOT = 4
+val X86_64_RELOC_SUBTRACTOR = 5
+val X86_64_RELOC_SIGNED_1 = 6
+val X86_64_RELOC_SIGNED_2 = 7
+val X86_64_RELOC_SIGNED_4 = 8
+val X86_64_RELOC_TLV = 9
+
+# Build version platforms
+val PLATFORM_MACOS = 1
+val PLATFORM_IOS = 2
+
+# Build version tools
+val TOOL_CLANG = 1
+val TOOL_LD = 3
+
+# Sizes
+val MACHO_HEADER_SIZE = 32      # mach_header_64 size
+val SEGMENT_CMD_SIZE = 72       # segment_command_64 base size (without sections)
+val SECTION_64_SIZE = 80        # section_64 size
+val NLIST_64_SIZE = 16          # nlist_64 size
+val RELOC_INFO_SIZE = 8         # relocation_info size
+val BUILD_VERSION_SIZE = 24     # build_version_command base size
+val BUILD_TOOL_SIZE = 8         # build_tool_version size
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+struct MachOSection:
+    sect_name: text       # Section name (max 16 chars, e.g., "__text")
+    seg_name: text        # Segment name (max 16 chars, e.g., "__TEXT")
+    data: [i64]
+    alignment: i64        # Power of 2 (e.g., 4 means 2^4 = 16-byte aligned)
+    sect_type: i64        # S_REGULAR, S_CSTRING_LITERALS, etc.
+    attributes: i64       # S_ATTR_PURE_INSTRUCTIONS, etc.
+    relocations: [MachOReloc]
+
+struct MachOReloc:
+    offset: i64           # Offset within section
+    symbol_index: i64     # Index in symbol table
+    reloc_type: i64       # ARM64_RELOC_* or X86_64_RELOC_*
+    length: i64           # 0=byte, 1=word, 2=long, 3=quad
+    is_pc_relative: bool
+    is_extern: bool
+
+struct MachOSymbol:
+    name: text
+    sym_type: i64         # N_UNDF, N_SECT, N_ABS, etc. (ORed with N_EXT for global)
+    section_ordinal: i64  # 1-based section ordinal (0 = NO_SECT for undefined)
+    desc: i64             # n_desc field
+    value: i64            # n_value
+
+struct MachOWriter:
+    cpu_type: i64
+    cpu_subtype: i64
+    sections: [MachOSection]
+    symbols: [MachOSymbol]
+
+# ============================================================================
+# Constructors
+# ============================================================================
+
+fn macho_writer_aarch64() -> MachOWriter:
+    MachOWriter(
+        cpu_type: CPU_TYPE_ARM64,
+        cpu_subtype: CPU_SUBTYPE_ARM64_ALL,
+        sections: [],
+        symbols: []
+    )
+
+fn macho_writer_x86_64() -> MachOWriter:
+    MachOWriter(
+        cpu_type: CPU_TYPE_X86_64,
+        cpu_subtype: CPU_SUBTYPE_X86_64_ALL,
+        sections: [],
+        symbols: []
+    )
+
+fn macho_add_section(writer: MachOWriter, section: MachOSection) -> MachOWriter:
+    var new_sections = writer.sections
+    new_sections = new_sections + [section]
+    MachOWriter(
+        cpu_type: writer.cpu_type,
+        cpu_subtype: writer.cpu_subtype,
+        sections: new_sections,
+        symbols: writer.symbols
+    )
+
+fn macho_add_symbol(writer: MachOWriter, sym: MachOSymbol) -> MachOWriter:
+    var new_symbols = writer.symbols
+    new_symbols = new_symbols + [sym]
+    MachOWriter(
+        cpu_type: writer.cpu_type,
+        cpu_subtype: writer.cpu_subtype,
+        sections: writer.sections,
+        symbols: new_symbols
+    )
+
+# ============================================================================
+# Section Factories
+# ============================================================================
+
+fn new_macho_text_section(data: [i64]) -> MachOSection:
+    MachOSection(
+        sect_name: "__text",
+        seg_name: "__TEXT",
+        data: data,
+        alignment: 4,  # 2^4 = 16-byte aligned
+        sect_type: S_REGULAR,
+        attributes: S_ATTR_PURE_INSTRUCTIONS + S_ATTR_SOME_INSTRUCTIONS,
+        relocations: []
+    )
+
+fn new_macho_const_section(data: [i64]) -> MachOSection:
+    MachOSection(
+        sect_name: "__const",
+        seg_name: "__TEXT",
+        data: data,
+        alignment: 3,  # 2^3 = 8-byte aligned
+        sect_type: S_REGULAR,
+        attributes: 0,
+        relocations: []
+    )
+
+fn new_macho_data_section(data: [i64]) -> MachOSection:
+    MachOSection(
+        sect_name: "__data",
+        seg_name: "__DATA",
+        data: data,
+        alignment: 3,  # 2^3 = 8-byte aligned
+        sect_type: S_REGULAR,
+        attributes: 0,
+        relocations: []
+    )
+
+fn new_macho_cstring_section(data: [i64]) -> MachOSection:
+    MachOSection(
+        sect_name: "__cstring",
+        seg_name: "__TEXT",
+        data: data,
+        alignment: 0,  # 2^0 = 1-byte aligned
+        sect_type: S_CSTRING_LITERALS,
+        attributes: 0,
+        relocations: []
+    )
+
+fn macho_section_add_reloc(section: MachOSection, reloc: MachOReloc) -> MachOSection:
+    var new_relocs = section.relocations
+    new_relocs = new_relocs + [reloc]
+    MachOSection(
+        sect_name: section.sect_name,
+        seg_name: section.seg_name,
+        data: section.data,
+        alignment: section.alignment,
+        sect_type: section.sect_type,
+        attributes: section.attributes,
+        relocations: new_relocs
+    )
+
+# ============================================================================
+# Symbol Factories
+# ============================================================================
+
+fn macho_symbol_name(name: text) -> text:
+    # Mach-O convention: C symbols get underscore prefix
+    "_{name}"
+
+fn new_macho_func_symbol(name: text, section_ordinal: i64, value: i64) -> MachOSymbol:
+    MachOSymbol(
+        name: macho_symbol_name(name),
+        sym_type: N_SECT + N_EXT,  # Defined + external (global)
+        section_ordinal: section_ordinal,
+        desc: 0,
+        value: value
+    )
+
+fn new_macho_local_symbol(name: text, section_ordinal: i64, value: i64) -> MachOSymbol:
+    MachOSymbol(
+        name: macho_symbol_name(name),
+        sym_type: N_SECT,  # Defined, local
+        section_ordinal: section_ordinal,
+        desc: 0,
+        value: value
+    )
+
+fn new_macho_extern_symbol(name: text) -> MachOSymbol:
+    MachOSymbol(
+        name: macho_symbol_name(name),
+        sym_type: N_UNDF + N_EXT,  # Undefined + external
+        section_ordinal: 0,         # NO_SECT
+        desc: 0,
+        value: 0
+    )
+
+fn new_macho_data_symbol(name: text, section_ordinal: i64, value: i64) -> MachOSymbol:
+    MachOSymbol(
+        name: macho_symbol_name(name),
+        sym_type: N_SECT + N_EXT,
+        section_ordinal: section_ordinal,
+        desc: 0,
+        value: value
+    )
+
+# ============================================================================
+# Relocation Mapping (ELF -> Mach-O ARM64)
+# ============================================================================
+
+fn map_elf_reloc_to_macho_arm64(elf_reloc_type: i64) -> i64:
+    # Map common ELF AArch64 relocation types to Mach-O ARM64 types
+    if elf_reloc_type == 283: return ARM64_RELOC_BRANCH26       # R_AARCH64_CALL26
+    if elf_reloc_type == 275: return ARM64_RELOC_PAGE21          # R_AARCH64_ADR_PREL_PG_HI21
+    if elf_reloc_type == 277: return ARM64_RELOC_PAGEOFF12       # R_AARCH64_ADD_ABS_LO12_NC
+    if elf_reloc_type == 286: return ARM64_RELOC_PAGEOFF12       # R_AARCH64_LDST64_ABS_LO12_NC
+    ARM64_RELOC_UNSIGNED  # Fallback
+
+fn map_elf_reloc_to_macho_x86_64(elf_reloc_type: i64) -> i64:
+    # Map common ELF x86_64 relocation types to Mach-O x86_64 types
+    if elf_reloc_type == 4: return X86_64_RELOC_BRANCH    # R_X86_64_PLT32
+    if elf_reloc_type == 2: return X86_64_RELOC_SIGNED    # R_X86_64_PC32
+    if elf_reloc_type == 1: return X86_64_RELOC_UNSIGNED  # R_X86_64_64
+    if elf_reloc_type == 11: return X86_64_RELOC_SIGNED   # R_X86_64_32S
+    X86_64_RELOC_UNSIGNED  # Fallback
+
+# ============================================================================
+# Mach-O Relocation Helpers
+# ============================================================================
+
+fn macho_reloc_info(sym_idx: i64, is_pc_rel: bool, length: i64, is_ext: bool, reloc_type: i64) -> i64:
+    # Pack relocation_info r_symbolnum/r_pcrel/r_length/r_extern/r_type
+    # Bit layout (little-endian 32-bit):
+    #   bits 0-23:  r_symbolnum (24 bits)
+    #   bit 24:     r_pcrel
+    #   bits 25-26: r_length
+    #   bit 27:     r_extern
+    #   bits 28-31: r_type (4 bits)
+    var packed = sym_idx % 16777216  # 24-bit mask
+    if is_pc_rel:
+        packed = packed + 16777216   # bit 24
+    packed = packed + (length % 4) * 33554432  # bits 25-26
+    if is_ext:
+        packed = packed + 134217728  # bit 27
+    packed = packed + (reloc_type % 16) * 268435456  # bits 28-31
+    packed
+
+# ============================================================================
+# Fixed-Size Name Encoding
+# ============================================================================
+
+fn write_fixed_name(buf: ByteBuffer, name: text, max_len: i64) -> ByteBuffer:
+    # Write name as fixed-size field (zero-padded to max_len bytes)
+    var b = buf
+    val name_bytes = name.bytes()
+    var written = 0
+    var i = 0
+    while i < name_bytes.len():
+        if written >= max_len:
+            break
+        b = buf_write_u8(b, name_bytes[i])
+        written = written + 1
+        i = i + 1
+    # Zero-pad remainder
+    while written < max_len:
+        b = buf_write_u8(b, 0)
+        written = written + 1
+    b
+
+# ============================================================================
+# Mach-O 64 Writing
+# ============================================================================
+
+fn write_macho64(writer: MachOWriter) -> [i64]:
+    # Sort symbols: locals first, then defined globals, then undefined (extern)
+    var local_syms: [MachOSymbol] = []
+    var defined_syms: [MachOSymbol] = []
+    var undef_syms: [MachOSymbol] = []
+
+    for sym in writer.symbols:
+        val is_external = (sym.sym_type % 2) == 1  # N_EXT bit
+        val is_undefined = ((sym.sym_type / 2) % 8) == 0  # type bits == N_UNDF
+        if is_undefined:
+            undef_syms = undef_syms + [sym]
+        elif is_external:
+            defined_syms = defined_syms + [sym]
+        else:
+            local_syms = local_syms + [sym]
+
+    val num_local = local_syms.len()
+    val num_defined = defined_syms.len()
+    val num_undef = undef_syms.len()
+    val num_symbols = num_local + num_defined + num_undef
+
+    # Build string table for symbol names
+    var strtab = new_string_table()
+    for sym in local_syms:
+        strtab = strtab_add(strtab, sym.name)
+    for sym in defined_syms:
+        strtab = strtab_add(strtab, sym.name)
+    for sym in undef_syms:
+        strtab = strtab_add(strtab, sym.name)
+
+    # Count sections and total relocations
+    val num_sections = writer.sections.len()
+    var total_relocs = 0
+    for section in writer.sections:
+        total_relocs = total_relocs + section.relocations.len()
+
+    # Calculate load command sizes
+    val segment_cmd_size = SEGMENT_CMD_SIZE + (num_sections * SECTION_64_SIZE)
+    val symtab_cmd_size = 16  # LC_SYMTAB: cmd(4) + cmdsize(4) + symoff(4) + nsyms(4) + stroff(4) + strsize(4) = 24
+    val dysymtab_cmd_size = 80  # LC_DYSYMTAB fixed size
+    val build_version_cmd_size = BUILD_VERSION_SIZE + BUILD_TOOL_SIZE  # one tool entry
+
+    # 4 load commands: segment, symtab, dysymtab, build_version
+    val num_load_commands = 4
+    val load_commands_size = segment_cmd_size + 24 + dysymtab_cmd_size + build_version_cmd_size
+
+    val header_plus_lc = MACHO_HEADER_SIZE + load_commands_size
+
+    # Calculate section data offsets
+    var section_offsets: [i64] = []
+    var section_sizes: [i64] = []
+    var data_offset = header_plus_lc
+
+    for section in writer.sections:
+        val sect_align = pow2(section.alignment)
+        data_offset = align_offset(data_offset, sect_align)
+        section_offsets = section_offsets + [data_offset]
+        section_sizes = section_sizes + [section.data.len()]
+        data_offset = data_offset + section.data.len()
+
+    val section_data_end = data_offset
+
+    # Relocation table (after section data, aligned to 4)
+    var reloc_offset = align_offset(section_data_end, 4)
+    var section_reloc_offsets: [i64] = []
+    for section in writer.sections:
+        if section.relocations.len() > 0:
+            section_reloc_offsets = section_reloc_offsets + [reloc_offset]
+            reloc_offset = reloc_offset + section.relocations.len() * RELOC_INFO_SIZE
+        else:
+            section_reloc_offsets = section_reloc_offsets + [0]
+
+    # Symbol table (after relocations, aligned to 4)
+    val symtab_offset = align_offset(reloc_offset, 4)
+    val symtab_size = num_symbols * NLIST_64_SIZE
+
+    # String table (after symbol table)
+    val strtab_offset_val = symtab_offset + symtab_size
+    val strtab_size_val = strtab.data.len()
+
+    # Segment size = all section data
+    val segment_file_size = section_data_end - header_plus_lc
+    val segment_vm_size = segment_file_size
+
+    # === Write the Mach-O file ===
+    var buf = new_byte_buffer()
+
+    # ---- Mach-O Header (32 bytes) ----
+    buf = buf_write_u32_le(buf, MH_MAGIC_64)          # magic
+    buf = buf_write_u32_le(buf, writer.cpu_type)       # cputype
+    buf = buf_write_u32_le(buf, writer.cpu_subtype)    # cpusubtype
+    buf = buf_write_u32_le(buf, MH_OBJECT)             # filetype
+    buf = buf_write_u32_le(buf, num_load_commands)     # ncmds
+    buf = buf_write_u32_le(buf, load_commands_size)    # sizeofcmds
+    buf = buf_write_u32_le(buf, MH_SUBSECTIONS_VIA_SYMBOLS)  # flags
+    buf = buf_write_u32_le(buf, 0)                     # reserved
+
+    # ---- LC_SEGMENT_64 ----
+    buf = buf_write_u32_le(buf, LC_SEGMENT_64)         # cmd
+    buf = buf_write_u32_le(buf, segment_cmd_size)      # cmdsize
+    buf = write_fixed_name(buf, "", 16)                # segname (empty for object files)
+    buf = buf_write_u64_le(buf, 0)                     # vmaddr
+    buf = buf_write_u64_le(buf, segment_vm_size)       # vmsize
+    buf = buf_write_u64_le(buf, header_plus_lc)        # fileoff
+    buf = buf_write_u64_le(buf, segment_file_size)     # filesize
+    buf = buf_write_u32_le(buf, 7)                     # maxprot (rwx)
+    buf = buf_write_u32_le(buf, 7)                     # initprot (rwx)
+    buf = buf_write_u32_le(buf, num_sections)          # nsects
+    buf = buf_write_u32_le(buf, 0)                     # flags
+
+    # ---- Section headers ----
+    var sect_idx = 0
+    var vm_addr = 0
+    for section in writer.sections:
+        val sect_align = pow2(section.alignment)
+        vm_addr = align_offset(vm_addr, sect_align)
+
+        buf = write_fixed_name(buf, section.sect_name, 16)  # sectname
+        buf = write_fixed_name(buf, section.seg_name, 16)   # segname
+        buf = buf_write_u64_le(buf, vm_addr)                # addr
+        buf = buf_write_u64_le(buf, section.data.len())     # size
+        buf = buf_write_u32_le(buf, section_offsets[sect_idx])  # offset
+        buf = buf_write_u32_le(buf, section.alignment)      # align (power of 2)
+        if section.relocations.len() > 0:
+            buf = buf_write_u32_le(buf, section_reloc_offsets[sect_idx])  # reloff
+        else:
+            buf = buf_write_u32_le(buf, 0)
+        buf = buf_write_u32_le(buf, section.relocations.len())  # nreloc
+        buf = buf_write_u32_le(buf, section.sect_type + section.attributes)  # flags
+        buf = buf_write_u32_le(buf, 0)                      # reserved1
+        buf = buf_write_u32_le(buf, 0)                      # reserved2
+        buf = buf_write_u32_le(buf, 0)                      # reserved3 (padding for 64-bit)
+
+        vm_addr = vm_addr + section.data.len()
+        sect_idx = sect_idx + 1
+
+    # ---- LC_SYMTAB (24 bytes) ----
+    buf = buf_write_u32_le(buf, LC_SYMTAB)             # cmd
+    buf = buf_write_u32_le(buf, 24)                    # cmdsize
+    buf = buf_write_u32_le(buf, symtab_offset)         # symoff
+    buf = buf_write_u32_le(buf, num_symbols)           # nsyms
+    buf = buf_write_u32_le(buf, strtab_offset_val)     # stroff
+    buf = buf_write_u32_le(buf, strtab_size_val)       # strsize
+
+    # ---- LC_DYSYMTAB (80 bytes) ----
+    buf = buf_write_u32_le(buf, LC_DYSYMTAB)           # cmd
+    buf = buf_write_u32_le(buf, dysymtab_cmd_size)     # cmdsize
+    buf = buf_write_u32_le(buf, 0)                     # ilocalsym
+    buf = buf_write_u32_le(buf, num_local)             # nlocalsym
+    buf = buf_write_u32_le(buf, num_local)             # iextdefsym
+    buf = buf_write_u32_le(buf, num_defined)           # nextdefsym
+    buf = buf_write_u32_le(buf, num_local + num_defined) # iundefsym
+    buf = buf_write_u32_le(buf, num_undef)             # nundefsym
+    buf = buf_write_u32_le(buf, 0)                     # tocoff
+    buf = buf_write_u32_le(buf, 0)                     # ntoc
+    buf = buf_write_u32_le(buf, 0)                     # modtaboff
+    buf = buf_write_u32_le(buf, 0)                     # nmodtab
+    buf = buf_write_u32_le(buf, 0)                     # extrefsymoff
+    buf = buf_write_u32_le(buf, 0)                     # nextrefsyms
+    buf = buf_write_u32_le(buf, 0)                     # indirectsymoff
+    buf = buf_write_u32_le(buf, 0)                     # nindirectsyms
+    buf = buf_write_u32_le(buf, 0)                     # extreloff
+    buf = buf_write_u32_le(buf, 0)                     # nextrel
+    buf = buf_write_u32_le(buf, 0)                     # locreloff
+    buf = buf_write_u32_le(buf, 0)                     # nlocrel
+
+    # ---- LC_BUILD_VERSION (32 bytes: 24 base + 8 tool) ----
+    buf = buf_write_u32_le(buf, LC_BUILD_VERSION)      # cmd
+    buf = buf_write_u32_le(buf, build_version_cmd_size) # cmdsize
+    buf = buf_write_u32_le(buf, PLATFORM_MACOS)        # platform
+    buf = buf_write_u32_le(buf, 0x000e0000)            # minos (14.0.0 encoded)
+    buf = buf_write_u32_le(buf, 0x000f0000)            # sdk (15.0.0 encoded)
+    buf = buf_write_u32_le(buf, 1)                     # ntools
+    # Tool entry
+    buf = buf_write_u32_le(buf, TOOL_LD)               # tool (ld)
+    buf = buf_write_u32_le(buf, 0x03e80000)            # version (1000.0.0 encoded)
+
+    # ---- Section data ----
+    for i in 0..num_sections:
+        buf = pad_to(buf, section_offsets[i])
+        buf = buf_write_bytes(buf, writer.sections[i].data)
+
+    # ---- Relocations ----
+    for i in 0..num_sections:
+        val section = writer.sections[i]
+        if section.relocations.len() > 0:
+            buf = pad_to(buf, section_reloc_offsets[i])
+            for reloc in section.relocations:
+                # Write relocation_info: r_address (4 bytes) + packed info (4 bytes)
+                buf = buf_write_u32_le(buf, reloc.offset)
+                val packed = macho_reloc_info(
+                    reloc.symbol_index,
+                    reloc.is_pc_relative,
+                    reloc.length,
+                    reloc.is_extern,
+                    reloc.reloc_type
+                )
+                buf = buf_write_u32_le(buf, packed)
+
+    # ---- Symbol table (nlist_64 entries, 16 bytes each) ----
+    buf = pad_to(buf, symtab_offset)
+
+    # Write local symbols
+    for sym in local_syms:
+        buf = write_nlist64(buf, sym, strtab)
+
+    # Write defined external symbols
+    for sym in defined_syms:
+        buf = write_nlist64(buf, sym, strtab)
+
+    # Write undefined symbols
+    for sym in undef_syms:
+        buf = write_nlist64(buf, sym, strtab)
+
+    # ---- String table ----
+    buf = pad_to(buf, strtab_offset_val)
+    buf = buf_write_bytes(buf, strtab.data)
+
+    buf.bytes
+
+# Write a single nlist_64 entry (16 bytes)
+fn write_nlist64(buf: ByteBuffer, sym: MachOSymbol, strtab: StringTable) -> ByteBuffer:
+    val name_off = strtab_get_offset(strtab, sym.name)
+    var b = buf
+    b = buf_write_u32_le(b, name_off)       # n_strx
+    b = buf_write_u8(b, sym.sym_type)        # n_type
+    b = buf_write_u8(b, sym.section_ordinal) # n_sect
+    b = buf_write_u16_le(b, sym.desc)        # n_desc
+    b = buf_write_u64_le(b, sym.value)       # n_value
+    b
+
+# ============================================================================
+# Power of 2 Helper
+# ============================================================================
+
+fn pow2(exponent: i64) -> i64:
+    if exponent <= 0: return 1
+    var result = 1
+    for i in 0..exponent:
+        result = result * 2
+    result
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MachOWriter, MachOSection, MachOReloc, MachOSymbol
+export macho_writer_aarch64, macho_writer_x86_64
+export macho_add_section, macho_add_symbol
+export new_macho_text_section, new_macho_const_section, new_macho_data_section, new_macho_cstring_section
+export macho_section_add_reloc
+export new_macho_func_symbol, new_macho_local_symbol, new_macho_extern_symbol, new_macho_data_symbol
+export macho_symbol_name
+export map_elf_reloc_to_macho_arm64, map_elf_reloc_to_macho_x86_64
+export macho_reloc_info
+export write_macho64, write_fixed_name, write_nlist64
+export pow2
+
+# Constants
+export MH_MAGIC_64, CPU_TYPE_ARM64, CPU_TYPE_X86_64
+export CPU_SUBTYPE_ARM64_ALL, CPU_SUBTYPE_X86_64_ALL
+export MH_OBJECT, MH_SUBSECTIONS_VIA_SYMBOLS
+export LC_SEGMENT_64, LC_SYMTAB, LC_DYSYMTAB, LC_BUILD_VERSION
+export S_REGULAR, S_CSTRING_LITERALS
+export S_ATTR_PURE_INSTRUCTIONS, S_ATTR_SOME_INSTRUCTIONS
+export N_UNDF, N_ABS, N_SECT, N_EXT
+export ARM64_RELOC_UNSIGNED, ARM64_RELOC_BRANCH26, ARM64_RELOC_PAGE21, ARM64_RELOC_PAGEOFF12
+export ARM64_RELOC_GOT_LOAD_PAGE21, ARM64_RELOC_GOT_LOAD_PAGEOFF12
+export X86_64_RELOC_UNSIGNED, X86_64_RELOC_SIGNED, X86_64_RELOC_BRANCH
+export PLATFORM_MACOS
+export MACHO_HEADER_SIZE, SEGMENT_CMD_SIZE, SECTION_64_SIZE, NLIST_64_SIZE, RELOC_INFO_SIZE

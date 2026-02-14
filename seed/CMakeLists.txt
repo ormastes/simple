@@ -31,9 +31,11 @@ else()
     # GCC-style compilers (Clang with MinGW, GCC)
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
     # Use large code model for seed_cpp to handle massive static arrays
-    # Note: Not supported on Windows MinGW, skip if building for Windows
+    # Note: Not supported on Windows MinGW or ARM64 (aarch64/arm64)
     if(NOT WIN32 OR CMAKE_CROSSCOMPILING)
-        add_compile_options(-mcmodel=large)
+        if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+            add_compile_options(-mcmodel=large)
+        endif()
     endif()
 endif()
 
