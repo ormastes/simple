@@ -109,6 +109,7 @@ class LlvmIRBuilder:
     local_counter: i64
     debug_counter: i64
     size_type: text            # "i32" for 32-bit targets, "i64" for 64-bit
+    tbaa_counter: i64          # Counter for TBAA metadata nodes
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
         val st = if target.is_32bit(): "i32" else: "i64"
@@ -119,7 +120,8 @@ class LlvmIRBuilder:
             current_function: nil,
             local_counter: 0,
             debug_counter: 10,
-            size_type: st
+            size_type: st,
+            tbaa_counter: 100
         )
 
     me emit(line: text):
@@ -142,10 +144,10 @@ class LlvmIRBuilder:
         self.emit("")
 
     me start_function(name: text, params: [text], return_type: text):
-        """Start a function definition."""
+        """Start a function definition with nounwind (Simple has no exceptions)."""
         self.current_function = Some(name)
         val param_str = params.join(", ")
-        self.emit("define {return_type} @{name}({param_str}) {{")
+        self.emit("define {return_type} @{name}({param_str}) nounwind {{")
 
     me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
         """Start a function definition with attributes."""
@@ -177,28 +179,53 @@ class LlvmIRBuilder:
         "%{id}"
 
     me emit_alloca(dest: text, ty: text):
-        """Emit alloca instruction."""
-        self.emit("  {dest} = alloca {ty}")
+        """Emit alloca instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  {dest} = alloca {ty}, align {alignment}")
+
+    me emit_alloca_aligned(dest: text, ty: text, alignment: i64):
+        """Emit alloca with explicit alignment (for SIMD arrays)."""
+        self.emit("  {dest} = alloca {ty}, align {alignment}")
 
     me emit_load(dest: text, ty: text, ptr: text):
-        """Emit load instruction."""
-        self.emit("  {dest} = load {ty}, ptr {ptr}")
+        """Emit load instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  {dest} = load {ty}, ptr {ptr}, align {alignment}")
 
     me emit_store(ty: text, value: text, ptr: text):
-        """Emit store instruction."""
-        self.emit("  store {ty} {value}, ptr {ptr}")
+        """Emit store instruction with natural alignment."""
+        val alignment = natural_alignment(ty)
+        self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}")
+
+    # === Arithmetic with nsw/nuw flags ===
 
     me emit_add(dest: text, ty: text, lhs: text, rhs: text):
         """Emit add instruction."""
         self.emit("  {dest} = add {ty} {lhs}, {rhs}")
 
+    me emit_add_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit add with no signed wrap (enables LLVM strength reduction)."""
+        self.emit("  {dest} = add nsw {ty} {lhs}, {rhs}")
+
+    me emit_add_nuw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit add with no unsigned wrap (for array indexing)."""
+        self.emit("  {dest} = add nuw {ty} {lhs}, {rhs}")
+
     me emit_sub(dest: text, ty: text, lhs: text, rhs: text):
         """Emit sub instruction."""
         self.emit("  {dest} = sub {ty} {lhs}, {rhs}")
 
+    me emit_sub_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit sub with no signed wrap."""
+        self.emit("  {dest} = sub nsw {ty} {lhs}, {rhs}")
+
     me emit_mul(dest: text, ty: text, lhs: text, rhs: text):
         """Emit mul instruction."""
         self.emit("  {dest} = mul {ty} {lhs}, {rhs}")
+
+    me emit_mul_nsw(dest: text, ty: text, lhs: text, rhs: text):
+        """Emit mul with no signed wrap (enables loop strength reduction)."""
+        self.emit("  {dest} = mul nsw {ty} {lhs}, {rhs}")
 
     me emit_div(dest: text, ty: text, lhs: text, rhs: text):
         """Emit div instruction (signed)."""
@@ -405,9 +432,89 @@ class LlvmIRBuilder:
         self.debug_counter = self.debug_counter + 1
         id
 
+    # === TBAA Metadata ===
+
+    me emit_tbaa_hierarchy():
+        """Emit TBAA type hierarchy for Simple language types.
+
+        Simple has strict typing with no type punning, enabling aggressive alias analysis.
+        Hierarchy: root -> int/float/ptr/struct subtypes.
+        """
+        val base = self.tbaa_counter
+        self.emit("")
+        self.emit("; TBAA metadata")
+        self.emit("!{base} = !{!\"Simple TBAA\"}")
+        self.emit("!{base + 1} = !{!\"int\", !{base}, i64 0}")
+        self.emit("!{base + 2} = !{!\"float\", !{base}, i64 0}")
+        self.emit("!{base + 3} = !{!\"ptr\", !{base}, i64 0}")
+        self.emit("!{base + 4} = !{!\"bool\", !{base}, i64 0}")
+        self.emit("!{base + 5} = !{!\"struct\", !{base}, i64 0}")
+        # Access tags (type, type, offset)
+        self.emit("!{base + 6} = !{!{base + 1}, !{base + 1}, i64 0}")
+        self.emit("!{base + 7} = !{!{base + 2}, !{base + 2}, i64 0}")
+        self.emit("!{base + 8} = !{!{base + 3}, !{base + 3}, i64 0}")
+        self.emit("!{base + 9} = !{!{base + 4}, !{base + 4}, i64 0}")
+        self.emit("!{base + 10} = !{!{base + 5}, !{base + 5}, i64 0}")
+        self.tbaa_counter = base + 11
+
+    fn tbaa_tag_for_type(ty: text) -> i64:
+        """Get TBAA access tag metadata ID for a given LLVM type."""
+        val base = 100  # Must match tbaa_counter initial value
+        if ty == "i64" or ty == "i32" or ty == "i16" or ty == "i8":
+            return base + 6
+        if ty == "double" or ty == "float":
+            return base + 7
+        if ty == "ptr":
+            return base + 8
+        if ty == "i1":
+            return base + 9
+        # Default: struct tag
+        base + 10
+
+    me emit_load_tbaa(dest: text, ty: text, ptr: text):
+        """Emit load with TBAA metadata for better alias analysis."""
+        val alignment = natural_alignment(ty)
+        val tag = self.tbaa_tag_for_type(ty)
+        self.emit("  {dest} = load {ty}, ptr {ptr}, align {alignment}, !tbaa !{tag}")
+
+    me emit_store_tbaa(ty: text, value: text, ptr: text):
+        """Emit store with TBAA metadata."""
+        val alignment = natural_alignment(ty)
+        val tag = self.tbaa_tag_for_type(ty)
+        self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}, !tbaa !{tag}")
+
     fn build() -> text:
         """Build final IR string."""
         self.instructions.join(NL)
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn natural_alignment(ty: text) -> i64:
+    """Return natural alignment in bytes for an LLVM type."""
+    if ty == "i1":
+        return 1
+    if ty == "i8":
+        return 1
+    if ty == "i16":
+        return 2
+    if ty == "i32" or ty == "float":
+        return 4
+    if ty == "i64" or ty == "double" or ty == "ptr":
+        return 8
+    # Default for structs/arrays
+    8
+
+fn is_integer_type(ty: text) -> bool:
+    """Check if an LLVM type is an integer type (for nsw/nuw flags)."""
+    if ty == "i8" or ty == "i16" or ty == "i32" or ty == "i64":
+        return true
+    false
+
+fn is_signed_int_type(ty: text) -> bool:
+    """Check if type is used as signed integer (i32/i64 in Simple)."""
+    ty == "i32" or ty == "i64"
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -478,6 +585,9 @@ class MirToLlvm:
             self.builder.emit("; String constants")
             for global_decl in self.string_globals:
                 self.builder.emit(global_decl)
+
+        # Emit TBAA metadata hierarchy for alias analysis
+        self.builder.emit_tbaa_hierarchy()
 
         self.builder.build()
 
@@ -811,17 +921,29 @@ class MirToLlvm:
                 self.builder.emit("  {dest_name} = add i64 0, 0  ; VhdlConcat (requires VHDL backend)")
 
     me translate_binop(dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
-        """Translate binary operation."""
+        """Translate binary operation. Uses nsw for signed int arithmetic."""
         val dest_name = self.get_local(dest.id)
         val left_val = self.translate_operand(left)
         val right_val = self.translate_operand(right)
         val ty = self.get_local_type(dest.id)
 
         match op:
-            # Arithmetic
-            case Add: self.builder.emit_add(dest_name, ty, left_val, right_val)
-            case Sub: self.builder.emit_sub(dest_name, ty, left_val, right_val)
-            case Mul: self.builder.emit_mul(dest_name, ty, left_val, right_val)
+            # Arithmetic - use nsw for signed integers to enable LLVM optimizations
+            case Add:
+                if is_signed_int_type(ty):
+                    self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_add(dest_name, ty, left_val, right_val)
+            case Sub:
+                if is_signed_int_type(ty):
+                    self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_sub(dest_name, ty, left_val, right_val)
+            case Mul:
+                if is_signed_int_type(ty):
+                    self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
+                else:
+                    self.builder.emit_mul(dest_name, ty, left_val, right_val)
             case Div: self.builder.emit_div(dest_name, ty, left_val, right_val)
             case Rem: self.builder.emit_rem(dest_name, ty, left_val, right_val)
             case Pow:
@@ -1121,3 +1243,4 @@ export LlvmPass, passes_for_level
 export LlvmIRBuilder, MirToLlvm
 export LlvmIRBuilder__create
 export MirToLlvm__create, MirToLlvm__create_baremetal
+export natural_alignment, is_integer_type, is_signed_int_type

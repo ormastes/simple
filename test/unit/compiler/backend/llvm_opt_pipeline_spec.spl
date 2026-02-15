@@ -1,0 +1,200 @@
+# LLVM Optimization Pipeline Tests
+#
+# Tests for nsw/nuw arithmetic, alignment, TBAA metadata,
+# function attributes, and optimization helpers.
+
+use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type}
+use compiler.backend.llvm_target.{LlvmTargetTriple}
+
+# ============================================================================
+# nsw/nuw Arithmetic Tests
+# ============================================================================
+
+describe "LLVM Opt - nsw/nuw arithmetic":
+    it "emits add nsw for signed integers":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_add_nsw("%r", "i64", "%a", "%b")
+        val ir = builder.build()
+        expect(ir).to_contain("%r = add nsw i64 %a, %b")
+
+    it "emits sub nsw for signed integers":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_sub_nsw("%r", "i64", "%a", "%b")
+        val ir = builder.build()
+        expect(ir).to_contain("%r = sub nsw i64 %a, %b")
+
+    it "emits mul nsw for signed integers":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_mul_nsw("%r", "i64", "%a", "%b")
+        val ir = builder.build()
+        expect(ir).to_contain("%r = mul nsw i64 %a, %b")
+
+    it "emits add nuw for unsigned":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_add_nuw("%r", "i64", "%a", "%b")
+        val ir = builder.build()
+        expect(ir).to_contain("%r = add nuw i64 %a, %b")
+
+    it "plain add has no nsw/nuw":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_add("%r", "i64", "%a", "%b")
+        val ir = builder.build()
+        expect(ir).to_contain("%r = add i64 %a, %b")
+
+# ============================================================================
+# Alignment Tests
+# ============================================================================
+
+describe "LLVM Opt - alignment":
+    it "aligns i64 to 8 bytes":
+        expect(natural_alignment("i64")).to_equal(8)
+
+    it "aligns i32 to 4 bytes":
+        expect(natural_alignment("i32")).to_equal(4)
+
+    it "aligns i16 to 2 bytes":
+        expect(natural_alignment("i16")).to_equal(2)
+
+    it "aligns i8 to 1 byte":
+        expect(natural_alignment("i8")).to_equal(1)
+
+    it "aligns double to 8 bytes":
+        expect(natural_alignment("double")).to_equal(8)
+
+    it "aligns float to 4 bytes":
+        expect(natural_alignment("float")).to_equal(4)
+
+    it "aligns ptr to 8 bytes":
+        expect(natural_alignment("ptr")).to_equal(8)
+
+    it "aligns i1 to 1 byte":
+        expect(natural_alignment("i1")).to_equal(1)
+
+    it "alloca i32 gets align 4":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_alloca("%p", "i32")
+        val ir = builder.build()
+        expect(ir).to_contain("%p = alloca i32, align 4")
+
+    it "load float gets align 4":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_load("%v", "float", "%p")
+        val ir = builder.build()
+        expect(ir).to_contain("%v = load float, ptr %p, align 4")
+
+    it "store double gets align 8":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_store("double", "%v", "%p")
+        val ir = builder.build()
+        expect(ir).to_contain("store double %v, ptr %p, align 8")
+
+    it "alloca_aligned uses explicit alignment":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_alloca_aligned("%simd", "i64", 32)
+        val ir = builder.build()
+        expect(ir).to_contain("%simd = alloca i64, align 32")
+
+# ============================================================================
+# Function Attribute Tests
+# ============================================================================
+
+describe "LLVM Opt - function attributes":
+    it "emits nounwind on functions":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.start_function("foo", [], "void")
+        builder.emit_ret_void()
+        builder.end_function()
+        val ir = builder.build()
+        expect(ir).to_contain("nounwind")
+
+    it "emits nounwind with parameters":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.start_function("bar", ["i64 %x"], "i64")
+        builder.emit_ret("i64", "%x")
+        builder.end_function()
+        val ir = builder.build()
+        expect(ir).to_contain("define i64 @bar(i64 %x) nounwind {")
+
+# ============================================================================
+# TBAA Metadata Tests
+# ============================================================================
+
+describe "LLVM Opt - TBAA metadata":
+    it "emits TBAA hierarchy":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_tbaa_hierarchy()
+        val ir = builder.build()
+        expect(ir).to_contain("Simple TBAA")
+        expect(ir).to_contain("int")
+        expect(ir).to_contain("float")
+        expect(ir).to_contain("ptr")
+        expect(ir).to_contain("bool")
+        expect(ir).to_contain("struct")
+
+    it "returns correct tag for integer types":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        val builder = LlvmIRBuilder.create("test", triple)
+        val tag_i64 = builder.tbaa_tag_for_type("i64")
+        val tag_i32 = builder.tbaa_tag_for_type("i32")
+        expect(tag_i64).to_equal(tag_i32)
+
+    it "returns different tags for int vs float":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        val builder = LlvmIRBuilder.create("test", triple)
+        val tag_int = builder.tbaa_tag_for_type("i64")
+        val tag_float = builder.tbaa_tag_for_type("double")
+        val tags_differ = tag_int != tag_float
+        expect(tags_differ).to_equal(true)
+
+    it "emits load with TBAA tag":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_load_tbaa("%v", "i64", "%p")
+        val ir = builder.build()
+        expect(ir).to_contain("!tbaa")
+        expect(ir).to_contain("align 8")
+
+    it "emits store with TBAA tag":
+        val triple = LlvmTargetTriple.x86_64_linux()
+        var builder = LlvmIRBuilder.create("test", triple)
+        builder.emit_store_tbaa("double", "%v", "%p")
+        val ir = builder.build()
+        expect(ir).to_contain("!tbaa")
+        expect(ir).to_contain("align 8")
+
+# ============================================================================
+# Type Helper Tests
+# ============================================================================
+
+describe "LLVM Opt - type helpers":
+    it "identifies integer types":
+        expect(is_integer_type("i8")).to_equal(true)
+        expect(is_integer_type("i16")).to_equal(true)
+        expect(is_integer_type("i32")).to_equal(true)
+        expect(is_integer_type("i64")).to_equal(true)
+
+    it "rejects non-integer types":
+        expect(is_integer_type("double")).to_equal(false)
+        expect(is_integer_type("ptr")).to_equal(false)
+        expect(is_integer_type("float")).to_equal(false)
+
+    it "identifies signed int types":
+        expect(is_signed_int_type("i32")).to_equal(true)
+        expect(is_signed_int_type("i64")).to_equal(true)
+
+    it "rejects unsigned/small int from signed":
+        expect(is_signed_int_type("i8")).to_equal(false)
+        expect(is_signed_int_type("i16")).to_equal(false)
+        expect(is_signed_int_type("double")).to_equal(false)

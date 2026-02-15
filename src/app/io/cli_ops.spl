@@ -331,6 +331,11 @@ fn cli_compile(args: [str]) -> i64:
     var backend: text = "auto"
     var verbose: bool = false
     var release: bool = false
+    var use_lto: bool = false
+    var march_target: text = ""
+    var pgo_generate: bool = false
+    var pgo_use_path: text = ""
+    var release_optimized: bool = false
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -353,6 +358,11 @@ fn cli_compile(args: [str]) -> i64:
             print "  --coverage            Enable coverage instrumentation"
             print "  --coverage-output=<p> Coverage output file path"
             print "  --release             Release build (optimized, prefers LLVM)"
+            print "  --release-optimized   Max optimization: -O2 + x86-64-v3 + ThinLTO"
+            print "  --lto                 Enable ThinLTO (+2-3% speed)"
+            print "  --march=<target>      CPU target: native, x86-64-v2, x86-64-v3, x86-64-v4"
+            print "  --pgo-generate        Build instrumented binary for PGO"
+            print "  --pgo-use=<path>      Use PGO profile for optimization (+5-20% speed)"
             print "  -o <output>           Output file path"
             print "  --verbose, -v         Verbose output"
             print "  --help, -h            Show this help"
@@ -382,6 +392,19 @@ fn cli_compile(args: [str]) -> i64:
             backend = arg.substring(10)
         elif arg == "--release":
             release = true
+        elif arg == "--release-optimized":
+            release_optimized = true
+            release = true
+            use_lto = true
+            march_target = "x86-64-v3"
+        elif arg == "--lto":
+            use_lto = true
+        elif arg.starts_with("--march="):
+            march_target = arg.substring(8)
+        elif arg == "--pgo-generate":
+            pgo_generate = true
+        elif arg.starts_with("--pgo-use="):
+            pgo_use_path = arg.substring(10)
         elif arg == "--coverage":
             # Pass-through (compiler config reads env/args)
             pass
@@ -427,6 +450,30 @@ fn cli_compile(args: [str]) -> i64:
         var out = output_file
         if out == "":
             out = source_file.replace(".spl", "")
+        # Build optimization flags for llvm_direct pipeline
+        var opt_flags = ""
+        if use_lto:
+            opt_flags = opt_flags + " --lto"
+        if march_target != "":
+            opt_flags = opt_flags + " --march=" + march_target
+        if pgo_generate:
+            opt_flags = opt_flags + " --pgo-generate"
+        if pgo_use_path != "":
+            opt_flags = opt_flags + " --pgo-use=" + pgo_use_path
+        if release_optimized:
+            opt_flags = opt_flags + " --release-optimized"
+        # Use llvm_direct if optimization flags are set, otherwise native
+        var has_opt_flags = use_lto or march_target != "" or pgo_generate or pgo_use_path != "" or release_optimized
+        if has_opt_flags:
+            var llvm_cmd = "bin/release/simple src/app/compile/llvm_direct.spl '{source_file}' '{out}'" + opt_flags
+            if verbose:
+                llvm_cmd = llvm_cmd + " --verbose"
+            val llvm_result = _cli_shell(llvm_cmd)
+            if llvm_result.stdout != "":
+                print llvm_result.stdout
+            if llvm_result.stderr != "" and llvm_result.exit_code != 0:
+                _cli_eprint(llvm_result.stderr)
+            return llvm_result.exit_code
         var native_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}'"
         if verbose:
             native_cmd = "bin/release/simple src/app/compile/native.spl '{source_file}' '{out}' --verbose"

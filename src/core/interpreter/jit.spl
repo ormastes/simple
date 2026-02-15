@@ -4,11 +4,12 @@
 # Tracks function call counts and delegates to execution manager
 # when hot functions exceed the compilation threshold.
 #
-# Uses parallel arrays (no generics, no Dict<>) for seed compatibility.
+# Uses chained hash maps (no generics, no Dict<>) for seed compatibility.
+# Call tracking and compiled status checks are O(1) average via hashing.
 #
 # Architecture:
 #   1. Tree-walk all functions initially (cold path)
-#   2. Count calls per function
+#   2. Count calls per function (hash map lookup)
 #   3. When threshold reached, JIT compile via ExecutionManager SFFI
 #   4. Subsequent calls use native code (hot path)
 #   5. Fall back to tree-walk if JIT fails
@@ -16,10 +17,20 @@
 use app.io.jit_ffi.{jit_available}
 use app.io.jit_ffi.{rt_exec_manager_create, rt_exec_manager_compile, rt_exec_manager_execute, rt_exec_manager_has_function, rt_exec_manager_cleanup}
 
-# ===== JIT State (module-level parallel arrays) =====
-var jit_call_names: [text] = []      # function name
-var jit_call_values: [i64] = []      # call count per function
-var jit_compiled_names: [text] = []  # names of JIT-compiled functions
+# ===== JIT State (hash maps for O(1) lookup) =====
+
+# Call tracking hash map (function name → call count)
+var jcc_keys: [text] = []
+var jcc_vals: [i64] = []
+var jcc_buckets: [i64] = []
+var jcc_nexts: [i64] = []
+
+# Compiled status hash map (function name → 1 if compiled)
+var jcn_keys: [text] = []
+var jcn_vals: [i64] = []
+var jcn_buckets: [i64] = []
+var jcn_nexts: [i64] = []
+
 var jit_threshold: i64 = 10
 var jit_handle: i64 = 0
 var jit_verbose: i64 = 0
@@ -30,9 +41,14 @@ var jit_enabled: i64 = 0
 fn jit_init(threshold: i64, verbose: i64):
     jit_threshold = threshold
     jit_verbose = verbose
-    jit_call_names = []
-    jit_call_values = []
-    jit_compiled_names = []
+    jcc_keys = []
+    jcc_vals = []
+    jcc_buckets = hm_make_global_buckets()
+    jcc_nexts = []
+    jcn_keys = []
+    jcn_vals = []
+    jcn_buckets = hm_make_global_buckets()
+    jcn_nexts = []
     jit_handle = 0
     if threshold < 999999:
         jit_enabled = 1
@@ -50,35 +66,44 @@ fn jit_cleanup():
     if jit_handle != 0:
         rt_exec_manager_cleanup(jit_handle)
         jit_handle = 0
-    jit_call_names = []
-    jit_call_values = []
-    jit_compiled_names = []
+    jcc_keys = []
+    jcc_vals = []
+    jcc_buckets = []
+    jcc_nexts = []
+    jcn_keys = []
+    jcn_vals = []
+    jcn_buckets = []
+    jcn_nexts = []
     jit_enabled = 0
 
-# ===== Call Tracking =====
+# ===== Call Tracking (O(1) hash map) =====
 
 fn jit_record_call(fn_name: text):
     if jit_enabled == 0: return
-    # Find existing entry
-    var i: i64 = 0
-    for name in jit_call_names:
-        if name == fn_name:
-            jit_call_values[i] = jit_call_values[i] + 1
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcc_buckets[bucket]
+    while idx != -1:
+        if jcc_keys[idx] == fn_name:
+            jcc_vals[idx] = jcc_vals[idx] + 1
             return
-        i = i + 1
+        idx = jcc_nexts[idx]
     # New entry
-    jit_call_names.push(fn_name)
-    jit_call_values.push(1)
+    val new_idx = jcc_keys.len()
+    jcc_keys.push(fn_name)
+    jcc_vals.push(1)
+    jcc_nexts.push(jcc_buckets[bucket])
+    jcc_buckets[bucket] = new_idx
 
 fn jit_get_call_count(fn_name: text) -> i64:
-    var i: i64 = 0
-    for name in jit_call_names:
-        if name == fn_name:
-            return jit_call_values[i]
-        i = i + 1
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcc_buckets[bucket]
+    while idx != -1:
+        if jcc_keys[idx] == fn_name:
+            return jcc_vals[idx]
+        idx = jcc_nexts[idx]
     0
 
-# ===== Compilation Status =====
+# ===== Compilation Status (O(1) hash map) =====
 
 fn jit_should_compile(fn_name: text) -> bool:
     if jit_enabled == 0: return false
@@ -86,13 +111,22 @@ fn jit_should_compile(fn_name: text) -> bool:
     count >= jit_threshold
 
 fn jit_is_compiled(fn_name: text) -> bool:
-    for name in jit_compiled_names:
-        if name == fn_name: return true
+    val bucket = hm_hash_text(fn_name) % HM_SIZE
+    var idx = jcn_buckets[bucket]
+    while idx != -1:
+        if jcn_keys[idx] == fn_name:
+            return true
+        idx = jcn_nexts[idx]
     false
 
 fn jit_mark_compiled(fn_name: text):
     if jit_is_compiled(fn_name) == false:
-        jit_compiled_names.push(fn_name)
+        val bucket = hm_hash_text(fn_name) % HM_SIZE
+        val new_idx = jcn_keys.len()
+        jcn_keys.push(fn_name)
+        jcn_vals.push(1)
+        jcn_nexts.push(jcn_buckets[bucket])
+        jcn_buckets[bucket] = new_idx
         if jit_verbose == 1:
             print "[jit] Marked as compiled: {fn_name}"
 
@@ -129,10 +163,10 @@ fn jit_is_enabled() -> bool:
     jit_enabled == 1
 
 fn jit_compiled_count() -> i64:
-    jit_compiled_names.len()
+    jcn_keys.len()
 
 fn jit_total_tracked() -> i64:
-    jit_call_names.len()
+    jcc_keys.len()
 
 export jit_init, jit_init_with_backend, jit_cleanup
 export jit_record_call, jit_get_call_count
