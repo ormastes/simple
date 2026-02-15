@@ -1058,6 +1058,9 @@ static bool expr_is_text(const char *e) {
 
 /* Check if the C++ output generated between saved_pos and out_pos looks broken */
 static bool output_has_problems(int saved_pos) {
+    /* Disabled for core bootstrap: every function is critical, better to let */
+    /* the C++ compiler catch real issues than to stub out critical functions */
+    return false;
     if (out_pos <= saved_pos) return false;
     int len = out_pos - saved_pos;
     const char *start = output + saved_pos;
@@ -1095,28 +1098,26 @@ static bool output_has_problems(int saved_pos) {
         }
         /* TODO stubs indicate untranslated code */
         if (strncmp(start + i, "/* TODO", 7) == 0) todos++;
-        /* Raw Simple syntax leaked into C++ */
+        /* Raw Simple syntax leaked into C++ — only flag truly garbled output */
+        /* Note: val/var/elif may appear due to minor translation misses but are */
+        /* better caught by the C++ compiler than by stubbing entire functions */
         if (i == 0 || start[i-1] == '\n' || start[i-1] == ' ' || start[i-1] == '(') {
-            if (strncmp(start + i, "val ", 4) == 0) problems++;
-            if (strncmp(start + i, "var ", 4) == 0 && strncmp(start + i, "var_", 4) != 0) problems++;
             if (strncmp(start + i, "fn ", 3) == 0) problems++;
-            if (strncmp(start + i, "elif ", 5) == 0) problems++;
-            if (strncmp(start + i, "elif:", 5) == 0) problems++;
             if (strncmp(start + i, "impl ", 5) == 0) problems++;
             if (strncmp(start + i, "trait ", 6) == 0) problems++;
-            if (strncmp(start + i, "match ", 6) == 0 && strncmp(start + i, "match(", 6) != 0) problems++;
         }
     }
     if (line_len > max_line_len) max_line_len = line_len;
 
     /* Garbled output produces extremely long lines */
-    if (max_line_len > 300) return true;
+    /* 600 threshold: spl_str_concat chains from string concatenation can be 400+ chars */
+    if (max_line_len > 600) { fprintf(stderr, "[seed_cpp] problem: max_line_len=%d\n", max_line_len); return true; }
     /* Unbalanced braces indicate broken output */
-    if (brace_depth != 0) return true;
+    if (brace_depth != 0) { fprintf(stderr, "[seed_cpp] problem: brace_depth=%d\n", brace_depth); return true; }
     /* If too many problems, the body is garbled */
-    if (nested_funcs > 0) return true;
-    if (todos > 0) return true;
-    if (problems > 0) return true;
+    if (nested_funcs > 0) { fprintf(stderr, "[seed_cpp] problem: nested_funcs=%d\n", nested_funcs); return true; }
+    if (todos > 0) { fprintf(stderr, "[seed_cpp] problem: todos=%d\n", todos); return true; }
+    if (problems > 0) { fprintf(stderr, "[seed_cpp] problem: problems=%d\n", problems); return true; }
     /* No problems detected - body is good! */
     return false;
 }
@@ -3175,18 +3176,45 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
             /* Check if this is an implicit return (last expression in function body) */
             bool is_implicit_return = false;
             if (current_func && strcmp(current_func->ret_type, "void") != 0) {
-                /* Peek ahead to see if next line exits the block */
-                int next_idx = *line_idx + 1;
-                if (next_idx >= num_lines) {
-                    /* End of file - this is last line */
-                    is_implicit_return = true;
-                } else {
-                    const char *next_line = source_lines[next_idx];
-                    const char *next_trimmed = trim(next_line);
-                    int next_ind = indent_level(next_line);
-                    /* If next line is less indented or is closing syntax, this is last expr */
-                    if (next_ind <= base_indent || next_trimmed[0] == '\0' || next_trimmed[0] == '#') {
+                /* Only add implicit return at function body level (c_indent==1), not inside loops/if */
+                if (c_indent == 1) {
+                    /* Peek ahead, skipping blank lines and comments, to find next real code */
+                    int next_idx = *line_idx + 1;
+                    while (next_idx < num_lines) {
+                        const char *nl = trim(source_lines[next_idx]);
+                        if (nl[0] != '\0' && nl[0] != '#') break;
+                        next_idx++;
+                    }
+                    if (next_idx >= num_lines) {
                         is_implicit_return = true;
+                    } else {
+                        int next_ind = indent_level(source_lines[next_idx]);
+                        if (next_ind <= base_indent) {
+                            is_implicit_return = true;
+                        }
+                    }
+                }
+                /* Don't add return for void function calls */
+                if (is_implicit_return) {
+                    char call_name[MAX_IDENT] = "";
+                    int cni = 0;
+                    const char *ec = expr_c;
+                    while (*ec && *ec != '(' && *ec != ' ' && cni < MAX_IDENT - 1)
+                        call_name[cni++] = *ec++;
+                    call_name[cni] = '\0';
+                    FuncInfo *called = find_func(call_name);
+                    if (called && strcmp(called->ret_type, "void") == 0) {
+                        is_implicit_return = false;
+                    }
+                    /* Also check common runtime void functions */
+                    if (is_implicit_return && (
+                        strncmp(expr_c, "spl_array_push(", 15) == 0 ||
+                        strncmp(expr_c, "spl_array_set(", 14) == 0 ||
+                        strncmp(expr_c, "spl_dict_set(", 13) == 0 ||
+                        strncmp(expr_c, "spl_println(", 12) == 0 ||
+                        strncmp(expr_c, "spl_print(", 10) == 0 ||
+                        strncmp(expr_c, "spl_free(", 9) == 0)) {
+                        is_implicit_return = false;
                     }
                 }
             }
@@ -3783,8 +3811,7 @@ static void process_file(void) {
     emit("typedef int64_t (*FnPtr_HoverInfo)();\n");
     /* Note: Option_fn_ptr and Option_Symbol are now auto-generated by Option<T> registry */
     emit("typedef uint64_t u64;\n\n");
-    emit("/* Common constants from stdlib */\n");
-    emit("static const char* NL = \"\\n\";\n\n");
+    /* NL is provided by shim_nl.spl as a Simple-level val, emitted as a global */
 
     /* Stub declarations for functions NOT in runtime.h */
     emit("inline void log_debug(...) {}\n");
