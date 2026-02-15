@@ -1,0 +1,276 @@
+# Lightweight MCP Server - Minimal imports for fast startup
+#
+# Avoids heavy handler imports. Handles basic tools directly.
+# Startup target: <5s (vs 60s for full server)
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> text
+extern fn rt_env_get(name: text) -> text
+
+val SERVER_NAME = "simple-mcp-lite"
+val SERVER_VERSION = "2.1.0"
+val NL = "\n"
+
+fn file_read(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn shell_output(cmd: text) -> text:
+    var args: [text] = ["-c", cmd]
+    val result = rt_process_run("/bin/sh", args)
+    result[0]
+
+fn cwd() -> text:
+    var args: [text] = ["-c", "pwd"]
+    val result = rt_process_run("/bin/sh", args)
+    var out = result[0]
+    if out.ends_with("\n"):
+        out = out.substring(0, out.len() - 1)
+    out
+
+# Start server directly - no args checking needed
+# Wrapper script ensures "server" arg is passed
+start_server()
+
+fn start_server():
+    var running = true
+    while running:
+        var line = read_stdin_message()
+        if line == "":
+            running = false
+        else:
+            var method = extract_field(line, "method")
+            var id = extract_id(line)
+            var response = ""
+
+            if method == "initialize":
+                response = make_init_response(id)
+            elif method == "initialized":
+                response = ""
+            elif method == "tools/list":
+                response = make_tools_list(id)
+            elif method == "tools/call":
+                var tool_name = extract_nested(line, "name")
+                response = dispatch_tool(id, tool_name, line)
+            elif method == "resources/list":
+                response = make_json_result(id, "{\"resources\":[]}")
+            elif method == "prompts/list":
+                response = make_json_result(id, "{\"prompts\":[]}")
+            elif method == "ping":
+                response = make_json_result(id, "{}")
+            elif method == "notifications/initialized":
+                response = ""
+            else:
+                response = make_error(id, -32601, "Method not found: " + method)
+
+            if response != "":
+                write_stdout_message(response)
+
+fn read_stdin_message() -> text:
+    var header = input()
+    if header == "":
+        return ""
+    if header.ends_with("\r"):
+        header = header.substring(0, header.len() - 1)
+    var content_length = 0
+    if header.starts_with("Content-Length:"):
+        var len_str = header.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        content_length = int(len_str)
+    if content_length == 0:
+        return ""
+    input()
+    var body = input()
+    body
+
+fn write_stdout_message(body: text):
+    var header = "Content-Length: " + str(body.len()) + "\r{NL}\r{NL}"
+    print_raw(header)
+    print_raw(body)
+
+# --- JSON helpers ---
+
+fn js(s: text) -> text:
+    "\"" + s + "\""
+
+fn extract_field(json_str: text, field: text) -> text:
+    var search = "\"" + field + "\":"
+    var idx = find_in(json_str, search)
+    if idx < 0:
+        return ""
+    var rest = json_str.substring(idx + search.len(), json_str.len())
+    rest = rest.trim()
+    if rest.starts_with("\""):
+        var end = find_in(rest.substring(1, rest.len()), "\"")
+        if end >= 0:
+            return rest.substring(1, end + 1)
+    ""
+
+fn extract_nested(json_str: text, field: text) -> text:
+    var search = "\"" + field + "\":"
+    var idx = find_in(json_str, search)
+    if idx < 0:
+        return ""
+    var rest = json_str.substring(idx + search.len(), json_str.len())
+    rest = rest.trim()
+    if rest.starts_with("\""):
+        var end = find_in(rest.substring(1, rest.len()), "\"")
+        if end >= 0:
+            return rest.substring(1, end + 1)
+    ""
+
+fn extract_id(json_str: text) -> text:
+    var search = "\"id\":"
+    var idx = find_in(json_str, search)
+    if idx < 0:
+        return "null"
+    var rest = json_str.substring(idx + search.len(), json_str.len())
+    rest = rest.trim()
+    if rest.starts_with("\""):
+        var end = find_in(rest.substring(1, rest.len()), "\"")
+        if end >= 0:
+            return "\"" + rest.substring(1, end + 1) + "\""
+    # Numeric ID
+    var end_pos = 0
+    while end_pos < rest.len():
+        var ch = rest.substring(end_pos, end_pos + 1)
+        if (ch >= "0" and ch <= "9") or ch == "-":
+            end_pos = end_pos + 1
+        else:
+            break
+    if end_pos > 0:
+        return rest.substring(0, end_pos)
+    "null"
+
+fn find_in(haystack: text, needle: text) -> i64:
+    var i = 0
+    while i <= haystack.len() - needle.len():
+        if haystack.substring(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn extract_arg_value(body: text, arg_name: text) -> text:
+    var search = "\"" + arg_name + "\":"
+    var idx = find_in(body, search)
+    if idx < 0:
+        return ""
+    var rest = body.substring(idx + search.len(), body.len())
+    rest = rest.trim()
+    if rest.starts_with("\""):
+        var end = find_in(rest.substring(1, rest.len()), "\"")
+        if end >= 0:
+            return rest.substring(1, end + 1)
+    ""
+
+# --- Response builders ---
+# NOTE: In Simple, }} inside a string literal is an escape for single }.
+# Use }}} to get literal }}. Use string concat to avoid ambiguity.
+
+fn make_init_response(id: text) -> text:
+    var caps = "\"tools\":{\"listChanged\":true}"
+    caps = caps + ",\"resources\":{\"subscribe\":true,\"listChanged\":true}"
+    caps = caps + ",\"prompts\":{\"listChanged\":true}"
+    caps = caps + ",\"logging\":{}"
+    caps = caps + ",\"completions\":{}"
+    var info = "\"name\":\"" + SERVER_NAME + "\",\"version\":\"" + SERVER_VERSION + "\",\"instructions\":\"Simple language MCP tools for code, bugs, tests.\""
+    var result = "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{" + caps + "},\"serverInfo\":{" + info + "}}}"
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}"
+
+fn make_json_result(id: text, result: text) -> text:
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + result + "}"
+
+fn make_error(id: text, code: i64, msg: text) -> text:
+    var err = "{\"code\":" + str(code) + ",\"message\":" + js(msg) + "}"
+    "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"error\":" + err + "}"
+
+fn make_text_result(id: text, content: text) -> text:
+    var escaped = escape_json(content)
+    var inner = "{\"type\":\"text\",\"text\":" + js(escaped) + "}"
+    var result = "{\"content\":[" + inner + "],\"isError\":false}"
+    make_json_result(id, result)
+
+fn escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        var ch = s.substring(i, i + 1)
+        if ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == NL:
+            result = result + "\\n"
+        elif ch == "\t":
+            result = result + "\\t"
+        elif ch == "\r":
+            result = result + "\\r"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+# --- Tool schemas ---
+
+fn make_tool_schema(name: text, desc: text, props: text, req: text) -> text:
+    var schema = "{\"type\":\"object\",\"properties\":{" + props + "},\"required\":[" + req + "]}"
+    "{\"name\":\"" + name + "\",\"description\":\"" + desc + "\",\"inputSchema\":" + schema + "}"
+
+fn make_tools_list(id: text) -> text:
+    var t1 = make_tool_schema("read_code", "Read a Simple language source file", "\"path\":{\"type\":\"string\",\"description\":\"File path\"}", "\"path\"")
+    var t2 = make_tool_schema("list_files", "List Simple language files in a directory", "\"path\":{\"type\":\"string\",\"description\":\"Directory path (default: src/)\"}", "")
+    var t3 = make_tool_schema("search_code", "Search for patterns in Simple source files", "\"query\":{\"type\":\"string\",\"description\":\"Search query (grep pattern)\"}", "\"query\"")
+    var t4 = make_tool_schema("project_status", "Get project status including test results and recent changes", "", "")
+    var tools = "[" + t1 + "," + t2 + "," + t3 + "," + t4 + "]"
+    var result = "{\"tools\":" + tools + "}"
+    make_json_result(id, result)
+
+# --- Tool dispatch ---
+
+fn dispatch_tool(id: text, tool_name: text, body: text) -> text:
+    if tool_name == "read_code":
+        var path = extract_arg_value(body, "path")
+        if path == "":
+            return make_error(id, -32602, "Missing required parameter: path")
+        return handle_read_code(id, path)
+    elif tool_name == "list_files":
+        var path = extract_arg_value(body, "path")
+        if path == "":
+            path = "src/"
+        return handle_list_files(id, path)
+    elif tool_name == "search_code":
+        var query = extract_arg_value(body, "query")
+        if query == "":
+            return make_error(id, -32602, "Missing required parameter: query")
+        return handle_search_code(id, query)
+    elif tool_name == "project_status":
+        return handle_project_status(id)
+    else:
+        make_error(id, -32601, "Unknown tool: " + tool_name)
+
+fn handle_read_code(id: text, path: text) -> text:
+    if not file_exists(path):
+        return make_error(id, -32602, "File not found: " + path)
+    var content = file_read(path)
+    make_text_result(id, content)
+
+fn handle_list_files(id: text, path: text) -> text:
+    var output = shell_output("find " + path + " -name '*.spl' -type f 2>/dev/null | sort | head -50")
+    make_text_result(id, output)
+
+fn handle_search_code(id: text, query: text) -> text:
+    var output = shell_output("grep -rn '" + query + "' src/ --include='*.spl' 2>/dev/null | head -30")
+    make_text_result(id, output)
+
+fn handle_project_status(id: text) -> text:
+    var status = "Simple Language Compiler\n"
+    status = status + "Working Dir: " + cwd() + "\n"
+    if file_exists("doc/test/test_result.md"):
+        var test_result = file_read("doc/test/test_result.md")
+        status = status + test_result.substring(0, 500) + "\n"
+    else:
+        status = status + "No test results available\n"
+    make_text_result(id, status)

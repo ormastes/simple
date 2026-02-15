@@ -15,6 +15,17 @@ use lexer.Span
 # Data Structures
 # ================================================================
 
+struct VariableDecl:
+    """A declared variable with optional type hint.
+
+    Used for tracking variable declarations with type information
+    when available from annotations. Type tag follows core/types.spl
+    constants (TYPE_I64=2, TYPE_F64=3, TYPE_BOOL=1, TYPE_TEXT=4, etc.).
+    A type_tag of -1 means the type is inferred (unknown at parse time).
+    """
+    name: text
+    type_tag: i64
+
 struct SuspensionPoint:
     """A single suspension point in an async function.
 
@@ -31,7 +42,8 @@ struct SuspensionPoint:
         await_expr: The await expression itself
         awaited_future: The expression being awaited (inside the await)
         context_depth: Nesting depth (for tracking control flow)
-        live_variables: Variables that must be preserved in state
+        live_variables: Variable names that must be preserved in state
+        live_var_decls: Variable declarations with type hints (parallel to live_variables)
         span: Source location of the await expression
     """
     id: i64
@@ -39,6 +51,7 @@ struct SuspensionPoint:
     awaited_future: Expr
     context_depth: i64
     live_variables: [text]
+    live_var_decls: [VariableDecl]
     span: Span
 
 struct SuspensionAnalysis:
@@ -98,7 +111,8 @@ fn analyze_suspensions(func: Function) -> SuspensionAnalysis:
         next_id: 0,
         suspension_points: [],
         current_depth: 0,
-        declared_variables: []
+        declared_variables: [],
+        declared_var_types: []
     )
 
     visitor.visit_block(func.body)
@@ -119,6 +133,7 @@ class SuspensionVisitor:
     - All await expressions (suspension points)
     - Control flow depth (for nested blocks)
     - Declared variables (for live variable analysis)
+    - Variable type hints (from annotations, -1 if inferred)
 
     Methods walk the AST recursively, building up the list of suspension
     points with their context.
@@ -127,6 +142,7 @@ class SuspensionVisitor:
     suspension_points: [SuspensionPoint]
     current_depth: i64
     declared_variables: [text]
+    declared_var_types: [i64]
 
     me visit_block(block: Block):
         """Visit all statements in a block."""
@@ -140,14 +156,16 @@ class SuspensionVisitor:
                 self.visit_expr(expr)
 
             case StmtKind.Val(name, type_, value):
-                # Track variable declaration
+                # Track variable declaration with type hint
                 self.declared_variables = self.declared_variables.push(name)
+                self.declared_var_types = self.declared_var_types.push(resolve_type_hint(type_))
                 if value.?:
                     self.visit_expr(value)
 
             case StmtKind.Var(name, type_, value):
-                # Track mutable variable declaration
+                # Track mutable variable declaration with type hint
                 self.declared_variables = self.declared_variables.push(name)
+                self.declared_var_types = self.declared_var_types.push(resolve_type_hint(type_))
                 if value.?:
                     self.visit_expr(value)
 
@@ -163,8 +181,9 @@ class SuspensionVisitor:
                 self.current_depth = self.current_depth - 1
 
             case StmtKind.For(var_name, iterable, body):
-                # Track loop variable
+                # Track loop variable (type unknown at parse time)
                 self.declared_variables = self.declared_variables.push(var_name)
+                self.declared_var_types = self.declared_var_types.push(-1)
                 self.visit_expr(iterable)
 
                 self.current_depth = self.current_depth + 1
@@ -257,6 +276,7 @@ class SuspensionVisitor:
         Assigns a sequential ID and computes live variables at this point.
         """
         val live_vars = self.compute_live_variables()
+        val live_decls = self.compute_live_var_decls(live_vars)
 
         val sp = SuspensionPoint(
             id: self.next_id,
@@ -264,11 +284,25 @@ class SuspensionVisitor:
             awaited_future: awaited_future,
             context_depth: self.current_depth,
             live_variables: live_vars,
+            live_var_decls: live_decls,
             span: await_expr.span
         )
 
         self.suspension_points = self.suspension_points.push(sp)
         self.next_id = self.next_id + 1
+
+    fn compute_live_var_decls(live_names: [text]) -> [VariableDecl]:
+        """Build VariableDecl list for live variables with type hints."""
+        var decls = []
+        for name in live_names:
+            var type_tag = -1
+            # Look up the type hint from declared_var_types
+            for idx in 0..self.declared_variables.len():
+                if self.declared_variables[idx] == name:
+                    type_tag = self.declared_var_types[idx]
+                    break
+            decls = decls.push(VariableDecl(name: name, type_tag: type_tag))
+        decls
 
     fn compute_live_variables() -> [text]:
         """Compute which variables are live at current suspension point.
@@ -304,6 +338,57 @@ class SuspensionVisitor:
         """Convert expression to string for simple analysis."""
         # Simplified - actual implementation would use proper AST traversal
         "expr"
+
+# ================================================================
+# Type Hint Resolution
+# ================================================================
+
+# Type tag constants (matching core/types.spl)
+val TYPETAG_BOOL = 1
+val TYPETAG_I64 = 2
+val TYPETAG_F64 = 3
+val TYPETAG_TEXT = 4
+val TYPETAG_UNKNOWN = -1
+
+fn resolve_type_hint(type_node: Type?) -> i64:
+    """Resolve AST Type annotation to a type tag.
+
+    Returns -1 (TYPETAG_UNKNOWN) if type is not annotated or unrecognized.
+    This is a best-effort resolution from explicit annotations only.
+    Full type inference happens later in the pipeline.
+    """
+    if type_node == nil:
+        return TYPETAG_UNKNOWN
+    match type_node.kind:
+        case TypeKind.Named(name):
+            if name == "i64":
+                return TYPETAG_I64
+            if name == "i32":
+                return TYPETAG_I64
+            if name == "f64":
+                return TYPETAG_F64
+            if name == "f32":
+                return TYPETAG_F64
+            if name == "bool":
+                return TYPETAG_BOOL
+            if name == "text":
+                return TYPETAG_TEXT
+            if name == "u8":
+                return TYPETAG_I64
+            if name == "u16":
+                return TYPETAG_I64
+            if name == "u32":
+                return TYPETAG_I64
+            if name == "u64":
+                return TYPETAG_I64
+            if name == "i8":
+                return TYPETAG_I64
+            if name == "i16":
+                return TYPETAG_I64
+            # Struct/enum/unknown named type - treat as pointer (8 bytes)
+            return TYPETAG_UNKNOWN
+        case _:
+            return TYPETAG_UNKNOWN
 
 # ================================================================
 # Utility Functions
@@ -393,8 +478,11 @@ fn format_suspension_analysis(analysis: SuspensionAnalysis) -> text:
 # Exports
 # ================================================================
 
+export VariableDecl
 export SuspensionPoint
 export SuspensionAnalysis
 export analyze_suspensions
 export has_await_expressions
 export format_suspension_analysis
+export resolve_type_hint
+export TYPETAG_BOOL, TYPETAG_I64, TYPETAG_F64, TYPETAG_TEXT, TYPETAG_UNKNOWN

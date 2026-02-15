@@ -140,7 +140,8 @@ fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
         return []
     val all_files = dir_walk(base_path)
     # Check if we need content-based filtering at all
-    val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != ""
+    # Always need content if filtering slow tests (default behavior)
+    val needs_content = options.list_ignored or options.only_slow or options.only_skipped or options.tag != "" or not options.run_all
     var test_files: [text] = []
     for f in all_files:
         if not is_test_file(f):
@@ -154,11 +155,13 @@ fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
             if content.contains("# @skip") or content.contains("# @pending"):
                 continue
         # Option C: Directory convention filtering
+        # Skip if user explicitly targeted baremetal/remote directory
+        val explicit_target = base_path.contains("/baremetal") or base_path.contains("/remote")
         val is_host_mode = not execution_mode_is_composite(options.mode)
-        if is_host_mode:
+        if is_host_mode and not explicit_target:
             if f.contains("/baremetal/") or f.contains("/remote/"):
                 continue
-        else:
+        elif not is_host_mode:
             # Composite mode: filter arch-specific baremetal dirs
             val arch = execution_mode_target_arch(options.mode)
             if f.contains("/baremetal/riscv32/") and arch != "riscv32":
@@ -167,15 +170,16 @@ fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
                 continue
             if f.contains("/baremetal/x86/") and arch != "x86":
                 continue
-        # Option B: Platform tag filtering
-        val ptags = file_get_platform_tags(content)
-        if ptags.len() > 0:
-            var tag_matched = false
-            for ptag in ptags:
-                if platform_tag_matches(ptag, options.mode):
-                    tag_matched = true
-            if not tag_matched:
-                continue
+        # Option B: Platform tag filtering (skip when user explicitly targets dir)
+        if not explicit_target:
+            val ptags = file_get_platform_tags(content)
+            if ptags.len() > 0:
+                var tag_matched = false
+                for ptag in ptags:
+                    if platform_tag_matches(ptag, options.mode):
+                        tag_matched = true
+                if not tag_matched:
+                    continue
         # Content-based filters
         if needs_content:
             # --list-ignored: only show files with ignored tests
@@ -195,6 +199,12 @@ fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
             if options.tag != "":
                 if not (content.contains("tag: \"{options.tag}\"") or content.contains("tag: '{options.tag}'")):
                     continue
+
+        # Skip slow tests by default (unless --all or --only-slow)
+        if not options.run_all and not options.only_slow:
+            if content.contains("slow_it "):
+                continue
+
         test_files.push(f)
 
     # Apply seed shuffle
