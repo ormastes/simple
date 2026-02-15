@@ -27,12 +27,12 @@ These run BEFORE Simple compiler exists:
 | Script | Lines | .spl Equivalent | Status |
 |--------|-------|-----------------|--------|
 | `filter_pending_tests.sh` | 51 | `src/app/test/filter_pending.spl` | ✅ **DONE** |
-| `ci-test.sh` | 293 | `src/app/test/ci_runner.spl` | 📝 PLANNED |
+| `ci-test.sh` | 293 | `src/app/test/ci_runner.spl` | ✅ **DONE** |
 | `local-container-test.sh` | 328 | `src/app/test/container_test.spl` | 📝 PLANNED |
 | `docker-test.sh` | 284 | `src/app/test/docker_runner.spl` | 📝 PLANNED |
 
-**Completed:** 1/4 (25%)
-**Total lines converted:** 51 → 116 lines .spl
+**Completed:** 2/4 (50%)
+**Total lines converted:** 344 bash → 395 Simple
 
 ### Phase 2: Build System (Priority 2)
 
@@ -128,6 +128,61 @@ These run BEFORE Simple compiler exists:
 
 # New (Simple)
 bin/simple run src/app/test/filter_pending.spl test/lib
+```
+
+### 2. ci_runner.spl ✅
+
+**Original:** `script/ci-test.sh` (293 lines bash)
+**New:** `src/app/test/ci_runner.spl` (279 lines Simple)
+**Status:** Complete
+
+**Features:**
+- Auto-detects container runtime (podman/docker)
+- Five resource profiles (fast/standard/slow/intensive/critical)
+- Hardened container execution (read-only, cap-drop, tmpfs)
+- Resource limits (memory, CPU, timeout) per profile
+- JSON result parsing (with jq or fallback)
+- Color-coded output (info/success/warning/error)
+- Environment variable configuration
+- Cross-platform (Windows/Linux/macOS/FreeBSD)
+
+**APIs used:**
+- `shell()`, `shell_bool()`, `shell_output()` - Process execution
+- `file_read()`, `file_exists()` - File I/O
+- `env_get()`, `cwd()`, `get_args()`, `exit()` - Environment
+- `std.string.{contains, starts_with, trim, split}` - String ops
+- `std.path.{join}` - Path utilities
+
+**Resource Profiles:**
+```simple
+fast       - 128MB, 0.5 CPU, 30s   (unit tests)
+standard   - 512MB, 1.0 CPU, 120s  (integration tests)
+slow       - 1GB,   2.0 CPU, 600s  (system tests)
+intensive  - 2GB,   4.0 CPU, 1800s (heavy workloads)
+critical   - 4GB,   8.0 CPU, 3600s (QEMU/baremetal)
+```
+
+**Security Features:**
+- `--read-only` filesystem
+- `--tmpfs /tmp:rw,noexec,nosuid` (no code execution in tmp)
+- `--cap-drop=ALL` (drop all Linux capabilities)
+- `--security-opt=no-new-privileges` (prevent privilege escalation)
+- Read-only workspace mount
+
+**Key improvements over bash:**
+- Type-safe resource profile struct
+- Clearer function separation
+- Better error handling
+- Structured logging
+- Simpler JSON parsing (with fallback)
+
+**Usage:**
+```bash
+# Old (bash)
+TEST_PROFILE=standard ./script/ci-test.sh test/unit/
+
+# New (Simple)
+TEST_PROFILE=standard bin/simple run src/app/test/ci_runner.spl test/unit/
 ```
 
 ---
@@ -359,5 +414,5 @@ fn run_in_container(image: text, memory: text, cpus: text, cmd: text):
 ---
 
 **Last updated:** 2026-02-15
-**Status:** Phase 1 started, 1/32 scripts converted (3% complete)
-**Next:** Convert ci-test.sh to ci_runner.spl
+**Status:** Phase 1 in progress, 2/32 scripts converted (6% complete)
+**Next:** Convert local-container-test.sh to container_test.spl
