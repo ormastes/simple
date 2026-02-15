@@ -164,6 +164,9 @@ var eval_continuing: bool = false
 var eval_had_error: bool = false
 var eval_error_msg: text = ""
 
+# ===== LOAD_FAST: Current Function Tracking =====
+var eval_current_decl_id: i64 = -1
+
 # ===== Warning Tracking =====
 var eval_warnings: [text] = []
 
@@ -178,6 +181,7 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    eval_current_decl_id = -1
 
 fn eval_set_error(msg: text):
     eval_had_error = true
@@ -314,37 +318,38 @@ fn must_use_scan_source(source: text):
     must_use_critical_mode = false
     # Split source into lines and scan for comment annotations
     var lines: [text] = []
-    var current_line: text = ""
+    var line_chars: [text] = []
     var ci: i64 = 0
     for _unused in source:
         if ci >= source.len(): break
         val ch = source[ci]
         if ch == "\n":
-            lines.push(current_line)
-            current_line = ""
+            lines.push(line_chars.join(""))
+            line_chars = []
         else:
-            current_line = current_line + ch
+            line_chars.push(ch)
         ci = ci + 1
-    if current_line != "":
-        lines.push(current_line)
+    if line_chars.len() > 0:
+        lines.push(line_chars.join(""))
     # Scan for annotations
     var pending_must_use: bool = false
     var pending_reason: text = ""
     var li: i64 = 0
     for line in lines:
         # Trim leading spaces
-        var trimmed: text = ""
+        var trimmed_chars: [text] = []
         var started: bool = false
         var ti: i64 = 0
         for _c in line:
             if ti >= line.len(): break
             val lc = line[ti]
             if started:
-                trimmed = trimmed + lc
+                trimmed_chars.push(lc)
             elif lc != " " and lc != "\t":
                 started = true
-                trimmed = trimmed + lc
+                trimmed_chars.push(lc)
             ti = ti + 1
+        val trimmed = trimmed_chars.join("")
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
             must_use_critical_mode = true
@@ -356,7 +361,7 @@ fn must_use_scan_source(source: text):
             if trimmed.contains("(\""):
                 # Find text between (" and ")
                 var in_reason: bool = false
-                var reason_buf: text = ""
+                var reason_chars: [text] = []
                 var ri: i64 = 0
                 for _rc in trimmed:
                     if ri >= trimmed.len(): break
@@ -365,7 +370,7 @@ fn must_use_scan_source(source: text):
                         if rc2 == "\"":
                             in_reason = false
                         else:
-                            reason_buf = reason_buf + rc2
+                            reason_chars.push(rc2)
                     elif ri + 1 < trimmed.len():
                         val rc3 = trimmed[ri]
                         val rc4 = trimmed[ri + 1]
@@ -373,19 +378,20 @@ fn must_use_scan_source(source: text):
                             in_reason = true
                             ri = ri + 1
                     ri = ri + 1
-                pending_reason = reason_buf
+                pending_reason = reason_chars.join("")
         # Check if line declares a function (and we have a pending annotation)
         if pending_must_use:
             if trimmed.starts_with("fn "):
                 # Extract function name
-                var fname: text = ""
+                var fname_chars: [text] = []
                 var fi: i64 = 3
                 for _fc in trimmed:
                     if fi >= trimmed.len(): break
                     val fc2 = trimmed[fi]
                     if fc2 == "(" or fc2 == " " or fc2 == ":": break
-                    fname = fname + fc2
+                    fname_chars.push(fc2)
                     fi = fi + 1
+                val fname = fname_chars.join("")
                 if fname != "":
                     must_use_register(fname, pending_reason)
                 pending_must_use = false
@@ -609,6 +615,13 @@ fn eval_bool_lit(eid: i64) -> i64:
 # ===== Identifier Evaluation =====
 
 fn eval_ident(eid: i64) -> i64:
+    # Fast path: LOAD_FAST via pre-resolved local index
+    val local_idx = expr_i_val[eid]
+    if local_idx >= 0:
+        if env_has_frame():
+            val fast_val = env_get_local(local_idx)
+            if fast_val >= 0: return fast_val
+    # Slow path: hash map lookup
     val name = expr_get(eid).s_val
     val vid = env_lookup(name)
     if vid >= 0: return vid
@@ -1017,13 +1030,23 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
             return val_make_int(jit_result)
 
     # Fall back to tree-walking
+    val local_count = resolve_cached_local_count(actual_decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = actual_decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
     env_push_scope()
     var pi: i64 = 0
     for pname in param_names:
+        var pval = val_make_nil()
         if pi < arg_values.len():
-            env_define(pname, arg_values[pi])
-        else:
-            env_define(pname, val_make_nil())
+            pval = arg_values[pi]
+        env_define(pname, pval)
+        # LOAD_FAST: set fast local for non-shadowed params
+        if local_count > 0:
+            val is_shadowed = resolve_is_slot_shadowed(actual_decl_id, pi)
+            if is_shadowed == false:
+                env_set_local(pi, pval)
         pi = pi + 1
 
     # Execute body
@@ -1040,6 +1063,9 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         eval_return_value = -1
 
     env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
     last_val
 
 fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
@@ -1197,8 +1223,17 @@ fn eval_field_access(eid: i64) -> i64:
     if eval_had_error: return -1
 
     if val_is_struct(base_val):
-        val fv = val_struct_get_field(base_val, field_name)
-        if fv >= 0: return fv
+        # Fast path: cached field index from previous access
+        val cached_idx = expr_i_val[eid]
+        if cached_idx >= 0:
+            val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
+            if ok:
+                return val_struct_get_field_idx(base_val, cached_idx)
+        # Slow path: linear search + cache index
+        val fi = val_struct_find_field_idx(base_val, field_name)
+        if fi >= 0:
+            expr_i_val[eid] = fi
+            return val_struct_get_field_idx(base_val, fi)
         eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
         return -1
 
@@ -1380,8 +1415,21 @@ fn eval_assign_expr(eid: i64) -> i64:
         val base_val = eval_expr(base_eid2)
         if eval_had_error: return -1
         if val_is_struct(base_val):
-            val_struct_set_field(base_val, field_name, new_val)
-            return new_val
+            # Fast path: cached field index
+            val cached_idx = expr_i_val[target_eid]
+            if cached_idx >= 0:
+                val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
+                if ok:
+                    val_struct_set_field_idx(base_val, cached_idx, new_val)
+                    return new_val
+            # Slow path: find + set + cache
+            val fi = val_struct_find_field_idx(base_val, field_name)
+            if fi >= 0:
+                val_struct_set_field_idx(base_val, fi, new_val)
+                expr_i_val[target_eid] = fi
+                return new_val
+            eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
+            return -1
         eval_set_error("cannot set field on " + val_kind_name(val_get_kind(base_val)))
         return -1
 
@@ -1589,6 +1637,11 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         init_val = eval_expr(init_eid)
         if eval_had_error: return -1
     env_define(name, init_val)
+    # LOAD_FAST: also set fast local slot
+    if eval_current_decl_id >= 0:
+        val slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if slot >= 0:
+            env_set_local(slot, init_val)
     init_val
 
 fn eval_stmt_var_decl(sid: i64) -> i64:
@@ -1600,6 +1653,11 @@ fn eval_stmt_var_decl(sid: i64) -> i64:
         init_val = eval_expr(init_eid)
         if eval_had_error: return -1
     env_define(name, init_val)
+    # LOAD_FAST: also set fast local slot
+    if eval_current_decl_id >= 0:
+        val slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if slot >= 0:
+            env_set_local(slot, init_val)
     init_val
 
 fn eval_stmt_assign(sid: i64) -> i64:
@@ -1622,6 +1680,11 @@ fn eval_stmt_assign(sid: i64) -> i64:
         if ok == false:
             eval_set_error("undefined variable: " + name)
             return -1
+        # LOAD_FAST: also update fast local slot
+        if eval_current_decl_id >= 0:
+            val slot = resolve_is_fast_local(eval_current_decl_id, name)
+            if slot >= 0:
+                env_set_local(slot, new_val)
         return new_val
 
     if target_tag == EXPR_FIELD_ACCESS:
@@ -1630,7 +1693,20 @@ fn eval_stmt_assign(sid: i64) -> i64:
         val base_val = eval_expr(base_eid)
         if eval_had_error: return -1
         if val_is_struct(base_val):
-            val_struct_set_field(base_val, field_name, new_val)
+            # Fast path: cached field index
+            val cached_idx2 = expr_i_val[target_eid]
+            if cached_idx2 >= 0:
+                val ok2 = val_struct_check_field_idx(base_val, cached_idx2, field_name)
+                if ok2:
+                    val_struct_set_field_idx(base_val, cached_idx2, new_val)
+                    return new_val
+            # Slow path: find + set + cache
+            val fi2 = val_struct_find_field_idx(base_val, field_name)
+            if fi2 >= 0:
+                val_struct_set_field_idx(base_val, fi2, new_val)
+                expr_i_val[target_eid] = fi2
+                return new_val
+            eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
             return new_val
 
     if target_tag == EXPR_INDEX:
