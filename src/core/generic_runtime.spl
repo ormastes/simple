@@ -21,54 +21,38 @@ use core.ast.{decl_get}
 
 # ===== Specialization Cache =====
 # Maps: (decl_id, type_signature) -> specialized_decl_id
-var cache_keys: [[i64]] = []        # Each entry is [decl_id, type1, type2, ...]
-var cache_values: [i64] = []        # Corresponding specialized decl IDs
+# Uses Dict with text key for O(1) lookup instead of parallel arrays with O(n*m) scan
+var cache_dict = {}
+var cache_size: i64 = 0
 
 fn generic_cache_reset():
     """Clear the specialization cache"""
-    cache_keys = []
-    cache_values = []
+    cache_dict = {}
+    cache_size = 0
 
-fn generic_cache_make_key(decl_id: i64, type_tags: [i64]) -> [i64]:
-    """Create a cache key from decl_id and type tags"""
-    var key: [i64] = [decl_id]
+fn generic_cache_key(decl_id: i64, type_tags: [i64]) -> text:
+    """Create a text cache key from decl_id and type tags for O(1) Dict lookup"""
+    var key = "{decl_id}"
     for tag in type_tags:
-        key.push(tag)
+        key = key + ":{tag}"
     key
-
-fn generic_cache_keys_equal(k1: [i64], k2: [i64]) -> bool:
-    """Check if two cache keys are equal"""
-    if k1.len() != k2.len():
-        return false
-
-    var i: i64 = 0
-    for val1 in k1:
-        if val1 != k2[i]:
-            return false
-        i = i + 1
-
-    true
 
 fn generic_cache_lookup(decl_id: i64, type_tags: [i64]) -> i64:
     """Look up a specialized version in the cache
 
     Returns specialized decl_id if found, -1 otherwise.
+    O(1) lookup via Dict.
     """
-    val search_key = generic_cache_make_key(decl_id, type_tags)
-
-    var i: i64 = 0
-    for key in cache_keys:
-        if generic_cache_keys_equal(key, search_key):
-            return cache_values[i]
-        i = i + 1
-
+    val key = generic_cache_key(decl_id, type_tags)
+    if cache_dict.contains_key(key):
+        return cache_dict[key]
     -1
 
 fn generic_cache_insert(decl_id: i64, type_tags: [i64], specialized_id: i64):
     """Insert a specialization into the cache"""
-    val key = generic_cache_make_key(decl_id, type_tags)
-    cache_keys.push(key)
-    cache_values.push(specialized_id)
+    val key = generic_cache_key(decl_id, type_tags)
+    cache_dict[key] = specialized_id
+    cache_size = cache_size + 1
 
 # ===== Type Inference =====
 
@@ -118,7 +102,7 @@ fn generic_infer_types_from_args(args: [text]) -> [i64]:
     """Infer type tags from a list of argument values"""
     var types: [i64] = []
     for arg in args:
-        types.push(generic_infer_type_from_value(arg))
+        types = types.push(generic_infer_type_from_value(arg))
     types
 
 # ===== Monomorphization =====
@@ -186,7 +170,7 @@ fn generic_specialize_for_call(decl_id: i64, arg_values: [text]) -> i64:
 
 fn generic_cache_size() -> i64:
     """Get the current size of the specialization cache"""
-    cache_keys.len()
+    cache_size
 
 fn generic_cache_has(decl_id: i64, type_tags: [i64]) -> bool:
     """Check if a specialization exists in cache"""
@@ -197,11 +181,7 @@ fn generic_cache_has(decl_id: i64, type_tags: [i64]) -> bool:
 
 fn generic_dump_cache():
     """Print cache contents (for debugging)"""
-    print "Generic cache: {cache_keys.len()} specializations"
-    var i: i64 = 0
-    for key in cache_keys:
-        print "  [{i}] decl={key[0]} types={key[1:]} -> {cache_values[i]}"
-        i = i + 1
+    print "Generic cache: {cache_size} specializations"
 
 # ===== Public API =====
 

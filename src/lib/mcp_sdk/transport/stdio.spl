@@ -1,0 +1,86 @@
+# MCP SDK - Stdio Transport
+#
+# Content-Length (LSP-style) and JSON Lines framing for MCP over stdio.
+# Auto-detects which framing is in use based on the first message.
+
+use lib.mcp_sdk.core.json.{LB}
+
+# Module state for framing mode
+var STDIO_USE_JSON_LINES = false
+var STDIO_FRAMING_DETECTED = false
+
+# Read a single JSON-RPC message from stdin
+# Auto-detects Content-Length vs JSON Lines framing.
+fn read_stdin_message() -> text:
+    var line = input()
+    if line == "":
+        return ""
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+
+    # JSON Lines mode: line starts with {
+    if line.starts_with(LB()):
+        STDIO_USE_JSON_LINES = true
+        STDIO_FRAMING_DETECTED = true
+        return line
+
+    # Content-Length mode (LSP-style framing)
+    if line.starts_with("Content-Length:"):
+        STDIO_FRAMING_DETECTED = true
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        # Skip blank line between headers and body
+        input()
+        # Read body
+        var body = input()
+        return body
+    ""
+
+# Write a JSON-RPC message to stdout using the detected framing
+fn write_stdout_message(body: text):
+    val nl = "\n"
+    if STDIO_USE_JSON_LINES:
+        print_raw(body + nl)
+    else:
+        var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+        print_raw(header)
+        print_raw(body)
+
+# Write using explicit Content-Length framing
+fn write_content_length(body: text):
+    val nl = "\n"
+    var header = "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+    print_raw(header)
+    print_raw(body)
+
+# Write using JSON Lines framing
+fn write_json_lines(body: text):
+    val nl = "\n"
+    print_raw(body + nl)
+
+# Force a specific framing mode
+fn set_json_lines_mode(use_json_lines: bool):
+    STDIO_USE_JSON_LINES = use_json_lines
+    STDIO_FRAMING_DETECTED = true
+
+# Check current framing mode
+fn is_json_lines_mode() -> bool:
+    STDIO_USE_JSON_LINES
+
+fn is_framing_detected() -> bool:
+    STDIO_FRAMING_DETECTED
+
+# Build Content-Length header for a message
+fn content_length_header(body: text) -> text:
+    val nl = "\n"
+    "Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl
+
+# --- Exports ---
+
+export read_stdin_message, write_stdout_message
+export write_content_length, write_json_lines
+export set_json_lines_mode, is_json_lines_mode, is_framing_detected
+export content_length_header

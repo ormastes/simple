@@ -370,35 +370,41 @@ fn is_digit(c: text) -> bool:
 
 ## Part 4: Prioritized Optimization Plan
 
-### Phase 1: Hash Map Conversions (Highest Impact, Lowest Risk)
+### Phase 1: Hash Map Conversions (Highest Impact, Lowest Risk) -- IMPLEMENTED
 
-| Target | File | Current | Expected Speedup |
-|--------|------|---------|-----------------|
-| Function lookup | eval.spl | O(n) linear | 5-20x |
-| Variable lookup | env.spl | O(depth*vars) | 10-50x |
-| Struct lookup | eval.spl | O(n) linear | 5-10x |
-| JIT tracking | jit.spl | O(n) linear | 3-5x |
-| Mono cache | eval.spl | O(n) linear | 2-5x |
+| Target | File | Current | Status |
+|--------|------|---------|--------|
+| Function lookup | eval.spl | O(n) -> O(1) hash | DONE |
+| Variable lookup | env.spl | O(depth*vars) -> O(1) per scope | DONE |
+| Struct lookup | eval.spl | O(n) -> O(1) hash | DONE |
+| JIT tracking | jit.spl | O(n) -> O(1) hash | DONE |
+| Mono cache | eval.spl | O(n) -> O(1) hash | DONE |
+| Must-use registry | eval.spl | O(n) -> O(1) hash | DONE |
+| Return type table | eval.spl | O(n) -> O(1) hash | DONE |
+| Scope pop | env.spl | O(depth) rebuild -> O(1) decrement | DONE |
 
-Replace all parallel-array patterns (`names[]` + `values[]` + linear scan) with `Dict<text, i64>`.
+Shared hash utility: `src/core/interpreter/hashmap.spl` (64 lines)
 
-### Phase 2: String Optimization
+### Phase 2: String Optimization -- IMPLEMENTED
 
-| Target | File | Current | Expected Speedup |
-|--------|------|---------|-----------------|
-| String interpolation | eval.spl | O(n^2) concat | 2-10x |
-| Source scanning | eval.spl | O(n^2) concat | 2-5x |
-| Identifier interning | lexer.spl | No interning | 2-3x name compare |
+| Target | File | Current | Status |
+|--------|------|---------|--------|
+| Source scanning | eval.spl | O(n^2) -> O(n) slice-based | DONE |
+| Line trimming | eval.spl | O(n^2) -> O(n) slice-based | DONE |
+| Lexer char classification | lexer.spl | O(k) contains -> O(1) range check | DONE |
+| String interpolation | eval.spl | O(n^2) but parts typically small | SKIPPED (low impact) |
+| Identifier interning | lexer.spl | No interning | NOT DONE (Phase 4 prerequisite) |
 
-### Phase 3: Allocation Reduction
+### Phase 3: Allocation Reduction -- IMPLEMENTED
 
-| Target | File | Current | Expected Speedup |
-|--------|------|---------|-----------------|
-| Value caching | value.spl | Alloc every literal | 2-5x for literals |
-| Frame reuse | env.spl | Rebuild on pop | 3-5x scope ops |
-| Range iterator | eval.spl | Full array alloc | 2-10x for ranges |
+| Target | File | Current | Status |
+|--------|------|---------|--------|
+| Value caching | value.spl | Alloc every literal -> cached nil/true/false/0-255/"" | DONE |
+| Frame reuse | env.spl | Rebuild on pop -> O(1) slot reuse | DONE (Phase 1) |
+| Range iterator | eval.spl | eval_for_expr already lazy | DONE (cache helps 0-255) |
+| Struct field access | value.spl | O(fields) linear | SKIPPED (2-5 fields typical, hash overhead not worth it) |
 
-### Phase 4: Advanced (Index-Based Access)
+### Phase 4: Advanced (Index-Based Access) -- NOT IMPLEMENTED
 
 | Target | File | Current | Expected Speedup |
 |--------|------|---------|-----------------|
@@ -406,20 +412,23 @@ Replace all parallel-array patterns (`names[]` + `values[]` + linear scan) with 
 | Field indexing | parser.spl + value.spl | Name lookup | 5-10x |
 | Specialized nodes | eval.spl | Generic eval | 25-50% |
 
+Requires parser changes to assign compile-time indices. High complexity/risk.
+
 ---
 
 ## Part 5: Comparison Table
 
-| Technique | Go | Python | Simple (Current) | Simple (Proposed) |
-|-----------|-----|--------|-------------------|-------------------|
-| Variable lookup | Compile-time offset | LOAD_FAST (index) | O(depth*vars) linear | O(1) index or hash |
-| Function dispatch | Interface + itab cache | Specializing adaptive | O(n) linear scan | O(1) hash map |
-| String interning | unique.Handle (1.23+) | PyUnicode_InternInPlace | None | Intern identifiers |
-| GC/Memory | Concurrent mark-sweep | Refcount + gen GC | N/A (manual) | Value pooling |
-| Dispatch | Jump table (8+ cases) | Computed goto (15-20%) | match on string tag | Integer tag + fn ptr |
-| Frame alloc | 2KB goroutine stack | Stack array (3.11+) | Rebuild on pop | Pre-alloc + reuse |
-| Common values | Stack alloc small objs | Free lists + immortal | Alloc every time | Cache nil/true/false/0/1 |
-| Hash maps | Swiss tables (1.24+) | Compact dict (3.6+) | Parallel arrays | Dict<text, i64> |
+| Technique | Go | Python | Simple (Before) | Simple (After) | Status |
+|-----------|-----|--------|-----------------|----------------|--------|
+| Variable lookup | Compile-time offset | LOAD_FAST (index) | O(depth*vars) linear | O(1) hash per scope | DONE |
+| Function dispatch | Interface + itab cache | Specializing adaptive | O(n) linear scan | O(1) hash map | DONE |
+| String interning | unique.Handle (1.23+) | PyUnicode_InternInPlace | None | Not yet | TODO |
+| GC/Memory | Concurrent mark-sweep | Refcount + gen GC | N/A (manual) | Immortal cache (260 values) | DONE |
+| Dispatch | Jump table (8+ cases) | Computed goto (15-20%) | match on string tag | Same (string tag) | TODO |
+| Frame alloc | 2KB goroutine stack | Stack array (3.11+) | Rebuild on pop | O(1) slot reuse | DONE |
+| Common values | Stack alloc small objs | Free lists + immortal | Alloc every time | Cached nil/true/false/0-255/"" | DONE |
+| Hash maps | Swiss tables (1.24+) | Compact dict (3.6+) | Parallel arrays | Chained hash maps | DONE |
+| Char classification | N/A | N/A | O(k) contains() | O(1) range compare | DONE |
 
 ---
 

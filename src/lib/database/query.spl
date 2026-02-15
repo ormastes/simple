@@ -103,10 +103,10 @@ class QueryBuilder:
         for filter in self.filters:
             results = results.filter(\row: filter.matches(row))
 
-        # Apply sorting (manual insertion sort for bootstrap runtime compatibility)
+        # Apply sorting (merge sort - O(n log n) stable sort)
         if self.sort_field.?:
             val field = self.sort_field?
-            results = insertion_sort(results, field, self.sort_desc)
+            results = merge_sort_rows(results, field, self.sort_desc)
 
         # Apply limit
         if self.limit_count.?:
@@ -133,22 +133,39 @@ class QueryBuilder:
 
 use lib.database.core.{SdnDatabase}
 
-# Manual insertion sort for arrays of SdnRow (bootstrap runtime doesn't have sort_by)
-fn insertion_sort(rows: [SdnRow], field: text, desc: bool) -> [SdnRow]:
-    var result = rows
-    for i in 1..result.len():
-        var j = i
-        while j > 0:
-            val a = result[j - 1].get(field) ?? ""
-            val b = result[j].get(field) ?? ""
-            val should_swap = if desc: a < b else: a > b
-            if should_swap:
-                val temp = result[j]
-                result[j] = result[j - 1]
-                result[j - 1] = temp
-                j = j - 1
-            else:
-                break
+# Merge sort for arrays of SdnRow - O(n log n) stable sort
+fn merge_sort_rows(rows: [SdnRow], field: text, desc: bool) -> [SdnRow]:
+    if rows.len() <= 1:
+        return rows
+    val mid = rows.len() / 2
+    var left: [SdnRow] = []
+    var right: [SdnRow] = []
+    for i in 0..mid:
+        left = left.push(rows[i])
+    for i in mid..rows.len():
+        right = right.push(rows[i])
+    merge_rows(left=merge_sort_rows(left, field, desc), right=merge_sort_rows(right, field, desc), field=field, desc=desc)
+
+fn merge_rows(left: [SdnRow], right: [SdnRow], field: text, desc: bool) -> [SdnRow]:
+    var result: [SdnRow] = []
+    var i = 0
+    var j = 0
+    while i < left.len() and j < right.len():
+        val a = left[i].get(field) ?? ""
+        val b = right[j].get(field) ?? ""
+        val take_left = if desc: a >= b else: a <= b
+        if take_left:
+            result = result.push(left[i])
+            i = i + 1
+        else:
+            result = result.push(right[j])
+            j = j + 1
+    while i < left.len():
+        result = result.push(left[i])
+        i = i + 1
+    while j < right.len():
+        result = result.push(right[j])
+        j = j + 1
     result
 
 fn query_table(db: SdnDatabase, table_name: text) -> QueryBuilder?:

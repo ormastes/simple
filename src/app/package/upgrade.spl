@@ -2,10 +2,12 @@
 # Upgrades an installed package to a new version
 
 use app.io
+use std.log.{error, warn, info}
+
 class PackageUpgrade:
     static fn run(args: [text]):
         if args.is_empty():
-            print "Error: No package file specified"
+            error("package", "No package file specified")
             print "Usage: simple package upgrade <package.spk> [options]"
             return
 
@@ -13,21 +15,21 @@ class PackageUpgrade:
         val install_args = args[1:]
 
         if not file_exists(package_path):
-            print "Error: Package file not found: {package_path}"
+            error("package", "Package file not found: {package_path}")
             return
 
         val paths = PackagePaths.from_args(install_args)
 
         # Check if package is currently installed
         if not file_exists(paths.manifest_path()):
-            print "No existing installation found. Installing fresh..."
+            info("package", "No existing installation found. Installing fresh...")
             PackageInstall.run(args)
             return
 
         # Read current manifest
         val current = PackageManifest.from_file(paths.manifest_path())
 
-        print "Current installation: {current.name} v{current.version}"
+        info("package", "Current installation: {current.name} v{current.version}")
         print ""
 
         # Extract new package to check version
@@ -39,46 +41,46 @@ class PackageUpgrade:
 
         val new_manifest_path = tmp_dir + "/manifest.sdn"
         if not file_exists(new_manifest_path):
-            print "Error: Invalid package - missing manifest"
+            error("package", "Invalid package - missing manifest")
             dir_remove_all(tmp_dir)
             return
 
         val new = PackageManifest.from_file(new_manifest_path)
 
-        print "Upgrading to: {new.name} v{new.version}"
+        info("package", "Upgrading to: {new.name} v{new.version}")
         print ""
 
         # Check version compatibility
         if new.version == current.version:
-            print "Warning: Same version ({new.version})"
-            print "Proceeding with reinstallation..."
+            warn("package", "Same version ({new.version})")
+            info("package", "Proceeding with reinstallation...")
             print ""
 
         # Backup config directory (if not system install)
         var config_backup = ""
         if not paths.is_system and file_exists(paths.config_dir()):
             config_backup = "/tmp/simple-config-backup-{process.pid()}"
-            print "Backing up configuration to {config_backup}"
+            info("package", "Backing up configuration to {config_backup}")
             fs.copy_dir(paths.config_dir(), config_backup)
 
         # Uninstall current version (keep config)
-        print "Removing old version..."
+        info("package", "Removing old version...")
         PackageUninstall.run(install_args)  # Don't pass --purge
 
         # Install new version
         print ""
-        print "Installing new version..."
+        info("package", "Installing new version...")
         PackageInstall.run(args)
 
         # Restore config if we backed it up
         if config_backup != "":
-            print "Restoring configuration..."
+            info("package", "Restoring configuration...")
             if file_exists(config_backup):
                 fs.copy_dir(config_backup, paths.config_dir())
                 dir_remove_all(config_backup)
 
         print ""
-        print "Upgrade complete: v{current.version} → v{new.version}"
+        info("package", "Upgrade complete: v{current.version} → v{new.version}")
 
         # Cleanup
         dir_remove_all(tmp_dir)

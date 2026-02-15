@@ -31,6 +31,7 @@ extern fn rt_cli_get_args() -> [str]
 use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 use app.compile.c_codegen.{generate_c_code}
 use std.string.{NL}
+use std.log.{error, warn, info, debug}
 
 # ============================================================================
 # Platform Detection
@@ -167,15 +168,15 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
         val dep_source = rt_file_read_text(dep_file) ?? ""
         if dep_source == "":
             if verbose:
-                print "[native] Warning: cannot read dependency: {dep_file}"
+                warn("compile", "cannot read dependency: {dep_file}")
             continue
         # Skip if combined source would exceed 80KB (runtime file_write limit)
         if combined_size + dep_source.len() > 80000:
             if verbose:
-                print "[native] Skipping dependency (size limit): {dep_file}"
+                debug("compile", "Skipping dependency (size limit): {dep_file}")
             continue
         if verbose:
-            print "[native] Including dependency: {dep_file}"
+            debug("compile", "Including dependency: {dep_file}")
         dep_sources.push(dep_source)
         combined_size = combined_size + dep_source.len()
 
@@ -202,13 +203,13 @@ fn collect_all_sources(source_file: text, source: text, verbose: bool) -> text:
 
 fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_override: text) -> i64:
     if verbose:
-        print "[native] Compiling {source_file} to native binary..."
+        info("compile", "Compiling {source_file} to native binary...")
 
     # Step 1: Read source file
     val source_raw = rt_file_read_text(source_file)
     val source_single = source_raw ?? ""
     if source_single == "":
-        print "Error: Cannot read source file: {source_file}"
+        error("compile", "Cannot read source file: {source_file}")
         return 1
 
     # Step 1b: Collect dependencies (multi-file support)
@@ -217,25 +218,25 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
     # Step 2: Generate C code
     val c_code = generate_c_code(source)
     if verbose:
-        print "[native] Generated C code ({c_code.len()} bytes)"
+        debug("compile", "Generated C code ({c_code.len()} bytes)")
 
     # Step 3: Write to temp file
     val temp_c = shell_output("mktemp /tmp/simple_native_XXXXXX.c")
     if temp_c == "":
-        print "Error: Failed to create temp file"
+        error("compile", "Failed to create temp file")
         return 1
 
     if not file_write(temp_c, c_code):
-        print "Error: Failed to write temp C file: {temp_c}"
+        error("compile", "Failed to write temp C file: {temp_c}")
         return 1
 
     if verbose:
-        print "[native] Wrote temp C file: {temp_c}"
+        debug("compile", "Wrote temp C file: {temp_c}")
 
     # Step 4: Find compiler and mold, then compile
     val cc = if compiler_override != "": compiler_override else: find_c_compiler()
     if cc == "":
-        print "Error: No C compiler found (tried clang, gcc, cc)"
+        error("compile", "No C compiler found (tried clang, gcc, cc)")
         file_delete(temp_c)
         return 1
 
@@ -251,14 +252,14 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
         gcc_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/ -o '{output_file}' '{temp_c}'"
         used_mold = true
         if verbose:
-            print "[native] Using mold linker at: {mold_path}"
+            debug("compile", "Using mold linker at: {mold_path}")
     else:
         gcc_cmd = "{cc} -o '{output_file}' '{temp_c}'"
         if verbose:
-            print "[native] No mold found, using system linker"
+            debug("compile", "No mold found, using system linker")
 
     if verbose:
-        print "[native] Running: {gcc_cmd}"
+        debug("compile", "Running: {gcc_cmd}")
 
     val (gcc_out, gcc_err, gcc_exit) = shell(gcc_cmd)
 
@@ -267,21 +268,21 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 
     # Step 6: Report results
     if gcc_exit != 0:
-        print "Error: Compilation failed (exit code {gcc_exit})"
+        error("compile", "Compilation failed (exit code {gcc_exit})")
         if gcc_err != "":
-            print gcc_err
+            error("compile", gcc_err)
         return 1
 
     if rt_file_exists(output_file):
         val size = file_size(output_file)
-        print "Compiled: {output_file} ({size} bytes)"
+        info("compile", "Compiled: {output_file} ({size} bytes)")
         if verbose:
             var linker_name = "system"
             if used_mold:
                 linker_name = "mold"
-            print "[native] Linker: {linker_name}"
+            debug("compile", "Linker: {linker_name}")
     else:
-        print "Error: Output file not created: {output_file}"
+        error("compile", "Output file not created: {output_file}")
         return 1
 
     0
@@ -293,12 +294,12 @@ fn compile_native(source_file: text, output_file: text, verbose: bool, compiler_
 fn compile_c_to_object(c_file: text, obj_file: text, verbose: bool, cc: text) -> bool:
     val cmd = "{cc} -c -fPIE -o '{obj_file}' '{c_file}'"
     if verbose:
-        print "[native-linked] {cc} -c: {c_file} -> {obj_file}"
+        debug("compile", "{cc} -c: {c_file} -> {obj_file}")
     val (out, err, exit_code) = shell(cmd)
     if exit_code != 0:
-        print "Error: compile failed for {c_file}"
+        error("compile", "compile failed for {c_file}")
         if err != "":
-            print err
+            error("compile", err)
         return false
     true
 
@@ -313,10 +314,10 @@ fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -
             mold_dir = mold_path.substring(0, last_slash)
         link_cmd = "{cc} -fuse-ld=mold -B {mold_dir}/"
         if verbose:
-            print "[native-linked] Using mold linker at: {mold_path}"
+            debug("compile", "Using mold linker at: {mold_path}")
     else:
         if verbose:
-            print "[native-linked] Using system linker ({cc})"
+            debug("compile", "Using system linker ({cc})")
 
     # Add object files
     for obj in obj_files:
@@ -324,25 +325,25 @@ fn link_objects(obj_files: [text], output_file: text, verbose: bool, cc: text) -
     link_cmd = link_cmd + " -o '{output_file}'"
 
     if verbose:
-        print "[native-linked] Link: {link_cmd}"
+        debug("compile", "Link: {link_cmd}")
 
     val (out, err, exit_code) = shell(link_cmd)
     if exit_code != 0:
-        print "Error: Linking failed (exit code {exit_code})"
+        error("compile", "Linking failed (exit code {exit_code})")
         if err != "":
-            print err
+            error("compile", err)
         return false
     true
 
 fn compile_native_linked(source_file: text, output_file: text, verbose: bool, compiler_override: text) -> i64:
     if verbose:
-        print "[native-linked] Compiling {source_file} to native binary (separate compile+link)..."
+        info("compile", "Compiling {source_file} to native binary (separate compile+link)...")
 
     # Step 1: Read main source
     val source_raw = rt_file_read_text(source_file)
     val source_single = source_raw ?? ""
     if source_single == "":
-        print "Error: Cannot read source file: {source_file}"
+        error("compile", "Cannot read source file: {source_file}")
         return 1
 
     # Step 2: Discover dependency files via BFS
@@ -365,10 +366,10 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
         val dep_source = rt_file_read_text(dep_file) ?? ""
         if dep_source == "":
             if verbose:
-                print "[native-linked] Warning: cannot read dependency: {dep_file}"
+                warn("compile", "cannot read dependency: {dep_file}")
             continue
         if verbose:
-            print "[native-linked] Found dependency: {dep_file}"
+            debug("compile", "Found dependency: {dep_file}")
         dep_sources.push(dep_source)
 
         val dep_dir = get_dir_of_file(dep_file)
@@ -387,23 +388,23 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
 
     val c_code = generate_c_code(combined)
     if verbose:
-        print "[native-linked] Generated C code ({c_code.len()} bytes)"
+        debug("compile", "Generated C code ({c_code.len()} bytes)")
 
     # Step 4: Write C, compile to .o, then link separately
     val temp_dir = shell_output("mktemp -d /tmp/simple_linked_XXXXXX")
     if temp_dir == "":
-        print "Error: Failed to create temp directory"
+        error("compile", "Failed to create temp directory")
         return 1
 
     val temp_c = temp_dir + "/combined.c"
     if not file_write(temp_c, c_code):
-        print "Error: Failed to write temp C file"
+        error("compile", "Failed to write temp C file")
         shell("rm -rf '{temp_dir}'")
         return 1
 
     val cc = if compiler_override != "": compiler_override else: find_c_compiler()
     if cc == "":
-        print "Error: No C compiler found (tried clang, gcc, cc)"
+        error("compile", "No C compiler found (tried clang, gcc, cc)")
         shell("rm -rf '{temp_dir}'")
         return 1
 
@@ -415,7 +416,7 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
     # Step 5: Link object file(s) to binary
     var obj_files: [text] = [temp_o]
     if verbose:
-        print "[native-linked] Linking {obj_files.len()} object file(s)..."
+        debug("compile", "Linking {obj_files.len()} object file(s)...")
 
     val link_ok = link_objects(obj_files, output_file, verbose, cc)
 
@@ -427,9 +428,9 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
 
     if rt_file_exists(output_file):
         val size = file_size(output_file)
-        print "Compiled: {output_file} ({size} bytes) [linked]"
+        info("compile", "Compiled: {output_file} ({size} bytes) [linked]")
     else:
-        print "Error: Output file not created: {output_file}"
+        error("compile", "Output file not created: {output_file}")
         return 1
 
     0
@@ -440,22 +441,22 @@ fn compile_native_linked(source_file: text, output_file: text, verbose: bool, co
 
 fn compile_gen_c_only(source_file: text, output_file: text, verbose: bool) -> i64:
     if verbose:
-        print "[native] Generating C code only for {source_file}..."
+        info("compile", "Generating C code only for {source_file}...")
 
     val source_raw = rt_file_read_text(source_file)
     val source_single = source_raw ?? ""
     if source_single == "":
-        print "Error: Cannot read source file: {source_file}"
+        error("compile", "Cannot read source file: {source_file}")
         return 1
 
     val source = collect_all_sources(source_file, source_single, verbose)
     val c_code = generate_c_code(source)
 
     if not file_write(output_file, c_code):
-        print "Error: Failed to write C file: {output_file}"
+        error("compile", "Failed to write C file: {output_file}")
         return 1
 
-    print "Generated C: {output_file} ({c_code.len()} bytes)"
+    info("compile", "Generated C: {output_file} ({c_code.len()} bytes)")
     0
 
 # ============================================================================

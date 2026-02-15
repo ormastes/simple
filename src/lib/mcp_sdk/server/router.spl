@@ -1,0 +1,100 @@
+# MCP SDK - Server Router
+#
+# Dispatches JSON-RPC methods to handlers and runs the main server loop.
+# The user provides a tool handler callback; built-in methods (initialize,
+# tools/list, resources/list, prompts/list, ping) are handled automatically.
+
+use lib.mcp_sdk.core.json.{LB, RB, Q, jp, js, extract_json_value, extract_nested_string}
+use lib.mcp_sdk.core.jsonrpc.{jsonrpc_result, jsonrpc_error}
+use lib.mcp_sdk.transport.stdio.{read_stdin_message, write_stdout_message}
+use lib.mcp_sdk.server.builder.{ServerConfig, server_build_init_result, server_build_tools_list, server_build_resources_list, server_build_prompts_list}
+
+# --- Caches ---
+var ROUTER_INIT_CACHE = ""
+var ROUTER_TOOLS_CACHE = ""
+var ROUTER_RESOURCES_CACHE = ""
+var ROUTER_PROMPTS_CACHE = ""
+
+# Dispatch a single MCP method, returning the response JSON.
+# tool_handler is called for tools/call with (id, tool_name, body) -> response.
+# resource_handler is called for resources/read with (id, uri) -> response.
+# prompt_handler is called for prompts/get with (id, prompt_name, body) -> response.
+# Returns "EXIT" to signal shutdown, "" for notifications (no response needed).
+fn dispatch_method(cfg: ServerConfig, method: text, id: text, body: text, tool_handler_fn: text, resource_handler_fn: text, prompt_handler_fn: text) -> text:
+    if method == "initialize":
+        if ROUTER_INIT_CACHE == "":
+            ROUTER_INIT_CACHE = server_build_init_result(cfg)
+        return jsonrpc_result(id, ROUTER_INIT_CACHE)
+    elif method == "initialized":
+        return ""
+    elif method == "tools/list":
+        if ROUTER_TOOLS_CACHE == "":
+            ROUTER_TOOLS_CACHE = server_build_tools_list(cfg)
+        return jsonrpc_result(id, ROUTER_TOOLS_CACHE)
+    elif method == "resources/list":
+        if ROUTER_RESOURCES_CACHE == "":
+            ROUTER_RESOURCES_CACHE = server_build_resources_list(cfg)
+        return jsonrpc_result(id, ROUTER_RESOURCES_CACHE)
+    elif method == "resources/templates/list":
+        val result = jo1_local(jp("resourceTemplates", "[]"))
+        return jsonrpc_result(id, result)
+    elif method == "prompts/list":
+        if ROUTER_PROMPTS_CACHE == "":
+            ROUTER_PROMPTS_CACHE = server_build_prompts_list(cfg)
+        return jsonrpc_result(id, ROUTER_PROMPTS_CACHE)
+    elif method == "ping":
+        return jsonrpc_result(id, LB() + RB())
+    elif method == "shutdown":
+        return jsonrpc_result(id, "null")
+    elif method == "exit":
+        return "EXIT"
+    elif method.starts_with("notifications/"):
+        return ""
+    # For tools/call, resources/read, prompts/get: return marker for external dispatch
+    elif method == "tools/call":
+        return "DISPATCH_TOOL"
+    elif method == "resources/read":
+        return "DISPATCH_RESOURCE"
+    elif method == "prompts/get":
+        return "DISPATCH_PROMPT"
+    jsonrpc_error(id, -32601, "Method not found: " + method)
+
+fn jo1_local(pair: text) -> text:
+    var r = LB()
+    r = r + pair
+    r = r + RB()
+    r
+
+# Run the server loop, reading from stdin and writing to stdout.
+# tool_handler: fn(id: text, tool_name: text, body: text) -> text
+# This is a simplified loop; the caller passes a dispatch function.
+fn server_loop(cfg: ServerConfig, dispatch_fn_marker: text):
+    for _iter in range(0, 999999):
+        val line = read_stdin_message()
+        if line == "":
+            return
+        val method = extract_json_value(line, "method")
+        # Remove surrounding quotes if present
+        var clean_method = method
+        if clean_method.starts_with("\""):
+            clean_method = clean_method.substring(1)
+        if clean_method.ends_with("\""):
+            clean_method = clean_method.substring(0, clean_method.len() - 1)
+
+        val id = extract_json_value(line, "id")
+        val response = dispatch_method(cfg, clean_method, id, line, "", "", "")
+        if response == "EXIT":
+            return
+        if response != "":
+            write_stdout_message(response)
+
+# Clear all router caches (useful for dynamic tool registration)
+fn router_clear_caches():
+    ROUTER_INIT_CACHE = ""
+    ROUTER_TOOLS_CACHE = ""
+    ROUTER_RESOURCES_CACHE = ""
+    ROUTER_PROMPTS_CACHE = ""
+
+# --- Exports ---
+
+export dispatch_method, server_loop, router_clear_caches

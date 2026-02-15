@@ -124,22 +124,32 @@ impl LoopDetector:
         # Reset loops
         self.loops = []
 
+        # Pre-compute block index map for O(1) lookup
+        var block_idx_map = {}
+        for i in 0..(func.blocks.len()):
+            val bid = "{func.blocks[i].id.id}"
+            block_idx_map[bid] = i
+
         # Find potential loop headers (blocks jumped to from later blocks)
         var potential_headers: [BlockId] = []
+        var header_set = {}
 
         for block in func.blocks:
             val successors = self.get_successors(block.terminator)
             for succ in successors:
-                # Check if successor appears earlier in block list
-                if self.block_index(func, succ) <= self.block_index(func, block.id):
+                # Check if successor appears earlier in block list (O(1) lookup)
+                val succ_idx = block_idx_map["{succ.id}"] ?? -1
+                val block_idx = block_idx_map["{block.id.id}"] ?? -1
+                if succ_idx <= block_idx:
                     # Potential backedge
-                    if not self.is_block_in_list(succ, potential_headers):
-                        potential_headers.push(succ)
+                    if not header_set.contains_key("{succ.id}"):
+                        header_set["{succ.id}"] = true
+                        potential_headers = potential_headers.push(succ)
 
         # Build LoopInfo for each header
         for header in potential_headers:
             val loop_info = self.build_loop_info(func, header)
-            self.loops.push(loop_info)
+            self.loops = self.loops.push(loop_info)
 
     # TEMPORARILY COMMENTED OUT - Testing parse error location
     # fn get_successors(term: MirTerminator) -> [BlockId]:
@@ -174,8 +184,8 @@ impl LoopDetector:
             case Switch(_, targets, default):
                 var succs: [BlockId] = []
                 for case_item in targets:
-                    succs.push(case_item.target)
-                succs.push(default)
+                    succs = succs.push(case_item.target)
+                succs = succs.push(default)
                 succs
             case CallTerminator(_, _, _, normal, unwind):
                 if unwind.?:
@@ -189,6 +199,7 @@ impl LoopDetector:
         # Simple implementation: find all blocks that can reach header
         var body: [BlockId] = []
         var backedges: [BlockId] = []
+        var body_set = {}
 
         for block in func.blocks:
             if block.id.id == header.id:
@@ -198,21 +209,30 @@ impl LoopDetector:
             for succ in successors:
                 if succ.id == header.id:
                     # This block jumps to header
-                    backedges.push(block.id)
-                    if not self.is_block_in_list(block.id, body):
-                        body.push(block.id)
+                    backedges = backedges.push(block.id)
+                    if not body_set.contains_key("{block.id.id}"):
+                        body_set["{block.id.id}"] = true
+                        body = body.push(block.id)
+
+        # Build all_body set for O(1) membership checks
+        var all_body_set = {}
+        all_body_set["{header.id}"] = true
+        for bid in body:
+            all_body_set["{bid.id}"] = true
 
         # Detect exit edges: edges from body blocks to non-body blocks
         var exit_edges: [BlockId] = []
+        var exit_set = {}
         val all_body = [header] + body
         for block in func.blocks:
-            if not self.is_block_in_list(block.id, all_body):
+            if not all_body_set.contains_key("{block.id.id}"):
                 continue
             val successors = self.get_successors(block.terminator)
             for succ in successors:
-                if not self.is_block_in_list(succ, all_body):
-                    if not self.is_block_in_list(succ, exit_edges):
-                        exit_edges.push(succ)
+                if not all_body_set.contains_key("{succ.id}"):
+                    if not exit_set.contains_key("{succ.id}"):
+                        exit_set["{succ.id}"] = true
+                        exit_edges = exit_edges.push(succ)
 
         # Analyze iteration count from exit conditions
         # Look at conditional terminators in loop blocks that branch out
@@ -237,17 +257,22 @@ impl LoopDetector:
 
         Returns Some(N) if a constant bound is found, nil otherwise.
         """
+        # Build loop block set for O(1) lookup
+        var loop_block_set = {}
+        for lb in loop_blocks:
+            loop_block_set["{lb.id}"] = true
+
         # Check each block in the loop for conditional exits
         for block in func.blocks:
-            if not self.is_block_in_list(block.id, loop_blocks):
+            if not loop_block_set.contains_key("{block.id.id}"):
                 continue
 
             # Look for If terminators that compare against a constant
             match block.terminator:
                 case If(cond, then_, else_):
                     # Check if one target exits the loop and the other stays
-                    val then_in_loop = self.is_block_in_list(then_, loop_blocks)
-                    val else_in_loop = self.is_block_in_list(else_, loop_blocks)
+                    val then_in_loop = loop_block_set.contains_key("{then_.id}")
+                    val else_in_loop = loop_block_set.contains_key("{else_.id}")
 
                     # Exactly one branch should exit for a counted loop
                     if then_in_loop and not else_in_loop:
@@ -399,10 +424,16 @@ impl LoopInvariantMotion:
 
     me hoist_invariants(blocks: [MirBlock], loop: LoopInfo) -> [MirBlock]:
         """Hoist loop-invariant instructions out of loop."""
+        # Pre-compute loop block membership set for O(1) lookup
+        var loop_block_set = {}
+        loop_block_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_block_set["{bid.id}"] = true
+
         # Build set of locals defined inside the loop
         var loop_defs: Dict<i64, bool> = {}
         for block in blocks:
-            if loop.contains_block(block.id):
+            if loop_block_set.contains_key("{block.id.id}"):
                 for inst in block.instructions:
                     val dest = self.inst_dest(inst)
                     if dest.?:
@@ -413,10 +444,10 @@ impl LoopInvariantMotion:
         var hoisted_ids: Dict<i64, bool> = {}
 
         for block in blocks:
-            if loop.contains_block(block.id):
+            if loop_block_set.contains_key("{block.id.id}"):
                 for inst in block.instructions:
                     if self.is_loop_invariant(inst, loop_defs, hoisted_ids):
-                        invariant_insts.push(inst)
+                        invariant_insts = invariant_insts.push(inst)
                         val dest = self.inst_dest(inst)
                         if dest.?:
                             hoisted_ids[dest.unwrap().id] = true
@@ -435,27 +466,27 @@ impl LoopInvariantMotion:
                 # Insert hoisted instructions at start of header block
                 var new_insts: [MirInst] = []
                 for hinst in invariant_insts:
-                    new_insts.push(hinst)
+                    new_insts = new_insts.push(hinst)
                 for inst in block.instructions:
                     if not self.is_in_list(inst, invariant_insts):
-                        new_insts.push(inst)
-                new_blocks.push(MirBlock(
+                        new_insts = new_insts.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: new_insts, terminator: block.terminator
                 ))
                 hoisted_to_preheader = true
-            elif loop.contains_block(block.id):
+            elif loop_block_set.contains_key("{block.id.id}"):
                 # Remove hoisted instructions from loop body
                 var kept: [MirInst] = []
                 for inst in block.instructions:
                     if not self.is_in_list(inst, invariant_insts):
-                        kept.push(inst)
-                new_blocks.push(MirBlock(
+                        kept = kept.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: kept, terminator: block.terminator
                 ))
             else:
-                new_blocks.push(block)
+                new_blocks = new_blocks.push(block)
 
         new_blocks
 
@@ -564,13 +595,19 @@ impl LoopUnroller:
         in the header block, removing the backedge. This eliminates loop overhead
         (branch, counter increment) for small loops.
         """
+        # Pre-compute loop block membership set for O(1) lookup
+        var loop_block_set = {}
+        loop_block_set["{loop.header.id}"] = true
+        for bid in loop.body:
+            loop_block_set["{bid.id}"] = true
+
         # Collect body instructions from all loop body blocks
         var body_insts: [MirInst] = []
         for block in blocks:
-            if loop.contains_block(block.id):
+            if loop_block_set.contains_key("{block.id.id}"):
                 if block.id.id != loop.header.id:
                     for inst in block.instructions:
-                        body_insts.push(inst)
+                        body_insts = body_insts.push(inst)
 
         if body_insts.len() == 0:
             return blocks
@@ -579,7 +616,7 @@ impl LoopUnroller:
         var unrolled: [MirInst] = []
         for iteration in 0..count:
             for inst in body_insts:
-                unrolled.push(inst)
+                unrolled = unrolled.push(inst)
 
         # Replace header block: keep header instructions + add unrolled body
         # Remove backedge (loop body blocks become empty)
@@ -589,21 +626,21 @@ impl LoopUnroller:
                 # Header gets original instructions + unrolled body
                 var combined: [MirInst] = []
                 for inst in block.instructions:
-                    combined.push(inst)
+                    combined = combined.push(inst)
                 for inst in unrolled:
-                    combined.push(inst)
-                new_blocks.push(MirBlock(
+                    combined = combined.push(inst)
+                new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: combined, terminator: block.terminator
                 ))
-            elif loop.contains_block(block.id):
+            elif loop_block_set.contains_key("{block.id.id}"):
                 # Body blocks become empty (instructions moved to header)
-                new_blocks.push(MirBlock(
+                new_blocks = new_blocks.push(MirBlock(
                     id: block.id, label: block.label,
                     instructions: [], terminator: block.terminator
                 ))
             else:
-                new_blocks.push(block)
+                new_blocks = new_blocks.push(block)
 
         new_blocks
 
@@ -634,7 +671,7 @@ impl StrengthReduction:
 
         for block in func.blocks:
             val optimized = self.reduce_block(block)
-            optimized_blocks.push(optimized)
+            optimized_blocks = optimized_blocks.push(optimized)
 
         copy_mir_function_with_blocks(func, optimized_blocks)
 
@@ -644,7 +681,7 @@ impl StrengthReduction:
 
         for inst in block.instructions:
             val reduced = self.try_reduce_instruction(inst)
-            reduced_instructions.push(reduced)
+            reduced_instructions = reduced_instructions.push(reduced)
 
         MirBlock(
             id: block.id,
