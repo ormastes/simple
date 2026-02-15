@@ -58,24 +58,37 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     true
 
 # ===== Type Erasure / Monomorphization Support =====
-# Cache for monomorphic function instances
-# Maps (fn_name, type_args_str) -> specialized_decl_id
-var mono_cache_keys: [text] = []
-var mono_cache_decls: [i64] = []
+# Cache for monomorphic function instances (Hash Map)
+# Maps (fn_name + "__" + type_args_str) -> specialized_decl_id
+var mc_keys: [text] = []
+var mc_vals: [i64] = []
+var mc_buckets: [i64] = []
+var mc_nexts: [i64] = []
+
+fn mono_cache_init():
+    mc_keys = []
+    mc_vals = []
+    mc_buckets = hm_make_global_buckets()
+    mc_nexts = []
 
 fn mono_cache_lookup(fn_name: text, type_args_str: text) -> i64:
     val cache_key = fn_name + "__" + type_args_str
-    var i: i64 = 0
-    for key in mono_cache_keys:
-        if key == cache_key:
-            return mono_cache_decls[i]
-        i = i + 1
+    val bucket = hm_hash_text(cache_key) % HM_SIZE
+    var idx = mc_buckets[bucket]
+    while idx != -1:
+        if mc_keys[idx] == cache_key:
+            return mc_vals[idx]
+        idx = mc_nexts[idx]
     -1
 
 fn mono_cache_register(fn_name: text, type_args_str: text, decl_id: i64):
     val cache_key = fn_name + "__" + type_args_str
-    mono_cache_keys.push(cache_key)
-    mono_cache_decls.push(decl_id)
+    val bucket = hm_hash_text(cache_key) % HM_SIZE
+    val new_idx = mc_keys.len()
+    mc_keys.push(cache_key)
+    mc_vals.push(decl_id)
+    mc_nexts.push(mc_buckets[bucket])
+    mc_buckets[bucket] = new_idx
 
 fn infer_type_args_from_values(arg_values: [i64]) -> text:
     # Infer type arguments from runtime values
@@ -176,81 +189,128 @@ fn eval_get_error() -> text:
 fn eval_has_error() -> bool:
     eval_had_error
 
-# ===== Function Table =====
+# ===== Function Table (Hash Map) =====
 # Maps function name -> decl_id for call resolution
-var func_table_names: [text] = []
-var func_table_decls: [i64] = []
+var ft_keys: [text] = []
+var ft_vals: [i64] = []
+var ft_buckets: [i64] = []
+var ft_nexts: [i64] = []
 
-# Maps function name -> return type tag
-var func_return_types: [(text, i64)] = []
+# ===== Function Return Types (Hash Map) =====
+var frt_keys: [text] = []
+var frt_vals: [i64] = []
+var frt_buckets: [i64] = []
+var frt_nexts: [i64] = []
 
-# ===== Must-Use Function Registry (R9) =====
-var must_use_fn_names: [text] = []
-var must_use_fn_reasons: [text] = []
+# ===== Must-Use Function Registry (Hash Map, R9) =====
+var mu_keys: [text] = []
+var mu_reasons: [text] = []
+var mu_buckets: [i64] = []
+var mu_nexts: [i64] = []
 var must_use_critical_mode: bool = false
 
 fn func_table_reset():
-    func_table_names = []
-    func_table_decls = []
-    func_return_types = []
-    must_use_fn_names = []
-    must_use_fn_reasons = []
+    ft_keys = []
+    ft_vals = []
+    ft_buckets = hm_make_global_buckets()
+    ft_nexts = []
+    frt_keys = []
+    frt_vals = []
+    frt_buckets = hm_make_global_buckets()
+    frt_nexts = []
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
     must_use_critical_mode = false
 
 fn func_table_register(name: text, decl_id: i64):
-    # Check for existing
-    var i: i64 = 0
-    for fn_name in func_table_names:
-        if fn_name == name:
-            func_table_decls[i] = decl_id
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == name:
+            ft_vals[idx] = decl_id
             return
-        i = i + 1
-    func_table_names.push(name)
-    func_table_decls.push(decl_id)
+        idx = ft_nexts[idx]
+    # New entry
+    val new_idx = ft_keys.len()
+    ft_keys.push(name)
+    ft_vals.push(decl_id)
+    ft_nexts.push(ft_buckets[bucket])
+    ft_buckets[bucket] = new_idx
 
 fn func_table_lookup(name: text) -> i64:
-    var i: i64 = 0
-    for fn_name in func_table_names:
-        if fn_name == name:
-            return func_table_decls[i]
-        i = i + 1
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = ft_buckets[bucket]
+    while idx != -1:
+        if ft_keys[idx] == name:
+            return ft_vals[idx]
+        idx = ft_nexts[idx]
     -1
 
 fn func_register_return_type(name: text, ret_type: i64):
-    func_return_types.push((name, ret_type))
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = frt_buckets[bucket]
+    while idx != -1:
+        if frt_keys[idx] == name:
+            frt_vals[idx] = ret_type
+            return
+        idx = frt_nexts[idx]
+    val new_idx = frt_keys.len()
+    frt_keys.push(name)
+    frt_vals.push(ret_type)
+    frt_nexts.push(frt_buckets[bucket])
+    frt_buckets[bucket] = new_idx
 
 fn func_lookup_return_type(name: text) -> i64:
-    for entry in func_return_types:
-        val fn_name = entry[0]
-        val ret_type = entry[1]
-        if fn_name == name:
-            return ret_type
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = frt_buckets[bucket]
+    while idx != -1:
+        if frt_keys[idx] == name:
+            return frt_vals[idx]
+        idx = frt_nexts[idx]
     -1
 
 # ===== Must-Use Registry Functions (R9) =====
 
 fn must_use_register(name: text, reason: text):
-    must_use_fn_names.push(name)
-    must_use_fn_reasons.push(reason)
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name:
+            mu_reasons[idx] = reason
+            return
+        idx = mu_nexts[idx]
+    val new_idx = mu_keys.len()
+    mu_keys.push(name)
+    mu_reasons.push(reason)
+    mu_nexts.push(mu_buckets[bucket])
+    mu_buckets[bucket] = new_idx
 
 fn must_use_is_registered(name: text) -> bool:
-    for fn_name in must_use_fn_names:
-        if fn_name == name: return true
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name: return true
+        idx = mu_nexts[idx]
     false
 
 fn must_use_get_reason(name: text) -> text:
-    var i: i64 = 0
-    for fn_name in must_use_fn_names:
-        if fn_name == name: return must_use_fn_reasons[i]
-        i = i + 1
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = mu_buckets[bucket]
+    while idx != -1:
+        if mu_keys[idx] == name: return mu_reasons[idx]
+        idx = mu_nexts[idx]
     ""
 
 fn must_use_is_critical() -> bool:
     must_use_critical_mode
 
 fn must_use_scan_source(source: text):
-    must_use_fn_names = []
-    must_use_fn_reasons = []
+    mu_keys = []
+    mu_reasons = []
+    mu_buckets = hm_make_global_buckets()
+    mu_nexts = []
     must_use_critical_mode = false
     # Split source into lines and scan for comment annotations
     var lines: [text] = []
@@ -336,31 +396,40 @@ fn must_use_scan_source(source: text):
                 pending_reason = ""
         li = li + 1
 
-# ===== Struct Definition Table =====
+# ===== Struct Definition Table (Hash Map) =====
 # Maps struct name -> decl_id for constructor resolution
-var struct_table_names: [text] = []
-var struct_table_decls: [i64] = []
+var st_keys: [text] = []
+var st_vals: [i64] = []
+var st_buckets: [i64] = []
+var st_nexts: [i64] = []
 
 fn struct_table_reset():
-    struct_table_names = []
-    struct_table_decls = []
+    st_keys = []
+    st_vals = []
+    st_buckets = hm_make_global_buckets()
+    st_nexts = []
 
 fn struct_table_register(name: text, decl_id: i64):
-    var i: i64 = 0
-    for sn in struct_table_names:
-        if sn == name:
-            struct_table_decls[i] = decl_id
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            st_vals[idx] = decl_id
             return
-        i = i + 1
-    struct_table_names.push(name)
-    struct_table_decls.push(decl_id)
+        idx = st_nexts[idx]
+    val new_idx = st_keys.len()
+    st_keys.push(name)
+    st_vals.push(decl_id)
+    st_nexts.push(st_buckets[bucket])
+    st_buckets[bucket] = new_idx
 
 fn struct_table_lookup(name: text) -> i64:
-    var i: i64 = 0
-    for sn in struct_table_names:
-        if sn == name:
-            return struct_table_decls[i]
-        i = i + 1
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            return st_vals[idx]
+        idx = st_nexts[idx]
     -1
 
 # ===== Expression Evaluation =====
@@ -676,7 +745,8 @@ fn eval_for_expr(eid: i64) -> i64:
             val end_n = val_get_int(end_val)
             var current = start_n
             val limit = end_n
-            for _unused in func_table_names:
+            var _range_iter: i64 = 0
+            while _range_iter < 1000001:
                 if eval_breaking: break
                 if eval_returning: break
                 if eval_had_error: break
@@ -698,6 +768,7 @@ fn eval_for_expr(eid: i64) -> i64:
                     last_val = eval_stmt(sid)
                 env_pop_scope()
                 current = current + 1
+                _range_iter = _range_iter + 1
             eval_breaking = false
             eval_continuing = false
             return last_val
@@ -718,7 +789,8 @@ fn eval_range(eid: i64) -> i64:
     val end_n = val_get_int(end_val)
     var elements: [i64] = []
     var current = start_n
-    for _unused in func_table_names:
+    var _range_iter2: i64 = 0
+    while _range_iter2 < 10001:
         val should_stop = current > end_n
         val at_limit = current == end_n
         if inclusive != 0:
@@ -728,8 +800,7 @@ fn eval_range(eid: i64) -> i64:
             if should_stop: break
         elements.push(val_make_int(current))
         current = current + 1
-        # safety limit
-        if elements.len() > 10000: break
+        _range_iter2 = _range_iter2 + 1
     val_make_array(elements)
 
 # ===== While Expression =====
@@ -742,7 +813,7 @@ fn eval_while_expr(eid: i64) -> i64:
     var iterations: i64 = 0
     val max_iterations: i64 = 1000000
 
-    for _unused in func_table_names:
+    while iterations < max_iterations:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
@@ -757,9 +828,9 @@ fn eval_while_expr(eid: i64) -> i64:
             if eval_continuing: break
             last_val = eval_stmt(sid)
         iterations = iterations + 1
-        if iterations >= max_iterations:
-            eval_set_error("while loop exceeded maximum iterations")
-            break
+
+    if iterations >= max_iterations:
+        eval_set_error("while loop exceeded maximum iterations")
 
     eval_breaking = false
     eval_continuing = false
@@ -1680,7 +1751,7 @@ fn eval_stmt_for(sid: i64) -> i64:
         var current = start_n
         var last_val = val_make_nil()
         var iterations: i64 = 0
-        for _unused in func_table_names:
+        while iterations < 1000001:
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
@@ -1703,7 +1774,6 @@ fn eval_stmt_for(sid: i64) -> i64:
             env_pop_scope()
             current = current + 1
             iterations = iterations + 1
-            if iterations > 1000000: break
         eval_breaking = false
         eval_continuing = false
         return last_val
@@ -1743,7 +1813,7 @@ fn eval_stmt_while(sid: i64) -> i64:
     var last_val = val_make_nil()
     var iterations: i64 = 0
 
-    for _unused in func_table_names:
+    while iterations < 1000000:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
@@ -1758,9 +1828,9 @@ fn eval_stmt_while(sid: i64) -> i64:
             if eval_continuing: break
             last_val = eval_stmt(sid2)
         iterations = iterations + 1
-        if iterations >= 1000000:
-            eval_set_error("while loop exceeded maximum iterations")
-            break
+
+    if iterations >= 1000000:
+        eval_set_error("while loop exceeded maximum iterations")
 
     eval_breaking = false
     eval_continuing = false
@@ -1928,6 +1998,7 @@ fn eval_init():
     env_init()
     func_table_reset()
     struct_table_reset()
+    mono_cache_init()
     eval_reset()
     module_loader_init()
 

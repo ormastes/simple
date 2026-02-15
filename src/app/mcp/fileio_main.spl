@@ -9,6 +9,9 @@ use app.io.mod (cli_get_args, env_get, shell, exit)
 use lib.json.builder.{escape_json}
 use std.string.{NL}
 
+# Protocol auto-detection: JSON Lines (MCP SDK) vs Content-Length (LSP)
+var USE_JSON_LINES = false
+
 # Cache tool schemas to avoid rebuilding on every tools/list request
 var FILEIO_TOOLS_CACHE: [String] = []
 var FILEIO_TOOLS_CACHE_BUILT: Bool = false
@@ -512,37 +515,36 @@ fn parse_params(json: text) -> text:
     result
 
 fn read_stdin_message() -> String:
-    # Read Content-Length header
-    var header = input()
-    if header == "":
+    var line = input()
+    if line == "":
         return ""
-
-    # Strip trailing \r if present
-    if header.ends_with("\r"):
-        header = header.substring(0, header.len() - 1)
-
-    # Parse content length
-    var content_length = 0
-    if header.starts_with("Content-Length:"):
-        val len_str = header.replace("Content-Length:", "").trim()
-        content_length = len_str.to_int()
-
-    if content_length == 0:
-        return ""
-
-    # Skip blank line after headers
-    input()
-
-    # Read body (JSON-RPC body is typically one line)
-    val body = input()
-    body
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+    # JSON Lines mode: line starts with { (MCP SDK format)
+    if line.starts_with("{"):
+        USE_JSON_LINES = true
+        return line
+    # Content-Length mode (LSP-style framing)
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
+        len_str = len_str.trim()
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
 
 fn write_stdout_message(body: String):
-    var header = "Content-Length: "
-    header = header + body.len().to_string()
-    header = header + "\r{NL}\r{NL}"
-    print_raw(header)
-    print_raw(body)
+    if USE_JSON_LINES:
+        print_raw(body + NL)
+    else:
+        var header = "Content-Length: "
+        header = header + body.len().to_string()
+        header = header + "\r{NL}\r{NL}"
+        print_raw(header)
+        print_raw(body)
 
 fn make_prop(name: String, desc: String) -> String:
     jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))
