@@ -213,12 +213,42 @@ Example GitHub Actions workflow:
     file bin/simple | grep FreeBSD
 ```
 
+## Testing in QEMU
+
+After building, you can run basic tests in the FreeBSD VM:
+
+```bash
+# Run basic test suite (~80-100 tests)
+./script/test-freebsd-qemu-basic.sh
+
+# Core tests only (~50 tests, faster)
+./script/test-freebsd-qemu-basic.sh --core-only
+
+# Skip rebuild if already built
+./script/test-freebsd-qemu-basic.sh --skip-build
+
+# See detailed output
+./script/test-freebsd-qemu-basic.sh --verbose
+
+# Manual testing in VM
+ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
+```
+
+**Expected results:**
+- 100% pass rate on core compiler tests
+- 30-60 second runtime (excluding build)
+- FreeBSD ELF binary verified
+
+**See:** `doc/guide/freebsd_testing_qemu.md` for complete testing guide
+
 ## Documentation
 
 - **Complete Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
+- **Testing Guide:** `doc/guide/freebsd_testing_qemu.md`
 - **Bootstrap Pipeline:** `doc/build/bootstrap_pipeline.md`
 - **Native FreeBSD Script:** `script/bootstrap-from-scratch-freebsd.sh`
-- **QEMU Test:** `script/test-freebsd-qemu-setup.sh`
+- **QEMU Setup Test:** `script/test-freebsd-qemu-setup.sh`
+- **QEMU Basic Test:** `script/test-freebsd-qemu-basic.sh`
 
 ## Status
 
