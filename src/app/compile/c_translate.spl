@@ -147,173 +147,144 @@ fn translate_condition(cond: text, types: text) -> text:
 # Translate a method call expression to C
 # Returns the original expression if no method call is detected
 fn translate_method_expr(expr: text, types: text) -> text:
-    # .contains( - check dict first, then string array, then string
-    val contains_pos = expr.index_of(".contains(") ?? -1
-    if contains_pos >= 0:
-        val obj = expr.substring(0, contains_pos)
-        val arg_start = contains_pos + 10
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            if is_dict_var(obj, types):
-                return "simple_dict_contains({obj}, {translate_expr(arg, types)})"
-            if is_string_array_var(obj, types):
-                return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
-            if is_struct_field_str_array(obj, types):
-                return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
-            return "simple_contains({obj}, {translate_expr(arg, types)})"
+    # Extract method name once with a single scan instead of 15+ serial index_of() calls.
+    # Find the last '.' before the first '(' to get: obj.method(args)
+    val paren_pos = expr.index_of("(") ?? -1
+    if paren_pos > 0:
+        # Find the last '.' before '(' by scanning backward
+        var method_dot = -1
+        var scan_i = paren_pos - 1
+        for scan_i in 0..paren_pos:
+            val ch = expr.substring(paren_pos - 1 - scan_i, paren_pos - scan_i)
+            if ch == ".":
+                method_dot = paren_pos - 1 - scan_i
+                # Found the last dot before paren - stop
+                scan_i = paren_pos
+        if method_dot >= 0:
+            val method_name = expr.substring(method_dot + 1, paren_pos)
+            val obj = expr.substring(0, method_dot)
 
-    # .starts_with(
-    val sw_pos = expr.index_of(".starts_with(") ?? -1
-    if sw_pos >= 0:
-        val obj = expr.substring(0, sw_pos)
-        val arg_start = sw_pos + 13
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_starts_with({obj}, {translate_expr(arg, types)})"
+            # Dispatch on extracted method name (O(1) string comparisons on short names)
+            if method_name == "contains":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    if is_dict_var(obj, types):
+                        return "simple_dict_contains({obj}, {translate_expr(arg, types)})"
+                    if is_string_array_var(obj, types):
+                        return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
+                    if is_struct_field_str_array(obj, types):
+                        return "simple_str_array_contains({obj}, {translate_expr(arg, types)})"
+                    return "simple_contains({obj}, {translate_expr(arg, types)})"
 
-    # .ends_with(
-    val ew_pos = expr.index_of(".ends_with(") ?? -1
-    if ew_pos >= 0:
-        val obj = expr.substring(0, ew_pos)
-        val arg_start = ew_pos + 11
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_ends_with({obj}, {translate_expr(arg, types)})"
+            elif method_name == "starts_with":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_starts_with({obj}, {translate_expr(arg, types)})"
 
-    # .substring(
-    val sub_pos = expr.index_of(".substring(") ?? -1
-    if sub_pos >= 0:
-        val obj = expr.substring(0, sub_pos)
-        val arg_start = sub_pos + 11
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val args = expr.substring(arg_start, arg_end)
-            return "simple_substring({obj}, {args})"
+            elif method_name == "ends_with":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_ends_with({obj}, {translate_expr(arg, types)})"
 
-    # .trim()
-    val trim_pos = expr.index_of(".trim()") ?? -1
-    if trim_pos >= 0:
-        val obj = expr.substring(0, trim_pos)
-        return "simple_trim({obj})"
+            elif method_name == "substring":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val args = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_substring({obj}, {args})"
 
-    # .split(
-    val split_pos = expr.index_of(".split(") ?? -1
-    if split_pos >= 0:
-        val obj = expr.substring(0, split_pos)
-        val arg_start = split_pos + 7
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_split({obj}, {arg})"
+            elif method_name == "trim":
+                return "simple_trim({obj})"
 
-    # .replace(
-    val repl_pos = expr.index_of(".replace(") ?? -1
-    if repl_pos >= 0:
-        val obj = expr.substring(0, repl_pos)
-        val arg_start = repl_pos + 9
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val args = expr.substring(arg_start, arg_end)
-            return "simple_replace({obj}, {args})"
+            elif method_name == "split":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_split({obj}, {arg})"
 
-    # .index_of(
-    val iof_pos = expr.index_of(".index_of(") ?? -1
-    if iof_pos >= 0:
-        val obj = expr.substring(0, iof_pos)
-        val arg_start = iof_pos + 10
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_index_of({obj}, {arg})"
+            elif method_name == "replace":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val args = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_replace({obj}, {args})"
 
-    # .last_index_of(
-    val liof_pos = expr.index_of(".last_index_of(") ?? -1
-    if liof_pos >= 0:
-        val obj = expr.substring(0, liof_pos)
-        val arg_start = liof_pos + 15
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_last_index_of({obj}, {arg})"
+            elif method_name == "index_of":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_index_of({obj}, {arg})"
 
-    # .join(
-    val join_pos = expr.index_of(".join(") ?? -1
-    if join_pos >= 0:
-        val obj = expr.substring(0, join_pos)
-        val arg_start = join_pos + 6
-        val arg_end = find_close_paren(expr, arg_start - 1)
-        if arg_end >= 0:
-            val arg = expr.substring(arg_start, arg_end)
-            return "simple_string_join(&{obj}, {arg})"
+            elif method_name == "last_index_of":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_last_index_of({obj}, {arg})"
 
-    # .len() - context-dependent
-    if expr.ends_with(".len()"):
-        val base = expr.substring(0, expr.len() - 6)
-        if is_dict_var(base, types):
-            return "simple_dict_len({base})"
-        if is_string_array_var(base, types):
-            return "{base}.len"
-        if is_int_array_var(base, types):
-            return "{base}.len"
-        if is_str_arr_arr_var(base, types):
-            return "{base}.len"
-        if is_int_arr_arr_var(base, types):
-            return "{base}.len"
-        if is_struct_array_var(base, types) != "":
-            return "{base}.len"
-        val base_is_text = is_text_var(base, types)
-        val base_is_literal = base.starts_with("\"")
-        if base_is_text or base_is_literal:
-            return "simple_strlen({base})"
-        # Check if base is a struct field that is text (e.g., self.source.len())
-        if is_struct_field_text(base, types):
-            return "simple_strlen({base})"
-        # Check if base is a struct field that is an array
-        if is_struct_field_str_array(base, types):
-            return "{base}.len"
-        if is_struct_field_int_array(base, types):
-            return "{base}.len"
-        if is_struct_field_struct_array(base, types) != "":
-            return "{base}.len"
-        # Check if base contains bracket indexing (e.g., arr[idx].len())
-        val base_bracket = base.index_of("[") ?? -1
-        if base_bracket >= 0:
-            val c_base = translate_expr(base, types)
-            return "{c_base}.len"
-        return "{base}.len"
+            elif method_name == "join":
+                val arg_end = find_close_paren(expr, paren_pos)
+                if arg_end >= 0:
+                    val arg = expr.substring(paren_pos + 1, arg_end)
+                    return "simple_string_join(&{obj}, {arg})"
 
-    # .to_int() - convert string to integer
-    if expr.ends_with(".to_int()"):
-        val base = expr.substring(0, expr.len() - 9)
-        return "atoll({base})"
+            elif method_name == "len":
+                val base = obj
+                if is_dict_var(base, types):
+                    return "simple_dict_len({base})"
+                if is_string_array_var(base, types):
+                    return "{base}.len"
+                if is_int_array_var(base, types):
+                    return "{base}.len"
+                if is_str_arr_arr_var(base, types):
+                    return "{base}.len"
+                if is_int_arr_arr_var(base, types):
+                    return "{base}.len"
+                if is_struct_array_var(base, types) != "":
+                    return "{base}.len"
+                val base_is_text = is_text_var(base, types)
+                val base_is_literal = base.starts_with("\"")
+                if base_is_text or base_is_literal:
+                    return "simple_strlen({base})"
+                # Check if base is a struct field that is text (e.g., self.source.len())
+                if is_struct_field_text(base, types):
+                    return "simple_strlen({base})"
+                # Check if base is a struct field that is an array
+                if is_struct_field_str_array(base, types):
+                    return "{base}.len"
+                if is_struct_field_int_array(base, types):
+                    return "{base}.len"
+                if is_struct_field_struct_array(base, types) != "":
+                    return "{base}.len"
+                # Check if base contains bracket indexing (e.g., arr[idx].len())
+                val base_bracket = base.index_of("[") ?? -1
+                if base_bracket >= 0:
+                    val c_base = translate_expr(base, types)
+                    return "{c_base}.len"
+                return "{base}.len"
 
-    # .pop()
-    if expr.ends_with(".pop()"):
-        val base = expr.substring(0, expr.len() - 6)
-        if is_int_array_var(base, types):
-            return "simple_int_pop(&{base})"
-        return "simple_string_pop(&{base})"
+            elif method_name == "to_int":
+                return "atoll({obj})"
 
-    # .keys() on dict
-    val keys_pos = expr.index_of(".keys()") ?? -1
-    if keys_pos >= 0:
-        val obj = expr.substring(0, keys_pos)
-        if is_dict_var(obj, types):
-            return "simple_dict_keys({obj})"
+            elif method_name == "pop":
+                val base = obj
+                if is_int_array_var(base, types):
+                    return "simple_int_pop(&{base})"
+                return "simple_string_pop(&{base})"
 
-    # .remove() on dict
-    val remove_pos = expr.index_of(".remove(") ?? -1
-    if remove_pos >= 0:
-        val obj = expr.substring(0, remove_pos)
-        if is_dict_var(obj, types):
-            val arg_start = remove_pos + 8
-            val arg_end = find_close_paren(expr, arg_start - 1)
-            if arg_end >= 0:
-                val arg = expr.substring(arg_start, arg_end)
-                return "simple_dict_remove({obj}, {arg})"
+            elif method_name == "keys":
+                if is_dict_var(obj, types):
+                    return "simple_dict_keys({obj})"
+
+            elif method_name == "remove":
+                if is_dict_var(obj, types):
+                    val arg_end = find_close_paren(expr, paren_pos)
+                    if arg_end >= 0:
+                        val arg = expr.substring(paren_pos + 1, arg_end)
+                        return "simple_dict_remove({obj}, {arg})"
+
+            else:
+                pass_dn
 
     # Struct method call: obj.method(args) where obj is a known struct variable
     val dot_pos = expr.index_of(".") ?? -1

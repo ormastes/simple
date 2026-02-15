@@ -1,0 +1,89 @@
+# MCP SDK - Cursor-Based Pagination
+#
+# Handles paginated tool/resource/prompt listings for servers
+# with many items (e.g., jj-git-mcp with 75 tools).
+
+use lib.mcp_sdk.core.json.{LB, RB, jp, js, jo1}
+use lib.mcp_sdk.core.jsonrpc.{jsonrpc_result}
+
+# Parse a cursor string like "offset:20" into an integer offset
+fn parse_cursor(cursor: text) -> i64:
+    if cursor == "":
+        return 0
+    if cursor.starts_with("offset:"):
+        val num_str = cursor.substring(7)
+        return int(num_str)
+    0
+
+# Build a cursor string from an offset
+fn make_cursor(offset: i64) -> text:
+    "offset:" + offset.to_string()
+
+# Minimum of two integers
+fn min_val(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+# Get a page of items from a list, applying cursor-based pagination.
+# Returns (items_json_array, next_cursor_or_empty, has_more)
+fn paginate_items(items: [text], cursor: text, page_size: i64) -> text:
+    val offset = parse_cursor(cursor)
+    val total = items.len()
+    val end_idx = min_val(offset + page_size, total)
+    val has_more = end_idx < total
+
+    var arr = "["
+    var first = true
+    var i = offset
+    for _iter in range(offset, end_idx):
+        if i < total:
+            if not first:
+                arr = arr + ","
+            first = false
+            arr = arr + items[i]
+        i = i + 1
+    arr = arr + "]"
+
+    # Build result: items array, optional nextCursor
+    var result = LB()
+    result = result + jp("items", arr)
+    if has_more:
+        val next = make_cursor(end_idx)
+        result = result + "," + jp("nextCursor", js(next))
+    result = result + "," + jp("total", total.to_string())
+    result = result + RB()
+    result
+
+# Build a paginated tools/list response
+fn paginate_tools_response(id: text, tools: [text], cursor: text, page_size: i64) -> text:
+    val offset = parse_cursor(cursor)
+    val total = tools.len()
+    val end_idx = min_val(offset + page_size, total)
+    val has_more = end_idx < total
+
+    var arr = "["
+    var first = true
+    var i = offset
+    for _iter in range(offset, end_idx):
+        if i < total:
+            if not first:
+                arr = arr + ","
+            first = false
+            arr = arr + tools[i]
+        i = i + 1
+    arr = arr + "]"
+
+    var result = LB()
+    result = result + jp("tools", arr)
+    if has_more:
+        val next = make_cursor(end_idx)
+        result = result + "," + jp("nextCursor", js(next))
+    result = result + RB()
+    jsonrpc_result(id, result)
+
+# --- Exports ---
+
+export parse_cursor, make_cursor
+export paginate_items, paginate_tools_response

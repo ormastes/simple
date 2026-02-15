@@ -114,12 +114,17 @@ impl DeadCodeElimination:
         # Phase 1: Find reachable blocks
         val reachable = self.find_reachable_blocks(func)
 
+        # Build reachable set for O(1) lookup
+        var reachable_set = {}
+        for bid in reachable:
+            reachable_set["{bid.id}"] = true
+
         # Phase 2: Remove dead instructions in reachable blocks
         var optimized_blocks: [MirBlock] = []
         for block in func.blocks:
-            if self.is_block_in_set(block.id, reachable):
+            if reachable_set.contains_key("{block.id.id}"):
                 val optimized_block = self.remove_dead_instructions(block)
-                optimized_blocks.push(optimized_block)
+                optimized_blocks = optimized_blocks.push(optimized_block)
             else:
                 # Unreachable block - don't include
                 self.removed_blocks = self.removed_blocks + 1
@@ -138,45 +143,41 @@ impl DeadCodeElimination:
         Returns list of reachable block IDs.
         """
         var reachable: [BlockId] = []
+        var visited = {}
         var worklist: [BlockId] = [func.entry_block]
+
+        # Pre-compute block lookup by ID for O(1) find_block
+        var block_map = {}
+        for i in 0..(func.blocks.len()):
+            val b = func.blocks[i]
+            block_map["{b.id.id}"] = i
 
         while worklist.len() > 0:
             val block_id = worklist[0]
             worklist = worklist[1..]  # Pop first element
 
-            # Skip if already visited
-            if self.is_block_in_set(block_id, reachable):
+            # Skip if already visited (O(1) Dict lookup)
+            if visited.contains_key("{block_id.id}"):
                 continue
 
             # Mark reachable
-            reachable.push(block_id)
+            visited["{block_id.id}"] = true
+            reachable = reachable.push(block_id)
 
-            # Find block
-            val block = self.find_block(func, block_id)
-            if not block.?:
+            # Find block via pre-computed map (O(1) lookup)
+            val block_key = "{block_id.id}"
+            if not block_map.contains_key(block_key):
                 continue
+            val block_idx = block_map[block_key]
+            val block = func.blocks[block_idx]
 
             # Add successors to worklist
-            val successors = self.get_successor_blocks(block.unwrap().terminator)
+            val successors = self.get_successor_blocks(block.terminator)
             for succ in successors:
-                if not self.is_block_in_set(succ, reachable):
-                    worklist.push(succ)
+                if not visited.contains_key("{succ.id}"):
+                    worklist = worklist.push(succ)
 
         reachable
-
-    fn find_block(func: MirFunction, block_id: BlockId) -> MirBlock?:
-        """Find block by ID."""
-        for block in func.blocks:
-            if block.id.id == block_id.id:
-                return Some(block)
-        nil
-
-    fn is_block_in_set(block_id: BlockId, set: [BlockId]) -> bool:
-        """Check if block ID is in set."""
-        for id in set:
-            if id.id == block_id.id:
-                return true
-        false
 
     fn get_successor_blocks(term: MirTerminator) -> [BlockId]:
         """Get successor block IDs from terminator."""
@@ -190,7 +191,7 @@ impl DeadCodeElimination:
             case Switch(_, targets, default):
                 var succs: [BlockId] = [default]
                 for case_item in targets:
-                    succs.push(case_item.target)
+                    succs = succs.push(case_item.target)
                 succs
 
             case CallTerminator(_, _, _, normal, unwind):
@@ -228,23 +229,23 @@ impl DeadCodeElimination:
         # 2. Mark instructions whose results are used as live
         # 3. Remove unmarked (dead) instructions
 
-        var live_set = []
+        var live_set = {}
 
         # First pass: mark side-effect instructions
         for i in 0..(block.instructions.len()):
             if self.instruction_has_side_effects(block.instructions[i]):
-                live_set.push(i)
+                live_set["{i}"] = true
 
         # Second pass: mark instructions whose results are used
         for i in 0..(block.instructions.len()):
             if self.is_instruction_result_used(block.instructions[i], block):
-                if not live_set.contains(i):
-                    live_set.push(i)
+                if not live_set.contains_key("{i}"):
+                    live_set["{i}"] = true
 
         # Third pass: build live instruction list
         for i in 0..(block.instructions.len()):
-            if live_set.contains(i):
-                live_instructions.push(block.instructions[i])
+            if live_set.contains_key("{i}"):
+                live_instructions = live_instructions.push(block.instructions[i])
             else:
                 # Dead instruction - count removal
                 self.removed_instructions = self.removed_instructions + 1
