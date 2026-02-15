@@ -102,6 +102,33 @@ fn file_has_tag(file_path: text, tag: text) -> bool:
     content.contains("tag: \"{tag}\"") or content.contains("tag: '{tag}'")
 
 # =========================================================================
+# Platform Tag Functions
+# =========================================================================
+
+fn file_get_platform_tags(content: text) -> [text]:
+    """Extract # @platform: tags from file content."""
+    val lines = content.split(NL)
+    var tags: [text] = []
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("# @platform:"):
+            val tag = trimmed[12:].trim()
+            if tag != "":
+                tags.push(tag)
+    tags
+
+fn platform_tag_matches(tag: text, mode: TestExecutionMode) -> bool:
+    """Check if a single platform tag matches the current mode."""
+    if tag == "host" or tag == "all":
+        return true
+    match mode:
+        case TestExecutionMode.Interpreter: tag == "interpreter"
+        case TestExecutionMode.Smf: tag == "smf"
+        case TestExecutionMode.Native: tag == "native"
+        case TestExecutionMode.Composite(spec):
+            spec.contains(tag) or tag == "composite"
+
+# =========================================================================
 # Test File Discovery
 # =========================================================================
 
@@ -125,6 +152,29 @@ fn discover_test_files(base_path: text, options: TestOptions) -> [text]:
         # Skip files with # @skip or # @pending unless running --only-skipped
         if not options.only_skipped:
             if content.contains("# @skip") or content.contains("# @pending"):
+                continue
+        # Option C: Directory convention filtering
+        val is_host_mode = not execution_mode_is_composite(options.mode)
+        if is_host_mode:
+            if f.contains("/baremetal/") or f.contains("/remote/"):
+                continue
+        else:
+            # Composite mode: filter arch-specific baremetal dirs
+            val arch = execution_mode_target_arch(options.mode)
+            if f.contains("/baremetal/riscv32/") and arch != "riscv32":
+                continue
+            if f.contains("/baremetal/arm32/") and arch != "arm32":
+                continue
+            if f.contains("/baremetal/x86/") and arch != "x86":
+                continue
+        # Option B: Platform tag filtering
+        val ptags = file_get_platform_tags(content)
+        if ptags.len() > 0:
+            var tag_matched = false
+            for ptag in ptags:
+                if platform_tag_matches(ptag, options.mode):
+                    tag_matched = true
+            if not tag_matched:
                 continue
         # Content-based filters
         if needs_content:
@@ -318,6 +368,7 @@ export strip_ansi
 export is_test_file, matches_level
 export read_file_content
 export file_has_slow_test, file_has_skip_tag, file_has_ignored_test, file_has_tag
+export file_get_platform_tags, platform_tag_matches
 export discover_test_files
 export simple_hash, shuffle_files
 export extract_skip_feature_info, print_skip_features
