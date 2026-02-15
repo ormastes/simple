@@ -8,7 +8,7 @@
 
 use app.io.mod (file_read, file_exists)
 use sdoctest.types.*
-use std.string.{NL}
+use std.string.{NL, split, trim, starts_with, ends_with}
 
 # =========================================================================
 # Public API
@@ -45,7 +45,7 @@ fn default_sdoctest_config() -> SdoctestConfig:
 # =========================================================================
 
 fn parse_config_from_text(content: text) -> SdoctestConfig:
-    val lines = content.split(NL)
+    val lines = split(content, NL)
     var version = 1
     var default_timeout = 5000
     var sources: [SdoctestSource] = []
@@ -73,17 +73,17 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        val trimmed = line.trim()
+        val trimmed = trim(line)
 
         # Skip empty lines and comments
-        if trimmed == "" or trimmed.starts_with("#"):
+        if trimmed == "" or starts_with(trimmed, "#"):
             i = i + 1
             continue
 
         val indent = line_indent(line)
 
         # Top-level sections (indent 0)
-        if indent == 0 and trimmed.ends_with(":"):
+        if indent == 0 and ends_with(trimmed, ":"):
             # Flush previous section data (inline due to BUG-15)
             if current_source_path != "":
                 val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
@@ -97,7 +97,8 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
             current_env_name = ""
             in_env_vars = false
 
-            section = trimmed[0:trimmed.len() - 1].trim()
+            val section_str = trimmed[0:trimmed.len() - 1]
+            section = trim(section_str)
             subsection = ""
             i = i + 1
             continue
@@ -112,7 +113,7 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # sources section - array of entries
         elif section == "sources":
-            if trimmed.starts_with("- "):
+            if starts_with(trimmed, "- "):
                 # Flush previous source (inline due to BUG-15)
                 if current_source_path != "":
                     val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
@@ -123,7 +124,8 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
                 current_source_init = ""
                 current_source_env = ""
 
-                val entry_str = trimmed[2:].trim()
+                val entry_substr = trimmed[2:]
+                val entry_str = trim(entry_substr)
                 val kv = parse_kv(entry_str)
                 if kv.0 == "file":
                     current_source_path = strip_quotes(kv.1)
@@ -151,11 +153,12 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # init_scripts section
         elif section == "init_scripts":
-            if indent == 2 and trimmed.ends_with(":"):
+            if indent == 2 and ends_with(trimmed, ":"):
                 # Flush previous (inline due to BUG-15)
                 if current_init_name != "":
                     init_scripts.push(SdoctestInitScript(name: current_init_name, file: current_init_file))
-                current_init_name = trimmed[0:trimmed.len() - 1].trim()
+                val init_substr = trimmed[0:trimmed.len() - 1]
+                current_init_name = trim(init_substr)
                 current_init_file = ""
             else:
                 val kv = parse_kv(trimmed)
@@ -164,11 +167,12 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # environments section
         elif section == "environments":
-            if indent == 2 and trimmed.ends_with(":"):
+            if indent == 2 and ends_with(trimmed, ":"):
                 # Flush previous (inline due to BUG-15)
                 if current_env_name != "":
                     environments.push(SdoctestEnv(name: current_env_name, timeout: current_env_timeout, env_vars: current_env_vars, run_config: current_env_run_config))
-                current_env_name = trimmed[0:trimmed.len() - 1].trim()
+                val env_substr = trimmed[0:trimmed.len() - 1]
+                current_env_name = trim(env_substr)
                 current_env_timeout = default_timeout
                 current_env_vars = {}
                 current_env_run_config = ""
@@ -239,28 +243,34 @@ fn parse_kv(s: text) -> (text, text):
     val idx = s.index_of(":") ?? -1
     if idx < 0:
         return ("", s)
-    val key = s[0:idx].trim()
-    val value = s[idx + 1:].trim()
+    val key_str = s[0:idx]
+    val key = trim(key_str)
+    val value_str = s[idx + 1:]
+    val value = trim(value_str)
     (key, value)
 
 fn strip_quotes(s: text) -> text:
     if s.len() >= 2:
-        if (s.starts_with("\"") and s.ends_with("\"")) or (s.starts_with("'") and s.ends_with("'")):
+        val starts_dquote = starts_with(s, "\"")
+        val ends_dquote = ends_with(s, "\"")
+        val starts_squote = starts_with(s, "'")
+        val ends_squote = ends_with(s, "'")
+        if (starts_dquote and ends_dquote) or (starts_squote and ends_squote):
             return s[1 : s.len() - 1]
     s
 
 fn parse_inline_array(s: text) -> [text]:
     # Parse ["item1", "item2", "item3"]
     var items: [text] = []
-    var inner = s.trim()
-    if inner.starts_with("["):
+    var inner = trim(s)
+    if starts_with(inner, "["):
         inner = inner[1:]
-    if inner.ends_with("]"):
+    if ends_with(inner, "]"):
         inner = inner[0:inner.len() - 1]
 
-    val parts = inner.split(",")
+    val parts = split(inner, ",")
     for part in parts:
-        val trimmed = part.trim()
+        val trimmed = trim(part)
         if trimmed != "":
             items.push(strip_quotes(trimmed))
 

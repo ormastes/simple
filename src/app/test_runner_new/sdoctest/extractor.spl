@@ -5,7 +5,7 @@
 
 use app.io.mod (file_read, file_exists)
 use sdoctest.types.*
-use std.string.{NL}
+use std.string.{NL, split, trim, starts_with, ends_with, index_of}
 
 # =========================================================================
 # Public API
@@ -19,7 +19,7 @@ fn extract_sdoctest_blocks(file_path: text) -> [SdoctestBlock]:
     extract_blocks_from_content(content, file_path)
 
 fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock]:
-    val lines = content.split(NL)
+    val lines = split(content, NL)
     var blocks: [SdoctestBlock] = []
     var i = 0
     var in_code_block = false
@@ -33,7 +33,7 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
 
     while i < lines.len():
         val line = lines[i]
-        val trimmed = line.trim()
+        val trimmed = trim(line)
 
         # Check for HTML comment markers
         if trimmed == "<!--sdoctest:skip-next-->":
@@ -51,7 +51,7 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
             i = i + 1
             continue
 
-        if trimmed.starts_with("<!--sdoctest:@") and trimmed.ends_with("-->"):
+        if starts_with(trimmed, "<!--sdoctest:@") and ends_with(trimmed, "-->"):
             val inner = trimmed[14 : trimmed.len() - 3]
             pending_run_config = inner
             i = i + 1
@@ -59,7 +59,7 @@ fn extract_blocks_from_content(content: text, file_path: text) -> [SdoctestBlock
 
         if not in_code_block:
             # Check for opening fence
-            if trimmed.starts_with("```simple") or trimmed.starts_with("```spl") or trimmed.starts_with("```sdoctest"):
+            if starts_with(trimmed, "```simple") or starts_with(trimmed, "```spl") or starts_with(trimmed, "```sdoctest"):
                 in_code_block = true
                 code_lines = []
                 start_line = i + 1
@@ -124,26 +124,26 @@ fn parse_fence_line(fence: text) -> (text, [SdoctestModifier]):
 
     # Strip leading backticks
     var rest = fence
-    while rest.starts_with("`"):
+    while starts_with(rest, "`"):
         rest = rest[1:]
 
     # Split on first ':'
-    val ci = rest.index_of(":") ?? -1
+    val ci = index_of(rest, ":") ?? -1
     if ci >= 0:
         language = rest[0:ci]
         val mod_str = rest[ci + 1:]
         modifiers = parse_modifiers(mod_str)
     else:
-        language = rest.trim()
+        language = trim(rest)
 
     (language, modifiers)
 
 fn parse_modifiers(mod_str: text) -> [SdoctestModifier]:
     var modifiers: [SdoctestModifier] = []
-    val parts = mod_str.split(",")
+    val parts = split(mod_str, ",")
 
     for part in parts:
-        val trimmed = part.trim()
+        val trimmed = trim(part)
         if trimmed == "":
             continue
 
@@ -155,16 +155,16 @@ fn parse_modifiers(mod_str: text) -> [SdoctestModifier]:
             modifiers.push(SdoctestModifier.FailAsSuccess)
         elif trimmed == "ignore_output":
             modifiers.push(SdoctestModifier.IgnoreOutput)
-        elif trimmed.starts_with("init="):
+        elif starts_with(trimmed, "init="):
             val name = trimmed[5:]
             modifiers.push(SdoctestModifier.Init(name))
-        elif trimmed.starts_with("env="):
+        elif starts_with(trimmed, "env="):
             val name = trimmed[4:]
             modifiers.push(SdoctestModifier.Env(name))
-        elif trimmed.starts_with("tag="):
+        elif starts_with(trimmed, "tag="):
             val name = trimmed[4:]
             modifiers.push(SdoctestModifier.Tag(name))
-        elif trimmed.starts_with("@"):
+        elif starts_with(trimmed, "@"):
             val rc = trimmed[1:]
             modifiers.push(SdoctestModifier.RunConfig(rc))
 
@@ -178,12 +178,12 @@ fn strip_doctest_prompts(lines: [text]) -> [text]:
     # Strip >>> and ... prompts from sdoctest blocks, remove expected output lines
     var result: [text] = []
     for line in lines:
-        var trimmed = line.trim()
-        if trimmed.starts_with(">>> "):
+        var trimmed = trim(line)
+        if starts_with(trimmed, ">>> "):
             result.push(trimmed[4:])
         elif trimmed == ">>>":
             result.push("")
-        elif trimmed.starts_with("... "):
+        elif starts_with(trimmed, "... "):
             result.push(trimmed[4:])
         elif trimmed == "...":
             result.push("")
@@ -199,42 +199,42 @@ fn extract_reusable_lines(code: text) -> text:
     # - `use` import statements
     # - `struct`, `class`, `enum`, `fn` definitions (with their indented bodies)
     # Does NOT extract bare expressions, assignments, or print statements.
-    val lines = code.split(NL)
+    val lines = split(code, NL)
     var result_lines: [text] = []
     var i = 0
 
     while i < lines.len():
         val line = lines[i]
-        val trimmed = line.trim()
+        val trimmed = trim(line)
 
         # Skip empty lines, comments, bare expressions
-        if trimmed == "" or trimmed.starts_with("#"):
+        if trimmed == "" or starts_with(trimmed, "#"):
             i = i + 1
             continue
 
         # Accumulate `use` import lines
-        if trimmed.starts_with("use "):
+        if starts_with(trimmed, "use "):
             result_lines.push(line)
             i = i + 1
             continue
 
         # Accumulate `import` lines
-        if trimmed.starts_with("import "):
+        if starts_with(trimmed, "import "):
             result_lines.push(line)
             i = i + 1
             continue
 
         # Accumulate definition blocks: struct, class, enum, fn, impl
         var is_def = false
-        if trimmed.starts_with("struct ") or trimmed.starts_with("class "):
+        if starts_with(trimmed, "struct ") or starts_with(trimmed, "class "):
             is_def = true
-        if trimmed.starts_with("enum ") or trimmed.starts_with("fn "):
+        if starts_with(trimmed, "enum ") or starts_with(trimmed, "fn "):
             is_def = true
-        if trimmed.starts_with("impl "):
+        if starts_with(trimmed, "impl "):
             is_def = true
-        if trimmed.starts_with("static fn "):
+        if starts_with(trimmed, "static fn "):
             is_def = true
-        if trimmed.starts_with("me "):
+        if starts_with(trimmed, "me "):
             is_def = true
 
         if is_def:
@@ -244,7 +244,7 @@ fn extract_reusable_lines(code: text) -> text:
             i = i + 1
             while i < lines.len():
                 val next_line = lines[i]
-                val next_trimmed = next_line.trim()
+                val next_trimmed = trim(next_line)
                 # Empty lines within definition are kept
                 if next_trimmed == "":
                     result_lines.push(next_line)
@@ -263,7 +263,7 @@ fn extract_reusable_lines(code: text) -> text:
 
     # Join and trim trailing empty lines
     var result = result_lines.join(NL)
-    result = result.trim()
+    result = trim(result)
     result
 
 fn line_indent_count(line: text) -> i64:
