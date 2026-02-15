@@ -1,0 +1,687 @@
+# Pure Simple Functional API (torch.nn.functional equivalent)
+#
+# Stateless function versions of all NN operations
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros}
+
+# ============================================================================
+# Math Helpers (private)
+# ============================================================================
+
+fn _fn_exp(x: f64) -> f64:
+    """Exponential function using Taylor series (20 terms)."""
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 20:
+        term = term * x / i
+        result = result + term
+        i = i + 1
+    result
+
+fn _fn_sqrt(x: f64) -> f64:
+    """Square root via Newton's method (15 iterations)."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x / 2.0
+    var i = 0
+    while i < 15:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn _fn_abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0: 0.0 - x else: x
+
+fn _fn_max(a: f64, b: f64) -> f64:
+    """Maximum of two values."""
+    if a > b: a else: b
+
+fn _fn_min(a: f64, b: f64) -> f64:
+    """Minimum of two values."""
+    if a < b: a else: b
+
+fn _fn_tanh(x: f64) -> f64:
+    """Tanh of a scalar value."""
+    val exp_pos = _fn_exp(x)
+    val exp_neg = _fn_exp(0.0 - x)
+    (exp_pos - exp_neg) / (exp_pos + exp_neg)
+
+# ============================================================================
+# Activation Functions
+# ============================================================================
+
+fn fn_relu(x: PureTensor<f64>) -> PureTensor<f64>:
+    """ReLU activation: max(0, x).
+
+    Args:
+        x - Input tensor of any shape
+
+    Returns:
+        Tensor with same shape, negative values zeroed
+    """
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        result_data.push(if v > 0.0: v else: 0.0)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_sigmoid(x: PureTensor<f64>) -> PureTensor<f64>:
+    """Sigmoid activation: 1 / (1 + exp(-x)).
+
+    Args:
+        x - Input tensor of any shape
+
+    Returns:
+        Tensor with values in (0, 1)
+    """
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        val exp_neg = _fn_exp(0.0 - v)
+        result_data.push(1.0 / (1.0 + exp_neg))
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_tanh(x: PureTensor<f64>) -> PureTensor<f64>:
+    """Tanh activation: (exp(x) - exp(-x)) / (exp(x) + exp(-x)).
+
+    Args:
+        x - Input tensor of any shape
+
+    Returns:
+        Tensor with values in (-1, 1)
+    """
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        result_data.push(_fn_tanh(v))
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_gelu(x: PureTensor<f64>) -> PureTensor<f64>:
+    """GELU activation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3))).
+
+    Gaussian Error Linear Unit - smoother alternative to ReLU.
+
+    Args:
+        x - Input tensor of any shape
+
+    Returns:
+        Tensor with GELU applied element-wise
+    """
+    # sqrt(2/pi) ~ 0.7978845608
+    val sqrt_2_over_pi = 0.7978845608
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        val inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v)
+        val tanh_val = _fn_tanh(inner)
+        result_data.push(0.5 * v * (1.0 + tanh_val))
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_leaky_relu(x: PureTensor<f64>, negative_slope: f64) -> PureTensor<f64>:
+    """Leaky ReLU: x if x > 0, negative_slope * x otherwise.
+
+    Args:
+        x - Input tensor of any shape
+        negative_slope - Slope for negative values (e.g. 0.01)
+
+    Returns:
+        Tensor with leaky ReLU applied element-wise
+    """
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        val out = if v > 0.0: v else: negative_slope * v
+        result_data.push(out)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_elu(x: PureTensor<f64>, alpha: f64) -> PureTensor<f64>:
+    """ELU activation: x if x > 0, alpha * (exp(x) - 1) otherwise.
+
+    Args:
+        x - Input tensor of any shape
+        alpha - Scale for negative values (e.g. 1.0)
+
+    Returns:
+        Tensor with ELU applied element-wise
+    """
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        val out = if v > 0.0: v else: alpha * (_fn_exp(v) - 1.0)
+        result_data.push(out)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_selu(x: PureTensor<f64>) -> PureTensor<f64>:
+    """SELU activation: scale * (x if x > 0, alpha * (exp(x) - 1) otherwise).
+
+    Self-normalizing activation with fixed scale and alpha constants.
+    scale = 1.0507009873554804934193349852946
+    alpha = 1.6732632423543772848170429916717
+
+    Args:
+        x - Input tensor of any shape
+
+    Returns:
+        Tensor with SELU applied element-wise
+    """
+    val scale = 1.0507
+    val alpha = 1.6733
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        val v = x.data[i]
+        val out = if v > 0.0: scale * v else: scale * alpha * (_fn_exp(v) - 1.0)
+        result_data.push(out)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_softmax(x: PureTensor<f64>, dim: i64) -> PureTensor<f64>:
+    """Numerically stable softmax along dimension.
+
+    Computes: exp(x - max(x)) / sum(exp(x - max(x))) along the given dim.
+    For 1D tensors, dim is ignored and softmax is over all elements.
+    For 2D tensors, dim=0 means along rows, dim=1 means along columns.
+
+    Args:
+        x - Input tensor
+        dim - Dimension to apply softmax along
+
+    Returns:
+        Tensor with softmax probabilities (sum to 1 along dim)
+    """
+    # Handle 1D case: softmax over all elements
+    if x.shape.len() == 1:
+        val n = x.data.len()
+        # Find max for numerical stability
+        var max_v = x.data[0]
+        var i = 1
+        while i < n:
+            if x.data[i] > max_v:
+                max_v = x.data[i]
+            i = i + 1
+        # Compute exp(x - max) and sum
+        var exp_data: [f64] = []
+        var exp_sum = 0.0
+        i = 0
+        while i < n:
+            val e = _fn_exp(x.data[i] - max_v)
+            exp_data.push(e)
+            exp_sum = exp_sum + e
+            i = i + 1
+        # Normalize
+        var result_data: [f64] = []
+        i = 0
+        while i < n:
+            result_data.push(exp_data[i] / exp_sum)
+            i = i + 1
+        return tensor_from_data(result_data, x.shape)
+
+    # Handle 2D case
+    val rows = x.shape[0]
+    val cols = x.shape[1]
+    var result_data: [f64] = []
+
+    # Pre-fill result with zeros
+    var total = rows * cols
+    var idx = 0
+    while idx < total:
+        result_data.push(0.0)
+        idx = idx + 1
+
+    if dim == 1:
+        # Softmax along columns (each row independently)
+        var r = 0
+        while r < rows:
+            # Find max in this row
+            var max_v = x.data[r * cols]
+            var c = 1
+            while c < cols:
+                if x.data[r * cols + c] > max_v:
+                    max_v = x.data[r * cols + c]
+                c = c + 1
+            # Compute exp and sum for this row
+            var row_sum = 0.0
+            c = 0
+            while c < cols:
+                val e = _fn_exp(x.data[r * cols + c] - max_v)
+                result_data[r * cols + c] = e
+                row_sum = row_sum + e
+                c = c + 1
+            # Normalize
+            c = 0
+            while c < cols:
+                result_data[r * cols + c] = result_data[r * cols + c] / row_sum
+                c = c + 1
+            r = r + 1
+    else:
+        # Softmax along rows (each column independently), dim == 0
+        var c = 0
+        while c < cols:
+            # Find max in this column
+            var max_v = x.data[c]
+            var r = 1
+            while r < rows:
+                if x.data[r * cols + c] > max_v:
+                    max_v = x.data[r * cols + c]
+                r = r + 1
+            # Compute exp and sum for this column
+            var col_sum = 0.0
+            r = 0
+            while r < rows:
+                val e = _fn_exp(x.data[r * cols + c] - max_v)
+                result_data[r * cols + c] = e
+                col_sum = col_sum + e
+                r = r + 1
+            # Normalize
+            r = 0
+            while r < rows:
+                result_data[r * cols + c] = result_data[r * cols + c] / col_sum
+                r = r + 1
+            c = c + 1
+
+    tensor_from_data(result_data, x.shape)
+
+fn fn_log_softmax(x: PureTensor<f64>, dim: i64) -> PureTensor<f64>:
+    """Log-softmax: log(softmax(x)) computed in a numerically stable way.
+
+    Computes: x - max(x) - log(sum(exp(x - max(x)))) along the given dim.
+
+    Args:
+        x - Input tensor
+        dim - Dimension to apply log-softmax along
+
+    Returns:
+        Tensor with log-softmax values
+    """
+    # Handle 1D case
+    if x.shape.len() == 1:
+        val n = x.data.len()
+        var max_v = x.data[0]
+        var i = 1
+        while i < n:
+            if x.data[i] > max_v:
+                max_v = x.data[i]
+            i = i + 1
+        # Compute log(sum(exp(x - max)))
+        var exp_sum = 0.0
+        i = 0
+        while i < n:
+            exp_sum = exp_sum + _fn_exp(x.data[i] - max_v)
+            i = i + 1
+        # log_sum_exp = max + log(sum(exp(x - max)))
+        val log_sum = _fn_log(exp_sum)
+        var result_data: [f64] = []
+        i = 0
+        while i < n:
+            result_data.push(x.data[i] - max_v - log_sum)
+            i = i + 1
+        return tensor_from_data(result_data, x.shape)
+
+    # Handle 2D case
+    val rows = x.shape[0]
+    val cols = x.shape[1]
+    var result_data: [f64] = []
+    var total = rows * cols
+    var idx = 0
+    while idx < total:
+        result_data.push(0.0)
+        idx = idx + 1
+
+    if dim == 1:
+        var r = 0
+        while r < rows:
+            var max_v = x.data[r * cols]
+            var c = 1
+            while c < cols:
+                if x.data[r * cols + c] > max_v:
+                    max_v = x.data[r * cols + c]
+                c = c + 1
+            var row_sum = 0.0
+            c = 0
+            while c < cols:
+                row_sum = row_sum + _fn_exp(x.data[r * cols + c] - max_v)
+                c = c + 1
+            val log_sum = _fn_log(row_sum)
+            c = 0
+            while c < cols:
+                result_data[r * cols + c] = x.data[r * cols + c] - max_v - log_sum
+                c = c + 1
+            r = r + 1
+    else:
+        var c = 0
+        while c < cols:
+            var max_v = x.data[c]
+            var r = 1
+            while r < rows:
+                if x.data[r * cols + c] > max_v:
+                    max_v = x.data[r * cols + c]
+                r = r + 1
+            var col_sum = 0.0
+            r = 0
+            while r < rows:
+                col_sum = col_sum + _fn_exp(x.data[r * cols + c] - max_v)
+                r = r + 1
+            val log_sum = _fn_log(col_sum)
+            r = 0
+            while r < rows:
+                result_data[r * cols + c] = x.data[r * cols + c] - max_v - log_sum
+                r = r + 1
+            c = c + 1
+
+    tensor_from_data(result_data, x.shape)
+
+fn _fn_log(x: f64) -> f64:
+    """Natural logarithm using series: ln(x) = 2 * atanh((x-1)/(x+1))."""
+    if x <= 0.0:
+        return -999999.0
+    val z = (x - 1.0) / (x + 1.0)
+    var sum = 0.0
+    var z_pow = z
+    var i = 0
+    while i < 20:
+        val denom = 2 * i + 1
+        sum = sum + z_pow / denom
+        z_pow = z_pow * z * z
+        i = i + 1
+    2.0 * sum
+
+# ============================================================================
+# Linear and Pooling Functions
+# ============================================================================
+
+fn fn_linear(x: PureTensor<f64>, weight: PureTensor<f64>, bias_data: [f64]) -> PureTensor<f64>:
+    """Linear transformation: y = x @ W^T + bias.
+
+    Computes matrix multiply of input with transposed weight, then adds bias.
+    If bias_data is empty, no bias is added.
+
+    Args:
+        x - Input tensor [batch_size, in_features] or [in_features]
+        weight - Weight tensor [out_features, in_features]
+        bias_data - Bias values as flat array, or empty [] for no bias
+
+    Returns:
+        Output tensor [batch_size, out_features] or [out_features]
+    """
+    val out_features = weight.shape[0]
+    val in_features = weight.shape[1]
+    val has_bias = bias_data.len() > 0
+
+    # Handle 1D input: [in_features] -> [out_features]
+    if x.shape.len() == 1:
+        var result_data: [f64] = []
+        var o = 0
+        while o < out_features:
+            var sum = 0.0
+            var k = 0
+            while k < in_features:
+                sum = sum + x.data[k] * weight.data[o * in_features + k]
+                k = k + 1
+            if has_bias:
+                sum = sum + bias_data[o]
+            result_data.push(sum)
+            o = o + 1
+        return tensor_from_data(result_data, [out_features])
+
+    # Handle 2D input: [batch_size, in_features] -> [batch_size, out_features]
+    val batch_size = x.shape[0]
+    var result_data: [f64] = []
+    var b = 0
+    while b < batch_size:
+        var o = 0
+        while o < out_features:
+            var sum = 0.0
+            var k = 0
+            while k < in_features:
+                sum = sum + x.data[b * in_features + k] * weight.data[o * in_features + k]
+                k = k + 1
+            if has_bias:
+                sum = sum + bias_data[o]
+            result_data.push(sum)
+            o = o + 1
+        b = b + 1
+    tensor_from_data(result_data, [batch_size, out_features])
+
+fn fn_dropout(x: PureTensor<f64>, p: f64, training: bool) -> PureTensor<f64>:
+    """Dropout: randomly zeroes elements during training.
+
+    Uses a deterministic pattern based on element index for reproducibility.
+    During evaluation (training=false), returns input unchanged.
+
+    Args:
+        x - Input tensor of any shape
+        p - Probability of zeroing an element (0.0 to 1.0)
+        training - Whether in training mode
+
+    Returns:
+        Tensor with dropout applied (scaled by 1/(1-p))
+    """
+    if not training:
+        return x
+
+    val scale = 1.0 / (1.0 - p)
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        # Deterministic hash-based dropout pattern
+        val hash = ((i * 2654435761) % 1000000) / 1000000.0
+        val out = if hash < p: 0.0 else: x.data[i] * scale
+        result_data.push(out)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_max_pool1d(x: PureTensor<f64>, kernel_size: i64, stride: i64) -> PureTensor<f64>:
+    """1D max pooling over the last dimension.
+
+    Input shape: [batch_size, channels, length]
+    Output shape: [batch_size, channels, out_length]
+    where out_length = (length - kernel_size) / stride + 1
+
+    Args:
+        x - Input tensor [batch_size, channels, length]
+        kernel_size - Size of the pooling window
+        stride - Stride of the pooling window
+
+    Returns:
+        Max-pooled tensor
+    """
+    val actual_stride = if stride == 0: kernel_size else: stride
+    val batch_size = x.shape[0]
+    val channels = x.shape[1]
+    val length = x.shape[2]
+    val out_length = (length - kernel_size) / actual_stride + 1
+
+    var result_data: [f64] = []
+    var b = 0
+    while b < batch_size:
+        var c = 0
+        while c < channels:
+            var ol = 0
+            while ol < out_length:
+                var max_val = -999999.0
+                var k = 0
+                while k < kernel_size:
+                    val idx = (b * channels + c) * length + ol * actual_stride + k
+                    if x.data[idx] > max_val:
+                        max_val = x.data[idx]
+                    k = k + 1
+                result_data.push(max_val)
+                ol = ol + 1
+            c = c + 1
+        b = b + 1
+
+    tensor_from_data(result_data, [batch_size, channels, out_length])
+
+fn fn_avg_pool1d(x: PureTensor<f64>, kernel_size: i64, stride: i64) -> PureTensor<f64>:
+    """1D average pooling over the last dimension.
+
+    Input shape: [batch_size, channels, length]
+    Output shape: [batch_size, channels, out_length]
+    where out_length = (length - kernel_size) / stride + 1
+
+    Args:
+        x - Input tensor [batch_size, channels, length]
+        kernel_size - Size of the pooling window
+        stride - Stride of the pooling window
+
+    Returns:
+        Average-pooled tensor
+    """
+    val actual_stride = if stride == 0: kernel_size else: stride
+    val batch_size = x.shape[0]
+    val channels = x.shape[1]
+    val length = x.shape[2]
+    val out_length = (length - kernel_size) / actual_stride + 1
+
+    var result_data: [f64] = []
+    var b = 0
+    while b < batch_size:
+        var c = 0
+        while c < channels:
+            var ol = 0
+            while ol < out_length:
+                var sum = 0.0
+                var k = 0
+                while k < kernel_size:
+                    val idx = (b * channels + c) * length + ol * actual_stride + k
+                    sum = sum + x.data[idx]
+                    k = k + 1
+                result_data.push(sum / kernel_size)
+                ol = ol + 1
+            c = c + 1
+        b = b + 1
+
+    tensor_from_data(result_data, [batch_size, channels, out_length])
+
+# ============================================================================
+# Normalization Functions
+# ============================================================================
+
+fn fn_batch_norm(x: PureTensor<f64>, mean_val: PureTensor<f64>, var_val: PureTensor<f64>, weight: PureTensor<f64>, bias: PureTensor<f64>, eps: f64) -> PureTensor<f64>:
+    """Batch normalization: y = weight * (x - mean) / sqrt(var + eps) + bias.
+
+    Applies per-feature normalization using provided mean and variance.
+
+    Args:
+        x - Input tensor [batch_size, features] or [features]
+        mean_val - Running mean [features]
+        var_val - Running variance [features]
+        weight - Scale parameter (gamma) [features]
+        bias - Shift parameter (beta) [features]
+        eps - Small value for numerical stability (e.g. 1e-5)
+
+    Returns:
+        Normalized tensor with same shape as input
+    """
+    val features = mean_val.data.len()
+
+    # Handle 1D input: [features]
+    if x.shape.len() == 1:
+        var result_data: [f64] = []
+        var f = 0
+        while f < features:
+            val normalized = (x.data[f] - mean_val.data[f]) / _fn_sqrt(var_val.data[f] + eps)
+            result_data.push(weight.data[f] * normalized + bias.data[f])
+            f = f + 1
+        return tensor_from_data(result_data, x.shape)
+
+    # Handle 2D input: [batch_size, features]
+    val batch_size = x.shape[0]
+    var result_data: [f64] = []
+    var b = 0
+    while b < batch_size:
+        var f = 0
+        while f < features:
+            val idx = b * features + f
+            val normalized = (x.data[idx] - mean_val.data[f]) / _fn_sqrt(var_val.data[f] + eps)
+            result_data.push(weight.data[f] * normalized + bias.data[f])
+            f = f + 1
+        b = b + 1
+    tensor_from_data(result_data, x.shape)
+
+fn fn_normalize(x: PureTensor<f64>, p_norm: f64) -> PureTensor<f64>:
+    """Normalize tensor to unit norm using p-norm.
+
+    Computes: x / max(||x||_p, eps) where eps = 1e-12.
+    Supports p=1 (Manhattan), p=2 (Euclidean), and other positive p values.
+
+    Args:
+        x - Input tensor of any shape (treated as flat vector)
+        p_norm - Norm type (1.0 for L1, 2.0 for L2, etc.)
+
+    Returns:
+        Normalized tensor with same shape
+    """
+    val eps = 1e-12
+
+    # Compute p-norm
+    var norm = 0.0
+    if p_norm == 1.0:
+        # L1 norm: sum of absolute values
+        var i = 0
+        while i < x.data.len():
+            norm = norm + _fn_abs(x.data[i])
+            i = i + 1
+    elif p_norm == 2.0:
+        # L2 norm: sqrt of sum of squares
+        var sum_sq = 0.0
+        var i = 0
+        while i < x.data.len():
+            sum_sq = sum_sq + x.data[i] * x.data[i]
+            i = i + 1
+        norm = _fn_sqrt(sum_sq)
+    else:
+        # General p-norm: (sum |x_i|^p)^(1/p)
+        var sum_pow = 0.0
+        var i = 0
+        while i < x.data.len():
+            var abs_v = _fn_abs(x.data[i])
+            # Compute |x|^p using repeated multiplication for integer p
+            var powered = 1.0
+            var j = 0
+            while j < int(p_norm):
+                powered = powered * abs_v
+                j = j + 1
+            sum_pow = sum_pow + powered
+            i = i + 1
+        # (sum)^(1/p) ~ exp(log(sum)/p)
+        if sum_pow > 0.0:
+            norm = _fn_exp(_fn_log(sum_pow) / p_norm)
+
+    # Normalize (avoid division by zero)
+    val denom = _fn_max(norm, eps)
+    var result_data: [f64] = []
+    var i = 0
+    while i < x.data.len():
+        result_data.push(x.data[i] / denom)
+        i = i + 1
+    tensor_from_data(result_data, x.shape)
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export fn_relu, fn_sigmoid, fn_tanh, fn_gelu, fn_leaky_relu, fn_elu, fn_selu
+export fn_softmax, fn_log_softmax
+export fn_linear, fn_dropout
+export fn_max_pool1d, fn_avg_pool1d
+export fn_batch_norm, fn_normalize

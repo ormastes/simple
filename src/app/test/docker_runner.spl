@@ -1,0 +1,470 @@
+# Docker Test Runner
+#
+# Provides Docker-based test execution with multiple container environments
+# Simple (.spl) replacement for script/docker-test.sh
+#
+# Features:
+# - Build Docker images (test-isolation, test-full)
+# - Run tests in isolated containers (no network, limited resources)
+# - Run tests in full environment (build tools, more resources)
+# - Interactive shell for debugging
+# - Docker Compose orchestration
+# - Container cleanup
+#
+# Commands:
+#   build              Build Docker images
+#   run [path]         Run tests in isolated container
+#   run-full [path]    Run tests in full container
+#   shell              Interactive shell in container
+#   compose            Run via docker-compose
+#   clean              Clean up containers and images
+#   help               Show help
+
+use app.io.mod.{shell, shell_bool, shell_output, env_get, cwd, file_exists, dir_create_all, is_dir, get_args, exit}
+use std.string.{contains, trim, split, starts_with}
+use std.path.{join}
+
+# Configuration
+val DEFAULT_COMMAND = "build"
+
+# ANSI color codes
+val COLOR_RED = "\x1b[0;31m"
+val COLOR_GREEN = "\x1b[0;32m"
+val COLOR_YELLOW = "\x1b[1;33m"
+val COLOR_BLUE = "\x1b[0;34m"
+val COLOR_RESET = "\x1b[0m"
+
+# Logging functions
+fn log_info(msg: text):
+    print "{COLOR_BLUE}[INFO]{COLOR_RESET} {msg}"
+
+fn log_success(msg: text):
+    print "{COLOR_GREEN}[SUCCESS]{COLOR_RESET} {msg}"
+
+fn log_warn(msg: text):
+    print "{COLOR_YELLOW}[WARN]{COLOR_RESET} {msg}"
+
+fn log_error(msg: text):
+    print "{COLOR_RED}[ERROR]{COLOR_RESET} {msg}"
+
+# Check prerequisites
+fn check_prerequisites() -> bool:
+    """Check if Docker is installed and running"""
+
+    # Check if docker command exists
+    if not shell_bool("command -v docker"):
+        log_error("Docker is not installed. Please install Docker first.")
+        return false
+
+    # Check if docker daemon is running
+    if not shell_bool("docker info"):
+        log_error("Docker daemon is not running. Please start Docker.")
+        return false
+
+    # Check if runtime binary exists
+    if not file_exists("bin/release/simple"):
+        log_error("Runtime binary not found: bin/release/simple")
+        log_info("Please build release binary first: bin/simple build --release")
+        return false
+
+    log_success("Prerequisites check passed")
+    true
+
+# Build Docker images
+fn build_images(project_root: text) -> bool:
+    """Build test-isolation and test-full Docker images"""
+
+    log_info("Building Docker images...")
+
+    # Get current date for tagging
+    val date_tag = shell_output("date +%Y%m%d").trim()
+
+    # Build test-isolation image (~40MB)
+    log_info("Building simple-test-isolation:latest (~40MB)...")
+    val isolation_dockerfile = join(project_root, "docker/Dockerfile.test-isolation")
+
+    var build_cmd = "docker build"
+    build_cmd = build_cmd + " -f {isolation_dockerfile}"
+    build_cmd = build_cmd + " -t simple-test-isolation:latest"
+    build_cmd = build_cmd + " -t simple-test-isolation:{date_tag}"
+    build_cmd = build_cmd + " --quiet"
+    build_cmd = build_cmd + " {project_root}"
+
+    val isolation_result = shell(build_cmd)
+    if isolation_result.exit_code != 0:
+        log_error("Failed to build test-isolation image")
+        log_error(isolation_result.stderr)
+        return false
+
+    # Build test-full image (~450MB)
+    log_info("Building simple-test-full:latest (~450MB)...")
+    val full_dockerfile = join(project_root, "docker/Dockerfile.test-full")
+
+    var full_build_cmd = "docker build"
+    full_build_cmd = full_build_cmd + " -f {full_dockerfile}"
+    full_build_cmd = full_build_cmd + " -t simple-test-full:latest"
+    full_build_cmd = full_build_cmd + " -t simple-test-full:{date_tag}"
+    full_build_cmd = full_build_cmd + " --quiet"
+    full_build_cmd = full_build_cmd + " {project_root}"
+
+    val full_result = shell(full_build_cmd)
+    if full_result.exit_code != 0:
+        log_error("Failed to build test-full image")
+        log_error(full_result.stderr)
+        return false
+
+    log_success("Docker images built successfully")
+
+    # Show image list
+    val list_result = shell("docker images simple-test-*")
+    print list_result.stdout
+
+    true
+
+# Run tests in isolated container
+fn run_isolated(project_root: text, test_path: text) -> bool:
+    """Run tests in isolated container (no network, limited resources)"""
+
+    log_info("Running tests in isolated container...")
+
+    # Create test-results directory
+    val results_dir = join(project_root, "test-results")
+    if not is_dir(results_dir):
+        dir_create_all(results_dir)
+
+    # Build docker run command
+    var docker_cmd = "docker run --rm"
+
+    # Volume mounts
+    docker_cmd = docker_cmd + " -v {project_root}:/workspace:ro"
+    docker_cmd = docker_cmd + " -v {results_dir}:/workspace/test-results:rw"
+
+    # Tmpfs mount
+    docker_cmd = docker_cmd + " --tmpfs /tmp:rw,noexec,nosuid,size=100m"
+
+    # Resource limits
+    docker_cmd = docker_cmd + " --memory=1g"
+    docker_cmd = docker_cmd + " --cpus=2.0"
+
+    # Security: no network
+    docker_cmd = docker_cmd + " --network=none"
+
+    # User
+    docker_cmd = docker_cmd + " --user 1001:1001"
+
+    # Image
+    docker_cmd = docker_cmd + " simple-test-isolation:latest"
+
+    # Test command
+    docker_cmd = docker_cmd + " test"
+    if test_path != "":
+        docker_cmd = docker_cmd + " {test_path}"
+
+    log_info("Executing: {docker_cmd}")
+
+    # Run container
+    val result = shell(docker_cmd)
+    if result.exit_code != 0:
+        log_error("Test execution failed")
+        print result.stdout
+        print result.stderr
+        return false
+
+    log_success("Tests completed successfully")
+    print result.stdout
+    true
+
+# Run tests in full container
+fn run_full(project_root: text, test_path: text) -> bool:
+    """Run tests in full container (with build tools, more resources)"""
+
+    log_info("Running tests in full container (with build tools)...")
+
+    # Create test-results directory
+    val results_dir = join(project_root, "test-results")
+    if not is_dir(results_dir):
+        dir_create_all(results_dir)
+
+    # Build docker run command
+    var docker_cmd = "docker run --rm"
+
+    # Volume mounts
+    docker_cmd = docker_cmd + " -v {project_root}:/workspace:ro"
+    docker_cmd = docker_cmd + " -v {results_dir}:/workspace/test-results:rw"
+
+    # Tmpfs mount (larger for build operations)
+    docker_cmd = docker_cmd + " --tmpfs /tmp:rw,size=500m"
+
+    # Resource limits (more generous)
+    docker_cmd = docker_cmd + " --memory=4g"
+    docker_cmd = docker_cmd + " --cpus=4.0"
+
+    # Network: bridge (for downloading dependencies if needed)
+    docker_cmd = docker_cmd + " --network=bridge"
+
+    # User
+    docker_cmd = docker_cmd + " --user 1001:1001"
+
+    # Image
+    docker_cmd = docker_cmd + " simple-test-full:latest"
+
+    # Test command
+    docker_cmd = docker_cmd + " test"
+    if test_path != "":
+        docker_cmd = docker_cmd + " {test_path}"
+
+    log_info("Executing: {docker_cmd}")
+
+    # Run container
+    val result = shell(docker_cmd)
+    if result.exit_code != 0:
+        log_error("Test execution failed")
+        print result.stdout
+        print result.stderr
+        return false
+
+    log_success("Tests completed successfully")
+    print result.stdout
+    true
+
+# Run interactive shell in container
+fn run_shell(project_root: text) -> bool:
+    """Start interactive shell in test-full container"""
+
+    log_info("Starting interactive shell in test-full container...")
+
+    # Build docker run command (interactive mode)
+    var docker_cmd = "docker run --rm -it"
+
+    # Volume mount (read-only workspace)
+    docker_cmd = docker_cmd + " -v {project_root}:/workspace:ro"
+
+    # Tmpfs mount
+    docker_cmd = docker_cmd + " --tmpfs /tmp:rw,size=500m"
+
+    # Resource limits
+    docker_cmd = docker_cmd + " --memory=2g"
+    docker_cmd = docker_cmd + " --cpus=2.0"
+
+    # Network: bridge
+    docker_cmd = docker_cmd + " --network=bridge"
+
+    # User
+    docker_cmd = docker_cmd + " --user 1001:1001"
+
+    # Entrypoint: bash shell
+    docker_cmd = docker_cmd + " --entrypoint /bin/bash"
+
+    # Image
+    docker_cmd = docker_cmd + " simple-test-full:latest"
+
+    log_info("Executing: {docker_cmd}")
+
+    # Run container (interactive)
+    val result = shell(docker_cmd)
+
+    # Exit code doesn't matter for interactive shell
+    true
+
+# Run using docker-compose
+fn run_compose(project_root: text) -> bool:
+    """Run tests using docker-compose orchestration"""
+
+    log_info("Running tests using docker-compose...")
+
+    val compose_file = join(project_root, "docker-compose.test.yml")
+
+    # Build images
+    val build_cmd = "docker-compose -f {compose_file} build"
+    log_info("Building images with docker-compose...")
+    val build_result = shell(build_cmd)
+    if build_result.exit_code != 0:
+        log_error("docker-compose build failed")
+        print build_result.stderr
+        return false
+
+    # Run test-isolation service
+    val run_cmd = "docker-compose -f {compose_file} run --rm test-isolation"
+    log_info("Running test-isolation service...")
+    val run_result = shell(run_cmd)
+    if run_result.exit_code != 0:
+        log_error("docker-compose test execution failed")
+        print run_result.stdout
+        print run_result.stderr
+        return false
+
+    log_success("docker-compose tests completed successfully")
+    print run_result.stdout
+    true
+
+# Clean up containers and images
+fn clean_all(project_root: text) -> bool:
+    """Clean up Docker containers, images, and test results"""
+
+    log_info("Cleaning up Docker containers and images...")
+
+    # Stop and remove containers
+    log_info("Removing containers...")
+    val ps_result = shell_output("docker ps -a")
+    val ps_lines = split(ps_result, "\n")
+
+    for line in ps_lines:
+        if contains(line, "simple-test"):
+            # Extract container ID (first column)
+            val parts = split(line, " ")
+            if parts.len() > 0:
+                val container_id = parts[0]
+                if container_id != "":
+                    val rm_cmd = "docker rm -f {container_id}"
+                    shell(rm_cmd)
+
+    # Remove images
+    log_info("Removing images...")
+    val images_result = shell_output("docker images")
+    val image_lines = split(images_result, "\n")
+
+    for line in image_lines:
+        if contains(line, "simple-test"):
+            # Extract image ID (third column typically)
+            val parts = split(line, " ")
+            var image_id = ""
+            var col_count = 0
+
+            for part in parts:
+                if part != "":
+                    col_count = col_count + 1
+                    if col_count == 3:
+                        image_id = part
+                        break
+
+            if image_id != "":
+                val rmi_cmd = "docker rmi -f {image_id}"
+                shell(rmi_cmd)
+
+    # Remove test-results directory
+    val results_dir = join(project_root, "test-results")
+    if is_dir(results_dir):
+        log_info("Removing test-results directory...")
+        val rmdir_cmd = "rm -rf {results_dir}"
+        shell(rmdir_cmd)
+
+    log_success("Cleanup completed")
+    true
+
+# Show usage
+fn show_usage():
+    """Display help text"""
+    print "Docker Test Runner - Simple Language Project"
+    print ""
+    print "Usage:"
+    print "  simple run src/app/test/docker_runner.spl [command] [options]"
+    print ""
+    print "Commands:"
+    print "  build              Build Docker images (test-isolation, test-full)"
+    print "  run [path]         Run tests in isolated container (default: all tests)"
+    print "  run-full [path]    Run tests in full container with build tools"
+    print "  shell              Start interactive shell in test-full container"
+    print "  compose            Run tests using docker-compose"
+    print "  clean              Clean up containers, images, and test results"
+    print "  help               Show this help message"
+    print ""
+    print "Examples:"
+    print "  simple run src/app/test/docker_runner.spl build"
+    print "    Build Docker images"
+    print ""
+    print "  simple run src/app/test/docker_runner.spl run"
+    print "    Run all tests in isolated container"
+    print ""
+    print "  simple run src/app/test/docker_runner.spl run test/unit/std/string_spec.spl"
+    print "    Run single test file"
+    print ""
+    print "  simple run src/app/test/docker_runner.spl run-full test/integration/"
+    print "    Run integration tests in full environment"
+    print ""
+    print "  simple run src/app/test/docker_runner.spl shell"
+    print "    Debug in interactive container shell"
+    print ""
+    print "  simple run src/app/test/docker_runner.spl clean"
+    print "    Clean up Docker artifacts"
+    print ""
+    print "Resource Limits:"
+    print "  test-isolation:  1GB RAM, 2 CPUs, no network"
+    print "  test-full:       4GB RAM, 4 CPUs, bridge network"
+    print ""
+    print "For more information, see doc/research/robust_test_runner_plan_2026-02-14.md"
+
+# Main command dispatcher
+fn main():
+    """Entry point"""
+    val args = get_args()
+
+    # Get command (default: build)
+    var command = DEFAULT_COMMAND
+    if args.len() > 1:
+        command = args[1]
+
+    # Get project root
+    val project_root = cwd()
+
+    # Handle help
+    if (command == "help" or
+        command == "--help" or
+        command == "-h"):
+        show_usage()
+        exit(0)
+
+    # Dispatch commands
+    var success = false
+
+    if command == "build":
+        if check_prerequisites():
+            success = build_images(project_root)
+        else:
+            success = false
+
+    else if command == "run":
+        if check_prerequisites():
+            var test_path = ""
+            if args.len() > 2:
+                test_path = args[2]
+            success = run_isolated(project_root, test_path)
+        else:
+            success = false
+
+    else if command == "run-full":
+        if check_prerequisites():
+            var test_path = ""
+            if args.len() > 2:
+                test_path = args[2]
+            success = run_full(project_root, test_path)
+        else:
+            success = false
+
+    else if command == "shell":
+        if check_prerequisites():
+            success = run_shell(project_root)
+        else:
+            success = false
+
+    else if command == "compose":
+        if check_prerequisites():
+            success = run_compose(project_root)
+        else:
+            success = false
+
+    else if command == "clean":
+        success = clean_all(project_root)
+
+    else:
+        log_error("Unknown command: {command}")
+        print ""
+        show_usage()
+        exit(1)
+
+    # Exit with appropriate code
+    if success:
+        exit(0)
+    else:
+        exit(1)
+
+export main

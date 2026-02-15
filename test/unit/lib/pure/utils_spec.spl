@@ -1,0 +1,119 @@
+# Tests for Pure Simple Training Utilities
+
+use lib.pure.tensor.{PureTensor, tensor_from_data}
+use lib.pure.utils.{
+    set_seed, get_seed, next_random, random_tensor,
+    clip_grad_norm, clip_grad_value,
+    count_parameters, count_parameters_by_layer,
+    tensor_norm, tensor_max, tensor_min
+}
+
+describe "Training Utilities":
+    describe "Random Seed Management":
+        it "sets and gets the seed":
+            set_seed(123)
+            expect(get_seed()).to_equal(123)
+
+        it "generates reproducible random values":
+            set_seed(42)
+            val r1 = next_random()
+            set_seed(42)
+            val r2 = next_random()
+            expect(r1).to_equal(r2)
+
+        it "generates values in [0, 1)":
+            set_seed(99)
+            val r = next_random()
+            expect(r).to_be_greater_than(-0.01)
+            expect(r).to_be_less_than(1.0)
+
+        it "creates random tensor with correct shape":
+            set_seed(7)
+            val t = random_tensor([2, 3])
+            expect(t.shape).to_equal([2, 3])
+            expect(t.data.len()).to_equal(6)
+
+    describe "Gradient Clipping":
+        describe "Clip by Norm":
+            it "does not clip when norm is below max":
+                val grad1 = tensor_from_data([0.1, 0.2], [2])
+                val grads = [grad1]
+                val total = clip_grad_norm(grads, 10.0)
+                # Norm is small, should not change
+                expect(grads[0].data[0]).to_equal(0.1)
+                expect(grads[0].data[1]).to_equal(0.2)
+
+            it "clips when norm exceeds max":
+                val grad1 = tensor_from_data([3.0, 4.0], [2])
+                val grads = [grad1]
+                # Norm = sqrt(9+16) = 5, clip to 1.0
+                val total = clip_grad_norm(grads, 1.0)
+                expect(total).to_be_greater_than(4.99)
+                expect(total).to_be_less_than(5.01)
+                # After clipping, each element scaled by 1/5
+                expect(grads[0].data[0]).to_be_greater_than(0.59)
+                expect(grads[0].data[0]).to_be_less_than(0.61)
+
+            it "clips multiple gradient tensors":
+                val grad1 = tensor_from_data([3.0, 0.0], [2])
+                val grad2 = tensor_from_data([0.0, 4.0], [2])
+                val grads = [grad1, grad2]
+                val total = clip_grad_norm(grads, 1.0)
+                # Global norm = sqrt(9+16) = 5
+                expect(total).to_be_greater_than(4.99)
+
+        describe "Clip by Value":
+            it "clips values above threshold":
+                val grad = tensor_from_data([0.5, 2.0, -3.0], [3])
+                val clipped = clip_grad_value([grad], 1.0)
+                expect(grad.data[0]).to_equal(0.5)    # Not clipped
+                expect(grad.data[1]).to_equal(1.0)    # Clipped from 2.0
+                expect(grad.data[2]).to_equal(-1.0)   # Clipped from -3.0
+                expect(clipped).to_equal(2)
+
+            it "returns zero when nothing is clipped":
+                val grad = tensor_from_data([0.1, 0.2, -0.3], [3])
+                val clipped = clip_grad_value([grad], 1.0)
+                expect(clipped).to_equal(0)
+
+    describe "Parameter Counting":
+        it "counts parameters in single tensor":
+            val params = [tensor_from_data([1.0, 2.0, 3.0, 4.0], [2, 2])]
+            val total = count_parameters(params)
+            expect(total).to_equal(4)
+
+        it "counts parameters across multiple tensors":
+            val p1 = tensor_from_data([1.0, 2.0], [2])
+            val p2 = tensor_from_data([3.0, 4.0, 5.0], [3])
+            val total = count_parameters([p1, p2])
+            expect(total).to_equal(5)
+
+        it "counts parameters by layer":
+            val layer1 = [tensor_from_data([1.0, 2.0], [2])]
+            val layer2 = [tensor_from_data([3.0, 4.0, 5.0], [3]), tensor_from_data([6.0], [1])]
+            val counts = count_parameters_by_layer([layer1, layer2])
+            expect(counts[0]).to_equal(2)
+            expect(counts[1]).to_equal(4)
+
+    describe "Tensor Utilities":
+        it "computes L2 norm":
+            # norm([3, 4]) = sqrt(9+16) = 5
+            val t = tensor_from_data([3.0, 4.0], [2])
+            val n = tensor_norm(t)
+            expect(n).to_be_greater_than(4.99)
+            expect(n).to_be_less_than(5.01)
+
+        it "computes zero norm for zero tensor":
+            val t = tensor_from_data([0.0, 0.0], [2])
+            val n = tensor_norm(t)
+            expect(n).to_equal(0.0)
+
+        it "finds maximum value":
+            val t = tensor_from_data([1.0, 5.0, 3.0, 2.0], [4])
+            val m = tensor_max(t)
+            expect(m).to_equal(5.0)
+
+        it "finds minimum value":
+            val t = tensor_from_data([1.0, 5.0, 3.0, 2.0], [4])
+            val m = tensor_min(t)
+            expect(m).to_equal(1.0)

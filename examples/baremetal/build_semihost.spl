@@ -1,0 +1,98 @@
+# Simple (.spl) replacement for build_semihost.sh
+# Build RISC-V 32 Semihosting Binary with LLVM or GCC
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, print, exit}
+use std.string.{trim}
+
+fn detect_toolchain() -> [text]:
+    # Returns [toolchain, assembler, linker]
+    if (shell_bool("command -v clang-16") and
+        shell_bool("command -v lld-16")):
+        print "Using LLVM toolchain (clang-16 + lld-16)\n"
+        return ["LLVM", "clang-16", "lld-16"]
+    else if (shell_bool("command -v clang") and
+             shell_bool("command -v lld")):
+        print "Using LLVM toolchain (clang + lld)\n"
+        return ["LLVM", "clang", "lld"]
+    else if (shell_bool("command -v riscv64-unknown-elf-as") and
+             shell_bool("command -v riscv64-unknown-elf-ld")):
+        print "Using GCC RISC-V toolchain (riscv64-unknown-elf)\n"
+        return ["GCC", "riscv64-unknown-elf-as", "riscv64-unknown-elf-ld"]
+    else:
+        print "Error: No suitable toolchain found\n"
+        print "\n"
+        print "Install LLVM (recommended):\n"
+        print "  Ubuntu: sudo apt install clang-16 lld-16\n"
+        print "  macOS:  brew install llvm\n"
+        print "\n"
+        print "Or install GCC RISC-V (fallback):\n"
+        print "  sudo apt install gcc-riscv64-unknown-elf\n"
+        print "\n"
+        exit(1)
+    return ["", "", ""]
+
+fn build_llvm(assembler: text):
+    print "Compiling hello_riscv32_semihost.s with LLVM...\n"
+    val cmd = "{assembler} -target riscv32-unknown-none -march=rv32i -mabi=ilp32 -nostdlib -static -Wl,-Ttext=0x80000000 -Wl,--no-relax -fuse-ld=lld hello_riscv32_semihost.s -o hello_riscv32_semihost.elf"
+    val result = shell(cmd)
+    if result.exit_code != 0:
+        print "Build failed\n"
+        exit(1)
+
+fn build_gcc(assembler: text, linker: text):
+    print "Assembling hello_riscv32_semihost.s with GCC...\n"
+    shell("{assembler} -march=rv32i -mabi=ilp32 hello_riscv32_semihost.s -o /tmp/hello_riscv32_semihost.o")
+    print "Linking hello_riscv32_semihost.elf with GCC...\n"
+    shell("{linker} -m elf32lriscv /tmp/hello_riscv32_semihost.o -o hello_riscv32_semihost.elf -Ttext=0x80000000 --no-relax")
+
+fn test_with_qemu():
+    print "\n"
+    print "Testing with QEMU...\n"
+    if shell_bool("command -v qemu-system-riscv32"):
+        print "Running in QEMU...\n"
+        shell("timeout 5 qemu-system-riscv32 -M virt -bios none -kernel hello_riscv32_semihost.elf -nographic -semihosting-config enable=on,target=native 2>&1 || true")
+        print "\n"
+        print "QEMU test complete\n"
+    else if file_exists("../../resources/qemu/bin/qemu-system-riscv32"):
+        print "Running with project QEMU...\n"
+        shell("timeout 5 ../../resources/qemu/bin/qemu-system-riscv32 -M virt -bios none -kernel hello_riscv32_semihost.elf -nographic -semihosting-config enable=on,target=native 2>&1 || true")
+        print "\n"
+        print "QEMU test complete\n"
+    else:
+        print "qemu-system-riscv32 not found, skipping test\n"
+
+fn main():
+    print "Building RISC-V 32 Semihosting Binary\n"
+    print "\n"
+
+    val tc = detect_toolchain()
+    val toolchain = tc[0]
+    val assembler = tc[1]
+    val linker = tc[2]
+    print "\n"
+
+    if toolchain == "LLVM":
+        build_llvm(assembler)
+    else if toolchain == "GCC":
+        build_gcc(assembler, linker)
+
+    if file_exists("hello_riscv32_semihost.elf"):
+        val size = trim(shell_output("du -h hello_riscv32_semihost.elf | cut -f1"))
+        print "\n"
+        print "Built: hello_riscv32_semihost.elf ({size})\n"
+        print "Toolchain: {toolchain}\n"
+        print "\n"
+
+        if shell_bool("command -v file"):
+            val info = trim(shell_output("file hello_riscv32_semihost.elf"))
+            print "{info}\n"
+
+        test_with_qemu()
+    else:
+        print "Build failed\n"
+        exit(1)
+
+    print "\n"
+    print "Build Complete with {toolchain}!\n"
+
+main()

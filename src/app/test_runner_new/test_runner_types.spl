@@ -12,6 +12,7 @@ enum TestExecutionMode:
     Interpreter
     Smf
     Native
+    Composite(spec: text)
 
 # =========================================================================
 # Test Level Filter
@@ -75,6 +76,7 @@ struct TestOptions:
     max_workers: i64
     parallel_timeout: i64
     closure_warnings: bool
+    ci_mode: bool
 
 # =========================================================================
 # Test File Result
@@ -123,6 +125,79 @@ struct SkipFeatureInfo:
     status: text
 
 # =========================================================================
+# Platform Specification Helper Functions
+# =========================================================================
+
+fn execution_mode_from_string(mode: text) -> TestExecutionMode:
+    """Parse execution mode from string, supporting nested syntax."""
+    val trimmed = mode.trim()
+    if trimmed.contains("("):
+        return TestExecutionMode.Composite(trimmed)
+    match trimmed.lower():
+        case "interpreter": TestExecutionMode.Interpreter
+        case "smf": TestExecutionMode.Smf
+        case "native": TestExecutionMode.Native
+        case _: TestExecutionMode.Interpreter
+
+fn execution_mode_base_runtime(mode: TestExecutionMode) -> text:
+    """Extract base runtime layer (interpreter, smf, native)."""
+    match mode:
+        case Interpreter: "interpreter"
+        case Smf: "smf"
+        case Native: "native"
+        case Composite(spec):
+            val first_paren = spec.find("(")
+            if first_paren > 0:
+                spec[0:first_paren].trim()
+            else:
+                "interpreter"
+
+fn execution_mode_is_composite(mode: TestExecutionMode) -> bool:
+    """Check if this is a composite platform spec."""
+    match mode:
+        case Composite(_): true
+        case _: false
+
+fn execution_mode_has_layer(mode: TestExecutionMode, layer: text) -> bool:
+    """Check if spec contains a specific layer."""
+    match mode:
+        case Composite(spec): spec.contains(layer)
+        case _: false
+
+fn execution_mode_is_remote(mode: TestExecutionMode) -> bool:
+    """Check if execution happens on remote target."""
+    execution_mode_has_layer(mode, "remote")
+
+fn execution_mode_is_baremetal(mode: TestExecutionMode) -> bool:
+    """Check if target is bare-metal (no OS)."""
+    execution_mode_has_layer(mode, "baremetal")
+
+fn execution_mode_is_container(mode: TestExecutionMode) -> bool:
+    """Check if execution happens in container."""
+    execution_mode_has_layer(mode, "container")
+
+fn execution_mode_target_arch(mode: TestExecutionMode) -> text:
+    """Extract target architecture from spec."""
+    match mode:
+        case Composite(spec):
+            val archs = ["riscv32", "arm32", "x86_64", "aarch64", "mips"]
+            var i = 0
+            while i < archs.len():
+                if spec.contains(archs[i]):
+                    return archs[i]
+                i = i + 1
+            "host"
+        case _: "host"
+
+fn execution_mode_to_string(mode: TestExecutionMode) -> text:
+    """Convert to string representation."""
+    match mode:
+        case Interpreter: "interpreter"
+        case Smf: "smf"
+        case Native: "native"
+        case Composite(spec): spec
+
+# =========================================================================
 # Exports
 # =========================================================================
 
@@ -133,3 +208,12 @@ export TestOptions
 export TestFileResult
 export TestRunResult
 export SkipFeatureInfo
+export execution_mode_from_string
+export execution_mode_base_runtime
+export execution_mode_is_composite
+export execution_mode_has_layer
+export execution_mode_is_remote
+export execution_mode_is_baremetal
+export execution_mode_is_container
+export execution_mode_target_arch
+export execution_mode_to_string

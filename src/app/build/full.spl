@@ -1,0 +1,94 @@
+# Simple (.spl) replacement for script/build-full.sh
+# Build Full Development Package
+# Creates a complete source distribution.
+
+use app.io.mod.{shell, shell_output, file_exists, file_read, exit, cwd, is_dir, get_args}
+use std.string.{trim, starts_with, split, contains}
+
+val COLOR_GREEN = "\x1b[0;32m"
+val COLOR_BLUE = "\x1b[0;34m"
+val COLOR_RESET = "\x1b[0m"
+
+fn get_version() -> text:
+    if file_exists("VERSION"):
+        return trim(file_read("VERSION"))
+    # Try extracting from Cargo.toml
+    if file_exists("rust/driver/Cargo.toml"):
+        val content = file_read("rust/driver/Cargo.toml")
+        val lines = split(content, "\n")
+        for line in lines:
+            if starts_with(line, "version = "):
+                # Extract between quotes
+                val parts = split(line, "\"")
+                if parts.len() >= 2:
+                    return parts[1]
+    return "0.0.0"
+
+fn main():
+    val args = get_args()
+
+    print "{COLOR_BLUE}Building Simple Full Package{COLOR_RESET}"
+    print ""
+
+    val version = get_version()
+    print "{COLOR_BLUE}Version:{COLOR_RESET} {version}"
+    print ""
+
+    val output = "simple-full-{version}.tar.gz"
+
+    # Build optimized runtime if --with-binary flag
+    var with_binary = false
+    for arg in args:
+        if arg == "--with-binary":
+            with_binary = true
+
+    if with_binary:
+        if is_dir("rust"):
+            print "{COLOR_GREEN}Building optimized runtime from Rust source...{COLOR_RESET}"
+            val build_result = shell("cd rust && cargo build --profile release-opt --quiet")
+            if build_result.exit_code != 0:
+                print "ERROR: Rust build failed."
+                print build_result.stderr
+                exit(1)
+            print "{COLOR_GREEN}OK{COLOR_RESET} Runtime built from source"
+            print ""
+        else:
+            print "{COLOR_BLUE}Skipping Rust build (pure Simple distribution){COLOR_RESET}"
+            print "{COLOR_BLUE}Using pre-built runtime at bin/release/simple{COLOR_RESET}"
+            print ""
+
+    # Create tarball
+    print "{COLOR_GREEN}Creating source tarball...{COLOR_RESET}"
+
+    val tmpout = "/tmp/{output}"
+    val tar_cmd = "tar -czf {tmpout} --exclude='.git' --exclude='rust/target' --exclude='__pycache__' --exclude='*.pyc' --exclude='.DS_Store' --exclude='node_modules' --exclude='*.log' --exclude='simple-full-*.tar.gz' --exclude='simple-bootstrap-*.spk' --transform='s,^,simple-{version}/,' ."
+    val tar_result = shell(tar_cmd)
+    if tar_result.exit_code != 0:
+        print "ERROR: Failed to create tarball."
+        print tar_result.stderr
+        exit(1)
+
+    shell("mv {tmpout} {output}")
+
+    val pkg_size = trim(shell_output("stat -c%s {output} 2>/dev/null || stat -f%z {output} 2>/dev/null || echo 0"))
+    val pkg_display = trim(shell_output("numfmt --to=iec-i --suffix=B {pkg_size} 2>/dev/null || echo '{pkg_size} bytes'"))
+
+    print "{COLOR_GREEN}OK{COLOR_RESET} Tarball created: {pkg_display}"
+    print ""
+
+    # Summary
+    print "{COLOR_BLUE}================================================={COLOR_RESET}"
+    print "{COLOR_GREEN}OK Full package built successfully{COLOR_RESET}"
+    print "{COLOR_BLUE}================================================={COLOR_RESET}"
+    print ""
+    print "Package:  {output}"
+    print "Size:     {pkg_display}"
+    print "Version:  {version}"
+    print ""
+    print "To extract and install:"
+    print "  tar -xzf {output}"
+    print "  cd simple-{version}"
+    print "  make install PREFIX=~/.local"
+    print ""
+
+main()
