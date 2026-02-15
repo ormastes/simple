@@ -597,6 +597,7 @@ def fix_cpp(input_path, output_path):
         # Post-struct stubs that need struct types
         result.append('// Post-struct stubs\n')
         result.append('inline int64_t HirExprKind_InlineAsm_new(int64_t, SplArray*, Span) { return 0; }\n')
+        result.append('SymbolId symbolid_new(const char* name) { return SymbolId{(int64_t)name}; }\n')
         result.append('\n')
         # Add CompileResult as a struct (seed generates it as enum but code uses it as struct)
         result.append('struct CompileResult { int64_t kind; const char* message; bool is_success() const { return kind == 0; } };\n')
