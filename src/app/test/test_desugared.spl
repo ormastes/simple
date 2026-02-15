@@ -1,0 +1,127 @@
+# Simple (.spl) replacement for src/tools/test_desugared.sh
+# Test script for desugared Core Simple code
+#
+# Verifies that desugared files are valid and can be compiled.
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, is_dir, exit, cwd}
+use std.string.{trim, split}
+
+val COLOR_GREEN = "\x1b[0;32m"
+val COLOR_RED = "\x1b[0;31m"
+val COLOR_YELLOW = "\x1b[1;33m"
+val COLOR_RESET = "\x1b[0m"
+
+fn main():
+    val project_root = cwd()
+    val compiler_core = "{project_root}/src/compiler_core"
+    val seed_compiler = "{project_root}/seed/build/seed"
+
+    print "============================================================================"
+    print "Testing Desugared Core Simple Code"
+    print "============================================================================"
+    print ""
+
+    # Check if seed compiler exists
+    if not file_exists(seed_compiler):
+        print "{COLOR_YELLOW}WARN{COLOR_RESET} Seed compiler not found at: {seed_compiler}"
+        print "   Building seed compiler..."
+        val bootstrap_dir = "{project_root}/bootstrap"
+        if not is_dir("{bootstrap_dir}/build"):
+            val mk_result = shell("mkdir -p {bootstrap_dir}/build && cd {bootstrap_dir}/build && cmake .. && make -j$(nproc)")
+            if mk_result.exit_code != 0:
+                print "{COLOR_RED}FAIL{COLOR_RESET} Failed to build seed compiler"
+                print mk_result.stderr
+                exit(1)
+        else:
+            val build_result = shell("cd {bootstrap_dir}/build && make -j$(nproc)")
+            if build_result.exit_code != 0:
+                print "{COLOR_RED}FAIL{COLOR_RESET} Failed to build seed compiler"
+                print build_result.stderr
+                exit(1)
+
+    print "{COLOR_GREEN}OK{COLOR_RESET} Seed compiler ready"
+    print ""
+
+    # Count files
+    if not is_dir(compiler_core):
+        print "{COLOR_RED}FAIL{COLOR_RESET} compiler_core directory not found: {compiler_core}"
+        exit(1)
+
+    val total_files_str = trim(shell_output("find {compiler_core} -name '*.spl' | wc -l"))
+    print "Found {total_files_str} desugared files"
+    print ""
+
+    # Test key files
+    print "Testing key files with Core Simple compiler..."
+    print ""
+
+    val test_files = ["lexer.spl", "parser.spl", "backend.spl"]
+
+    var success = 0
+    var failed = 0
+
+    for file in test_files:
+        val file_path = "{compiler_core}/{file}"
+
+        if file_exists(file_path):
+            # Try to parse with simple (if available)
+            if shell_bool("command -v simple"):
+                if shell_bool("simple check {file_path} 2>/dev/null"):
+                    print "  Testing {file}... {COLOR_GREEN}OK{COLOR_RESET}"
+                    success = success + 1
+                else:
+                    print "  Testing {file}... {COLOR_RED}FAIL{COLOR_RESET} (parse error)"
+                    failed = failed + 1
+            else:
+                print "  Testing {file}... (simple not available, skipping)"
+        else:
+            print "  {COLOR_YELLOW}WARN{COLOR_RESET} {file} not found"
+
+    print ""
+    print "============================================================================"
+    print "Summary"
+    print "============================================================================"
+    print "  Total files: {total_files_str}"
+    print "  Tested: {success} passed, {failed} failed"
+    print ""
+
+    # Check for potential issues
+    print "Checking for potential issues..."
+    print ""
+
+    var issues = 0
+
+    # Check for remaining Option types
+    val opt_count_str = trim(shell_output("grep -r ':\\s*\\w\\+?' {compiler_core} --include='*.spl' 2>/dev/null | grep -v '^#' | wc -l"))
+    val opt_count = int(opt_count_str)
+    if opt_count > 0:
+        print "  {COLOR_YELLOW}WARN{COLOR_RESET} Found {opt_count_str} potential un-desugared Option types"
+        issues = issues + 1
+    else:
+        print "  {COLOR_GREEN}OK{COLOR_RESET} No un-desugared Option types found"
+
+    # Check for impl blocks
+    val impl_count_str = trim(shell_output("grep -r '^impl\\s' {compiler_core} --include='*.spl' 2>/dev/null | wc -l"))
+    val impl_count = int(impl_count_str)
+    if impl_count > 0:
+        print "  {COLOR_YELLOW}WARN{COLOR_RESET} Found {impl_count_str} remaining impl blocks"
+        issues = issues + 1
+    else:
+        print "  {COLOR_GREEN}OK{COLOR_RESET} No remaining impl blocks found"
+
+    # Check for .? operator usage
+    val dot_q_str = trim(shell_output("grep -r '\\.?' {compiler_core} --include='*.spl' 2>/dev/null | grep -v '^#' | wc -l"))
+    val dot_q_count = int(dot_q_str)
+    if dot_q_count > 10:
+        print "  {COLOR_YELLOW}WARN{COLOR_RESET} Found {dot_q_str} uses of .? operator (should be desugared)"
+        issues = issues + 1
+    else:
+        print "  {COLOR_GREEN}OK{COLOR_RESET} Minimal .? operator usage ({dot_q_str} occurrences)"
+
+    print ""
+    if issues == 0:
+        print "{COLOR_GREEN}All checks passed!{COLOR_RESET}"
+    else:
+        print "{COLOR_YELLOW}Found {issues} potential issues (may be false positives){COLOR_RESET}"
+
+main()

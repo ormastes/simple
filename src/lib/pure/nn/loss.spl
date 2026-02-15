@@ -1,0 +1,268 @@
+# Pure Simple Loss Functions
+#
+# Additional loss functions for neural network training
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros}
+
+# ============================================================================
+# Math Helpers (module-local, avoid importing tensor_ops)
+# ============================================================================
+
+fn _loss_exp(x: f64) -> f64:
+    """Taylor series exp(x) with 20 terms."""
+    var result = 1.0
+    var term = 1.0
+    var k = 1
+    while k < 20:
+        term = term * x / k
+        result = result + term
+        k = k + 1
+    result
+
+fn _loss_log(x: f64) -> f64:
+    """Natural log via series expansion.
+
+    Uses ln(x) = 2 * arctanh((x-1)/(x+1)) series.
+    Clamps input to avoid log(0).
+    """
+    val clamped = if x < 0.0000001: 0.0000001 else: x
+    val z = (clamped - 1.0) / (clamped + 1.0)
+    var result = 0.0
+    var z_power = z
+    var j = 0
+    while j < 30:
+        result = result + z_power / (2 * j + 1)
+        z_power = z_power * z * z
+        j = j + 1
+    2.0 * result
+
+fn _loss_sqrt(x: f64) -> f64:
+    """Square root via Newton's method."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x
+    var i = 0
+    while i < 20:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn _loss_abs(x: f64) -> f64:
+    """Absolute value."""
+    if x < 0.0: -x else: x
+
+# ============================================================================
+# Loss Functions
+# ============================================================================
+
+fn nll_loss(log_probs: PureTensor<f64>, targets: PureTensor<f64>) -> f64:
+    """Negative Log-Likelihood loss.
+
+    Expects log-probabilities as input (e.g., output of log_softmax).
+    Targets should be one-hot encoded or class probabilities.
+
+    L = -sum(targets * log_probs) / N
+
+    Args:
+        log_probs - Log-probabilities tensor
+        targets - Target distribution (one-hot or probabilities)
+
+    Returns:
+        Scalar NLL loss value
+    """
+    val n = log_probs.data.len()
+    if n == 0:
+        return 0.0
+
+    var loss_sum = 0.0
+    var i = 0
+    while i < n:
+        loss_sum = loss_sum - targets.data[i] * log_probs.data[i]
+        i = i + 1
+
+    loss_sum / n
+
+fn bce_with_logits_loss(input: PureTensor<f64>, target: PureTensor<f64>) -> f64:
+    """Binary Cross-Entropy with Logits loss.
+
+    Combines sigmoid and BCE in a numerically stable way.
+    Uses the identity: BCE(sigmoid(x), y) = max(x, 0) - x*y + log(1 + exp(-|x|))
+
+    Args:
+        input - Raw logits (before sigmoid)
+        target - Target labels (0 or 1)
+
+    Returns:
+        Scalar BCE-with-logits loss value
+    """
+    val n = input.data.len()
+    if n == 0:
+        return 0.0
+
+    var loss_sum = 0.0
+    var i = 0
+    while i < n:
+        val x = input.data[i]
+        val y = target.data[i]
+
+        # Numerically stable: max(x, 0) - x*y + log(1 + exp(-|x|))
+        val max_x = if x > 0.0: x else: 0.0
+        val abs_x = _loss_abs(x)
+        val stable_term = _loss_log(1.0 + _loss_exp(-abs_x))
+        loss_sum = loss_sum + max_x - x * y + stable_term
+
+        i = i + 1
+
+    loss_sum / n
+
+fn kl_div_loss(log_input: PureTensor<f64>, target: PureTensor<f64>) -> f64:
+    """Kullback-Leibler Divergence loss.
+
+    KL(target || input) = sum(target * (log(target) - log_input))
+
+    Expects log-probabilities as first argument.
+
+    Args:
+        log_input - Log-probabilities of the input distribution
+        target - Target probability distribution
+
+    Returns:
+        Scalar KL divergence value
+    """
+    val n = log_input.data.len()
+    if n == 0:
+        return 0.0
+
+    var loss_sum = 0.0
+    var i = 0
+    while i < n:
+        val t = target.data[i]
+        if t > 0.0:
+            val log_t = _loss_log(t)
+            loss_sum = loss_sum + t * (log_t - log_input.data[i])
+        i = i + 1
+
+    loss_sum / n
+
+fn cosine_embedding_loss(x1: PureTensor<f64>, x2: PureTensor<f64>, target_label: f64, margin: f64) -> f64:
+    """Cosine Embedding loss.
+
+    Measures cosine similarity between two vectors.
+    When target_label=1: penalizes dissimilar pairs (loss = 1 - cos_sim)
+    When target_label=-1: penalizes similar pairs (loss = max(0, cos_sim - margin))
+
+    Args:
+        x1 - First input vector
+        x2 - Second input vector
+        target_label - 1.0 for similar pairs, -1.0 for dissimilar
+        margin - Margin for dissimilar pairs (typically 0.0)
+
+    Returns:
+        Scalar cosine embedding loss value
+    """
+    val n = x1.data.len()
+    if n == 0:
+        return 0.0
+
+    # Compute dot product and norms
+    var dot = 0.0
+    var norm1_sq = 0.0
+    var norm2_sq = 0.0
+    var i = 0
+    while i < n:
+        dot = dot + x1.data[i] * x2.data[i]
+        norm1_sq = norm1_sq + x1.data[i] * x1.data[i]
+        norm2_sq = norm2_sq + x2.data[i] * x2.data[i]
+        i = i + 1
+
+    val norm1 = _loss_sqrt(norm1_sq)
+    val norm2 = _loss_sqrt(norm2_sq)
+
+    # Avoid division by zero
+    val denom = if norm1 * norm2 < 0.0000001: 0.0000001 else: norm1 * norm2
+    val cos_sim = dot / denom
+
+    if target_label > 0.0:
+        # Similar: loss = 1 - cos_sim
+        1.0 - cos_sim
+    else:
+        # Dissimilar: loss = max(0, cos_sim - margin)
+        val diff = cos_sim - margin
+        if diff > 0.0: diff else: 0.0
+
+fn triplet_margin_loss(anchor: PureTensor<f64>, positive: PureTensor<f64>, negative: PureTensor<f64>, margin: f64) -> f64:
+    """Triplet Margin loss.
+
+    L = max(0, d(anchor, positive) - d(anchor, negative) + margin)
+
+    where d is Euclidean distance.
+
+    Args:
+        anchor - Anchor embedding
+        positive - Positive (similar) embedding
+        negative - Negative (dissimilar) embedding
+        margin - Margin between positive and negative distances
+
+    Returns:
+        Scalar triplet margin loss value
+    """
+    val n = anchor.data.len()
+    if n == 0:
+        return 0.0
+
+    # Compute squared distances
+    var dist_pos_sq = 0.0
+    var dist_neg_sq = 0.0
+    var i = 0
+    while i < n:
+        val dp = anchor.data[i] - positive.data[i]
+        val dn = anchor.data[i] - negative.data[i]
+        dist_pos_sq = dist_pos_sq + dp * dp
+        dist_neg_sq = dist_neg_sq + dn * dn
+        i = i + 1
+
+    val dist_pos = _loss_sqrt(dist_pos_sq)
+    val dist_neg = _loss_sqrt(dist_neg_sq)
+
+    # max(0, d_pos - d_neg + margin)
+    val loss = dist_pos - dist_neg + margin
+    if loss > 0.0: loss else: 0.0
+
+fn hinge_loss(input: PureTensor<f64>, target: PureTensor<f64>) -> f64:
+    """Hinge loss (for SVM-style classification).
+
+    L = mean(max(0, 1 - target * input))
+
+    Targets should be -1 or +1.
+
+    Args:
+        input - Predicted scores
+        target - Target labels (-1 or +1)
+
+    Returns:
+        Scalar hinge loss value
+    """
+    val n = input.data.len()
+    if n == 0:
+        return 0.0
+
+    var loss_sum = 0.0
+    var i = 0
+    while i < n:
+        val margin_term = 1.0 - target.data[i] * input.data[i]
+        val clamped = if margin_term > 0.0: margin_term else: 0.0
+        loss_sum = loss_sum + clamped
+        i = i + 1
+
+    loss_sum / n
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export nll_loss, bce_with_logits_loss, kl_div_loss
+export cosine_embedding_loss, triplet_margin_loss, hinge_loss

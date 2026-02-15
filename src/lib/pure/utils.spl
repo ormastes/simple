@@ -1,0 +1,259 @@
+# Pure Simple Training Utilities
+#
+# Gradient clipping, parameter counting, and random seed management
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use lib.pure.tensor.{PureTensor, tensor_from_data}
+
+# ============================================================================
+# Random Seed Management
+# ============================================================================
+
+var _global_seed = 42
+
+fn set_seed(seed: i64):
+    """Set the global random seed.
+
+    Used by random number generation throughout the training pipeline.
+
+    Args:
+        seed - Integer seed value
+    """
+    _global_seed = seed
+
+fn get_seed() -> i64:
+    """Get the current global random seed.
+
+    Returns:
+        Current seed value
+    """
+    _global_seed
+
+fn next_random() -> f64:
+    """Generate next pseudo-random f64 in [0, 1) using the global seed.
+
+    Uses a linear congruential generator (LCG).
+
+    Returns:
+        Pseudo-random value in [0.0, 1.0)
+    """
+    # LCG: seed = (a * seed + c) mod m
+    _global_seed = (_global_seed * 1103515245 + 12345) % 2147483647
+    val abs_seed = if _global_seed < 0: -_global_seed else: _global_seed
+    abs_seed * 1.0 / 2147483647.0
+
+fn random_tensor(shape: [i64]) -> PureTensor<f64>:
+    """Create a tensor with pseudo-random values from global seed.
+
+    Values are drawn uniformly from [0, 1).
+
+    Args:
+        shape - Shape of the output tensor
+
+    Returns:
+        Tensor filled with random values
+    """
+    var numel = 1
+    for dim in shape:
+        numel = numel * dim
+    var data: [f64] = []
+    var i = 0
+    while i < numel:
+        data.push(next_random())
+        i = i + 1
+    tensor_from_data(data, shape)
+
+# ============================================================================
+# Gradient Clipping
+# ============================================================================
+
+fn clip_grad_norm(gradients: [PureTensor<f64>], max_norm: f64) -> f64:
+    """Clip gradients by global norm (in-place).
+
+    Computes the global L2 norm across all gradient tensors,
+    then scales each gradient so the total norm does not exceed max_norm.
+
+    Args:
+        gradients - List of gradient tensors to clip (modified in-place)
+        max_norm - Maximum allowed global norm
+
+    Returns:
+        The total norm before clipping
+    """
+    # Compute total norm squared
+    var total_norm_sq = 0.0
+    var g = 0
+    while g < gradients.len():
+        val grad = gradients[g]
+        var i = 0
+        while i < grad.data.len():
+            total_norm_sq = total_norm_sq + grad.data[i] * grad.data[i]
+            i = i + 1
+        g = g + 1
+
+    # sqrt via Newton's method
+    var total_norm = 0.0
+    if total_norm_sq > 0.000001:
+        var guess = total_norm_sq / 2.0
+        var iter = 0
+        while iter < 50:
+            guess = (guess + total_norm_sq / guess) / 2.0
+            iter = iter + 1
+        total_norm = guess
+
+    # Scale if needed
+    if total_norm > max_norm:
+        val scale = max_norm / total_norm
+        g = 0
+        while g < gradients.len():
+            val grad = gradients[g]
+            var i = 0
+            while i < grad.data.len():
+                grad.data[i] = grad.data[i] * scale
+                i = i + 1
+            g = g + 1
+
+    total_norm
+
+fn clip_grad_value(gradients: [PureTensor<f64>], clip_value: f64) -> i64:
+    """Clip gradient values to [-clip_value, clip_value] (in-place).
+
+    Each element of each gradient tensor is clamped independently.
+
+    Args:
+        gradients - List of gradient tensors to clip (modified in-place)
+        clip_value - Maximum absolute value for any gradient element
+
+    Returns:
+        Number of elements that were clipped
+    """
+    var clipped_count = 0
+    var g = 0
+    while g < gradients.len():
+        val grad = gradients[g]
+        var i = 0
+        while i < grad.data.len():
+            if grad.data[i] > clip_value:
+                grad.data[i] = clip_value
+                clipped_count = clipped_count + 1
+            if grad.data[i] < -clip_value:
+                grad.data[i] = -clip_value
+                clipped_count = clipped_count + 1
+            i = i + 1
+        g = g + 1
+    clipped_count
+
+# ============================================================================
+# Parameter Counting
+# ============================================================================
+
+fn count_parameters(parameters: [PureTensor<f64>]) -> i64:
+    """Count total number of trainable parameters.
+
+    Sums the number of elements across all parameter tensors.
+
+    Args:
+        parameters - List of parameter tensors
+
+    Returns:
+        Total number of scalar parameters
+    """
+    var total = 0
+    for param in parameters:
+        total = total + param.data.len()
+    total
+
+fn count_parameters_by_layer(layer_params: [[PureTensor<f64>]]) -> [i64]:
+    """Count parameters per layer.
+
+    Args:
+        layer_params - List of parameter lists, one per layer
+
+    Returns:
+        Array with parameter count for each layer
+    """
+    var counts: [i64] = []
+    for params in layer_params:
+        var layer_count = 0
+        for param in params:
+            layer_count = layer_count + param.data.len()
+        counts.push(layer_count)
+    counts
+
+# ============================================================================
+# Tensor Utilities
+# ============================================================================
+
+fn tensor_norm(t: PureTensor<f64>) -> f64:
+    """Compute L2 norm of a tensor.
+
+    Args:
+        t - Input tensor
+
+    Returns:
+        L2 norm (Frobenius norm for matrices)
+    """
+    var sum_sq = 0.0
+    var i = 0
+    while i < t.data.len():
+        sum_sq = sum_sq + t.data[i] * t.data[i]
+        i = i + 1
+    # sqrt via Newton's method
+    if sum_sq < 0.000001:
+        return 0.0
+    var guess = sum_sq / 2.0
+    var iter = 0
+    while iter < 50:
+        guess = (guess + sum_sq / guess) / 2.0
+        iter = iter + 1
+    guess
+
+fn tensor_max(t: PureTensor<f64>) -> f64:
+    """Find maximum value in a tensor.
+
+    Args:
+        t - Input tensor
+
+    Returns:
+        Maximum value, or -999999.0 if empty
+    """
+    if t.data.len() == 0:
+        return -999999.0
+    var max_val = t.data[0]
+    var i = 1
+    while i < t.data.len():
+        if t.data[i] > max_val:
+            max_val = t.data[i]
+        i = i + 1
+    max_val
+
+fn tensor_min(t: PureTensor<f64>) -> f64:
+    """Find minimum value in a tensor.
+
+    Args:
+        t - Input tensor
+
+    Returns:
+        Minimum value, or 999999.0 if empty
+    """
+    if t.data.len() == 0:
+        return 999999.0
+    var min_val = t.data[0]
+    var i = 1
+    while i < t.data.len():
+        if t.data[i] < min_val:
+            min_val = t.data[i]
+        i = i + 1
+    min_val
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export set_seed, get_seed, next_random, random_tensor
+export clip_grad_norm, clip_grad_value
+export count_parameters, count_parameters_by_layer
+export tensor_norm, tensor_max, tensor_min

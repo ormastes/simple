@@ -1,0 +1,132 @@
+# Simple (.spl) replacement for test_string_interning_e2e.sh
+# End-to-End Test for String Interning System
+#
+# Tests complete pipeline:
+#   1. Create test SMF file
+#   2. Create test assembly (uses string IDs via semihosting)
+#   3. Generate string table
+#   4. Build binary with embedded table
+#   5. Run in custom QEMU
+#   6. Verify output
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, file_write, print, exit, cwd, dir_create_all}
+use std.string.{trim}
+
+fn main():
+    val script_dir = cwd()
+    var project_root = trim(shell_output("cd {script_dir}/../.. && pwd"))
+    val test_dir = "{script_dir}/test_string_interning_tmp"
+    val qemu = "{project_root}/resources/qemu/bin/qemu-system-riscv32-simple"
+
+    print "String Interning End-to-End Test\n"
+    print "\n"
+
+    # Check prerequisites
+    if not file_exists(qemu):
+        print "Error: Custom QEMU not found at {qemu}\n"
+        print "   Run: ./script/build_custom_qemu.sh\n"
+        exit(1)
+
+    # Create test directory
+    print "Creating test directory...\n"
+    shell("rm -rf {test_dir}")
+    dir_create_all(test_dir)
+
+    # Step 1: Create test SMF file
+    print "Step 1: Creating test SMF file...\n"
+    val smf_content = "metadata:\n  version: 1\n  format: \"subset\"\n  target: \"riscv32-bare\"\n  source: \"test.spl\"\n\nstrings:\n  - id: 1\n    text: \"Hello, RISC-V!\\n\"\n    params: 0\n    source:\n      file: \"test.spl\"\n      line: 2\n\n  - id: 2\n    text: \"[TEST] String interning works!\\n\"\n    params: 0\n    source:\n      file: \"test.spl\"\n      line: 3\n"
+    file_write("{test_dir}/test.smf", smf_content)
+    print "Created test.smf (2 strings)\n"
+
+    # Step 2: Create test assembly
+    print "Step 2: Creating test assembly...\n"
+    val asm_content = ".section .text\n.global _start\n\n# RISC-V semihosting call macro\n.macro semihost_call\n    .align 4\n    slli x0, x0, 0x1f   # Entry NOP\n    ebreak              # Breakpoint triggers semihosting\n    srai x0, x0, 7      # Exit NOP\n.endm\n\n_start:\n    # Print string ID 1: \"Hello, RISC-V!\\n\"\n    li a0, 0x100        # Syscall number: SYS_WRITE_HANDLE\n    li a1, 1            # Argument: string ID\n    semihost_call\n\n    # Print string ID 2: \"[TEST] String interning works!\\n\"\n    li a0, 0x100        # Syscall number: SYS_WRITE_HANDLE\n    li a1, 2            # Argument: string ID\n    semihost_call\n\n    # Exit\n    li a0, 0x18         # Syscall number: SYS_EXIT\n    li a1, 0            # Argument: exit code 0\n    semihost_call\n\n.align 4\n"
+    file_write("{test_dir}/test.s", asm_content)
+    print "Created test.s (assembly using string IDs)\n"
+
+    # Step 3: Generate string table
+    print "Step 3: Generating string table...\n"
+    val table_content = ".section .smt, \"a\"\n.align 4\n.global __simple_string_table\n__simple_string_table:\n    .word 2                          # Entry count\n\n    # Entry 1: \"Hello, RISC-V!\\n\" (16 bytes, 0 params)\n    .word 1                          # ID\n    .word 16                         # Length\n    .word 0                          # Params\n    .ascii \"Hello, RISC-V!\\n\\0\"\n    .align 4\n\n    # Entry 2: \"[TEST] String interning works!\\n\" (34 bytes, 0 params)\n    .word 2                          # ID\n    .word 34                         # Length\n    .word 0                          # Params\n    .ascii \"[TEST] String interning works!\\n\\0\"\n    .align 4\n\n__simple_string_table_end:\n"
+    file_write("{test_dir}/string_table.s", table_content)
+    print "Generated string_table.s\n"
+
+    # Step 4: Build binary
+    print "Step 4: Building binary...\n"
+
+    # Check for available assembler
+    var assembler = ""
+    if shell_bool("command -v clang-16"):
+        assembler = "clang-16"
+    else if shell_bool("command -v clang"):
+        assembler = "clang"
+    else:
+        print "Error: No suitable assembler found (clang-16 or clang)\n"
+        exit(1)
+
+    # Check for available linker
+    var linker = ""
+    if shell_bool("command -v ld.lld"):
+        linker = "ld.lld"
+    else if shell_bool("command -v riscv64-unknown-elf-ld"):
+        linker = "riscv64-unknown-elf-ld"
+    else:
+        print "Error: No suitable linker found (ld.lld or riscv64-unknown-elf-ld)\n"
+        exit(1)
+
+    print "   Using assembler: {assembler}\n"
+    print "   Using linker: {linker}\n"
+
+    # Compile test.s
+    shell("{assembler} --target=riscv32 -march=rv32i -c -o {test_dir}/test.o {test_dir}/test.s")
+
+    # Compile string_table.s
+    shell("{assembler} --target=riscv32 -march=rv32i -c -o {test_dir}/string_table.o {test_dir}/string_table.s")
+
+    # Create linker script
+    val link_script = "ENTRY(_start)\nSECTIONS\n{\n    . = 0x80000000;\n    .text : { *(.text) }\n    . = 0x80000100;\n    .smt : { *(.smt) }\n}\n"
+    file_write("{test_dir}/link.ld", link_script)
+
+    # Link
+    shell("{linker} -T {test_dir}/link.ld -o {test_dir}/test.elf {test_dir}/test.o {test_dir}/string_table.o")
+    print "Built test.elf\n"
+
+    # Show binary info
+    print "\n"
+    print "Binary information:\n"
+    val objdump_out = shell_output("riscv64-unknown-elf-objdump -h {test_dir}/test.elf 2>/dev/null | grep -E '\\.text|\\.smt' || objdump -h {test_dir}/test.elf 2>/dev/null | grep -E '\\.text|\\.smt' || echo '  (objdump not available)'")
+    print "{objdump_out}\n"
+
+    # Step 5: Run in QEMU
+    print "\n"
+    print "Step 5: Running in custom QEMU...\n"
+    print "   (Press Ctrl+A then X to exit QEMU if it hangs)\n"
+    print "\n"
+    print "Expected output:\n"
+    print "  Simple: Loaded string table (2 entries) from 0x...\n"
+    print "  Hello, RISC-V!\n"
+    print "  [TEST] String interning works!\n"
+    print "\n"
+    print "Actual output:\n"
+    print "----------------------------------------------------------------\n"
+
+    shell("timeout 5 {qemu} -M virt -bios none -kernel {test_dir}/test.elf -nographic -semihosting-config enable=on 2>&1 || true")
+
+    print "----------------------------------------------------------------\n"
+    print "\n"
+
+    # Cleanup
+    print "Cleanup...\n"
+    print "   Test files kept in: {test_dir}\n"
+
+    print "\n"
+    print "Test Complete!\n"
+    print "\n"
+    print "If you saw the expected output above, the string interning\n"
+    print "system is working correctly!\n"
+    print "\n"
+    print "Next steps:\n"
+    print "  - Integrate into compiler with --string-interning flag\n"
+    print "  - Add automatic SMF generation during compilation\n"
+    print "  - Make transparent to users\n"
+
+main()

@@ -1,0 +1,138 @@
+# Simple (.spl) replacement for script/fix_constructors_smart.sh
+# Smart Constructor Fixer
+# Uses type database to convert ClassName.new(args) to ClassName(field: arg)
+#
+# Usage: bin/simple run src/app/fix/constructors.spl [target]
+
+use app.io.mod.{file_exists, file_read, file_write, is_dir, get_args, shell_output, exit}
+use std.string.{contains, trim, split}
+use std.path.{join}
+
+fn find_spl_files(target: text) -> [text]:
+    var files = []
+    if is_dir(target):
+        val output = shell_output("find '{target}' -name '*.spl' -type f")
+        val lines = split(output, "\n")
+        for line in lines:
+            val trimmed = trim(line)
+            if trimmed.len() > 0:
+                files = files + [trimmed]
+    else:
+        files = [target]
+    files
+
+fn load_type_database(path: text) -> [text]:
+    # Returns lines of format "TypeName:field1,field2,field3"
+    # We store as flat list of "TypeName:fields" strings
+    val content = file_read(path)
+    val lines = split(content, "\n")
+    var entries = []
+    for line in lines:
+        val trimmed = trim(line)
+        if trimmed.len() > 0:
+            entries = entries + [trimmed]
+    entries
+
+fn get_type_fields(entries: [text], type_name: text) -> text:
+    # Find the entry with the most fields for this type
+    var best_fields = ""
+    var best_count = 0
+    for entry in entries:
+        if contains(entry, type_name + ":"):
+            val parts = split(entry, ":")
+            if parts.len() >= 2:
+                val fields = parts[1]
+                val field_list = split(fields, ",")
+                if field_list.len() > best_count:
+                    best_count = field_list.len()
+                    best_fields = fields
+    best_fields
+
+fn starts_with_upper(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    val ch = s[0:1]
+    # Check A-Z
+    if (ch >= "A" and
+        ch <= "Z"):
+        return true
+    false
+
+fn scan_file(path: text, type_entries: [text]) -> i64:
+    val content = file_read(path)
+    if contains(content, ".new(") == false:
+        return 0
+
+    print "Processing: {path}"
+    val lines = split(content, "\n")
+    var pattern_count = 0
+    var line_num = 0
+
+    for line in lines:
+        line_num = line_num + 1
+        if contains(line, ".new("):
+            # Try to extract type name before .new(
+            val parts = split(line, ".new(")
+            if parts.len() >= 2:
+                val before = trim(parts[0])
+                # Get the last word (potential type name)
+                val words = split(before, " ")
+                if words.len() > 0:
+                    val last_word = words[words.len() - 1]
+                    # Also split by = for assignments
+                    val eq_parts = split(last_word, "=")
+                    var candidate = last_word
+                    if eq_parts.len() > 1:
+                        candidate = trim(eq_parts[eq_parts.len() - 1])
+                    if starts_with_upper(candidate):
+                        val fields = get_type_fields(type_entries, candidate)
+                        if fields.len() > 0:
+                            print "  Line {line_num}: {candidate} (fields: {fields})"
+                            pattern_count = pattern_count + 1
+
+    pattern_count
+
+fn main():
+    val type_db_path = "build/type_database.txt"
+    val args = get_args()
+    var target = "."
+    if args.len() > 0:
+        target = args[0]
+
+    if file_exists(type_db_path) == false:
+        print "Error: Type database not found. Run ./script/build_type_database.sh first"
+        exit(1)
+
+    if (file_exists(target) == false and
+        is_dir(target) == false):
+        print "Error: {target} not found"
+        exit(1)
+
+    print "=== Smart Constructor Fixer ==="
+    print "Type database: {type_db_path}"
+    print "Target: {target}"
+    print ""
+
+    val type_entries = load_type_database(type_db_path)
+    print "Loaded {type_entries.len()} type definitions"
+    print ""
+
+    val files = find_spl_files(target)
+    var fixed_count = 0
+    var total_patterns = 0
+
+    for file in files:
+        val count = scan_file(file, type_entries)
+        if count > 0:
+            fixed_count = fixed_count + 1
+            total_patterns = total_patterns + count
+
+    print ""
+    print "Summary:"
+    print "  Files with fixable constructors: {fixed_count}"
+    print "  Total .new() patterns found: {total_patterns}"
+    print ""
+    print "Note: Actual replacement needs manual review or advanced parsing."
+    print "This scan identifies fixable patterns. Use the data to create targeted fixes."
+
+main()

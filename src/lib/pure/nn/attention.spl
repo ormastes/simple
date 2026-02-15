@@ -1,0 +1,463 @@
+# Pure Simple Attention Mechanism
+#
+# Implements scaled dot-product attention and multi-head attention
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros}
+
+# ============================================================================
+# Private Helpers
+# ============================================================================
+
+fn _attn_sqrt(x: f64) -> f64:
+    """Square root via Newton's method (15 iterations)."""
+    if x <= 0.0:
+        return 0.0
+    var guess = x
+    var i = 0
+    while i < 15:
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    guess
+
+fn _attn_exp(x: f64) -> f64:
+    """Exponential function via Taylor series (20 terms).
+
+    Computes e^x using sum of x^k / k! for k = 0..19.
+    Clamps input to [-20, 20] to avoid overflow.
+    """
+    # Clamp to avoid overflow
+    var cx = x
+    if cx > 20.0:
+        cx = 20.0
+    if cx < -20.0:
+        cx = -20.0
+    var result = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20:
+        term = term * cx / i
+        result = result + term
+        i = i + 1
+    if result < 0.0000001:
+        return 0.0000001
+    result
+
+fn _attn_init_weight(rows: i64, cols: i64, seed_start: i64) -> PureTensor<f64>:
+    """Initialize a weight matrix with deterministic pseudo-random values.
+
+    Uses LCG PRNG scaled by sqrt(cols) for Xavier-like initialization.
+
+    Args:
+        rows - Number of output features
+        cols - Number of input features
+        seed_start - PRNG seed for reproducibility
+
+    Returns:
+        Weight tensor of shape [rows, cols]
+    """
+    var data: [f64] = []
+    val scale = 1.0 / _attn_sqrt(cols)
+    var seed = seed_start
+    var i = 0
+    val total = rows * cols
+    while i < total:
+        # LCG step
+        seed = seed * 1664525 + 1013904223
+        if seed < 0:
+            seed = 0 - seed
+        seed = seed % 2147483647
+        # Map to [-scale, scale]
+        val u = (seed % 1000000) / 1000000.0
+        data.push((u - 0.5) * 2.0 * scale)
+        i = i + 1
+    tensor_from_data(data, [rows, cols])
+
+# ============================================================================
+# Row-wise Softmax
+# ============================================================================
+
+fn row_softmax(t: PureTensor<f64>) -> PureTensor<f64>:
+    """Apply softmax to each row of a 2D tensor.
+
+    For each row, computes:
+        softmax(x_i) = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
+
+    Subtracts row max for numerical stability.
+
+    Args:
+        t - 2D tensor of shape [rows, cols]
+
+    Returns:
+        New tensor with same shape, softmax applied per row
+    """
+    val rows = t.shape[0]
+    val cols = t.shape[1]
+    var result_data: [f64] = []
+
+    var r = 0
+    while r < rows:
+        # Find row max for numerical stability
+        var max_val = t.data[r * cols]
+        var c = 1
+        while c < cols:
+            val v = t.data[r * cols + c]
+            if v > max_val:
+                max_val = v
+            c = c + 1
+
+        # Compute exp(x - max) and sum
+        var exp_vals: [f64] = []
+        var exp_sum = 0.0
+        c = 0
+        while c < cols:
+            val e = _attn_exp(t.data[r * cols + c] - max_val)
+            exp_vals.push(e)
+            exp_sum = exp_sum + e
+            c = c + 1
+
+        # Normalize
+        c = 0
+        while c < cols:
+            result_data.push(exp_vals[c] / exp_sum)
+            c = c + 1
+
+        r = r + 1
+
+    tensor_from_data(result_data, [rows, cols])
+
+# ============================================================================
+# AttentionOutput - Result container
+# ============================================================================
+
+class AttentionOutput:
+    """Container for attention computation results.
+
+    Fields:
+        output - Attention output tensor
+        weights - Attention weight tensor (softmax scores)
+    """
+    output: PureTensor<f64>
+    weights: PureTensor<f64>
+
+# ============================================================================
+# Scaled Dot-Product Attention
+# ============================================================================
+
+fn scaled_dot_product_attention(query: PureTensor<f64>, key: PureTensor<f64>, value: PureTensor<f64>, mask: PureTensor<f64>?) -> AttentionOutput:
+    """Compute scaled dot-product attention.
+
+    Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) * V
+
+    Args:
+        query - Query tensor of shape [seq_q, d_k]
+        key - Key tensor of shape [seq_k, d_k]
+        value - Value tensor of shape [seq_k, d_v]
+        mask - Optional mask tensor of shape [seq_q, seq_k]
+               Values: 0.0 = attend, -999999.0 = block
+
+    Returns:
+        AttentionOutput with output [seq_q, d_v] and weights [seq_q, seq_k]
+    """
+    val seq_q = query.shape[0]
+    val d_k = query.shape[1]
+    val seq_k = key.shape[0]
+    val d_v = value.shape[1]
+
+    val scale = 1.0 / _attn_sqrt(d_k)
+
+    # Compute QK^T: [seq_q, d_k] x [d_k, seq_k] = [seq_q, seq_k]
+    var scores_data: [f64] = []
+    var qi = 0
+    while qi < seq_q:
+        var ki = 0
+        while ki < seq_k:
+            var dot = 0.0
+            var d = 0
+            while d < d_k:
+                dot = dot + query.data[qi * d_k + d] * key.data[ki * d_k + d]
+                d = d + 1
+            # Scale by 1/sqrt(d_k)
+            scores_data.push(dot * scale)
+            ki = ki + 1
+        qi = qi + 1
+
+    # Apply mask if provided (0.0 = attend, -999999.0 = block)
+    if mask != nil:
+        var i = 0
+        val total = seq_q * seq_k
+        while i < total:
+            scores_data[i] = scores_data[i] + mask.data[i]
+            i = i + 1
+
+    # Softmax over keys dimension (row-wise)
+    val scores_tensor = tensor_from_data(scores_data, [seq_q, seq_k])
+    val attn_weights = row_softmax(scores_tensor)
+
+    # Compute attention output: [seq_q, seq_k] x [seq_k, d_v] = [seq_q, d_v]
+    var output_data: [f64] = []
+    qi = 0
+    while qi < seq_q:
+        var di = 0
+        while di < d_v:
+            var sum = 0.0
+            var ki = 0
+            while ki < seq_k:
+                sum = sum + attn_weights.data[qi * seq_k + ki] * value.data[ki * d_v + di]
+                ki = ki + 1
+            output_data.push(sum)
+            di = di + 1
+        qi = qi + 1
+
+    val output = tensor_from_data(output_data, [seq_q, d_v])
+    AttentionOutput(output: output, weights: attn_weights)
+
+fn scaled_dot_product_attention_forward(query: PureTensor<f64>, key: PureTensor<f64>, value: PureTensor<f64>) -> AttentionOutput:
+    """Compute scaled dot-product attention without mask.
+
+    Convenience wrapper that calls scaled_dot_product_attention with nil mask.
+
+    Args:
+        query - Query tensor [seq_q, d_k]
+        key - Key tensor [seq_k, d_k]
+        value - Value tensor [seq_k, d_v]
+
+    Returns:
+        AttentionOutput with output and weights
+    """
+    scaled_dot_product_attention(query, key, value, nil)
+
+# ============================================================================
+# Multi-Head Attention
+# ============================================================================
+
+class MultiHeadAttention:
+    """Multi-head attention layer.
+
+    Splits input into multiple heads, applies scaled dot-product attention
+    to each head independently, then concatenates and projects.
+
+    For simplicity, this implementation processes heads sequentially and
+    stores weight matrices as flat tensors.
+
+    Fields:
+        d_model - Model dimension (input/output)
+        num_heads - Number of attention heads
+        d_k - Dimension per head (d_model / num_heads)
+        w_q - Query projection weight [d_model, d_model]
+        w_k - Key projection weight [d_model, d_model]
+        w_v - Value projection weight [d_model, d_model]
+        w_o - Output projection weight [d_model, d_model]
+        training - Whether in training mode
+    """
+    d_model: i64
+    num_heads: i64
+    d_k: i64
+    w_q: PureTensor<f64>
+    w_k: PureTensor<f64>
+    w_v: PureTensor<f64>
+    w_o: PureTensor<f64>
+    training: bool
+
+    static fn create(d_model: i64, num_heads: i64) -> MultiHeadAttention:
+        """Create MultiHeadAttention layer.
+
+        Args:
+            d_model - Total model dimension
+            num_heads - Number of attention heads (must divide d_model)
+
+        Returns:
+            MultiHeadAttention instance with initialized weights
+        """
+        val d_k = d_model / num_heads
+
+        # Initialize projection weights with different seeds
+        val w_q = _attn_init_weight(d_model, d_model, 42)
+        val w_k = _attn_init_weight(d_model, d_model, 137)
+        val w_v = _attn_init_weight(d_model, d_model, 256)
+        val w_o = _attn_init_weight(d_model, d_model, 512)
+
+        MultiHeadAttention(
+            d_model: d_model,
+            num_heads: num_heads,
+            d_k: d_k,
+            w_q: w_q,
+            w_k: w_k,
+            w_v: w_v,
+            w_o: w_o,
+            training: true
+        )
+
+    fn forward(query: PureTensor<f64>, key: PureTensor<f64>, value: PureTensor<f64>) -> PureTensor<f64>:
+        """Forward pass: multi-head attention.
+
+        1. Project Q, K, V through weight matrices
+        2. Split into heads
+        3. Apply scaled dot-product attention per head
+        4. Concatenate heads
+        5. Project output
+
+        Args:
+            query - Query tensor [seq_q, d_model]
+            key - Key tensor [seq_k, d_model]
+            value - Value tensor [seq_k, d_model]
+
+        Returns:
+            Output tensor [seq_q, d_model]
+        """
+        val seq_q = query.shape[0]
+        val seq_k = key.shape[0]
+
+        # Step 1: Linear projections Q' = Q * W_q, K' = K * W_k, V' = V * W_v
+        val proj_q = _matmul_2d(query, self.w_q, seq_q, self.d_model, self.d_model)
+        val proj_k = _matmul_2d(key, self.w_k, seq_k, self.d_model, self.d_model)
+        val proj_v = _matmul_2d(value, self.w_v, seq_k, self.d_model, self.d_model)
+
+        # Step 2-4: Process each head and concatenate
+        var concat_data: [f64] = []
+        # Initialize concat with zeros for all positions
+        var qi = 0
+        while qi < seq_q:
+            var d = 0
+            while d < self.d_model:
+                concat_data.push(0.0)
+                d = d + 1
+            qi = qi + 1
+
+        var h = 0
+        while h < self.num_heads:
+            val head_offset = h * self.d_k
+
+            # Extract head slice from projected Q: [seq_q, d_k]
+            var hq_data: [f64] = []
+            qi = 0
+            while qi < seq_q:
+                var d = 0
+                while d < self.d_k:
+                    hq_data.push(proj_q.data[qi * self.d_model + head_offset + d])
+                    d = d + 1
+                qi = qi + 1
+            val head_q = tensor_from_data(hq_data, [seq_q, self.d_k])
+
+            # Extract head slice from projected K: [seq_k, d_k]
+            var hk_data: [f64] = []
+            var ki = 0
+            while ki < seq_k:
+                var d = 0
+                while d < self.d_k:
+                    hk_data.push(proj_k.data[ki * self.d_model + head_offset + d])
+                    d = d + 1
+                ki = ki + 1
+            val head_k = tensor_from_data(hk_data, [seq_k, self.d_k])
+
+            # Extract head slice from projected V: [seq_k, d_k]
+            var hv_data: [f64] = []
+            ki = 0
+            while ki < seq_k:
+                var d = 0
+                while d < self.d_k:
+                    hv_data.push(proj_v.data[ki * self.d_model + head_offset + d])
+                    d = d + 1
+                ki = ki + 1
+            val head_v = tensor_from_data(hv_data, [seq_k, self.d_k])
+
+            # Apply scaled dot-product attention for this head
+            val attn_result = scaled_dot_product_attention(head_q, head_k, head_v, nil)
+            val head_out = attn_result.output  # [seq_q, d_k]
+
+            # Place head output into concatenated result
+            qi = 0
+            while qi < seq_q:
+                var d = 0
+                while d < self.d_k:
+                    concat_data[qi * self.d_model + head_offset + d] = head_out.data[qi * self.d_k + d]
+                    d = d + 1
+                qi = qi + 1
+
+            h = h + 1
+
+        # Step 5: Output projection: concat * W_o
+        val concat_tensor = tensor_from_data(concat_data, [seq_q, self.d_model])
+        _matmul_2d(concat_tensor, self.w_o, seq_q, self.d_model, self.d_model)
+
+    fn parameters() -> [PureTensor<f64>]:
+        """Get list of trainable parameters.
+
+        Returns:
+            [w_q, w_k, w_v, w_o] - four weight matrices
+        """
+        [self.w_q, self.w_k, self.w_v, self.w_o]
+
+    me train_mode():
+        """Set layer to training mode."""
+        self.training = true
+
+    me eval_mode():
+        """Set layer to evaluation mode."""
+        self.training = false
+
+    fn to_string() -> text:
+        """String representation."""
+        "MultiHeadAttention(d_model={self.d_model}, num_heads={self.num_heads}, d_k={self.d_k})"
+
+# ============================================================================
+# Private Matrix Multiplication Helper
+# ============================================================================
+
+fn _matmul_2d(a: PureTensor<f64>, b: PureTensor<f64>, m: i64, k: i64, n: i64) -> PureTensor<f64>:
+    """Matrix multiplication: A[m,k] x B[k,n] -> C[m,n].
+
+    Simple triple loop implementation.
+
+    Args:
+        a - Left matrix [m, k]
+        b - Right matrix [k, n]
+        m - Rows of A
+        k - Shared dimension
+        n - Columns of B
+
+    Returns:
+        Result tensor [m, n]
+    """
+    var data: [f64] = []
+    var i = 0
+    while i < m:
+        var j = 0
+        while j < n:
+            var sum = 0.0
+            var p = 0
+            while p < k:
+                sum = sum + a.data[i * k + p] * b.data[p * n + j]
+                p = p + 1
+            data.push(sum)
+            j = j + 1
+        i = i + 1
+    tensor_from_data(data, [m, n])
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+fn multi_head_attention_create(d_model: i64, num_heads: i64) -> MultiHeadAttention:
+    """Create MultiHeadAttention layer (factory function).
+
+    Args:
+        d_model - Total model dimension
+        num_heads - Number of attention heads
+
+    Returns:
+        MultiHeadAttention instance
+    """
+    MultiHeadAttention.create(d_model, num_heads)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export AttentionOutput
+export scaled_dot_product_attention, scaled_dot_product_attention_forward
+export row_softmax
+export MultiHeadAttention, multi_head_attention_create

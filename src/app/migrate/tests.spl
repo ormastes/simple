@@ -1,0 +1,632 @@
+# Simple (.spl) replacement for script/migrate_tests.sh
+# Test Directory Migration Script
+# Moves test files from old layout to new layout
+# Phase 2 of test refactoring plan
+#
+# Usage: bin/simple run src/app/migrate/tests.spl
+
+use app.io.mod.{shell, shell_output, shell_bool, file_exists, file_read, file_write, is_dir, dir_create_all, exit}
+use std.string.{contains, ends_with, trim, split, starts_with}
+use std.path.{join}
+
+val ROOT = "/home/ormastes/dev/pub/simple"
+
+fn find_files(pattern: text) -> [text]:
+    val result = shell("find {pattern} 2>/dev/null")
+    var files = []
+    if result.exit_code == 0:
+        val lines = split(result.stdout, "\n")
+        for line in lines:
+            val trimmed = trim(line)
+            if trimmed.len() > 0:
+                files = files + [trimmed]
+    files
+
+fn find_spec_files(directory: text) -> [text]:
+    find_files("{directory} -name '*_spec.spl' -o -name '*_test.spl'")
+
+fn find_spec_files_maxdepth1(directory: text) -> [text]:
+    find_files("{directory} -maxdepth 1 \\( -name '*_spec.spl' -o -name '*_test.spl' \\)")
+
+fn glob_files(pattern: text) -> [text]:
+    # Use shell ls/find to expand glob pattern
+    val result = shell("ls -1 {pattern} 2>/dev/null")
+    var files = []
+    if result.exit_code == 0:
+        val lines = split(result.stdout, "\n")
+        for line in lines:
+            val trimmed = trim(line)
+            if trimmed.len() > 0:
+                files = files + [trimmed]
+    files
+
+fn basename(path: text) -> text:
+    val parts = split(path, "/")
+    if parts.len() > 0:
+        return parts[parts.len() - 1]
+    path
+
+fn dirname(path: text) -> text:
+    val parts = split(path, "/")
+    if parts.len() <= 1:
+        return "."
+    var result = ""
+    var i = 0
+    for part in parts:
+        if i < parts.len() - 1:
+            if i == 0:
+                result = part
+            else:
+                result = result + "/" + part
+        i = i + 1
+    result
+
+fn copy_if_not_exists(src: text, dest: text) -> bool:
+    if file_exists(dest):
+        return false
+    if file_exists(src) == false:
+        return false
+    val content = file_read(src)
+    file_write(dest, content)
+    true
+
+fn copy_files_to_dir(sources: [text], dest_dir: text) -> i64:
+    var count = 0
+    for src in sources:
+        val bn = basename(src)
+        val dest = join(dest_dir, bn)
+        if copy_if_not_exists(src, dest):
+            count = count + 1
+    count
+
+fn main():
+    shell("cd '{ROOT}'")
+
+    print "=== Phase 2: Test Directory Migration ==="
+    print ""
+
+    # Step 1: Create new directory structure
+    print "Step 1: Creating new directory structure..."
+
+    val dirs = [
+        "test/unit/std",
+        "test/unit/lib/database",
+        "test/unit/lib/pure",
+        "test/unit/lib/collections",
+        "test/unit/app/build",
+        "test/unit/app/cli",
+        "test/unit/app/desugar",
+        "test/unit/app/formatter",
+        "test/unit/app/linter",
+        "test/unit/app/io",
+        "test/unit/app/mcp",
+        "test/unit/app/test_runner",
+        "test/unit/app/duplicate_check",
+        "test/unit/app/fix",
+        "test/unit/app/package",
+        "test/unit/app/interpreter",
+        "test/unit/app/diagnostics",
+        "test/unit/app/utils",
+        "test/unit/app/devtools",
+        "test/unit/app/linker_gen",
+        "test/unit/compiler/codegen",
+        "test/unit/compiler/linker",
+        "test/unit/compiler/regalloc",
+        "test/unit/compiler/parser",
+        "test/unit/compiler/backend",
+        "test/unit/compiler/blocks",
+        "test/unit/compiler/config",
+        "test/unit/compiler/dependency",
+        "test/feature",
+        "test/integration/spec",
+        "test/system/compiler",
+        "test/system/interpreter/sample/python_inspired_sample",
+        "test/system/platform",
+        "test/system/dap",
+        "test/system/watcher",
+        "test/system/ffi",
+        "test/benchmark",
+        "test/fixtures/sample_programs"
+    ]
+    for d in dirs:
+        dir_create_all(d)
+
+    print "  Created directory structure."
+
+    # Step 2: Move feature specs
+    print "Step 2: Moving feature specs..."
+    var feat_count = 0
+
+    # Feature subdirs
+    val feat_subdirs = glob_files("test/system/features/*/")
+    for sub_dir in feat_subdirs:
+        if is_dir(sub_dir):
+            val spec_files = glob_files("{sub_dir}*.spl")
+            for f in spec_files:
+                if copy_if_not_exists(f, join("test/feature", basename(f))):
+                    feat_count = feat_count + 1
+
+    # Top-level feature specs
+    val top_feat = glob_files("test/system/features/*_spec.spl")
+    for f in top_feat:
+        if copy_if_not_exists(f, join("test/feature", basename(f))):
+            feat_count = feat_count + 1
+
+    print "  Moved {feat_count} feature specs to test/feature/"
+
+    # Step 3: Move stdlib unit tests
+    print "Step 3: Moving stdlib unit tests..."
+    var std_count = 0
+
+    val std_files_1 = glob_files("test/lib/std/unit/core/*_spec.spl") + glob_files("test/lib/std/unit/core/*_test.spl")
+    std_count = std_count + copy_files_to_dir(std_files_1, "test/unit/std")
+
+    val std_files_2 = glob_files("test/std/*_spec.spl") + glob_files("test/std/*_test.spl")
+    std_count = std_count + copy_files_to_dir(std_files_2, "test/unit/std")
+
+    print "  Moved {std_count} stdlib unit tests to test/unit/std/"
+
+    # Step 4: Move app tests
+    print "Step 4: Moving app tests..."
+    var app_count = 0
+
+    # Build tests
+    val build_files = glob_files("test/app/build/*_spec.spl") + glob_files("test/build/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(build_files, "test/unit/app/build")
+
+    # Formatter tests
+    val fmt_files = glob_files("test/app/formatter*_spec.spl")
+    app_count = app_count + copy_files_to_dir(fmt_files, "test/unit/app/formatter")
+
+    # MCP tests
+    val mcp_files = glob_files("test/app/mcp/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(mcp_files, "test/unit/app/mcp")
+
+    # IO tests
+    val io_files = glob_files("test/app/io/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(io_files, "test/unit/app/io")
+
+    # Duplicate check tests
+    val dup_files = glob_files("test/app/duplicate_check/*_spec.spl") + glob_files("test/app/duplicate_check_spec.spl")
+    app_count = app_count + copy_files_to_dir(dup_files, "test/unit/app/duplicate_check")
+
+    # Package tests
+    val pkg_files = glob_files("test/app/package/*_spec.spl") + glob_files("test/app/package/registry/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(pkg_files, "test/unit/app/package")
+
+    # Interpreter tests
+    val interp_files = glob_files("test/app/interpreter/*/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(interp_files, "test/unit/app/interpreter")
+
+    # Test runner tests
+    val runner_files = glob_files("test/app/test_runner/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(runner_files, "test/unit/app/test_runner")
+
+    # Utils tests
+    val utils_files = glob_files("test/app/utils/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(utils_files, "test/unit/app/utils")
+
+    # Linker gen tests
+    val linker_files = glob_files("test/app/linker_gen/*_spec.spl")
+    app_count = app_count + copy_files_to_dir(linker_files, "test/unit/app/linker_gen")
+
+    # Top-level app tests (route by name)
+    val top_app_files = glob_files("test/app/*_spec.spl")
+    for f in top_app_files:
+        val bn = basename(f)
+        var dest = ""
+        if starts_with(bn, "dap"):
+            dest = join("test/system/dap", bn)
+        else if starts_with(bn, "devtools"):
+            dest = join("test/unit/app/devtools", bn)
+        else:
+            dest = join("test/unit/app", bn)
+        val dest_dir = dirname(dest)
+        dir_create_all(dest_dir)
+        if copy_if_not_exists(f, dest):
+            app_count = app_count + 1
+
+    print "  Moved {app_count} app tests"
+
+    # Step 5: Move compiler tests
+    print "Step 5: Moving compiler tests..."
+    var comp_count = 0
+
+    val backend_files = glob_files("test/compiler/backend/*_spec.spl") + glob_files("test/compiler/backend/common/*_spec.spl")
+    comp_count = comp_count + copy_files_to_dir(backend_files, "test/unit/compiler/backend")
+
+    val blocks_files = glob_files("test/compiler/blocks/*_spec.spl")
+    comp_count = comp_count + copy_files_to_dir(blocks_files, "test/unit/compiler/blocks")
+
+    val config_files = glob_files("test/compiler/config/*_spec.spl")
+    comp_count = comp_count + copy_files_to_dir(config_files, "test/unit/compiler/config")
+
+    val dep_files = glob_files("test/compiler/dependency/*_spec.spl")
+    comp_count = comp_count + copy_files_to_dir(dep_files, "test/unit/compiler/dependency")
+
+    val top_comp_files = glob_files("test/compiler/*_spec.spl") + glob_files("test/compiler/*_test.spl")
+    comp_count = comp_count + copy_files_to_dir(top_comp_files, "test/unit/compiler")
+
+    val src_linker_files = glob_files("src/compiler/linker/test/*_spec.spl")
+    comp_count = comp_count + copy_files_to_dir(src_linker_files, "test/unit/compiler/linker")
+
+    print "  Moved {comp_count} compiler tests"
+
+    # Step 6: Move library tests
+    print "Step 6: Moving library tests..."
+    var lib_count = 0
+
+    val db_files = glob_files("test/lib/database*_spec.spl")
+    lib_count = lib_count + copy_files_to_dir(db_files, "test/unit/lib/database")
+
+    val db_int_files = glob_files("test/integration/database*_spec.spl")
+    lib_count = lib_count + copy_files_to_dir(db_int_files, "test/unit/lib/database")
+
+    val pure_files = glob_files("src/lib/pure/test/*_spec.spl")
+    lib_count = lib_count + copy_files_to_dir(pure_files, "test/unit/lib/pure")
+
+    val coll_files = glob_files("test/lib/collections/*_spec.spl")
+    lib_count = lib_count + copy_files_to_dir(coll_files, "test/unit/lib/collections")
+
+    print "  Moved {lib_count} library tests"
+
+    # Step 7: Move integration tests
+    print "Step 7: Moving integration tests..."
+    var int_count = 0
+
+    val int_spec_files = glob_files("test/integration/spec/*_spec.spl")
+    for f in int_spec_files:
+        val bn = basename(f)
+        val dest = join("test/integration", bn)
+        if copy_if_not_exists(f, dest):
+            int_count = int_count + 1
+
+    # Count existing integration tests
+    val existing_int = glob_files("test/integration/*_spec.spl")
+    for f in existing_int:
+        val bn = basename(f)
+        if starts_with(bn, "database") == false:
+            int_count = int_count + 1
+
+    print "  Processed {int_count} integration tests"
+
+    # Step 8: Move system tests
+    print "Step 8: Moving system tests..."
+    var sys_count = 0
+
+    val sys_comp = glob_files("test/system/compiler/*_spec.spl")
+    sys_count = sys_count + sys_comp.len()
+
+    val sys_interp = glob_files("test/system/interpreter/sample/python_inspired_sample/*_spec.spl")
+    sys_count = sys_count + sys_interp.len()
+
+    val sys_dap = glob_files("test/system/dap/*_spec.spl")
+    sys_count = sys_count + sys_dap.len()
+
+    val sys_watch = glob_files("test/system/watcher/*_spec.spl")
+    sys_count = sys_count + sys_watch.len()
+
+    val sys_ffi = glob_files("test/system/ffi/*_spec.spl") + glob_files("test/system/ffi/*_test.spl")
+    sys_count = sys_count + sys_ffi.len()
+
+    val plat_files = glob_files("test/platform/*_spec.spl")
+    sys_count = sys_count + copy_files_to_dir(plat_files, "test/system/platform")
+
+    print "  Processed {sys_count} system tests"
+
+    # Step 9: Move remaining tests
+    print "Step 9: Moving remaining tests..."
+    var remaining = 0
+
+    # Diagnostics
+    val diag_files = glob_files("test/diagnostics/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(diag_files, "test/unit/app/diagnostics")
+
+    # Debug
+    dir_create_all("test/unit/app/debug")
+    val debug_files = glob_files("test/debug/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(debug_files, "test/unit/app/debug")
+
+    # Meta
+    dir_create_all("test/unit/app/meta")
+    val meta_files = glob_files("test/meta/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(meta_files, "test/unit/app/meta")
+
+    # Benchmarks
+    val bench_files = glob_files("test/benchmarks/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(bench_files, "test/benchmark")
+
+    # Baremetal
+    dir_create_all("test/system/baremetal")
+    val bare_files = glob_files("test/baremetal/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(bare_files, "test/system/baremetal")
+
+    # Specs
+    val spec_files = glob_files("test/specs/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(spec_files, "test/feature")
+
+    # Test framework
+    val fw_files = glob_files("test/test_framework/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(fw_files, "test/unit/app/test_runner")
+
+    # Runtime tests
+    val rt_files = glob_files("test/runtime/*_spec.spl") + glob_files("test/runtime/*_test.spl")
+    remaining = remaining + copy_files_to_dir(rt_files, "test/unit/std")
+
+    # Remote tests
+    val remote_files = glob_files("test/remote/*_spec.spl")
+    remaining = remaining + copy_files_to_dir(remote_files, "test/integration")
+
+    # tmp tests
+    val tmp_files = glob_files("test/tmp/*_spec.spl") + glob_files("test/tmp/*_test.spl")
+    remaining = remaining + copy_files_to_dir(tmp_files, "test/unit/std")
+
+    print "  Moved {remaining} remaining tests"
+
+    # Step 10: Move deep lib/std/unit hierarchy
+    print "Step 10: Moving deep lib/std/unit hierarchy..."
+    var deep_count = 0
+
+    # App sub-hierarchy
+    val deep_app_files = find_spec_files("test/lib/std/unit/app")
+    for f in deep_app_files:
+        val bn = basename(f)
+        var dest = ""
+        if contains(f, "/cli/"):
+            dest = join("test/unit/app/cli", bn)
+        else if contains(f, "/formatter/"):
+            dest = join("test/unit/app/formatter", bn)
+        else if contains(f, "/lsp/"):
+            dir_create_all("test/unit/app/lsp")
+            dest = join("test/unit/app/lsp", bn)
+        else if contains(f, "/test_runner/"):
+            dest = join("test/unit/app/test_runner", bn)
+        else if contains(f, "/utils/"):
+            dest = join("test/unit/app/utils", bn)
+        else:
+            dest = join("test/unit/app", bn)
+        if copy_if_not_exists(f, dest):
+            deep_count = deep_count + 1
+
+    # Compiler sub-hierarchy
+    val deep_comp_files = find_spec_files("test/lib/std/unit/compiler")
+    for f in deep_comp_files:
+        val bn = basename(f)
+        var dest = ""
+        if contains(f, "/linker/"):
+            dest = join("test/unit/compiler/linker", bn)
+        else if contains(f, "/loader/"):
+            dir_create_all("test/unit/compiler/loader")
+            dest = join("test/unit/compiler/loader", bn)
+        else:
+            dest = join("test/unit/compiler", bn)
+        if copy_if_not_exists(f, dest):
+            deep_count = deep_count + 1
+
+    # MCP sub-hierarchy
+    val deep_mcp_files = find_files("test/lib/std/unit/mcp -name '*_spec.spl'")
+    deep_count = deep_count + copy_files_to_dir(deep_mcp_files, "test/unit/app/mcp")
+
+    # LSP sub-hierarchy
+    val deep_lsp_files = find_files("test/lib/std/unit/lsp -name '*_spec.spl'")
+    if deep_lsp_files.len() > 0:
+        dir_create_all("test/unit/app/lsp")
+        deep_count = deep_count + copy_files_to_dir(deep_lsp_files, "test/unit/app/lsp")
+
+    # Parser sub-hierarchy
+    val deep_parser_files = find_files("test/lib/std/unit/parser -name '*_spec.spl'")
+    deep_count = deep_count + copy_files_to_dir(deep_parser_files, "test/unit/compiler/parser")
+
+    # HIR sub-hierarchy
+    dir_create_all("test/unit/compiler/hir")
+    val deep_hir_files = find_files("test/lib/std/unit/hir -name '*_spec.spl'")
+    deep_count = deep_count + copy_files_to_dir(deep_hir_files, "test/unit/compiler/hir")
+
+    # Codegen sub-hierarchy
+    val deep_cg_files = find_files("test/lib/std/unit/codegen -name '*_spec.spl'")
+    deep_count = deep_count + copy_files_to_dir(deep_cg_files, "test/unit/compiler/codegen")
+
+    # Topic-based mapping for remaining deep unit tests
+    val topic_mappings = [
+        "collections:test/unit/std",
+        "concurrency:test/unit/std",
+        "sdn:test/unit/std",
+        "spec:test/unit/std",
+        "testing:test/unit/std",
+        "syntax:test/unit/std",
+        "shell:test/unit/std",
+        "config:test/unit/std",
+        "console:test/unit/std",
+        "ffi:test/unit/std",
+        "fs:test/unit/std",
+        "host:test/unit/std",
+        "dap:test/unit/app/dap",
+        "diagram:test/unit/app/diagram",
+        "exp:test/unit/std/exp",
+        "failsafe:test/unit/std/failsafe",
+        "game_engine:test/unit/lib/game_engine",
+        "improvements:test/unit/std/improvements",
+        "infra:test/unit/std/infra",
+        "interpreter:test/unit/app/interpreter",
+        "lms:test/unit/lib/lms",
+        "macros:test/unit/compiler/macros",
+        "ml:test/unit/lib/ml",
+        "todo_tests:test/unit/app/todo",
+        "contracts:test/unit/std/contracts",
+        "units:test/unit/std/units",
+        "verification:test/unit/compiler/verification"
+    ]
+
+    for mapping in topic_mappings:
+        val map_parts = split(mapping, ":")
+        if map_parts.len() >= 2:
+            val topic = map_parts[0]
+            val dest_dir = map_parts[1]
+            val src_dir = "test/lib/std/unit/{topic}"
+            if is_dir(src_dir):
+                dir_create_all(dest_dir)
+                val topic_files = find_spec_files_maxdepth1(src_dir)
+                deep_count = deep_count + copy_files_to_dir(topic_files, dest_dir)
+
+    # Handle nested topics (ml/engine, ml/torch, physics/*, tooling/*, ui/*, verification/lean)
+    val nested_topics = [
+        "ml/engine:test/unit/lib/ml",
+        "ml/torch:test/unit/lib/ml",
+        "physics/collision:test/unit/lib/physics",
+        "physics/constraints:test/unit/lib/physics",
+        "physics/core:test/unit/lib/physics",
+        "physics/dynamics:test/unit/lib/physics",
+        "tooling:test/unit/app/tooling",
+        "tooling/compiler:test/unit/app/tooling",
+        "ui:test/unit/app/ui",
+        "ui/gui:test/unit/app/ui",
+        "ui/tui:test/unit/app/ui",
+        "verification/lean:test/unit/compiler/verification"
+    ]
+
+    for mapping in nested_topics:
+        val map_parts = split(mapping, ":")
+        if map_parts.len() >= 2:
+            val topic = map_parts[0]
+            val dest_dir = map_parts[1]
+            val src_dir = "test/lib/std/unit/{topic}"
+            if is_dir(src_dir):
+                dir_create_all(dest_dir)
+                val topic_files = find_spec_files_maxdepth1(src_dir)
+                deep_count = deep_count + copy_files_to_dir(topic_files, dest_dir)
+
+    print "  Moved {deep_count} deep hierarchy tests"
+
+    # Step 11: Move remaining lib tests
+    print "Step 11: Moving remaining lib tests..."
+    var librem_count = 0
+
+    val feat_lib_files = find_files("test/lib/std/features -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(feat_lib_files, "test/feature")
+
+    val spec_lib_files = find_files("test/lib/std/spec -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(spec_lib_files, "test/unit/std")
+
+    val parser_lib_files = find_files("test/lib/std/parser -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(parser_lib_files, "test/unit/compiler/parser")
+
+    dir_create_all("test/unit/compiler/type_checker")
+    val tc_files = find_files("test/lib/std/type_checker -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(tc_files, "test/unit/compiler/type_checker")
+
+    dir_create_all("test/unit/compiler/type_inference")
+    val ti_files = find_files("test/lib/std/type_inference -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(ti_files, "test/unit/compiler/type_inference")
+
+    val sys_lib_files = find_files("test/lib/std/system -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(sys_lib_files, "test/system")
+
+    val fixture_lib_files = find_files("test/lib/std/fixtures -name '*_spec.spl'")
+    librem_count = librem_count + copy_files_to_dir(fixture_lib_files, "test/unit/std")
+
+    # Top-level test/lib/*_spec.spl
+    val top_lib_files = glob_files("test/lib/*_spec.spl")
+    for f in top_lib_files:
+        val bn = basename(f)
+        var dest = ""
+        if starts_with(bn, "database"):
+            dest = join("test/unit/lib/database", bn)
+        else:
+            dest = join("test/unit/lib", bn)
+        if copy_if_not_exists(f, dest):
+            librem_count = librem_count + 1
+
+    # test/lib/hooks/*
+    val hook_files = glob_files("test/lib/hooks/*_spec.spl")
+    if hook_files.len() > 0:
+        dir_create_all("test/unit/std/hooks")
+        librem_count = librem_count + copy_files_to_dir(hook_files, "test/unit/std/hooks")
+
+    print "  Moved {librem_count} remaining lib tests"
+
+    # Step 12: Move intensive tests
+    print "Step 12: Moving intensive tests..."
+    var intense_count = 0
+    val intense_files = find_files("test/intensive -name '*_spec.spl'")
+    intense_count = copy_files_to_dir(intense_files, "test/integration")
+    print "  Moved {intense_count} intensive tests"
+
+    # Step 13: Move remaining system tests
+    print "Step 13: Moving remaining system tests..."
+    var sysrem_count = 0
+
+    val sys_coll_files = glob_files("test/system/collections/*_spec.spl")
+    sysrem_count = sysrem_count + copy_files_to_dir(sys_coll_files, "test/feature")
+
+    val sys_interp_top = glob_files("test/system/interpreter/*_spec.spl")
+    sysrem_count = sysrem_count + sys_interp_top.len()
+
+    val sys_top = glob_files("test/system/*_spec.spl")
+    sysrem_count = sysrem_count + sys_top.len()
+
+    print "  Processed {sysrem_count} system tests"
+
+    # Step 14: Move src/ spec files
+    print "Step 14: Moving src/ spec files..."
+    var src_count = 0
+
+    val ffi_files = glob_files("src/app/ffi_gen.specs/*_spec.spl") + glob_files("src/app/ffi_gen/specs/*_spec.spl")
+    if ffi_files.len() > 0:
+        dir_create_all("test/unit/app/ffi_gen")
+        src_count = src_count + copy_files_to_dir(ffi_files, "test/unit/app/ffi_gen")
+
+    if file_exists("src/app/fix/rules/impl/lint_spec.spl"):
+        if copy_if_not_exists("src/app/fix/rules/impl/lint_spec.spl", "test/unit/app/fix/lint_spec.spl"):
+            src_count = src_count + 1
+
+    print "  Moved {src_count} src/ spec files"
+
+    # Step 15: Set up symlinks
+    print "Step 15: Setting up symlinks..."
+
+    val sym_dirs = [
+        "test/unit/std",
+        "test/unit/lib",
+        "test/unit/app",
+        "test/unit/compiler",
+        "test/feature",
+        "test/integration",
+        "test/system"
+    ]
+    for new_dir in sym_dirs:
+        if is_dir(new_dir):
+            val lib_link = join(new_dir, "lib")
+            if (file_exists(lib_link) == false and
+                is_dir(lib_link) == false):
+                shell("ln -sf '{ROOT}/test/lib' '{lib_link}' 2>/dev/null")
+
+    print "  Symlinks configured."
+
+    # Summary
+    print ""
+    print "=== Migration Complete ==="
+
+    val new_count_output = shell_output("find test/unit test/feature test/integration test/system test/benchmark \\( -name '*_spec.spl' -o -name '*_test.spl' \\) 2>/dev/null | wc -l")
+    val new_count = trim(new_count_output)
+    print "Files in new structure: {new_count}"
+    print ""
+    print "New structure:"
+
+    val summary_dirs = [
+        "test/unit",
+        "test/unit/std",
+        "test/unit/lib",
+        "test/unit/app",
+        "test/unit/compiler",
+        "test/feature",
+        "test/integration",
+        "test/system",
+        "test/benchmark"
+    ]
+    for d in summary_dirs:
+        if is_dir(d):
+            val direct = trim(shell_output("find {d} -maxdepth 1 \\( -name '*_spec.spl' -o -name '*_test.spl' \\) 2>/dev/null | wc -l"))
+            val total = trim(shell_output("find {d} \\( -name '*_spec.spl' -o -name '*_test.spl' \\) 2>/dev/null | wc -l"))
+            print "  {d}: {direct} direct, {total} total"
+
+main()

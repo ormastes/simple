@@ -1,0 +1,94 @@
+# Simple (.spl) replacement for build_interned.sh
+# Build RISC-V 32 Interned Semihosting Binary with LLVM
+# This builds the string-interned version that uses protocol for 89% size reduction.
+
+use app.io.mod.{shell, shell_bool, shell_output, file_exists, print, exit}
+use std.string.{trim}
+
+fn detect_llvm_toolchain() -> [text]:
+    # Returns [toolchain, assembler]
+    if (shell_bool("command -v clang-16") and
+        shell_bool("command -v lld-16")):
+        print "Using LLVM toolchain (clang-16 + lld-16)\n"
+        return ["LLVM", "clang-16"]
+    else if (shell_bool("command -v clang") and
+             shell_bool("command -v lld")):
+        print "Using LLVM toolchain (clang + lld)\n"
+        return ["LLVM", "clang"]
+    else if shell_bool("command -v riscv64-unknown-elf-as"):
+        print "GCC not supported for interned binaries (use LLVM)\n"
+        exit(1)
+    else:
+        print "Error: LLVM not found\n"
+        print "\n"
+        print "Install LLVM:\n"
+        print "  Ubuntu: sudo apt install clang-16 lld-16\n"
+        print "  macOS:  brew install llvm\n"
+        exit(1)
+    return ["", ""]
+
+fn main():
+    print "Building RISC-V 32 Interned Semihosting Binary\n"
+    print "\n"
+
+    val tc = detect_llvm_toolchain()
+    val toolchain = tc[0]
+    val assembler = tc[1]
+    print "\n"
+
+    # Build with LLVM
+    print "Compiling hello_riscv32_interned.s...\n"
+    val cmd = "{assembler} -target riscv32-unknown-none -march=rv32i -mabi=ilp32 -nostdlib -static -Wl,-Ttext=0x80000000 -Wl,--no-relax -fuse-ld=lld hello_riscv32_interned.s -o hello_riscv32_interned.elf"
+    val result = shell(cmd)
+    if result.exit_code != 0:
+        print "Build failed\n"
+        exit(1)
+
+    if file_exists("hello_riscv32_interned.elf"):
+        val size_bytes = trim(shell_output("du -b hello_riscv32_interned.elf | cut -f1"))
+        val size_kb = trim(shell_output("echo \"scale=1; {size_bytes} / 1024\" | bc"))
+        print "\n"
+        print "Built: hello_riscv32_interned.elf ({size_bytes} bytes, {size_kb}KB)\n"
+        print "Toolchain: {toolchain}\n"
+        print "String table: hello_riscv32_interned.smt\n"
+        print "\n"
+
+        # Show size comparison
+        if file_exists("hello_riscv32_semihost.elf"):
+            val text_size = trim(shell_output("du -b hello_riscv32_semihost.elf | cut -f1"))
+            val reduction = trim(shell_output("echo $(( 100 - ({size_bytes} * 100 / {text_size}) ))"))
+            print "Size Comparison:\n"
+            print "  Text mode:    {text_size} bytes\n"
+            print "  Interned:     {size_bytes} bytes\n"
+            print "  Reduction:    {reduction}%\n"
+            print "\n"
+
+        # Show file info
+        if shell_bool("command -v file"):
+            val info = trim(shell_output("file hello_riscv32_interned.elf"))
+            print "{info}\n"
+
+        # Test with QEMU
+        print "\n"
+        print "Testing with QEMU...\n"
+        if shell_bool("command -v qemu-system-riscv32"):
+            print "Running in QEMU (protocol output)...\n"
+            print "Note: Output is binary protocol - needs parser to decode\n"
+            shell("timeout 5 qemu-system-riscv32 -M virt -bios none -kernel hello_riscv32_interned.elf -nographic -semihosting-config enable=on,target=native 2>&1 | head -20 || true")
+            print "\n"
+            print "QEMU test complete (raw protocol output shown)\n"
+        else:
+            print "qemu-system-riscv32 not found, skipping test\n"
+    else:
+        print "Build failed\n"
+        exit(1)
+
+    print "\n"
+    print "Build Complete - String Interning Protocol\n"
+    print "\n"
+    print "Next steps:\n"
+    print "  1. Run with protocol parser: bin/simple test test/baremetal/hello_riscv32_interned_spec.spl\n"
+    print "  2. Parser will use .smt file to reconstruct text\n"
+    print "  3. Verify 89% size reduction\n"
+
+main()
