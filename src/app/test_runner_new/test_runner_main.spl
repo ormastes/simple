@@ -137,6 +137,32 @@ fn propagate_env_vars(options: TestOptions):
     if options.coverage:
         env_set("SIMPLE_COVERAGE", "1")
 
+    # Propagate advanced testing mode env vars
+    if options.fuzz_mode:
+        env_set("SIMPLE_FUZZ_MODE", "true")
+        env_set("SIMPLE_FUZZ_TIME", "{options.fuzz_time_secs}")
+        env_set("SIMPLE_FUZZ_CORPUS", options.fuzz_corpus_dir)
+        if options.fuzz_differential:
+            env_set("SIMPLE_FUZZ_DIFFERENTIAL", "true")
+        if not options.fuzz_shrink:
+            env_set("SIMPLE_FUZZ_SHRINK", "false")
+    if options.chaos_mode:
+        env_set("SIMPLE_CHAOS_MODE", "true")
+        env_set("SIMPLE_CHAOS_TRIALS", "{options.chaos_trials}")
+        env_set("SIMPLE_CHAOS_FAULT_RATE", "{options.chaos_fault_rate}")
+    if options.deploy_mode:
+        env_set("SIMPLE_DEPLOY_MODE", "true")
+        if options.deploy_platform != "":
+            env_set("SIMPLE_DEPLOY_PLATFORM", options.deploy_platform)
+        if options.deploy_upgrade:
+            env_set("SIMPLE_DEPLOY_UPGRADE", "true")
+    if options.security_mode:
+        env_set("SIMPLE_SECURITY_MODE", "true")
+        if options.security_scan:
+            env_set("SIMPLE_SECURITY_SCAN", "true")
+        if options.security_supply_chain:
+            env_set("SIMPLE_SECURITY_SUPPLY_CHAIN", "true")
+
     # Propagate JIT settings (default: JIT enabled with threshold=10)
     env_set("SIMPLE_JIT_ENABLED", "1")
 
@@ -459,18 +485,31 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
     val mode_str = mode_to_str(options.mode)
     env_set("SIMPLE_RUNTIME_MODE", mode_str)
 
+    # Override timeout for advanced testing modes
+    var effective_options = options
+    if options.fuzz_mode:
+        val fuzz_timeout = options.fuzz_time_secs + 30
+        if fuzz_timeout > effective_options.timeout:
+            effective_options.timeout = fuzz_timeout
+    if options.chaos_mode:
+        var chaos_timeout = options.chaos_trials * 2
+        if chaos_timeout < 300:
+            chaos_timeout = 300
+        if chaos_timeout > effective_options.timeout:
+            effective_options.timeout = chaos_timeout
+
     # G1: Use safe mode with resource limits when enabled
-    if options.safe_mode:
-        return run_test_file_safe_mode(file_path, options)
-    match options.mode:
+    if effective_options.safe_mode:
+        return run_test_file_safe_mode(file_path, effective_options)
+    match effective_options.mode:
         case TestExecutionMode.Interpreter:
-            run_test_file_interpreter(file_path, options)
+            run_test_file_interpreter(file_path, effective_options)
         case TestExecutionMode.Smf:
-            run_test_file_smf(file_path, options)
+            run_test_file_smf(file_path, effective_options)
         case TestExecutionMode.Native:
-            run_test_file_native(file_path, options)
+            run_test_file_native(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
-            run_test_file_composite(file_path, options, spec)
+            run_test_file_composite(file_path, effective_options, spec)
 
 # =========================================================================
 # C4: Individual test result parsing from output

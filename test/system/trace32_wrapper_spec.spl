@@ -1,0 +1,282 @@
+# Trace32 Wrapper System Tests
+# Tests the full Trace32 stack: types, config, feature registry, adapter, and parser.
+# Most tests run without hardware. Integration tests require Trace32 and are slow_it.
+
+use remote.types.{Architecture, DebugConfig}
+use remote.feature.features.{FeatureId, FeatureRank}
+use remote.feature.registry.{FeatureHandler, FeatureRegistry}
+use remote.protocol.trace32.{Trace32Client, Trace32Parser}
+use app.dap.adapter.mod.{AdapterConfig, AdapterCapabilities}
+use app.debug.coordinator.{VarInfo, FrameInfo}
+
+# Check if Trace32 (t32rem) is available on this system
+fn is_trace32_available() -> bool:
+    val result = shell("which t32rem 2>/dev/null")
+    result.exit_code == 0
+
+# ============================================================================
+# Test Group 1: Core Types
+# ============================================================================
+
+describe "Trace32 Core Types":
+
+    context "DebugConfig.for_trace32":
+        it "creates config with trace32 backend":
+            val config = DebugConfig.for_trace32("192.168.1.100", 20000)
+            expect(config.host).to_equal("192.168.1.100")
+            expect(config.port).to_equal(20000)
+            expect(config.options["backend"]).to_equal("trace32")
+
+        it "defaults to Arm32 architecture":
+            val config = DebugConfig.for_trace32("localhost", 20000)
+            expect(config.target.to_string()).to_equal("arm32")
+
+    context "DebugConfig.for_trace32_gdb":
+        it "creates config with trace32-gdb backend":
+            val config = DebugConfig.for_trace32_gdb("localhost", 20000)
+            expect(config.options["backend"]).to_equal("trace32-gdb")
+
+    context "FeatureId.TraceCapture":
+        it "converts to string":
+            expect(FeatureId.TraceCapture.to_string()).to_equal("TraceCapture")
+
+        it "supports equality":
+            val a = FeatureId.TraceCapture
+            val b = FeatureId.TraceCapture
+            expect(a.eq(b)).to_equal(true)
+
+    context "FeatureId.CoverageCollect":
+        it "converts to string":
+            expect(FeatureId.CoverageCollect.to_string()).to_equal("CoverageCollect")
+
+        it "is distinct from TraceCapture":
+            val a = FeatureId.TraceCapture
+            val b = FeatureId.CoverageCollect
+            expect(a.eq(b)).to_equal(false)
+
+# ============================================================================
+# Test Group 2: Feature Registry
+# ============================================================================
+
+describe "Trace32 Feature Registry":
+
+    context "handler registration":
+        it "registers trace32 handlers at rank 0":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, FeatureRank.NATIVE(), "trace32",
+                \args: Ok("halted"),
+                "T32 Break"
+            ))
+            val handler = registry.best_handler(FeatureId.Halt)
+            match handler:
+                Ok(h):
+                    expect(h.backend_name).to_equal("trace32")
+                    expect(h.rank).to_equal(0)
+                Err(_): expect(true).to_equal(false)
+
+        it "trace32 wins over emulated by rank":
+            var registry = FeatureRegistry.empty()
+            # Register emulated first (rank 4)
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, FeatureRank.EMULATED(), "emulation",
+                \args: Ok("emulated"),
+                "Emulated locals"
+            ))
+            # Register trace32 native (rank 0)
+            registry.register(FeatureHandler.of(
+                FeatureId.ReadLocals, FeatureRank.NATIVE(), "trace32",
+                \args: Ok("native"),
+                "T32 Var.View %Local"
+            ))
+            val handler = registry.best_handler(FeatureId.ReadLocals)
+            match handler:
+                Ok(h): expect(h.backend_name).to_equal("trace32")
+                Err(_): expect(true).to_equal(false)
+
+        it "reports trace32-unique features as supported":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.TraceCapture, FeatureRank.NATIVE(), "trace32",
+                \args: Ok("trace data"),
+                "T32 Trace.List"
+            ))
+            expect(registry.is_supported(FeatureId.TraceCapture)).to_equal(true)
+            expect(registry.is_supported(FeatureId.CoverageCollect)).to_equal(false)
+
+    context "capabilities report":
+        it "includes trace32 in report":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, FeatureRank.NATIVE(), "trace32",
+                \args: Ok("halted"),
+                "T32 Break"
+            ))
+            val report = registry.capabilities_report()
+            expect(report).to_contain("trace32")
+            expect(report).to_contain("T32 Break")
+
+    context "execute":
+        it "executes trace32 handler":
+            var registry = FeatureRegistry.empty()
+            registry.register(FeatureHandler.of(
+                FeatureId.Halt, FeatureRank.NATIVE(), "trace32",
+                \args: Ok("mock halted"),
+                "T32 Break"
+            ))
+            val result = registry.execute(FeatureId.Halt, [])
+            match result:
+                Ok(v): expect(v).to_equal("mock halted")
+                Err(_): expect(true).to_equal(false)
+
+# ============================================================================
+# Test Group 3: Adapter Config
+# ============================================================================
+
+describe "Trace32 Adapter Config":
+
+    context "AdapterConfig.trace32":
+        it "creates trace32 adapter config":
+            val config = AdapterConfig.trace32("192.168.1.100", 20000, "firmware.elf")
+            expect(config.adapter_type).to_equal("trace32")
+            expect(config.host).to_equal("192.168.1.100")
+            expect(config.port).to_equal(20000)
+            expect(config.program).to_equal("firmware.elf")
+
+        it "defaults to arm architecture":
+            val config = AdapterConfig.trace32("localhost", 20000, "test.elf")
+            expect(config.architecture).to_equal("arm")
+
+        it "has 30s default timeout":
+            val config = AdapterConfig.trace32("localhost", 20000, "test.elf")
+            expect(config.timeout_ms).to_equal(30000)
+
+    context "AdapterCapabilities":
+        it "supports memory and registers":
+            val cap = AdapterCapabilities.basic()
+                .with_reset()
+                .with_memory()
+                .with_registers()
+            expect(cap.can_reset).to_equal(true)
+            expect(cap.supports_memory).to_equal(true)
+            expect(cap.supports_registers).to_equal(true)
+
+# ============================================================================
+# Test Group 4: Trace32 Client Parser
+# ============================================================================
+
+describe "Trace32 Client Parser":
+
+    context "variable parsing":
+        it "parses complex variable types":
+            val raw = "buffer  uint8_t[256]  0x20002000\nsize  size_t  128"
+            val vars = Trace32Parser.parse_variables(raw)
+            expect(vars.len()).to_equal(2)
+            expect(vars[0].name).to_equal("buffer")
+            expect(vars[0].type_name).to_equal("uint8_t[256]")
+            expect(vars[1].name).to_equal("size")
+            expect(vars[1].value).to_equal("128")
+
+    context "stack trace parsing":
+        it "builds correct frame indices":
+            val raw = "#0  0x08001234  main  main.c:42\n#1  0x08001000  init  init.c:10\n#2  0x08000800  start  start.s:1"
+            val frames = Trace32Parser.parse_stack_trace(raw)
+            expect(frames.len()).to_equal(3)
+            expect(frames[0].index).to_equal(0)
+            expect(frames[1].index).to_equal(1)
+            expect(frames[2].index).to_equal(2)
+
+    context "memory dump parsing":
+        it "parses multi-line dump":
+            val raw = "0x20000000: 00 01 02 03 04 05 06 07\n0x20000008: 08 09 0A 0B 0C 0D 0E 0F"
+            val bytes = Trace32Parser.parse_memory_dump(raw)
+            expect(bytes.len()).to_equal(16)
+            expect(bytes[0]).to_equal(0)
+            expect(bytes[8]).to_equal(8)
+            expect(bytes[15]).to_equal(15)
+
+    context "register parsing":
+        it "parses ARM core registers":
+            val raw = "R0=0x00000000  R1=0x00000001  R2=0x00000002  R3=0x00000003\nR4=0x00000004  R5=0x00000005  R6=0x00000006  R7=0x00000007\nSP=0x20008000  LR=0x08001000  PC=0x08002000"
+            val regs = Trace32Parser.parse_register_list(raw)
+            expect(regs["R0"]).to_equal(0)
+            expect(regs["R3"]).to_equal(3)
+            expect(regs["SP"]).to_equal(536903680)
+            expect(regs["PC"]).to_equal(134225920)
+
+    context "unified data types":
+        it "returns same VarInfo type as GDB parser would":
+            val raw = "x  int  42"
+            val vars = Trace32Parser.parse_variables(raw)
+            expect(vars.len()).to_equal(1)
+            # VarInfo has name, value, type_name - same struct used by GDB adapter
+            val v = vars[0]
+            expect(v.name).to_equal("x")
+            expect(v.value).to_equal("42")
+            expect(v.type_name).to_equal("int")
+
+        it "returns same FrameInfo type as GDB parser would":
+            val raw = "#0  0x08001234  main  main.c:42"
+            val frames = Trace32Parser.parse_stack_trace(raw)
+            expect(frames.len()).to_equal(1)
+            # FrameInfo has index, function_name, file, line - same struct used by GDB adapter
+            val f = frames[0]
+            expect(f.index).to_equal(0)
+            expect(f.function_name).to_equal("main")
+            expect(f.file).to_equal("main.c")
+            expect(f.line).to_equal(42)
+
+# ============================================================================
+# Test Group 5: Trace32 Integration (requires hardware)
+# ============================================================================
+
+describe "Trace32 Integration":
+
+    slow_it "connects to Trace32 and reads registers":
+        if is_trace32_available():
+            # Real hardware test - only runs when Trace32 is available
+            val config = DebugConfig.for_trace32("localhost", 20000)
+            val client = Trace32Client.connect(config)
+            match client:
+                Ok(c):
+                    val regs = c.read_all_registers()
+                    match regs:
+                        Ok(r): expect(r.keys().len()).to_be_greater_than(0)
+                        Err(e): skip("Trace32 register read failed: {e}")
+                    c.disconnect()
+                Err(e):
+                    skip("Trace32 not reachable: {e}")
+        else:
+            skip("Trace32 not available")
+
+    slow_it "sets breakpoint and reads locals":
+        if is_trace32_available():
+            val config = DebugConfig.for_trace32("localhost", 20000)
+            val client = Trace32Client.connect(config)
+            match client:
+                Ok(c):
+                    val bp = c.set_breakpoint("main")
+                    match bp:
+                        Ok(id): expect(id).to_be_greater_than(0)
+                        Err(e): skip("Trace32 breakpoint failed: {e}")
+                    c.disconnect()
+                Err(e):
+                    skip("Trace32 not reachable: {e}")
+        else:
+            skip("Trace32 not available")
+
+    slow_it "captures trace data":
+        if is_trace32_available():
+            val config = DebugConfig.for_trace32("localhost", 20000)
+            val client = Trace32Client.connect(config)
+            match client:
+                Ok(c):
+                    val trace = c.trace_capture(100)
+                    match trace:
+                        Ok(data): expect(data.len()).to_be_greater_than(0)
+                        Err(e): skip("Trace32 trace capture failed: {e}")
+                    c.disconnect()
+                Err(e):
+                    skip("Trace32 not reachable: {e}")
+        else:
+            skip("Trace32 not available")

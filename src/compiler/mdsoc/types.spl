@@ -1,0 +1,572 @@
+# MDSOC Type Definitions
+#
+# Multi-Dimensional Separation of Concerns (MDSOC) types.
+# Implements Candidate A: Manifest-Composed Virtual Capsules.
+#
+# Research lineage:
+# - MDSOC / Hyper/J: hyperslice -> hypermodule composition
+# - FOP / AHEAD: feature-directory composition
+# - Layer enforcement: dependency direction constraints
+#
+# Design: All types are structs/enums. No generics.
+# Uses Option pattern (nil = none) for error handling.
+
+export CaretId, CaretMapping
+export DimensionDef, DimensionMap
+export LayerDirection, LayerDef
+export VirtualCapsule, SurfaceBinding, CapsuleExport
+export CapsuleVisibility
+export BypassGrant, BypassUsage
+export CapsuleRules, MdsocManifest
+
+# ============================================================================
+# Capsule Visibility (Option A: export internal)
+# ============================================================================
+
+enum CapsuleVisibility:
+    """Three-tier visibility for MDSOC.
+
+    Extends Simple's two-tier (Public/Private) with capsule-internal.
+    """
+    # Visible everywhere (via surface)
+    Public
+
+    # Visible only within the same virtual capsule
+    Internal
+
+    # Visible only within same caret + physical folder subtree
+    Private
+
+impl CapsuleVisibility:
+    fn is_public() -> bool:
+        match self:
+            CapsuleVisibility.Public: true
+            CapsuleVisibility.Internal: false
+            CapsuleVisibility.Private: false
+
+    fn is_internal() -> bool:
+        match self:
+            CapsuleVisibility.Public: false
+            CapsuleVisibility.Internal: true
+            CapsuleVisibility.Private: false
+
+    fn is_private() -> bool:
+        match self:
+            CapsuleVisibility.Public: false
+            CapsuleVisibility.Internal: false
+            CapsuleVisibility.Private: true
+
+    fn to_text() -> text:
+        match self:
+            CapsuleVisibility.Public: "public"
+            CapsuleVisibility.Internal: "internal"
+            CapsuleVisibility.Private: "private"
+
+# ============================================================================
+# Caret (Aspect Root)
+# ============================================================================
+
+struct CaretId:
+    """Aspect root identifier.
+
+    A caret marks a top-level namespace boundary (e.g., ^core, ^ui, ^infra).
+    The default caret (^main) is implicit and represents src/.
+    """
+    name: text
+    path: text
+    is_default: bool
+
+impl CaretId:
+    static fn new(name: text, path: text) -> CaretId:
+        CaretId(name: name, path: path, is_default: false)
+
+    static fn default_caret(path: text) -> CaretId:
+        CaretId(name: "main", path: path, is_default: true)
+
+    fn caret_prefix() -> text:
+        "^{self.name}"
+
+    fn equals(other: CaretId) -> bool:
+        self.name == other.name
+
+# ============================================================================
+# Per-Caret Path Mapping
+# ============================================================================
+
+struct CaretMapping:
+    """Maps caret-specific local path to canonical capsule key.
+
+    Different carets can have different local layouts but map to the same
+    virtual capsule. E.g.:
+      ^core: feature/auth/**  -> feature/auth
+      ^ui:   ui_feature/auth/** -> feature/auth
+    """
+    caret_name: text
+    match_pattern: text
+    target_key: text
+
+impl CaretMapping:
+    static fn new(caret_name: text, match_pattern: text, target_key: text) -> CaretMapping:
+        CaretMapping(
+            caret_name: caret_name,
+            match_pattern: match_pattern,
+            target_key: target_key
+        )
+
+    fn matches_path(path: text) -> bool:
+        """Check if a path matches this mapping's pattern.
+
+        Simple glob: only supports trailing /** wildcard.
+        """
+        val prefix = self.match_pattern
+        if prefix.ends_with("/**"):
+            val base = prefix[0:prefix.len() - 3]
+            return path.starts_with(base)
+        prefix == path
+
+# ============================================================================
+# Dimension Definition
+# ============================================================================
+
+struct DimensionMap:
+    """Maps a dimension selector to allowed caret roots."""
+    selector: text
+    roots: [text]
+
+impl DimensionMap:
+    static fn new(selector: text, roots: [text]) -> DimensionMap:
+        DimensionMap(selector: selector, roots: roots)
+
+struct DimensionDef:
+    """A dimension of separation (e.g., feature, platform).
+
+    Dimensions define orthogonal axes of decomposition.
+    Each dimension has its own key template, surface file,
+    and layering rules.
+    """
+    name: text
+    key_template: text
+    surface_file: text
+    participation: text
+    intra_access: text
+    symbol_merge: text
+    dep_cycles: text
+    mappings: [CaretMapping]
+    layer: LayerDef
+
+impl DimensionDef:
+    static fn new(name: text, key_template: text) -> DimensionDef:
+        DimensionDef(
+            name: name,
+            key_template: key_template,
+            surface_file: "__init__.spl",
+            participation: "explicit_bind_only",
+            intra_access: "via_surface_only",
+            symbol_merge: "forbid_implicit",
+            dep_cycles: "reject",
+            mappings: [],
+            layer: LayerDef.empty()
+        )
+
+    fn expand_key(feature_name: text) -> text:
+        """Expand key template with feature name.
+
+        E.g., 'feature/{name}' with 'auth' -> 'feature/auth'
+        """
+        var result = self.key_template
+        val placeholder = r"{name}"
+        result = result.replace(placeholder, feature_name)
+        result
+
+    fn find_mapping(caret_name: text) -> CaretMapping?:
+        for mapping in self.mappings:
+            if mapping.caret_name == caret_name:
+                return Some(mapping)
+        nil
+
+    fn is_explicit_bind() -> bool:
+        self.participation == "explicit_bind_only"
+
+    fn rejects_cycles() -> bool:
+        self.dep_cycles == "reject"
+
+# ============================================================================
+# Layer Enforcement
+# ============================================================================
+
+enum LayerDirection:
+    """Direction of allowed dependencies between layers.
+
+    UpperToLower: api -> app -> domain -> infra (default)
+    LowerToUpper: infra -> domain -> app -> api (Clean Architecture inward)
+    """
+    UpperToLower
+    LowerToUpper
+
+impl LayerDirection:
+    fn to_text() -> text:
+        match self:
+            LayerDirection.UpperToLower: "upper_to_lower"
+            LayerDirection.LowerToUpper: "lower_to_upper"
+
+struct LayerDef:
+    """Layer definition with ordering and dependency rules.
+
+    Layers are ordered from index 0 (first in list) to N-1 (last).
+    Direction determines which way dependencies flow.
+    """
+    order: [text]
+    direction: LayerDirection
+    allow_same_layer: bool
+    allow_adjacent_only: bool
+
+impl LayerDef:
+    static fn empty() -> LayerDef:
+        LayerDef(
+            order: [],
+            direction: LayerDirection.UpperToLower,
+            allow_same_layer: true,
+            allow_adjacent_only: false
+        )
+
+    static fn new(order: [text], direction: LayerDirection) -> LayerDef:
+        LayerDef(
+            order: order,
+            direction: direction,
+            allow_same_layer: true,
+            allow_adjacent_only: false
+        )
+
+    fn get_level(layer_name: text) -> i64:
+        """Get the index of a layer in the order list.
+
+        Returns -1 if not found.
+        """
+        var i: i64 = 0
+        for name in self.order:
+            if name == layer_name:
+                return i
+            i = i + 1
+        -1
+
+    fn has_layer(layer_name: text) -> bool:
+        self.get_level(layer_name) >= 0
+
+    fn layer_count() -> i64:
+        self.order.len()
+
+    fn can_depend(from_layer: text, to_layer: text) -> bool:
+        """Check if from_layer can depend on to_layer.
+
+        Rules:
+        - Unknown layers (not in order list) are unrestricted
+        - Same-layer deps controlled by allow_same_layer
+        - Direction determines flow
+        - Adjacent-only optionally restricts to immediate neighbors
+        """
+        val from_level = self.get_level(from_layer)
+        val to_level = self.get_level(to_layer)
+
+        # Unknown layers: no restriction
+        if from_level < 0 or to_level < 0:
+            return true
+
+        # Same layer
+        if from_layer == to_layer:
+            return self.allow_same_layer
+
+        match self.direction:
+            LayerDirection.UpperToLower:
+                # Upper (low index) can depend on lower (high index)
+                if self.allow_adjacent_only:
+                    from_level + 1 == to_level
+                else:
+                    from_level < to_level
+            LayerDirection.LowerToUpper:
+                # Lower (high index) can depend on upper (low index)
+                if self.allow_adjacent_only:
+                    from_level == to_level + 1
+                else:
+                    from_level > to_level
+
+    fn describe_violation(from_layer: text, to_layer: text) -> text:
+        """Generate human-readable violation description."""
+        val from_level = self.get_level(from_layer)
+        val to_level = self.get_level(to_layer)
+        val dir = self.direction.to_text()
+
+        if from_layer == to_layer:
+            return "same-layer dependency '{from_layer}' -> '{to_layer}' not allowed (allow_same_layer=false)"
+
+        "layer '{from_layer}' (level {from_level}) cannot depend on '{to_layer}' (level {to_level}), direction={dir}"
+
+# ============================================================================
+# Virtual Capsule
+# ============================================================================
+
+struct SurfaceBinding:
+    """Binds a file from a caret into a virtual capsule.
+
+    Explicit binding is required (no implicit merge).
+    Each binding gets an alias for collision-free composition.
+    """
+    source_caret: text
+    source_path: text
+    alias: text
+
+impl SurfaceBinding:
+    static fn new(caret: text, path: text, alias: text) -> SurfaceBinding:
+        SurfaceBinding(source_caret: caret, source_path: path, alias: alias)
+
+struct CapsuleExport:
+    """An export from a virtual capsule surface."""
+    binding_alias: text
+    symbol_name: text
+    visibility: CapsuleVisibility
+
+impl CapsuleExport:
+    static fn public_export(alias: text, symbol: text) -> CapsuleExport:
+        CapsuleExport(
+            binding_alias: alias,
+            symbol_name: symbol,
+            visibility: CapsuleVisibility.Public
+        )
+
+    static fn internal_export(alias: text, symbol: text) -> CapsuleExport:
+        CapsuleExport(
+            binding_alias: alias,
+            symbol_name: symbol,
+            visibility: CapsuleVisibility.Internal
+        )
+
+    static fn private_export(alias: text, symbol: text) -> CapsuleExport:
+        CapsuleExport(
+            binding_alias: alias,
+            symbol_name: symbol,
+            visibility: CapsuleVisibility.Private
+        )
+
+    fn qualified_name() -> text:
+        "{self.binding_alias}.{self.symbol_name}"
+
+    fn is_accessible_from_capsule() -> bool:
+        """Both Public and Internal are accessible within capsule."""
+        not self.visibility.is_private()
+
+struct VirtualCapsule:
+    """A composed capsule keyed by (dimension, canonical_path).
+
+    Combines contributions from multiple carets into a single
+    logical module with explicit binding and aliasing.
+    """
+    name: text
+    dimension: text
+    layer: text
+    bindings: [SurfaceBinding]
+    exports: [CapsuleExport]
+
+impl VirtualCapsule:
+    static fn new(name: text, dimension: text, layer: text) -> VirtualCapsule:
+        VirtualCapsule(
+            name: name,
+            dimension: dimension,
+            layer: layer,
+            bindings: [],
+            exports: []
+        )
+
+    fn capsule_id() -> text:
+        """Deterministic capsule identifier (M4: stable IDs)."""
+        "{self.dimension}/{self.name}"
+
+    fn find_binding(alias: text) -> SurfaceBinding?:
+        for binding in self.bindings:
+            if binding.alias == alias:
+                return Some(binding)
+        nil
+
+    fn find_export(symbol: text) -> CapsuleExport?:
+        for exp in self.exports:
+            if exp.symbol_name == symbol:
+                return Some(exp)
+        nil
+
+    fn public_exports() -> [CapsuleExport]:
+        var result: [CapsuleExport] = []
+        for exp in self.exports:
+            if exp.visibility.is_public():
+                result.push(exp)
+        result
+
+    fn internal_exports() -> [CapsuleExport]:
+        var result: [CapsuleExport] = []
+        for exp in self.exports:
+            if exp.visibility.is_internal():
+                result.push(exp)
+        result
+
+    fn has_binding_from(caret: text) -> bool:
+        for binding in self.bindings:
+            if binding.source_caret == caret:
+                return true
+        false
+
+# ============================================================================
+# Bypass Mechanism
+# ============================================================================
+
+struct BypassGrant:
+    """Export-side bypass grant (dual-consent part 1).
+
+    Allows a specific symbol to be accessed across a disallowed layer edge.
+    Must be paired with a BypassUsage at the use site.
+    """
+    granting_module: text
+    granted_symbol: text
+    layer_edge: text
+    reason: text
+    location: text
+
+impl BypassGrant:
+    static fn new(module: text, symbol: text, edge: text, reason: text, location: text) -> BypassGrant:
+        BypassGrant(
+            granting_module: module,
+            granted_symbol: symbol,
+            layer_edge: edge,
+            reason: reason,
+            location: location
+        )
+
+    fn grant_key() -> text:
+        """Unique key for this grant."""
+        "{self.granting_module}::{self.granted_symbol}"
+
+struct BypassUsage:
+    """Use-site bypass annotation (dual-consent part 2).
+
+    Must match a corresponding BypassGrant.
+    Non-transitive: cannot be re-exported.
+    """
+    using_module: text
+    target_symbol: text
+    layer_edge: text
+    reason: text
+    use_location: text
+    grant_location: text
+
+impl BypassUsage:
+    static fn new(
+        using_mod: text,
+        target: text,
+        edge: text,
+        reason: text,
+        use_loc: text,
+        grant_loc: text
+    ) -> BypassUsage:
+        BypassUsage(
+            using_module: using_mod,
+            target_symbol: target,
+            layer_edge: edge,
+            reason: reason,
+            use_location: use_loc,
+            grant_location: grant_loc
+        )
+
+# ============================================================================
+# Capsule Rules
+# ============================================================================
+
+struct CapsuleRules:
+    """Global MDSOC enforcement configuration."""
+    enforce_layering: bool
+    reject_cycles: bool
+    forbid_implicit_merge: bool
+    require_explicit_bind: bool
+
+impl CapsuleRules:
+    static fn new(enforce_layering: bool, reject_cycles: bool, forbid_implicit_merge: bool, require_explicit_bind: bool) -> CapsuleRules:
+        CapsuleRules(
+            enforce_layering: enforce_layering,
+            reject_cycles: reject_cycles,
+            forbid_implicit_merge: forbid_implicit_merge,
+            require_explicit_bind: require_explicit_bind
+        )
+
+    static fn strict() -> CapsuleRules:
+        """All mitigations enabled (recommended)."""
+        CapsuleRules.new(true, true, true, true)
+
+    static fn permissive() -> CapsuleRules:
+        """No enforcement (migration/testing mode)."""
+        CapsuleRules.new(false, false, false, false)
+
+    static fn default_rules() -> CapsuleRules:
+        """Strict by default."""
+        CapsuleRules.strict()
+
+# ============================================================================
+# Top-Level Manifest
+# ============================================================================
+
+struct MdsocManifest:
+    """Complete MDSOC manifest for a project.
+
+    Parsed from capsule.sdn config file.
+    Contains all carets, dimensions, capsules, and rules.
+    """
+    name: text
+    version: text
+    carets: [CaretId]
+    dimensions: [DimensionDef]
+    capsules: [VirtualCapsule]
+    bypass_grants: [BypassGrant]
+    rules: CapsuleRules
+
+impl MdsocManifest:
+    static fn new(name: text) -> MdsocManifest:
+        MdsocManifest(
+            name: name,
+            version: "0.1.0",
+            carets: [],
+            dimensions: [],
+            capsules: [],
+            bypass_grants: [],
+            rules: CapsuleRules.default_rules()
+        )
+
+    fn get_caret(name: text) -> CaretId?:
+        for caret in self.carets:
+            if caret.name == name:
+                return Some(caret)
+        nil
+
+    fn get_dimension(name: text) -> DimensionDef?:
+        for dim in self.dimensions:
+            if dim.name == name:
+                return Some(dim)
+        nil
+
+    fn get_capsule(name: text) -> VirtualCapsule?:
+        for cap in self.capsules:
+            if cap.name == name:
+                return Some(cap)
+        nil
+
+    fn find_capsule_by_id(capsule_id: text) -> VirtualCapsule?:
+        for cap in self.capsules:
+            if cap.capsule_id() == capsule_id:
+                return Some(cap)
+        nil
+
+    fn find_bypass_grant(symbol: text) -> BypassGrant?:
+        for grant in self.bypass_grants:
+            if grant.granted_symbol == symbol:
+                return Some(grant)
+        nil
+
+    fn all_layers() -> [LayerDef]:
+        """Collect all layer definitions from all dimensions."""
+        var result: [LayerDef] = []
+        for dim in self.dimensions:
+            result.push(dim.layer)
+        result
