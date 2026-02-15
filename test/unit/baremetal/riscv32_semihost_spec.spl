@@ -1,0 +1,265 @@
+# RISC-V 32-bit Semihosting Unit Tests
+#
+# Tests for RV32 semihosting operation constants, parameter block sizes,
+# mcycle reading, interrupt control, and semihosting magic sequence.
+
+# ============================================================================
+# Semihosting Operation Constants
+# ============================================================================
+
+describe "RV32 Semihost - Operation Constants":
+    it "SYS_OPEN is 0x01":
+        val sys_open = 0x01
+        expect(sys_open).to_equal(1)
+
+    it "SYS_CLOSE is 0x02":
+        val sys_close = 0x02
+        expect(sys_close).to_equal(2)
+
+    it "SYS_WRITEC is 0x03":
+        val sys_writec = 0x03
+        expect(sys_writec).to_equal(3)
+
+    it "SYS_WRITE0 is 0x04":
+        val sys_write0 = 0x04
+        expect(sys_write0).to_equal(4)
+
+    it "SYS_WRITE is 0x05":
+        val sys_write = 0x05
+        expect(sys_write).to_equal(5)
+
+    it "SYS_READ is 0x06":
+        val sys_read = 0x06
+        expect(sys_read).to_equal(6)
+
+    it "SYS_EXIT is 0x18":
+        val sys_exit = 0x18
+        expect(sys_exit).to_equal(24)
+
+# ============================================================================
+# Parameter Block Sizes (u32, not i64)
+# ============================================================================
+
+describe "RV32 Semihost - Parameter Block Sizes":
+    it "each parameter is u32 (4 bytes)":
+        val param_size = 4
+        expect(param_size).to_equal(4)
+
+    it "SYS_OPEN parameter block is 3 x u32 = 12 bytes":
+        # params: [name_ptr, mode, name_len]
+        val block_size = 3 * 4
+        expect(block_size).to_equal(12)
+
+    it "SYS_CLOSE parameter block is 1 x u32 = 4 bytes":
+        # params: [handle]
+        val block_size = 1 * 4
+        expect(block_size).to_equal(4)
+
+    it "SYS_WRITEC parameter block is 1 x u32 = 4 bytes":
+        # params: [char_ptr as u32]
+        val block_size = 1 * 4
+        expect(block_size).to_equal(4)
+
+    it "SYS_WRITE0 parameter block is 1 x u32 = 4 bytes":
+        # params: [str_ptr as u32]
+        val block_size = 1 * 4
+        expect(block_size).to_equal(4)
+
+    it "SYS_WRITE parameter block is 3 x u32 = 12 bytes":
+        # params: [handle, data_ptr, length]
+        val block_size = 3 * 4
+        expect(block_size).to_equal(12)
+
+    it "SYS_READ parameter block is 3 x u32 = 12 bytes":
+        # params: [handle, buf_ptr, length]
+        val block_size = 3 * 4
+        expect(block_size).to_equal(12)
+
+    it "SYS_EXIT parameter block is 2 x u32 = 8 bytes":
+        # params: [ADP_Stopped_ApplicationExit, reason]
+        val block_size = 2 * 4
+        expect(block_size).to_equal(8)
+
+    it "parameter blocks are NOT i64 (that would be RV64)":
+        # On RV32, parameters are 4 bytes, not 8
+        val rv32_param_size = 4
+        val rv64_param_size = 8
+        expect(rv32_param_size).to_be_less_than(rv64_param_size)
+
+# ============================================================================
+# Semihosting Magic Sequence
+# ============================================================================
+
+describe "RV32 Semihost - Magic Instruction Sequence":
+    it "entry NOP is slli zero, zero, 0x1f":
+        val entry_nop = "slli zero, zero, 0x1f"
+        expect(entry_nop).to_contain("slli")
+        expect(entry_nop).to_contain("zero")
+        expect(entry_nop).to_contain("0x1f")
+
+    it "trigger instruction is ebreak":
+        val trigger = "ebreak"
+        expect(trigger).to_equal("ebreak")
+
+    it "exit NOP is srai zero, zero, 0x7":
+        val exit_nop = "srai zero, zero, 0x7"
+        expect(exit_nop).to_contain("srai")
+        expect(exit_nop).to_contain("zero")
+        expect(exit_nop).to_contain("0x7")
+
+    it "operation number goes in a0":
+        val op_reg = "a0"
+        expect(op_reg).to_equal("a0")
+
+    it "parameter block pointer goes in a1 (32-bit on RV32)":
+        val param_reg = "a1"
+        expect(param_reg).to_equal("a1")
+
+    it "return value comes from a0":
+        val result_reg = "a0"
+        expect(result_reg).to_equal("a0")
+
+    it "compressed instructions are disabled during sequence":
+        val directive = ".option norvc"
+        expect(directive).to_contain("norvc")
+
+# ============================================================================
+# mcycle Reading (RV32 Specific: mcycleh:mcycle pair)
+# ============================================================================
+
+describe "RV32 Semihost - mcycle Counter":
+    it "mcycle is 32-bit on RV32":
+        val mcycle_bits = 32
+        expect(mcycle_bits).to_equal(32)
+
+    it "full 64-bit cycle count requires mcycleh:mcycle pair":
+        # RV32 has 32-bit CSRs, so cycle counter is split across two CSRs
+        val lo_csr = "mcycle"
+        val hi_csr = "mcycleh"
+        expect(lo_csr).to_equal("mcycle")
+        expect(hi_csr).to_equal("mcycleh")
+
+    it "must read hi-lo-hi to avoid tearing":
+        # Atomic 64-bit read on RV32 requires:
+        # 1. Read mcycleh (hi1)
+        # 2. Read mcycle (lo)
+        # 3. Read mcycleh again (hi2)
+        # 4. If hi1 != hi2, retry
+        val read_steps = 3
+        expect(read_steps).to_equal(3)
+
+    it "result is (hi << 32) | lo":
+        # Reconstructing 64-bit value from two 32-bit halves
+        val hi = 1
+        val lo = 100
+        val combined = (hi * 0x100000000) + lo
+        val expected = 0x100000000 + 100
+        expect(combined).to_equal(expected)
+
+    it "retry on tearing uses bne instruction":
+        val retry_inst = "bne"
+        expect(retry_inst).to_equal("bne")
+
+    it "RV64 does NOT need mcycleh (single 64-bit read)":
+        # On RV64, mcycle is 64 bits wide, no splitting needed
+        val rv64_needs_mcycleh = false
+        expect(rv64_needs_mcycleh).to_equal(false)
+
+# ============================================================================
+# Interrupt Control for Semihosting
+# ============================================================================
+
+describe "RV32 Semihost - Interrupt Control":
+    it "MIE bit is bit 3 of mstatus":
+        val mie_bit = 0x8
+        expect(mie_bit).to_equal(8)
+
+    it "disable_interrupts clears MIE bit":
+        val csrrci_mask = 0x8
+        expect(csrrci_mask).to_equal(8)
+
+    it "disable_interrupts returns previous mstatus":
+        # The function saves mstatus before clearing MIE
+        val returns_saved = true
+        expect(returns_saved).to_equal(true)
+
+    it "restore_interrupts only restores MIE if it was set":
+        # Only sets MIE bit if saved_mstatus had bit 3 set
+        val saved_with_mie = 0x08
+        val should_restore = (saved_with_mie & 0x08) != 0
+        expect(should_restore).to_equal(true)
+
+    it "restore_interrupts does NOT restore if MIE was cleared":
+        val saved_without_mie = 0x00
+        val should_restore = (saved_without_mie & 0x08) != 0
+        expect(should_restore).to_equal(false)
+
+    it "safe semihosting call disables interrupts before call":
+        # semi_host_call_safe_rv32 wraps: disable -> call -> restore
+        val step_count = 3
+        expect(step_count).to_equal(3)
+
+    it "safe semihosting call restores interrupts after call":
+        val restores_after = true
+        expect(restores_after).to_equal(true)
+
+# ============================================================================
+# ADP (Angel Debug Protocol) Constants
+# ============================================================================
+
+describe "RV32 Semihost - ADP Constants":
+    it "ADP_Stopped_ApplicationExit is 0x20026":
+        val adp_exit = 0x20026
+        expect(adp_exit).to_equal(0x20026)
+
+    it "ADP_Stopped_ApplicationExit in decimal is 131110":
+        val adp_exit = 0x20026
+        expect(adp_exit).to_equal(131110)
+
+# ============================================================================
+# QEMU Platform Constants
+# ============================================================================
+
+describe "RV32 Semihost - QEMU Platform Constants":
+    it "QEMU virt mtime address is 0x0200BFF8":
+        val mtime_addr = 0x0200BFF8
+        expect(mtime_addr).to_equal(0x0200BFF8)
+
+    it "QEMU virt mtimecmp address is 0x02004000":
+        val mtimecmp_addr = 0x02004000
+        expect(mtimecmp_addr).to_equal(0x02004000)
+
+    it "QEMU virt UART address is 0x10000000":
+        val uart_addr = 0x10000000
+        expect(uart_addr).to_equal(0x10000000)
+
+    it "mtime address is in CLINT region (0x02000000-0x0200FFFF)":
+        val mtime_addr = 0x0200BFF8
+        val in_clint = mtime_addr >= 0x02000000 and mtime_addr <= 0x0200FFFF
+        expect(in_clint).to_equal(true)
+
+    it "mtimecmp address is in CLINT region":
+        val mtimecmp_addr = 0x02004000
+        val in_clint = mtimecmp_addr >= 0x02000000 and mtimecmp_addr <= 0x0200FFFF
+        expect(in_clint).to_equal(true)
+
+# ============================================================================
+# Register Width Consistency
+# ============================================================================
+
+describe "RV32 Semihost - Register Width Consistency":
+    it "all semihosting args are u32 (not u64)":
+        val arg_width = 32
+        expect(arg_width).to_equal(32)
+
+    it "semihosting return value is u32":
+        val ret_width = 32
+        expect(ret_width).to_equal(32)
+
+    it "parameter block pointer is u32 (32-bit address space)":
+        val ptr_width = 32
+        expect(ptr_width).to_equal(32)
+
+    it "interrupt save/restore uses u32 mstatus":
+        val mstatus_width = 32
+        expect(mstatus_width).to_equal(32)

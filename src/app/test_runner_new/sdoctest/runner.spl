@@ -9,7 +9,7 @@ use sdoctest.types.*
 use sdoctest.config.{find_init_script_file, find_env_timeout, find_env_vars, find_env_run_config}
 use sdoctest.extractor.{extract_sdoctest_blocks, extract_reusable_lines}
 use sdoctest.discovery.{discover_sdoctest_files, is_tag_ignored}
-use std.string.{NL}
+use std.string.{NL, split, trim, starts_with, contains}
 
 # =========================================================================
 # Top-Level Orchestrator
@@ -170,35 +170,35 @@ fn build_file_preambles(blocks: [SdoctestBlock]) -> [text]:
 fn should_auto_skip(code: text) -> text:
     # Check if code contains unsupported keywords that will always fail.
     # Returns empty string if OK, or reason string if should skip.
-    val lines = code.split(NL)
+    val lines = split(code, NL)
 
     for line in lines:
-        val trimmed = line.trim()
+        val trimmed = trim(line)
 
         # Skip comment lines - don't check content of comments
-        if trimmed.starts_with("#"):
+        if starts_with(trimmed, "#"):
             continue
         # Skip string-only lines (rough heuristic: starts with quote)
-        if trimmed.starts_with("\"") or trimmed.starts_with("'"):
+        if starts_with(trimmed, "\"") or starts_with(trimmed, "'"):
             continue
 
         # Check for unsupported keywords
-        if trimmed.starts_with("mock ") or trimmed.starts_with("mock("):
+        if starts_with(trimmed, "mock ") or starts_with(trimmed, "mock("):
             return "unsupported keyword: mock"
-        if trimmed.starts_with("gpu ") or trimmed.contains("@gpu"):
+        if starts_with(trimmed, "gpu ") or contains(trimmed, "@gpu"):
             return "unsupported keyword: gpu"
-        if trimmed.starts_with("macro "):
+        if starts_with(trimmed, "macro "):
             return "unsupported keyword: macro"
-        if trimmed.starts_with("async ") or trimmed.starts_with("async("):
+        if starts_with(trimmed, "async ") or starts_with(trimmed, "async("):
             return "unsupported keyword: async"
-        if trimmed.starts_with("await "):
+        if starts_with(trimmed, "await "):
             return "unsupported keyword: await"
-        if trimmed.starts_with("spawn "):
+        if starts_with(trimmed, "spawn "):
             return "unsupported keyword: spawn"
 
         # // as parallel operator (not comment - Simple uses # for comments)
         # Check for standalone // operator (not inside strings)
-        if trimmed.contains(" // "):
+        if contains(trimmed, " // "):
             return "unsupported operator: // (parallel)"
 
     ""
@@ -360,17 +360,19 @@ fn build_temp_code(block: SdoctestBlock, config: SdoctestConfig, preamble: text)
 
 fn extract_block_error(stderr: text, stdout: text) -> text:
     val combined = stderr + NL + stdout
-    val lines = combined.split(NL)
+    val lines = split(combined, NL)
 
     for line in lines:
-        val trimmed = line.trim()
-        if trimmed.contains("error:") or trimmed.contains("Error:") or trimmed.contains("parse error"):
+        val trimmed = trim(line)
+        if contains(trimmed, "error:") or contains(trimmed, "Error:") or contains(trimmed, "parse error"):
             return trimmed
-        if trimmed.contains("semantic:") or trimmed.contains("compile failed"):
+        if contains(trimmed, "semantic:") or contains(trimmed, "compile failed"):
             return trimmed
 
-    if stderr.trim() != "":
-        val first_line = stderr.split(NL)[0].trim()
+    val stderr_trimmed = trim(stderr)
+    if stderr_trimmed != "":
+        val stderr_lines = split(stderr, NL)
+        val first_line = trim(stderr_lines[0])
         if first_line != "":
             return first_line
 
