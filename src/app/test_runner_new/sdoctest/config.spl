@@ -8,7 +8,7 @@
 
 use app.io.mod (file_read, file_exists)
 use sdoctest.types.*
-use std.string.{NL, split, trim, starts_with, ends_with}
+use std.string.{NL, string_split, string_trim}
 
 # =========================================================================
 # Public API
@@ -18,7 +18,7 @@ fn load_sdoctest_config(config_path: text) -> SdoctestConfig:
     if not file_exists(config_path):
         return default_sdoctest_config()
 
-    val content = file_read(config_path)
+    val content = file_read(config_path) ?? ""
     if content == "":
         return default_sdoctest_config()
 
@@ -45,7 +45,7 @@ fn default_sdoctest_config() -> SdoctestConfig:
 # =========================================================================
 
 fn parse_config_from_text(content: text) -> SdoctestConfig:
-    val lines = split(content, NL)
+    val lines = string_split(content, NL)
     var version = 1
     var default_timeout = 5000
     var sources: [SdoctestSource] = []
@@ -73,17 +73,17 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
     var i = 0
     while i < lines.len():
         val line = lines[i]
-        val trimmed = trim(line)
+        val trimmed = string_trim(line)
 
         # Skip empty lines and comments
-        if trimmed == "" or starts_with(trimmed, "#"):
+        if trimmed == "" or trimmed.starts_with( "#"):
             i = i + 1
             continue
 
         val indent = line_indent(line)
 
         # Top-level sections (indent 0)
-        if indent == 0 and ends_with(trimmed, ":"):
+        if indent == 0 and trimmed.ends_with( ":"):
             # Flush previous section data (inline due to BUG-15)
             if current_source_path != "":
                 val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
@@ -98,7 +98,7 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
             in_env_vars = false
 
             val section_str = trimmed[0:trimmed.len() - 1]
-            section = trim(section_str)
+            section = string_trim(section_str)
             subsection = ""
             i = i + 1
             continue
@@ -113,7 +113,7 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # sources section - array of entries
         elif section == "sources":
-            if starts_with(trimmed, "- "):
+            if trimmed.starts_with( "- "):
                 # Flush previous source (inline due to BUG-15)
                 if current_source_path != "":
                     val pat = if current_source_is_dir and current_source_pattern == "": "*.md" else: current_source_pattern
@@ -125,7 +125,7 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
                 current_source_env = ""
 
                 val entry_substr = trimmed[2:]
-                val entry_str = trim(entry_substr)
+                val entry_str = string_trim(entry_substr)
                 val kv = parse_kv(entry_str)
                 if kv.0 == "file":
                     current_source_path = strip_quotes(kv.1)
@@ -153,12 +153,12 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # init_scripts section
         elif section == "init_scripts":
-            if indent == 2 and ends_with(trimmed, ":"):
+            if indent == 2 and trimmed.ends_with( ":"):
                 # Flush previous (inline due to BUG-15)
                 if current_init_name != "":
                     init_scripts.push(SdoctestInitScript(name: current_init_name, file: current_init_file))
                 val init_substr = trimmed[0:trimmed.len() - 1]
-                current_init_name = trim(init_substr)
+                current_init_name = string_trim(init_substr)
                 current_init_file = ""
             else:
                 val kv = parse_kv(trimmed)
@@ -167,12 +167,12 @@ fn parse_config_from_text(content: text) -> SdoctestConfig:
 
         # environments section
         elif section == "environments":
-            if indent == 2 and ends_with(trimmed, ":"):
+            if indent == 2 and trimmed.ends_with( ":"):
                 # Flush previous (inline due to BUG-15)
                 if current_env_name != "":
                     environments.push(SdoctestEnv(name: current_env_name, timeout: current_env_timeout, env_vars: current_env_vars, run_config: current_env_run_config))
                 val env_substr = trimmed[0:trimmed.len() - 1]
-                current_env_name = trim(env_substr)
+                current_env_name = string_trim(env_substr)
                 current_env_timeout = default_timeout
                 current_env_vars = {}
                 current_env_run_config = ""
@@ -244,17 +244,17 @@ fn parse_kv(s: text) -> (text, text):
     if idx < 0:
         return ("", s)
     val key_str = s[0:idx]
-    val key = trim(key_str)
+    val key = string_trim(key_str)
     val value_str = s[idx + 1:]
-    val value = trim(value_str)
+    val value = string_trim(value_str)
     (key, value)
 
 fn strip_quotes(s: text) -> text:
     if s.len() >= 2:
-        val starts_dquote = starts_with(s, "\"")
-        val ends_dquote = ends_with(s, "\"")
-        val starts_squote = starts_with(s, "'")
-        val ends_squote = ends_with(s, "'")
+        val starts_dquote = s.starts_with( "\"")
+        val ends_dquote = s.ends_with( "\"")
+        val starts_squote = s.starts_with( "'")
+        val ends_squote = s.ends_with( "'")
         if (starts_dquote and ends_dquote) or (starts_squote and ends_squote):
             return s[1 : s.len() - 1]
     s
@@ -262,15 +262,15 @@ fn strip_quotes(s: text) -> text:
 fn parse_inline_array(s: text) -> [text]:
     # Parse ["item1", "item2", "item3"]
     var items: [text] = []
-    var inner = trim(s)
+    var inner = string_trim(s)
     if starts_with(inner, "["):
         inner = inner[1:]
     if ends_with(inner, "]"):
         inner = inner[0:inner.len() - 1]
 
-    val parts = split(inner, ",")
+    val parts = string_split(inner, ",")
     for part in parts:
-        val trimmed = trim(part)
+        val trimmed = string_trim(part)
         if trimmed != "":
             items.push(strip_quotes(trimmed))
 
