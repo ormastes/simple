@@ -1,0 +1,167 @@
+"""
+Resource Exhaustion Resilience Specification
+
+Tests for operations under high load: large arrays, deep string
+concatenation, many small allocations, and bulk computations.
+
+Feature: Resource Exhaustion Resilience
+Category: Resilience Testing
+Status: Active
+"""
+
+# Inline LCG random number generator
+var lcg_state = 13579
+
+fn lcg_seed(s: i64):
+    lcg_state = s
+
+fn lcg_next() -> i64:
+    lcg_state = (1103515245 * lcg_state + 12345) % 2147483647
+    if lcg_state < 0: lcg_state = -lcg_state
+    return lcg_state
+
+fn lcg_range(lo: i64, hi: i64) -> i64:
+    val raw = lcg_next()
+    val range_size = hi - lo
+    if range_size <= 0: return lo
+    return lo + (raw % range_size)
+
+describe "resilience: large arrays":
+    it "creates and verifies a 1000-element array":
+        var arr = []
+        for i in 0..1000:
+            arr.push(i)
+        expect(arr.len()).to_equal(1000)
+        expect(arr[0]).to_equal(0)
+        expect(arr[999]).to_equal(999)
+
+    it "sums 1000 elements correctly":
+        var arr = []
+        for i in 0..1000:
+            arr.push(i)
+        var total = 0
+        for item in arr:
+            total = total + item
+        # Sum of 0..999 = 999 * 1000 / 2 = 499500
+        expect(total).to_equal(499500)
+
+    it "creates and searches a 500-element array":
+        var arr = []
+        for i in 0..500:
+            arr.push(i * 3)
+        # Search for known value
+        var found = false
+        for item in arr:
+            if item == 300:
+                found = true
+        expect(found).to_equal(true)
+
+    it "handles array of random values with correct length":
+        lcg_seed(40001)
+        var arr = []
+        for i in 0..1000:
+            val item = lcg_range(0, 10000)
+            arr.push(item)
+        expect(arr.len()).to_equal(1000)
+
+    it "overwrites all elements in a large array":
+        var arr = []
+        for i in 0..500:
+            arr.push(0)
+        for i in 0..500:
+            arr[i] = i * 2
+        expect(arr[0]).to_equal(0)
+        expect(arr[249]).to_equal(498)
+        expect(arr[499]).to_equal(998)
+
+describe "resilience: deep string concatenation":
+    it "builds a 200-character string incrementally":
+        var s = ""
+        for i in 0..200:
+            s = s + "x"
+        expect(s.len()).to_equal(200)
+
+    it "builds a 100-segment string":
+        var s = ""
+        for i in 0..100:
+            s = s + "ab"
+        expect(s.len()).to_equal(200)
+
+    it "builds a string with varied content":
+        lcg_seed(40002)
+        var s = ""
+        val chars = "abcdefghij"
+        for i in 0..150:
+            val idx = lcg_range(0, 10)
+            s = s + chars[idx]
+        expect(s.len()).to_equal(150)
+
+    it "concatenation preserves content order":
+        var parts = []
+        for i in 0..50:
+            parts.push("{i}")
+        var combined = ""
+        for part in parts:
+            combined = combined + part + ","
+        # Should start with "0," and contain "49,"
+        val starts_ok = combined.starts_with("0,")
+        expect(starts_ok).to_equal(true)
+        val contains_last = combined.contains("49,")
+        expect(contains_last).to_equal(true)
+
+describe "resilience: many small allocations":
+    it "creates 500 small arrays":
+        var total_len = 0
+        for i in 0..500:
+            val small = [i, i + 1, i + 2]
+            total_len = total_len + small.len()
+        expect(total_len).to_equal(1500)
+
+    it "creates 200 small strings":
+        var total_len = 0
+        for i in 0..200:
+            val s = "item_{i}"
+            total_len = total_len + s.len()
+        # Each "item_X" has length 5-8 depending on i
+        expect(total_len).to_be_greater_than(0)
+
+    it "nested loops with allocation do not crash":
+        var total = 0
+        for i in 0..50:
+            for j in 0..20:
+                val pair = [i, j]
+                total = total + pair[0] + pair[1]
+        # Sum of i over 50*20 iterations + sum of j over 50*20 iterations
+        # i: each i repeated 20 times = 20 * (0+1+...+49) = 20 * 1225 = 24500
+        # j: each j repeated 50 times = 50 * (0+1+...+19) = 50 * 190 = 9500
+        expect(total).to_equal(34000)
+
+describe "resilience: bulk computation":
+    it "performs 5000 arithmetic operations":
+        var result = 0
+        for i in 0..5000:
+            result = result + 1
+        expect(result).to_equal(5000)
+
+    it "performs 1000 comparisons without error":
+        lcg_seed(40003)
+        var less_count = 0
+        var equal_count = 0
+        var greater_count = 0
+        for i in 0..1000:
+            val a = lcg_range(-100, 100)
+            val b = lcg_range(-100, 100)
+            if a < b: less_count = less_count + 1
+            if a == b: equal_count = equal_count + 1
+            if a > b: greater_count = greater_count + 1
+        val total = less_count + equal_count + greater_count
+        expect(total).to_equal(1000)
+
+    it "performs 500 modulo operations":
+        var failures = 0
+        for i in 0..500:
+            val n = i + 1
+            val remainder = n % 7
+            if remainder < 0 or remainder >= 7:
+                failures = failures + 1
+        expect(failures).to_equal(0)

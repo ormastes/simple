@@ -8,13 +8,16 @@ use remote.target.riscv32.RiscV32Target
 use remote.feature.features.FeatureId
 use remote.feature.registry.{FeatureRegistry, FeatureHandler}
 use remote.feature.register_gdb.{register_gdb_features, serialize_vars}
+use remote.feature.register_trace32.register_trace32_features
 use remote.protocol.gdb_mi.GdbMiClient
+use remote.protocol.trace32.Trace32Client
 
 # Remote RISC-V 32-bit debug backend
 class RemoteRiscV32Backend:
     config: DebugConfig
     registry: FeatureRegistry
     gdb: Option<GdbMiClient>
+    t32: Option<Trace32Client>
     target: RiscV32Target
     attached: bool
 
@@ -29,6 +32,22 @@ impl RemoteRiscV32Backend:
             config: config,
             registry: registry,
             gdb: Some(gdb),
+            t32: nil,
+            target: RiscV32Target.create(),
+            attached: true
+        ))
+
+    # Trace32-only connection (for Lauterbach hardware probes)
+    static fn trace32_only(config: DebugConfig) -> Result<RemoteRiscV32Backend, text>:
+        val t32 = Trace32Client.connect(config)?
+        var registry = FeatureRegistry.empty()
+        register_trace32_features(registry, t32)
+
+        Ok(RemoteRiscV32Backend(
+            config: config,
+            registry: registry,
+            gdb: nil,
+            t32: Some(t32),
             target: RiscV32Target.create(),
             attached: true
         ))
@@ -73,6 +92,12 @@ impl RemoteRiscV32Backend:
                 self.attached = false
             nil:
                 pass
+        match self.t32:
+            Some(t32):
+                t32.disconnect()
+                self.attached = false
+            nil:
+                pass
         Ok(nil)
 
     fn run() -> Result<Nil, String>:
@@ -96,13 +121,18 @@ impl RemoteRiscV32Backend:
         Ok(nil)
 
     fn step_out() -> Result<Nil, String>:
-        # Step out uses GDB's finish command
+        # Step out uses GDB's finish command or Trace32's Step.Out
         match self.gdb:
             Some(gdb):
                 gdb.step_out()?
                 Ok(nil)
             nil:
-                Err("step_out requires GDB connection")
+                match self.t32:
+                    Some(t32):
+                        t32.step_out()?
+                        Ok(nil)
+                    nil:
+                        Err("step_out requires GDB or Trace32 connection")
 
     fn add_breakpoint(file: String, line: Int) -> Result<Int, String>:
         val location = "{file}:{line}"

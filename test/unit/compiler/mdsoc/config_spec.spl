@@ -1,0 +1,365 @@
+# NOTE: These tests validate the MDSOC SDN config parser.
+# Run with: bin/simple test test/unit/compiler/mdsoc/config_spec.spl
+#
+# Tests for: src/compiler/mdsoc/config.spl
+# The config parser reads capsule.sdn files (indentation-based SDN format)
+# and produces MdsocManifest structs.
+#
+# SDN format uses:
+#   - Section headers at indent 0: "section_name:"
+#   - Key-value pairs: "key: value" (colon separator)
+#   - List items: "- key: value" with continuation on next lines
+#   - Subsections at indent 2 within dimension: "map:", "layering:"
+#   - Inline arrays: "[a, b, c]"
+
+use compiler.mdsoc.types.*
+use compiler.mdsoc.config.*
+
+# ============================================================================
+# Basic parsing
+# ============================================================================
+
+describe "parse_mdsoc_sdn basics":
+    it "empty string returns nil":
+        val result = parse_mdsoc_sdn("")
+        expect(result).to_be_nil()
+
+    it "whitespace-only returns manifest with empty name":
+        # Parser only returns nil for empty string; whitespace-only
+        # produces a manifest with empty capsule name
+        val result = parse_mdsoc_sdn("   \n\n  ")
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.name).to_equal("")
+
+    it "minimal valid config returns manifest":
+        var sdn = "capsule:\n  name: my-project\n  version: 0.1.0"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.name).to_equal("my-project")
+        expect(manifest.version).to_equal("0.1.0")
+
+# ============================================================================
+# Capsule section
+# ============================================================================
+
+describe "parse_mdsoc_sdn capsule section":
+    it "parses capsule name":
+        var sdn = "capsule:\n  name: web-app\n  version: 1.0.0"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.name).to_equal("web-app")
+
+    it "parses capsule version":
+        var sdn = "capsule:\n  name: proj\n  version: 2.3.1"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.version).to_equal("2.3.1")
+
+    it "handles missing version gracefully":
+        var sdn = "capsule:\n  name: proj"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.name).to_equal("proj")
+        # version defaults to "0.1.0" when not specified
+        expect(manifest.version).to_equal("0.1.0")
+
+# ============================================================================
+# Roots (carets) section
+# ============================================================================
+
+describe "parse_mdsoc_sdn roots section":
+    it "parses single root":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nroots:\n  - name: core\n    path: src/core"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.carets.len()).to_equal(1)
+        val caret = manifest.carets[0]
+        expect(caret.name).to_equal("core")
+        expect(caret.path).to_equal("src/core")
+
+    it "parses multiple roots":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nroots:\n  - name: core\n    path: src/core"
+        sdn = sdn + "\n  - name: ui\n    path: src/ui"
+        sdn = sdn + "\n  - name: infra\n    path: src/infra"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.carets.len()).to_equal(3)
+
+    it "root name field maps to CaretId name":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nroots:\n  - name: backend\n    path: src/backend"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val caret = manifest.carets[0]
+        expect(caret.name).to_equal("backend")
+
+    it "root path field maps to CaretId path":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nroots:\n  - name: api\n    path: src/api/v2"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val caret = manifest.carets[0]
+        expect(caret.path).to_equal("src/api/v2")
+
+# ============================================================================
+# Dimension section
+# ============================================================================
+
+describe "parse_mdsoc_sdn dimension section":
+    it "parses dimension name and key_template":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.dimensions.len()).to_equal(1)
+        val dim = manifest.dimensions[0]
+        expect(dim.name).to_equal("feature")
+        expect(dim.key_template).to_equal("feature/" + r"{name}")
+
+    it "parses dimension surface":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n  surface: surface.spl"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.surface_file).to_equal("surface.spl")
+
+    it "parses dimension participation":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n  participation: auto_bind"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.participation).to_equal("auto_bind")
+
+    it "parses dimension dependency_cycles":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n  dependency_cycles: allow"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.dep_cycles).to_equal("allow")
+
+    it "dimension without explicit surface uses default":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.surface_file).to_equal("__init__.spl")
+
+# ============================================================================
+# Dimension map (caret-to-pattern mappings)
+# ============================================================================
+
+describe "parse_mdsoc_sdn dimension map":
+    it "parses caret-to-pattern mapping":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  map:\n    - caret: core\n      match: feature/**"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.mappings.len()).to_be_greater_than(0)
+
+    it "mapping has correct caret_name":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  map:\n    - caret: ui\n      match: ui_feature/**"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        val mapping = dim.mappings[0]
+        expect(mapping.caret_name).to_equal("ui")
+
+    it "mapping has correct match_pattern":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  map:\n    - caret: core\n      match: feature/**"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        val mapping = dim.mappings[0]
+        expect(mapping.match_pattern).to_equal("feature/**")
+
+    it "parses multiple map entries":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  map:\n    - caret: core\n      match: feature/**"
+        sdn = sdn + "\n    - caret: ui\n      match: ui_feature/**"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.mappings.len()).to_equal(2)
+        expect(dim.mappings[0].caret_name).to_equal("core")
+        expect(dim.mappings[1].caret_name).to_equal("ui")
+
+# ============================================================================
+# Dimension layering
+# ============================================================================
+
+describe "parse_mdsoc_sdn dimension layering":
+    it "parses layer order":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, app, domain, infra]"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.layer.order.len()).to_equal(4)
+
+    it "parses layer direction upper_to_lower":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, domain]\n    direction: upper_to_lower"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.layer.direction.to_text()).to_equal("upper_to_lower")
+
+    it "parses layer direction lower_to_upper":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, domain]\n    direction: lower_to_upper"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.layer.direction.to_text()).to_equal("lower_to_upper")
+
+    it "parses allow_same_layer flag":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, domain]\n    allow_same_layer: false"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.layer.allow_same_layer).to_equal(false)
+
+    it "parses allow_adjacent_only flag":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, app, domain]\n    allow_adjacent_only: true"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.layer.allow_adjacent_only).to_equal(true)
+
+# ============================================================================
+# Rules section
+# ============================================================================
+
+describe "parse_mdsoc_sdn rules section":
+    it "parses all four boolean flags (strict)":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nrules:\n  enforce_layering: true\n  reject_cycles: true"
+        sdn = sdn + "\n  forbid_implicit_merge: true\n  require_explicit_bind: true"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.rules.enforce_layering).to_equal(true)
+        expect(manifest.rules.reject_cycles).to_equal(true)
+        expect(manifest.rules.forbid_implicit_merge).to_equal(true)
+        expect(manifest.rules.require_explicit_bind).to_equal(true)
+
+    it "parses permissive rules":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nrules:\n  enforce_layering: false\n  reject_cycles: false"
+        sdn = sdn + "\n  forbid_implicit_merge: false\n  require_explicit_bind: false"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.rules.enforce_layering).to_equal(false)
+        expect(manifest.rules.reject_cycles).to_equal(false)
+        expect(manifest.rules.forbid_implicit_merge).to_equal(false)
+        expect(manifest.rules.require_explicit_bind).to_equal(false)
+
+    it "parses mixed rules":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nrules:\n  enforce_layering: true\n  reject_cycles: false"
+        sdn = sdn + "\n  forbid_implicit_merge: true\n  require_explicit_bind: false"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        expect(manifest.rules.enforce_layering).to_equal(true)
+        expect(manifest.rules.reject_cycles).to_equal(false)
+        expect(manifest.rules.forbid_implicit_merge).to_equal(true)
+        expect(manifest.rules.require_explicit_bind).to_equal(false)
+
+# ============================================================================
+# Full config integration
+# ============================================================================
+
+describe "parse_mdsoc_sdn full config":
+    it "parses complete capsule.sdn":
+        var sdn = "capsule:\n  name: my-project\n  version: 1.2.0\n"
+        sdn = sdn + "\nroots:\n  - name: core\n    path: src/core"
+        sdn = sdn + "\n  - name: ui\n    path: src/ui\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}" + "\n"
+        sdn = sdn + "  layering:\n    order: [api, app, domain, infra]\n    direction: upper_to_lower\n"
+        sdn = sdn + "\nrules:\n  enforce_layering: true\n  reject_cycles: true"
+        sdn = sdn + "\n  forbid_implicit_merge: true\n  require_explicit_bind: true"
+
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+
+        # capsule section
+        expect(manifest.name).to_equal("my-project")
+        expect(manifest.version).to_equal("1.2.0")
+
+        # roots section
+        expect(manifest.carets.len()).to_equal(2)
+
+        # dimensions section
+        expect(manifest.dimensions.len()).to_equal(1)
+        val dim = manifest.dimensions[0]
+        expect(dim.name).to_equal("feature")
+        expect(dim.layer.order.len()).to_equal(4)
+
+        # rules section
+        expect(manifest.rules.enforce_layering).to_equal(true)
+
+    it "carets are accessible by name after parse":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\nroots:\n  - name: core\n    path: src/core"
+        sdn = sdn + "\n  - name: ui\n    path: src/ui"
+
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val core_caret = manifest.get_caret("core")
+        val core = core_caret ?? CaretId.new("", "")
+        expect(core.name).to_equal("core")
+        expect(core.path).to_equal("src/core")
+
+    it "dimensions support expand_key after parse":
+        var sdn = "capsule:\n  name: proj\n  version: 0.1.0\n"
+        sdn = sdn + "\ndimension:\n  name: feature\n  key_template: feature/" + r"{name}"
+
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("")
+        val dim = manifest.dimensions[0]
+        expect(dim.expand_key("auth")).to_equal("feature/auth")
+
+# ============================================================================
+# Error cases
+# ============================================================================
+
+describe "parse_mdsoc_sdn error cases":
+    it "missing capsule section returns manifest with empty name":
+        # Input has roots but no capsule section; parser returns a manifest
+        # with empty name (nil only for empty source)
+        var sdn = "roots:\n  - name: core\n    path: src/core"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("fallback")
+        expect(manifest.name).to_equal("")
+
+    it "missing capsule name returns manifest with empty name":
+        # capsule section exists but has no name field
+        var sdn = "capsule:\n  version: 0.1.0"
+        val result = parse_mdsoc_sdn(sdn)
+        val manifest = result ?? MdsocManifest.new("fallback")
+        expect(manifest.name).to_equal("")
+
+    it "random text returns manifest with empty name":
+        # Non-empty text without valid sections still returns a manifest
+        val result = parse_mdsoc_sdn("this is not valid SDN at all")
+        val manifest = result ?? MdsocManifest.new("fallback")
+        expect(manifest.name).to_equal("")
