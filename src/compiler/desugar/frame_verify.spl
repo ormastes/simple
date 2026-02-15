@@ -1,0 +1,316 @@
+# Async Frame Verification — Compile-Time Enforcement
+#
+# Checks async frame sizes against profile limits and emits errors/warnings.
+# This implements Pass A enforcement from the v0.3 baremetal async spec.
+#
+# In strict mode (baremetal):
+#   - frame_size > frame_max => compile ERROR
+#   - large capture > large_capture_max => compile WARNING
+#
+# In relaxed mode:
+#   - frame_size > frame_max => compile WARNING
+#   - large capture > large_capture_max => compile WARNING
+#
+# In managed mode:
+#   - checks disabled unless explicitly enabled via @limit policy
+
+use compiler.desugar.frame_analysis.{
+    FrameAnalysis,
+    VariableSizeInfo,
+    format_frame_analysis
+}
+
+# ================================================================
+# Configuration
+# ================================================================
+
+struct FrameLimits:
+    """Frame verification limits from build profile.
+
+    Fields:
+        frame_max: Maximum allowed frame size in bytes (0 = unlimited)
+        large_capture_max: Threshold for large capture warnings in bytes (0 = disabled)
+        strict: If true, limit violations are errors. If false, warnings.
+    """
+    frame_max: i64
+    large_capture_max: i64
+    strict: bool
+
+fn default_baremetal_limits() -> FrameLimits:
+    """Default limits for baremetal strict profile.
+
+    Matches the v0.3 spec example: frame_max=256B, large_capture_max=64B.
+    """
+    FrameLimits(
+        frame_max: 256,
+        large_capture_max: 64,
+        strict: true
+    )
+
+fn default_relaxed_limits() -> FrameLimits:
+    """Default limits for relaxed profile."""
+    FrameLimits(
+        frame_max: 1024,
+        large_capture_max: 128,
+        strict: false
+    )
+
+fn unlimited_limits() -> FrameLimits:
+    """No limits (managed/GC mode)."""
+    FrameLimits(
+        frame_max: 0,
+        large_capture_max: 0,
+        strict: false
+    )
+
+# ================================================================
+# Verification Result
+# ================================================================
+
+struct FrameDiagnostic:
+    """A single diagnostic from frame verification.
+
+    Fields:
+        level: "error" or "warning"
+        message: Human-readable message
+        function_name: Which async function triggered this
+        actual_size: The size that violated the limit
+        limit_size: The limit that was exceeded
+    """
+    level: text
+    message: text
+    function_name: text
+    actual_size: i64
+    limit_size: i64
+
+struct FrameVerifyResult:
+    """Complete verification result for one or more async functions.
+
+    Fields:
+        diagnostics: All errors and warnings
+        has_errors: True if any errors were found
+        has_warnings: True if any warnings were found
+        total_functions: Number of functions checked
+        passed_functions: Number of functions that passed all checks
+    """
+    diagnostics: [FrameDiagnostic]
+    has_errors: bool
+    has_warnings: bool
+    total_functions: i64
+    passed_functions: i64
+
+# ================================================================
+# Single Function Verification
+# ================================================================
+
+fn verify_frame(fa: FrameAnalysis, limits: FrameLimits) -> FrameVerifyResult:
+    """Verify a single async function's frame against limits.
+
+    Checks:
+    1. Optimized frame size <= frame_max
+    2. No individual variable exceeds large_capture_max
+    3. Declared @task frame attribute matches (if provided)
+
+    Args:
+        fa: Frame analysis result
+        limits: Profile limits
+
+    Returns:
+        FrameVerifyResult with any diagnostics
+    """
+    var diagnostics = []
+    var has_errors = false
+    var has_warnings = false
+
+    # Check 1: Frame size limit
+    if limits.frame_max > 0:
+        if fa.optimized_frame_size > limits.frame_max:
+            var level = "error"
+            if not limits.strict:
+                level = "warning"
+            val diag = FrameDiagnostic(
+                level: level,
+                message: "async fn '{fa.function_name}' frame {fa.optimized_frame_size}B exceeds limit {limits.frame_max}B",
+                function_name: fa.function_name,
+                actual_size: fa.optimized_frame_size,
+                limit_size: limits.frame_max
+            )
+            diagnostics = diagnostics.push(diag)
+            if limits.strict:
+                has_errors = true
+            else:
+                has_warnings = true
+
+    # Check 2: Large capture detection
+    if limits.large_capture_max > 0:
+        for var_info in fa.all_saved_variables:
+            if var_info.size_bytes > limits.large_capture_max:
+                val diag = FrameDiagnostic(
+                    level: "warning",
+                    message: "large value '{var_info.name}' ({var_info.size_bytes}B) held across await in '{fa.function_name}' — consider splitting or boxing",
+                    function_name: fa.function_name,
+                    actual_size: var_info.size_bytes,
+                    limit_size: limits.large_capture_max
+                )
+                diagnostics = diagnostics.push(diag)
+                has_warnings = true
+
+    var passed = 0
+    if not has_errors:
+        passed = 1
+
+    FrameVerifyResult(
+        diagnostics: diagnostics,
+        has_errors: has_errors,
+        has_warnings: has_warnings,
+        total_functions: 1,
+        passed_functions: passed
+    )
+
+# ================================================================
+# @task Frame Attribute Verification
+# ================================================================
+
+fn verify_task_frame(
+    fa: FrameAnalysis,
+    declared_frame: i64,
+    limits: FrameLimits
+) -> FrameVerifyResult:
+    """Verify frame against both profile limits and @task declared frame.
+
+    When a task declares @task(frame=224B), the compiler checks:
+    1. optimized_frame_size <= declared_frame
+    2. declared_frame <= limits.frame_max (redundant but explicit)
+
+    Args:
+        fa: Frame analysis result
+        declared_frame: Frame size from @task attribute (bytes)
+        limits: Profile limits
+
+    Returns:
+        FrameVerifyResult with any diagnostics
+    """
+    # First run standard checks
+    var result = verify_frame(fa, limits)
+    var diagnostics = result.diagnostics
+    var has_errors = result.has_errors
+    var has_warnings = result.has_warnings
+
+    # Check: actual frame fits in declared @task frame
+    if declared_frame > 0:
+        if fa.optimized_frame_size > declared_frame:
+            val diag = FrameDiagnostic(
+                level: "error",
+                message: "async fn '{fa.function_name}' computed frame {fa.optimized_frame_size}B exceeds @task(frame={declared_frame}B)",
+                function_name: fa.function_name,
+                actual_size: fa.optimized_frame_size,
+                limit_size: declared_frame
+            )
+            diagnostics = diagnostics.push(diag)
+            has_errors = true
+
+        # Check declared frame fits in profile limit
+        if limits.frame_max > 0 and declared_frame > limits.frame_max:
+            val diag = FrameDiagnostic(
+                level: "error",
+                message: "@task(frame={declared_frame}B) for '{fa.function_name}' exceeds profile frame_max={limits.frame_max}B",
+                function_name: fa.function_name,
+                actual_size: declared_frame,
+                limit_size: limits.frame_max
+            )
+            diagnostics = diagnostics.push(diag)
+            has_errors = true
+
+    var passed = 0
+    if not has_errors:
+        passed = 1
+
+    FrameVerifyResult(
+        diagnostics: diagnostics,
+        has_errors: has_errors,
+        has_warnings: has_warnings,
+        total_functions: 1,
+        passed_functions: passed
+    )
+
+# ================================================================
+# Batch Verification
+# ================================================================
+
+fn verify_frames_batch(
+    analyses: [FrameAnalysis],
+    limits: FrameLimits
+) -> FrameVerifyResult:
+    """Verify multiple async functions in batch.
+
+    Merges all diagnostics into a single result.
+    """
+    var all_diagnostics = []
+    var any_errors = false
+    var any_warnings = false
+    var passed_count = 0
+
+    for fa in analyses:
+        val result = verify_frame(fa, limits)
+        all_diagnostics = all_diagnostics + result.diagnostics
+        if result.has_errors:
+            any_errors = true
+        if result.has_warnings:
+            any_warnings = true
+        passed_count = passed_count + result.passed_functions
+
+    FrameVerifyResult(
+        diagnostics: all_diagnostics,
+        has_errors: any_errors,
+        has_warnings: any_warnings,
+        total_functions: analyses.len(),
+        passed_functions: passed_count
+    )
+
+# ================================================================
+# Formatting
+# ================================================================
+
+fn format_verify_result(result: FrameVerifyResult) -> text:
+    """Format verification result for display.
+
+    Returns human-readable report of all diagnostics.
+    """
+    var lines = []
+    lines = lines.push("Frame Verification: {result.passed_functions}/{result.total_functions} passed")
+
+    if result.diagnostics.len() == 0:
+        lines = lines.push("  All checks passed.")
+        return lines.join("\n")
+
+    for diag in result.diagnostics:
+        val prefix = "[{diag.level}]"
+        lines = lines.push("  {prefix} {diag.message}")
+
+    lines.join("\n")
+
+fn format_diagnostics_compact(result: FrameVerifyResult) -> [text]:
+    """Format diagnostics as compact one-line messages.
+
+    Suitable for compiler error output.
+    """
+    var messages = []
+    for diag in result.diagnostics:
+        messages = messages.push("{diag.level}: {diag.message}")
+    messages
+
+# ================================================================
+# Exports
+# ================================================================
+
+export FrameLimits
+export FrameDiagnostic
+export FrameVerifyResult
+export default_baremetal_limits
+export default_relaxed_limits
+export unlimited_limits
+export verify_frame
+export verify_task_frame
+export verify_frames_batch
+export format_verify_result
+export format_diagnostics_compact

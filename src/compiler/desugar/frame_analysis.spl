@@ -1,0 +1,564 @@
+# Async Frame Size Analysis
+#
+# Computes the memory layout and size of async state machines generated
+# by the desugaring pipeline. This is the core of compile-time frame
+# verification for bare-metal async (v0.3 spec, Pass A).
+#
+# The analysis operates on the StateEnum produced by state_enum.spl.
+# Each variant of the enum represents a suspend point, and the frame
+# size is the tagged-union maximum across all variants plus the header.
+#
+# Pipeline position:
+#   analyze_suspensions() -> generate_state_enum() -> analyze_frame() -> verify_frame_limits()
+#
+# Design decisions:
+# - All types default to 8 bytes (pointer-width on 64-bit targets)
+# - Bool is 1 byte but aligned to 8 in struct layout
+# - The state discriminant is 8 bytes (i64 tag)
+# - Frame header is 24 bytes (see v0.3 spec section 9.1)
+# - Storage conflict analysis identifies variables that can share memory
+
+use compiler.desugar.state_enum.{StateEnum, StateVariant}
+use compiler.desugar.suspension_analysis.{
+    SuspensionAnalysis,
+    SuspensionPoint,
+    VariableDecl,
+    TYPETAG_BOOL,
+    TYPETAG_I64,
+    TYPETAG_F64,
+    TYPETAG_TEXT,
+    TYPETAG_UNKNOWN
+}
+
+# ================================================================
+# Constants
+# ================================================================
+
+# Frame header: state(4) + run_queue_next(4) + poll_fn_idx(4) +
+#               timer_expires(4) + generation(2) + priority(1) +
+#               flags(1) + waiter_head(4) = 24 bytes
+val FRAME_HEADER_SIZE = 24
+
+# State discriminant: i64 tag to identify which variant is active
+val DISCRIMINANT_SIZE = 8
+
+# Default size for any type (pointer-width on 64-bit target)
+val DEFAULT_TYPE_SIZE = 8
+
+# Size of a Future value (opaque pointer to state machine)
+val FUTURE_SIZE = 8
+
+# Alignment boundary
+val ALIGNMENT = 8
+
+# ================================================================
+# Data Structures
+# ================================================================
+
+struct VariableSizeInfo:
+    """Size information for a single variable saved across an await point."""
+    name: text
+    type_tag: i64
+    size_bytes: i64
+
+struct VariantLayout:
+    """Memory layout of a single state variant."""
+    variant_name: text
+    variables: [VariableSizeInfo]
+    payload_size: i64
+    has_future: bool
+
+struct ConflictEntry:
+    """Entry in the storage conflict matrix.
+
+    Two variables conflict if they are both live in the same variant.
+    Non-conflicting variables can share memory in the union layout.
+    """
+    var_a: text
+    var_b: text
+
+struct FrameAnalysis:
+    """Complete frame size analysis for an async function.
+
+    Fields:
+        function_name: Name of the analyzed async function
+        variant_layouts: Per-variant size breakdowns
+        max_variant_payload: Size of the largest variant payload
+        discriminant_size: Size of the state tag
+        frame_body_size: discriminant + max_variant_payload
+        frame_header_size: Fixed header overhead
+        total_frame_size: header + body (what gets allocated)
+        all_saved_variables: Union of all variables across variants
+        conflict_pairs: Variables that are simultaneously live
+        non_conflict_pairs: Variables that can share memory
+        overlap_savings: Bytes saved by overlap optimization
+        optimized_frame_size: total_frame_size - overlap_savings
+        large_captures: Variables exceeding a threshold
+    """
+    function_name: text
+    variant_layouts: [VariantLayout]
+    max_variant_payload: i64
+    discriminant_size: i64
+    frame_body_size: i64
+    frame_header_size: i64
+    total_frame_size: i64
+    all_saved_variables: [VariableSizeInfo]
+    conflict_pairs: [ConflictEntry]
+    non_conflict_pairs: [ConflictEntry]
+    overlap_savings: i64
+    optimized_frame_size: i64
+    large_captures: [VariableSizeInfo]
+
+# ================================================================
+# Entry Point
+# ================================================================
+
+fn analyze_frame(
+    function_name: text,
+    state_enum: StateEnum,
+    analysis: SuspensionAnalysis
+) -> FrameAnalysis:
+    """Analyze async function frame size from its state enum.
+
+    This is the main entry point for frame size analysis. It takes
+    the generated state enum and computes:
+    1. Per-variant payload sizes
+    2. Maximum variant size (determines frame body)
+    3. Total frame size (header + body)
+    4. Storage conflict matrix for overlap optimization
+    5. Large capture detection
+
+    Args:
+        function_name: Name of the async function
+        state_enum: Generated state enum from state_enum.spl
+        analysis: Suspension analysis (for type hints from live_var_decls)
+
+    Returns:
+        FrameAnalysis with complete size information
+    """
+    # Step 1: Compute per-variant layouts
+    val layouts = compute_variant_layouts(state_enum, analysis)
+
+    # Step 2: Find maximum variant payload
+    var max_payload = 0
+    for layout in layouts:
+        if layout.payload_size > max_payload:
+            max_payload = layout.payload_size
+
+    # Step 3: Compute frame sizes
+    val body_size = DISCRIMINANT_SIZE + max_payload
+    val total_size = FRAME_HEADER_SIZE + body_size
+
+    # Step 4: Collect all saved variables across variants
+    val all_vars = collect_all_variables(layouts)
+
+    # Step 5: Build conflict matrix
+    val conflicts = build_conflict_pairs(layouts)
+    val non_conflicts = build_non_conflict_pairs(layouts, all_vars)
+
+    # Step 6: Compute overlap savings
+    val savings = compute_overlap_savings(non_conflicts, all_vars)
+    val optimized = total_size - savings
+
+    # Step 7: Detect large captures (threshold checked by caller)
+    val large = []
+
+    FrameAnalysis(
+        function_name: function_name,
+        variant_layouts: layouts,
+        max_variant_payload: max_payload,
+        discriminant_size: DISCRIMINANT_SIZE,
+        frame_body_size: body_size,
+        frame_header_size: FRAME_HEADER_SIZE,
+        total_frame_size: total_size,
+        all_saved_variables: all_vars,
+        conflict_pairs: conflicts,
+        non_conflict_pairs: non_conflicts,
+        overlap_savings: savings,
+        optimized_frame_size: optimized,
+        large_captures: large
+    )
+
+fn analyze_frame_with_large_capture_check(
+    function_name: text,
+    state_enum: StateEnum,
+    analysis: SuspensionAnalysis,
+    large_capture_threshold: i64
+) -> FrameAnalysis:
+    """Analyze frame with large capture detection.
+
+    Same as analyze_frame but also identifies variables whose size
+    exceeds large_capture_threshold. These are reported as warnings
+    in strict mode.
+
+    Args:
+        function_name: Name of async function
+        state_enum: Generated state enum
+        analysis: Suspension analysis
+        large_capture_threshold: Max bytes before warning (e.g. 64)
+
+    Returns:
+        FrameAnalysis with large_captures populated
+    """
+    var result = analyze_frame(function_name, state_enum, analysis)
+
+    # Find variables exceeding threshold
+    var large = []
+    for var_info in result.all_saved_variables:
+        if var_info.size_bytes > large_capture_threshold:
+            large = large.push(var_info)
+
+    FrameAnalysis(
+        function_name: result.function_name,
+        variant_layouts: result.variant_layouts,
+        max_variant_payload: result.max_variant_payload,
+        discriminant_size: result.discriminant_size,
+        frame_body_size: result.frame_body_size,
+        frame_header_size: result.frame_header_size,
+        total_frame_size: result.total_frame_size,
+        all_saved_variables: result.all_saved_variables,
+        conflict_pairs: result.conflict_pairs,
+        non_conflict_pairs: result.non_conflict_pairs,
+        overlap_savings: result.overlap_savings,
+        optimized_frame_size: result.optimized_frame_size,
+        large_captures: large
+    )
+
+# ================================================================
+# Variant Layout Computation
+# ================================================================
+
+fn compute_variant_layouts(
+    state_enum: StateEnum,
+    analysis: SuspensionAnalysis
+) -> [VariantLayout]:
+    """Compute memory layout for each state variant.
+
+    For each variant in the state enum:
+    - Determine size of each field
+    - Sum to get payload size
+    - Align to ALIGNMENT boundary
+    """
+    var layouts = []
+
+    for variant in state_enum.variants:
+        val layout = compute_single_variant_layout(variant, analysis)
+        layouts = layouts.push(layout)
+
+    layouts
+
+fn compute_single_variant_layout(
+    variant: StateVariant,
+    analysis: SuspensionAnalysis
+) -> VariantLayout:
+    """Compute layout for a single state variant."""
+    var variables = []
+    var payload = 0
+    var has_future = false
+
+    for field in variant.fields:
+        val field_size = resolve_field_size(field, variant, analysis)
+        val var_info = VariableSizeInfo(
+            name: field.name,
+            type_tag: resolve_field_type_tag(field, variant, analysis),
+            size_bytes: field_size
+        )
+        variables = variables.push(var_info)
+        payload = payload + field_size
+
+        if field.name == "future":
+            has_future = true
+
+    # Align payload to boundary
+    payload = align_up(payload, ALIGNMENT)
+
+    VariantLayout(
+        variant_name: variant.name,
+        variables: variables,
+        payload_size: payload,
+        has_future: has_future
+    )
+
+fn resolve_field_size(field: Field, variant: StateVariant, analysis: SuspensionAnalysis) -> i64:
+    """Resolve the byte size of a state variant field.
+
+    Uses type hints from the suspension analysis when available.
+    Falls back to DEFAULT_TYPE_SIZE (8 bytes) for unknown types.
+    """
+    # The "future" field is always pointer-sized
+    if field.name == "future":
+        return FUTURE_SIZE
+
+    # Try to get type hint from suspension analysis
+    val type_tag = resolve_field_type_tag(field, variant, analysis)
+    type_tag_to_size(type_tag)
+
+fn resolve_field_type_tag(
+    field: Field,
+    variant: StateVariant,
+    analysis: SuspensionAnalysis
+) -> i64:
+    """Resolve type tag for a field using suspension analysis type hints."""
+    if field.name == "future":
+        return TYPETAG_UNKNOWN
+
+    # Search suspension points for matching variable with type hint
+    if variant.suspension_point_id != nil:
+        val sp_id = variant.suspension_point_id ?? -1
+        if sp_id >= 0 and sp_id < analysis.suspension_points.len():
+            val sp = analysis.suspension_points[sp_id]
+            for decl in sp.live_var_decls:
+                if decl.name == field.name:
+                    return decl.type_tag
+
+    TYPETAG_UNKNOWN
+
+fn type_tag_to_size(type_tag: i64) -> i64:
+    """Convert a type tag to its byte size.
+
+    On 64-bit targets:
+    - bool: 1 byte (but aligned to 8 in struct context)
+    - i64, f64: 8 bytes
+    - text: 8 bytes (pointer)
+    - unknown/struct/array: 8 bytes (pointer)
+
+    For struct layout, we always align to 8 bytes, so even bool
+    takes 8 bytes when stored in a state variant field.
+    """
+    if type_tag == TYPETAG_BOOL:
+        # In struct layout, bool is padded to alignment
+        return ALIGNMENT
+    if type_tag == TYPETAG_I64:
+        return 8
+    if type_tag == TYPETAG_F64:
+        return 8
+    if type_tag == TYPETAG_TEXT:
+        return 8
+    # Unknown/struct/enum/array/fn — all pointer-sized
+    DEFAULT_TYPE_SIZE
+
+fn align_up(size: i64, alignment: i64) -> i64:
+    """Align size up to the nearest multiple of alignment."""
+    if alignment == 0:
+        return size
+    val remainder = size % alignment
+    if remainder == 0:
+        return size
+    size + (alignment - remainder)
+
+# ================================================================
+# Variable Collection
+# ================================================================
+
+fn collect_all_variables(layouts: [VariantLayout]) -> [VariableSizeInfo]:
+    """Collect the union of all variables across all variants.
+
+    Each variable appears once in the output with its maximum size
+    across all variants where it appears.
+    """
+    var seen_names = []
+    var result = []
+
+    for layout in layouts:
+        for var_info in layout.variables:
+            # Skip the future field (internal implementation detail)
+            if var_info.name == "future":
+                continue
+            var found = false
+            for idx in 0..seen_names.len():
+                if seen_names[idx] == var_info.name:
+                    found = true
+                    # Update to max size if larger
+                    if var_info.size_bytes > result[idx].size_bytes:
+                        result[idx] = var_info
+                    break
+            if not found:
+                seen_names = seen_names.push(var_info.name)
+                result = result.push(var_info)
+
+    result
+
+# ================================================================
+# Storage Conflict Analysis
+# ================================================================
+
+fn build_conflict_pairs(layouts: [VariantLayout]) -> [ConflictEntry]:
+    """Build conflict pairs: variables that are simultaneously live.
+
+    Two variables conflict if they both appear in the same variant.
+    Conflicting variables MUST occupy separate memory in the union layout.
+    """
+    var pairs = []
+
+    for layout in layouts:
+        val vars_in_variant = layout.variables
+        for i in 0..vars_in_variant.len():
+            val vi = vars_in_variant[i]
+            if vi.name == "future":
+                continue
+            for j in (i + 1)..vars_in_variant.len():
+                val vj = vars_in_variant[j]
+                if vj.name == "future":
+                    continue
+                # Check if this pair is already recorded
+                var already = false
+                for existing in pairs:
+                    val match_fwd = existing.var_a == vi.name and existing.var_b == vj.name
+                    val match_rev = existing.var_a == vj.name and existing.var_b == vi.name
+                    if match_fwd or match_rev:
+                        already = true
+                        break
+                if not already:
+                    pairs = pairs.push(ConflictEntry(var_a: vi.name, var_b: vj.name))
+
+    pairs
+
+fn build_non_conflict_pairs(
+    layouts: [VariantLayout],
+    all_vars: [VariableSizeInfo]
+) -> [ConflictEntry]:
+    """Build non-conflict pairs: variables that can share memory.
+
+    Two variables don't conflict if they NEVER appear in the same variant.
+    These variables can be placed at the same offset in the union layout.
+    """
+    val conflicts = build_conflict_pairs(layouts)
+    var non_conflicts = []
+
+    for i in 0..all_vars.len():
+        val vi = all_vars[i]
+        for j in (i + 1)..all_vars.len():
+            val vj = all_vars[j]
+            # Check if (vi, vj) is in conflicts
+            var is_conflict = false
+            for c in conflicts:
+                val match_fwd = c.var_a == vi.name and c.var_b == vj.name
+                val match_rev = c.var_a == vj.name and c.var_b == vi.name
+                if match_fwd or match_rev:
+                    is_conflict = true
+                    break
+            if not is_conflict:
+                non_conflicts = non_conflicts.push(ConflictEntry(var_a: vi.name, var_b: vj.name))
+
+    non_conflicts
+
+fn compute_overlap_savings(
+    non_conflicts: [ConflictEntry],
+    all_vars: [VariableSizeInfo]
+) -> i64:
+    """Compute bytes saved by overlapping non-conflicting variables.
+
+    For each pair of non-conflicting variables, the smaller one can
+    share memory with the larger one, saving min(size_a, size_b) bytes.
+
+    This is a greedy approximation. Optimal overlap requires graph
+    coloring which is NP-hard but tractable for small variable counts.
+    For most embedded async functions (2-5 suspend points, <20 locals),
+    the greedy approach gives near-optimal results.
+    """
+    # For now, use a simple greedy: track which variables have been
+    # "merged" with another. Each variable can merge with at most one other.
+    var merged = []
+    var savings = 0
+
+    for pair in non_conflicts:
+        # Check neither variable is already merged
+        var a_merged = false
+        var b_merged = false
+        for m in merged:
+            if m == pair.var_a:
+                a_merged = true
+            if m == pair.var_b:
+                b_merged = true
+        if a_merged or b_merged:
+            continue
+
+        # Find sizes
+        var size_a = 0
+        var size_b = 0
+        for v in all_vars:
+            if v.name == pair.var_a:
+                size_a = v.size_bytes
+            if v.name == pair.var_b:
+                size_b = v.size_bytes
+
+        # The smaller variable can share memory with the larger
+        var saved = size_a
+        if size_b < size_a:
+            saved = size_b
+        savings = savings + saved
+
+        # Mark both as merged
+        merged = merged.push(pair.var_a)
+        merged = merged.push(pair.var_b)
+
+    savings
+
+# ================================================================
+# Debugging / Reporting
+# ================================================================
+
+fn format_frame_analysis(fa: FrameAnalysis) -> text:
+    """Format frame analysis for debugging output.
+
+    Returns a human-readable multi-line report of the frame layout.
+    """
+    var lines = []
+    lines = lines.push("Frame Analysis: {fa.function_name}")
+    lines = lines.push("  Header:        {fa.frame_header_size}B")
+    lines = lines.push("  Discriminant:  {fa.discriminant_size}B")
+    lines = lines.push("  Max payload:   {fa.max_variant_payload}B")
+    lines = lines.push("  Frame body:    {fa.frame_body_size}B")
+    lines = lines.push("  Total frame:   {fa.total_frame_size}B")
+    lines = lines.push("  Overlap saves: {fa.overlap_savings}B")
+    lines = lines.push("  Optimized:     {fa.optimized_frame_size}B")
+    lines = lines.push("")
+    lines = lines.push("  Variants:")
+
+    for layout in fa.variant_layouts:
+        var var_strs = []
+        for v in layout.variables:
+            var_strs = var_strs.push("{v.name}:{v.size_bytes}B")
+        val vars_desc = var_strs.join(", ")
+        lines = lines.push("    {layout.variant_name}: {layout.payload_size}B [{vars_desc}]")
+
+    if fa.all_saved_variables.len() > 0:
+        lines = lines.push("")
+        lines = lines.push("  Saved variables:")
+        for v in fa.all_saved_variables:
+            lines = lines.push("    {v.name}: {v.size_bytes}B (tag={v.type_tag})")
+
+    if fa.conflict_pairs.len() > 0:
+        lines = lines.push("")
+        lines = lines.push("  Conflicts (must not overlap):")
+        for c in fa.conflict_pairs:
+            lines = lines.push("    {c.var_a} <-> {c.var_b}")
+
+    if fa.non_conflict_pairs.len() > 0:
+        lines = lines.push("")
+        lines = lines.push("  Non-conflicts (can share memory):")
+        for nc in fa.non_conflict_pairs:
+            lines = lines.push("    {nc.var_a} ~ {nc.var_b}")
+
+    if fa.large_captures.len() > 0:
+        lines = lines.push("")
+        lines = lines.push("  Large captures (warning):")
+        for lc in fa.large_captures:
+            lines = lines.push("    {lc.name}: {lc.size_bytes}B")
+
+    lines.join("\n")
+
+# ================================================================
+# Exports
+# ================================================================
+
+export VariableSizeInfo
+export VariantLayout
+export ConflictEntry
+export FrameAnalysis
+export analyze_frame
+export analyze_frame_with_large_capture_check
+export format_frame_analysis
+export type_tag_to_size
+export align_up
+export FRAME_HEADER_SIZE, DISCRIMINANT_SIZE, DEFAULT_TYPE_SIZE, FUTURE_SIZE, ALIGNMENT

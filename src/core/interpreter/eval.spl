@@ -184,10 +184,18 @@ var func_table_decls: [i64] = []
 # Maps function name -> return type tag
 var func_return_types: [(text, i64)] = []
 
+# ===== Must-Use Function Registry (R9) =====
+var must_use_fn_names: [text] = []
+var must_use_fn_reasons: [text] = []
+var must_use_critical_mode: bool = false
+
 fn func_table_reset():
     func_table_names = []
     func_table_decls = []
     func_return_types = []
+    must_use_fn_names = []
+    must_use_fn_reasons = []
+    must_use_critical_mode = false
 
 fn func_table_register(name: text, decl_id: i64):
     # Check for existing
@@ -218,6 +226,115 @@ fn func_lookup_return_type(name: text) -> i64:
         if fn_name == name:
             return ret_type
     -1
+
+# ===== Must-Use Registry Functions (R9) =====
+
+fn must_use_register(name: text, reason: text):
+    must_use_fn_names.push(name)
+    must_use_fn_reasons.push(reason)
+
+fn must_use_is_registered(name: text) -> bool:
+    for fn_name in must_use_fn_names:
+        if fn_name == name: return true
+    false
+
+fn must_use_get_reason(name: text) -> text:
+    var i: i64 = 0
+    for fn_name in must_use_fn_names:
+        if fn_name == name: return must_use_fn_reasons[i]
+        i = i + 1
+    ""
+
+fn must_use_is_critical() -> bool:
+    must_use_critical_mode
+
+fn must_use_scan_source(source: text):
+    must_use_fn_names = []
+    must_use_fn_reasons = []
+    must_use_critical_mode = false
+    # Split source into lines and scan for comment annotations
+    var lines: [text] = []
+    var current_line: text = ""
+    var ci: i64 = 0
+    for _unused in source:
+        if ci >= source.len(): break
+        val ch = source[ci]
+        if ch == "\n":
+            lines.push(current_line)
+            current_line = ""
+        else:
+            current_line = current_line + ch
+        ci = ci + 1
+    if current_line != "":
+        lines.push(current_line)
+    # Scan for annotations
+    var pending_must_use: bool = false
+    var pending_reason: text = ""
+    var li: i64 = 0
+    for line in lines:
+        # Trim leading spaces
+        var trimmed: text = ""
+        var started: bool = false
+        var ti: i64 = 0
+        for _c in line:
+            if ti >= line.len(): break
+            val lc = line[ti]
+            if started:
+                trimmed = trimmed + lc
+            elif lc != " " and lc != "\t":
+                started = true
+                trimmed = trimmed + lc
+            ti = ti + 1
+        # Check for @profile(critical)
+        if trimmed.starts_with("# @profile(critical)"):
+            must_use_critical_mode = true
+        # Check for @must_use
+        if trimmed.starts_with("# @must_use"):
+            pending_must_use = true
+            # Extract reason from @must_use("reason")
+            pending_reason = ""
+            if trimmed.contains("(\""):
+                # Find text between (" and ")
+                var in_reason: bool = false
+                var reason_buf: text = ""
+                var ri: i64 = 0
+                for _rc in trimmed:
+                    if ri >= trimmed.len(): break
+                    if in_reason:
+                        val rc2 = trimmed[ri]
+                        if rc2 == "\"":
+                            in_reason = false
+                        else:
+                            reason_buf = reason_buf + rc2
+                    elif ri + 1 < trimmed.len():
+                        val rc3 = trimmed[ri]
+                        val rc4 = trimmed[ri + 1]
+                        if rc3 == "(" and rc4 == "\"":
+                            in_reason = true
+                            ri = ri + 1
+                    ri = ri + 1
+                pending_reason = reason_buf
+        # Check if line declares a function (and we have a pending annotation)
+        if pending_must_use:
+            if trimmed.starts_with("fn "):
+                # Extract function name
+                var fname: text = ""
+                var fi: i64 = 3
+                for _fc in trimmed:
+                    if fi >= trimmed.len(): break
+                    val fc2 = trimmed[fi]
+                    if fc2 == "(" or fc2 == " " or fc2 == ":": break
+                    fname = fname + fc2
+                    fi = fi + 1
+                if fname != "":
+                    must_use_register(fname, pending_reason)
+                pending_must_use = false
+                pending_reason = ""
+            elif trimmed.starts_with("# ") == false and trimmed != "":
+                # Non-comment, non-empty line without fn => cancel pending
+                pending_must_use = false
+                pending_reason = ""
+        li = li + 1
 
 # ===== Struct Definition Table =====
 # Maps struct name -> decl_id for constructor resolution
@@ -1373,9 +1490,22 @@ fn eval_stmt_expr(sid: i64) -> i64:
                 val is_void = ret_type == 0
                 val is_unknown = ret_type == -1
                 if is_void == false and is_unknown == false:
-                    val type_name = type_tag_name(ret_type)
-                    val warning = "warning: return value of type '" + type_name + "' from function '" + fn_name + "' is ignored"
-                    eval_warnings.push(warning)
+                    if must_use_is_registered(fn_name):
+                        val reason = must_use_get_reason(fn_name)
+                        val msg = "error[R9]: return value of function '" + fn_name + "' must be used"
+                        eval_warnings.push(msg)
+                        if reason != "":
+                            eval_warnings.push("  = note: " + reason)
+                        eval_warnings.push("  = help: assign to variable or use 'val _ = ...' to discard")
+                    elif must_use_critical_mode:
+                        val type_name = type_tag_name(ret_type)
+                        val msg = "error[R9]: return value of '" + fn_name + "' (" + type_name + ") discarded in @profile(critical)"
+                        eval_warnings.push(msg)
+                        eval_warnings.push("  = help: assign to variable or use 'val _ = ...' to discard")
+                    else:
+                        val type_name = type_tag_name(ret_type)
+                        val warning = "warning: return value of type '" + type_name + "' from function '" + fn_name + "' is ignored"
+                        eval_warnings.push(warning)
 
     eval_expr(eid)
 
@@ -1851,3 +1981,5 @@ export struct_table_reset, struct_table_register, struct_table_lookup
 export eval_expr, eval_stmt, eval_decl, eval_module
 export eval_block, eval_function_call, eval_builtin_call
 export eval_init
+export must_use_scan_source, must_use_register, must_use_is_registered
+export must_use_get_reason, must_use_is_critical
