@@ -1,12 +1,259 @@
-# Actors Module
-#
-# Actor model for concurrent programming.
-# Provides isolated actors with message passing.
-# Actors register named method handlers at spawn time; the runtime
-# dispatches incoming messages by looking up method names in the
-# handler table.
-#
-# Public API:
-#   - use std.actors.actor.{ActorRef, spawn_actor, make_handlers, get_actor_runtime}
+"""Actors Module - Actor model for fault-tolerant concurrent programming
+
+@tag:stdlib
+@tag:api
+@tag:actors
+
+This module implements the actor model, providing isolated concurrent entities
+that communicate through asynchronous message passing. Actors register named
+method handlers at spawn time; the runtime dispatches incoming messages by
+looking up method names in the handler table.
+
+Core Concepts
+-------------
+
+- **Actor**: Isolated entity with private state and message handlers
+- **Message**: Asynchronous communication between actors
+- **Supervision**: Hierarchical fault tolerance with supervisor actors
+- **ActorRef**: Reference to an actor (for sending messages)
+
+Public API
+----------
+
+```simple
+use std.actors.actor.{ActorRef, spawn_actor, make_handlers, get_actor_runtime}
+use std.actors.supervisor.{Supervisor, restart_strategy}
+use std.actors.mailbox.{Mailbox, send_message}
+```
+
+Examples
+--------
+
+Basic actor with message handlers:
+```simple
+use std.actors.actor.{spawn_actor, make_handlers, ActorRef}
+
+# Define actor state
+class CounterState:
+    count: i64
+
+# Define message handlers
+fn handle_increment(state: CounterState, amount: i64) -> CounterState:
+    # Increment counter by amount
+    CounterState(count: state.count + amount)
+
+fn handle_get(state: CounterState) -> i64:
+    # Return current count
+    state.count
+
+# Create handler table
+val handlers = make_handlers({
+    "increment": handle_increment,
+    "get": handle_get
+})
+
+# Spawn actor
+val initial_state = CounterState(count: 0)
+val actor_ref = spawn_actor(initial_state, handlers)
+
+# Send messages
+actor_ref.send("increment", 5)
+actor_ref.send("increment", 3)
+
+# Get result (blocking)
+val count = actor_ref.ask("get", nil)
+print "Count: {count}"  # Count: 8
+```
+
+Actor-to-actor communication:
+```simple
+use std.actors.actor.{spawn_actor, make_handlers, ActorRef}
+
+# Worker actor that processes data
+fn worker_handler(state: [i64], msg: i64) -> [i64]:
+    state.push(msg * 2)
+    state
+
+val worker_handlers = make_handlers({
+    "process": worker_handler
+})
+
+val worker = spawn_actor([], worker_handlers)
+
+# Manager actor that delegates to workers
+class ManagerState:
+    workers: [ActorRef]
+    results: [i64]
+
+fn manager_delegate(state: ManagerState, value: i64) -> ManagerState:
+    # Send to first worker
+    val worker = state.workers[0]
+    worker.send("process", value)
+    state
+
+val manager_handlers = make_handlers({
+    "delegate": manager_delegate
+})
+
+val manager_state = ManagerState(workers: [worker], results: [])
+val manager = spawn_actor(manager_state, manager_handlers)
+
+# Use the actors
+manager.send("delegate", 10)
+manager.send("delegate", 20)
+```
+
+Supervised actors with fault tolerance:
+```simple
+use std.actors.supervisor.{Supervisor, RestartStrategy}
+
+# Define supervisor strategy
+val restart_strategy = RestartStrategy.one_for_one(
+    max_restarts: 3,
+    within_seconds: 60
+)
+
+# Create supervisor
+val supervisor = Supervisor.new("main_supervisor", restart_strategy)
+
+# Spawn child actors under supervision
+val child1 = supervisor.spawn_child("worker1", initial_state, handlers)
+val child2 = supervisor.spawn_child("worker2", initial_state, handlers)
+
+# If child1 crashes, supervisor restarts it
+# Other children continue running (one-for-one strategy)
+```
+
+Actor patterns:
+```simple
+use std.actors.actor.{spawn_actor, make_handlers}
+
+# Request-Reply pattern
+fn handle_request(state: text, request: text) -> (text, text):
+    val response = process_request(request)
+    (state, response)  # Return (new_state, reply)
+
+# Fire-and-Forget pattern
+fn handle_log(state: [text], message: text) -> [text]:
+    state.push(message)
+    state  # No reply expected
+
+# Pub-Sub pattern
+class PubSubState:
+    subscribers: [ActorRef]
+    messages: [text]
+
+fn handle_subscribe(state: PubSubState, subscriber: ActorRef) -> PubSubState:
+    state.subscribers.push(subscriber)
+    state
+
+fn handle_publish(state: PubSubState, message: text) -> PubSubState:
+    for subscriber in state.subscribers:
+        subscriber.send("message", message)
+    state
+```
+
+Message Handler Signature
+--------------------------
+
+All message handlers must follow this pattern:
+
+```simple
+fn handler_name(state: StateType, message: MessageType) -> StateType:
+    # Process message and return new state
+    new_state
+```
+
+Handlers can also return tuples for request-reply:
+
+```simple
+fn handler_name(state: StateType, message: MessageType) -> (StateType, ReplyType):
+    # Process and return (new_state, reply)
+    (new_state, reply_value)
+```
+
+Actor Lifecycle
+---------------
+
+1. **Spawn**: Create actor with initial state and handlers
+2. **Running**: Process messages from mailbox
+3. **Suspended**: Temporarily paused (supervision)
+4. **Restarting**: Recovering from failure (supervision)
+5. **Stopped**: Actor terminated (cleanup complete)
+
+Supervision Strategies
+----------------------
+
+- **one-for-one**: Restart only failed actor
+- **one-for-all**: Restart all child actors when one fails
+- **rest-for-one**: Restart failed actor and those started after it
+
+Error Handling
+--------------
+
+```simple
+# Actors handle errors internally
+fn safe_handler(state: MyState, msg: text) -> MyState:
+    # Use Option pattern for errors
+    var error = nil
+
+    val result = risky_operation(msg)
+    if result == nil:
+        error = "Operation failed"
+        # Log error and return unchanged state
+        log_error(error)
+        return state
+
+    # Success - update state
+    MyState(value: result)
+```
+
+Performance Notes
+-----------------
+
+- Message passing is asynchronous (non-blocking send)
+- Actor mailboxes are unbounded by default (configure limits)
+- Each actor runs on its own logical thread
+- Multiple actors can run on same OS thread (lightweight)
+- Use actors for coordination, not heavy computation
+
+Actor Runtime
+-------------
+
+Get runtime information:
+
+```simple
+use std.actors.actor.{get_actor_runtime}
+
+val runtime = get_actor_runtime()
+val active_actors = runtime.actor_count()
+val total_messages = runtime.message_count()
+
+print "Active actors: {active_actors}"
+print "Messages processed: {total_messages}"
+```
+
+Submodules
+----------
+
+- **actor**: Core actor implementation and spawning
+- **supervisor**: Supervision trees and fault tolerance
+- **mailbox**: Message queuing and delivery
+- **runtime**: Actor system runtime management
+
+Related Modules
+---------------
+
+- **std.concurrent**: Low-level concurrency (threads, locks)
+- **std.async**: Asynchronous programming (futures, promises)
+- **std.concurrent.channel**: Message passing without actors
+
+See Also
+--------
+
+- **doc/guide/actor_model.md**: Actor model guide
+- **doc/design/actor_supervision.md**: Supervision design
+- **test/unit/std/actors/**: Actor test examples
+"""
 
 # All submodules are automatically available.

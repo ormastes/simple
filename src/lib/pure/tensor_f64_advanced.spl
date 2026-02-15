@@ -1,0 +1,400 @@
+# Pure Simple Advanced Tensor Operations
+#
+# Advanced tensor manipulation operations for TensorF64
+# - stack: Stack tensors along new dimension
+# - concat: Concatenate tensors along existing dimension
+# - split: Split tensor into chunks
+# - reshape: Reshape with -1 inference
+# - permute: Multi-dimensional transpose
+
+use lib.pure.tensor_f64 (TensorF64, from_data, zeros, compute_strides)
+
+# ============================================================================
+# Stack - Stack tensors along new dimension
+# ============================================================================
+
+fn stack(tensors: [TensorF64], dim: i64) -> TensorF64:
+    """Stack tensors along a new dimension.
+
+    Args:
+        tensors: List of tensors with identical shapes
+        dim: Dimension index for new axis (0 to ndim)
+
+    Returns:
+        Stacked tensor with shape[dim] = len(tensors)
+
+    Example:
+        stack([t1, t2, t3], 0) where each ti has shape [2, 3]
+        -> result shape [3, 2, 3]
+    """
+    if tensors.len() == 0:
+        return zeros([0])
+
+    val base_shape = tensors[0].shape
+    val base_ndim = base_shape.len()
+
+    # Build new shape with added dimension
+    var new_shape: [i64] = []
+    var d = 0
+    while d < base_ndim + 1:
+        if d == dim:
+            new_shape.push(tensors.len())
+        if d < base_ndim:
+            val idx = if d < dim: d else: d - 1
+            new_shape.push(base_shape[idx])
+        elif d == base_ndim and dim == base_ndim:
+            new_shape.push(tensors.len())
+        d = d + 1
+
+    # Compute new strides
+    val new_strides = compute_strides(new_shape)
+
+    # Allocate result data
+    var numel = 1
+    for s in new_shape:
+        numel = numel * s
+
+    var result_data: [f64] = []
+    var i = 0
+    while i < numel:
+        result_data.push(0.0)
+        i = i + 1
+
+    # Copy data from each tensor
+    var tensor_idx = 0
+    while tensor_idx < tensors.len():
+        val t = tensors[tensor_idx]
+        var elem_idx = 0
+        while elem_idx < t.data.len():
+            # Compute multi-dimensional index in result
+            var result_offset = 0
+            var remaining = elem_idx
+
+            # Build index for base dimensions
+            var base_idx: [i64] = []
+            var base_d = base_ndim - 1
+            while base_d >= 0:
+                val size = base_shape[base_d]
+                base_idx.insert(0, remaining % size)
+                remaining = remaining / size
+                base_d = base_d - 1
+
+            # Insert tensor index at dim position
+            var full_idx: [i64] = []
+            var fd = 0
+            while fd < base_ndim + 1:
+                if fd == dim:
+                    full_idx.push(tensor_idx)
+                if fd < base_ndim:
+                    val bidx = if fd < dim: fd else: fd - 1
+                    full_idx.push(base_idx[bidx])
+                elif fd == base_ndim and dim == base_ndim:
+                    full_idx.push(tensor_idx)
+                fd = fd + 1
+
+            # Compute flat offset
+            var off = 0
+            var d2 = 0
+            while d2 < new_strides.len():
+                off = off + full_idx[d2] * new_strides[d2]
+                d2 = d2 + 1
+
+            result_data[off] = t.data[elem_idx]
+            elem_idx = elem_idx + 1
+        tensor_idx = tensor_idx + 1
+
+    from_data(result_data, new_shape)
+
+
+# ============================================================================
+# Concat - Concatenate along existing dimension
+# ============================================================================
+
+fn concat(tensors: [TensorF64], dim: i64) -> TensorF64:
+    """Concatenate tensors along an existing dimension.
+
+    Args:
+        tensors: List of tensors with compatible shapes
+        dim: Dimension index to concatenate along
+
+    Returns:
+        Concatenated tensor with increased size at dim
+
+    Example:
+        concat([t1, t2], 0) where t1=[2,3], t2=[3,3]
+        -> result shape [5, 3]
+    """
+    if tensors.len() == 0:
+        return zeros([0])
+
+    val base_shape = tensors[0].shape
+    val ndim = base_shape.len()
+
+    # Compute concatenated size along dim
+    var concat_size = 0
+    for t in tensors:
+        concat_size = concat_size + t.shape[dim]
+
+    # Build new shape
+    var new_shape: [i64] = []
+    var d = 0
+    while d < ndim:
+        if d == dim:
+            new_shape.push(concat_size)
+        else:
+            new_shape.push(base_shape[d])
+        d = d + 1
+
+    # Allocate result
+    var numel = 1
+    for s in new_shape:
+        numel = numel * s
+
+    var result_data: [f64] = []
+    var i = 0
+    while i < numel:
+        result_data.push(0.0)
+        i = i + 1
+
+    val new_strides = compute_strides(new_shape)
+
+    # Copy each tensor with offset along dim
+    var dim_offset = 0
+    for t in tensors:
+        var elem_idx = 0
+        while elem_idx < t.data.len():
+            # Compute source multi-dim index
+            var src_idx: [i64] = []
+            var remaining = elem_idx
+            var sd = ndim - 1
+            while sd >= 0:
+                val size = t.shape[sd]
+                src_idx.insert(0, remaining % size)
+                remaining = remaining / size
+                sd = sd - 1
+
+            # Add offset to dim index
+            var dst_idx: [i64] = []
+            var dd = 0
+            while dd < ndim:
+                if dd == dim:
+                    dst_idx.push(src_idx[dd] + dim_offset)
+                else:
+                    dst_idx.push(src_idx[dd])
+                dd = dd + 1
+
+            # Compute destination offset
+            var dst_off = 0
+            var d2 = 0
+            while d2 < ndim:
+                dst_off = dst_off + dst_idx[d2] * new_strides[d2]
+                d2 = d2 + 1
+
+            result_data[dst_off] = t.data[elem_idx]
+            elem_idx = elem_idx + 1
+
+        dim_offset = dim_offset + t.shape[dim]
+
+    from_data(result_data, new_shape)
+
+
+# ============================================================================
+# Split - Split tensor into chunks
+# ============================================================================
+
+fn split(tensor: TensorF64, sizes: [i64], dim: i64) -> [TensorF64]:
+    """Split tensor into chunks along dimension.
+
+    Args:
+        tensor: Input tensor
+        sizes: Size of each chunk (must sum to tensor.shape[dim])
+        dim: Dimension to split along
+
+    Returns:
+        List of tensors with specified sizes
+
+    Example:
+        split(t, [2, 3], 0) where t has shape [5, 4]
+        -> [chunk1[2,4], chunk2[3,4]]
+    """
+    var results: [TensorF64] = []
+    val ndim = tensor.shape.len()
+
+    var dim_offset = 0
+    for chunk_size in sizes:
+        # Build chunk shape
+        var chunk_shape: [i64] = []
+        var d = 0
+        while d < ndim:
+            if d == dim:
+                chunk_shape.push(chunk_size)
+            else:
+                chunk_shape.push(tensor.shape[d])
+            d = d + 1
+
+        # Allocate chunk data
+        var chunk_numel = 1
+        for s in chunk_shape:
+            chunk_numel = chunk_numel * s
+
+        var chunk_data: [f64] = []
+
+        # Copy elements for this chunk
+        var elem_idx = 0
+        while elem_idx < chunk_numel:
+            # Compute multi-dim index in chunk
+            var chunk_idx: [i64] = []
+            var remaining = elem_idx
+            var cd = ndim - 1
+            while cd >= 0:
+                val size = chunk_shape[cd]
+                chunk_idx.insert(0, remaining % size)
+                remaining = remaining / size
+                cd = cd - 1
+
+            # Add offset for source index
+            var src_idx: [i64] = []
+            var sd = 0
+            while sd < ndim:
+                if sd == dim:
+                    src_idx.push(chunk_idx[sd] + dim_offset)
+                else:
+                    src_idx.push(chunk_idx[sd])
+                sd = sd + 1
+
+            # Compute source offset
+            var src_off = 0
+            var d2 = 0
+            while d2 < ndim:
+                src_off = src_off + src_idx[d2] * tensor.strides[d2]
+                d2 = d2 + 1
+
+            chunk_data.push(tensor.data[src_off])
+            elem_idx = elem_idx + 1
+
+        results.push(from_data(chunk_data, chunk_shape))
+        dim_offset = dim_offset + chunk_size
+
+    results
+
+
+# ============================================================================
+# Reshape - Reshape with -1 inference
+# ============================================================================
+
+fn reshape(tensor: TensorF64, shape: [i64]) -> TensorF64:
+    """Reshape tensor with automatic dimension inference.
+
+    Args:
+        tensor: Input tensor
+        shape: Target shape (one dimension can be -1 for auto-inference)
+
+    Returns:
+        Reshaped tensor (data copied, not a view)
+
+    Example:
+        reshape(t, [2, -1]) where t.numel() = 6
+        -> shape becomes [2, 3]
+    """
+    val total_elems = tensor.numel()
+
+    # Find -1 dimension and compute inferred size
+    var inferred_dim = -1
+    var known_product = 1
+    var d = 0
+    while d < shape.len():
+        if shape[d] == -1:
+            inferred_dim = d
+        else:
+            known_product = known_product * shape[d]
+        d = d + 1
+
+    # Build final shape
+    var final_shape: [i64] = []
+    var fd = 0
+    while fd < shape.len():
+        if fd == inferred_dim:
+            final_shape.push(total_elems / known_product)
+        else:
+            final_shape.push(shape[fd])
+        fd = fd + 1
+
+    # Copy data (reshape doesn't change data order)
+    var new_data: [f64] = []
+    for v in tensor.data:
+        new_data.push(v)
+
+    from_data(new_data, final_shape)
+
+
+# ============================================================================
+# Permute - Multi-dimensional transpose
+# ============================================================================
+
+fn permute(tensor: TensorF64, dims: [i64]) -> TensorF64:
+    """Permute (transpose) tensor dimensions.
+
+    Args:
+        tensor: Input tensor
+        dims: New ordering of dimensions (permutation of [0..ndim-1])
+
+    Returns:
+        Permuted tensor
+
+    Example:
+        permute(t, [2, 0, 1]) where t has shape [2, 3, 4]
+        -> result shape [4, 2, 3]
+    """
+    val ndim = tensor.shape.len()
+
+    # Build new shape
+    var new_shape: [i64] = []
+    for d in dims:
+        new_shape.push(tensor.shape[d])
+
+    # Allocate result
+    var numel = tensor.numel()
+    var result_data: [f64] = []
+    var i = 0
+    while i < numel:
+        result_data.push(0.0)
+        i = i + 1
+
+    val new_strides = compute_strides(new_shape)
+
+    # Copy with permutation
+    var elem_idx = 0
+    while elem_idx < numel:
+        # Compute source multi-dim index
+        var src_idx: [i64] = []
+        var remaining = elem_idx
+        var sd = ndim - 1
+        while sd >= 0:
+            val size = tensor.shape[sd]
+            src_idx.insert(0, remaining % size)
+            remaining = remaining / size
+            sd = sd - 1
+
+        # Permute index
+        var dst_idx: [i64] = []
+        for d in dims:
+            dst_idx.push(src_idx[d])
+
+        # Compute destination offset
+        var dst_off = 0
+        var d2 = 0
+        while d2 < ndim:
+            dst_off = dst_off + dst_idx[d2] * new_strides[d2]
+            d2 = d2 + 1
+
+        result_data[dst_off] = tensor.data[elem_idx]
+        elem_idx = elem_idx + 1
+
+    from_data(result_data, new_shape)
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export stack, concat, split, reshape, permute
