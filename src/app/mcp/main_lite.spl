@@ -31,6 +31,9 @@ fn cwd() -> text:
         out = out.substring(0, out.len() - 1)
     out
 
+# Protocol auto-detection: JSON Lines (MCP SDK) vs Content-Length (LSP)
+var USE_JSON_LINES = false
+
 # Start server directly - no args checking needed
 # Wrapper script ensures "server" arg is passed
 start_server()
@@ -70,26 +73,34 @@ fn start_server():
                 write_stdout_message(response)
 
 fn read_stdin_message() -> text:
-    var header = input()
-    if header == "":
+    var line = input()
+    if line == "":
         return ""
-    if header.ends_with("\r"):
-        header = header.substring(0, header.len() - 1)
-    var content_length = 0
-    if header.starts_with("Content-Length:"):
-        var len_str = header.replace("Content-Length:", "")
+    if line.ends_with("\r"):
+        line = line.substring(0, line.len() - 1)
+    # JSON Lines mode: line starts with { (MCP SDK format)
+    if line.starts_with("{"):
+        USE_JSON_LINES = true
+        return line
+    # Content-Length mode (LSP-style framing)
+    if line.starts_with("Content-Length:"):
+        var len_str = line.replace("Content-Length:", "")
         len_str = len_str.trim()
-        content_length = int(len_str)
-    if content_length == 0:
-        return ""
-    input()
-    var body = input()
-    body
+        val content_length = int(len_str)
+        if content_length == 0:
+            return ""
+        input()
+        var body = input()
+        return body
+    ""
 
 fn write_stdout_message(body: text):
-    var header = "Content-Length: " + str(body.len()) + "\r{NL}\r{NL}"
-    print_raw(header)
-    print_raw(body)
+    if USE_JSON_LINES:
+        print_raw(body + NL)
+    else:
+        var header = "Content-Length: " + str(body.len()) + "\r{NL}\r{NL}"
+        print_raw(header)
+        print_raw(body)
 
 # --- JSON helpers ---
 
