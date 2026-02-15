@@ -149,6 +149,22 @@ class LlvmIRBuilder:
         val param_str = params.join(", ")
         self.emit("define {return_type} @{name}({param_str}) nounwind {{")
 
+    me start_function_opt(name: text, params: [text], return_type: text, is_readonly: bool, is_small: bool):
+        """Start a function definition with optimization attributes.
+
+        - nounwind: always (Simple has no exceptions)
+        - readonly: function has no side effects (no stores, no non-pure calls)
+        - alwaysinline: function is small (< 10 instructions)
+        """
+        self.current_function = Some(name)
+        val param_str = params.join(", ")
+        var attrs = " nounwind"
+        if is_readonly:
+            attrs = attrs + " readonly"
+        if is_small:
+            attrs = attrs + " alwaysinline"
+        self.emit("define {return_type} @{name}({param_str}){attrs} {{")
+
     me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
         """Start a function definition with attributes."""
         self.current_function = Some(name)
@@ -604,7 +620,7 @@ class MirToLlvm:
         self.builder.emit("")
 
     me translate_function(name: text, body: MirBody):
-        """Translate a MIR function."""
+        """Translate a MIR function with optimization attributes."""
         # Build local type map from function locals for type-aware codegen
         self.local_types = {}
         for local in body.locals:
@@ -618,7 +634,28 @@ class MirToLlvm:
 
         val ret_ty = self.type_mapper.map_type(body.return_ty)
 
-        self.builder.start_function(name, params, ret_ty)
+        # Analyze function body for optimization attributes
+        var has_store = false
+        var has_call = false
+        var inst_count = 0
+        for block in body.blocks:
+            for inst in block.instructions:
+                inst_count = inst_count + 1
+                match inst.kind:
+                    case Store(_, _): has_store = true
+                    case SetField(_, _, _): has_store = true
+                    case Call(_, _, _): has_call = true
+                    case CallIndirect(_, _, _, _): has_call = true
+                    case Intrinsic(_, _, _): has_call = true
+                    case Send(_, _): has_store = true
+                    case _: ()
+
+        # readonly: no stores and no calls (pure computation only)
+        val is_readonly = not has_store and not has_call
+        # alwaysinline: small functions (< 10 instructions)
+        val is_small = inst_count < 10
+
+        self.builder.start_function_opt(name, params, ret_ty, is_readonly, is_small)
 
         for block in body.blocks:
             self.translate_block(block)

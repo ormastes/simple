@@ -57,17 +57,28 @@ fn mold_flags() -> text:
 # ============================================================================
 
 fn merge_pgo_profiles(input_dir: text, output_path: text, verbose: bool) -> i64:
-    val merge_cmd = "llvm-profdata merge -output=" + output_path + " " + input_dir + "/default_*.profraw 2>&1"
+    val glob = input_dir + "/default_*.profraw"
+    # Detect clang version and try matching llvm-profdata first
+    val (clang_ver_out, _, _) = shell("clang --version 2>&1 | head -1")
+    var profdata_tool = "llvm-profdata"
+    if clang_ver_out.contains("clang version 20"):
+        profdata_tool = "llvm-profdata-20"
+    elif clang_ver_out.contains("clang version 19"):
+        profdata_tool = "llvm-profdata-19"
+    elif clang_ver_out.contains("clang version 18"):
+        profdata_tool = "llvm-profdata-18"
+    val merge_cmd = profdata_tool + " merge -output=" + output_path + " " + glob + " 2>&1"
     if verbose:
         print "[llvm-direct] Merging PGO profiles: " + merge_cmd
     val (merge_out, merge_err, merge_exit) = shell(merge_cmd)
     if merge_exit != 0:
-        # Try versioned tool
-        val merge_cmd2 = "llvm-profdata-18 merge -output=" + output_path + " " + input_dir + "/default_*.profraw 2>&1"
+        # Fallback: try unversioned tool
+        val merge_cmd2 = "llvm-profdata merge -output=" + output_path + " " + glob + " 2>&1"
         val (out2, err2, exit2) = shell(merge_cmd2)
         if exit2 != 0:
             print "Error: llvm-profdata merge failed"
             print merge_out
+            print out2
             return 1
     print "PGO profiles merged to: " + output_path
     0

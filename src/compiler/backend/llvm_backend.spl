@@ -20,6 +20,7 @@ use compiler.backend.backend_api.*
 use core.backend_types.{CompiledModule, CompiledSymbol, CodegenTarget, OptimizationLevel}
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
 use compiler.backend.llvm_ir_builder.{LlvmPass, passes_for_level, LlvmIRBuilder, MirToLlvm, LlvmIRBuilder__create, MirToLlvm__create, MirToLlvm__create_baremetal}
+use compiler.mir_opt.mod.{optimize_module, OptLevel}
 use llvm_shared.tools (find_llc as llvm_find_llc, find_opt as llvm_find_opt, llc_available as llvm_llc_available, opt_available as llvm_opt_available)
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
 use std.string.{NL}
@@ -191,16 +192,20 @@ class LlvmBackend:
         else:
             LlvmTargetConfig__for_target(self.target, self.cpu_override)
 
+        # Run MIR optimization passes before LLVM IR emission
+        val mir_opt_level = to_mir_opt_level(self.opt_level)
+        var optimized_module = optimize_module(module, mir_opt_level)
+
         # Translate MIR to LLVM IR
         var translator = if self.bare_metal:
-            MirToLlvm__create_baremetal(module.name, self.target, self.cpu_override)
+            MirToLlvm__create_baremetal(optimized_module.name, self.target, self.cpu_override)
         else:
-            MirToLlvm__create(module.name, self.target, self.cpu_override)
+            MirToLlvm__create(optimized_module.name, self.target, self.cpu_override)
 
         # Add runtime FFI declarations
         val runtime_decls = generate_runtime_declarations_for_target(self.target)
         var llvm_ir = runtime_decls + NL + NL
-        llvm_ir = llvm_ir + translator.translate_module(module)
+        llvm_ir = llvm_ir + translator.translate_module(optimized_module)
 
         # Run LLVM opt if available (optimize IR before llc)
         val opt_tool = find_opt()
@@ -466,6 +471,19 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
         return Err("Failed to read compiled object file: {obj_path}")
 
     Ok(bytes)
+
+# ============================================================================
+# Optimization Level Mapping
+# ============================================================================
+
+fn to_mir_opt_level(level: OptimizationLevel) -> OptLevel:
+    """Convert backend OptimizationLevel to MIR OptLevel for pass dispatch."""
+    match level:
+        case Debug: OptLevel.NoOpt
+        case Size: OptLevel.Size
+        case Speed: OptLevel.Speed
+        case Aggressive: OptLevel.Aggressive
+        case _: OptLevel.NoOpt
 
 # ============================================================================
 # Desugared static methods
