@@ -122,6 +122,97 @@ clang++ -std=c++20 -o build/bootstrap/full2 \
 sha256sum build/bootstrap/full1 build/bootstrap/full2  # Must match
 ```
 
+## Windows (MinGW x86-64) — 2026-02-15
+
+### Pipeline
+
+```
+seed/seed.cpp ──g++──> build/bootstrap/seed_cpp.exe
+seed_cpp.exe + src/core/*.spl + build/bootstrap/shim_nl.spl ──> core1.cpp ──g++──> core1.exe
+core1.exe copied as core2_new.exe (core2 self-host hangs at runtime)
+core2_new.exe + src/compiler_core/*.spl ──build_win.py──> cc_v2_raw.cpp
+fix_cpp.py ──> cc_v2_fixed.cpp (struct dedup, reserved words, type fixes, stubs)
+g++ -fpermissive ──> compiler_v2.exe (FAIL: many type errors)
+stub_broken.py ──> cc_v2_stubbed.cpp (stub 542 broken functions)
+g++ -fpermissive ──> compiler_v2.exe (388KB, SUCCESS)
+```
+
+### Status
+
+| Stage | Status | Artifact | Size |
+|-------|--------|----------|------|
+| seed | **PASS** | `build/bootstrap/seed_cpp.exe` | ~200K |
+| core1 | **PASS** | `build/bootstrap/core1.exe` | ~200K |
+| core2 | **HANG** | core2 self-host compiles but hangs at runtime | — |
+| full1 | **PASS** | `build/bootstrap/compiler_v2.exe` (542 funcs stubbed) | 388K |
+| full2 | TODO | Not yet attempted | — |
+
+### Files Used
+
+| File | Purpose |
+|------|---------|
+| `seed/seed.cpp` | C++ seed transpiler (~4800 lines) |
+| `seed/runtime.h`, `seed/runtime.c` | Runtime library (arrays, strings, dicts, GC) |
+| `seed/platform/platform_win.h` | Windows platform layer (MinGW/MSVC/ClangCL) |
+| `seed/build/libspl_runtime.a` | Pre-built MinGW runtime static library |
+| `build/bootstrap/shim_nl.spl` | Provides `NL`/`_NL` constants for bootstrap |
+| `src/core/types.spl` | Core type definitions |
+| `src/core/tokens.spl` | Token definitions |
+| `src/core/ast_types.spl` | AST node types (CoreExpr, CoreStmt, CoreDecl) |
+| `src/core/ast.spl` | AST node constructors/accessors |
+| `src/core/lexer.spl` | Lexer (tokenizer) |
+| `src/core/parser.spl` | Parser (arena-based AST) |
+| `src/core/compiler/c_codegen.spl` | C++ code generation |
+| `src/core/compiler/driver.spl` | Main entry point |
+| `src/compiler_core/` | Full compiler source (~292 files) |
+| `src/compiler_core_win/build_win.py` | Build orchestrator script |
+| `src/compiler_core_win/fix_cpp.py` | C++ post-processor (struct dedup, reserved words) |
+| `src/compiler_core_win/stub_broken.py` | Stubs functions with compilation errors |
+| `src/compiler_core_win/ffi_shim.spl` | FFI shim for compiler_core |
+
+### Build Command
+
+```bash
+# Prerequisites: MinGW g++ (MSYS2), Python 3
+# 1. Build seed
+cd build/bootstrap
+g++ -std=c++20 -O2 -I../../seed ../../seed/seed.cpp -o seed_cpp.exe
+
+# 2. Build core1
+./seed_cpp.exe ../../src/core/types.spl ../../src/core/tokens.spl \
+  ../../src/core/ast_types.spl ../../src/core/ast.spl \
+  ./shim_nl.spl ../../src/core/lexer.spl ../../src/core/parser.spl \
+  ../../src/core/compiler/c_codegen.spl ../../src/core/compiler/driver.spl \
+  > core1.cpp
+g++ -std=c++20 -O2 -I../../seed core1.cpp ../../seed/build/libspl_runtime.a -o core1.exe
+
+# 3. Use core1 as core2 (core2 self-host hangs)
+cp core1.exe core2_new.exe
+
+# 4. Build full compiler
+cd ../..
+python src/compiler_core_win/build_win.py
+# Output: build/bootstrap/compiler_v2.exe
+```
+
+### Key Fixes Applied to seed.cpp
+
+1. **Implicit return restricted** to function body level only (`c_indent == 1`)
+2. **Void function return prevention** — detects void functions, skips `return`
+3. **Blank line/comment skipping** in implicit return peek-ahead logic
+4. **`output_has_problems()` disabled** — was stubbing critical functions
+5. **NL removed from preamble** — now provided by `shim_nl.spl`
+6. **`#include <stdio.h>`** added to `platform_win.h` for snprintf
+
+### Known Issues
+
+- **122/292 files fail to parse** — mostly due to unsupported syntax (generics, traits, lambdas, etc.)
+- **542/1020 functions stubbed** — binary structure correct but most logic is no-ops
+- **core2 self-host hangs** — compiles to C++ successfully but infinite loop at runtime
+- **Warnings with `-fpermissive`** — void functions returning values, type mismatches in structs
+
+---
+
 ## Current Status (2026-02-12)
 
 ### Linux
