@@ -8,23 +8,30 @@ use app.dap.adapter.local.LocalAdapter
 use app.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 
 # Execution target configuration
+# Describes where and how to execute a program (local interpreter or remote target)
+#
+# Example:
+#     val config = ExecutionConfig.local("bin/simple")
+#     config.execution_timeout_ms = 10000  # 10 seconds
 class ExecutionConfig:
-    target: text                 # "local", "riscv32-qemu", etc.
-    program: text                # Program to execute/debug
-    args: [text]                 # Program arguments
+    target: text                 # Target type: "local", "riscv32-qemu", "x86_64-qemu"
+    program: text                # Program path to execute/debug
+    args: [text]                 # Command-line arguments for program
 
-    # Remote target settings (optional)
-    host: text                   # Remote host (for QEMU)
-    port: i32                    # Remote port (GDB stub)
+    # Remote target settings (only for QEMU/GDB targets)
+    host: text                   # Remote host address (e.g., "localhost")
+    port: i32                    # GDB stub port number (e.g., 1234)
 
-    # Test isolation settings
-    clear_context: bool          # Clear interpreter state between tests
-    reload_program: bool         # Reload program between tests
+    # Test isolation settings (prevent state leakage between tests)
+    clear_context: bool          # Clear interpreter state between test runs
+    reload_program: bool         # Reload program binary (for remote targets)
 
-    # Timeouts
-    execution_timeout_ms: i64    # Execution timeout
-    operation_timeout_ms: i64    # Individual operation timeout
+    # Timeouts (milliseconds)
+    execution_timeout_ms: i64    # Maximum time for full execution
+    operation_timeout_ms: i64    # Maximum time for single operation (step, continue, etc.)
 
+    # Create configuration for local execution (interpreter mode)
+    # Fast execution with context clearing for test isolation
     static fn local(program: text) -> ExecutionConfig:
         ExecutionConfig(
             target: "local",
@@ -38,6 +45,8 @@ class ExecutionConfig:
             operation_timeout_ms: 5000
         )
 
+    # Create configuration for RISC-V 32-bit QEMU emulation
+    # Connects via GDB stub for debugging and test execution
     static fn qemu_riscv32(program: text, gdb_port: i32) -> ExecutionConfig:
         ExecutionConfig(
             target: "riscv32-qemu",
@@ -101,10 +110,17 @@ class ExecutionResult:
         )
 
 # Test executor - transparently routes to local or remote execution
+# Wraps debug adapters (LocalAdapter, GdbMiAdapter) with unified interface
+#
+# Example:
+#     val config = ExecutionConfig.local("bin/simple")
+#     val executor = TestExecutor__create(config)?
+#     val result = executor.execute()?
+#     print "Completed in {result.duration_ms}ms"
 class TestExecutor:
-    config: ExecutionConfig
-    adapter: Option<DebugAdapter>
-    initialized: bool
+    config: ExecutionConfig      # Execution configuration (target, timeouts, etc.)
+    adapter: Option<DebugAdapter>  # Debug adapter instance (Local or GDB)
+    initialized: bool            # Whether adapter has been initialized
 
 fn TestExecutor__create(config: ExecutionConfig) -> Result<TestExecutor, text>:
     var executor = TestExecutor(
@@ -245,6 +261,12 @@ fn get_timestamp_ms() -> i64:
     time_now_unix_micros() / 1000
 
 # Parse target string to ExecutionConfig
+# Supports "local", "riscv32-qemu", "x86_64-qemu", or "arch:host:port" format
+#
+# Example:
+#     val cfg1 = parse_target("local", "bin/simple")?
+#     val cfg2 = parse_target("riscv32-qemu", "test.elf")?
+#     val cfg3 = parse_target("riscv64-qemu:192.168.1.100:5678", "app.elf")?
 fn parse_target(target: text, program: text) -> Result<ExecutionConfig, text>:
     match target:
         "local":

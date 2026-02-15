@@ -1,0 +1,404 @@
+# Pure Simple Pooling Layers
+#
+# Implements MaxPool2d and AvgPool2d for 2D pooling operations
+# Zero external dependencies
+#
+# NOTE: This module uses generics (PureTensor<f64>) and will only work
+# in compiled mode, not in the interpreter (runtime parser limitation).
+
+use lib.pure.tensor.{PureTensor, tensor_from_data, tensor_zeros}
+
+# ============================================================================
+# Pooling Layer Classes
+# ============================================================================
+
+class MaxPool2d:
+    """2D Max Pooling layer with indices for backward pass
+
+    Input shape: [batch_size, channels, height, width]
+    Output shape: [batch_size, channels, out_height, out_width]
+
+    where:
+        out_height = (height + 2*padding - kernel_size) / stride + 1
+        out_width = (width + 2*padding - kernel_size) / stride + 1
+    """
+    kernel_size: i64
+    stride: i64
+    padding: i64
+    training: bool
+    # Store indices for backward pass (flattened 1D array)
+    last_indices: [i64]
+    last_input_shape: [i64]
+
+    static fn create(kernel_size: i64, stride: i64, padding: i64) -> MaxPool2d:
+        """Create MaxPool2d layer.
+
+        Args:
+            kernel_size - Size of pooling window (square)
+            stride - Stride of pooling window (default: kernel_size)
+            padding - Zero padding on all sides
+
+        Returns:
+            MaxPool2d layer instance
+        """
+        val actual_stride = if stride == 0: kernel_size else: stride
+        MaxPool2d(
+            kernel_size: kernel_size,
+            stride: actual_stride,
+            padding: padding,
+            training: true,
+            last_indices: [],
+            last_input_shape: []
+        )
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Forward pass: max pooling over 2D spatial dimensions.
+
+        Args:
+            x - Input tensor [batch, channels, height, width]
+
+        Returns:
+            Pooled tensor [batch, channels, out_height, out_width]
+        """
+        # Extract dimensions
+        val batch_size = x.shape[0]
+        val channels = x.shape[1]
+        val in_height = x.shape[2]
+        val in_width = x.shape[3]
+
+        # Calculate output dimensions
+        val out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1
+        val out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1
+
+        # Store input shape for backward
+        self.last_input_shape = x.shape
+
+        var result_data: [f64] = []
+        var indices_data: [i64] = []
+
+        # Process each batch and channel
+        var b = 0
+        while b < batch_size:
+            var c = 0
+            while c < channels:
+                # Process each output position
+                var oh = 0
+                while oh < out_height:
+                    var ow = 0
+                    while ow < out_width:
+                        # Find max value in pooling window
+                        var max_val = -999999.0  # Very small number
+                        var max_idx = 0
+
+                        # Scan pooling window
+                        var kh = 0
+                        while kh < self.kernel_size:
+                            var kw = 0
+                            while kw < self.kernel_size:
+                                val ih = oh * self.stride + kh - self.padding
+                                val iw = ow * self.stride + kw - self.padding
+
+                                # Check bounds (treat padding as -inf)
+                                if (ih >= 0 and ih < in_height and
+                                    iw >= 0 and iw < in_width):
+                                    val idx = ((b * channels + c) * in_height + ih) * in_width + iw
+                                    val val = x.data[idx]
+                                    if val > max_val:
+                                        max_val = val
+                                        max_idx = idx
+
+                                kw = kw + 1
+                            kh = kh + 1
+
+                        result_data.push(max_val)
+                        indices_data.push(max_idx)
+
+                        ow = ow + 1
+                    oh = oh + 1
+                c = c + 1
+            b = b + 1
+
+        # Store indices for backward
+        self.last_indices = indices_data
+
+        tensor_from_data(result_data, [batch_size, channels, out_height, out_width])
+
+    fn backward(grad_output: PureTensor<f64>) -> PureTensor<f64>:
+        """Backward pass: route gradients to max positions.
+
+        Args:
+            grad_output - Gradient from upstream [batch, channels, out_h, out_w]
+
+        Returns:
+            Gradient w.r.t. input [batch, channels, in_height, in_width]
+        """
+        # Create zero gradient of input shape
+        val input_numel = self.last_input_shape[0] * self.last_input_shape[1] *
+                          self.last_input_shape[2] * self.last_input_shape[3]
+
+        var grad_input_data: [f64] = []
+        var i = 0
+        while i < input_numel:
+            grad_input_data.push(0.0)
+            i = i + 1
+
+        # Scatter gradients to max indices
+        i = 0
+        while i < grad_output.data.len():
+            val max_idx = self.last_indices[i]
+            grad_input_data[max_idx] = grad_input_data[max_idx] + grad_output.data[i]
+            i = i + 1
+
+        tensor_from_data(grad_input_data, self.last_input_shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        """No trainable parameters in pooling layers."""
+        []
+
+    me train():
+        """Set layer to training mode."""
+        self.training = true
+
+    me eval():
+        """Set layer to evaluation mode."""
+        self.training = false
+
+    fn to_string() -> text:
+        """String representation."""
+        "MaxPool2d(kernel_size={self.kernel_size}, stride={self.stride}, padding={self.padding})"
+
+
+class AvgPool2d:
+    """2D Average Pooling layer
+
+    Input shape: [batch_size, channels, height, width]
+    Output shape: [batch_size, channels, out_height, out_width]
+
+    where:
+        out_height = (height + 2*padding - kernel_size) / stride + 1
+        out_width = (width + 2*padding - kernel_size) / stride + 1
+    """
+    kernel_size: i64
+    stride: i64
+    padding: i64
+    training: bool
+    last_input_shape: [i64]
+
+    static fn create(kernel_size: i64, stride: i64, padding: i64) -> AvgPool2d:
+        """Create AvgPool2d layer.
+
+        Args:
+            kernel_size - Size of pooling window (square)
+            stride - Stride of pooling window (default: kernel_size)
+            padding - Zero padding on all sides
+
+        Returns:
+            AvgPool2d layer instance
+        """
+        val actual_stride = if stride == 0: kernel_size else: stride
+        AvgPool2d(
+            kernel_size: kernel_size,
+            stride: actual_stride,
+            padding: padding,
+            training: true,
+            last_input_shape: []
+        )
+
+    fn forward(x: PureTensor<f64>) -> PureTensor<f64>:
+        """Forward pass: average pooling over 2D spatial dimensions.
+
+        Args:
+            x - Input tensor [batch, channels, height, width]
+
+        Returns:
+            Pooled tensor [batch, channels, out_height, out_width]
+        """
+        # Extract dimensions
+        val batch_size = x.shape[0]
+        val channels = x.shape[1]
+        val in_height = x.shape[2]
+        val in_width = x.shape[3]
+
+        # Calculate output dimensions
+        val out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1
+        val out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1
+
+        # Store input shape for backward
+        self.last_input_shape = x.shape
+
+        var result_data: [f64] = []
+
+        # Process each batch and channel
+        var b = 0
+        while b < batch_size:
+            var c = 0
+            while c < channels:
+                # Process each output position
+                var oh = 0
+                while oh < out_height:
+                    var ow = 0
+                    while ow < out_width:
+                        # Compute average in pooling window
+                        var sum = 0.0
+                        var count = 0
+
+                        # Scan pooling window
+                        var kh = 0
+                        while kh < self.kernel_size:
+                            var kw = 0
+                            while kw < self.kernel_size:
+                                val ih = oh * self.stride + kh - self.padding
+                                val iw = ow * self.stride + kw - self.padding
+
+                                # Check bounds (only count valid positions)
+                                if (ih >= 0 and ih < in_height and
+                                    iw >= 0 and iw < in_width):
+                                    val idx = ((b * channels + c) * in_height + ih) * in_width + iw
+                                    sum = sum + x.data[idx]
+                                    count = count + 1
+
+                                kw = kw + 1
+                            kh = kh + 1
+
+                        # Average (avoid division by zero)
+                        val avg = if count > 0: sum / count else: 0.0
+                        result_data.push(avg)
+
+                        ow = ow + 1
+                    oh = oh + 1
+                c = c + 1
+            b = b + 1
+
+        tensor_from_data(result_data, [batch_size, channels, out_height, out_width])
+
+    fn backward(grad_output: PureTensor<f64>) -> PureTensor<f64>:
+        """Backward pass: distribute gradients uniformly across pooling windows.
+
+        Args:
+            grad_output - Gradient from upstream [batch, channels, out_h, out_w]
+
+        Returns:
+            Gradient w.r.t. input [batch, channels, in_height, in_width]
+        """
+        # Extract dimensions
+        val batch_size = self.last_input_shape[0]
+        val channels = self.last_input_shape[1]
+        val in_height = self.last_input_shape[2]
+        val in_width = self.last_input_shape[3]
+
+        val out_height = (in_height + 2 * self.padding - self.kernel_size) / self.stride + 1
+        val out_width = (in_width + 2 * self.padding - self.kernel_size) / self.stride + 1
+
+        # Create zero gradient of input shape
+        val input_numel = batch_size * channels * in_height * in_width
+        var grad_input_data: [f64] = []
+        var i = 0
+        while i < input_numel:
+            grad_input_data.push(0.0)
+            i = i + 1
+
+        # Distribute gradients
+        var out_idx = 0
+        var b = 0
+        while b < batch_size:
+            var c = 0
+            while c < channels:
+                var oh = 0
+                while oh < out_height:
+                    var ow = 0
+                    while ow < out_width:
+                        # Count valid positions in this window
+                        var count = 0
+                        var kh = 0
+                        while kh < self.kernel_size:
+                            var kw = 0
+                            while kw < self.kernel_size:
+                                val ih = oh * self.stride + kh - self.padding
+                                val iw = ow * self.stride + kw - self.padding
+                                if (ih >= 0 and ih < in_height and
+                                    iw >= 0 and iw < in_width):
+                                    count = count + 1
+                                kw = kw + 1
+                            kh = kh + 1
+
+                        # Distribute gradient uniformly
+                        val grad_per_element = if count > 0:
+                            grad_output.data[out_idx] / count
+                        else:
+                            0.0
+
+                        kh = 0
+                        while kh < self.kernel_size:
+                            var kw = 0
+                            while kw < self.kernel_size:
+                                val ih = oh * self.stride + kh - self.padding
+                                val iw = ow * self.stride + kw - self.padding
+                                if (ih >= 0 and ih < in_height and
+                                    iw >= 0 and iw < in_width):
+                                    val idx = ((b * channels + c) * in_height + ih) * in_width + iw
+                                    grad_input_data[idx] = grad_input_data[idx] + grad_per_element
+                                kw = kw + 1
+                            kh = kh + 1
+
+                        out_idx = out_idx + 1
+                        ow = ow + 1
+                    oh = oh + 1
+                c = c + 1
+            b = b + 1
+
+        tensor_from_data(grad_input_data, self.last_input_shape)
+
+    fn parameters() -> [PureTensor<f64>]:
+        """No trainable parameters in pooling layers."""
+        []
+
+    me train():
+        """Set layer to training mode."""
+        self.training = true
+
+    me eval():
+        """Set layer to evaluation mode."""
+        self.training = false
+
+    fn to_string() -> text:
+        """String representation."""
+        "AvgPool2d(kernel_size={self.kernel_size}, stride={self.stride}, padding={self.padding})"
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn maxpool2d_create(kernel_size: i64, stride: i64, padding: i64) -> MaxPool2d:
+    """Create MaxPool2d layer (factory function).
+
+    Args:
+        kernel_size - Size of pooling window
+        stride - Stride (0 means use kernel_size)
+        padding - Padding size
+
+    Returns:
+        MaxPool2d instance
+    """
+    MaxPool2d.create(kernel_size, stride, padding)
+
+fn avgpool2d_create(kernel_size: i64, stride: i64, padding: i64) -> AvgPool2d:
+    """Create AvgPool2d layer (factory function).
+
+    Args:
+        kernel_size - Size of pooling window
+        stride - Stride (0 means use kernel_size)
+        padding - Padding size
+
+    Returns:
+        AvgPool2d instance
+    """
+    AvgPool2d.create(kernel_size, stride, padding)
+
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MaxPool2d, AvgPool2d
+export maxpool2d_create, avgpool2d_create
