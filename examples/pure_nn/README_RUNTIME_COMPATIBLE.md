@@ -20,6 +20,8 @@ The original Pure NN library (`src/lib/pure/`) uses generic types like `PureTens
 | **autograd_example_runtime.spl** | Automatic differentiation demonstration | 140 | ✅ Working |
 | **complete_demo_runtime.spl** | Full NN demonstration (2→4→1 network) | 250 | ✅ Working |
 | **xor_training_runtime.spl** | Complete training loop simulation | 220 | ✅ Working |
+| **simple_regression_runtime.spl** | Learn y=2x+1 with gradient descent | 180 | ✅ Working |
+| **nn_layers_runtime.spl** | Layer composition and architectures | 320 | ✅ Working |
 
 ### ⚠️ Compiled Mode Only (Require Generics)
 
@@ -51,6 +53,12 @@ bin/simple examples/pure_nn/complete_demo_runtime.spl
 
 # Training loop simulation
 bin/simple examples/pure_nn/xor_training_runtime.spl
+
+# Linear regression (learn y=2x+1)
+bin/simple examples/pure_nn/simple_regression_runtime.spl
+
+# Layer composition and network architectures
+bin/simple examples/pure_nn/nn_layers_runtime.spl
 ```
 
 ### Running Compiled Examples
@@ -151,7 +159,9 @@ fn tensor_matmul(a: SimpleTensor, b: SimpleTensor) -> SimpleTensor:
 1. Start with `xor_example.spl` to understand tensor basics
 2. Explore `autograd_example_runtime.spl` for gradient concepts
 3. Study `complete_demo_runtime.spl` for full network architecture
-4. Run `xor_training_runtime.spl` to see training loop structure
+4. Learn regression with `simple_regression_runtime.spl` (real gradient descent!)
+5. Understand layers with `nn_layers_runtime.spl` (composition patterns)
+6. Run `xor_training_runtime.spl` to see training loop structure
 
 ### For Production
 
@@ -193,5 +203,5 @@ error=Unexpected token: expected expression, found Val
 ---
 
 **Status**: Production Ready (2026-02-16)
-**Test Coverage**: 4/4 runtime examples passing (100%)
+**Test Coverage**: 6/6 runtime examples passing (100%)
 **Documentation**: Complete
