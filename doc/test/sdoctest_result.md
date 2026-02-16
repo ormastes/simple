@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 31129ms |
+| Duration | 30404ms |
 
 **Status: PASS**
 
@@ -256,7 +256,7 @@
 | test/unit/std/runtime_value_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/sdn_minimal_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/set_utils_ext_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/std/shared_examples_spec.spl | 1 | 1 | 0 | 0 | 4ms |
+| test/unit/std/shared_examples_spec.spl | 1 | 1 | 0 | 0 | 5ms |
 | test/unit/std/.simple/build/actor_body_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/.simple/build/algorithm_utils_ext_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/.simple/build/allocator_spec.smf | 0 | 0 | 0 | 0 | 0ms |
