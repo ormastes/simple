@@ -104,7 +104,7 @@ bin/simple test --list              # List tests
 bin/simple test --only-slow         # Slow tests
 
 # Container Testing (isolated, reproducible)
-docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .
+docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .
 docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
   simple-test-isolation:latest test                   # All tests in container
 docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
@@ -209,11 +209,11 @@ src/
   std/          # Standard library (spec, text, math, path, array, platform)
   core/         # Core Simple library (tokens, types, ast, mir, lexer, parser)
   compiler/     # Compiler source (seed, native)
-test/           # Test files (std, lib, app, compiler)
+test/           # Test files (std, lib, app, compiler, benchmarks)
 doc/            # Documentation (report, design, guide, research, feature, test, bug)
 bin/            # Binaries (simple, release/simple)
-seed/           # C/C++ seed compiler sources (seed.c, runtime.c/h, startup CRT)
-scripts/         # Bootstrap bash scripts (3 only)
+tools/          # Development tools (seed bootstrap compiler, docker containers)
+scripts/        # Bootstrap bash scripts (3 only)
 .claude/        # Agents, skills, templates
 ```
 
@@ -267,7 +267,7 @@ See MEMORY.md and code agent for full list. Key issues:
 
 ### Quick Fixes
 
-**Container not found:** `docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .`
+**Container not found:** `docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .`
 **Permission denied:** `chmod +x bin/release/simple` or `sudo usermod -aG docker $USER && newgrp docker`
 **Out of memory:** Increase `--memory=512m` to `--memory=1g` or `--memory=2g`
 **Timeout errors:** Use correct profile: `--profile=slow` (10 min) or `--profile=intensive` (30 min)
