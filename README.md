@@ -744,6 +744,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 | **Architecture** | System design principles | [doc/architecture/](doc/architecture/) |
 | **Features** | Feature catalog | [doc/features/feature.md](doc/features/feature.md) |
 | **Status** | Implementation tracking | [doc/status/](doc/status/) |
+| **Deep Learning** | Neural networks & GPU computing | [doc/guide/deep_learning_guide.md](doc/guide/deep_learning_guide.md) |
 
 ### Core Documentation
 
@@ -759,6 +760,7 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 - [Standard Library](doc/spec/stdlib.md) - Standard library specification
 
 **GPU Computing:**
+- [Deep Learning Guide](doc/guide/deep_learning_guide.md) - **Comprehensive DL guide** (Pure Simple, PyTorch, CUDA)
 - [Vulkan User Guide](doc/guides/vulkan_backend.md) - Getting started with GPU kernels
 - [GPU & SIMD Spec](doc/spec/gpu_simd/README.md) - GPU compute and SIMD specification
 - [Vulkan Architecture](doc/architecture/vulkan_backend.md) - Implementation details
@@ -779,7 +781,39 @@ fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
 
 ## Examples
 
-The `simple/std_lib/examples/` directory contains working examples:
+### Deep Learning Examples
+
+Simple provides 17 deep learning examples across 4 categories:
+
+**Pure Simple Neural Networks (7 examples - 100% working):**
+```bash
+# XOR neural network training
+bin/simple examples/pure_nn/xor_training_example.spl
+
+# Linear regression (learns y = 2x + 1)
+bin/simple examples/pure_nn/simple_regression.spl
+
+# Iris flower classification
+bin/simple examples/pure_nn/iris_classification.spl
+```
+
+**MedGemma Korean Fine-Tuning (3 phases - 100% working):**
+```bash
+# Progressive LoRA training to prevent catastrophic forgetting
+bin/simple examples/medgemma_korean/run_all.spl
+```
+
+**CUDA Programming (1 example - 100% working):**
+```bash
+# Direct CUDA C API - multi-GPU, streams, events
+bin/simple examples/cuda/basic.spl
+```
+
+**See [Deep Learning Guide](doc/guide/deep_learning_guide.md) for complete documentation.**
+
+### Other Examples
+
+The `examples/` directory contains additional working examples:
 
 | Example | Description |
 |---------|-------------|
@@ -791,7 +825,7 @@ The `simple/std_lib/examples/` directory contains working examples:
 
 Run an example:
 ```bash
-./target/debug/simple simple/std_lib/examples/cli_demo.spl
+bin/simple examples/cli_demo.spl
 ```
 
 ---

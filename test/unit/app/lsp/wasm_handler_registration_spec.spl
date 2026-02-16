@@ -1,132 +1,70 @@
 # WASM LSP Handler Registration Tests
-# Tests registration of completion, hover, definition, references, and symbol handlers
+#
+# Tests ParserAdapter backend selection and mode detection.
+# Validates that WASM mode correctly falls back to core parser.
 
-# Local type definitions (test stubs)
+use app.lsp.parser_adapter.{ParserBackend, ParserAdapter, ParserAdapter__create_core, ParserAdapter__create_treesitter}
 
-struct Position:
-    line: i64
-    character: i64
+describe "WASM Handler Registration":
 
-struct Range:
-    start: Position
-    end: Position
+    context "Backend selection":
+        it "core parser is WASM mode":
+            val adapter = ParserAdapter__create_core()
+            expect(adapter.is_wasm_mode()).to_equal(true)
 
-enum DiagnosticSeverity:
-    Error
-    Warning
-    Information
-    Hint
+        it "treesitter is not WASM mode":
+            val adapter = ParserAdapter__create_treesitter()
+            expect(adapter.is_wasm_mode()).to_equal(false)
 
-struct Diagnostic:
-    range: Range
-    severity: DiagnosticSeverity
-    message: str
-    source: str
+        it "core parser backend enum value":
+            val adapter = ParserAdapter__create_core()
+            expect(adapter.backend).to_equal(ParserBackend.CoreParser)
 
-enum CompletionItemKind:
-    Text = 1
-    Method = 2
-    Function = 3
-    Variable = 6
-    Keyword = 14
-    Struct = 22
+        it "treesitter backend enum value":
+            val adapter = ParserAdapter__create_treesitter()
+            expect(adapter.backend).to_equal(ParserBackend.TreeSitter)
 
-struct CompletionItem:
-    label: str
-    kind: i64
-    detail: Option<str>
-    documentation: Option<str>
-    insert_text: Option<str>
+    context "Parser mode handling":
+        it "core parser handles function definitions":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("fn hello():\n    print \"hi\"")
+            expect(result.success).to_equal(true)
 
+        it "core parser handles class definitions":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("class Foo:\n    x: i64")
+            expect(result.success).to_equal(true)
 
+        it "core parser handles struct definitions":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("struct Point:\n    x: i64\n    y: i64")
+            expect(result.success).to_equal(true)
 
-describe "Handler Registration":
-    describe "Completion Handler":
-        it "registers completion handler":
-            # Branch: register_completion_handler path
-            val handler_registered = true
-            expect(handler_registered)
+        it "core parser handles import statements":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("use std.string.{NL}")
+            expect(result.success).to_equal(true)
 
-        it "allocates callback ID for completion":
-            # Branch: callback_id allocation
-            val callback_allocated = true
-            expect(callback_allocated)
+    context "Error detection in WASM mode":
+        it "detects extra closing paren":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("fn foo(x)): pass")
+            expect(result.success).to_equal(false)
 
-        it "stores completion handler in global dict":
-            # Branch: completion_handlers[callback_id] = handler
-            val handler_stored = true
-            expect(handler_stored)
+        it "detects extra closing bracket":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val arr = [1, 2]]")
+            expect(result.success).to_equal(false)
 
-        it "registers textDocument/completion method":
-            # Branch: self.handlers["textDocument/completion"]
-            val method_registered = true
-            expect(method_registered)
+        it "does not report errors on valid code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = [1, 2, 3]")
+            expect(result.success).to_equal(true)
 
-        it "sets completion_provider capability":
-            # Branch: self.capabilities.completion_provider = true
-            val capability_set = true
-            expect(capability_set)
-
-    describe "Hover Handler":
-        it "registers hover handler":
-            # Branch: register_hover_handler path
-            val handler_registered = true
-            expect(handler_registered)
-
-        it "uses callback ID 2 for hover":
-            # Branch: val callback_id = 2
-            val callback_id = 2
-            expect(callback_id == 2)
-
-        it "registers textDocument/hover method":
-            # Branch: wasm_lsp_register_handler("textDocument/hover", 2)
-            val method_registered = true
-            expect(method_registered)
-
-    describe "Definition Handler":
-        it "registers definition handler":
-            # Branch: register_definition_handler path
-            val handler_registered = true
-            expect(handler_registered)
-
-        it "uses callback ID 3 for definition":
-            # Branch: val callback_id = 3
-            val callback_id = 3
-            expect(callback_id == 3)
-
-        it "registers textDocument/definition method":
-            # Branch: wasm_lsp_register_handler("textDocument/definition", 3)
-            val method_registered = true
-            expect(method_registered)
-
-    describe "References Handler":
-        it "registers references handler":
-            # Branch: register_references_handler path
-            val handler_registered = true
-            expect(handler_registered)
-
-        it "uses callback ID 4 for references":
-            # Branch: val callback_id = 4
-            val callback_id = 4
-            expect(callback_id == 4)
-
-        it "registers textDocument/references method":
-            # Branch: wasm_lsp_register_handler("textDocument/references", 4)
-            val method_registered = true
-            expect(method_registered)
-
-    describe "Document Symbol Handler":
-        it "registers document symbol handler":
-            # Branch: register_document_symbol_handler path
-            val handler_registered = true
-            expect(handler_registered)
-
-        it "uses callback ID 5 for symbols":
-            # Branch: val callback_id = 5
-            val callback_id = 5
-            expect(callback_id == 5)
-
-        it "registers textDocument/documentSymbol method":
-            # Branch: wasm_lsp_register_handler("textDocument/documentSymbol", 5)
-            val method_registered = true
-            expect(method_registered)
+    context "TreeSitter adapter fallback":
+        it "treesitter parse returns success for any input":
+            val adapter = ParserAdapter__create_treesitter()
+            # TreeSitter path returns default success (actual parsing done elsewhere)
+            val result = adapter.parse("val x = 1")
+            expect(result.success).to_equal(true)
+            expect(result.diagnostics.len()).to_equal(0)

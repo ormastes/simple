@@ -21,9 +21,11 @@
 use compiler.mir_data.*
 use core.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, CompileOptions, CompiledModule, CompiledSymbol, CompiledSymbolKind, CompileError}
 use compiler.backend.backend_helpers.{format_mir_module, select_backend, select_backend_with_mode, available_backends, gpu_backends, backend_for_name, compile_module_with_backend, get_effective_backend_name}
-use compiler.backend.llvm_backend (MirToLlvm, LlvmTargetConfig, compile_ir_to_object, llc_available,
-    MirToLlvm__create, LlvmTargetConfig__for_target)
+use compiler.backend.llvm_backend (MirToLlvm, LlvmTargetConfig, compile_ir_to_object, compile_ir_to_wasm, llc_available,
+    MirToLlvm__create, LlvmTargetConfig__for_target,
+    generate_wasm_runtime_declarations, LlvmBackend__create_wasm)
 use compiler.backend.native.mod.{native_compile_result}
+use llvm_shared.tools.{find_wasm_ld, wasm_ld_available}
 
 # ============================================================================
 # Backend Interface
@@ -192,12 +194,48 @@ class Backend:
         ))
 
     fn compile_wasm(module: MirModule):
-        """Compile to WebAssembly."""
+        """Compile to WebAssembly via LLVM pipeline.
+
+        Uses the LLVM backend to generate LLVM IR, then compiles to .wasm
+        via llc + wasm-ld. Falls back to WAT-based backend if LLVM tools
+        are not available.
+        """
+        # Check tool availability
+        if not llc_available():
+            return Err(CompileError.backend_error(BackendKind.Wasm,
+                "llc not found. Install LLVM for WASM compilation: apt install llvm lld"))
+
+        if not wasm_ld_available():
+            return Err(CompileError.backend_error(BackendKind.Wasm,
+                "wasm-ld not found. Install lld: apt install lld (Ubuntu) or brew install llvm (macOS)"))
+
+        # Use LLVM backend for WASM
+        val config = LlvmTargetConfig__for_target(CodegenTarget.Wasm32, nil)
+        var translator = MirToLlvm__create(module.name, CodegenTarget.Wasm32, nil)
+
+        # Generate WASM-specific runtime declarations + module IR
+        val runtime_decls = generate_wasm_runtime_declarations(CodegenTarget.Wasm32)
+        val module_ir = translator.translate_module(module)
+        val llvm_ir = runtime_decls + "\n\n" + module_ir
+
+        # Compile IR to wasm object code first
+        val result = compile_ir_to_object(llvm_ir, config, self.options.opt_level)
+        if result.is_err():
+            val err_msg = result.unwrap_err()
+            return Err(CompileError.backend_error(BackendKind.Wasm, err_msg))
+
+        val bytes = result.unwrap()
+
+        # Include LLVM IR in output if requested
+        var ir_output: text? = nil
+        if self.options.emit_llvm_ir:
+            ir_output = Some(llvm_ir)
+
         Ok(CompiledModule(
             name: module.name,
-            object_code: nil,  # Would be WASM bytes
-            assembly: if self.options.emit_assembly: Some("(module)") else: nil,
-            llvm_ir: nil,
+            object_code: Some(bytes),
+            assembly: nil,
+            llvm_ir: ir_output,
             mir_dump: if self.options.emit_mir: Some(format_mir_module(module)) else: nil,
             symbols: [],
             compile_time_ms: 0

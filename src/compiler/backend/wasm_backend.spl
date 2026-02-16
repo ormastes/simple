@@ -15,6 +15,8 @@
 use compiler.mir_data.*
 use compiler.backend.backend_api.*
 use compiler.backend.wasm_type_mapper.WasmTypeMapper
+use compiler.backend.wasm.wat_codegen.{MirToWat, MirToWat__create, MirToWat__create_standalone}
+use llvm_shared.tools.{find_wat2wasm, wat2wasm_available}
 use std.string.{NL}
 
 # ============================================================================
@@ -318,12 +320,283 @@ class WatBuilder:
         self.emit("local.set {idx}")
 
     me emit_call(func_idx: i64):
-        """Emit call."""
+        """Emit call by index."""
         self.emit("call {func_idx}")
+
+    me emit_call_named(name: text):
+        """Emit call by function name."""
+        self.emit("call ${name}")
+
+    me emit_call_indirect(type_idx: i64):
+        """Emit call_indirect."""
+        self.emit("call_indirect (type {type_idx})")
 
     me emit_return():
         """Emit return."""
         self.emit("return")
+
+    me emit_drop():
+        """Emit drop (discard top of stack)."""
+        self.emit("drop")
+
+    me emit_unreachable():
+        """Emit unreachable (trap)."""
+        self.emit("unreachable")
+
+    # Control flow instructions
+    me emit_block(label: text):
+        """Emit block start."""
+        self.emit("(block ${label}")
+        self.indent_level = self.indent_level + 1
+
+    me emit_loop(label: text):
+        """Emit loop start."""
+        self.emit("(loop ${label}")
+        self.indent_level = self.indent_level + 1
+
+    me emit_if():
+        """Emit if start."""
+        self.emit("(if")
+        self.indent_level = self.indent_level + 1
+
+    me emit_else():
+        """Emit else."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")(else")
+        self.indent_level = self.indent_level + 1
+
+    me emit_end():
+        """Emit end (close block/loop/if)."""
+        self.indent_level = self.indent_level - 1
+        self.emit(")")
+
+    me emit_br(label: text):
+        """Emit unconditional branch."""
+        self.emit("br ${label}")
+
+    me emit_br_if(label: text):
+        """Emit conditional branch."""
+        self.emit("br_if ${label}")
+
+    me emit_br_table(labels: [text], default_label: text):
+        """Emit branch table."""
+        var label_str = ""
+        for label in labels:
+            label_str = label_str + " ${label}"
+        self.emit("br_table{label_str} ${default_label}")
+
+    # Variable instructions
+    me emit_local_tee(idx: i64):
+        """Emit local.tee (set and keep on stack)."""
+        self.emit("local.tee {idx}")
+
+    me emit_local_named_get(name: text):
+        """Emit local.get by name."""
+        self.emit("local.get ${name}")
+
+    me emit_local_named_set(name: text):
+        """Emit local.set by name."""
+        self.emit("local.set ${name}")
+
+    me emit_global_get(name: text):
+        """Emit global.get."""
+        self.emit("global.get ${name}")
+
+    me emit_global_set(name: text):
+        """Emit global.set."""
+        self.emit("global.set ${name}")
+
+    # Memory instructions
+    me emit_i32_load(offset: i64, align: i64):
+        """Emit i32.load."""
+        self.emit("i32.load offset={offset} align={align}")
+
+    me emit_i32_store(offset: i64, align: i64):
+        """Emit i32.store."""
+        self.emit("i32.store offset={offset} align={align}")
+
+    me emit_i64_load(offset: i64, align: i64):
+        """Emit i64.load."""
+        self.emit("i64.load offset={offset} align={align}")
+
+    me emit_i64_store(offset: i64, align: i64):
+        """Emit i64.store."""
+        self.emit("i64.store offset={offset} align={align}")
+
+    me emit_f64_load(offset: i64, align: i64):
+        """Emit f64.load."""
+        self.emit("f64.load offset={offset} align={align}")
+
+    me emit_f64_store(offset: i64, align: i64):
+        """Emit f64.store."""
+        self.emit("f64.store offset={offset} align={align}")
+
+    # Numeric instructions
+    me emit_f64_const(value: f64):
+        """Emit f64.const."""
+        self.emit("f64.const {value}")
+
+    me emit_i32_add():
+        """Emit i32.add."""
+        self.emit("i32.add")
+
+    me emit_i32_sub():
+        """Emit i32.sub."""
+        self.emit("i32.sub")
+
+    me emit_i32_mul():
+        """Emit i32.mul."""
+        self.emit("i32.mul")
+
+    me emit_i32_div_s():
+        """Emit i32.div_s (signed division)."""
+        self.emit("i32.div_s")
+
+    me emit_i32_rem_s():
+        """Emit i32.rem_s (signed remainder)."""
+        self.emit("i32.rem_s")
+
+    me emit_i64_add():
+        """Emit i64.add."""
+        self.emit("i64.add")
+
+    me emit_i64_sub():
+        """Emit i64.sub."""
+        self.emit("i64.sub")
+
+    me emit_i64_mul():
+        """Emit i64.mul."""
+        self.emit("i64.mul")
+
+    me emit_i64_div_s():
+        """Emit i64.div_s."""
+        self.emit("i64.div_s")
+
+    me emit_i64_rem_s():
+        """Emit i64.rem_s."""
+        self.emit("i64.rem_s")
+
+    me emit_f64_add():
+        """Emit f64.add."""
+        self.emit("f64.add")
+
+    me emit_f64_sub():
+        """Emit f64.sub."""
+        self.emit("f64.sub")
+
+    me emit_f64_mul():
+        """Emit f64.mul."""
+        self.emit("f64.mul")
+
+    me emit_f64_div():
+        """Emit f64.div."""
+        self.emit("f64.div")
+
+    # Comparison instructions
+    me emit_i32_eq():
+        """Emit i32.eq."""
+        self.emit("i32.eq")
+
+    me emit_i32_ne():
+        """Emit i32.ne."""
+        self.emit("i32.ne")
+
+    me emit_i32_lt_s():
+        """Emit i32.lt_s."""
+        self.emit("i32.lt_s")
+
+    me emit_i32_le_s():
+        """Emit i32.le_s."""
+        self.emit("i32.le_s")
+
+    me emit_i32_gt_s():
+        """Emit i32.gt_s."""
+        self.emit("i32.gt_s")
+
+    me emit_i32_ge_s():
+        """Emit i32.ge_s."""
+        self.emit("i32.ge_s")
+
+    me emit_i64_eq():
+        """Emit i64.eq."""
+        self.emit("i64.eq")
+
+    me emit_i64_ne():
+        """Emit i64.ne."""
+        self.emit("i64.ne")
+
+    me emit_i64_lt_s():
+        """Emit i64.lt_s."""
+        self.emit("i64.lt_s")
+
+    me emit_i64_le_s():
+        """Emit i64.le_s."""
+        self.emit("i64.le_s")
+
+    me emit_i64_gt_s():
+        """Emit i64.gt_s."""
+        self.emit("i64.gt_s")
+
+    me emit_i64_ge_s():
+        """Emit i64.ge_s."""
+        self.emit("i64.ge_s")
+
+    me emit_f64_eq():
+        """Emit f64.eq."""
+        self.emit("f64.eq")
+
+    me emit_f64_ne():
+        """Emit f64.ne."""
+        self.emit("f64.ne")
+
+    me emit_f64_lt():
+        """Emit f64.lt."""
+        self.emit("f64.lt")
+
+    me emit_f64_le():
+        """Emit f64.le."""
+        self.emit("f64.le")
+
+    me emit_f64_gt():
+        """Emit f64.gt."""
+        self.emit("f64.gt")
+
+    me emit_f64_ge():
+        """Emit f64.ge."""
+        self.emit("f64.ge")
+
+    # Logical/bitwise instructions
+    me emit_i32_and():
+        """Emit i32.and."""
+        self.emit("i32.and")
+
+    me emit_i32_or():
+        """Emit i32.or."""
+        self.emit("i32.or")
+
+    me emit_i32_xor():
+        """Emit i32.xor."""
+        self.emit("i32.xor")
+
+    me emit_i32_shl():
+        """Emit i32.shl."""
+        self.emit("i32.shl")
+
+    me emit_i32_shr_s():
+        """Emit i32.shr_s."""
+        self.emit("i32.shr_s")
+
+    me emit_i32_shr_u():
+        """Emit i32.shr_u."""
+        self.emit("i32.shr_u")
+
+    me emit_i32_eqz():
+        """Emit i32.eqz (compare to zero)."""
+        self.emit("i32.eqz")
+
+    me emit_nop():
+        """Emit nop."""
+        self.emit("nop")
 
     fn build() -> text:
         """Build final WAT string."""
@@ -363,30 +636,27 @@ class WasmBackend:
         self.browser_bindings = self.browser_bindings.push(binding)
 
     fn compile_module(module: MirModule) -> Result<WasmCompileResult, CompileError>:
-        """Compile a MIR module to WebAssembly."""
-        # Build WAT
-        var builder = WatBuilder__create()
-        builder.begin_module(module.name)
+        """Compile a MIR module to WebAssembly.
 
-        # Add imports based on target
-        if self.target == WasmTarget.Browser:
-            for binding in self.browser_bindings:
-                builder.emit_import(binding.to_import())
+        Uses MirToWat translator for full MIR instruction translation.
+        Optionally converts WAT to binary WASM via wat2wasm.
+        """
+        # Select translator based on target
+        var use_wasi = self.target.needs_wasi_imports()
+        var translator = if use_wasi:
+            MirToWat__create(module.name)
+        else:
+            MirToWat__create_standalone(module.name)
 
-        # Add memory
-        builder.emit("(memory 1)")
-        builder.emit_export(WasmExport(
-            name: "memory",
-            kind: WasmExportKind.Memory(0)
-        ))
+        # Translate full MIR module to WAT text
+        val wat = translator.translate_module(module)
 
-        # Translate functions
-        for name, body in module.functions:
-            self.translate_function(builder, name, body, self.type_mapper)
-
-        builder.end_module()
-
-        val wat = builder.build()
+        # Try to compile WAT to binary WASM
+        var wasm_bytes: [u8]? = nil
+        if wat2wasm_available():
+            val result = wat_to_wasm_binary(wat, module.name)
+            if result.?:
+                wasm_bytes = result
 
         # Generate JS glue if needed
         var js_glue: text? = nil
@@ -394,46 +664,18 @@ class WasmBackend:
             var glue_gen = JsGlueGenerator__create()
             for binding in self.browser_bindings:
                 glue_gen.add_binding(binding)
-            for name, _ in module.functions:
-                glue_gen.add_export(name)
+            for func in module.functions:
+                if not func.is_extern:
+                    glue_gen.add_export(func.name)
             js_glue = Some(glue_gen.generate())
 
         Ok(WasmCompileResult(
             module_name: module.name,
             wat: wat,
-            wasm: nil,  # Would compile WAT to binary
+            wasm: wasm_bytes,
             js_glue: js_glue,
             compile_time_ms: 0
         ))
-
-    fn translate_function(
-        builder: WatBuilder,
-        name: text,
-        body: MirBody,
-        type_mapper: WasmTypeMapper
-    ):
-        """Translate a MIR function to WAT using shared type mapper."""
-        var params: [WasmType] = []
-        for _ in 0..body.arg_count:
-            params = params.push(WasmType.I64)
-
-        var results: [WasmType] = []
-        if body.return_ty.kind != MirTypeKind.Unit:
-            # Use type mapper and convert text to WasmType
-            val type_str = type_mapper.map_type(body.return_ty)
-            val wasm_type = match type_str:
-                case "i64": WasmType.I64
-                case "i32": WasmType.I32
-                case "f64": WasmType.F64
-                case "f32": WasmType.F32
-                case _: WasmType.I32
-            results = [wasm_type]
-
-        builder.begin_func(name, params, results)
-
-        # Would translate MIR to WASM instructions here
-
-        builder.end_func()
 
 struct WasmCompileResult:
     """Result of WASM compilation."""
@@ -456,6 +698,73 @@ impl WasmCompileResult:
         Ok(())
 
 # ============================================================================
+# WAT to WASM Binary Compilation
+# ============================================================================
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_process_run(cmd: text) -> i64
+extern fn rt_file_delete(path: text) -> bool
+
+fn wat_to_wasm_binary(wat: text, module_name: text) -> [u8]?:
+    """Convert WAT text to WASM binary using wat2wasm.
+
+    Writes WAT to a temp file, runs wat2wasm, reads back binary.
+    Returns nil if wat2wasm is not available or compilation fails.
+    """
+    val wat2wasm = find_wat2wasm()
+    if wat2wasm == "":
+        return nil
+
+    val wat_path = "/tmp/simple_wasm_{module_name}.wat"
+    val wasm_path = "/tmp/simple_wasm_{module_name}.wasm"
+
+    # Write WAT to temp file
+    val wrote = rt_file_write_text(wat_path, wat)
+    if not wrote:
+        return nil
+
+    # Run wat2wasm
+    val exit_code = rt_process_run("{wat2wasm} {wat_path} -o {wasm_path}")
+    if exit_code != 0:
+        rt_file_delete(wat_path)
+        return nil
+
+    # Read back WASM binary
+    val wasm_bytes = rt_file_read_bytes(wasm_path)
+
+    # Clean up temp files
+    rt_file_delete(wat_path)
+    rt_file_delete(wasm_path)
+
+    if wasm_bytes.len() > 0:
+        Some(wasm_bytes)
+    else:
+        nil
+
+# ============================================================================
+# Desugared Static Methods
+# ============================================================================
+
+fn WatBuilder__create() -> WatBuilder:
+    WatBuilder.create()
+
+fn WasmBackend__create(target: WasmTarget) -> WasmBackend:
+    WasmBackend.create(target)
+
+fn WasmBackend__browser() -> WasmBackend:
+    WasmBackend.browser()
+
+fn WasmBackend__wasi() -> WasmBackend:
+    WasmBackend.wasi()
+
+fn JsGlueGenerator__create() -> JsGlueGenerator:
+    JsGlueGenerator.create()
+
+fn WasmTypeMapper__create_for_target(target: CodegenTarget) -> WasmTypeMapper:
+    WasmTypeMapper.create_for_target(target)
+
+# ============================================================================
 # Exports
 # ============================================================================
 
@@ -463,3 +772,6 @@ export WasmTarget, WasmType, mir_type_to_wasm
 export WasmImport, WasmImportKind, WasmExport, WasmExportKind
 export BrowserBinding, JsGlueGenerator
 export WatBuilder, WasmBackend, WasmCompileResult
+export wat_to_wasm_binary
+export WatBuilder__create, WasmBackend__create, WasmBackend__browser, WasmBackend__wasi
+export JsGlueGenerator__create

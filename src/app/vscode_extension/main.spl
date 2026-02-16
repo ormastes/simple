@@ -22,6 +22,8 @@ class BuildOptions:
     pub extension_name: String
     pub version: String
 
+    pub lsp_wasm: bool             # Build LSP server as WASM
+
     pub fn new(): BuildOptions =
         BuildOptions {
             source_dir: "src",
@@ -30,7 +32,8 @@ class BuildOptions:
             watch: false,
             generate_manifest: true,
             extension_name: "",
-            version: "1.0.0"
+            version: "1.0.0",
+            lsp_wasm: false
         }
 
 # Build result
@@ -68,6 +71,15 @@ class VsCodeBuilder:
         4. Copy assets
         """
         val result = BuildResult__new()
+
+        # Step 0: Build LSP WASM if requested
+        if self.options.lsp_wasm:
+            stdio.println("Compiling LSP server to WASM...")
+            val lsp_result = self.compile_lsp_to_wasm()
+            if not lsp_result.success:
+                result.errors.extend(lsp_result.errors)
+                return result
+            stdio.println("  LSP WASM: {lsp_result.path}")
 
         # Step 1: Compile Simple to WASM
         stdio.println("Compiling Simple to WASM...")
@@ -256,6 +268,43 @@ module.exports = {
             errors: []
         }
 
+    fn compile_lsp_to_wasm(): CompileResult =
+        """Compile Simple LSP server to WASM for VSCode Web.
+
+        Targets wasm32-wasi (WASI Preview 1) for stdio-based LSP.
+        Output goes to wasm/simple-lsp.wasm in the output directory.
+        """
+        val wasm_dir = "{self.options.output_dir}/wasm"
+        dir.create(wasm_dir, true)
+
+        var args: [String] = ["build", "--target", "wasm32-wasi"]
+
+        if self.options.release:
+            args.append("--release")
+
+        args.append("--output")
+        val lsp_wasm_path = "{wasm_dir}/simple-lsp.wasm"
+        args.append(lsp_wasm_path)
+
+        args.append("src/app/lsp/main.spl")
+
+        val result = shell.run("simple", args)
+
+        if result.ok():
+            CompileResult {
+                success: true,
+                path: lsp_wasm_path,
+                errors: []
+            }
+        else:
+            val shell_result = result.unwrap()
+            val error_lines = shell_result.stderr.split(NL).filter(|line| line.trim().len() > 0)
+            CompileResult {
+                success: false,
+                path: "",
+                errors: error_lines
+            }
+
     fn copy_assets():
         """Copy assets to output directory.
 
@@ -304,6 +353,8 @@ fn parse_args(): BuildOptions =
                 options.release = true
             "--watch":
                 options.watch = true
+            "--lsp-wasm":
+                options.lsp_wasm = true
             "--no-manifest":
                 options.generate_manifest = false
             "--source":
@@ -339,6 +390,7 @@ pub fn main():
     Options:
         --release           Build in release mode
         --watch             Watch for changes and rebuild
+        --lsp-wasm          Also compile LSP server to WASM (for VSCode Web)
         --no-manifest       Don't generate package.json
         --source <dir>      Source directory (default: src)
         --output <dir>      Output directory (default: out)
@@ -347,6 +399,7 @@ pub fn main():
 
     Example:
         simple vscode build --release --name simple-lang --version 1.0.0
+        simple vscode build --lsp-wasm --release   # Include WASM LSP
     """
     stdio.println("VSCode Extension Builder")
     stdio.println("========================")

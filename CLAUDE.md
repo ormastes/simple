@@ -65,7 +65,8 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - Push: `jj bookmark set main -r @ && jj git push --bookmark main`
 
 ### Language
-- **ALL code in `.spl`** - No Python, no Bash (except 3 bootstrap scripts in `script/`)
+- **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `script/`)
+- **Scripts:** Use `.ssh` for shell scripts that need to remain shell (e.g., container entrypoints)
 - **Generics:** `<>` not `[]` - `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
 - **Constructors:** `Point(x: 3, y: 4)` not `.new()`
@@ -76,6 +77,9 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **NEVER skip/ignore** failing tests without user approval
 - **Built-in matchers only:** `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 - Use `to_equal(true)` not `to_be_true()`
+- **Interpreter mode limitation:** Test runner only verifies file loading, NOT `it` block execution
+- **Live API tests:** `test/system/llm_caret_live_comprehensive_spec.spl` requires `CLAUDECODE=` env var
+- **Test costs:** Live LLM tests cost ~$1-2 per run, use sparingly
 
 ### Code Style
 - **NEVER over-engineer** - only make requested changes
@@ -135,7 +139,20 @@ bin/simple fix file.spl --dry-run   # Preview fixes
 bin/simple todo-scan                # Update TODO tracking
 bin/simple bug-add --id=X           # Add bug
 bin/simple bug-gen                  # Generate bug report
+
+# LLM Integration Testing (requires claude CLI + auth, ~$1-2 per run)
+CLAUDECODE= bin/simple test test/system/llm_caret_live_comprehensive_spec.spl
 ```
+
+**Live LLM Tests:** The comprehensive test suite (`test/system/llm_caret_live_comprehensive_spec.spl`) makes **22 real Claude API calls** covering:
+- Single-shot responses (5 tests)
+- System prompt adherence (2 tests)
+- Multi-turn conversations with session resume (6 turns, 5 tests)
+- Code tutor progressive Q&A (5 turns, 4 tests)
+- Shopping list state tracking (5 turns, 4 tests)
+- Edge cases (2 tests)
+
+**Note:** Interpreter mode test runner only verifies file loading. The `it` block bodies don't execute in interpreter mode, so live tests appear as "1 passed, 6ms" but don't make real API calls. Use compiled mode for actual execution.
 
 ---
 

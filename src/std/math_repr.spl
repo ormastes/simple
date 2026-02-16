@@ -1,0 +1,728 @@
+# Math Expression Rendering
+#
+# Parses math expression source text and renders to multiple formats:
+# - to_text:   Normalized plain text
+# - to_debug:  AST structure (e.g. "Add(Pow(x,2),1)")
+# - to_pretty: Unicode pretty print (e.g. "x² + 1")
+# - to_md:     Markdown LaTeX (e.g. "$x^{2} + 1$")
+#
+# Uses existing pretty_* and latex_* builders from std.repr
+# and Unicode lookup tables from std.unicode_math.
+
+use std.repr.{pretty_fraction, pretty_power, pretty_sub, pretty_sqrt}
+use std.repr.{pretty_sum, pretty_integral}
+use std.repr.{latex_fraction, latex_power, latex_sub, latex_sqrt}
+use std.repr.{latex_sum, latex_integral}
+use std.unicode_math.{greek, greek_upper, superscript, subscript_char}
+
+# ============================================================================
+# Node Pool (parallel arrays)
+# ============================================================================
+
+# Tags: "num", "id", "add", "sub", "mul", "div", "pow",
+#       "neg", "call", "subscript", "group", "frac", "transpose"
+var _tags: [text] = []
+var _vals: [text] = []
+var _lefts: [i64] = []
+var _rights: [i64] = []
+var _extras: [[i64]] = []
+
+fn _reset():
+    _tags = []
+    _vals = []
+    _lefts = []
+    _rights = []
+    _extras = []
+
+fn _mk(tag: text, tval: text, left: i64, right: i64) -> i64:
+    val idx = _tags.len()
+    _tags = _tags + [tag]
+    _vals = _vals + [tval]
+    _lefts = _lefts + [left]
+    _rights = _rights + [right]
+    _extras = _extras + [[]]
+    idx
+
+fn _mk_call(name: text, args: [i64]) -> i64:
+    val idx = _tags.len()
+    _tags = _tags + ["call"]
+    _vals = _vals + [name]
+    _lefts = _lefts + [-1]
+    _rights = _rights + [-1]
+    _extras = _extras + [args]
+    idx
+
+# ============================================================================
+# Tokenizer
+# ============================================================================
+
+# Token: [kind, tval] stored as two parallel arrays
+var _tk_kinds: [text] = []
+var _tk_vals: [text] = []
+
+fn _is_digit(ch: text) -> bool:
+    if ch == "0": return true
+    if ch == "1": return true
+    if ch == "2": return true
+    if ch == "3": return true
+    if ch == "4": return true
+    if ch == "5": return true
+    if ch == "6": return true
+    if ch == "7": return true
+    if ch == "8": return true
+    if ch == "9": return true
+    false
+
+fn _is_alpha(ch: text) -> bool:
+    if ch == "_": return true
+    val c = ch.char_code_at(0)
+    if c >= 65 and c <= 90: return true
+    if c >= 97 and c <= 122: return true
+    false
+
+fn _is_alnum(ch: text) -> bool:
+    if _is_digit(ch): return true
+    _is_alpha(ch)
+
+fn _tokenize(source: text):
+    _tk_kinds = []
+    _tk_vals = []
+    var i = 0
+    val slen = source.len()
+    for _loop in 0..10000:
+        if i >= slen:
+            break
+        val ch = source.substring(i, i + 1)
+        # Skip whitespace
+        if ch == " " or ch == "\t":
+            i = i + 1
+        # Number
+        elif _is_digit(ch):
+            var num_str = ""
+            for _inner in 0..1000:
+                if i >= slen:
+                    break
+                val c2 = source.substring(i, i + 1)
+                if _is_digit(c2) or c2 == ".":
+                    num_str = num_str + c2
+                    i = i + 1
+                else:
+                    break
+            _tk_kinds = _tk_kinds + ["num"]
+            _tk_vals = _tk_vals + [num_str]
+        # Identifier
+        elif _is_alpha(ch):
+            var id_str = ""
+            for _inner in 0..1000:
+                if i >= slen:
+                    break
+                val c2 = source.substring(i, i + 1)
+                if _is_alnum(c2):
+                    id_str = id_str + c2
+                    i = i + 1
+                else:
+                    break
+            _tk_kinds = _tk_kinds + ["id"]
+            _tk_vals = _tk_vals + [id_str]
+        # Dot-dot range
+        elif ch == ".":
+            if i + 1 < slen:
+                val next = source.substring(i + 1, i + 2)
+                if next == ".":
+                    _tk_kinds = _tk_kinds + ["op"]
+                    _tk_vals = _tk_vals + [".."]
+                    i = i + 2
+                else:
+                    _tk_kinds = _tk_kinds + ["op"]
+                    _tk_vals = _tk_vals + ["."]
+                    i = i + 1
+            else:
+                _tk_kinds = _tk_kinds + ["op"]
+                _tk_vals = _tk_vals + ["."]
+                i = i + 1
+        # Operators
+        elif ch == "+":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["+"]
+            i = i + 1
+        elif ch == "-":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["-"]
+            i = i + 1
+        elif ch == "*":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["*"]
+            i = i + 1
+        elif ch == "/":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["/"]
+            i = i + 1
+        elif ch == "^":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["^"]
+            i = i + 1
+        elif ch == "'":
+            _tk_kinds = _tk_kinds + ["op"]
+            _tk_vals = _tk_vals + ["'"]
+            i = i + 1
+        elif ch == "(":
+            _tk_kinds = _tk_kinds + ["lparen"]
+            _tk_vals = _tk_vals + ["("]
+            i = i + 1
+        elif ch == ")":
+            _tk_kinds = _tk_kinds + ["rparen"]
+            _tk_vals = _tk_vals + [")"]
+            i = i + 1
+        elif ch == "[":
+            _tk_kinds = _tk_kinds + ["lbracket"]
+            _tk_vals = _tk_vals + ["["]
+            i = i + 1
+        elif ch == "]":
+            _tk_kinds = _tk_kinds + ["rbracket"]
+            _tk_vals = _tk_vals + ["]"]
+            i = i + 1
+        elif ch == ",":
+            _tk_kinds = _tk_kinds + ["comma"]
+            _tk_vals = _tk_vals + [","]
+            i = i + 1
+        else:
+            # Skip unknown
+            i = i + 1
+    _tk_kinds = _tk_kinds + ["eof"]
+    _tk_vals = _tk_vals + [""]
+
+# ============================================================================
+# Parser (recursive descent)
+# ============================================================================
+
+var _pos = 0
+
+fn _peek_kind() -> text:
+    if _pos >= _tk_kinds.len():
+        return "eof"
+    _tk_kinds[_pos]
+
+fn _peek_val() -> text:
+    if _pos >= _tk_vals.len():
+        return ""
+    _tk_vals[_pos]
+
+fn _advance():
+    _pos = _pos + 1
+
+fn _eat(expected_kind: text) -> text:
+    val v = _peek_val()
+    if _peek_kind() == expected_kind:
+        _advance()
+    v
+
+# Forward declarations through module-level functions
+# Grammar:
+#   expr       -> add_expr
+#   add_expr   -> mul_expr (('+' | '-') mul_expr)*
+#   mul_expr   -> unary_expr (('*' | implicit) unary_expr)*
+#   unary_expr -> '-' unary_expr | pow_expr
+#   pow_expr   -> postfix_expr ('^' unary_expr)?
+#   postfix   -> primary ('[' expr ']')? ("'")?
+#   primary    -> NUM | IDENT | IDENT '(' args ')' | '(' expr ')'
+#               | 'frac' '(' expr ',' expr ')'
+#               | 'sum' '(' var ',' expr '..' expr ')' expr
+#               | 'int' '(' var ',' expr '..' expr ')' expr
+
+fn _parse_expr() -> i64:
+    _parse_add()
+
+fn _parse_add() -> i64:
+    var left = _parse_mul()
+    for _loop in 0..1000:
+        val pk = _peek_kind()
+        val pv = _peek_val()
+        if pk == "op" and pv == "+":
+            _advance()
+            val right = _parse_mul()
+            left = _mk("add", "+", left, right)
+        elif pk == "op" and pv == "-":
+            _advance()
+            val right = _parse_mul()
+            left = _mk("sub", "-", left, right)
+        else:
+            break
+    left
+
+fn _can_start_expr() -> bool:
+    val pk = _peek_kind()
+    if pk == "num": return true
+    if pk == "id": return true
+    if pk == "lparen": return true
+    false
+
+fn _parse_mul() -> i64:
+    var left = _parse_unary()
+    for _loop in 0..1000:
+        val pk = _peek_kind()
+        val pv = _peek_val()
+        if pk == "op" and pv == "*":
+            _advance()
+            val right = _parse_unary()
+            left = _mk("mul", "*", left, right)
+        # Implicit multiplication: num followed by id or lparen, id followed by lparen
+        elif _can_implicit_mul():
+            val right = _parse_unary()
+            left = _mk("mul", "", left, right)
+        else:
+            break
+    left
+
+fn _can_implicit_mul() -> bool:
+    # Current position must be at something that can start an expression
+    # AND previous token must be something that can end an expression
+    if not _can_start_expr():
+        return false
+    # Check what's at current position - must be id or lparen for implicit mul
+    val pk = _peek_kind()
+    if pk == "id": return true
+    if pk == "lparen": return true
+    false
+
+fn _parse_unary() -> i64:
+    val pk = _peek_kind()
+    val pv = _peek_val()
+    if pk == "op" and pv == "-":
+        _advance()
+        val operand = _parse_unary()
+        return _mk("neg", "-", operand, -1)
+    _parse_pow()
+
+fn _parse_pow() -> i64:
+    var base = _parse_postfix()
+    val pk = _peek_kind()
+    val pv = _peek_val()
+    if pk == "op" and pv == "^":
+        _advance()
+        val exp = _parse_unary()
+        base = _mk("pow", "^", base, exp)
+    base
+
+fn _parse_postfix() -> i64:
+    var node = _parse_primary()
+    # Subscript: x[i]
+    for _loop in 0..100:
+        if _peek_kind() == "lbracket":
+            _advance()
+            val idx = _parse_expr()
+            if _peek_kind() == "rbracket":
+                _advance()
+            node = _mk("subscript", "", node, idx)
+        elif _peek_kind() == "op" and _peek_val() == "'":
+            _advance()
+            node = _mk("transpose", "'", node, -1)
+        else:
+            break
+    node
+
+fn _parse_primary() -> i64:
+    val pk = _peek_kind()
+    val pv = _peek_val()
+
+    # Number literal
+    if pk == "num":
+        _advance()
+        return _mk("num", pv, -1, -1)
+
+    # Identifier or function call
+    if pk == "id":
+        _advance()
+        val name = pv
+        # Special forms
+        if name == "frac" and _peek_kind() == "lparen":
+            return _parse_frac_call()
+        if name == "sum" and _peek_kind() == "lparen":
+            return _parse_sum_call(name)
+        if name == "int" and _peek_kind() == "lparen":
+            return _parse_sum_call(name)
+        # Regular function call
+        if _peek_kind() == "lparen":
+            _advance()
+            var args: [i64] = []
+            if _peek_kind() != "rparen":
+                args = args + [_parse_expr()]
+                for _loop in 0..100:
+                    if _peek_kind() == "comma":
+                        _advance()
+                        args = args + [_parse_expr()]
+                    else:
+                        break
+            if _peek_kind() == "rparen":
+                _advance()
+            return _mk_call(name, args)
+        # Plain identifier
+        return _mk("id", name, -1, -1)
+
+    # Grouped expression
+    if pk == "lparen":
+        _advance()
+        val inner = _parse_expr()
+        if _peek_kind() == "rparen":
+            _advance()
+        return _mk("group", "", inner, -1)
+
+    # Fallback: consume and return error node
+    _advance()
+    _mk("id", "?", -1, -1)
+
+fn _parse_frac_call() -> i64:
+    # Already consumed "frac", sitting at "("
+    _advance()
+    val num = _parse_expr()
+    if _peek_kind() == "comma":
+        _advance()
+    val den = _parse_expr()
+    if _peek_kind() == "rparen":
+        _advance()
+    _mk("frac", "frac", num, den)
+
+fn _parse_sum_call(kind: text) -> i64:
+    # Already consumed "sum" or "int", sitting at "("
+    # sum(var, from..to) body
+    _advance()
+    val var_name = _peek_val()
+    _advance()
+    if _peek_kind() == "comma":
+        _advance()
+    val from_val = _parse_expr()
+    # expect ".."
+    if _peek_kind() == "op" and _peek_val() == "..":
+        _advance()
+    val to_val = _parse_expr()
+    if _peek_kind() == "rparen":
+        _advance()
+    # Parse body expression
+    val body = _parse_unary()
+    # Store as: tag="sum_expr" or "int_expr", val=var_name
+    # left=body, right=-1
+    # extras = [from_val, to_val]
+    val idx = _tags.len()
+    var tag = "sum_expr"
+    if kind == "int":
+        tag = "int_expr"
+    _tags = _tags + [tag]
+    _vals = _vals + [var_name]
+    _lefts = _lefts + [body]
+    _rights = _rights + [-1]
+    _extras = _extras + [[from_val, to_val]]
+    idx
+
+var _root_idx = 0
+
+fn _do_parse(source: text):
+    _pos = 0
+    _tokenize(source)
+    _root_idx = _parse_expr()
+
+# ============================================================================
+# Renderers
+# ============================================================================
+
+# --- Text renderer (normalized plain text) ---
+
+fn _render_text(idx: i64) -> text:
+    if idx < 0:
+        return ""
+    val tag = _tags[idx]
+    val tval = _vals[idx]
+    val left = _lefts[idx]
+    val right = _rights[idx]
+
+    if tag == "num":
+        return tval
+    if tag == "id":
+        return tval
+    if tag == "add":
+        return _render_text(left) + " + " + _render_text(right)
+    if tag == "sub":
+        return _render_text(left) + " - " + _render_text(right)
+    if tag == "mul":
+        if tval == "":
+            return _render_text(left) + _render_text(right)
+        return _render_text(left) + " * " + _render_text(right)
+    if tag == "div":
+        return _render_text(left) + " / " + _render_text(right)
+    if tag == "pow":
+        return _render_text(left) + "^" + _render_text(right)
+    if tag == "neg":
+        return "-" + _render_text(left)
+    if tag == "frac":
+        return _render_text(left) + " / " + _render_text(right)
+    if tag == "group":
+        return "(" + _render_text(left) + ")"
+    if tag == "subscript":
+        return _render_text(left) + "[" + _render_text(right) + "]"
+    if tag == "transpose":
+        return _render_text(left) + "'"
+    if tag == "call":
+        val args = _extras[idx]
+        var arg_str = ""
+        var ai = 0
+        for a in args:
+            if ai > 0:
+                arg_str = arg_str + ", "
+            arg_str = arg_str + _render_text(a)
+            ai = ai + 1
+        return tval + "(" + arg_str + ")"
+    if tag == "sum_expr":
+        val bounds = _extras[idx]
+        val from_v = _render_text(bounds[0])
+        val to_v = _render_text(bounds[1])
+        return "sum(" + tval + ", " + from_v + ".." + to_v + ") " + _render_text(left)
+    if tag == "int_expr":
+        val bounds = _extras[idx]
+        val from_v = _render_text(bounds[0])
+        val to_v = _render_text(bounds[1])
+        return "int(" + tval + ", " + from_v + ".." + to_v + ") " + _render_text(left)
+    tval
+
+# --- Debug renderer (AST structure) ---
+
+fn _render_debug(idx: i64) -> text:
+    if idx < 0:
+        return ""
+    val tag = _tags[idx]
+    val tval = _vals[idx]
+    val left = _lefts[idx]
+    val right = _rights[idx]
+
+    if tag == "num":
+        return "Num(" + tval + ")"
+    if tag == "id":
+        return "Id(" + tval + ")"
+    if tag == "add":
+        return "Add(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "sub":
+        return "Sub(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "mul":
+        return "Mul(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "div":
+        return "Div(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "pow":
+        return "Pow(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "neg":
+        return "Neg(" + _render_debug(left) + ")"
+    if tag == "frac":
+        return "Frac(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "group":
+        return "Group(" + _render_debug(left) + ")"
+    if tag == "subscript":
+        return "Sub(" + _render_debug(left) + ", " + _render_debug(right) + ")"
+    if tag == "transpose":
+        return "Transpose(" + _render_debug(left) + ")"
+    if tag == "call":
+        val args = _extras[idx]
+        var arg_str = ""
+        var ai = 0
+        for a in args:
+            if ai > 0:
+                arg_str = arg_str + ", "
+            arg_str = arg_str + _render_debug(a)
+            ai = ai + 1
+        return "Call(" + tval + ", " + arg_str + ")"
+    if tag == "sum_expr":
+        val bounds = _extras[idx]
+        return "Sum(" + tval + ", " + _render_debug(bounds[0]) + ", " + _render_debug(bounds[1]) + ", " + _render_debug(left) + ")"
+    if tag == "int_expr":
+        val bounds = _extras[idx]
+        return "Int(" + tval + ", " + _render_debug(bounds[0]) + ", " + _render_debug(bounds[1]) + ", " + _render_debug(left) + ")"
+    "Unknown(" + tag + ")"
+
+# --- Pretty renderer (Unicode) ---
+
+fn _is_greek(name: text) -> bool:
+    val g = greek(name)
+    if g != name:
+        return true
+    val gu = greek_upper(name)
+    gu != name
+
+fn _resolve_greek(name: text) -> text:
+    val g = greek(name)
+    if g != name:
+        return g
+    val gu = greek_upper(name)
+    if gu != name:
+        return gu
+    name
+
+fn _render_pretty(idx: i64) -> text:
+    if idx < 0:
+        return ""
+    val tag = _tags[idx]
+    val tval = _vals[idx]
+    val left = _lefts[idx]
+    val right = _rights[idx]
+
+    if tag == "num":
+        return tval
+    if tag == "id":
+        return _resolve_greek(tval)
+    if tag == "add":
+        return _render_pretty(left) + " + " + _render_pretty(right)
+    if tag == "sub":
+        return _render_pretty(left) + " - " + _render_pretty(right)
+    if tag == "mul":
+        if tval == "":
+            return _render_pretty(left) + _render_pretty(right)
+        return _render_pretty(left) + " * " + _render_pretty(right)
+    if tag == "pow":
+        return pretty_power(_render_pretty(left), _render_pretty(right))
+    if tag == "neg":
+        return "-" + _render_pretty(left)
+    if tag == "frac":
+        return pretty_fraction(_render_pretty(left), _render_pretty(right))
+    if tag == "group":
+        return "(" + _render_pretty(left) + ")"
+    if tag == "subscript":
+        return pretty_sub(_render_pretty(left), _render_pretty(right))
+    if tag == "transpose":
+        return _render_pretty(left) + "T"
+    if tag == "call":
+        val args = _extras[idx]
+        if tval == "sqrt" and args.len() == 1:
+            return pretty_sqrt(_render_pretty(args[0]))
+        var arg_str = ""
+        var ai = 0
+        for a in args:
+            if ai > 0:
+                arg_str = arg_str + ", "
+            arg_str = arg_str + _render_pretty(a)
+            ai = ai + 1
+        return tval + "(" + arg_str + ")"
+    if tag == "sum_expr":
+        val bounds = _extras[idx]
+        return pretty_sum(_render_pretty(left), tval, _render_pretty(bounds[0]), _render_pretty(bounds[1]))
+    if tag == "int_expr":
+        val bounds = _extras[idx]
+        return pretty_integral(_render_pretty(left), tval, _render_pretty(bounds[0]), _render_pretty(bounds[1]))
+    tval
+
+# --- LaTeX renderer ---
+
+fn _is_known_fn(name: text) -> bool:
+    if name == "sin": return true
+    if name == "cos": return true
+    if name == "tan": return true
+    if name == "log": return true
+    if name == "ln": return true
+    if name == "exp": return true
+    if name == "min": return true
+    if name == "max": return true
+    if name == "lim": return true
+    false
+
+fn _latex_greek(name: text) -> text:
+    # Map greek names to LaTeX commands
+    val g = greek(name)
+    if g != name:
+        return "\\" + name
+    val gu = greek_upper(name)
+    if gu != name:
+        return "\\" + name
+    name
+
+fn _render_latex(idx: i64) -> text:
+    if idx < 0:
+        return ""
+    val tag = _tags[idx]
+    val tval = _vals[idx]
+    val left = _lefts[idx]
+    val right = _rights[idx]
+
+    if tag == "num":
+        return tval
+    if tag == "id":
+        return _latex_greek(tval)
+    if tag == "add":
+        return _render_latex(left) + " + " + _render_latex(right)
+    if tag == "sub":
+        return _render_latex(left) + " - " + _render_latex(right)
+    if tag == "mul":
+        if tval == "":
+            return _render_latex(left) + " " + _render_latex(right)
+        return _render_latex(left) + " \\cdot " + _render_latex(right)
+    if tag == "pow":
+        return latex_power(_render_latex(left), _render_latex(right))
+    if tag == "neg":
+        return "-" + _render_latex(left)
+    if tag == "frac":
+        return latex_fraction(_render_latex(left), _render_latex(right))
+    if tag == "group":
+        return "(" + _render_latex(left) + ")"
+    if tag == "subscript":
+        return latex_sub(_render_latex(left), _render_latex(right))
+    if tag == "transpose":
+        return _render_latex(left) + "^{T}"
+    if tag == "call":
+        val args = _extras[idx]
+        if tval == "sqrt" and args.len() == 1:
+            return latex_sqrt(_render_latex(args[0]))
+        val is_known = _is_known_fn(tval)
+        var fn_prefix = "\\operatorname{" + tval + "}"
+        if is_known:
+            fn_prefix = "\\" + tval
+        var arg_str = ""
+        var ai = 0
+        for a in args:
+            if ai > 0:
+                arg_str = arg_str + ", "
+            arg_str = arg_str + _render_latex(a)
+            ai = ai + 1
+        return fn_prefix + "(" + arg_str + ")"
+    if tag == "sum_expr":
+        val bounds = _extras[idx]
+        return latex_sum(_render_latex(left), tval, _render_latex(bounds[0]), _render_latex(bounds[1]))
+    if tag == "int_expr":
+        val bounds = _extras[idx]
+        return latex_integral(_render_latex(left), tval, _render_latex(bounds[0]), _render_latex(bounds[1]))
+    tval
+
+# --- Markdown renderer ---
+
+fn _render_md(idx: i64) -> text:
+    "$" + _render_latex(idx) + "$"
+
+# ============================================================================
+# Public API
+# ============================================================================
+
+fn to_text(source: text) -> text:
+    _reset()
+    _do_parse(source)
+    if _tags.len() == 0:
+        return source
+    _render_text(_root_idx)
+
+fn to_debug(source: text) -> text:
+    _reset()
+    _do_parse(source)
+    if _tags.len() == 0:
+        return source
+    _render_debug(_root_idx)
+
+fn to_pretty(source: text) -> text:
+    _reset()
+    _do_parse(source)
+    if _tags.len() == 0:
+        return source
+    _render_pretty(_root_idx)
+
+fn to_md(source: text) -> text:
+    _reset()
+    _do_parse(source)
+    if _tags.len() == 0:
+        return "$" + source + "$"
+    _render_md(_root_idx)
+
+fn render_latex_raw(source: text) -> text:
+    _reset()
+    _do_parse(source)
+    if _tags.len() == 0:
+        return source
+    _render_latex(_root_idx)

@@ -10,6 +10,12 @@ import {
 import { LanguageModelClient } from './ai/languageModelClient';
 import { ChatPanel } from './ai/chatPanel';
 import { AIInlineCompletionProvider } from './ai/inlineCompletionProvider';
+import { shouldUseWasm, getEnvironmentDescription } from './wasm/environmentDetector';
+import { createWasmServerOptions, isWasmLspAvailable } from './wasm/wasmLspBridge';
+import { activateMathFeatures } from './math';
+
+/** Path to bundled WASM LSP binary (relative to extension root) */
+const WASM_LSP_PATH = 'wasm/simple-lsp.wasm';
 
 let client: LanguageClient | undefined;
 let statusBarItem: vscode.StatusBarItem | undefined;
@@ -18,6 +24,10 @@ let outputChannel: vscode.OutputChannel | undefined;
 let aiOutputChannel: vscode.OutputChannel | undefined;
 let lmClient: LanguageModelClient | undefined;
 let inlineCompletionProvider: AIInlineCompletionProvider | undefined;
+/** Whether the LSP is running via WASM (true) or native subprocess (false) */
+let usingWasmLsp = false;
+/** Callback to notify math hover provider of LSP state changes */
+let setMathLspRunning: ((running: boolean) => void) | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Simple Language extension activating...');
@@ -30,27 +40,90 @@ export function activate(context: vscode.ExtensionContext) {
     aiOutputChannel = vscode.window.createOutputChannel('Simple AI Assistant');
     context.subscriptions.push(aiOutputChannel);
 
-    // Get configuration
-    const config = vscode.workspace.getConfiguration('simple');
-    const serverPath = config.get<string>('lsp.serverPath', 'simple-lsp');
-    const traceLevel = config.get<string>('lsp.trace.server', 'off');
+    // Log environment info
+    outputChannel.appendLine(getEnvironmentDescription());
 
-    // Server launch options
-    const serverOptions: ServerOptions = {
+    // Start LSP (async - determines native vs WASM)
+    startLspClient(context).then(() => {
+        // Initialize AI features after LSP is set up
+        initializeAI(context);
+    });
+
+    // Initialize math block rendering features.
+    // Pass LSP state callback so the math hover provider can defer to the
+    // LSP hover handler (src/app/lsp/handlers/hover.spl) when connected.
+    activateMathFeatures(context, (setter) => {
+        setMathLspRunning = setter;
+    });
+
+    console.log('Simple Language extension activated');
+}
+
+/**
+ * Create server options based on environment (native subprocess or WASM in-process).
+ *
+ * Selection logic:
+ * - `simple.lsp.mode = "native"` -> always native subprocess
+ * - `simple.lsp.mode = "wasm"` -> always WASM (fail if not available)
+ * - `simple.lsp.mode = "auto"` (default) -> WASM on web, native on desktop
+ */
+async function createServerOptions(
+    context: vscode.ExtensionContext
+): Promise<ServerOptions> {
+    const useWasm = shouldUseWasm();
+
+    if (useWasm) {
+        // Try WASM LSP
+        const wasmAvailable = await isWasmLspAvailable(context, WASM_LSP_PATH);
+
+        if (wasmAvailable) {
+            const wasmOptions = await createWasmServerOptions({
+                wasmPath: WASM_LSP_PATH,
+                context,
+                outputChannel: outputChannel!,
+            });
+
+            if (wasmOptions) {
+                usingWasmLsp = true;
+                outputChannel?.appendLine('Using WASM LSP server (in-process)');
+                return wasmOptions;
+            }
+        }
+
+        outputChannel?.appendLine('WASM LSP not available, falling back to native');
+    }
+
+    // Native subprocess (default)
+    usingWasmLsp = false;
+    const config = vscode.workspace.getConfiguration('simple');
+    const serverPath = config.get<string>('lsp.serverPath', 'simple');
+
+    outputChannel?.appendLine(`Using native LSP server: ${serverPath} lsp`);
+
+    return {
         command: serverPath,
-        args: [],
+        args: ['lsp'],
         transport: TransportKind.stdio,
         options: {
             env: process.env
         }
     };
+}
+
+async function startLspClient(context: vscode.ExtensionContext) {
+    const config = vscode.workspace.getConfiguration('simple');
+
+    // Create server options (native or WASM)
+    const serverOptions = await createServerOptions(context);
 
     // Client options
     const clientOptions: LanguageClientOptions = {
         // Register for .spl files
         documentSelector: [
             { scheme: 'file', language: 'simple' },
-            { scheme: 'untitled', language: 'simple' }
+            { scheme: 'untitled', language: 'simple' },
+            // Support vscode-vfs scheme for web environments
+            { scheme: 'vscode-vfs', language: 'simple' }
         ],
 
         // Synchronize file watching
@@ -60,15 +133,16 @@ export function activate(context: vscode.ExtensionContext) {
         },
 
         // Output channel for LSP logs
-        outputChannel: outputChannel,
+        outputChannel: outputChannel!,
 
         // Trace level (off, messages, verbose)
-        traceOutputChannel: outputChannel,
+        traceOutputChannel: outputChannel!,
 
         // Initialize options
         initializationOptions: {
             semanticTokens: config.get<boolean>('lsp.enableSemanticTokens', true),
-            debounceDelay: config.get<number>('lsp.debounceDelay', 300)
+            debounceDelay: config.get<number>('lsp.debounceDelay', 300),
+            wasmMode: usingWasmLsp,
         }
     };
 
@@ -89,9 +163,12 @@ export function activate(context: vscode.ExtensionContext) {
     // Start LSP client
     client.start().then(() => {
         updateStatusBar(State.Running);
-        outputChannel?.appendLine('Simple LSP server started successfully');
+        setMathLspRunning?.(true);
+        const mode = usingWasmLsp ? '(WASM)' : '(native)';
+        outputChannel?.appendLine(`Simple LSP server started successfully ${mode}`);
     }).catch((error) => {
         updateStatusBar(State.Stopped);
+        setMathLspRunning?.(false);
         outputChannel?.appendLine(`Failed to start LSP server: ${error}`);
         vscode.window.showErrorMessage(
             `Failed to start Simple LSP server. Check output for details.`,
@@ -107,12 +184,10 @@ export function activate(context: vscode.ExtensionContext) {
     client.onDidChangeState((event) => {
         outputChannel?.appendLine(`LSP state changed: ${State[event.oldState]} -> ${State[event.newState]}`);
         updateStatusBar(event.newState);
+        // Notify math hover provider of LSP state so it can defer to the
+        // LSP hover handler (src/app/lsp/handlers/hover.spl) when connected
+        setMathLspRunning?.(event.newState === State.Running);
     });
-
-    // Initialize AI features
-    initializeAI(context);
-
-    console.log('Simple Language extension activated');
 }
 
 async function initializeAI(context: vscode.ExtensionContext) {
@@ -399,10 +474,12 @@ function setupStatusBar(context: vscode.ExtensionContext) {
 function updateStatusBar(state: State) {
     if (!statusBarItem) return;
 
+    const modeLabel = usingWasmLsp ? ' (WASM)' : '';
+
     switch (state) {
         case State.Running:
-            statusBarItem.text = '$(check) Simple';
-            statusBarItem.tooltip = 'Simple LSP Server: Running';
+            statusBarItem.text = '$(check) Simple' + modeLabel;
+            statusBarItem.tooltip = `Simple LSP Server: Running${modeLabel}`;
             statusBarItem.backgroundColor = undefined;
             break;
 
