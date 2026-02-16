@@ -8,9 +8,10 @@ use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, extract_json_string_v2, e
 use app.io.mod (cli_get_args, env_get, shell, exit)
 use lib.json.builder.{escape_json}
 use std.text.{NL}
+use mcp_lib.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
 
-# Protocol auto-detection: JSON Lines (MCP SDK) vs Content-Length (LSP)
-var USE_JSON_LINES = false
+# Protocol state
+var PROTOCOL = create_protocol_state()
 
 # Cache tool schemas to avoid rebuilding on every tools/list request
 var FILEIO_TOOLS_CACHE: [String] = []
@@ -515,36 +516,12 @@ fn parse_params(json: text) -> text:
     result
 
 fn read_stdin_message() -> String:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
-    # JSON Lines mode: line starts with { (MCP SDK format)
-    if line.starts_with("{"):
-        USE_JSON_LINES = true
-        return line
-    # Content-Length mode (LSP-style framing)
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
-            return ""
-        input()
-        var body = input()
-        return body
-    ""
+    """Read message using MCP protocol (delegates to protocol module)."""
+    protocol_read_message(PROTOCOL)
 
 fn write_stdout_message(body: String):
-    if USE_JSON_LINES:
-        print_raw(body + NL)
-    else:
-        var header = "Content-Length: "
-        header = header + body.len().to_string()
-        header = header + "\r{NL}\r{NL}"
-        print_raw(header)
-        print_raw(body)
+    """Write message using MCP protocol (delegates to protocol module)."""
+    protocol_write_message(PROTOCOL, body)
 
 fn make_prop(name: String, desc: String) -> String:
     jp(name, jo2(jp("type", js("string")), jp("description", js(escape_json(desc)))))

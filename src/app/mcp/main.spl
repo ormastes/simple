@@ -18,6 +18,9 @@ extern fn rt_env_get(name: text) -> text
 # JSON and response helpers
 use app.mcp.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, escape_json, extract_json_string_v2, extract_json_value, extract_nested_string, extract_arguments_dict, make_tool_result, make_result_response, make_error_response, min_int}
 
+# Protocol handling
+use mcp_lib.protocol.{create_protocol_state, protocol_read_message, protocol_write_message}
+
 # Debug tools (16 tools)
 use app.mcp.debug_tools.{SessionManager, schema_debug_create_session, schema_debug_list_sessions, schema_debug_close_session, schema_debug_set_breakpoint, schema_debug_remove_breakpoint, schema_debug_continue, schema_debug_step, schema_debug_get_variables, schema_debug_stack_trace, schema_debug_evaluate, schema_debug_set_function_breakpoint, schema_debug_enable_breakpoint, schema_debug_get_source, schema_debug_watch, schema_debug_set_variable, schema_debug_terminate, handle_debug_create_session, handle_debug_list_sessions, handle_debug_close_session, handle_debug_set_breakpoint, handle_debug_remove_breakpoint, handle_debug_continue, handle_debug_step, handle_debug_get_variables, handle_debug_stack_trace, handle_debug_evaluate, handle_debug_set_function_breakpoint, handle_debug_enable_breakpoint, handle_debug_get_source, handle_debug_watch, handle_debug_set_variable, handle_debug_terminate}
 
@@ -45,7 +48,7 @@ val SERVER_VERSION = "3.0.0"
 # Module state
 # ============================================================================
 
-var USE_JSON_LINES = false
+var PROTOCOL = create_protocol_state()
 var TOOLS_CACHE = ""
 var INIT_CACHE = ""
 var RESOURCES_CACHE = ""
@@ -616,38 +619,16 @@ fn handle_completion_req(id: text, body: text) -> text:
     make_result_response(id, result)
 
 # ============================================================================
-# Protocol I/O
+# Protocol I/O (thin delegation to mcp_lib.protocol)
 # ============================================================================
 
 fn read_stdin_message() -> text:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = line.substring(0, line.len() - 1)
-    # JSON Lines mode: line starts with {
-    if line.starts_with("{"):
-        USE_JSON_LINES = true
-        return line
-    # Content-Length mode (LSP-style framing)
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
-            return ""
-        input()
-        var body = input()
-        return body
-    ""
+    """Read message using MCP protocol (delegates to protocol module)."""
+    protocol_read_message(PROTOCOL)
 
 fn write_stdout_message(body: text):
-    if USE_JSON_LINES:
-        print_raw(body + NL)
-    else:
-        var header = "Content-Length: " + str(body.len()) + "\r" + NL + "\r" + NL
-        print_raw(header)
-        print_raw(body)
+    """Write message using MCP protocol (delegates to protocol module)."""
+    protocol_write_message(PROTOCOL, body)
 
 # ============================================================================
 # Local helpers

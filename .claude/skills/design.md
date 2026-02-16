@@ -124,6 +124,83 @@ Source → AST → HIR → MIR → Codegen
 - **MIR**: 50+ instructions with effects
 - **Codegen**: Cranelift/LLVM backends
 
+## Advanced Features
+
+### MDSOC (Multi-Dimensional Separation of Concerns)
+
+**Location:** `src/compiler/mdsoc/`
+
+Virtual capsules with manifest-composed hypermodules (inspired by Hyper/J, FOP/AHEAD):
+
+**3-Tier Visibility:**
+```simple
+enum CapsuleVisibility:
+    Public      # Visible everywhere (via surface)
+    Internal    # Visible within same virtual capsule
+    Private     # Visible within same caret + folder
+```
+
+**Key Concepts:**
+- **Caret** (^): Aspect root namespace (^core, ^ui, ^infra)
+- **Virtual Capsule**: Composed module with explicit surface
+- **Layer Enforcement**: Directional dependency constraints
+- **Surface Binding**: Explicit capsule interface exports
+
+**Example:**
+```simple
+use compiler.mdsoc.types.{CapsuleVisibility, VirtualCapsule}
+
+val visibility = CapsuleVisibility.Internal
+check(visibility.is_internal())  # true
+```
+
+**Modules:**
+- `types.spl` - Core type definitions (CapsuleVisibility, CaretId, LayerDef)
+- `config.spl` - SDN config parser for capsule.sdn
+- `layer_checker.spl` - Layer dependency enforcement
+
+**Tests:** `test/unit/compiler/mdsoc/` (3 passing)
+
+### Public Interface Documentation
+
+**Location:** `src/app/doc/public_check/`
+
+Validates documentation on exported types (structs, classes, enums, functions):
+
+**Features:**
+- Parse `export X, Y, Z` statements from mod.spl or __init__.spl
+- Find type definitions in source files
+- Extract docstrings (triple-quoted `"""` or `#` comments)
+- Report missing documentation with file:line references
+
+**Example:**
+```simple
+use app.doc.public_check.export_parser.{find_module_exports}
+use app.doc.public_check.docstring_checker.{check_module_docstrings}
+
+# Find all exported types
+val exports = find_module_exports("src/std/array")
+
+# Check which have docstrings
+val export_names = exports.map(\e: e.name)
+val docs = check_module_docstrings("src/std/array", export_names)
+
+# Report missing
+for info in docs:
+    if not info.has_docstring:
+        print "Missing doc: {info.type_name} ({info.type_kind})"
+```
+
+**Modules:**
+- `export_parser.spl` - Parse export statements
+- `docstring_checker.spl` - Extract and validate docstrings
+- `statistics.spl` - Coverage metrics
+- `warnings.spl` - Missing documentation warnings
+
+**Tests:** `test/unit/app/doc/public_check/` (2 passing)
+
+**Integration:** Can be combined with MDSOC to validate documentation on `CapsuleVisibility.Public` exports.
+
 ## Documentation
 
 Design decisions go in:

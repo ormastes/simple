@@ -7,6 +7,8 @@ use app.duplicate_check.formatter (print_text_report, print_json_report, write_s
 use app.duplicate_check.debug (init_debug)
 use app.duplicate_check.cache.{new_token_cache_manager, get_cache_stats}
 use app.duplicate_check.benchmark.{run_benchmark, run_benchmark_iterations, format_benchmark_result, format_benchmark_stats, save_benchmark_results, load_benchmark_results, compare_benchmarks}
+use app.duplicate_check.semantic.{run_semantic_analysis}
+use app.duplicate_check.semantic_formatter.{print_semantic_text_report, print_semantic_json_report}
 use app.io.mod.{file_read, file_write, cli_get_args}
 
 fn parse_args(args: [text]) -> DuplicationConfig:
@@ -48,6 +50,21 @@ fn parse_args(args: [text]) -> DuplicationConfig:
         elif arg == "--cosine":
             config.use_cosine_similarity = true
             i = i + 1
+        elif arg == "--semantic":
+            config.use_semantic = true
+            i = i + 1
+        elif arg == "--semantic-threshold" and i + 1 < args.len():
+            config.semantic_threshold = float(args[i + 1])
+            i = i + 2
+        elif arg == "--semantic-model" and i + 1 < args.len():
+            config.semantic_model = args[i + 1]
+            i = i + 2
+        elif arg == "--ollama-url" and i + 1 < args.len():
+            config.ollama_url = args[i + 1]
+            i = i + 2
+        elif arg == "--rebuild-embeddings":
+            config.rebuild_embeddings = true
+            i = i + 1
         elif arg == "--no-cache":
             config.use_incremental = false
             i = i + 1
@@ -71,6 +88,11 @@ fn parse_args(args: [text]) -> DuplicationConfig:
             print "  --jobs N            Number of parallel workers (implies --parallel)"
             print "  --no-cache          Disable incremental cache"
             print "  --cache-path PATH   Path to incremental cache (enables caching)"
+            print "  --semantic          Enable semantic doc similarity analysis"
+            print "  --semantic-threshold N  Similarity threshold (default: 0.90)"
+            print "  --semantic-model NAME   Ollama model (default: nomic-embed-text)"
+            print "  --ollama-url URL    Ollama base URL (default: http://localhost:11434)"
+            print "  --rebuild-embeddings  Force rebuild embedding cache"
             print "  --benchmark         Run performance benchmark"
             print "  --benchmark-iterations N  Number of benchmark iterations (default: 3)"
             print "  --benchmark-save PATH     Save benchmark results to file"
@@ -102,6 +124,16 @@ fn main():
         cmd_args[0]
     else:
         "src/"
+
+    # Semantic analysis mode
+    if config.use_semantic:
+        val report = run_semantic_analysis(target_path, config)
+        if config.output_format == "json":
+            print_semantic_json_report(report)
+        else:
+            print_semantic_text_report(report, config)
+        val exit_code = if report.matches.len() > config.max_allowed: 1 else: 0
+        exit(exit_code)
 
     val files = collect_files(target_path, config)
 

@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 44813ms |
+| Duration | 46084ms |
 
 **Status: PASS**
 
@@ -103,12 +103,15 @@
 | test/unit/app/diagram/call_flow_profiling_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/diagram/diagram_gen_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/diagram/filter_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/app/doc/public_check/statistics_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/app/doc/public_check/warnings_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/benchmark_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/cache_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/config_migrated_test.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/duplicate_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/phase1_integration_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check/phase2_integration_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/app/duplicate_check/semantic_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/duplicate_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/ffi_gen/module_gen_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/fix/lint_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -305,7 +308,7 @@
 | test/unit/app/tooling/color_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/command_dispatch_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/compile_commands_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/app/tooling/config_ffi_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/app/tooling/config_ffi_spec.spl | 1 | 1 | 0 | 0 | 3ms |
 | test/unit/app/tooling/context_pack_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/coverage_ffi_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/coverage_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -315,8 +318,8 @@
 | test/unit/app/tooling/ds_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/env_commands_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/extract_tests_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/app/tooling/feature_db_spec.spl | 1 | 1 | 0 | 0 | 5ms |
-| test/unit/app/tooling/file_walker_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/app/tooling/feature_db_spec.spl | 1 | 1 | 0 | 0 | 6ms |
+| test/unit/app/tooling/file_walker_spec.spl | 1 | 1 | 0 | 0 | 6ms |
 | test/unit/app/tooling/fix_if_val_pattern_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/format_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/html_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -332,7 +335,7 @@
 | test/unit/app/tooling/migrate_val_var_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/minimal_test.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/misc_commands_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/app/tooling/option_utils_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/app/tooling/option_utils_spec.spl | 1 | 1 | 0 | 0 | 3ms |
 | test/unit/app/tooling/parse_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/path_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/pkg_commands_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -365,7 +368,7 @@
 | test/unit/app/tooling/test_stats_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/time_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/todo_parser_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/app/tooling/tooling_spec.spl | 1 | 1 | 0 | 0 | 3ms |
+| test/unit/app/tooling/tooling_spec.spl | 1 | 1 | 0 | 0 | 5ms |
 | test/unit/app/tooling/url_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/validation_utils_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/app/tooling/web_commands_spec.spl | 0 | 0 | 0 | 0 | 0ms |

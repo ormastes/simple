@@ -337,6 +337,72 @@ bitfield Flags:
 
 ---
 
+## 9. MDSOC Virtual Capsules - COMPLETE ✅
+
+**Status:** Multi-dimensional separation of concerns implemented
+**Test Coverage:** 3 tests passing
+**Location:** `src/compiler/mdsoc/`
+
+### Working Features
+
+- ✅ **3-Tier Visibility** - Public, Internal, Private access control
+- ✅ **Virtual Capsules** - Manifest-composed hypermodules
+- ✅ **Layer Enforcement** - Directional dependency constraints
+- ✅ **Caret System** - Aspect roots (^core, ^ui, ^infra)
+- ✅ **Surface Bindings** - Explicit capsule interfaces
+
+**Tests:**
+- `test/unit/compiler/mdsoc/types_spec.spl` - PASS
+- `test/unit/compiler/mdsoc/config_spec.spl` - PASS
+- `test/unit/compiler/mdsoc/layer_checker_spec.spl` - PASS
+
+**Inspired by:**
+- MDSOC / Hyper/J hyperslice composition
+- Feature-Oriented Programming (FOP/AHEAD)
+
+**Example:**
+```simple
+use compiler.mdsoc.types.{CapsuleVisibility, VirtualCapsule}
+
+val visibility = CapsuleVisibility.Public
+check(visibility.is_public())
+```
+
+---
+
+## 10. Public Interface Documentation - COMPLETE ✅
+
+**Status:** Export documentation validation operational
+**Test Coverage:** 2 tests passing
+**Location:** `src/app/doc/public_check/`
+
+### Working Features
+
+- ✅ **Export Parser** - Reads `export X, Y, Z` from mod.spl/__init__.spl
+- ✅ **Docstring Checker** - Validates triple-quoted docs and # comments
+- ✅ **Type Finder** - Locates struct/class/enum/fn definitions
+- ✅ **Coverage Statistics** - Reports documentation completeness
+- ✅ **Missing Doc Warnings** - Identifies undocumented exports
+
+**Tests:**
+- `test/unit/app/doc/public_check/statistics_spec.spl` - PASS
+- `test/unit/app/doc/public_check/warnings_spec.spl` - PASS
+
+**Use Cases:**
+- API documentation enforcement
+- Public interface validation
+- Module export analysis
+
+**Example:**
+```simple
+use app.doc.public_check.export_parser.{find_module_exports}
+
+val exports = find_module_exports("src/std/array")
+# Returns list of ExportInfo for all exported types
+```
+
+---
+
 ## Summary Table
 
 | Feature | Tests | Status | Priority |
@@ -350,7 +416,9 @@ bitfield Flags:
 | Effect Inference | 1 | ✅ WORKING | Document |
 | QEMU | 1 | ✅ WORKING | Document |
 | Interpreter | 1 | ✅ FIXED | Announce |
-| **TOTAL** | **34** | **✅ ALL PASS** | **Docs!** |
+| MDSOC | 3 | ✅ COMPLETE | Document |
+| Public Docs | 2 | ✅ COMPLETE | Document |
+| **TOTAL** | **39** | **✅ ALL PASS** | **Docs!** |
 
 ---
 
