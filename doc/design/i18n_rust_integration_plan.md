@@ -10,7 +10,7 @@ Complete plan to make Rust compiler work with Simple language `__init__` i18n fi
 
 ### Existing Files
 ```
-i18n/
+src/i18n/
 ├── __init__.spl           ✅ English common UI (severity names)
 ├── __init__.ko.spl        ✅ Korean common UI
 ├── parser.spl             ✅ English parser errors (E0001-E0012)
@@ -19,7 +19,7 @@ i18n/
 
 ### Partial Implementation
 ```
-src/i18n/
+src/src/i18n/
 ├── src/
 │   ├── lib.rs             ✅ I18n global singleton
 │   ├── locale.rs          ✅ Locale detection
@@ -47,7 +47,7 @@ src/i18n/
 ```
 ┌─────────────────────────────────────────────────────────┐
 │  Layer 1: Build-Time (Compile Default Locale)          │
-│  - Parse i18n/__init__.spl at cargo build time         │
+│  - Parse src/i18n/__init__.spl at cargo build time         │
 │  - Generate Rust const/static data structures          │
 │  - Embed in binary (zero runtime cost)                 │
 └─────────────────────────────────────────────────────────┘
@@ -71,7 +71,7 @@ src/i18n/
 
 ```
 Compile Time (build.rs)
-  ├─ Parse i18n/__init__.spl
+  ├─ Parse src/i18n/__init__.spl
   ├─ Extract val severity = {...}
   ├─ Generate Rust code:
   │    pub const DEFAULT_SEVERITY: phf::Map<&str, &str> = ...
@@ -80,7 +80,7 @@ Compile Time (build.rs)
 Runtime (--lang ko)
   ├─ I18n::from_env() detects locale="ko"
   ├─ Check if locale.is_default() → false
-  ├─ Load i18n/__init__.ko.spl
+  ├─ Load src/i18n/__init__.ko.spl
   │    ├─ Parse Simple code
   │    ├─ Extract val severity
   │    └─ Store in HashMap
@@ -142,7 +142,7 @@ See doc/contributing/i18n_translation.md
 # Adding I18n Translations
 
 ## File Structure
-i18n/
+src/i18n/
 ├── __init__.spl          # English (default)
 ├── __init__.<locale>.spl # Your language
 ├── parser.spl            # English parser errors
@@ -151,12 +151,12 @@ i18n/
 ## Adding Korean Translation
 
 1. Create files:
-   - i18n/__init__.ko.spl
-   - i18n/parser.ko.spl
-   - i18n/compiler.ko.spl (if needed)
+   - src/i18n/__init__.ko.spl
+   - src/i18n/parser.ko.spl
+   - src/i18n/compiler.ko.spl (if needed)
 
 2. Copy English template:
-   cp i18n/__init__.spl i18n/__init__.ko.spl
+   cp src/i18n/__init__.spl src/i18n/__init__.ko.spl
 
 3. Translate content:
    val severity = {
@@ -229,7 +229,7 @@ Error messages support multiple languages:
 - **Default**: English (embedded in compiler)
 - **Runtime**: Korean, Japanese (loaded on-demand)
 
-**Files**: `i18n/__init__.spl`, `i18n/__init__.ko.spl`
+**Files**: `src/i18n/__init__.spl`, `src/i18n/__init__.ko.spl`
 
 **Usage**:
 simple build main.spl --lang ko   # Korean errors
@@ -252,7 +252,7 @@ simple build main.spl --lang ko   # Korean errors
 ```markdown
 ## I18n Subsystem
 
-Location: `src/i18n/`, `i18n/*.spl`
+Location: `src/src/i18n/`, `src/i18n/*.spl`
 
 **Purpose**: Multi-language error messages
 
@@ -262,10 +262,10 @@ Location: `src/i18n/`, `i18n/*.spl`
 - Fallback: Always falls back to English
 
 **Files**:
-- `i18n/__init__.spl` - Common UI strings (English)
-- `i18n/__init__.ko.spl` - Korean UI strings
-- `i18n/parser.spl` - Parser errors (English)
-- `i18n/parser.ko.spl` - Korean parser errors
+- `src/i18n/__init__.spl` - Common UI strings (English)
+- `src/i18n/__init__.ko.spl` - Korean UI strings
+- `src/i18n/parser.spl` - Parser errors (English)
+- `src/i18n/parser.ko.spl` - Korean parser errors
 ```
 
 ---
@@ -277,24 +277,24 @@ Location: `src/i18n/`, `i18n/*.spl`
 **Goal**: Make Rust recognize `__init__.ko.spl` pattern
 
 **Files to modify**:
-1. `src/i18n/src/catalog.rs`
-2. `src/i18n/src/simple_catalog.rs`
+1. `src/src/i18n/src/catalog.rs`
+2. `src/src/i18n/src/simple_catalog.rs`
 
 **Changes**:
 
 ```rust
-// src/i18n/src/catalog.rs
+// src/src/i18n/src/catalog.rs
 
 impl CatalogRegistry {
     /// Load a catalog with locale suffix support
     ///
     /// For default locale (en):
-    ///   common → i18n/__init__.spl
-    ///   parser → i18n/parser.spl
+    ///   common → src/i18n/__init__.spl
+    ///   parser → src/i18n/parser.spl
     ///
     /// For other locales (ko):
-    ///   common → i18n/__init__.ko.spl
-    ///   parser → i18n/parser.ko.spl
+    ///   common → src/i18n/__init__.ko.spl
+    ///   parser → src/i18n/parser.ko.spl
     pub fn load(&mut self, locale: &str, domain: &str) -> Result<()> {
         let catalog_dir = self.catalog_dir.as_ref()
             .ok_or_else(|| I18nError::CatalogDirectoryNotFound("not set".to_string()))?;
@@ -402,10 +402,10 @@ fn test_fallback_to_english() {
 **Goal**: Embed default locale at compile time for zero-cost access
 
 **New files**:
-1. `src/i18n/build.rs` - Build script
-2. `src/i18n/src/codegen/` - Code generation utilities
+1. `src/src/i18n/build.rs` - Build script
+2. `src/src/i18n/src/codegen/` - Code generation utilities
 
-**Add dependencies** to `src/i18n/Cargo.toml`:
+**Add dependencies** to `src/src/i18n/Cargo.toml`:
 ```toml
 [dependencies]
 phf = "0.11"
@@ -415,7 +415,7 @@ phf_codegen = "0.11"
 simple-parser = { path = "../parser" }
 ```
 
-**Create `src/i18n/build.rs`**:
+**Create `src/src/i18n/build.rs`**:
 ```rust
 use phf_codegen::Map;
 use simple_parser::Parser;
@@ -439,9 +439,9 @@ fn main() {
 }
 
 fn generate_severity_map<W: Write>(file: &mut W) {
-    // Parse i18n/__init__.spl
-    let content = fs::read_to_string("../../i18n/__init__.spl")
-        .expect("Failed to read i18n/__init__.spl");
+    // Parse src/i18n/__init__.spl
+    let content = fs::read_to_string("../../src/i18n/__init__.spl")
+        .expect("Failed to read src/i18n/__init__.spl");
 
     let mut parser = Parser::new(&content);
     let ast = parser.parse().expect("Failed to parse __init__.spl");
@@ -464,12 +464,12 @@ fn generate_severity_map<W: Write>(file: &mut W) {
 
 fn generate_parser_messages<W: Write>(file: &mut W) {
     // Similar to generate_severity_map
-    // Parse i18n/parser.spl
+    // Parse src/i18n/parser.spl
     // Extract val messages = {...}
     // Generate phf::Map<&str, LocalizedMessage>
 
-    let content = fs::read_to_string("../../i18n/parser.spl")
-        .expect("Failed to read i18n/parser.spl");
+    let content = fs::read_to_string("../../src/i18n/parser.spl")
+        .expect("Failed to read src/i18n/parser.spl");
 
     // ... parse and extract ...
 
@@ -484,7 +484,7 @@ fn extract_variable(ast: &Module, name: &str) -> Option<Vec<(String, String)>> {
 }
 ```
 
-**Update `src/i18n/src/lib.rs`**:
+**Update `src/src/i18n/src/lib.rs`**:
 ```rust
 // Include generated code
 include!(concat!(env!("OUT_DIR"), "/default_catalogs.rs"));
@@ -636,7 +636,7 @@ fn main() {
 
 **Unit Tests**:
 ```rust
-// In src/i18n/src/catalog.rs
+// In src/src/i18n/src/catalog.rs
 
 #[cfg(test)]
 mod tests {
@@ -815,7 +815,7 @@ echo "=== All tests complete ==="
 
 ### Functional Requirements
 
-- [ ] Load `i18n/__init__.ko.spl` successfully
+- [ ] Load `src/i18n/__init__.ko.spl` successfully
 - [ ] CLI flag `--lang ko` works end-to-end
 - [ ] Environment variable `SIMPLE_LANG=ko` works
 - [ ] Fallback to English for missing translations
@@ -841,7 +841,7 @@ echo "=== All tests complete ==="
 ## Migration Checklist
 
 ### Phase 1: Foundation
-- [ ] Update `src/i18n/src/catalog.rs` for locale suffix
+- [ ] Update `src/src/i18n/src/catalog.rs` for locale suffix
 - [ ] Add fallback logic to `CatalogRegistry`
 - [ ] Update `SimpleCatalogParser` if needed
 - [ ] Write unit tests for locale loading
@@ -849,7 +849,7 @@ echo "=== All tests complete ==="
 
 ### Phase 2: Build System
 - [ ] Add `phf` dependencies
-- [ ] Create `src/i18n/build.rs`
+- [ ] Create `src/src/i18n/build.rs`
 - [ ] Implement catalog parser in build script
 - [ ] Generate default catalogs at build time
 - [ ] Test: `cargo build -p simple_i18n`
@@ -881,8 +881,8 @@ echo "=== All tests complete ==="
 ## File Checklist
 
 ### New Files to Create
-- [ ] `src/i18n/build.rs` - Build script
-- [ ] `src/i18n/src/codegen/mod.rs` - Codegen utilities
+- [ ] `src/src/i18n/build.rs` - Build script
+- [ ] `src/src/i18n/src/codegen/mod.rs` - Codegen utilities
 - [ ] `doc/guide/i18n.md` - User guide
 - [ ] `doc/contributing/i18n_translation.md` - Contributor guide
 - [ ] `doc/spec/i18n_architecture.md` - Technical spec
@@ -890,9 +890,9 @@ echo "=== All tests complete ==="
 - [ ] `scripts/test_i18n.sh` - Manual test script
 
 ### Files to Modify
-- [ ] `src/i18n/Cargo.toml` - Add phf dependencies
-- [ ] `src/i18n/src/catalog.rs` - Locale suffix support
-- [ ] `src/i18n/src/lib.rs` - Include generated code
+- [ ] `src/src/i18n/Cargo.toml` - Add phf dependencies
+- [ ] `src/src/i18n/src/catalog.rs` - Locale suffix support
+- [ ] `src/src/i18n/src/lib.rs` - Include generated code
 - [ ] `src/parser/src/error.rs` - Add `to_diagnostic_i18n()`
 - [ ] `src/driver/src/main.rs` - Add `--lang` flag
 - [ ] `CLAUDE.md` - Add i18n section
@@ -900,10 +900,10 @@ echo "=== All tests complete ==="
 - [ ] `doc/architecture/overview.md` - Add i18n subsystem
 
 ### Files Already Exist (No Changes)
-- ✅ `i18n/__init__.spl`
-- ✅ `i18n/__init__.ko.spl`
-- ✅ `i18n/parser.spl`
-- ✅ `i18n/parser.ko.spl`
+- ✅ `src/i18n/__init__.spl`
+- ✅ `src/i18n/__init__.ko.spl`
+- ✅ `src/i18n/parser.spl`
+- ✅ `src/i18n/parser.ko.spl`
 
 ---
 

@@ -128,11 +128,11 @@ Successfully implemented a **complete, production-ready package installation sys
 
 | Platform | File | Status |
 |----------|------|--------|
-| Debian/Ubuntu | `packaging/debian/control` | ✅ |
+| Debian/Ubuntu | `config/packaging/debian/control` | ✅ |
 | Debian/Ubuntu | `scripts/build-deb.sh` (145 lines) | ✅ |
-| Red Hat/Fedora | `packaging/rpm/simple-lang.spec` | ✅ |
-| macOS Homebrew | `packaging/homebrew/simple.rb` | ✅ |
-| Windows MSI | `packaging/windows/simple.wxs` | ✅ |
+| Red Hat/Fedora | `config/packaging/rpm/simple-lang.spec` | ✅ |
+| macOS Homebrew | `config/packaging/homebrew/simple.rb` | ✅ |
+| Windows MSI | `config/packaging/windows/simple.wxs` | ✅ |
 
 **Features:**
 - Automatic dependency detection
@@ -282,15 +282,16 @@ simple/
 │   └── report/
 │       ├── package_system_implementation_2026-01-31.md
 │       └── package_system_complete_2026-01-31.md
-├── packaging/
-│   ├── debian/
-│   │   └── control                        # Debian package config
-│   ├── rpm/
-│   │   └── simple-lang.spec               # RPM spec file
-│   ├── homebrew/
-│   │   └── simple.rb                      # Homebrew formula
-│   └── windows/
-│       └── simple.wxs                     # WiX installer config
+├── config/
+│   └── packaging/
+│       ├── debian/
+│       │   └── control                    # Debian package config
+│       ├── rpm/
+│       │   └── simple-lang.spec           # RPM spec file
+│       ├── homebrew/
+│       │   └── simple.rb                  # Homebrew formula
+│       └── windows/
+│           └── simple.wxs                 # WiX installer config
 ├── rust/
 │   └── runtime/
 │       └── src/

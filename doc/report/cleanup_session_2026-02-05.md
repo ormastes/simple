@@ -56,7 +56,7 @@ src/app/replay/main.spl.bak
 src/app/remove/main.spl.bak
 src/app/update/main.spl.bak
 src/app/cache/main.spl.bak
-src/app/i18n/main.spl.bak
+src/app/src/i18n/main.spl.bak
 src/app/migrate/main.spl.bak
 ```
 

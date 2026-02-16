@@ -21,9 +21,9 @@ Added comprehensive error codes for Simple language's unique features that diffe
 - `src/compiler/src/error.rs` - Added 48 error code constants
 
 ### i18n Files
-- `i18n/__init__.spl` - English error messages (192 new lines)
-- `i18n/__init__.ko.spl` - Korean translations (192 new lines)
-- `i18n/compiler.spl` - Catalog entries (360 new lines)
+- `src/i18n/__init__.spl` - English error messages (192 new lines)
+- `src/i18n/__init__.ko.spl` - Korean translations (192 new lines)
+- `src/i18n/compiler.spl` - Catalog entries (360 new lines)
 
 ### BDD Test Specifications
 - `simple/std_lib/test/features/errors/aop_errors_spec.spl`

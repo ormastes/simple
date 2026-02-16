@@ -2,7 +2,7 @@
 #
 # Provides convenient platform-agnostic functions for:
 # - Platform detection (Windows/Unix/macOS/Linux)
-# - Path handling (separators, normalization)
+# - Path handling (separators, normalization) - delegates to std.path
 # - Command resolution (executable extensions)
 #
 # Pure Simple implementation using shell commands (uname) for platform detection.
@@ -11,10 +11,15 @@
 extern fn rt_env_get(key: text) -> text
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
+# Import canonical path operations
+use std.path.{normalize_path, is_absolute_path, join_path}
+
 export is_windows, is_unix, is_macos, is_linux
 export get_host_os, get_host_arch
 export dir_sep, path_sep, exe_ext, lib_ext
-export normalize_path, resolve_command, is_absolute_path, join_path
+export resolve_command
+# Re-export path operations from std.path
+export normalize_path, is_absolute_path, join_path
 
 # ===========================================================================
 # Platform Detection - Pure Simple Implementation
@@ -135,30 +140,9 @@ fn lib_ext() -> text:
         ".so"  # Linux, FreeBSD, etc.
 
 # ===========================================================================
-# Path Normalization
+# Path Normalization (delegates to std.path)
 # ===========================================================================
-
-fn normalize_windows_path(path: text) -> text:
-    """Normalize Windows path (convert forward slashes, handle drive letters and UNC paths)."""
-    # Convert forward slashes to backslashes
-    var normalized = path.replace("/", "\\")
-
-    # Handle drive letters: C:/ → C:\
-    if normalized.len() >= 2 and normalized[1] == ':':
-        normalized = normalized[0:2] + normalized[2:].replace("/", "\\")
-
-    # Handle UNC paths: //server/share → \\server\share
-    if normalized.starts_with("//"):
-        normalized = "\\\\" + normalized[2:]
-
-    normalized
-
-fn normalize_path(path: text) -> text:
-    """Normalize path for current platform."""
-    if is_windows():
-        normalize_windows_path(path)
-    else:
-        path
+# normalize_path, is_absolute_path, join_path are imported from std.path above
 
 # ===========================================================================
 # Command Resolution
@@ -189,26 +173,3 @@ fn resolve_command(cmd: text) -> text:
             return candidate
 
     cmd  # Return original if not found
-
-# ===========================================================================
-# Path Utilities
-# ===========================================================================
-
-fn is_absolute_path(path: text) -> bool:
-    """Check if path is absolute."""
-    if is_windows():
-        # C:\... or \\server\share or \...
-        # WORKAROUND: Bootstrap parser doesn't support multi-line boolean expressions
-        val has_drive = path.len() >= 3 and path[1] == ':'
-        val is_unc = path.starts_with("\\\\")
-        val is_root = path.starts_with("\\")
-        has_drive or is_unc or is_root
-    else:
-        path.starts_with("/")
-
-fn join_path(dir: text, file: text) -> text:
-    val sep = dir_sep()
-    if dir.ends_with(sep):
-        "{dir}{file}"
-    else:
-        "{dir}{sep}{file}"

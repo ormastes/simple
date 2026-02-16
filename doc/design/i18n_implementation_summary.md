@@ -16,7 +16,7 @@ The Simple compiler now has a complete internationalization (i18n) system that e
 
 ## What Was Built
 
-### 1. Core I18n Crate (`src/i18n/`)
+### 1. Core I18n Crate (`src/src/i18n/`)
 
 **Modules** (8 total, ~800 lines of code):
 - `catalog.rs` - Locale suffix support, fallback chain (176 lines)
@@ -35,7 +35,7 @@ The Simple compiler now has a complete internationalization (i18n) system that e
 - Message interpolation (`{placeholder}` replacement)
 - Thread-safe global instance
 
-### 2. Catalog Files (`i18n/`)
+### 2. Catalog Files (`src/i18n/`)
 
 **English (Default)**:
 - `__init__.spl` - Severity names (error, warning, info, help, note)
@@ -83,7 +83,7 @@ simple build file.spl
 
 **User-Facing**:
 - `doc/guide/i18n.md` - Comprehensive user guide (300+ lines)
-- `i18n/README.md` - Quick reference for catalog directory
+- `src/i18n/README.md` - Quick reference for catalog directory
 
 **Developer-Facing**:
 - `doc/contributing/i18n_translation.md` - Translation contributor guide (500+ lines)
@@ -130,7 +130,7 @@ simple build file.spl
 **Design Decision**: Flat file structure with locale suffixes
 
 ```
-i18n/
+src/i18n/
 ├── __init__.spl          # English (default, no suffix)
 ├── __init__.ko.spl       # Korean (locale suffix)
 ├── __init__.ja.spl       # Japanese (future)
@@ -141,7 +141,7 @@ i18n/
 
 **Why not subdirectories?**
 - Simpler organization (all files visible at once)
-- Easier discovery (`ls i18n/*.ko.spl`)
+- Easier discovery (`ls src/i18n/*.ko.spl`)
 - Follows gettext pattern
 - Matches Simple's module philosophy
 
@@ -150,7 +150,7 @@ i18n/
 **Process**:
 1. `build.rs` runs at compile time
 2. Finds workspace root by looking for `[workspace]` in Cargo.toml
-3. Parses `i18n/__init__.spl` and `i18n/parser.spl`
+3. Parses `src/i18n/__init__.spl` and `src/i18n/parser.spl`
 4. Uses simplified text parser (avoids circular dependency)
 5. Generates `generated.rs` with phf::Map constants
 6. Embedded in binary via `include!` macro
@@ -263,7 +263,7 @@ pub static DEFAULT_PARSER_MESSAGES: phf::Map<...> = phf::phf_map! {
 **Decision**: `__init__.ko.spl` instead of `locales/ko/__init__.spl`
 
 **Pros**:
-- Simple, discoverable (`ls i18n/*.ko.spl`)
+- Simple, discoverable (`ls src/i18n/*.ko.spl`)
 - All files at a glance
 - Matches Simple's module philosophy
 - Follows gettext pattern
@@ -537,8 +537,8 @@ let msg = i18n.get_message("parser", "E0002", &ctx);
 ## Related Files
 
 ### Code
-- `src/i18n/` - Complete implementation
-- `i18n/` - Catalog files
+- `src/src/i18n/` - Complete implementation
+- `src/i18n/` - Catalog files
 - `src/driver/` - CLI integration
 
 ### Documentation

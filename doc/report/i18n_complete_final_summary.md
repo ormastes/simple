@@ -9,10 +9,10 @@
 ### ✅ Phase 2, 3, 4 (From Previous Request)
 
 **Phase 2: Verification & Lint Catalogs**
-- ✅ `i18n/verification.spl` - 21 verification error codes (English)
-- ✅ `i18n/verification.ko.spl` - 21 verification error codes (Korean)
-- ✅ `i18n/lint.spl` - 8 lint message codes (English)
-- ✅ `i18n/lint.ko.spl` - 8 lint message codes (Korean)
+- ✅ `src/i18n/verification.spl` - 21 verification error codes (English)
+- ✅ `src/i18n/verification.ko.spl` - 21 verification error codes (Korean)
+- ✅ `src/i18n/lint.spl` - 8 lint message codes (English)
+- ✅ `src/i18n/lint.ko.spl` - 8 lint message codes (Korean)
 
 **Phase 3: Production Integration**
 - ✅ Integration guide: `doc/integration/i18n_cli_integration_guide.md`
@@ -29,8 +29,8 @@
 ### ✅ Phase 7 (This Session)
 
 **Error Explanations Catalogs**
-- ✅ `i18n/explanations.spl` - 8 detailed error explanations (English)
-- ✅ `i18n/explanations.ko.spl` - 8 detailed error explanations (Korean)
+- ✅ `src/i18n/explanations.spl` - 8 detailed error explanations (English)
+- ✅ `src/i18n/explanations.ko.spl` - 8 detailed error explanations (Korean)
 - Coverage: E0002, E1001, E1002, E1003, E1101, E1102, E3001, E3002
 
 Each explanation includes:
@@ -70,18 +70,18 @@ Each explanation includes:
 ## Files Created (Final List)
 
 ### Catalogs (12 files)
-1. `i18n/verification.spl`
-2. `i18n/verification.ko.spl`
-3. `i18n/lint.spl`
-4. `i18n/lint.ko.spl`
-5. `i18n/explanations.spl`
-6. `i18n/explanations.ko.spl`
-7. `i18n/parser.spl` (previous session)
-8. `i18n/parser.ko.spl` (previous session)
-9. `i18n/compiler.spl` (previous session)
-10. `i18n/compiler.ko.spl` (previous session)
-11. `i18n/__init__.spl` (previous session)
-12. `i18n/__init__.ko.spl` (previous session)
+1. `src/i18n/verification.spl`
+2. `src/i18n/verification.ko.spl`
+3. `src/i18n/lint.spl`
+4. `src/i18n/lint.ko.spl`
+5. `src/i18n/explanations.spl`
+6. `src/i18n/explanations.ko.spl`
+7. `src/i18n/parser.spl` (previous session)
+8. `src/i18n/parser.ko.spl` (previous session)
+9. `src/i18n/compiler.spl` (previous session)
+10. `src/i18n/compiler.ko.spl` (previous session)
+11. `src/i18n/__init__.spl` (previous session)
+12. `src/i18n/__init__.ko.spl` (previous session)
 
 ### Infrastructure (18 files from previous session)
 13-18. Core diagnostics system
@@ -90,12 +90,12 @@ Each explanation includes:
 24-30. Documentation
 
 ### New This Session (6 files)
-31. `i18n/verification.spl`
-32. `i18n/verification.ko.spl`
-33. `i18n/lint.spl`
-34. `i18n/lint.ko.spl`
-35. `i18n/explanations.spl`
-36. `i18n/explanations.ko.spl`
+31. `src/i18n/verification.spl`
+32. `src/i18n/verification.ko.spl`
+33. `src/i18n/lint.spl`
+34. `src/i18n/lint.ko.spl`
+35. `src/i18n/explanations.spl`
+36. `src/i18n/explanations.ko.spl`
 37. `src/diagnostics/tests/i18n_integration.rs`
 38. `src/driver/examples/i18n_error_example.rs`
 39. `doc/integration/i18n_cli_integration_guide.md`
@@ -241,7 +241,7 @@ println!("{}", output);
 
 ### For Users
 - `doc/guide/i18n.md` - How to use `--lang` flag
-- `i18n/README.md` - Catalog structure
+- `src/i18n/README.md` - Catalog structure
 
 ### For Contributors
 - `doc/contributing/i18n.md` - How to add translations

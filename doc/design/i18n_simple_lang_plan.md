@@ -14,7 +14,7 @@ Instead of using JSON files for i18n message catalogs, we'll use **Simple langua
 ### Catalog File Structure
 
 ```
-i18n/locales/
+src/i18n/locales/
 ├── en/
 │   ├── __init__.spl          # Common UI strings (severity names, etc.)
 │   ├── parser.spl            # Parser error messages (E0001-E0012)
@@ -32,7 +32,7 @@ i18n/locales/
 Each catalog file exports a dictionary/map of message IDs to message structures:
 
 ```simple
-# i18n/locales/en/parser.spl
+# src/i18n/locales/en/parser.spl
 
 # Message catalog for parser errors
 val messages = {
@@ -64,7 +64,7 @@ val messages = {
 Korean version:
 
 ```simple
-# i18n/locales/ko/parser.spl
+# src/i18n/locales/ko/parser.spl
 
 val messages = {
     "E0001": {
@@ -87,7 +87,7 @@ val messages = {
 Common UI strings:
 
 ```simple
-# i18n/locales/en/__init__.spl
+# src/i18n/locales/en/__init__.spl
 
 val severity = {
     "error": "error",
@@ -99,7 +99,7 @@ val severity = {
 ```
 
 ```simple
-# i18n/locales/ko/__init__.spl
+# src/i18n/locales/ko/__init__.spl
 
 val severity = {
     "error": "오류",
@@ -114,7 +114,7 @@ val severity = {
 
 ### Phase 1: Simple Catalog Parser (Rust)
 
-**Create:** `src/i18n/src/simple_catalog.rs`
+**Create:** `src/src/i18n/src/simple_catalog.rs`
 
 This module parses Simple language catalog files and extracts message data:
 
@@ -147,7 +147,7 @@ impl SimpleCatalogParser {
 
 ### Phase 2: Update I18n System
 
-**Modify:** `src/i18n/src/catalog.rs`
+**Modify:** `src/src/i18n/src/catalog.rs`
 
 Remove JSON loading, add Simple catalog loading:
 
@@ -185,7 +185,7 @@ impl CatalogRegistry {
 
 ### Phase 3: Bootstrap Fallback
 
-**Create:** `src/i18n/src/bootstrap.rs`
+**Create:** `src/src/i18n/src/bootstrap.rs`
 
 Hardcode minimal English messages for bootstrap errors:
 
@@ -236,10 +236,10 @@ impl I18n {
 ### Phase 4: Write Catalogs in Simple
 
 **Create catalog files:**
-1. `i18n/locales/en/__init__.spl` - English UI strings
-2. `i18n/locales/en/parser.spl` - English parser errors (E0001-E0012)
-3. `i18n/locales/ko/__init__.spl` - Korean UI strings
-4. `i18n/locales/ko/parser.spl` - Korean parser errors
+1. `src/i18n/locales/en/__init__.spl` - English UI strings
+2. `src/i18n/locales/en/parser.spl` - English parser errors (E0001-E0012)
+3. `src/i18n/locales/ko/__init__.spl` - Korean UI strings
+4. `src/i18n/locales/ko/parser.spl` - Korean parser errors
 
 ### Phase 5: Integration
 

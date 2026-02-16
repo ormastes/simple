@@ -17,7 +17,7 @@ src/parser/
 src/compiler/
   └── error.rs              # CompileError → to_diagnostic()
 
-src/i18n/                   # NEW - i18n system
+src/src/i18n/                   # NEW - i18n system
   ├── catalog.rs
   ├── message.rs
   └── lib.rs
@@ -222,7 +222,7 @@ for error in errors {
 
 ### Phase 3: Compiler Integration
 - [ ] Add `to_diagnostic_i18n()` to CompileError
-- [ ] Create compiler error catalogs (i18n/compiler.spl)
+- [ ] Create compiler error catalogs (src/i18n/compiler.spl)
 - [ ] Translate to Korean
 
 ### Phase 4: Runtime Integration

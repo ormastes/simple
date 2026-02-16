@@ -131,7 +131,7 @@ severity_name("warning") # "warning" (en) or "경고" (ko)
                    │ Calls Rust i18n APIs
                    ↓
 ┌─────────────────────────────────────────────────┐
-│  Rust I18n System (src/i18n/)                   │
+│  Rust I18n System (src/src/i18n/)                   │
 │  ┌───────────────────────────────────────────┐  │
 │  │ I18n::global() - Global instance          │  │
 │  │ MessageContext - Key-value map            │  │
@@ -160,7 +160,7 @@ val diag = error_i18n("compiler", "E1003", ctx)
     .with_span(span)
     .with_help("Convert the value")
 
-# English catalog (i18n/locales/en/compiler.json)
+# English catalog (src/i18n/locales/en/compiler.json)
 {
   "E1003": {
     "title": "Type Mismatch",
@@ -171,7 +171,7 @@ val diag = error_i18n("compiler", "E1003", ctx)
   }
 }
 
-# Korean catalog (i18n/locales/ko/compiler.json)
+# Korean catalog (src/i18n/locales/ko/compiler.json)
 {
   "E1003": {
     "title": "타입 불일치",
@@ -230,7 +230,7 @@ export i18n_context.severity_name
 - `simple_i18n` crate - Core i18n functionality
 - `simple_i18n::I18n::global()` - Global instance
 - `simple_i18n::MessageContext` - Context type
-- `i18n/locales/` directory - Message catalogs
+- `src/i18n/locales/` directory - Message catalogs
 
 ---
 

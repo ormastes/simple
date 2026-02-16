@@ -1,0 +1,277 @@
+# Semantic doc similarity orchestrator
+# Extract docs -> embed via Ollama -> compare -> report
+
+use app.duplicate_check.config.{DuplicationConfig}
+use app.duplicate_check.doc_extractor.{DocEntry, extract_docs_from_file, extract_docs_from_directory, build_embedding_key, content_hash}
+use app.duplicate_check.ollama_client.{EmbeddingResult, check_ollama_available, get_embedding}
+use app.duplicate_check.embedding_cache.{EmbeddingCacheManager, load_embedding_cache, save_embedding_cache, get_cached, set_cached, csv_to_floats, floats_to_csv}
+use app.duplicate_check.detector.{collect_files}
+use std.text.{NL, levenshtein_distance}
+
+extern fn rt_math_sqrt(x: f64) -> f64
+
+struct SemanticMatch:
+    entry_a: DocEntry
+    entry_b: DocEntry
+    similarity: f64
+    match_kind: text
+
+struct SemanticReport:
+    matches: [SemanticMatch]
+    missing_docs: [DocEntry]
+    total_items: i64
+    items_with_docs: i64
+    cache_hits: i64
+    cache_misses: i64
+    used_fallback: bool
+
+fn run_semantic_analysis(target_path: text, config: DuplicationConfig) -> SemanticReport:
+    # Collect files
+    val files = collect_files(target_path, config)
+    if files.len() == 0:
+        return empty_report()
+
+    # Extract doc entries from all files
+    var all_entries: [DocEntry] = []
+    for file in files:
+        val file_entries = extract_docs_from_file(file)
+        all_entries = all_entries + file_entries
+
+    if all_entries.len() == 0:
+        return empty_report()
+
+    # Separate documented and undocumented items
+    var documented: [DocEntry] = []
+    var missing_docs: [DocEntry] = []
+    for entry in all_entries:
+        if entry.has_doc:
+            documented = documented + [entry]
+        else:
+            missing_docs = missing_docs + [entry]
+
+    # Check if Ollama is available
+    val ollama_ok = check_ollama_available(config.ollama_url)
+
+    if not ollama_ok:
+        print "WARNING: Ollama not available at {config.ollama_url}"
+        print "  Install: curl -fsSL https://ollama.com/install.sh | sh"
+        print "  Then: ollama pull {config.semantic_model}"
+        print ""
+        print "Falling back to text-based similarity..."
+        print ""
+        val fallback_report = run_text_fallback(documented, config.semantic_threshold, config.semantic_drift_threshold)
+        return SemanticReport(
+            matches: fallback_report.matches,
+            missing_docs: missing_docs,
+            total_items: all_entries.len(),
+            items_with_docs: documented.len(),
+            cache_hits: 0,
+            cache_misses: 0,
+            used_fallback: true
+        )
+
+    # Load embedding cache
+    val cache_path = ".semantic_cache.txt"
+    var cache = load_embedding_cache(cache_path, config.semantic_model)
+    if config.rebuild_embeddings:
+        cache = load_embedding_cache("/dev/null/nonexistent", config.semantic_model)
+
+    # Get embeddings for all documented entries
+    var embeddings: [[f64]] = []
+    var embed_idx = 0
+    while embed_idx < documented.len():
+        val entry = documented[embed_idx]
+        val emb_key = entry.file_path + "::" + entry.item_name
+        val emb_text = build_embedding_key(entry)
+        val hash = content_hash(emb_text)
+
+        # Check cache first
+        val cached_csv = get_cached(cache, emb_key, hash)
+        if cached_csv.len() > 0:
+            val vec = csv_to_floats(cached_csv)
+            embeddings = embeddings + [vec]
+        else:
+            # Fetch from Ollama
+            val result = get_embedding(config.ollama_url, config.semantic_model, emb_text)
+            if result.error.len() == 0 and result.vector.len() > 0:
+                val csv = floats_to_csv(result.vector)
+                set_cached(cache, emb_key, hash, csv)
+                embeddings = embeddings + [result.vector]
+            else:
+                embeddings = embeddings + [[]]
+
+        embed_idx = embed_idx + 1
+
+    # Save cache
+    save_embedding_cache(cache)
+
+    # Find similar pairs
+    val matches = find_similar_pairs(documented, embeddings, config.semantic_threshold, config.semantic_drift_threshold)
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: missing_docs,
+        total_items: all_entries.len(),
+        items_with_docs: documented.len(),
+        cache_hits: cache.hits,
+        cache_misses: cache.misses,
+        used_fallback: false
+    )
+
+fn cosine_similarity_dense(a: [f64], b: [f64]) -> f64:
+    if a.len() == 0 or b.len() == 0:
+        return 0.0
+    if a.len() != b.len():
+        return 0.0
+
+    var dot_product = 0.0
+    var mag_a = 0.0
+    var mag_b = 0.0
+    var i = 0
+
+    while i < a.len():
+        dot_product = dot_product + a[i] * b[i]
+        mag_a = mag_a + a[i] * a[i]
+        mag_b = mag_b + b[i] * b[i]
+        i = i + 1
+
+    val mag_a_sqrt = rt_math_sqrt(mag_a)
+    val mag_b_sqrt = rt_math_sqrt(mag_b)
+
+    val either_zero = (mag_a_sqrt == 0.0 or mag_b_sqrt == 0.0)
+    if either_zero:
+        return 0.0
+
+    val sim = dot_product / (mag_a_sqrt * mag_b_sqrt)
+
+    # Clamp to [0, 1]
+    var clamped = sim
+    if sim < 0.0:
+        clamped = 0.0
+    if sim > 1.0:
+        clamped = 1.0
+    clamped
+
+fn find_similar_pairs(entries: [DocEntry], embeddings: [[f64]], threshold: f64, drift_threshold: f64) -> [SemanticMatch]:
+    var matches: [SemanticMatch] = []
+
+    var i = 0
+    while i < entries.len():
+        val vec_a = embeddings[i]
+        if vec_a.len() == 0:
+            i = i + 1
+            continue
+
+        var j = i + 1
+        while j < entries.len():
+            val vec_b = embeddings[j]
+            if vec_b.len() == 0:
+                j = j + 1
+                continue
+
+            val sim = cosine_similarity_dense(vec_a, vec_b)
+
+            if sim >= threshold:
+                val kind = classify_match(entries[i], entries[j], sim)
+                matches = matches + [SemanticMatch(
+                    entry_a: entries[i],
+                    entry_b: entries[j],
+                    similarity: sim,
+                    match_kind: kind
+                )]
+
+            j = j + 1
+
+        # Check for drift (doc doesn't match signature)
+        val self_sim = check_doc_sig_drift(entries[i], vec_a, drift_threshold)
+        if self_sim.len() > 0:
+            matches = matches + [self_sim[0]]
+
+        i = i + 1
+
+    # Sort by similarity descending (bubble sort)
+    var n = matches.len()
+    var si = 0
+    while si < n - 1:
+        var sj = 0
+        while sj < n - si - 1:
+            if matches[sj].similarity < matches[sj + 1].similarity:
+                val tmp = matches[sj]
+                matches[sj] = matches[sj + 1]
+                matches[sj + 1] = tmp
+            sj = sj + 1
+        si = si + 1
+
+    matches
+
+fn classify_match(a: DocEntry, b: DocEntry, sim: f64) -> text:
+    if sim >= 0.97:
+        return "copy_paste"
+    if sim >= 0.90:
+        return "similar"
+    "similar"
+
+fn check_doc_sig_drift(entry: DocEntry, vec: [f64], drift_threshold: f64) -> [SemanticMatch]:
+    # We can't easily embed signature alone without another API call
+    # so drift detection is done in text fallback or skipped for embedding mode
+    []
+
+fn run_text_fallback(entries: [DocEntry], threshold: f64, drift_threshold: f64) -> SemanticReport:
+    var matches: [SemanticMatch] = []
+
+    var i = 0
+    while i < entries.len():
+        var j = i + 1
+        while j < entries.len():
+            val doc_a = entries[i].doc_comment
+            val doc_b = entries[j].doc_comment
+
+            # Skip very short docs
+            val both_long = doc_a.len() >= 10 and doc_b.len() >= 10
+            if both_long:
+                val sim = text_similarity(doc_a, doc_b)
+                if sim >= threshold:
+                    val kind = if sim >= 0.97: "copy_paste" else: "similar"
+                    matches = matches + [SemanticMatch(
+                        entry_a: entries[i],
+                        entry_b: entries[j],
+                        similarity: sim,
+                        match_kind: kind + " [text-based]"
+                    )]
+
+            j = j + 1
+        i = i + 1
+
+    SemanticReport(
+        matches: matches,
+        missing_docs: [],
+        total_items: entries.len(),
+        items_with_docs: entries.len(),
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: true
+    )
+
+fn text_similarity(a: text, b: text) -> f64:
+    val dist = levenshtein_distance(a, b)
+    val max_len = if a.len() > b.len(): a.len() else: b.len()
+    if max_len == 0:
+        return 1.0
+    val dist_f = dist * 1.0
+    val max_f = max_len * 1.0
+    1.0 - (dist_f / max_f)
+
+fn empty_report() -> SemanticReport:
+    SemanticReport(
+        matches: [],
+        missing_docs: [],
+        total_items: 0,
+        items_with_docs: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        used_fallback: false
+    )
+
+export SemanticMatch, SemanticReport
+export run_semantic_analysis, cosine_similarity_dense
+export find_similar_pairs, run_text_fallback, text_similarity

@@ -534,7 +534,9 @@ src/compiler/src/formatter/
 
 src/compiler/src/bin/simple-fmt.rs   # Standalone binary
 
-editors/
+src/app/nvim_plugin/      # Neovim plugin
+src/app/vscode_extension/  # VS Code extension
+# (old editors/ moved to src/app/)
 ├── vscode/               # VS Code extension
 ├── vim/                  # Vim plugin
 ├── emacs/                # Emacs mode

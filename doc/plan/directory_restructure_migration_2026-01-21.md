@@ -34,7 +34,7 @@ simple/
 │   └── mock/           # Mock infrastructure
 ├── bench/              # Benchmarks
 ├── fuzz/               # Fuzzing
-├── i18n/               # Internationalization (KEEP AT ROOT)
+├── src/i18n/               # Internationalization (KEEP AT ROOT)
 └── scripts/            # Build scripts
 ```
 

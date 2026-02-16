@@ -726,7 +726,7 @@ pub mod source_map;
 
 **Current structure (already correct)**:
 ```
-i18n/
+src/i18n/
 ├── __init__.spl          # English severity names (embedded at build)
 ├── __init__.ko.spl       # Korean severity names
 ├── parser.spl            # English parser errors E0001-E0012 (embedded)
@@ -737,7 +737,7 @@ i18n/
 
 #### 7.2: Create Compiler Error Catalogs
 
-**`i18n/compiler.spl`** (English):
+**`src/i18n/compiler.spl`** (English):
 ```simple
 # English compiler error messages
 val messages = {
@@ -761,7 +761,7 @@ val messages = {
 }
 ```
 
-**`i18n/compiler.ko.spl`** (Korean):
+**`src/i18n/compiler.ko.spl`** (Korean):
 ```simple
 # Simple 컴파일러의 한국어 오류 메시지
 val messages = {
@@ -890,8 +890,8 @@ fn report_custom_error(message: String, span: Span):
 - [ ] Test all error paths
 
 ### Phase 5: Create Compiler Catalogs
-- [ ] Create `i18n/compiler.spl` (English)
-- [ ] Create `i18n/compiler.ko.spl` (Korean)
+- [ ] Create `src/i18n/compiler.spl` (English)
+- [ ] Create `src/i18n/compiler.ko.spl` (Korean)
 - [ ] Update build.rs to include compiler catalogs
 - [ ] Test compiler error localization
 

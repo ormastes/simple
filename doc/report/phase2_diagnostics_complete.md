@@ -47,7 +47,7 @@ Successfully completed **Phase 2** of the Rust-to-Simple migration: **Full diagn
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| `diagnostics_minimal/` | 338 | No i18n/formatters (for parser) |
+| `diagnostics_minimal/` | 338 | No src/i18n/formatters (for parser) |
 | **Total** | **338** | **Circular dependency breaker** |
 
 ### 5. Test Suite (1,115 lines) - ✅ Complete

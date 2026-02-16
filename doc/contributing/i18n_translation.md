@@ -35,7 +35,7 @@ cd simple
 cargo build --release
 
 # Verify i18n files exist
-ls i18n/
+ls src/i18n/
 ```
 
 ### Step 2: Choose Your Language
@@ -195,8 +195,8 @@ EOF
 
 ```bash
 # Simple parser can check your catalog files
-./target/release/simple build i18n/__init__.ja.spl
-./target/release/simple build i18n/parser.ja.spl
+./target/release/simple build src/i18n/__init__.ja.spl
+./target/release/simple build src/i18n/parser.ja.spl
 
 # Should output: "success" (no syntax errors)
 ```
@@ -225,11 +225,11 @@ EOF
 
 ```bash
 # Create a new branch
-git checkout -b i18n/japanese-translation
+git checkout -b src/i18n/japanese-translation
 
 # Add your files
-git add i18n/__init__.ja.spl
-git add i18n/parser.ja.spl
+git add src/i18n/__init__.ja.spl
+git add src/i18n/parser.ja.spl
 
 # Commit with descriptive message
 git commit -m "feat(i18n): Add Japanese translations for parser errors
@@ -240,7 +240,7 @@ git commit -m "feat(i18n): Add Japanese translations for parser errors
 - Tested with: simple build --lang ja"
 
 # Push to your fork
-git push origin i18n/japanese-translation
+git push origin src/i18n/japanese-translation
 ```
 
 **PR Template**:
@@ -249,8 +249,8 @@ git push origin i18n/japanese-translation
 Add Japanese translations for Simple compiler error messages.
 
 ## Translated Files
-- `i18n/__init__.ja.spl` - UI strings (severity names)
-- `i18n/parser.ja.spl` - Parser errors E0001-E0012
+- `src/i18n/__init__.ja.spl` - UI strings (severity names)
+- `src/i18n/parser.ja.spl` - Parser errors E0001-E0012
 
 ## Testing
 - ✅ Syntax validated with Simple parser
@@ -488,7 +488,7 @@ Before submitting, verify:
 
 ### Technical Issues
 - **Build errors**: File an issue with label `i18n`
-- **Syntax errors**: Run `simple build i18n/your_file.spl` for details
+- **Syntax errors**: Run `simple build src/i18n/your_file.spl` for details
 - **Testing**: See `doc/guide/i18n.md` for usage guide
 
 ### Getting Review
@@ -514,11 +514,11 @@ Thank you for helping make Simple accessible to developers worldwide! 🌍
 
 ### Complete Translation: Japanese Parser Errors
 
-See `i18n/parser.ja.spl` (when available) for a complete example of all E0001-E0012 errors translated to Japanese.
+See `src/i18n/parser.ja.spl` (when available) for a complete example of all E0001-E0012 errors translated to Japanese.
 
 ### Complete Translation: Korean Parser Errors
 
-See `i18n/parser.ko.spl` for a complete example of all E0001-E0012 errors translated to Korean.
+See `src/i18n/parser.ko.spl` for a complete example of all E0001-E0012 errors translated to Korean.
 
 ---
 

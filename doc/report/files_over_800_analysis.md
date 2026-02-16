@@ -46,9 +46,9 @@ These files have standalone functions, multiple types, or clear module boundarie
 
 | File | Lines | Structure | Refactoring Potential |
 |------|-------|-----------|----------------------|
-| `i18n/__init__.spl` | 1355 | Constant definitions by category | ✅ HIGH - Split by error category (parser/semantic/codegen/runtime) |
-| `i18n/__init__.ko.spl` | 1355 | Korean translations (mirrors __init__.spl) | ✅ HIGH - Same structure as __init__.spl |
-| `i18n/compiler.spl` | 1250 | Error code mappings | ⚠️ Medium - References __init__.spl constants |
+| `src/i18n/__init__.spl` | 1355 | Constant definitions by category | ✅ HIGH - Split by error category (parser/semantic/codegen/runtime) |
+| `src/i18n/__init__.ko.spl` | 1355 | Korean translations (mirrors __init__.spl) | ✅ HIGH - Same structure as __init__.spl |
+| `src/i18n/compiler.spl` | 1250 | Error code mappings | ⚠️ Medium - References __init__.spl constants |
 
 **Note**: i18n files are interconnected. Refactoring requires coordinated changes.
 
@@ -84,8 +84,8 @@ These files have standalone functions, multiple types, or clear module boundarie
 
 Files to refactor:
 1. ✅ **test_runner_new/main.spl** (1052 → ~150 lines) - Already started
-2. **i18n/__init__.spl** (1355 → ~300 max) - Split by error category
-3. **i18n/__init__.ko.spl** (1355 → ~300 max) - Mirror __init__.spl structure
+2. **src/i18n/__init__.spl** (1355 → ~300 max) - Split by error category
+3. **src/i18n/__init__.ko.spl** (1355 → ~300 max) - Mirror __init__.spl structure
 4. **tooling/deployment/packaging.spl** (1249 → ~400 max) - TBD structure
 5. **host/common/net/types.spl** (1242 → ~400 max) - Split type groups
 
@@ -155,37 +155,37 @@ All files from "CAN Be Refactored" list above.
 **Files**: `__init__.spl` (1355 lines), `__init__.ko.spl` (1355 lines)
 
 **Target modules** (for both .spl and .ko.spl):
-1. **i18n/common.spl** (~40 lines) - ✅ CREATED (partial)
+1. **src/i18n/common.spl** (~40 lines) - ✅ CREATED (partial)
    - Severity levels
    - Common error messages/labels/help
 
-2. **i18n/parser.spl** (~200 lines) - TODO
+2. **src/i18n/parser.spl** (~200 lines) - TODO
    - Parser errors E0001-E0016
    - Titles, messages, labels, help, notes
 
-3. **i18n/semantic.spl** (~700 lines) - TODO
+3. **src/i18n/semantic.spl** (~700 lines) - TODO
    - Semantic errors E1001-E1A06
    - Control flow, capability, macro, AOP, custom blocks, mixins, SDN, DI, architecture rules
 
-4. **i18n/codegen.spl** (~200 lines) - TODO
+4. **src/i18n/codegen.spl** (~200 lines) - TODO
    - Codegen errors E2001-E2009
 
-5. **i18n/runtime.spl** (~300 lines) - TODO
+5. **src/i18n/runtime.spl** (~300 lines) - TODO
    - Runtime errors E3001-E3009, E4xxx, E5xxx, E6xxx
 
-6. **i18n/verification.spl** (~200 lines) - TODO
+6. **src/i18n/verification.spl** (~200 lines) - TODO
    - Verification errors V-AOP-xxx, V-MACRO-xxx, V-TERM-xxx
 
-7. **i18n/lint.spl** (~100 lines) - TODO
+7. **src/i18n/lint.spl** (~100 lines) - TODO
    - Lint messages
 
-8. **i18n/explanations.spl** (~200 lines) - TODO
+8. **src/i18n/explanations.spl** (~200 lines) - TODO
    - Error explanations for various codes
 
 9. **__init__.spl** (~40 lines) - Re-export module
    - Import and re-export all categories
 
-**Coordination needed**: `i18n/compiler.spl` (1250 lines) references these constants.
+**Coordination needed**: `src/i18n/compiler.spl` (1250 lines) references these constants.
 
 ---
 

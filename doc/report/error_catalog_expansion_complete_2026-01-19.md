@@ -21,9 +21,9 @@ Successfully completed a comprehensive expansion of the Simple compiler's error 
 - Allocated E0013-E0016 (parser), E1019-E1080 (semantic), E1101-E1105 (control flow), E1301-E1302 (capability), E1401-E1403 (macro), E2001-E2009 (codegen), E3001-E3009 (runtime), E4005 (FFI)
 
 **Phase 1B: Catalog Expansion**
-- Extended `i18n/__init__.spl` with 84 English error constants (~250 lines)
-- Extended `i18n/__init__.ko.spl` with 84 Korean translations (~250 lines)
-- Fixed `src/i18n/Cargo.toml` to enable `simple-format` by default
+- Extended `src/i18n/__init__.spl` with 84 English error constants (~250 lines)
+- Extended `src/i18n/__init__.ko.spl` with 84 Korean translations (~250 lines)
+- Fixed `src/src/i18n/Cargo.toml` to enable `simple-format` by default
 
 **Phase 1C: SSpec Test Creation**
 - Created **95 comprehensive SSpec test files**
@@ -32,9 +32,9 @@ Successfully completed a comprehensive expansion of the Simple compiler's error 
 - Tests serve as both validation and documentation
 
 **Files Modified (Phase 1):**
-- `i18n/__init__.spl` (+250 lines)
-- `i18n/__init__.ko.spl` (+250 lines)
-- `src/i18n/Cargo.toml` (+1 line)
+- `src/i18n/__init__.spl` (+250 lines)
+- `src/i18n/__init__.ko.spl` (+250 lines)
+- `src/src/i18n/Cargo.toml` (+1 line)
 
 **Files Created (Phase 1):**
 - 95 SSpec test files in `test/features/errors/`
@@ -49,7 +49,7 @@ Successfully completed a comprehensive expansion of the Simple compiler's error 
 - Maintained backward compatibility with MACRO_SHADOWING alias
 
 **Phase 2B: I18n Catalog Entries**
-- Added 68 new error entries to `i18n/compiler.spl`
+- Added 68 new error entries to `src/i18n/compiler.spl`
 - Each entry includes: id, title, message, label, help
 - Total catalog now contains 109 error definitions
 
@@ -68,7 +68,7 @@ Successfully completed a comprehensive expansion of the Simple compiler's error 
 
 **Files Modified (Phase 2):**
 - `src/compiler/src/error.rs` (+70 constants)
-- `i18n/compiler.spl` (+68 entries, ~400 lines)
+- `src/i18n/compiler.spl` (+68 entries, ~400 lines)
 - `src/compiler/src/i18n_diagnostics.rs` (+68 cases, ~300 lines)
 
 ---
@@ -284,7 +284,7 @@ Feature: E1050 - Type Coercion Not Allowed
 
 ### Constant-Based Design
 
-**English Constants** (`i18n/__init__.spl`):
+**English Constants** (`src/i18n/__init__.spl`):
 ```simple
 val E1050_TITLE = "Disallowed Coercion"
 val E1050_MSG = "type coercion from `{from}` to `{to}` is not allowed"
@@ -292,7 +292,7 @@ val E1050_LABEL = "invalid coercion"
 val E1050_HELP = "use explicit conversion instead"
 ```
 
-**Korean Translations** (`i18n/__init__.ko.spl`):
+**Korean Translations** (`src/i18n/__init__.ko.spl`):
 ```simple
 val E1050_TITLE = "허용되지 않는 강제 변환"
 val E1050_MSG = "`{from}`에서 `{to}`(으)로의 타입 강제 변환은 허용되지 않습니다"
@@ -300,7 +300,7 @@ val E1050_LABEL = "잘못된 강제 변환"
 val E1050_HELP = "명시적 변환을 사용하세요"
 ```
 
-**Catalog References** (`i18n/compiler.spl`):
+**Catalog References** (`src/i18n/compiler.spl`):
 ```simple
 "E1050": {
     "id": "E1050",
@@ -367,16 +367,16 @@ The error will automatically:
 ### Phase 1 (Catalog & Tests)
 | File | Changes |
 |------|---------|
-| `i18n/__init__.spl` | +250 lines (84 English constants) |
-| `i18n/__init__.ko.spl` | +250 lines (84 Korean translations) |
-| `src/i18n/Cargo.toml` | +1 line (default features) |
+| `src/i18n/__init__.spl` | +250 lines (84 English constants) |
+| `src/i18n/__init__.ko.spl` | +250 lines (84 Korean translations) |
+| `src/src/i18n/Cargo.toml` | +1 line (default features) |
 | `test/features/errors/**/*.spl` | +95 files (SSpec tests) |
 
 ### Phase 2 (Infrastructure)
 | File | Changes |
 |------|---------|
 | `src/compiler/src/error.rs` | +70 constants |
-| `i18n/compiler.spl` | +68 entries (~400 lines) |
+| `src/i18n/compiler.spl` | +68 entries (~400 lines) |
 | `src/compiler/src/i18n_diagnostics.rs` | +68 cases (~300 lines) |
 
 **Total Impact:**

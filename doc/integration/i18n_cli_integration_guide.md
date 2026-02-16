@@ -269,7 +269,7 @@ SIMPLE_LANG=en cargo test --package simple-driver test_check_with_errors
 - **Example Code:** `src/driver/examples/i18n_error_example.rs`
 - **Conversion Helpers:** `src/driver/src/diagnostics_conversion.rs`
 - **Formatters:** `src/diagnostics/src/formatters/`
-- **Catalogs:** `i18n/*.spl`
+- **Catalogs:** `src/i18n/*.spl`
 - **Tests:** `src/diagnostics/tests/i18n_integration.rs`
 
 ## Getting Help

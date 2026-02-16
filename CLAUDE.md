@@ -171,6 +171,13 @@ print r"raw: \d+"                     # Raw string (no interpolation)
 fn square(x):
     x * x                             # Implicit return
 
+# Type aliases (working)
+type Point2D = Point                  # Type alias
+alias Optional = Option               # Class alias
+
+# Function aliases (NOT YET IMPLEMENTED - use delegation instead)
+fn println(msg): print(msg)           # Delegation workaround
+
 class Point:
     x: i64
     y: i64
