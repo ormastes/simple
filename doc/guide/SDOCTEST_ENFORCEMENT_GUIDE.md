@@ -117,7 +117,7 @@ bin/simple build --enforce-public-sdoctest
 Basic string manipulation:
 
 ```simple
-use std.string.{str_upper, str_lower}
+use std.text.{str_upper, str_lower}
 
 val text = "Hello World"
 print str_upper(text)  # "HELLO WORLD"
@@ -137,7 +137,7 @@ This ONE example covers both `str_upper` and `str_lower` in the group.
 
 ````markdown
 ```simple:tag=stdlib:string
-use std.string.{split, join}
+use std.text.{split, join}
 val parts = split("a,b,c", ",")
 val result = join(parts, "|")  # "a|b|c"
 ```

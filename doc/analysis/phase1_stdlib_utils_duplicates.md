@@ -232,7 +232,7 @@ fn get_N(tuple):
    - **Savings:** ~200 lines across all utils
    - **Complexity:** Low
 
-2. **String Transform Helpers** (add to `src/std/string.spl`)
+2. **String Transform Helpers** (add to `src/std/text.spl`)
    - `string_map(s, fn)` - Character-by-character transformation
    - `string_filter(s, predicate)` - Filter characters
    - **Savings:** ~100 lines
@@ -293,7 +293,7 @@ fn get_N(tuple):
    - Effort: 2-3 hours
    - Impact: 200+ lines saved
 
-2. **Add String Transform Helpers** to `src/std/string.spl`
+2. **Add String Transform Helpers** to `src/std/text.spl`
    - Priority: HIGH
    - Effort: 1-2 hours
    - Impact: 100+ lines saved

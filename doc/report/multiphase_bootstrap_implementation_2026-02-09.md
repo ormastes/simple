@@ -61,11 +61,11 @@ class MultiphaseBootstrap:
 ```
 
 #### 2. Standalone Runner Script
-**File:** `script/bootstrap-multiphase.spl` (~150 lines)
+**File:** `scripts/bootstrap-multiphase.spl` (~150 lines)
 
 **Usage:**
 ```bash
-./script/bootstrap-multiphase.spl [options]
+./scripts/bootstrap-multiphase.spl [options]
 
 Options:
   --no-verify        Skip Phase2/Phase3 reproducibility check
@@ -191,13 +191,13 @@ bin/simple build bootstrap-multiphase
 
 ```bash
 # Fast bootstrap without LLVM optimization
-./script/bootstrap-multiphase.spl --no-llvm
+./scripts/bootstrap-multiphase.spl --no-llvm
 
 # Debug mode keeping all intermediate binaries
-./script/bootstrap-multiphase.spl --keep-artifacts
+./scripts/bootstrap-multiphase.spl --keep-artifacts
 
 # Skip reproducibility check (faster)
-./script/bootstrap-multiphase.spl --no-verify
+./scripts/bootstrap-multiphase.spl --no-verify
 ```
 
 ### Programmatic API
@@ -284,7 +284,7 @@ Phase 4: Phase3 + LLVM → simple_phase4 (production)
 #### 1. Basic Execution
 ```bash
 cd /home/ormastes/dev/pub/simple
-./script/bootstrap-multiphase.spl
+./scripts/bootstrap-multiphase.spl
 ```
 
 **Expected:**
@@ -294,7 +294,7 @@ cd /home/ormastes/dev/pub/simple
 
 #### 2. Fast Mode
 ```bash
-./script/bootstrap-multiphase.spl --no-llvm --no-verify
+./scripts/bootstrap-multiphase.spl --no-llvm --no-verify
 ```
 
 **Expected:**
@@ -305,7 +305,7 @@ cd /home/ormastes/dev/pub/simple
 
 #### 3. Debug Mode
 ```bash
-./script/bootstrap-multiphase.spl --keep-artifacts
+./scripts/bootstrap-multiphase.spl --keep-artifacts
 ```
 
 **Expected:**
@@ -353,7 +353,7 @@ test-multiphase-bootstrap:
 
     - name: Run multi-phase bootstrap
       run: |
-        ./script/bootstrap-multiphase.spl
+        ./scripts/bootstrap-multiphase.spl
 
     - name: Verify final binary
       run: |
@@ -377,7 +377,7 @@ test-multiphase-bootstrap:
 
 ### Immediate (Before Merge)
 
-1. **Test execution:** Run `./script/bootstrap-multiphase.spl` and verify all phases complete
+1. **Test execution:** Run `./scripts/bootstrap-multiphase.spl` and verify all phases complete
 2. **Verify final binary:** Test `bin/simple` with various commands
 3. **Document hang bug:** Create issue describing Cranelift hang with reproduction steps
 4. **Update CI:** Add multi-phase bootstrap test to GitHub Actions
@@ -401,7 +401,7 @@ test-multiphase-bootstrap:
 ### Implementation Status
 
 - ✅ Core bootstrap module (`bootstrap_multiphase.spl`)
-- ✅ Standalone runner script (`script/bootstrap-multiphase.spl`)
+- ✅ Standalone runner script (`scripts/bootstrap-multiphase.spl`)
 - ✅ CLI integration (`build bootstrap-multiphase` command)
 - ✅ Comprehensive documentation
 - ⏸️  Testing (ready for manual testing)
@@ -410,7 +410,7 @@ test-multiphase-bootstrap:
 ### Files Modified
 
 1. `src/app/build/bootstrap_multiphase.spl` (new, 650 lines)
-2. `script/bootstrap-multiphase.spl` (new, 150 lines)
+2. `scripts/bootstrap-multiphase.spl` (new, 150 lines)
 3. `src/app/build/cli_entry.spl` (modified, +7 lines)
 4. `doc/build/multiphase_bootstrap.md` (new, 500 lines)
 5. `doc/report/multiphase_bootstrap_implementation_2026-02-09.md` (this file)
@@ -429,7 +429,7 @@ The multi-phase bootstrap implementation is **complete and ready for testing**. 
 
 **Next Action:** Test the bootstrap by running:
 ```bash
-./script/bootstrap-multiphase.spl
+./scripts/bootstrap-multiphase.spl
 ```
 
 ---

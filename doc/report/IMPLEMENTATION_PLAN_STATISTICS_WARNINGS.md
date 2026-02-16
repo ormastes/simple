@@ -203,7 +203,7 @@ Functions with sdoctest: 89 (36%)
 Missing sdoctest: 158 (64%)
 
 By Module:
-  std.string:   12/20 (60%)  ✅ Good
+  std.text:   12/20 (60%)  ✅ Good
   std.array:     8/15 (53%)  ⚠️  Needs work
   std.math:      5/25 (20%)  ❌ Critical
   core.parser:   0/42 (0%)   ❌ Critical

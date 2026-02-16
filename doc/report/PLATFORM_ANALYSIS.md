@@ -53,7 +53,7 @@
 **Added Files:**
 - `FREEBSD_*.md` - FreeBSD documentation (8 files)
 - `doc/guide/freebsd_*.md` - FreeBSD guides (2 files)
-- `script/bootstrap-from-scratch-freebsd.sh` - FreeBSD bootstrap
+- `scripts/bootstrap-from-scratch-freebsd.sh` - FreeBSD bootstrap
 - ✅ These are documentation only, no code impact
 
 ---

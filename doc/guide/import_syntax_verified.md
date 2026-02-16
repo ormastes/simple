@@ -68,7 +68,7 @@ describe "Import Syntax":
 use std.spec.{describe, it, expect, context}
 
 # String utilities
-use std.string.{trim, split, join}
+use std.text.{trim, split, join}
 
 # Math functions
 use std.math.{sin, cos, sqrt}

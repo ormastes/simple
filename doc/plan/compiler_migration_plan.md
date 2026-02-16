@@ -421,7 +421,7 @@ match value:
 - Pattern Matching: `doc/design/pattern_matching.md`
 
 ### Tools
-- Migration script: `script/migrate_rust_to_simple.spl` (to be created)
+- Migration script: `scripts/migrate_rust_to_simple.spl` (to be created)
 - Test runner: `simple test`
 - Linter: `simple lint`
 

@@ -33,8 +33,8 @@
 
 ### Phase 1: Code Review ✅
 
-- [x] macOS test script created (`script/test-macos-self-hosting.sh`)
-- [x] FreeBSD test scripts created (`script/setup-freebsd-vm.sh`, `script/test-freebsd-qemu.sh`)
+- [x] macOS test script created (`scripts/test-macos-self-hosting.sh`)
+- [x] FreeBSD test scripts created (`scripts/setup-freebsd-vm.sh`, `scripts/test-freebsd-qemu.sh`)
 - [x] Windows tests added to CI workflow
 - [x] Documentation updated (8 new/updated files)
 - [x] Version bumped in VERSION file
@@ -55,12 +55,12 @@
    - Platform: ubuntu-latest
 
 3. **test-macos-x86_64** ✅ NEW
-   - Runs: `script/test-macos-self-hosting.sh`
+   - Runs: `scripts/test-macos-self-hosting.sh`
    - Tests: Complete self-hosting workflow
    - Platform: macos-13 (Intel)
 
 4. **test-macos-arm64** ✅ NEW
-   - Runs: `script/test-macos-self-hosting.sh`
+   - Runs: `scripts/test-macos-self-hosting.sh`
    - Tests: Complete self-hosting workflow
    - Platform: macos-14 (Apple Silicon)
 

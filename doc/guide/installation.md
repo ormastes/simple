@@ -340,7 +340,7 @@ cargo test --workspace
 
 # Build bootstrap package
 cd ..
-./script/build-bootstrap.sh
+./scripts/build-bootstrap.sh
 
 # Install locally
 make install

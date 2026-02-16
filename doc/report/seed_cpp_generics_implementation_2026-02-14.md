@@ -276,7 +276,7 @@ cd seed/build && cmake --build . --target seed_cpp
 
 **Bootstrap Test**: ✅ Generic structs generated
 ```bash
-bash script/bootstrap-fixed.sh
+bash scripts/bootstrap-fixed.sh
 # Output includes:
 struct Option_FunctionAttr { ... };
 struct Option_MirType { ... };

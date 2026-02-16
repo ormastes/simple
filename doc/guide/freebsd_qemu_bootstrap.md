@@ -76,7 +76,7 @@ fi
 If the VM doesn't accept SSH connections, use the provided helper script:
 
 ```bash
-./script/configure_freebsd_vm_ssh.sh
+./scripts/configure_freebsd_vm_ssh.sh
 ```
 
 This script will:
@@ -144,7 +144,7 @@ export QEMU_PORT=2222
 export QEMU_USER=freebsd
 
 # Run full QEMU bootstrap
-./script/bootstrap-from-scratch.sh --platform=freebsd
+./scripts/bootstrap-from-scratch.sh --platform=freebsd
 ```
 
 This will:
@@ -172,7 +172,7 @@ rsync -az --delete -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
     . freebsd@localhost:~/simple/
 
 # 3. Run bootstrap inside VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh"
 
 # 4. Retrieve binary
 mkdir -p bin
@@ -241,7 +241,7 @@ ssh -p 2222 freebsd@localhost "echo OK"
 ssh -p 2222 freebsd@localhost "service sshd status"
 
 # 3. Re-configure SSH
-./script/configure_freebsd_vm_ssh.sh
+./scripts/configure_freebsd_vm_ssh.sh
 ```
 
 ### Issue: Rsync permission denied
@@ -284,7 +284,7 @@ ssh -p 2222 freebsd@localhost "df -h"
 ssh -p 2222 freebsd@localhost "sysctl hw.physmem"  # Should be >= 4GB
 
 # Run with verbose output
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh --verbose"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh --verbose"
 ```
 
 ## Performance Tuning
@@ -317,7 +317,7 @@ sudo sysctl vm.nr_hugepages=2048
 **Parallel Builds:**
 ```bash
 # Use more parallel jobs inside VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh --jobs=8"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh --jobs=8"
 ```
 
 ## Advanced: Native FreeBSD Bootstrap
@@ -333,7 +333,7 @@ cd simple
 pkg install cmake ninja
 
 # Run bootstrap
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Output: bin/simple (native FreeBSD binary)
 ```
@@ -420,7 +420,7 @@ jobs:
         timeout-minutes: 30
         run: |
           export QEMU_VM_PATH="build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2"
-          ./script/bootstrap-from-scratch.sh --platform=freebsd
+          ./scripts/bootstrap-from-scratch.sh --platform=freebsd
 
       - name: Verify Binary
         run: |
@@ -441,7 +441,7 @@ jobs:
 - **QEMU Documentation:** https://www.qemu.org/docs/master/
 - **FreeBSD Handbook:** https://docs.freebsd.org/en/books/handbook/
 - **Simple Bootstrap Pipeline:** `doc/build/bootstrap_pipeline.md`
-- **FreeBSD Bootstrap Script:** `script/bootstrap-from-scratch-freebsd.sh`
+- **FreeBSD Bootstrap Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
 
 ## Changelog
 

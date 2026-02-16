@@ -15,10 +15,10 @@ xz -d FreeBSD-14.3-RELEASE-amd64.qcow2.xz
 cd ../../..
 
 # 3. Test QEMU setup (recommended)
-./script/test-freebsd-qemu-setup.sh
+./scripts/test-freebsd-qemu-setup.sh
 
 # 4. Run full bootstrap in QEMU VM
-./script/bootstrap-from-scratch.sh --platform=freebsd
+./scripts/bootstrap-from-scratch.sh --platform=freebsd
 
 # 5. Verify FreeBSD binary
 file bin/simple
@@ -59,7 +59,7 @@ build/freebsd/vm/
   FreeBSD-14.3-RELEASE-amd64.qcow2  # QEMU VM image (~5-8 GB)
   qemu.pid                           # VM process ID (when running)
 
-script/
+scripts/
   bootstrap-from-scratch-freebsd.sh  # FreeBSD-native bootstrap (521 lines)
   test-freebsd-qemu-setup.sh         # QEMU setup verification
   configure_freebsd_vm_ssh.sh        # SSH configuration helper
@@ -73,13 +73,13 @@ doc/
 
 ```bash
 # Quick test (VM start + SSH connectivity only)
-./script/test-freebsd-qemu-setup.sh --quick
+./scripts/test-freebsd-qemu-setup.sh --quick
 
 # Full test (includes compilation verification)
-./script/test-freebsd-qemu-setup.sh --full
+./scripts/test-freebsd-qemu-setup.sh --full
 
 # Download FreeBSD VM if missing
-./script/test-freebsd-qemu-setup.sh --download
+./scripts/test-freebsd-qemu-setup.sh --download
 
 # Manual bootstrap (step-by-step)
 # 1. Start VM
@@ -94,7 +94,7 @@ rsync -az --delete -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
     --exclude='.git' --exclude='build' --exclude='.jj' . freebsd@localhost:~/simple/
 
 # 3. Run bootstrap in VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh"
 
 # 4. Retrieve binary
 rsync -az -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
@@ -162,7 +162,7 @@ ssh -p 2222 freebsd@localhost "sudo growfs /dev/vtbd0s1a"
 **Bootstrap fails:**
 ```bash
 # Run with verbose output
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh --verbose"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh --verbose"
 
 # Check disk space
 ssh -p 2222 freebsd@localhost "df -h"
@@ -181,7 +181,7 @@ ssh -p 2222 freebsd@localhost "sysctl hw.physmem"
 **Parallel Builds:**
 ```bash
 # Use more CPU cores in VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./script/bootstrap-from-scratch-freebsd.sh --jobs=8"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap-from-scratch-freebsd.sh --jobs=8"
 ```
 
 **Memory Tuning:**
@@ -207,7 +207,7 @@ Example GitHub Actions workflow:
     fi
 
     # Run bootstrap
-    ./script/bootstrap-from-scratch.sh --platform=freebsd
+    ./scripts/bootstrap-from-scratch.sh --platform=freebsd
 
     # Verify
     file bin/simple | grep FreeBSD
@@ -219,16 +219,16 @@ After building, you can run basic tests in the FreeBSD VM:
 
 ```bash
 # Run basic test suite (~80-100 tests)
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 
 # Core tests only (~50 tests, faster)
-./script/test-freebsd-qemu-basic.sh --core-only
+./scripts/test-freebsd-qemu-basic.sh --core-only
 
 # Skip rebuild if already built
-./script/test-freebsd-qemu-basic.sh --skip-build
+./scripts/test-freebsd-qemu-basic.sh --skip-build
 
 # See detailed output
-./script/test-freebsd-qemu-basic.sh --verbose
+./scripts/test-freebsd-qemu-basic.sh --verbose
 
 # Manual testing in VM
 ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
@@ -246,9 +246,9 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
 - **Complete Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Testing Guide:** `doc/guide/freebsd_testing_qemu.md`
 - **Bootstrap Pipeline:** `doc/build/bootstrap_pipeline.md`
-- **Native FreeBSD Script:** `script/bootstrap-from-scratch-freebsd.sh`
-- **QEMU Setup Test:** `script/test-freebsd-qemu-setup.sh`
-- **QEMU Basic Test:** `script/test-freebsd-qemu-basic.sh`
+- **Native FreeBSD Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
+- **QEMU Setup Test:** `scripts/test-freebsd-qemu-setup.sh`
+- **QEMU Basic Test:** `scripts/test-freebsd-qemu-basic.sh`
 
 ## Status
 
@@ -268,8 +268,8 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/"
 
 ## Next Steps
 
-1. **Verify Setup:** `./script/test-freebsd-qemu-setup.sh`
-2. **Run Bootstrap:** `./script/bootstrap-from-scratch.sh --platform=freebsd`
+1. **Verify Setup:** `./scripts/test-freebsd-qemu-setup.sh`
+2. **Run Bootstrap:** `./scripts/bootstrap-from-scratch.sh --platform=freebsd`
 3. **Test Binary:** `file bin/simple` (should show "FreeBSD ELF")
 4. **Read Docs:** `doc/guide/freebsd_qemu_bootstrap.md`
 

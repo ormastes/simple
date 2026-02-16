@@ -355,7 +355,7 @@ By Module:
 
 Missing Documentation (37 items):
   src/std/array.spl:chunk_by
-  src/std/string.spl:levenshtein
+  src/std/text.spl:levenshtein
   src/core/parser.spl:parse_match_arm
   ...
 ```
@@ -401,7 +401,7 @@ Missing Documentation (37 items):
 ## Missing Documentation
 
 - `src/std/array.spl:chunk_by` (function)
-- `src/std/string.spl:levenshtein` (function)
+- `src/std/text.spl:levenshtein` (function)
 ```
 
 ### CSV Format

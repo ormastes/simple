@@ -40,7 +40,7 @@ Successfully implemented **Rust-free distribution** with **multi-platform packag
    - Package creation (bootstrap, full, source)
    - Binary stripping and UPX compression
 
-3. **`script/package-dist.spl`** (320 lines)
+3. **`scripts/package-dist.spl`** (320 lines)
    - CLI packaging script
    - Platform-specific builds
    - Automated staging and archiving
@@ -193,16 +193,16 @@ val cmd = resolve_command("notepad")
 
 ```bash
 # Build for current platform
-simple script/package-dist.spl
+simple scripts/package-dist.spl
 
 # Build with compression
-simple script/package-dist.spl --compress
+simple scripts/package-dist.spl --compress
 
 # Build specific platform
-simple script/package-dist.spl --platform=linux-x86_64
+simple scripts/package-dist.spl --platform=linux-x86_64
 
 # Build all platforms (requires cross-compilation)
-simple script/package-dist.spl --platform=all
+simple scripts/package-dist.spl --platform=all
 ```
 
 ### CI/CD Build (GitHub Actions)
@@ -381,7 +381,7 @@ tar -tzf simple-bootstrap-0.5.0-linux-x86_64.tar.gz
 
 ```bash
 # Build for current platform
-simple script/package-dist.spl --bootstrap-only
+simple scripts/package-dist.spl --bootstrap-only
 
 # Extract
 tar -xzf dist/simple-bootstrap-*.tar.gz -C /tmp/test

@@ -155,7 +155,7 @@ src/app/build/main.spl                  # Self-hosting build system
 bin/simple build --bootstrap
 
 # Method B: Via bootstrap script
-SIMPLE_BOOTSTRAP=bin/bootstrap/simple script/build-bootstrap.sh
+SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 
 # Method C: Direct invocation
 bin/bootstrap/simple src/app/build/main.spl --bootstrap
@@ -282,5 +282,5 @@ The self-hosting build process is **platform-agnostic** - the same Simple code (
 - `BUILD_VERIFICATION.md` - Local build verification (Linux)
 - `BOOTSTRAP_NATIVE_FIXES.md` - Native compilation fixes
 - `.github/workflows/bootstrap-build.yml` - CI testing
-- `script/build-bootstrap.sh` - Bootstrap package builder
+- `scripts/build-bootstrap.sh` - Bootstrap package builder
 - `test_self_hosting.spl` - Self-hosting capability test

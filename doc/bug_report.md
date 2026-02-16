@@ -2568,7 +2568,7 @@ This syntax appears in multiple files:
 - `simple/std_lib/src/spec/matchers/core.spl`
 - `simple/std_lib/src/spec/matchers/comparison.spl`
 - `simple/std_lib/src/spec/matchers/collection.spl`
-- `simple/std_lib/src/spec/matchers/string.spl`
+- `simple/std_lib/src/spec/matchers/text.spl`
 - `simple/std_lib/src/spec/matchers/error.spl`
 
 ---

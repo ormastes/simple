@@ -11,7 +11,7 @@ The comprehensive macOS self-hosting test verifies the complete workflow:
 Bootstrap → Check → Build Native Hello → Run on macOS
 ```
 
-## Test Script: `script/test-macos-self-hosting.sh`
+## Test Script: `scripts/test-macos-self-hosting.sh`
 
 ### Step-by-Step Verification:
 
@@ -72,7 +72,7 @@ bin/bootstrap/simple src/app/compile/llvm_direct.spl \
 #### 9. ✅ Verify Self-Hosting Capability
 ```bash
 # Command that would perform full self-hosting build:
-SIMPLE_BOOTSTRAP=bin/bootstrap/simple script/build-bootstrap.sh
+SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 
 # This would:
 #   1. Use existing bootstrap binary
@@ -115,7 +115,7 @@ test-macos-x86_64:
       run: clang --version
 
     - name: Run comprehensive self-hosting test
-      run: ./script/test-macos-self-hosting.sh
+      run: ./scripts/test-macos-self-hosting.sh
 
     - name: Upload test artifacts
       uses: actions/upload-artifact@v4
@@ -211,7 +211,7 @@ Hello from Simple on macOS!
 Step 9: Test Self-Hosting Build (dry-run)
 --------------------------------------
 Self-hosting build command:
-  SIMPLE_BOOTSTRAP=bin/bootstrap/simple script/build-bootstrap.sh
+  SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 
 This would:
   1. Use existing bootstrap binary
@@ -243,7 +243,7 @@ Simple: Simple Language v0.5.0
 Next steps:
   • Run full test suite: bin/simple test
   • Build release: bin/simple build --release
-  • Create bootstrap package: script/build-bootstrap.sh
+  • Create bootstrap package: scripts/build-bootstrap.sh
 ```
 
 ### On macOS ARM64 (Apple Silicon):
@@ -269,7 +269,7 @@ Same output, but:
 ## Files Created/Modified
 
 ### New Files:
-1. ✅ `script/test-macos-self-hosting.sh` - Comprehensive test script
+1. ✅ `scripts/test-macos-self-hosting.sh` - Comprehensive test script
 2. ✅ `MACOS_SELF_HOSTING_VERIFIED.md` - This documentation
 
 ### Modified Files:
@@ -289,7 +289,7 @@ xcode-select --install
 # (Either from release or build locally)
 
 # Run comprehensive test
-./script/test-macos-self-hosting.sh
+./scripts/test-macos-self-hosting.sh
 ```
 
 ## How to Run in GitHub Actions
@@ -306,7 +306,7 @@ https://github.com/simple-lang/simple/actions/workflows/bootstrap-build.yml
 
 ## Next Steps
 
-1. ✅ Script created: `script/test-macos-self-hosting.sh`
+1. ✅ Script created: `scripts/test-macos-self-hosting.sh`
 2. ✅ Workflow updated: `.github/workflows/bootstrap-build.yml`
 3. 🔄 Push to GitHub to trigger CI
 4. 🔄 Verify tests pass on real macOS hardware

@@ -23,7 +23,7 @@ The Simple Language test runner now supports **container-based test execution** 
 
 ```bash
 # Build the test runner image
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 
 # Or manually with Docker
 docker build -f docker/test-runner.Dockerfile -t simple-test-runner:latest .
@@ -132,7 +132,7 @@ src/app/test_runner_new/
 docker/
   test-runner.Dockerfile          # Container image definition
 
-script/
+scripts/
   docker-build-test-runner.sh     # Image build script
 
 test/unit/app/test_runner_new/
@@ -215,7 +215,7 @@ brew install podman              # macOS
 **Solution**:
 ```bash
 # Build the image
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 
 # Verify image exists
 docker images simple-test-runner
@@ -341,7 +341,7 @@ See `doc/research/robust_test_runner_plan_2026-02-14.md` for complete roadmap.
 
 - **Plan Document**: `doc/research/robust_test_runner_plan_2026-02-14.md`
 - **Dockerfile**: `docker/test-runner.Dockerfile`
-- **Build Script**: `script/docker-build-test-runner.sh`
+- **Build Script**: `scripts/docker-build-test-runner.sh`
 - **Example Config**: `docker/simple.test.container.sdn`
 - **Tests**: `test/unit/app/test_runner_new/container_backend_spec.spl`
 

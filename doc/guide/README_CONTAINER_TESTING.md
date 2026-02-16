@@ -6,13 +6,13 @@ This directory contains comprehensive documentation for container-based testing 
 
 **For developers:**
 1. Read `container_testing.md` (10 min read)
-2. Run `script/local-container-test.sh unit` to try it out
+2. Run `scripts/local-container-test.sh unit` to try it out
 3. Use `docker-compose up unit-tests` for daily development
 
 **For CI/CD engineers:**
 1. Read `resource_limits.md` (resource profiles)
 2. Review `.github/workflows/containerized-tests.yml`
-3. Use `script/ci-test.sh` in your pipeline
+3. Use `scripts/ci-test.sh` in your pipeline
 
 ---
 
@@ -141,7 +141,7 @@ Features:
 #### 5. **script/ci-test.sh**
 **CI test runner helper (bash)**
 
-Usage: `script/ci-test.sh [TEST_PATH]`
+Usage: `scripts/ci-test.sh [TEST_PATH]`
 
 Features:
 - Auto-detect container runtime (podman → docker)
@@ -160,16 +160,16 @@ Environment variables:
 Examples:
 ```bash
 # All tests, fast profile
-script/ci-test.sh
+scripts/ci-test.sh
 
 # Unit tests, standard profile
-TEST_PROFILE=standard script/ci-test.sh test/unit/
+TEST_PROFILE=standard scripts/ci-test.sh test/unit/
 
 # Slow tests with custom image
-CONTAINER_IMAGE=simple-test:dev TEST_PROFILE=slow script/ci-test.sh test/system/
+CONTAINER_IMAGE=simple-test:dev TEST_PROFILE=slow scripts/ci-test.sh test/system/
 
 # Use Podman
-CONTAINER_RUNTIME=podman script/ci-test.sh
+CONTAINER_RUNTIME=podman scripts/ci-test.sh
 ```
 
 ---
@@ -177,7 +177,7 @@ CONTAINER_RUNTIME=podman script/ci-test.sh
 #### 6. **script/local-container-test.sh**
 **Developer-friendly container test wrapper (bash)**
 
-Usage: `script/local-container-test.sh [COMMAND]`
+Usage: `scripts/local-container-test.sh [COMMAND]`
 
 Commands:
 - `quick <file>` - Run single test file
@@ -192,16 +192,16 @@ Commands:
 Examples:
 ```bash
 # Single test
-script/local-container-test.sh quick test/unit/std/string_spec.spl
+scripts/local-container-test.sh quick test/unit/std/string_spec.spl
 
 # All unit tests
-script/local-container-test.sh unit
+scripts/local-container-test.sh unit
 
 # Debug in container
-script/local-container-test.sh shell
+scripts/local-container-test.sh shell
 
 # Rebuild after Dockerfile changes
-script/local-container-test.sh build
+scripts/local-container-test.sh build
 ```
 
 ---
@@ -308,16 +308,16 @@ docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation
 
 ### Daily Development
 
-1. **Edit code:** `vim src/std/string.spl`
+1. **Edit code:** `vim src/std/text.spl`
 2. **Quick test:** `bin/simple test test/unit/std/string_spec.spl`
-3. **Verify isolated:** `script/local-container-test.sh quick test/unit/std/string_spec.spl`
+3. **Verify isolated:** `scripts/local-container-test.sh quick test/unit/std/string_spec.spl`
 4. **Commit:** `jj commit -m "fix: String.trim edge case"`
 
 ### Before Pushing
 
 ```bash
 # Run all unit tests in container (matches CI)
-script/local-container-test.sh unit
+scripts/local-container-test.sh unit
 
 # Or use docker-compose
 docker-compose up unit-tests
@@ -331,7 +331,7 @@ docker run --rm -v $(pwd):/workspace:ro \
   simple-test-isolation:latest test test/failing_spec.spl --verbose
 
 # Interactive debugging
-script/local-container-test.sh shell
+scripts/local-container-test.sh shell
 # Inside: simple test test/failing_spec.spl --verbose
 ```
 
@@ -341,7 +341,7 @@ script/local-container-test.sh shell
 # .github/workflows/custom.yml
 - name: Run tests in container
   run: |
-    script/ci-test.sh test/unit/
+    scripts/ci-test.sh test/unit/
 ```
 
 ---
@@ -357,7 +357,7 @@ script/local-container-test.sh shell
 | Volume mount (Windows) | PowerShell: `${PWD}`, CMD: `%cd%` |
 | jq not installed | `sudo apt install jq` (Ubuntu) or `brew install jq` (macOS) |
 | Docker not running | `sudo systemctl start docker` (Linux) or start Docker Desktop |
-| Tests pass locally, fail CI | Run exact CI command: `script/ci-test.sh test/unit/` |
+| Tests pass locally, fail CI | Run exact CI command: `scripts/ci-test.sh test/unit/` |
 
 ---
 
@@ -386,8 +386,8 @@ script/local-container-test.sh shell
 ## Getting Help
 
 1. Check troubleshooting sections in guides
-2. Run `script/local-container-test.sh status` to verify setup
-3. Try in interactive shell: `script/local-container-test.sh shell`
+2. Run `scripts/local-container-test.sh status` to verify setup
+3. Try in interactive shell: `scripts/local-container-test.sh shell`
 4. Review CI logs: `.github/workflows/containerized-tests.yml`
 5. Ask in project chat with error output and test file
 

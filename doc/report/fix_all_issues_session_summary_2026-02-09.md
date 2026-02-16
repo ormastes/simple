@@ -44,7 +44,7 @@ Implemented the comprehensive "fix all issues" plan across three phases:
    - Writes binary data using hex encoding + xxd
 
 5. **Build Tools**
-   - Updated `script/build_libstd.spl` with `--with-objects` flag
+   - Updated `scripts/build_libstd.spl` with `--with-objects` flag
    - Tries multiple naming conventions for object files
    - Reports modules with/without objects
 
@@ -55,7 +55,7 @@ Implemented the comprehensive "fix all issues" plan across three phases:
 - `src/compiler/linker/lib_smf_reader.spl` (+60 lines)
 - `src/compiler/linker/smf_getter.spl` (+30 lines)
 - `src/compiler/linker/linker_wrapper_lib_support.spl` (+80 lines)
-- `script/build_libstd.spl` (+80 lines)
+- `scripts/build_libstd.spl` (+80 lines)
 - `examples/lib_smf/test_lib_with_objects.spl` (+100 lines, new)
 
 **Total:** ~500 lines across 7 files
@@ -64,7 +64,7 @@ Implemented the comprehensive "fix all issues" plan across three phases:
 
 ```bash
 # Build library with objects
-bin/simple script/build_libstd.spl --with-objects --obj-dir=build/obj
+bin/simple scripts/build_libstd.spl --with-objects --obj-dir=build/obj
 
 # Link against library (objects extracted automatically)
 bin/simple build test.spl --link-lib=build/lib/libstd.lsm -o test_exe

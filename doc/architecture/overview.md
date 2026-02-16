@@ -12,6 +12,7 @@ This specification is split into multiple files:
 | [architecture_modules.md](architecture_modules.md) | Module Details, Type/Struct Listing |
 | [architecture_flows.md](architecture_flows.md) | Data Flow, Execution, Memory Management |
 | [architecture_dev.md](architecture_dev.md) | Feature Guidance, Code Quality, Verification |
+| [file_class_structure.md](file_class_structure.md) | **Comprehensive codebase inventory** (2,649 files, 623K lines, duplication analysis) |
 
 ---
 

@@ -20,7 +20,7 @@ This guide covers:
 
 ```bash
 # Download and configure FreeBSD VM image
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # Start FreeBSD VM (interactive)
 ~/vms/freebsd/start-freebsd.sh
@@ -42,7 +42,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Bootstrap from scratch (native FreeBSD build)
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Verify
 bin/simple --version
@@ -56,7 +56,7 @@ bin/simple test
 
 ```bash
 # Run FreeBSD multi-file compilation test
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 ---
@@ -92,7 +92,7 @@ brew install qemu
 **Run the setup script:**
 
 ```bash
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 ```
 
 **What it does:**
@@ -209,7 +209,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Run FreeBSD-specific bootstrap
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 ```
 
 **Bootstrap steps:**
@@ -225,22 +225,22 @@ cd simple
 
 ```bash
 # Skip verification (faster)
-./script/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
 
 # Use specific compiler
-./script/bootstrap-from-scratch-freebsd.sh --cc=g++
+./scripts/bootstrap-from-scratch-freebsd.sh --cc=g++
 
 # Custom output location
-./script/bootstrap-from-scratch-freebsd.sh --output=/usr/local/bin/simple
+./scripts/bootstrap-from-scratch-freebsd.sh --output=/usr/local/bin/simple
 
 # Parallel jobs
-./script/bootstrap-from-scratch-freebsd.sh --jobs=8
+./scripts/bootstrap-from-scratch-freebsd.sh --jobs=8
 
 # Keep build artifacts
-./script/bootstrap-from-scratch-freebsd.sh --keep-artifacts
+./scripts/bootstrap-from-scratch-freebsd.sh --keep-artifacts
 
 # Verbose output
-./script/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 ### Verify Installation
@@ -289,7 +289,7 @@ This is expected if:
 
 Skip verification if acceptable:
 ```bash
-./script/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
 ```
 
 ---
@@ -377,7 +377,7 @@ ssh -p 2222 root@localhost '/tmp/seed_cpp --version'
 
 ```bash
 # Full multi-file compilation test
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 **What it does:**
@@ -437,10 +437,10 @@ jobs:
         run: sudo apt-get install -y qemu-system-x86
 
       - name: Setup FreeBSD VM
-        run: bin/release/simple script/setup_freebsd_vm.spl
+        run: bin/release/simple scripts/setup_freebsd_vm.spl
 
       - name: Test FreeBSD
-        run: bin/release/simple script/test_freebsd_qemu.spl
+        run: bin/release/simple scripts/test_freebsd_qemu.spl
         timeout-minutes: 10
 ```
 
@@ -702,7 +702,7 @@ gmake --version
 df -h
 
 # 4. Re-run with verbose
-./script/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 **Common errors:**
@@ -739,9 +739,9 @@ pkg install linux-c7
 
 ### Project Files
 
-- **VM Setup:** `script/setup_freebsd_vm.spl`
-- **FreeBSD Test:** `script/test_freebsd_qemu.spl`
-- **Bootstrap:** `script/bootstrap-from-scratch-freebsd.sh`
+- **VM Setup:** `scripts/setup_freebsd_vm.spl`
+- **FreeBSD Test:** `scripts/test_freebsd_qemu.spl`
+- **Bootstrap:** `scripts/bootstrap-from-scratch-freebsd.sh`
 - **VM Manager:** `src/app/vm/qemu_manager.spl`
 - **Toolchain:** `seed/cmake/toolchains/freebsd-x86_64.cmake`
 - **Platform Header:** `seed/platform/platform_freebsd.h`
@@ -761,10 +761,10 @@ pkg install linux-c7
 
 ```bash
 # 1. Setup FreeBSD VM
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # 2. Test FreeBSD
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 **Inside FreeBSD VM:**
@@ -774,7 +774,7 @@ bin/release/simple script/test_freebsd_qemu.spl
 pkg install cmake llvm gmake git
 
 # 2. Bootstrap
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # 3. Verify
 bin/simple --version

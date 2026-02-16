@@ -22,9 +22,9 @@ Successfully completed Phase 3 of the Python/Bash to Simple migration:
 
 | Original | Migrated To | Lines | Status |
 |----------|-------------|-------|--------|
-| `script/verify/verify_doctest.sh` | `src/app/verify/doctest.spl` | 174 | ✅ Done |
-| `script/verify/verify_generic_syntax.sh` | `src/app/verify/generics.spl` | 215 | ✅ Done |
-| `script/verify/test_visibility.sh` | `src/app/verify/visibility.spl` | 38 | ✅ Done |
+| `scripts/verify/verify_doctest.sh` | `src/app/verify/doctest.spl` | 174 | ✅ Done |
+| `scripts/verify/verify_generic_syntax.sh` | `src/app/verify/generics.spl` | 215 | ✅ Done |
+| `scripts/verify/test_visibility.sh` | `src/app/verify/visibility.spl` | 38 | ✅ Done |
 
 **Total migrated:** ~427 lines of Simple code (Phase 3)
 

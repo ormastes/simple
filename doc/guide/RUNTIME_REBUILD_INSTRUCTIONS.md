@@ -56,7 +56,7 @@ If you have a compatible Simple bootstrap binary:
 export SIMPLE_BOOTSTRAP=/path/to/compatible/simple
 
 # Run bootstrap build script
-./script/build-bootstrap.sh
+./scripts/build-bootstrap.sh
 
 # The script will use Simple to compile itself
 ```

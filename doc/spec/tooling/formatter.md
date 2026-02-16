@@ -219,7 +219,7 @@ fn example():
 use core.io
 use core.math
 use std.collections
-use std.string
+use std.text
 
 # Grouped by prefix (stdlib, external, local)
 use std.io

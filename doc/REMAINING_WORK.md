@@ -84,7 +84,7 @@ From `doc/test/uncovered_branches_analysis.md`:
 ### 📝 Priority 2: Simple Implementations (2-8 hours each)
 
 #### 2.1 String Utilities (2 hours)
-**File:** `src/std/string.spl`
+**File:** `src/std/text.spl`
 - [ ] `ends_with` edge case handling
 - [ ] String interpolation with nested braces
 - [ ] Escaped brace handling (`{{` for literal `{`)

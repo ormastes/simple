@@ -8,9 +8,9 @@
 
 **All scripts must be written in Simple (.spl), except for 3 bootstrap scripts:**
 
-1. `script/build-bootstrap.sh` - GitHub Actions first build
-2. `script/build-full.sh` - Release package builder
-3. `script/install.sh` - End-user installer
+1. `scripts/build-bootstrap.sh` - GitHub Actions first build
+2. `scripts/build-full.sh` - Release package builder
+3. `scripts/install.sh` - End-user installer
 
 These run before Simple runtime exists, so they must remain as Bash.
 
@@ -24,10 +24,10 @@ Determine where the migrated script should live:
 
 | Original Location | New Location | Example |
 |-------------------|--------------|---------|
-| `script/build/*.sh` | `src/app/build/*.spl` | `link-bins.sh` → `link_bins.spl` |
-| `script/verify/*.sh` | `src/app/verify/*.spl` | `verify_features.sh` → `features.spl` |
-| `script/*.py` | `src/app/<category>/*.spl` | `fix_ffi_calls.py` → `audit/ffi_analyzer.spl` |
-| `script/profiling/*.sh` | `src/app/profiling/*.spl` | `profile-interpreter.sh` → `profile.spl` |
+| `scripts/build/*.sh` | `src/app/build/*.spl` | `link-bins.sh` → `link_bins.spl` |
+| `scripts/verify/*.sh` | `src/app/verify/*.spl` | `verify_features.sh` → `features.spl` |
+| `scripts/*.py` | `src/app/<category>/*.spl` | `fix_ffi_calls.py` → `audit/ffi_analyzer.spl` |
+| `scripts/profiling/*.sh` | `src/app/profiling/*.spl` | `profile-interpreter.sh` → `profile.spl` |
 
 ### 2. Create Script Structure
 
@@ -36,7 +36,7 @@ All executable scripts must have:
 ```simple
 #!/usr/bin/env simple
 # Brief description
-# Migrated from: script/original/path.sh
+# Migrated from: scripts/original/path.sh
 
 use app.io
 use app.utils.colors (success, error, warning, info)
@@ -261,7 +261,7 @@ Compare output with original script:
 
 ```bash
 # Run both versions side-by-side
-./script/build/original.sh > /tmp/bash_output.txt
+./scripts/build/original.sh > /tmp/bash_output.txt
 ./src/app/build/migrated.spl > /tmp/simple_output.txt
 diff /tmp/bash_output.txt /tmp/simple_output.txt
 ```

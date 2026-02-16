@@ -201,17 +201,17 @@ bin/simple src/app/mcp/main.spl json src/compiler/driver.spl
 ### Bootstrap Debugging
 ```bash
 # Run bootstrap with debug capture
-script/capture_bootstrap_debug.sh
+scripts/capture_bootstrap_debug.sh
 
 # Run specific stage
-script/bootstrap.sh --stage=1
-script/bootstrap.sh --stage=2
+scripts/bootstrap.sh --stage=1
+scripts/bootstrap.sh --stage=2
 
 # Verify determinism
-script/bootstrap.sh --verify
+scripts/bootstrap.sh --verify
 
 # Extended multi-generation test
-bin/simple script/bootstrap_extended.spl --generations=5
+bin/simple scripts/bootstrap_extended.spl --generations=5
 ```
 
 ### Debug Instrumentation Points
@@ -247,19 +247,19 @@ bin/simple script/bootstrap_extended.spl --generations=5
 **Issue: Bootstrap timeout (>60s)**
 - Large debug output slowing compilation
 - Use `SIMPLE_LOG=warn` to reduce verbosity
-- Profile with: `time script/bootstrap.sh --stage=1`
+- Profile with: `time scripts/bootstrap.sh --stage=1`
 
 ### Automated Bug Detection
 
 **Test Dictionary Semantics:**
 ```bash
-bin/simple script/test_dict_semantics.spl
+bin/simple scripts/test_dict_semantics.spl
 # Should show: "ALL TESTS PASSED"
 ```
 
 **MCP Debug Script:**
 ```bash
-bin/simple script/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 # Auto-detects common bug patterns
 ```
 
@@ -280,7 +280,7 @@ cat doc/bug/bug_db.sdn
 
 1. **Capture Debug Output:**
    ```bash
-   script/capture_bootstrap_debug.sh
+   scripts/capture_bootstrap_debug.sh
    # Saves to: build/bootstrap_debug_TIMESTAMP.log
    ```
 
@@ -304,7 +304,7 @@ cat doc/bug/bug_db.sdn
    ```bash
    # After fixing
    bin/simple build
-   script/bootstrap.sh --verify
+   scripts/bootstrap.sh --verify
    ```
 
 ## See Also

@@ -10,13 +10,13 @@ Complete FreeBSD development and testing environment for the Simple compiler.
 
 ```bash
 # 1. Setup FreeBSD VM
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # 2. Start VM
 ~/vms/freebsd/start-freebsd-daemon.sh
 
 # 3. Test FreeBSD compilation
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 ### Native FreeBSD
@@ -30,7 +30,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # 3. Bootstrap from scratch
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # 4. Verify
 bin/simple --version
@@ -55,7 +55,7 @@ bin/simple test
 
 | Script | Purpose |
 |--------|---------|
-| `script/setup_freebsd_vm.spl` | Download and configure FreeBSD VM image |
+| `scripts/setup_freebsd_vm.spl` | Download and configure FreeBSD VM image |
 | `~/vms/freebsd/start-freebsd.sh` | Start VM (interactive, serial console) |
 | `~/vms/freebsd/start-freebsd-daemon.sh` | Start VM (background, SSH only) |
 
@@ -63,7 +63,7 @@ bin/simple test
 
 ```bash
 # Setup
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # Start
 ~/vms/freebsd/start-freebsd-daemon.sh
@@ -79,33 +79,33 @@ kill $(cat /tmp/freebsd-qemu.pid)
 
 | Script | Platform |
 |--------|----------|
-| `script/bootstrap-from-scratch-freebsd.sh` | **FreeBSD native** (this file!) |
-| `script/bootstrap-from-scratch.sh` | Linux/macOS |
-| `script/bootstrap-from-scratch.bat` | Windows |
+| `scripts/bootstrap-from-scratch-freebsd.sh` | **FreeBSD native** (this file!) |
+| `scripts/bootstrap-from-scratch.sh` | Linux/macOS |
+| `scripts/bootstrap-from-scratch.bat` | Windows |
 
 **Usage:**
 
 ```bash
 # FreeBSD (native)
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Options
-./script/bootstrap-from-scratch-freebsd.sh --skip-verify --jobs=8
+./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify --jobs=8
 ```
 
 ### Testing Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `script/test_freebsd_qemu.spl` | Test Simple compilation on FreeBSD via QEMU |
-| `script/test_macos_qemu.spl` | Test Simple compilation on macOS via QEMU |
-| `script/test_windows_vm.spl` | Test Simple compilation on Windows via QEMU |
+| `scripts/test_freebsd_qemu.spl` | Test Simple compilation on FreeBSD via QEMU |
+| `scripts/test_macos_qemu.spl` | Test Simple compilation on macOS via QEMU |
+| `scripts/test_windows_vm.spl` | Test Simple compilation on Windows via QEMU |
 
 **Example:**
 
 ```bash
 # Test FreeBSD multi-file compilation
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 ---
@@ -157,7 +157,7 @@ nano ~/vms/freebsd/start-freebsd-daemon.sh
 
 ```bash
 # From Linux host
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 **What it does:**
@@ -198,7 +198,7 @@ bin/simple test test/std/array_spec.spl
 
 ### Native FreeBSD Bootstrap
 
-**Script:** `script/bootstrap-from-scratch-freebsd.sh`
+**Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
 
 **Steps:**
 
@@ -338,7 +338,7 @@ pkg install llvm
 This is sometimes expected. Skip verification:
 
 ```bash
-./script/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
 ```
 
 ### Linuxulator Issues
@@ -391,10 +391,10 @@ jobs:
         run: sudo apt-get install -y qemu-system-x86
 
       - name: Setup FreeBSD VM
-        run: bin/release/simple script/setup_freebsd_vm.spl
+        run: bin/release/simple scripts/setup_freebsd_vm.spl
 
       - name: Test FreeBSD
-        run: bin/release/simple script/test_freebsd_qemu.spl
+        run: bin/release/simple scripts/test_freebsd_qemu.spl
         timeout-minutes: 10
 ```
 
@@ -407,13 +407,13 @@ jobs:
 bin/simple test
 
 # FreeBSD (QEMU)
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 
 # macOS (QEMU)
-bin/release/simple script/test_macos_qemu.spl
+bin/release/simple scripts/test_macos_qemu.spl
 
 # Windows (QEMU)
-bin/release/simple script/test_windows_vm.spl
+bin/release/simple scripts/test_windows_vm.spl
 ```
 
 ---
@@ -448,7 +448,7 @@ bin/release/simple script/test_windows_vm.spl
 
 ```
 simple/
-├── script/
+├── scripts/
 │   ├── bootstrap-from-scratch-freebsd.sh  # FreeBSD native bootstrap (NEW!)
 │   ├── setup_freebsd_vm.spl               # VM setup script
 │   └── test_freebsd_qemu.spl              # FreeBSD testing script
@@ -528,17 +528,17 @@ pkg install linux-c7
 ### Initial Setup
 
 - [ ] Install QEMU on host
-- [ ] Run `script/setup_freebsd_vm.spl`
+- [ ] Run `scripts/setup_freebsd_vm.spl`
 - [ ] Start VM: `~/vms/freebsd/start-freebsd-daemon.sh`
 - [ ] Configure VM (SSH, packages)
-- [ ] Test: `script/test_freebsd_qemu.spl`
+- [ ] Test: `scripts/test_freebsd_qemu.spl`
 
 ### Native Bootstrap
 
 - [ ] SSH into FreeBSD VM
 - [ ] Install: `pkg install cmake llvm gmake git`
 - [ ] Clone Simple repository
-- [ ] Run: `./script/bootstrap-from-scratch-freebsd.sh`
+- [ ] Run: `./scripts/bootstrap-from-scratch-freebsd.sh`
 - [ ] Verify: `bin/simple --version`
 
 ### Testing
@@ -561,8 +561,8 @@ pkg install linux-c7
 **Get started now:**
 
 ```bash
-bin/release/simple script/setup_freebsd_vm.spl
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 Happy FreeBSD development! 🐡

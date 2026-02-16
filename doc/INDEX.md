@@ -67,6 +67,10 @@
 - [MULTI_AGENT_SESSION_SUMMARY.md](MULTI_AGENT_SESSION_SUMMARY.md) - 7-agent analysis
 - [SESSION_FINAL_SUMMARY.md](SESSION_FINAL_SUMMARY.md) - Final summary
 
+**Architecture & Codebase:**
+- [architecture/overview.md](architecture/overview.md) - High-level architecture
+- [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive inventory** (2,649 files, 623K lines, duplication analysis)
+
 ---
 
 ## 📊 By Feature Category
@@ -211,6 +215,13 @@ doc/
 ├── IMPLEMENTATION_FIXES.md           ← Recent fixes
 ├── MULTI_AGENT_SESSION_SUMMARY.md    ← Session overview
 ├── SESSION_FINAL_SUMMARY.md          ← Final summary
+│
+├── architecture/                     ← Architecture documentation
+│   ├── overview.md                   ← High-level architecture
+│   ├── file_class_structure.md       ← **Comprehensive codebase inventory** (2,649 files, 623K lines)
+│   ├── architecture.md               ← Structure, dependencies
+│   ├── architecture_modules.md       ← Module details
+│   └── architecture_flows.md         ← Data flows, execution
 │
 ├── guide/                            ← User guides (4,700 lines)
 │   ├── async_guide.md

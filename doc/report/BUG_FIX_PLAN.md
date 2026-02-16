@@ -141,10 +141,10 @@ Make Pure Simple parser the default
    rg "if not.*\\.\\?:" --context 3 | grep -A 2 "return Err"
    ```
 
-   **Conversion script** (`script/convert_workarounds.spl`):
+   **Conversion script** (`scripts/convert_workarounds.spl`):
    ```simple
    use std.fs.{read_text, write_text, list_files}
-   use std.string
+   use std.text
 
    fn convert_file(path: text) -> Result<i64, text>:
        var content = read_text(path)?
@@ -397,7 +397,7 @@ export SIMPLE_USE_RUNTIME_PARSER=1
 
 ### New Files:
 - `BUG_FIX_PLAN.md` (this document)
-- `script/convert_workarounds.spl` (if doing workaround conversion)
+- `scripts/convert_workarounds.spl` (if doing workaround conversion)
 - `doc/report/parser_003_fix_complete_2026-02-09.md` (completion report)
 
 ### Files to Modify:

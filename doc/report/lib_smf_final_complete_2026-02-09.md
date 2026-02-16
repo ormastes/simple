@@ -229,7 +229,7 @@ Error: Object file not found for module 'std/io/mod'
 
   To fix:
     1. Compile with --emit-obj
-    2. Run: simple script/compile_with_objects.spl
+    2. Run: simple scripts/compile_with_objects.spl
     3. Check object location
 ```
 
@@ -364,11 +364,11 @@ Error: Object file not found for module 'std/io/mod'
 
 ```bash
 # Build
-simple script/compile_with_objects.spl --input-dir=src/std
-simple script/build_libstd.spl
+simple scripts/compile_with_objects.spl --input-dir=src/std
+simple scripts/build_libstd.spl
 
 # Verify
-simple script/lib_tool.spl verify build/lib/libstd.lsm
+simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
 # Install
 sudo cp build/lib/libstd.lsm /usr/lib/simple/
@@ -381,7 +381,7 @@ simple run myapp.spl --libraries=/usr/lib/simple/libstd.lsm
 
 ```bash
 # Package app modules
-simple script/lib_tool.spl create libmyapp.lsm \
+simple scripts/lib_tool.spl create libmyapp.lsm \
     build/smf/auth/*.smf \
     build/smf/database/*.smf \
     build/smf/api/*.smf

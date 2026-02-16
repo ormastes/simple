@@ -74,7 +74,7 @@ val obj_path = resolver.resolve("std/io/mod")?
 ```
 
 ### 3. Compilation Helper Script
-**File:** `script/compile_with_objects.spl` (200 lines)
+**File:** `scripts/compile_with_objects.spl` (200 lines)
 
 **Features:**
 - Compiles all .spl files to both SMF and object
@@ -86,10 +86,10 @@ val obj_path = resolver.resolve("std/io/mod")?
 **Usage:**
 ```bash
 # Compile standard library with objects
-simple script/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/std
 
 # Compile application
-simple script/compile_with_objects.spl --input-dir=src/app --verbose
+simple scripts/compile_with_objects.spl --input-dir=src/app --verbose
 ```
 
 **Output Structure:**
@@ -171,10 +171,10 @@ link_to_native(all_objects, output, config)?
 ### 1. Build Standard Library with Objects
 ```bash
 # Compile stdlib to SMF + object files
-simple script/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/std
 
 # Build library archive
-simple script/build_libstd.spl
+simple scripts/build_libstd.spl
 ```
 
 ### 2. Write Application Using Library
@@ -248,7 +248,7 @@ link_with_libraries(["app/main.o"], "myapp", config)?
 **New Files:**
 - `src/compiler/linker/object_resolver.spl` (250 lines)
 - `src/compiler/linker/test/object_resolver_spec.spl` (100 lines)
-- `script/compile_with_objects.spl` (200 lines)
+- `scripts/compile_with_objects.spl` (200 lines)
 
 **Modified Files:**
 - `src/compiler/linker/linker_wrapper_lib_support.spl` - Completed linking
@@ -347,8 +347,8 @@ echo 'fn main(): print("test")' > test.spl
 simple compile test.spl --emit-obj -o test.o
 
 # Create library with std modules
-simple script/compile_with_objects.spl --input-dir=src/std
-simple script/build_libstd.spl
+simple scripts/compile_with_objects.spl --input-dir=src/std
+simple scripts/build_libstd.spl
 
 # Link
 simple link test.o --libraries=build/lib
@@ -393,7 +393,7 @@ Error: Object file not found for module 'std/io/mod'
 
   To fix:
     1. Compile module to object: simple compile std/io/mod.spl --emit-obj
-    2. Or run: simple script/compile_with_objects.spl --input-dir=src/std
+    2. Or run: simple scripts/compile_with_objects.spl --input-dir=src/std
     3. Or recompile library with object files included
 ```
 
@@ -414,7 +414,7 @@ Error: Library not found: libstd.lsm
   Searched in: /usr/lib/simple, ./lib, build/lib
 
   To fix:
-    1. Build library: simple script/build_libstd.spl
+    1. Build library: simple scripts/build_libstd.spl
     2. Or add library path to config.library_paths
 ```
 
@@ -449,7 +449,7 @@ simple compile src/std/io/mod.spl --emit-smf -o io_mod.smf
 simple compile src/std/io/mod.spl --emit-obj -o io_mod.o
 
 # Or use helper script
-simple script/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/std
 ```
 
 ### For Library Users

@@ -222,8 +222,8 @@ $ ./seed_cpp test.spl | grep "spl_array_len"
 ## Files Modified
 
 - `seed/seed.cpp` - **5 fixes applied, 79 lines added**
-- `script/bootstrap-minimal.sh` - Test file exclusions
-- `script/bootstrap-core-only.sh` - Core-only build (230 files)
+- `scripts/bootstrap-minimal.sh` - Test file exclusions
+- `scripts/bootstrap-core-only.sh` - Core-only build (230 files)
 
 ## Code Quality
 

@@ -309,7 +309,7 @@ See `platform/PLATFORM_API.md` for complete function list.
 
 **FreeBSD x86_64**
 - Community supported
-- Test script: `script/bootstrap-from-scratch-freebsd.sh`
+- Test script: `scripts/bootstrap-from-scratch-freebsd.sh`
 - No CI/CD
 
 ### Tier 3 Platforms (Experimental)
@@ -363,7 +363,7 @@ The ultimate test is self-compilation:
 
 ```bash
 # Linux/macOS/FreeBSD
-script/bootstrap-from-scratch.sh
+scripts/bootstrap-from-scratch.sh
 
 # Windows
 script\bootstrap-from-scratch.bat

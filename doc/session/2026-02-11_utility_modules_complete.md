@@ -12,7 +12,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 ## Modules Created
 
 ### 1. `src/std/string_extra.spl` (328 lines, 20+ functions)
-**String manipulation beyond string.spl**
+**String manipulation beyond text.spl**
 
 - Predicates: empty, whitespace, ASCII checks
 - Counting: char/substring occurrences
@@ -149,7 +149,7 @@ Created **6 comprehensive utility modules** with **150+ functions** totaling **2
 
 ### String Operations
 ```simple
-use std.string_extra
+use std.text_extra
 use std.validation
 
 # Formatting

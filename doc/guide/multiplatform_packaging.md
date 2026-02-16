@@ -63,22 +63,22 @@ Build packages for current platform:
 
 ```bash
 # Build all package types
-simple script/package-dist.spl
+simple scripts/package-dist.spl
 
 # Build bootstrap only
-simple script/package-dist.spl --bootstrap-only
+simple scripts/package-dist.spl --bootstrap-only
 
 # Build with compression
-simple script/package-dist.spl --compress
+simple scripts/package-dist.spl --compress
 
 # Build specific platform
-simple script/package-dist.spl --platform=linux-x86_64
+simple scripts/package-dist.spl --platform=linux-x86_64
 ```
 
 ### Build Options
 
 ```bash
-simple script/package-dist.spl [OPTIONS]
+simple scripts/package-dist.spl [OPTIONS]
 
 Options:
   --version=VERSION        Package version (default: from simple.sdn)
@@ -94,17 +94,17 @@ Options:
 
 ```bash
 # Build all platforms (requires cross-compilation setup)
-simple script/package-dist.spl --platform=all
+simple scripts/package-dist.spl --platform=all
 
 # Build macOS packages only
-simple script/package-dist.spl --platform=darwin-arm64
-simple script/package-dist.spl --platform=darwin-x86_64
+simple scripts/package-dist.spl --platform=darwin-arm64
+simple scripts/package-dist.spl --platform=darwin-x86_64
 
 # Build compressed bootstrap for current platform
-simple script/package-dist.spl --bootstrap-only --compress
+simple scripts/package-dist.spl --bootstrap-only --compress
 
 # Build specific version
-simple script/package-dist.spl --version=0.5.0 --full-only
+simple scripts/package-dist.spl --version=0.5.0 --full-only
 ```
 
 ---
@@ -124,7 +124,7 @@ rustup target add aarch64-unknown-linux-gnu
 export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
 # Build
-simple script/package-dist.spl --platform=linux-aarch64
+simple scripts/package-dist.spl --platform=linux-aarch64
 ```
 
 ### Windows (from Linux/macOS)
@@ -138,7 +138,7 @@ brew install mingw-w64          # macOS
 rustup target add x86_64-pc-windows-gnu
 
 # Build
-simple script/package-dist.spl --platform=windows-x86_64
+simple scripts/package-dist.spl --platform=windows-x86_64
 ```
 
 ### macOS (from Linux)
@@ -152,8 +152,8 @@ rustup target add x86_64-apple-darwin
 rustup target add aarch64-apple-darwin
 
 # Build
-simple script/package-dist.spl --platform=darwin-x86_64
-simple script/package-dist.spl --platform=darwin-arm64
+simple scripts/package-dist.spl --platform=darwin-x86_64
+simple scripts/package-dist.spl --platform=darwin-arm64
 ```
 
 ---
@@ -313,7 +313,7 @@ ldd --version
 ```bash
 # Build with MUSL for static binary (works on any Linux)
 rustup target add x86_64-unknown-linux-musl
-simple script/package-dist.spl --profile=musl
+simple scripts/package-dist.spl --profile=musl
 ```
 
 ### macOS
@@ -496,7 +496,7 @@ sudo apt-get install mingw-w64
 **Solution:** Skip compression or update UPX:
 ```bash
 # Skip compression
-simple script/package-dist.spl --no-compress
+simple scripts/package-dist.spl --no-compress
 
 # Update UPX
 wget https://github.com/upx/upx/releases/download/v4.0.2/upx-4.0.2-amd64_linux.tar.xz
@@ -556,7 +556,7 @@ chmod +x bin/simple
 ## See Also
 
 - **CI/CD:** `.github/workflows/release.yml`
-- **Package Script:** `script/package-dist.spl`
+- **Package Script:** `scripts/package-dist.spl`
 - **Platform API:** `src/std/platform/mod.spl`
 - **Distribution Config:** `simple.sdn`
 - **Installation Guide:** `README.md`

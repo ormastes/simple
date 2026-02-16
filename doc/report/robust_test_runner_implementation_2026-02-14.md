@@ -334,8 +334,8 @@ describe 'Slow test':
 3. `doc/guide/README_CONTAINER_TESTING.md` - Index (11KB)
 4. `.github/workflows/containerized-tests.yml` - CI workflow (14KB)
 5. `.github/workflows/test-isolation.yml` - Critical tests (13KB)
-6. `script/ci-test.sh` - CI helper (7KB)
-7. `script/local-container-test.sh` - Dev helper (8KB)
+6. `scripts/ci-test.sh` - CI helper (7KB)
+7. `scripts/local-container-test.sh` - Dev helper (8KB)
 8. `docker-compose.yml` - Local dev config (4KB)
 
 **Features:**

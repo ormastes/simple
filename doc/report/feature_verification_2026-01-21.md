@@ -142,7 +142,7 @@ Comprehensive verification of all 67 features listed in `doc/feature/feature_db.
 |----|---------|--------|----------|
 | 20 | Arrays | ✅ COMPLETE | `core/array.spl`, `core/list.spl`, 20+ methods |
 | 21 | Dicts | ✅ COMPLETE | `core/set.spl` (Dict-backed), hash map operations |
-| 25 | Strings | ✅ COMPLETE | `core/string.spl`, interpolation, 30+ methods |
+| 25 | Strings | ✅ COMPLETE | `core/text.spl`, interpolation, 30+ methods |
 | 26 | Tuples | ✅ COMPLETE | `hir/types/type_system.rs` (HirType::Tuple) |
 | 33 | Sets | ✅ COMPLETE | `core/set.spl`, union/intersection/difference |
 | 34 | Ranges | ✅ COMPLETE | Extensively used in tests, inclusive/exclusive syntax |

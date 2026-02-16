@@ -13,7 +13,7 @@
 
 ### Added Files (10 .spl files)
 ```
-A  script/verify_freebsd_workspace.spl              [NEW - FreeBSD helper]
+A  scripts/verify_freebsd_workspace.spl              [NEW - FreeBSD helper]
 A  src/compiler/backend/native/layout_plan_writer.spl  [NEW - Track B]
 A  src/compiler/backend/native/layout_solver.spl       [NEW - Track B]
 A  test/benchmarks/native_layout_performance_spec.spl  [NEW - Track B tests]
@@ -49,10 +49,10 @@ M  src/compiler/backend/native/mod.spl           [Enhanced - Track B]
 
 ### Bootstrap Scripts (Legitimate Platform Variants)
 ```
-script/bootstrap-from-scratch.sh          [Linux/Unix]
-script/bootstrap-from-scratch-freebsd.sh  [FreeBSD] ✅ INTENTIONAL
-script/bootstrap-from-scratch.bat         [Windows] ✅ INTENTIONAL
-script/bootstrap-multiphase.spl           [Platform-independent Simple]
+scripts/bootstrap-from-scratch.sh          [Linux/Unix]
+scripts/bootstrap-from-scratch-freebsd.sh  [FreeBSD] ✅ INTENTIONAL
+scripts/bootstrap-from-scratch.bat         [Windows] ✅ INTENTIONAL
+scripts/bootstrap-multiphase.spl           [Platform-independent Simple]
 ```
 
 **Why These Are Correct:**
@@ -176,9 +176,9 @@ val os = if bare_metal: "none" else: "linux"  # ❌ Should detect at runtime
 ### Issue 2: Bootstrap Scripts Modified
 **Files Changed:**
 ```
-M script/bootstrap-from-scratch.sh           [Linux]
-M script/bootstrap-from-scratch.bat          [Windows]
-A script/bootstrap-from-scratch-freebsd.sh   [FreeBSD - NEW]
+M scripts/bootstrap-from-scratch.sh           [Linux]
+M scripts/bootstrap-from-scratch.bat          [Windows]
+A scripts/bootstrap-from-scratch-freebsd.sh   [FreeBSD - NEW]
 ```
 **Analysis:**
 - ✅ FreeBSD script is NEW, not a duplicate

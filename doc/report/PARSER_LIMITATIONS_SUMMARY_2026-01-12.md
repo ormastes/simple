@@ -446,7 +446,7 @@ use core.traits.*  # Same issue
 16. `result.spl` - Associated types, imports core.traits
 17. `string_core.spl` - Imports core.traits
 18. `string_ops.spl` - Imports core.traits
-19. `string.spl` - Imports core.traits (aggregator)
+19. `text.spl` - Imports core.traits (aggregator)
 20. `string_traits.spl` - Imports core.traits
 21. `string_utils.spl` - Unknown
 22. `sync.spl` - Associated types

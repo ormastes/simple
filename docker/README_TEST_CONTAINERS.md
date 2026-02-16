@@ -10,19 +10,19 @@ This directory contains Docker infrastructure for isolated test execution with r
 
 ```bash
 # 1. Build Docker images
-script/docker-test.sh build
+scripts/docker-test.sh build
 
 # 2. Run full test suite (isolated mode)
-script/docker-test.sh run
+scripts/docker-test.sh run
 
 # 3. Run single test file
-script/docker-test.sh run test/unit/std/string_spec.spl
+scripts/docker-test.sh run test/unit/std/string_spec.spl
 
 # 4. Run tests with full environment (debugging tools)
-script/docker-test.sh run-full test/integration/
+scripts/docker-test.sh run-full test/integration/
 
 # 5. Interactive shell for debugging
-script/docker-test.sh shell
+scripts/docker-test.sh shell
 ```
 
 ---
@@ -154,7 +154,7 @@ docker-compose -f docker-compose.test.yml run --rm test-full /bin/bash
 
 ## Helper Script
 
-**File:** `script/docker-test.sh`
+**File:** `scripts/docker-test.sh`
 
 Convenient wrapper script for common Docker test operations.
 
@@ -174,22 +174,22 @@ Convenient wrapper script for common Docker test operations.
 
 ```bash
 # Build images
-script/docker-test.sh build
+scripts/docker-test.sh build
 
 # Run all tests (isolated)
-script/docker-test.sh run
+scripts/docker-test.sh run
 
 # Run single test file
-script/docker-test.sh run test/unit/std/string_spec.spl
+scripts/docker-test.sh run test/unit/std/string_spec.spl
 
 # Run integration tests (full environment)
-script/docker-test.sh run-full test/integration/
+scripts/docker-test.sh run-full test/integration/
 
 # Debug in container
-script/docker-test.sh shell
+scripts/docker-test.sh shell
 
 # Clean up everything
-script/docker-test.sh clean
+scripts/docker-test.sh clean
 ```
 
 ---
@@ -274,7 +274,7 @@ Optimizes Docker build context by excluding unnecessary files:
 - `bin/release/simple` (runtime binary - required)
 - `src/` (source files for mounting)
 - `test/` (test files for mounting)
-- `script/` (helper scripts)
+- `scripts/` (helper scripts)
 - `doc/guide/` (reference documentation)
 
 **Build Context Optimization:**
@@ -300,18 +300,18 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Build image
-        run: script/docker-test.sh build
+        run: scripts/docker-test.sh build
       - name: Run tests
-        run: script/docker-test.sh run
+        run: scripts/docker-test.sh run
 
   test-full:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - name: Build image
-        run: script/docker-test.sh build
+        run: scripts/docker-test.sh build
       - name: Run integration tests
-        run: script/docker-test.sh run-full test/integration/
+        run: scripts/docker-test.sh run-full test/integration/
 ```
 
 ### GitLab CI
@@ -325,17 +325,17 @@ stages:
 build-images:
   stage: build
   script:
-    - script/docker-test.sh build
+    - scripts/docker-test.sh build
 
 test-isolated:
   stage: test
   script:
-    - script/docker-test.sh run
+    - scripts/docker-test.sh run
 
 test-full:
   stage: test
   script:
-    - script/docker-test.sh run-full test/integration/
+    - scripts/docker-test.sh run-full test/integration/
 ```
 
 ---
@@ -408,7 +408,7 @@ sudo usermod -aG docker $USER
 newgrp docker
 
 # Or run with sudo (not recommended)
-sudo script/docker-test.sh run
+sudo scripts/docker-test.sh run
 ```
 
 ### Issue: Container tests fail with "No such file or directory"
@@ -420,7 +420,7 @@ ERROR: /workspace/test/unit/std/string_spec.spl: No such file or directory
 **Solution:** Ensure you're running from project root:
 ```bash
 cd /path/to/simple
-script/docker-test.sh run test/unit/std/string_spec.spl
+scripts/docker-test.sh run test/unit/std/string_spec.spl
 ```
 
 ### Issue: Out of memory in container
@@ -433,7 +433,7 @@ ERROR: Container killed due to memory limit
 ```bash
 docker run --memory=2g ...    # Increase to 2GB
 # or use test-full image (4GB limit)
-script/docker-test.sh run-full
+scripts/docker-test.sh run-full
 ```
 
 ---
@@ -456,7 +456,7 @@ See `doc/research/robust_test_runner_plan_2026-02-14.md` for full implementation
 | `docker/Dockerfile.test-full` | Full test environment (Ubuntu) | 98 |
 | `.dockerignore` | Build context optimization | 95 |
 | `docker-compose.test.yml` | Compose configuration | 183 |
-| `script/docker-test.sh` | Helper script | 241 |
+| `scripts/docker-test.sh` | Helper script | 241 |
 | `docker/README_TEST_CONTAINERS.md` | This file | 500+ |
 
 **Total:** ~1,200 lines of infrastructure code

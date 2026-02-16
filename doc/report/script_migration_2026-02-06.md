@@ -19,9 +19,9 @@ Migrating 25+ scripts (~3,000+ lines) from Python/Bash to Simple (.spl) to achie
 
 These MUST remain as Bash because they run before Simple runtime exists:
 
-- ✅ `script/build-bootstrap.sh` - GitHub Actions first build
-- ✅ `script/build-full.sh` - Release package builder
-- ✅ `script/install.sh` - End-user installer (curl | sh)
+- ✅ `scripts/build-bootstrap.sh` - GitHub Actions first build
+- ✅ `scripts/build-full.sh` - Release package builder
+- ✅ `scripts/install.sh` - End-user installer (curl | sh)
 
 ---
 
@@ -31,10 +31,10 @@ These MUST remain as Bash because they run before Simple runtime exists:
 
 | Script | Status | Target Location | Lines |
 |--------|--------|-----------------|-------|
-| `script/build/link-bins.sh` | ✅ **DONE** | `src/app/build/link_bins.spl` | 40 |
-| `script/jj-wrappers/git.sh` | ⏸️ **SKIP** | (Keep as-is per user) | 73 |
-| `script/build/run_quick_tests.sh` | ✅ **DONE** | `src/app/test/quick_runner.spl` | ~100 |
-| `script/build/capture_bootstrap_debug.sh` | ✅ **DONE** | `src/app/build/capture_debug.spl` | ~50 |
+| `scripts/build/link-bins.sh` | ✅ **DONE** | `src/app/build/link_bins.spl` | 40 |
+| `scripts/jj-wrappers/git.sh` | ⏸️ **SKIP** | (Keep as-is per user) | 73 |
+| `scripts/build/run_quick_tests.sh` | ✅ **DONE** | `src/app/test/quick_runner.spl` | ~100 |
+| `scripts/build/capture_bootstrap_debug.sh` | ✅ **DONE** | `src/app/build/capture_debug.spl` | ~50 |
 
 **Completed:**
 - ✅ Created `src/app/utils/colors.spl` (145 lines) - ANSI color utilities
@@ -54,10 +54,10 @@ These MUST remain as Bash because they run before Simple runtime exists:
 
 | Script | Status | Target Location | Lines |
 |--------|--------|-----------------|-------|
-| `script/fix_ffi_calls.py` | ⏳ TODO | `src/app/audit/ffi_analyzer.spl` | 206 |
-| `script/build/scaffold_feature_test.py` | ⏳ TODO | `src/app/test/scaffold.spl` | 283 |
-| `script/build/extract_tests_from_spec.py` | ⏳ TODO | `src/app/test/extract.spl` | 340 |
-| `script/build/spec_gen.py` | ⏳ TODO | `src/app/doc/spec_gen/` (module) | 992 |
+| `scripts/fix_ffi_calls.py` | ⏳ TODO | `src/app/audit/ffi_analyzer.spl` | 206 |
+| `scripts/build/scaffold_feature_test.py` | ⏳ TODO | `src/app/test/scaffold.spl` | 283 |
+| `scripts/build/extract_tests_from_spec.py` | ⏳ TODO | `src/app/test/extract.spl` | 340 |
+| `scripts/build/spec_gen.py` | ⏳ TODO | `src/app/doc/spec_gen/` (module) | 992 |
 
 **Required Utilities:**
 - ⏳ `src/app/utils/markdown.spl` - MarkdownBuilder, table formatting
@@ -72,10 +72,10 @@ These MUST remain as Bash because they run before Simple runtime exists:
 
 | Script | Status | Target Location | Lines |
 |--------|--------|-----------------|-------|
-| `script/verify/verify_features.sh` | ⏳ TODO | `src/app/verify/features.spl` | 254 |
-| `script/verify/verify_doctest.sh` | ⏳ TODO | `src/app/verify/doctest.spl` | ~50 |
-| `script/verify/verify_generic_syntax.sh` | ⏳ TODO | `src/app/verify/generics.spl` | ~80 |
-| `script/verify/test_visibility.sh` | ⏳ TODO | `src/app/verify/visibility.spl` | ~60 |
+| `scripts/verify/verify_features.sh` | ⏳ TODO | `src/app/verify/features.spl` | 254 |
+| `scripts/verify/verify_doctest.sh` | ⏳ TODO | `src/app/verify/doctest.spl` | ~50 |
+| `scripts/verify/verify_generic_syntax.sh` | ⏳ TODO | `src/app/verify/generics.spl` | ~80 |
+| `scripts/verify/test_visibility.sh` | ⏳ TODO | `src/app/verify/visibility.spl` | ~60 |
 
 ---
 
@@ -85,10 +85,10 @@ These MUST remain as Bash because they run before Simple runtime exists:
 
 | Script | Status | Target Location | Lines |
 |--------|--------|-----------------|-------|
-| `script/build/download-mold.sh` | ⏳ TODO | `src/app/build/linker/download_mold.spl` | 162 |
-| `script/build/setup-dashboard-ci.sh` | ⏳ TODO | `src/app/ci/setup_dashboard.spl` | ~200 |
-| `script/build/cpu-aware-test.sh` | ⏳ TODO | `src/app/test/cpu_aware.spl` | ~150 |
-| `script/profiling/profile-interpreter.sh` | ⏳ TODO | `src/app/profiling/profile.spl` | ~100 |
+| `scripts/build/download-mold.sh` | ⏳ TODO | `src/app/build/linker/download_mold.spl` | 162 |
+| `scripts/build/setup-dashboard-ci.sh` | ⏳ TODO | `src/app/ci/setup_dashboard.spl` | ~200 |
+| `scripts/build/cpu-aware-test.sh` | ⏳ TODO | `src/app/test/cpu_aware.spl` | ~150 |
+| `scripts/profiling/profile-interpreter.sh` | ⏳ TODO | `src/app/profiling/profile.spl` | ~100 |
 
 ---
 
@@ -100,16 +100,16 @@ These MUST remain as Bash because they run before Simple runtime exists:
 
 | Script | Status |
 |--------|--------|
-| `script/migrate/*.py` (8 files) | ✅ Archived to `archive/scripts/migrate/` |
-| `script/migrate/*.sh` (5 files) | ✅ Archived to `archive/scripts/migrate/` |
-| `script/migrate/*.spl` (2 files) | ✅ Archived to `archive/scripts/migrate/` |
-| `script/build/link-bins.sh` | ✅ Archived (replaced by `link_bins.spl`) |
-| `script/build/run_quick_tests.sh` | ✅ Archived (replaced by `quick_runner.spl`) |
-| `script/build/capture_bootstrap_debug.sh` | ✅ Archived (replaced by `capture_debug.spl`) |
-| `script/prepare-release.sh` | ⏳ TODO: Migrate to `src/app/release/prepare.spl` |
+| `scripts/migrate/*.py` (8 files) | ✅ Archived to `archive/scripts/migrate/` |
+| `scripts/migrate/*.sh` (5 files) | ✅ Archived to `archive/scripts/migrate/` |
+| `scripts/migrate/*.spl` (2 files) | ✅ Archived to `archive/scripts/migrate/` |
+| `scripts/build/link-bins.sh` | ✅ Archived (replaced by `link_bins.spl`) |
+| `scripts/build/run_quick_tests.sh` | ✅ Archived (replaced by `quick_runner.spl`) |
+| `scripts/build/capture_bootstrap_debug.sh` | ✅ Archived (replaced by `capture_debug.spl`) |
+| `scripts/prepare-release.sh` | ⏳ TODO: Migrate to `src/app/release/prepare.spl` |
 
 **Archived:** 18 obsolete scripts to `archive/scripts/`
-**Deleted:** Empty `script/migrate/` directory
+**Deleted:** Empty `scripts/migrate/` directory
 
 ---
 

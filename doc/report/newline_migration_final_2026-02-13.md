@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Successfully completed migration of hardcoded `"\n"` string literals to the `NL` constant from `src/std/string.spl` across the entire Simple language codebase using 10 parallel agents.
+Successfully completed migration of hardcoded `"\n"` string literals to the `NL` constant from `src/std/text.spl` across the entire Simple language codebase using 10 parallel agents.
 
 ### Final Metrics
 
@@ -34,15 +34,15 @@ Successfully completed migration of hardcoded `"\n"` string literals to the `NL`
 8. **Agent 8** (remaining src/compiler/) - 5 files, ~40 occurrences ✅
 9. **Agent 9** (remaining test/) - 2,008 files, ~2,000 occurrences ✅
 10. **Agent 10** (final cleanup) - 13 files, 50 occurrences ✅
-11. **Manual fix** (string.spl restoration) - Critical fix ✅
+11. **Manual fix** (text.spl restoration) - Critical fix ✅
 
-## Critical Fix: string.spl Restoration
+## Critical Fix: text.spl Restoration
 
-**Issue:** Agent 4 accidentally modified `src/std/string.spl` despite skip instructions, creating circular references where NL constant definitions used `{NL}` instead of `"\n"`.
+**Issue:** Agent 4 accidentally modified `src/std/text.spl` despite skip instructions, creating circular references where NL constant definitions used `{NL}` instead of `"\n"`.
 
 **Impact:** Build failure - `Unexpected token: expected expression, found Indent`
 
-**Resolution:** Manually restored 7 locations in string.spl:
+**Resolution:** Manually restored 7 locations in text.spl:
 - Lines 113, 122, 124, 125, 126: NL constant definitions
 - Lines 324, 389, 397, 410, 584: Character comparisons and function calls
 
@@ -52,7 +52,7 @@ Successfully completed migration of hardcoded `"\n"` string literals to the `NL`
 
 ### 1. Import Addition (2,391 files)
 ```simple
-use std.string.{NL}
+use std.text.{NL}
 ```
 
 ### 2. String Interpolation (Primary pattern - 7,000+ uses)
@@ -98,7 +98,7 @@ if ch == NL
 ### Categories of Legitimate `"\n"` Usage
 
 #### 1. **Constant Definitions** (7 occurrences)
-**File:** `src/std/string.spl`
+**File:** `src/std/text.spl`
 - Lines 113, 122, 124, 125, 126: `val NL = "\n"` and related constants
 - Lines 324, 389, 397, 410, 584: Core string utility functions
 
@@ -188,7 +188,7 @@ bin/simple test test/unit/std/newline_constants_spec.spl
 
 ### Import Count ✅
 ```bash
-grep -r 'use std.string.{NL}' --include="*.spl" src/ test/ | wc -l
+grep -r 'use std.text.{NL}' --include="*.spl" src/ test/ | wc -l
 # 2,391 files with NL import
 ```
 
@@ -204,7 +204,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 - `src/app/` - 244 files (**100% coverage**)
 - `src/compiler/` - 21 files
 - `src/compiler_core/` - 46 files
-- `src/std/` - 33 files (excluding string.spl)
+- `src/std/` - 33 files (excluding text.spl)
 - `src/core/` - 3 files
 - `src/diagnostics/` - 3 files
 
@@ -233,7 +233,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 - Easy adaptation for Windows (CRLF), Unix (LF), old Mac (CR)
 
 ### 2. **Maintainability**
-- Centralized newline constant in `src/std/string.spl`
+- Centralized newline constant in `src/std/text.spl`
 - Clear semantic intent: `{NL}` is more readable than `\n`
 - Easier to find all newline-related code
 - Reduced risk of copy-paste errors with wrong escape sequences
@@ -255,10 +255,10 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 **Solution:** Clear directory boundaries assigned to each agent
 
 ### Challenge 2: Exemption Tracking
-**Problem:** Some files must preserve `"\n"` (string.spl, char mappings)
+**Problem:** Some files must preserve `"\n"` (text.spl, char mappings)
 **Solution:** Explicit skip instructions + manual verification
 
-### Challenge 3: string.spl Corruption
+### Challenge 3: text.spl Corruption
 **Problem:** Agent 4 accidentally modified the NL definition file
 **Solution:** Manual restoration of 7 critical lines + import removal
 
@@ -285,7 +285,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 4. ✅ Test discovery works (3,897 tests)
 5. ✅ No functional changes to behavior
 6. ✅ 95.7% migration rate achieved (target: 90%+)
-7. ✅ Critical file (string.spl) restored and working
+7. ✅ Critical file (text.spl) restored and working
 
 ## Recommendations
 
@@ -303,7 +303,7 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 
 ## Conclusion
 
-The newline migration is **complete, verified, and successful**. All 7,180 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/string.spl`, with 322 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
+The newline migration is **complete, verified, and successful**. All 7,180 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/text.spl`, with 322 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
 
 **Key Achievement:** Consistent newline handling across 2,391 files in the Simple language codebase, providing a foundation for cross-platform compatibility and improved maintainability.
 

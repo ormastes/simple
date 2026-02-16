@@ -42,8 +42,8 @@
 - [ ] **Morning:** Run remove_skip_annotations.spl script
   ```bash
   cd /home/ormastes/dev/pub/simple
-  bin/simple script/remove_skip_annotations.spl --dry-run
-  bin/simple script/remove_skip_annotations.spl
+  bin/simple scripts/remove_skip_annotations.spl --dry-run
+  bin/simple scripts/remove_skip_annotations.spl
   ```
 - [ ] **Afternoon:** Verify changes, commit results
   ```bash

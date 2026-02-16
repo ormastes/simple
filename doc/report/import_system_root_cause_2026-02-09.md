@@ -34,7 +34,7 @@ fn main():
 ### Test 2: Module Functions Don't Import ❌
 
 ```simple
-use std.string.{string_trim}  # ✅ Module loads
+use std.text.{string_trim}  # ✅ Module loads
 fn main():
     string_trim("  x  ")       # ❌ "function not found"
 ```
@@ -230,7 +230,7 @@ fn main():
 
 ### Test 2: Phase 2 Functions
 ```simple
-use std.string.{string_trim, string_split}
+use std.text.{string_trim, string_split}
 use std.array.{array_append_all}
 
 fn main():
@@ -243,7 +243,7 @@ fn main():
 
 ### Test 3: Wildcard Import
 ```simple
-use std.string.*
+use std.text.*
 
 fn main():
     val result = string_trim("  test  ")

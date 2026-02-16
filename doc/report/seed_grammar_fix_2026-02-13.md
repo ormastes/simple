@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
 
 ## Bootstrap Script Fixes
 
-Also updated `script/bootstrap-fixed.sh` to exclude test/demo files that have duplicate `fn main()` functions:
+Also updated `scripts/bootstrap-fixed.sh` to exclude test/demo files that have duplicate `fn main()` functions:
 
 **Excluded patterns:**
 - `_phase[0-9]` - Phase demo files (phase4a, phase4b, etc.)

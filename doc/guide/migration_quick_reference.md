@@ -316,7 +316,7 @@ describe "Feature":
 
 1. **Migrate coverage tools** - `rust/util/simple_mock_helper/` (~3,500 lines)
 2. **Add deprecation warnings** - Remaining 67 Makefile targets
-3. **Create std.string module** - String utilities in pure Simple
+3. **Create std.text module** - String utilities in pure Simple
 4. **Migrate arch_test** - `rust/util/arch_test/` (~500 lines)
 
 ## Getting Help

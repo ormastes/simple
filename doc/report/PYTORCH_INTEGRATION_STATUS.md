@@ -104,7 +104,7 @@ Rebuild `bin/release/simple` with PyTorch FFI statically linked:
 #   -L.build/rust/ffi_torch/target/release -lsimple_torch_ffi
 
 # 2. Rebuild runtime
-script/install.sh  # or equivalent
+scripts/install.sh  # or equivalent
 
 # 3. Verify symbols
 nm bin/release/simple | grep rt_torch_tensor_zeros
@@ -305,7 +305,7 @@ To enable full PyTorch integration:
    - Update build script or Makefile
 
 2. **Rebuild runtime**
-   - Run: `script/install.sh` or equivalent
+   - Run: `scripts/install.sh` or equivalent
    - Verify size increases by ~400KB
 
 3. **Verify symbols**

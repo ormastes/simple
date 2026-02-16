@@ -153,7 +153,7 @@ simple compile src/math/stats.spl --emit-obj -o build/obj/math_stats.o
 **Option B: Automated Script (Recommended)**
 ```bash
 # Compile all modules at once
-simple script/compile_with_objects.spl \
+simple scripts/compile_with_objects.spl \
     --input-dir=src/math \
     --output-dir=build \
     --verbose
@@ -190,7 +190,7 @@ Compilation complete:
 
 ```bash
 # Create libmath.lsm from compiled modules
-simple script/lib_tool.spl create libmath.lsm \
+simple scripts/lib_tool.spl create libmath.lsm \
     build/smf/math/arithmetic.smf \
     build/smf/math/stats.smf
 ```
@@ -212,7 +212,7 @@ Writing library...
 
 ```bash
 # List modules
-simple script/lib_tool.spl list libmath.lsm
+simple scripts/lib_tool.spl list libmath.lsm
 ```
 
 **Output:**
@@ -226,7 +226,7 @@ Modules (2):
 
 ```bash
 # Verify integrity
-simple script/lib_tool.spl verify libmath.lsm
+simple scripts/lib_tool.spl verify libmath.lsm
 ```
 
 **Output:**
@@ -383,7 +383,7 @@ Statistical Functions:
 
 ```bash
 # Extract arithmetic module
-simple script/lib_tool.spl extract libmath.lsm math_arithmetic --output=arithmetic.smf
+simple scripts/lib_tool.spl extract libmath.lsm math_arithmetic --output=arithmetic.smf
 
 # Inspect with hexdump (first 128 bytes = SMF header)
 hexdump -C arithmetic.smf | head -n 8
@@ -400,20 +400,20 @@ echo 'export square' >> src/math/power.spl
 simple compile src/math/power.spl --emit-smf -o build/smf/math/power.smf
 
 # Rebuild library with new module
-simple script/lib_tool.spl create libmath.lsm \
+simple scripts/lib_tool.spl create libmath.lsm \
     build/smf/math/arithmetic.smf \
     build/smf/math/stats.smf \
     build/smf/math/power.smf
 
 # Verify
-simple script/lib_tool.spl list libmath.lsm
+simple scripts/lib_tool.spl list libmath.lsm
 # Now shows 3 modules!
 ```
 
 ### View Library Details
 
 ```bash
-simple script/lib_tool.spl info libmath.lsm
+simple scripts/lib_tool.spl info libmath.lsm
 ```
 
 **Output:**
@@ -454,7 +454,7 @@ Error: Module not found: 'math_arithmetic'
 **Solution:**
 ```bash
 # Check module name in library
-simple script/lib_tool.spl list libmath.lsm
+simple scripts/lib_tool.spl list libmath.lsm
 
 # Use exact name from library
 use math_arithmetic.{add}  # Correct
@@ -474,7 +474,7 @@ Error: Object file not found for module 'math_arithmetic'
 simple compile src/math/arithmetic.spl --emit-obj -o build/obj/math_arithmetic.o
 
 # Or use helper script
-simple script/compile_with_objects.spl --input-dir=src/math
+simple scripts/compile_with_objects.spl --input-dir=src/math
 ```
 
 ### Issue 3: Symbol Not Found

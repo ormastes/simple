@@ -158,7 +158,7 @@ Missing functions:
 
 Covered by doctests only:
   - std.collections.Stack.push (doctest: lib/std/collections.spl:42)
-  - std.string.format (doctest: lib/std/string.spl:18)
+  - std.text.format (doctest: lib/std/text.spl:18)
 ```
 
 **Key insight:** Doctests contribute to integration-level coverage metrics.

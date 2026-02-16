@@ -51,7 +51,7 @@ use app.io.file_shell.{shell, shell_output, file_write, file_delete, file_size}
 
 ### ✅ Priority 2: String Parsing Utilities (MEDIUM Impact - ~25 lines)
 
-**Updated:** `src/std/string.spl`
+**Updated:** `src/std/text.spl`
 
 Added functions:
 - `parse_i64_safe(s)` - Parse i64 from string with safe fallback
@@ -167,8 +167,8 @@ bin/simple test test/lib/std/unit/tooling/path_utils_spec.spl
 1. `src/app/compile/native.spl` - Uses file_shell module
 2. `src/app/compile/llvm_direct.spl` - Uses file_shell module
 3. `src/app/cli/bootstrap_check.spl` - Uses file_shell module
-4. `src/std/string.spl` - Added parse_i64_safe, char_to_digit
-5. `src/app/mcp/fileio_temp.spl` - Uses std.string and std.path
+4. `src/std/text.spl` - Added parse_i64_safe, char_to_digit
+5. `src/app/mcp/fileio_temp.spl` - Uses std.text and std.path
 6. `src/app/mcp/fileio_protection.spl` - Uses std.path and std.glob
 
 ---

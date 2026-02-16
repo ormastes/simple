@@ -7,7 +7,7 @@
 ## Quick Start
 
 ```simple
-use std.string_core.{str_len, str_concat, str_trim}
+use std.text_core.{str_len, str_concat, str_trim}
 
 val text = "  hello world  "
 val cleaned = str_trim(text)           # "hello world"
@@ -24,7 +24,7 @@ val result = str_concat(cleaned, "!") # "hello world!"
 - You need string manipulation (reverse, repeat, truncate)
 - You want consistent, tested implementations
 
-**Use `std.string` when:**
+**Use `std.text` when:**
 - You need `char_code` / `char_from_code` (ASCII lookup tables)
 - You need platform-specific newlines
 - You need hash functions
@@ -40,7 +40,7 @@ val result = str_concat(cleaned, "!") # "hello world!"
 ### Basic Operations
 
 ```simple
-use std.string_core.{str_len, str_concat, str_eq}
+use std.text_core.{str_len, str_concat, str_eq}
 
 str_len("hello")              # → 5
 str_concat("hello", " world") # → "hello world"
@@ -50,7 +50,7 @@ str_eq("test", "test")        # → true
 ### Slicing and Access
 
 ```simple
-use std.string_core.{str_slice, str_char_at, str_safe_slice}
+use std.text_core.{str_slice, str_char_at, str_safe_slice}
 
 str_slice("hello", 0, 3)       # → "hel"
 str_char_at("hello", 1)        # → "e"
@@ -63,8 +63,8 @@ str_safe_slice("hi", -1, 100)  # → "hi" (bounds-safe)
 ### Search Operations
 
 ```simple
-use std.string_core.{str_contains, str_starts_with, str_ends_with}
-use std.string_core.{str_index_of, str_last_index_of}
+use std.text_core.{str_contains, str_starts_with, str_ends_with}
+use std.text_core.{str_index_of, str_last_index_of}
 
 str_contains("hello world", "world")  # → true
 str_starts_with("hello", "hel")       # → true
@@ -77,8 +77,8 @@ str_index_of("hello", "x")            # → -1 (not found)
 ### Whitespace Trimming
 
 ```simple
-use std.string_core.{str_trim, str_trim_left, str_trim_right}
-use std.string_core.{is_whitespace_char}
+use std.text_core.{str_trim, str_trim_left, str_trim_right}
+use std.text_core.{is_whitespace_char}
 
 str_trim("  hello  ")       # → "hello"
 str_trim_left("  hello  ")  # → "hello  "
@@ -90,7 +90,7 @@ is_whitespace_char("a")     # → false
 ### Replacement
 
 ```simple
-use std.string_core.{str_replace, str_replace_all}
+use std.text_core.{str_replace, str_replace_all}
 
 str_replace("hello", "l", "L")      # → "heLlo" (first only)
 str_replace_all("hello", "l", "L")  # → "heLLo" (all)
@@ -114,7 +114,7 @@ result = str_replace_all(result, "b", "B")
 ### Split and Join
 
 ```simple
-use std.string_core.{str_split, str_join}
+use std.text_core.{str_split, str_join}
 
 val parts = str_split("a,b,c", ",")  # → ["a", "b", "c"]
 str_join(["x", "y", "z"], "-")       # → "x-y-z"
@@ -124,7 +124,7 @@ str_join([], ",")                    # → ""
 ### Character Classification
 
 ```simple
-use std.string_core.{is_alpha_char, is_digit_char, is_alnum_char}
+use std.text_core.{is_alpha_char, is_digit_char, is_alnum_char}
 
 is_alpha_char("a")  # → true
 is_alpha_char("5")  # → false
@@ -138,7 +138,7 @@ is_alnum_char(" ")  # → false
 ### Case Conversion
 
 ```simple
-use std.string_core.{str_to_lower, str_to_upper, str_capitalize}
+use std.text_core.{str_to_lower, str_to_upper, str_capitalize}
 
 str_to_lower("HELLO")   # → "hello"
 str_to_upper("hello")   # → "HELLO"
@@ -150,8 +150,8 @@ str_capitalize("hello") # → "Hello"
 ### String Manipulation
 
 ```simple
-use std.string_core.{str_reverse, str_repeat, str_truncate}
-use std.string_core.{str_pad_left, str_pad_right, str_center}
+use std.text_core.{str_reverse, str_repeat, str_truncate}
+use std.text_core.{str_pad_left, str_pad_right, str_center}
 
 str_reverse("hello")          # → "olleh"
 str_repeat("ab", 3)           # → "ababab"
@@ -173,7 +173,7 @@ use std.template.utilities.{str_trim, str_contains, str_to_lower}
 
 **After:**
 ```simple
-use std.string_core.{str_trim, str_contains, str_to_lower}
+use std.text_core.{str_trim, str_contains, str_to_lower}
 ```
 
 **Compatibility:** Both work! Template utilities re-exports string_core functions.
@@ -188,7 +188,7 @@ use core.types.{str_concat, str_len, str_trim}
 **After:**
 ```simple
 # For application code, use string_core
-use std.string_core.{str_concat, str_len, str_trim}
+use std.text_core.{str_concat, str_len, str_trim}
 
 # For compiler code, continue using core.types (avoids circular deps)
 use core.types.{str_concat, str_len, str_trim}
@@ -199,10 +199,10 @@ use core.types.{str_concat, str_len, str_trim}
 1. **Import what you need**
    ```simple
    # Good
-   use std.string_core.{str_trim, str_split}
+   use std.text_core.{str_trim, str_split}
 
    # Avoid (explicit is better)
-   use std.string_core.*
+   use std.text_core.*
    ```
 
 2. **Use safe variants for untrusted input**
@@ -211,7 +211,7 @@ use core.types.{str_concat, str_len, str_trim}
    val ch = s[idx]
 
    # Safe (returns empty on invalid index)
-   use std.string_core.{str_char_at}
+   use std.text_core.{str_char_at}
    val ch = str_char_at(s, idx)
    ```
 
@@ -221,7 +221,7 @@ use core.types.{str_concat, str_len, str_trim}
    val prefix = s[:3]
 
    # Works (always use explicit start)
-   use std.string_core.{str_slice}
+   use std.text_core.{str_slice}
    val prefix = str_slice(s, 0, 3)
    ```
 
@@ -235,7 +235,7 @@ use core.types.{str_concat, str_len, str_trim}
        result
 
    # Do this
-   use std.string_core.{str_trim}
+   use std.text_core.{str_trim}
    val result = str_trim(s)
    ```
 
@@ -264,4 +264,4 @@ use core.types.{str_concat, str_len, str_trim}
 - **Full implementation:** `src/std/string_core.spl`
 - **Tests:** `test/unit/std/string_core_spec.spl`
 - **Migration report:** `doc/report/string_utilities_consolidation_2026-02-14.md`
-- **Related modules:** `src/std/string.spl`, `src/std/template/utilities.spl`
+- **Related modules:** `src/std/text.spl`, `src/std/template/utilities.spl`

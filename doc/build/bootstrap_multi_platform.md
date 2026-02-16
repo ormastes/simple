@@ -54,7 +54,7 @@ Build all platforms locally (requires `cross`):
 cargo install cross --git https://github.com/cross-rs/cross
 
 # Build all platforms
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 ```
 
 Output:
@@ -143,7 +143,7 @@ bin/simple build bootstrap-rebuild
 
 1. **Build all platforms:**
    ```bash
-   script/build-bootstrap-multi-platform.sh
+   scripts/build-bootstrap-multi-platform.sh
    ```
 
 2. **Create release package:**
@@ -246,7 +246,7 @@ sudo usermod -aG docker $USER
 newgrp docker
 
 # Retry build
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 ```
 
 **Target not found:**
@@ -335,7 +335,7 @@ All platforms have similar performance characteristics:
    ```
 
 2. **Update build scripts:**
-   - Add to `script/build-bootstrap-multi-platform.sh`
+   - Add to `scripts/build-bootstrap-multi-platform.sh`
    - Add to `.github/workflows/bootstrap-build.yml`
 
 3. **Update documentation:**

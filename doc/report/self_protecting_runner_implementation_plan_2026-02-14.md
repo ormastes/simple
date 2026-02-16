@@ -38,7 +38,7 @@ simple test --daemon
 
 use app.io.mod.{file_read, file_write, file_exists, process_run, getpid, time_now_unix_micros}
 use std.process_monitor.{sample_process, ProcessMetrics}
-use std.string.{NL}
+use std.text.{NL}
 
 # ============================================================================
 # Daemon State
@@ -244,7 +244,7 @@ export daemon_main_loop
 # Extends std.process_monitor for system-level metrics
 
 use app.io.mod.{file_read, file_exists, shell_output_trimmed, shell_int}
-use std.string.{NL}
+use std.text.{NL}
 
 struct SystemStats:
     total_cpu_percent: f64

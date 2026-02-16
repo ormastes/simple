@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 30404ms |
+| Duration | 32381ms |
 
 **Status: PASS**
 
@@ -226,7 +226,7 @@
 | test/unit/std/process_monitor_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/process_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/promise_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/std/query_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/std/query_spec.spl | 1 | 1 | 0 | 0 | 6ms |
 | test/unit/std/random_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/rc_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/regex_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -247,7 +247,7 @@
 | test/unit/std/report/.simple/build/tool_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/report/tool_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/repr_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/std/resource_limited_spec.spl | 1 | 1 | 0 | 0 | 4ms |
+| test/unit/std/resource_limited_spec.spl | 1 | 1 | 0 | 0 | 5ms |
 | test/unit/std/resource_limits_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/resource_tracker_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/roundtrip_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -256,7 +256,7 @@
 | test/unit/std/runtime_value_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/sdn_minimal_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/set_utils_ext_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/std/shared_examples_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/std/shared_examples_spec.spl | 1 | 1 | 0 | 0 | 4ms |
 | test/unit/std/.simple/build/actor_body_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/.simple/build/algorithm_utils_ext_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/std/.simple/build/allocator_spec.smf | 0 | 0 | 0 | 0 | 0ms |

@@ -145,13 +145,13 @@ build/bootstrap/simple_phase3 src/app/compile/llvm_direct.spl src/app/cli/main.s
 bin/simple build bootstrap-multiphase
 
 # Quick bootstrap without LLVM optimization
-./script/bootstrap-multiphase.spl --no-llvm
+./scripts/bootstrap-multiphase.spl --no-llvm
 
 # Debug mode with artifacts kept
-./script/bootstrap-multiphase.spl --keep-artifacts
+./scripts/bootstrap-multiphase.spl --keep-artifacts
 
 # Skip reproducibility check (faster)
-./script/bootstrap-multiphase.spl --no-verify
+./scripts/bootstrap-multiphase.spl --no-verify
 ```
 
 ### Programmatic API
@@ -308,7 +308,7 @@ bin/release/simple --version
 gcc --version
 
 # Reinstall bootstrap binary
-./script/setup-bootstrap-binaries.sh
+./scripts/setup-bootstrap-binaries.sh
 ```
 
 ### Phase 2/3 Size Mismatch
@@ -344,7 +344,7 @@ clang --version
 llc --version
 
 # Skip LLVM optimization
-./script/bootstrap-multiphase.spl --no-llvm
+./scripts/bootstrap-multiphase.spl --no-llvm
 ```
 
 ### Out of Memory
@@ -364,7 +364,7 @@ sudo swapon -a
 # Close other applications
 
 # Use --no-llvm to reduce memory usage
-./script/bootstrap-multiphase.spl --no-llvm
+./scripts/bootstrap-multiphase.spl --no-llvm
 ```
 
 ## Design Rationale
@@ -459,7 +459,7 @@ sudo swapon -a
 
 - **Implementation:** `src/app/build/bootstrap_multiphase.spl`
 - **CLI Entry:** `src/app/build/cli_entry.spl`
-- **Standalone Script:** `script/bootstrap-multiphase.spl`
+- **Standalone Script:** `scripts/bootstrap-multiphase.spl`
 - **Old Bootstrap:** `src/app/build/bootstrap.spl` (3-stage with Cranelift)
 - **Native Compiler:** `src/app/compile/native.spl` (C codegen)
 - **LLVM Compiler:** `src/app/compile/llvm_direct.spl` (LLVM IR codegen)

@@ -29,7 +29,7 @@ src/
     database/   # Database (bug, test, feature DBs)
   std/          # Standard library
     spec.spl    # SSpec test framework
-    string.spl  # String utilities
+    text.spl  # String utilities
     math.spl    # Math functions
     path.spl    # Path utilities
     array.spl   # Array utilities

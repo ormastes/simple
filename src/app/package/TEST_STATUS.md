@@ -111,7 +111,7 @@ Until FFI bindings are fully wired up, manual testing works:
 
 ```bash
 # Test package build
-./script/build-bootstrap.sh
+./scripts/build-bootstrap.sh
 # ✅ Works - creates 6.4 MB package
 
 # Test package extraction

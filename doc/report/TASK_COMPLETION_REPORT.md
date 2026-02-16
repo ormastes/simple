@@ -317,7 +317,7 @@ To complete integration (1-2 hours):
 
 2. **Rebuild runtime:**
    ```bash
-   script/install.sh  # or equivalent
+   scripts/install.sh  # or equivalent
    ```
 
 3. **Verify symbols:**

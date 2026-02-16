@@ -154,7 +154,7 @@ A comprehensive 7-agent audit discovered that **95%+ of features work correctly*
 ### Day 1: Annotation Cleanup
 ```bash
 cd /home/ormastes/dev/pub/simple
-bin/simple script/remove_skip_annotations.spl
+bin/simple scripts/remove_skip_annotations.spl
 ```
 **Output:** 170+ test files updated
 
@@ -207,7 +207,7 @@ simple/
 │       ├── lsp_integration.md    (1,100 lines)
 │       └── backend_capabilities.md (1,410 lines)
 │
-└── script/
+└── scripts/
     └── remove_skip_annotations.spl  ← Automation script
 ```
 
@@ -330,8 +330,8 @@ simple/
 ### Run Annotation Cleanup
 ```bash
 cd /home/ormastes/dev/pub/simple
-bin/simple script/remove_skip_annotations.spl --dry-run  # Preview
-bin/simple script/remove_skip_annotations.spl             # Apply
+bin/simple scripts/remove_skip_annotations.spl --dry-run  # Preview
+bin/simple scripts/remove_skip_annotations.spl             # Apply
 ```
 
 ### Run Tests

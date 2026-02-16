@@ -6,16 +6,16 @@ Run basic Simple language tests in FreeBSD QEMU VM to verify cross-platform comp
 
 ```bash
 # Option 1: Full test (build + test)
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 
 # Option 2: Core tests only (faster)
-./script/test-freebsd-qemu-basic.sh --core-only
+./scripts/test-freebsd-qemu-basic.sh --core-only
 
 # Option 3: Skip rebuild (if already built)
-./script/test-freebsd-qemu-basic.sh --skip-build
+./scripts/test-freebsd-qemu-basic.sh --skip-build
 
 # Option 4: Verbose output
-./script/test-freebsd-qemu-basic.sh --verbose
+./scripts/test-freebsd-qemu-basic.sh --verbose
 ```
 
 ## What Gets Tested
@@ -105,7 +105,7 @@ Rsync project files to VM:
 ### Step 3: Build Compiler
 
 Bootstrap Simple compiler in FreeBSD:
-- Uses `script/bootstrap-from-scratch-freebsd.sh`
+- Uses `scripts/bootstrap-from-scratch-freebsd.sh`
 - CMake + Clang 19+ + C++20
 - Skipped if `--skip-build` flag used
 - Verifies binary is FreeBSD ELF
@@ -130,10 +130,10 @@ Download compiled binary from VM:
 
 ```bash
 # Download FreeBSD VM first (if not already done)
-./script/test-freebsd-qemu-setup.sh --download
+./scripts/test-freebsd-qemu-setup.sh --download
 
 # Run full test suite
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 
 # Expected output:
 # [test-freebsd-basic] Step 1: Checking FreeBSD VM
@@ -169,7 +169,7 @@ Download compiled binary from VM:
 
 ```bash
 # VM already running, compiler already built
-./script/test-freebsd-qemu-basic.sh --skip-build
+./scripts/test-freebsd-qemu-basic.sh --skip-build
 
 # Takes 45-90 seconds instead of 5-8 minutes
 ```
@@ -178,7 +178,7 @@ Download compiled binary from VM:
 
 ```bash
 # Test just the core compiler components
-./script/test-freebsd-qemu-basic.sh --core-only
+./scripts/test-freebsd-qemu-basic.sh --core-only
 
 # Runs ~50 tests in 15-30 seconds
 ```
@@ -187,7 +187,7 @@ Download compiled binary from VM:
 
 ```bash
 # Show detailed output for each test
-./script/test-freebsd-qemu-basic.sh --verbose --core-only
+./scripts/test-freebsd-qemu-basic.sh --verbose --core-only
 
 # Output shows individual test cases:
 # describe "Token recognition":
@@ -201,7 +201,7 @@ Download compiled binary from VM:
 
 ```bash
 # Start VM (if not running)
-./script/test-freebsd-qemu-basic.sh --skip-build --core-only
+./scripts/test-freebsd-qemu-basic.sh --skip-build --core-only
 
 # SSH into VM for manual testing
 ssh -p 2222 freebsd@localhost
@@ -226,7 +226,7 @@ exit
 ls -lh build/freebsd/vm/FreeBSD-14.3-RELEASE-amd64.qcow2
 
 # If missing, download
-./script/test-freebsd-qemu-setup.sh --download
+./scripts/test-freebsd-qemu-setup.sh --download
 
 # Check KVM availability
 ls -l /dev/kvm
@@ -255,7 +255,7 @@ cmake --version    # Should be 3.20+
 
 # Run bootstrap manually with verbose output
 cd ~/simple
-./script/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 ### Issue: Tests Fail
@@ -265,7 +265,7 @@ cd ~/simple
 **Solution:**
 ```bash
 # Run with verbose output to see which tests
-./script/test-freebsd-qemu-basic.sh --skip-build --verbose
+./scripts/test-freebsd-qemu-basic.sh --skip-build --verbose
 
 # Run specific failing test manually
 ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test test/unit/core/parser_spec.spl"
@@ -287,7 +287,7 @@ ssh -p 2222 freebsd@localhost "file ~/simple/bin/simple"
 # If it's Linux ELF, the bootstrap didn't run correctly
 # Clean and rebuild
 ssh -p 2222 freebsd@localhost "cd ~/simple && rm -rf build/bootstrap bin/simple"
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 ```
 
 ### Issue: Project Sync Slow
@@ -303,7 +303,7 @@ rsync -avz --delete -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
 
 # Or clean VM workspace first
 ssh -p 2222 freebsd@localhost "rm -rf ~/simple"
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 ```
 
 ## Advanced Testing
@@ -330,7 +330,7 @@ bin/simple test test/
 
 ```bash
 # Time the test suite
-time ./script/test-freebsd-qemu-basic.sh --skip-build --core-only
+time ./scripts/test-freebsd-qemu-basic.sh --skip-build --core-only
 
 # Typical results:
 # real    0m35.123s  (KVM)
@@ -372,10 +372,10 @@ jobs:
         run: sudo apt install -y qemu-system-x86 rsync
 
       - name: Download FreeBSD VM
-        run: ./script/test-freebsd-qemu-setup.sh --download
+        run: ./scripts/test-freebsd-qemu-setup.sh --download
 
       - name: Run Basic Tests
-        run: ./script/test-freebsd-qemu-basic.sh --core-only
+        run: ./scripts/test-freebsd-qemu-basic.sh --core-only
 
       - name: Upload Test Results
         if: always()
@@ -397,8 +397,8 @@ docker run --rm -it --device=/dev/kvm -v $(pwd):/workspace ubuntu:22.04
 apt update
 apt install -y qemu-system-x86 rsync openssh-client wget xz-utils
 cd /workspace
-./script/test-freebsd-qemu-setup.sh --download
-./script/test-freebsd-qemu-basic.sh --core-only
+./scripts/test-freebsd-qemu-setup.sh --download
+./scripts/test-freebsd-qemu-basic.sh --core-only
 ```
 
 ## Test Coverage
@@ -429,13 +429,13 @@ cd /workspace
 **Quick Commands:**
 ```bash
 # Full test (first time)
-./script/test-freebsd-qemu-basic.sh
+./scripts/test-freebsd-qemu-basic.sh
 
 # Quick retest
-./script/test-freebsd-qemu-basic.sh --skip-build --core-only
+./scripts/test-freebsd-qemu-basic.sh --skip-build --core-only
 
 # Debug failures
-./script/test-freebsd-qemu-basic.sh --verbose
+./scripts/test-freebsd-qemu-basic.sh --verbose
 
 # Manual testing
 ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test <path>"
@@ -456,6 +456,6 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test <path>"
 
 - **Full QEMU Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Quick Start:** `README_FREEBSD_QEMU.md`
-- **Bootstrap Script:** `script/bootstrap-from-scratch-freebsd.sh`
-- **Setup Test:** `script/test-freebsd-qemu-setup.sh`
-- **Basic Test:** `script/test-freebsd-qemu-basic.sh`
+- **Bootstrap Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
+- **Setup Test:** `scripts/test-freebsd-qemu-setup.sh`
+- **Basic Test:** `scripts/test-freebsd-qemu-basic.sh`

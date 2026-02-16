@@ -74,8 +74,8 @@ Implemented comprehensive Library SMF (.lsm) format for bundling Simple modules 
 **Achievement:** Automated libstd.lsm generation and full library management CLI
 
 **Created:**
-- `script/build_libstd.spl` (200 lines) - Standard library builder
-- `script/lib_tool.spl` (450 lines) - Library management tool
+- `scripts/build_libstd.spl` (200 lines) - Standard library builder
+- `scripts/lib_tool.spl` (450 lines) - Library management tool
 
 **Features:**
 
@@ -96,12 +96,12 @@ Implemented comprehensive Library SMF (.lsm) format for bundling Simple modules 
 **Usage:**
 ```bash
 # Build standard library
-simple script/build_libstd.spl --verbose
+simple scripts/build_libstd.spl --verbose
 
 # Manage libraries
-simple script/lib_tool.spl list build/lib/libstd.lsm
-simple script/lib_tool.spl verify build/lib/libstd.lsm
-simple script/lib_tool.spl extract libstd.lsm std/io/mod
+simple scripts/lib_tool.spl list build/lib/libstd.lsm
+simple scripts/lib_tool.spl verify build/lib/libstd.lsm
+simple scripts/lib_tool.spl extract libstd.lsm std/io/mod
 ```
 
 ## Code Metrics
@@ -158,16 +158,16 @@ builder.write("libmath.lsm")?
 ### 3. Library Management
 ```bash
 # List modules
-simple script/lib_tool.spl list library.lsm
+simple scripts/lib_tool.spl list library.lsm
 
 # Verify integrity
-simple script/lib_tool.spl verify library.lsm
+simple scripts/lib_tool.spl verify library.lsm
 
 # Extract module
-simple script/lib_tool.spl extract library.lsm module/name
+simple scripts/lib_tool.spl extract library.lsm module/name
 
 # Create library
-simple script/lib_tool.spl create new.lsm *.smf
+simple scripts/lib_tool.spl create new.lsm *.smf
 ```
 
 ### 4. Symbol Resolution for Linking

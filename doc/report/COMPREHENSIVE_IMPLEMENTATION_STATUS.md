@@ -386,10 +386,10 @@ if (a and
 Integration into compiler pipeline to emit warnings during `simple build`:
 
 ```bash
-simple build src/std/string.spl
+simple build src/std/text.spl
 # Should emit:
-# warning: src/std/string.spl:42 - function 'split' missing inline comment
-# warning: src/std/string.spl:56 - function 'join' missing docstring
+# warning: src/std/text.spl:42 - function 'split' missing inline comment
+# warning: src/std/text.spl:56 - function 'join' missing docstring
 ```
 
 **Implementation Plan:**
@@ -514,7 +514,7 @@ simple stats
 
 **Auto-Generated Tags:**
 ```simple
-suggest_missing_tags("src/std/string.spl")
+suggest_missing_tags("src/std/text.spl")
 # → ["stdlib:string"]
 
 suggest_missing_tags("src/core/parser.spl")

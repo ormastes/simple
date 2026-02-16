@@ -39,7 +39,7 @@ ld.lld: error: unable to find library -lsimple_compiler
 The `libsimple_compiler.so` library does not exist anywhere in the project.
 
 ### 4. Seed.cpp Bootstrap Path Also Broken
-Running `./script/bootstrap-minimal.sh` fails with:
+Running `./scripts/bootstrap-minimal.sh` fails with:
 ```
 build/bootstrap/core1.cpp:7991:33: error: use of undeclared identifier 'BackendKind_Cranelift'
 build/bootstrap/core1.cpp:7995:9: error: use of undeclared identifier 'target_is_32bit'
@@ -119,7 +119,7 @@ This addresses the original user request: "update full simple buildable by core 
    - Add stub implementations for `target_is_32bit()`, `target_is_64bit()`, `target_is_wasm()`
 
 2. Search for other files referencing old enum values
-3. Test with `./script/bootstrap-minimal.sh`
+3. Test with `./scripts/bootstrap-minimal.sh`
 
 **Benefits:**
 - Directly addresses user's request
@@ -147,7 +147,7 @@ Fix the enum mismatches in compiler_core to enable the seed.cpp → compiler_cor
 **Steps:**
 1. Update `backend_factory.spl` enum usage
 2. Add missing helper functions
-3. Test: `./script/bootstrap-minimal.sh`
+3. Test: `./scripts/bootstrap-minimal.sh`
 4. Use resulting `build/bootstrap/core1` to compile full compiler
 5. Verify reproducibility
 

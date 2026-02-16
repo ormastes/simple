@@ -75,7 +75,7 @@ fn main():
 #    -L.build/rust/ffi_torch/target/release -lsimple_torch_ffi
 
 # 2. Rebuild runtime
-script/install.sh
+scripts/install.sh
 
 # 3. Verify
 nm bin/release/simple | grep rt_torch_tensor_zeros

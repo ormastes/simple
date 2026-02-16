@@ -244,7 +244,7 @@ me add_module_with_object(
 
 **Step 2: Update Build Process**
 ```simple
-# In script/build_libstd.spl
+# In scripts/build_libstd.spl
 for smf_path in smf_files:
     val module_name = derive_module_name(smf_path)
     val obj_path = smf_path.replace(".smf", ".o")

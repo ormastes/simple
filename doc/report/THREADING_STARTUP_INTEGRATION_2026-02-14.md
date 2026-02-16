@@ -219,7 +219,7 @@ void spl_thread_yield(void);
 
 1. **Rebuild Runtime Binary** (2-4 hours on CI)
    - Requires: 8GB+ RAM or GitHub Actions
-   - Command: `script/bootstrap-from-scratch.sh --output=bin/simple`
+   - Command: `scripts/bootstrap-from-scratch.sh --output=bin/simple`
    - Impact: Unlocks all 145 thread SFFI tests + 45 thread pool tests
 
 2. **Run Thread Tests**

@@ -5,16 +5,16 @@
 ### 1. FreeBSD Workspace Infrastructure (100% Complete)
 
 **Created files:**
-- ✅ `script/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap script
+- ✅ `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap script
 - ✅ `FREEBSD_WORKSPACE.md` - Main workspace guide
 - ✅ `doc/guide/freebsd_workspace_setup.md` - Detailed setup guide (16KB)
 - ✅ `doc/guide/freebsd_quick_reference.md` - Command cheat sheet (7.4KB)
-- ✅ `script/verify_freebsd_workspace.spl` - Verification script
+- ✅ `scripts/verify_freebsd_workspace.spl` - Verification script
 - ✅ `FREEBSD_SETUP_SUMMARY.md` - Quick start summary
 
 **Existing infrastructure verified:**
-- ✅ `script/setup_freebsd_vm.spl` - VM setup automation
-- ✅ `script/test_freebsd_qemu.spl` - FreeBSD testing
+- ✅ `scripts/setup_freebsd_vm.spl` - VM setup automation
+- ✅ `scripts/test_freebsd_qemu.spl` - FreeBSD testing
 - ✅ `src/app/vm/qemu_manager.spl` - VM lifecycle management
 - ✅ `seed/platform/platform_freebsd.h` - FreeBSD platform header
 - ✅ `seed/cmake/toolchains/freebsd-x86_64.cmake` - Cross-compile toolchain
@@ -97,7 +97,7 @@ pkg install cmake llvm gmake git
 ssh -p 2222 root@localhost
 git clone <repo-url> simple
 cd simple
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 ```
 
 **Time:** ~10 minutes (one-time setup) + ~60 seconds (bootstrap)
@@ -168,7 +168,7 @@ pkg install cmake llvm gmake git
 ssh -p 2222 root@localhost
 git clone <repo-url> simple
 cd simple
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Done! Full FreeBSD Simple compiler in bin/simple
 ```
@@ -203,9 +203,9 @@ All files are FreeBSD ELF 64-bit executables:
 
 ### Infrastructure Files
 
-1. **Bootstrap script:** `script/bootstrap-from-scratch-freebsd.sh`
+1. **Bootstrap script:** `scripts/bootstrap-from-scratch-freebsd.sh`
 2. **Documentation:** 4 comprehensive guides (~40KB total)
-3. **Verification:** `script/verify_freebsd_workspace.spl`
+3. **Verification:** `scripts/verify_freebsd_workspace.spl`
 4. **VM management:** Scripts + qemu_manager.spl
 5. **Cross-compile toolchain:** CMake toolchain files
 
@@ -261,8 +261,8 @@ netstat -tuln | grep 2222
 # All should exist
 ls -lh FREEBSD_WORKSPACE.md
 ls -lh doc/guide/freebsd_*.md
-ls -lh script/bootstrap-from-scratch-freebsd.sh
-ls -lh script/verify_freebsd_workspace.spl
+ls -lh scripts/bootstrap-from-scratch-freebsd.sh
+ls -lh scripts/verify_freebsd_workspace.spl
 ```
 
 ---

@@ -106,7 +106,7 @@ scenario outline Adding two numbers:
 - ✅ #1381 - Move closures (AST `MoveMode` enum)
 - ✅ #1382 - List[T] type (stdlib `core/list.spl`)
 - ✅ #1383 - Array[T, N] type (stdlib `core/array.spl`)
-- ✅ #1384 - String type (stdlib `core/string.spl`)
+- ✅ #1384 - String type (stdlib `core/text.spl`)
 
 **Remaining (3/9):**
 - 📋 #1385 - Persistent list (needs functional data structure)

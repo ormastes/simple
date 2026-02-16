@@ -381,7 +381,7 @@ Apply same pattern to:
 
 ```
 src/std/string_core.spl             # NEW (150-200 lines, canonical implementations)
-src/std/string.spl                  # KEEP (existing, imports from string_core)
+src/std/text.spl                  # KEEP (existing, imports from string_core)
 src/std/template/utilities.spl     # REFACTOR (remove duplicates)
 src/core/types.spl                  # REFACTOR (delegate to string_core)
 ```
@@ -532,8 +532,8 @@ fn str_to_upper(s: text) -> text:
         i = i + 1
     result
 
-# Helper for case conversion (depends on std.string.char_code)
-use std.string.{char_code}
+# Helper for case conversion (depends on std.text.char_code)
+use std.text.{char_code}
 
 fn char_from_code(code: i64) -> text:
     """Convert ASCII code to character."""
@@ -562,7 +562,7 @@ File: `src/core/types.spl`
 # Before: 35 lines of implementations
 
 # After: 3 lines
-use std.string_core.{str_concat, str_len, str_eq, str_slice, str_char_at, str_contains, str_starts_with, str_ends_with, str_index_of, str_trim, str_replace}
+use std.text_core.{str_concat, str_len, str_eq, str_slice, str_char_at, str_contains, str_starts_with, str_ends_with, str_index_of, str_trim, str_replace}
 
 # Re-export for backwards compatibility
 export str_concat, str_len, str_eq, str_slice, str_char_at, str_contains, str_starts_with, str_ends_with, str_index_of, str_trim, str_replace
@@ -711,7 +711,7 @@ jj restore @-  # Return to previous state
 wc -l src/core/backend_types.spl  # 158
 wc -l src/compiler/backend/backend_types.spl  # 400+
 wc -l src/app/*/config.spl  # ~600
-wc -l src/std/string.spl src/std/template/utilities.spl  # 500+
+wc -l src/std/text.spl src/std/template/utilities.spl  # 500+
 
 # Test coverage
 bin/simple test --coverage

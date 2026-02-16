@@ -52,7 +52,7 @@ The lexer correctly handles newlines after migrating from `NL` to `_NL`.
 
 | File | Change | Lines | Status |
 |------|--------|-------|--------|
-| `src/std/string.spl` | Distinguished `_NL` vs `NL` | 5 | ✅ Working |
+| `src/std/text.spl` | Distinguished `_NL` vs `NL` | 5 | ✅ Working |
 | `src/core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
 | `src/core/lexer.spl` | `NL` → `_NL` (9 occurrences) | 9 | ✅ Working |
 
@@ -148,7 +148,7 @@ The platform library:
 - ✅ Reuses existing `std.common.target` types
 - ✅ Integrates with `std.platform` detection
 - ✅ Works with `app.io.mod` file I/O
-- ✅ Compatible with `std.string` constants
+- ✅ Compatible with `std.text` constants
 
 ## Performance Characteristics
 

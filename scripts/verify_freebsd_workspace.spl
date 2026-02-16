@@ -1,0 +1,198 @@
+#!/usr/bin/env simple
+# Verify FreeBSD Workspace Setup
+#
+# Checks that all FreeBSD workspace components are properly configured.
+#
+# Usage: bin/release/simple scripts/verify_freebsd_workspace.spl
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+
+use app.io.file_shell.{shell, shell_output}
+
+fn main():
+    print "=========================================="
+    print "FreeBSD Workspace Verification"
+    print "=========================================="
+    print ""
+
+    var errors = 0
+    var warnings = 0
+
+    # Check 1: QEMU installation
+    print "1. Checking QEMU installation..."
+    val qemu_check = shell_output("which qemu-system-x86_64 2>/dev/null")
+    if qemu_check != "":
+        print "   ✓ QEMU found: {qemu_check.trim()}"
+        val version = shell_output("qemu-system-x86_64 --version 2>/dev/null").split("\n")[0]
+        print "     Version: {version}"
+    else:
+        print "   ✗ QEMU not found"
+        print "     Install: sudo apt-get install qemu-system-x86"
+        errors = errors + 1
+
+    print ""
+
+    # Check 2: FreeBSD bootstrap script
+    print "2. Checking FreeBSD bootstrap script..."
+    if rt_file_exists("scripts/bootstrap-from-scratch-freebsd.sh"):
+        print "   ✓ Found: scripts/bootstrap-from-scratch-freebsd.sh"
+        val (out, err, exit_code) = shell("test -x scripts/bootstrap-from-scratch-freebsd.sh")
+        if exit_code == 0:
+            print "     ✓ Executable"
+        else:
+            print "     ⚠ Not executable (run: chmod +x scripts/bootstrap-from-scratch-freebsd.sh)"
+            warnings = warnings + 1
+    else:
+        print "   ✗ Missing: scripts/bootstrap-from-scratch-freebsd.sh"
+        errors = errors + 1
+
+    print ""
+
+    # Check 3: VM setup script
+    print "3. Checking VM setup script..."
+    if rt_file_exists("scripts/setup_freebsd_vm.spl"):
+        print "   ✓ Found: scripts/setup_freebsd_vm.spl"
+    else:
+        print "   ✗ Missing: scripts/setup_freebsd_vm.spl"
+        errors = errors + 1
+
+    print ""
+
+    # Check 4: FreeBSD test script
+    print "4. Checking FreeBSD test script..."
+    if rt_file_exists("scripts/test_freebsd_qemu.spl"):
+        print "   ✓ Found: scripts/test_freebsd_qemu.spl"
+    else:
+        print "   ✗ Missing: scripts/test_freebsd_qemu.spl"
+        errors = errors + 1
+
+    print ""
+
+    # Check 5: VM manager module
+    print "5. Checking VM manager module..."
+    if rt_file_exists("src/app/vm/qemu_manager.spl"):
+        print "   ✓ Found: src/app/vm/qemu_manager.spl"
+    else:
+        print "   ✗ Missing: src/app/vm/qemu_manager.spl"
+        errors = errors + 1
+
+    print ""
+
+    # Check 6: FreeBSD platform support
+    print "6. Checking FreeBSD platform support..."
+    if rt_file_exists("seed/platform/platform_freebsd.h"):
+        print "   ✓ Found: seed/platform/platform_freebsd.h"
+    else:
+        print "   ✗ Missing: seed/platform/platform_freebsd.h"
+        errors = errors + 1
+
+    if rt_file_exists("seed/cmake/toolchains/freebsd-x86_64.cmake"):
+        print "   ✓ Found: seed/cmake/toolchains/freebsd-x86_64.cmake"
+    else:
+        print "   ✗ Missing: seed/cmake/toolchains/freebsd-x86_64.cmake"
+        errors = errors + 1
+
+    print ""
+
+    # Check 7: Documentation
+    print "7. Checking documentation..."
+    if rt_file_exists("FREEBSD_WORKSPACE.md"):
+        print "   ✓ Found: FREEBSD_WORKSPACE.md"
+    else:
+        print "   ⚠ Missing: FREEBSD_WORKSPACE.md"
+        warnings = warnings + 1
+
+    if rt_file_exists("doc/guide/freebsd_workspace_setup.md"):
+        print "   ✓ Found: doc/guide/freebsd_workspace_setup.md"
+    else:
+        print "   ⚠ Missing: doc/guide/freebsd_workspace_setup.md"
+        warnings = warnings + 1
+
+    if rt_file_exists("doc/guide/freebsd_quick_reference.md"):
+        print "   ✓ Found: doc/guide/freebsd_quick_reference.md"
+    else:
+        print "   ⚠ Missing: doc/guide/freebsd_quick_reference.md"
+        warnings = warnings + 1
+
+    print ""
+
+    # Check 8: FreeBSD VM image
+    print "8. Checking FreeBSD VM image..."
+    val home = shell_output("echo $HOME").trim()
+    val vm_image = "{home}/vms/freebsd/FreeBSD-14.3-RELEASE-amd64.qcow2"
+    if rt_file_exists(vm_image):
+        print "   ✓ Found: {vm_image}"
+        val size_kb = shell_output("du -k '{vm_image}' 2>/dev/null | cut -f1").trim()
+        if size_kb != "":
+            val size_mb = size_kb.to_int() / 1024
+            print "     Size: {size_mb} MB"
+    else:
+        print "   ⚠ Not found: {vm_image}"
+        print "     Run: bin/release/simple scripts/setup_freebsd_vm.spl"
+        warnings = warnings + 1
+
+    print ""
+
+    # Check 9: VM start scripts
+    print "9. Checking VM start scripts..."
+    val start_interactive = "{home}/vms/freebsd/start-freebsd.sh"
+    val start_daemon = "{home}/vms/freebsd/start-freebsd-daemon.sh"
+
+    if rt_file_exists(start_interactive):
+        print "   ✓ Found: {start_interactive}"
+    else:
+        print "   ⚠ Not found: {start_interactive}"
+        warnings = warnings + 1
+
+    if rt_file_exists(start_daemon):
+        print "   ✓ Found: {start_daemon}"
+    else:
+        print "   ⚠ Not found: {start_daemon}"
+        warnings = warnings + 1
+
+    print ""
+
+    # Check 10: VM status
+    print "10. Checking VM status..."
+    val pid_file = "/tmp/freebsd-qemu.pid"
+    if rt_file_exists(pid_file):
+        val pid = shell_output("cat {pid_file}").trim()
+        val (out, err, exit_code) = shell("kill -0 {pid} 2>/dev/null")
+        if exit_code == 0:
+            print "   ✓ FreeBSD VM is running (PID: {pid})"
+            print "     SSH: ssh -p 2222 root@localhost"
+        else:
+            print "   ⚠ PID file exists but process not running"
+            warnings = warnings + 1
+    else:
+        print "   ⚠ FreeBSD VM is not running"
+        print "     Start: {start_daemon}"
+
+    print ""
+
+    # Summary
+    print "=========================================="
+    print "Verification Complete"
+    print "=========================================="
+    print ""
+
+    if errors == 0 and warnings == 0:
+        print "✓ All checks passed!"
+        print ""
+        print "FreeBSD workspace is fully configured."
+        print ""
+        print "Next steps:"
+        print "  1. Setup VM:  bin/release/simple scripts/setup_freebsd_vm.spl"
+        print "  2. Test:      bin/release/simple scripts/test_freebsd_qemu.spl"
+        print "  3. Read docs: cat FREEBSD_WORKSPACE.md"
+    else:
+        if errors > 0:
+            print "✗ {errors} error(s) found"
+        if warnings > 0:
+            print "⚠ {warnings} warning(s) found"
+        print ""
+        print "Review errors/warnings above and fix them."
+        print "See: FREEBSD_WORKSPACE.md for setup instructions"
+
+    print ""

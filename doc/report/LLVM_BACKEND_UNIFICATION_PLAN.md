@@ -419,7 +419,7 @@ bin/simple build --backend=llvm-core         # Core Simple backend (if exposed)
 **Bootstrap compilation test**:
 ```bash
 # 1. Core Simple bootstrap
-script/bootstrap-from-scratch.sh
+scripts/bootstrap-from-scratch.sh
 
 # 2. Full Simple self-compilation
 bin/simple build --backend=llvm src/compiler/*.spl

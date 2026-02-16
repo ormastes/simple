@@ -18,7 +18,7 @@ The user requested:
 
 ### 1. FFI Usage Audit Script (Bash)
 
-**File:** `script/audit_ffi_usage.sh`
+**File:** `scripts/audit_ffi_usage.sh`
 
 **Purpose:** Generate comprehensive report of all direct FFI calls
 
@@ -33,7 +33,7 @@ The user requested:
 
 **Usage:**
 ```bash
-bash script/audit_ffi_usage.sh
+bash scripts/audit_ffi_usage.sh
 ```
 
 **Results:**
@@ -43,7 +43,7 @@ bash script/audit_ffi_usage.sh
 
 ### 2. FFI Call Fixer Script (Python)
 
-**File:** `script/fix_ffi_calls.py`
+**File:** `scripts/fix_ffi_calls.py`
 
 **Purpose:** Automatically add TODO comments to direct FFI calls
 
@@ -60,7 +60,7 @@ bash script/audit_ffi_usage.sh
 
 **Usage:**
 ```bash
-python3 script/fix_ffi_calls.py
+python3 scripts/fix_ffi_calls.py
 ```
 
 **Results:**
@@ -163,8 +163,8 @@ src/app/debug/interpreter_backend.spl
 
 ### Created Documentation
 
-1. `script/audit_ffi_usage.sh` - Bash audit script
-2. `script/fix_ffi_calls.py` - Python auto-fixer script
+1. `scripts/audit_ffi_usage.sh` - Bash audit script
+2. `scripts/fix_ffi_calls.py` - Python auto-fixer script
 3. `doc/report/ffi_direct_calls.md` - Full audit report (3811 calls)
 4. `doc/report/missing_ffi_wrappers.md` - Missing wrappers list (100 functions)
 5. `doc/report/ffi_wrapper_automation_2026-02-03.md` - This file
@@ -237,7 +237,7 @@ export file_exists
 
 ```bash
 # Generate fresh report
-bash script/audit_ffi_usage.sh
+bash scripts/audit_ffi_usage.sh
 
 # Review report
 cat doc/report/ffi_direct_calls.md
@@ -247,7 +247,7 @@ cat doc/report/ffi_direct_calls.md
 
 ```bash
 # Run fixer on new files
-python3 script/fix_ffi_calls.py
+python3 scripts/fix_ffi_calls.py
 
 # Check what was modified
 git diff --stat src/
@@ -258,7 +258,7 @@ git diff --stat src/
 Edit scripts to modify `EXCLUDE_PATTERNS`:
 
 ```python
-# In script/fix_ffi_calls.py
+# In scripts/fix_ffi_calls.py
 EXCLUDE_PATTERNS = [
     '/core/',
     '/collections/',

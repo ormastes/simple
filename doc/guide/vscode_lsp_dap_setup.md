@@ -300,7 +300,7 @@ Create `.vscode/tasks.json` for build tasks:
       "problemMatcher": []
     },
     {
-      "label": "test-simple",
+      "label": "test",
       "type": "shell",
       "command": "simple",
       "args": ["test"],

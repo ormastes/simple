@@ -77,7 +77,7 @@ src/
 │   └── database/ # Database library (SDN tables, atomic ops)
 ├── std/         # Standard library
 │   ├── spec.spl # SSpec BDD framework
-│   ├── string.spl
+│   ├── text.spl
 │   ├── array.spl
 │   ├── math.spl
 │   ├── path.spl

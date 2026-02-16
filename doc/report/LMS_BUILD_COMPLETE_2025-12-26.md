@@ -19,10 +19,10 @@ Successfully built the LMS (Language Model Server) implementation of Anthropic's
 - **File:** `simple/std_lib/src/core/json.spl`
 - **Learning:** Simple treats `{` in strings as f-string markers; use `{{` for literal braces
 
-**string.spl** - Named enum variant fields
+**text.spl** - Named enum variant fields
 - **Problem:** Enum variants used named field syntax `InvalidByte(position: usize, byte: u8)`
-- **Fix:** Removed unused import from transport.spl (advanced string.spl not needed)
-- **File:** `simple/std_lib/src/core/string.spl`
+- **Fix:** Removed unused import from transport.spl (advanced text.spl not needed)
+- **File:** `simple/std_lib/src/core/text.spl`
 
 **session.spl** - Square bracket generic syntax
 - **Problem:** Used `Option[T]`, `Set[T]` instead of angle brackets

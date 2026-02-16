@@ -30,7 +30,7 @@
 - [ ] Breaking changes documented
 
 ### Build Verification
-- [ ] Local bootstrap build works: `./script/build-bootstrap.sh`
+- [ ] Local bootstrap build works: `./scripts/build-bootstrap.sh`
 - [ ] Package structure correct (symlink present)
 - [ ] Binary sizes reasonable
 - [ ] All platforms tested (if possible)
@@ -202,7 +202,7 @@ git push origin :refs/tags/v0.5.0-rc.1
 tar -tzf simple-bootstrap-*.spk | less
 ```
 
-**Solution**: Verify `script/build-bootstrap.sh` creates symlink
+**Solution**: Verify `scripts/build-bootstrap.sh` creates symlink
 
 ### Issue: Symlink Not Preserved
 

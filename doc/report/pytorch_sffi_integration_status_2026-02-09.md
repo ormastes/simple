@@ -167,7 +167,7 @@ Link FFI libraries directly into the Simple runtime binary (requires build syste
 
 ### 3. Build System Integration ⏸️
 
-**Created:** `script/build-ffi.spl` - Script to build FFI crates
+**Created:** `scripts/build-ffi.spl` - Script to build FFI crates
 
 **Status:** Script exists but needs testing
 
@@ -421,7 +421,7 @@ Will automatically:
 ### Test Files (Created)
 - ⏸️ `test_ffi_direct.spl` - Direct FFI test
 - ⏸️ `test_torch_sffi.spl` - Full integration test
-- ⏸️ `script/build-ffi.spl` - FFI build script
+- ⏸️ `scripts/build-ffi.spl` - FFI build script
 
 ---
 

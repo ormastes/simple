@@ -236,7 +236,7 @@ All imports resolved correctly:
 - ✅ `doc_coverage.analysis.group_comment_detection`
 - ✅ `app.stats.types`
 - ✅ `app.io.mod`
-- ✅ `std.string`
+- ✅ `std.text`
 
 ---
 
@@ -317,7 +317,7 @@ Expected output structure:
   "coverage_percent": 87,
   "sdoctest_percent": 46,
   "missing_sdoctest": [
-    "src/std/string.spl:split_lines",
+    "src/std/text.spl:split_lines",
     "src/std/array.spl:flatten",
     ...
   ]

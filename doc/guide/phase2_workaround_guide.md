@@ -9,14 +9,14 @@
 ## Background
 
 Phase 2 implemented 415 lines of SFFI wrappers (65+ functions) across three domains:
-- **String Methods** (`src/std/string.spl`) - 8 functions
+- **String Methods** (`src/std/text.spl`) - 8 functions
 - **Array Methods** (`src/std/array.spl`) - 7 functions
 - **System/Process** (`src/ffi/system.spl`) - 50+ functions
 
 All implementations are correct and tested, but the runtime import system prevents using them:
 
 ```simple
-use std.string.{string_trim}  # ✅ Loads successfully
+use std.text.{string_trim}  # ✅ Loads successfully
 string_trim("  test  ")        # ❌ "function not found"
 ```
 
@@ -52,7 +52,7 @@ describe "My Feature":
 
 ### ❌ Doesn't Work: Module Import
 ```simple
-use std.string.{string_trim}  # Module loads...
+use std.text.{string_trim}  # Module loads...
 
 describe "My Feature":
     it "trims strings":
@@ -161,7 +161,7 @@ describe "My Tests":
 
 ### After (Imports Work)
 ```simple
-use std.string.{string_trim}
+use std.text.{string_trim}
 
 describe "My Tests":
     it "works":
@@ -302,7 +302,7 @@ describe "Config Parser":
 The goal is to eventually use:
 
 ```simple
-use std.string.{string_trim, string_split, to_int_or}
+use std.text.{string_trim, string_split, to_int_or}
 use std.array.{array_append_all, array_partition, array_flatten}
 use ffi.system.{uuid_v4, process_spawn, env_remove}
 ```
@@ -333,7 +333,7 @@ Once the runtime import system is fixed, all Phase 2 functions will be immediate
 ## References
 
 - **Phase 2 Implementations:**
-  - `src/std/string.spl` - String SFFI (+70 lines)
+  - `src/std/text.spl` - String SFFI (+70 lines)
   - `src/std/array.spl` - Array SFFI (+85 lines)
   - `src/ffi/system.spl` - System/Process SFFI (260 lines)
 

@@ -125,7 +125,7 @@ ENTRYPOINT ["/usr/local/bin/simple"]
 - `bin/release/simple` (runtime binary)
 - `src/` (source files for mounting)
 - `test/` (test files for mounting)
-- `script/` (helper scripts)
+- `scripts/` (helper scripts)
 - `doc/guide/` (reference documentation)
 
 ---
@@ -174,7 +174,7 @@ docker-compose -f docker-compose.test.yml up --scale test-parallel=4
 
 ---
 
-### 5. script/docker-test.sh (284 lines)
+### 5. scripts/docker-test.sh (284 lines)
 
 **Purpose:** Convenient wrapper script for Docker test operations
 
@@ -200,19 +200,19 @@ docker-compose -f docker-compose.test.yml up --scale test-parallel=4
 **Example usage:**
 ```bash
 # Build images
-script/docker-test.sh build
+scripts/docker-test.sh build
 
 # Run all tests (isolated)
-script/docker-test.sh run
+scripts/docker-test.sh run
 
 # Run single test
-script/docker-test.sh run test/unit/std/string_spec.spl
+scripts/docker-test.sh run test/unit/std/string_spec.spl
 
 # Debug in container
-script/docker-test.sh shell
+scripts/docker-test.sh shell
 
 # Clean up
-script/docker-test.sh clean
+scripts/docker-test.sh clean
 ```
 
 ---
@@ -339,9 +339,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Build images
-        run: script/docker-test.sh build
+        run: scripts/docker-test.sh build
       - name: Run tests
-        run: script/docker-test.sh run
+        run: scripts/docker-test.sh run
       - name: Upload results
         uses: actions/upload-artifact@v3
         with:
@@ -353,9 +353,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Build images
-        run: script/docker-test.sh build
+        run: scripts/docker-test.sh build
       - name: Run integration tests
-        run: script/docker-test.sh run-full test/integration/
+        run: scripts/docker-test.sh run-full test/integration/
 ```
 
 ### GitLab CI Example
@@ -369,7 +369,7 @@ stages:
 build-images:
   stage: build
   script:
-    - script/docker-test.sh build
+    - scripts/docker-test.sh build
   artifacts:
     reports:
       dotenv: build.env
@@ -379,14 +379,14 @@ test-isolated:
   dependencies:
     - build-images
   script:
-    - script/docker-test.sh run
+    - scripts/docker-test.sh run
 
 test-full:
   stage: test
   dependencies:
     - build-images
   script:
-    - script/docker-test.sh run-full test/integration/
+    - scripts/docker-test.sh run-full test/integration/
 ```
 
 ---
@@ -396,7 +396,7 @@ test-full:
 ### Build Verification
 
 ```bash
-$ script/docker-test.sh build
+$ scripts/docker-test.sh build
 [INFO] Building Docker images...
 [INFO] Building simple-test-isolation:latest (~40MB)...
 [INFO] Building simple-test-full:latest (~450MB)...
@@ -410,7 +410,7 @@ simple-test-full        latest    447MB
 ### Single Test Execution
 
 ```bash
-$ script/docker-test.sh run test/unit/std/string_spec.spl
+$ scripts/docker-test.sh run test/unit/std/string_spec.spl
 [INFO] Running tests in isolated container...
 Running test: test/unit/std/string_spec.spl
 ✓ String tests (125 tests, 0 failures)
@@ -420,7 +420,7 @@ Running test: test/unit/std/string_spec.spl
 ### Full Suite Execution
 
 ```bash
-$ script/docker-test.sh run
+$ scripts/docker-test.sh run
 [INFO] Running tests in isolated container...
 Discovered 4,067 test files
 Running 4,067 tests...
@@ -546,12 +546,12 @@ With Phase 2 complete, the foundation is ready for Phase 3:
 **Update process:**
 ```bash
 # Rebuild images
-script/docker-test.sh clean
+scripts/docker-test.sh clean
 bin/simple build --release
-script/docker-test.sh build
+scripts/docker-test.sh build
 
 # Verify
-script/docker-test.sh run test/unit/std/string_spec.spl
+scripts/docker-test.sh run test/unit/std/string_spec.spl
 ```
 
 ### .dockerignore Maintenance
@@ -602,12 +602,12 @@ script/docker-test.sh run test/unit/std/string_spec.spl
 ## Appendix: File Sizes
 
 ```
-$ ls -lh docker/Dockerfile.test-* .dockerignore docker-compose.test.yml script/docker-test.sh
+$ ls -lh docker/Dockerfile.test-* .dockerignore docker-compose.test.yml scripts/docker-test.sh
 -rw-rw-r-- 1 ormastes 1.3K .dockerignore
 -rw-rw-r-- 1 ormastes 5.2K docker-compose.test.yml
 -rw-rw-r-- 1 ormastes 3.0K docker/Dockerfile.test-full
 -rw-rw-r-- 1 ormastes 2.2K docker/Dockerfile.test-isolation
--rwxrwxr-x 1 ormastes 7.2K script/docker-test.sh
+-rwxrwxr-x 1 ormastes 7.2K scripts/docker-test.sh
 ```
 
 **Total:** 18.9KB source code → 490MB containers (27MB runtime + tooling)
@@ -617,12 +617,12 @@ $ ls -lh docker/Dockerfile.test-* .dockerignore docker-compose.test.yml script/d
 ## Appendix: Line Counts
 
 ```
-$ wc -l docker/Dockerfile.test-* .dockerignore docker-compose.test.yml script/docker-test.sh
+$ wc -l docker/Dockerfile.test-* .dockerignore docker-compose.test.yml scripts/docker-test.sh
    59 docker/Dockerfile.test-isolation
    96 docker/Dockerfile.test-full
   100 .dockerignore
   202 docker-compose.test.yml
-  284 script/docker-test.sh
+  284 scripts/docker-test.sh
   741 total
 ```
 

@@ -529,7 +529,7 @@ simple doc-coverage --tag=priority:critical --tag=doc:missing_sdoctest
 Missing SDoctest in Critical APIs (src/std/)
 ============================================
 
-src/std/string.spl:42 - fn split(delimiter: text) -> [text]
+src/std/text.spl:42 - fn split(delimiter: text) -> [text]
   Tags: kind:function, scope:stdlib, api:public, doc:missing_sdoctest, priority:critical
 
 src/std/array.spl:89 - fn filter(predicate: fn(T) -> bool) -> [T]
@@ -581,7 +581,7 @@ simple build --warn-docs --warn-docs-priority=critical
 **Output:**
 ```
 warning: missing sdoctest for public stdlib function
-  --> src/std/string.spl:42:1
+  --> src/std/text.spl:42:1
    |
 42 | fn split(delimiter: text) -> [text]:
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -604,7 +604,7 @@ simple stats --format=json --doc-coverage-only | jq '.items[] | select(.tags[] |
 {
   "name": "split",
   "kind": "function",
-  "file": "src/std/string.spl",
+  "file": "src/std/text.spl",
   "line": 42,
   "signature": "fn split(delimiter: text) -> [text]",
   "tags": [

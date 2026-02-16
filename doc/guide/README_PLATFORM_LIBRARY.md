@@ -247,7 +247,7 @@ See `test/unit/std/platform/*_spec.spl` for comprehensive usage examples.
 
 - `src/std/common/target.spl` - TargetArch, TargetOS, Endian types
 - `src/std/platform.spl` - OS detection (is_windows, is_unix, etc.)
-- `src/std/string.spl` - Newline constants (LF, CRLF, _NL, NL)
+- `src/std/text.spl` - Newline constants (LF, CRLF, _NL, NL)
 - `app/io/mod.spl` - File I/O primitives
 
 ## Migration Guide

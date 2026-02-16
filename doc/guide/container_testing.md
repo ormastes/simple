@@ -74,7 +74,7 @@ Make changes to Simple source files or test specs:
 
 ```bash
 # Edit source
-vim src/std/string.spl
+vim src/std/text.spl
 
 # Edit test
 vim test/unit/std/string_spec.spl
@@ -274,7 +274,7 @@ pwd  # Should be /path/to/simple
 ls -lh bin/release/simple  # Should be ~33MB
 
 # If missing, download or build runtime
-script/install.sh
+scripts/install.sh
 ```
 
 ### Permission Denied
@@ -426,7 +426,7 @@ docker run -it --rm -v $(pwd):/workspace \
 
 # Inside container:
 simple test test/unit/failing_spec.spl --verbose
-simple -c "use std.string.{trim}; print trim(\"  hello  \")"
+simple -c "use std.text.{trim}; print trim(\"  hello  \")"
 ```
 
 ### Build Cache Optimization

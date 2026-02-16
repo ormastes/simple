@@ -20,7 +20,7 @@ Successfully implemented **5 phases** of stdlib/SFFI features in a hybrid parall
 **Agent:** string-impl
 **Duration:** ~8 minutes
 **Files Created:**
-- `src/std/string.spl` (214 lines) - String extension methods
+- `src/std/text.spl` (214 lines) - String extension methods
 - `src/std/convert.spl` (126 lines) - Type conversion functions
 
 **Functions Implemented:**
@@ -39,7 +39,7 @@ Successfully implemented **5 phases** of stdlib/SFFI features in a hybrid parall
   - `to_bool(s)`, `bool_to_text(b)`, `i64_to_text(n)`, `f64_to_text(n)`
 
 **SFFI Addition:**
-- Added `text_hash_native()` to `src/app/io/mod.spl` (position-based hash, with note to use `std.string.text_hash()` for proper FNV-1a)
+- Added `text_hash_native()` to `src/app/io/mod.spl` (position-based hash, with note to use `std.text.text_hash()` for proper FNV-1a)
 
 **Runtime Bugs Discovered & Worked Around:**
 1. `.to_int()` on single characters returns 0 instead of ASCII code → used 128-char ASCII lookup table
@@ -265,7 +265,7 @@ Many methods already built-in: `.sort()`, `.reverse()`, `.first()`, `.last()`, `
 
 | File | Lines | Functions | Purpose |
 |------|-------|-----------|---------|
-| `src/std/string.spl` | 214 | 14 | String extensions & hashing |
+| `src/std/text.spl` | 214 | 14 | String extensions & hashing |
 | `src/std/convert.spl` | 126 | 11 | Type conversions (unsigned, bool, etc.) |
 | `src/std/array.spl` | 251 | 18 | Collection utilities |
 | `src/std/math.spl` | 205 | 15 | Pure math utilities |
@@ -302,8 +302,8 @@ Many methods already built-in: `.sort()`, `.reverse()`, `.first()`, `.last()`, `
 
 ### Short-term
 1. Implement workaround scripts (Phase 6-7 from plan):
-   - `script/fix_reserved_words.spl` - Auto-fix parameter name conflicts
-   - `script/fix_new_constructors.spl` - Refactor `.new()` antipattern
+   - `scripts/fix_reserved_words.spl` - Auto-fix parameter name conflicts
+   - `scripts/fix_new_constructors.spl` - Refactor `.new()` antipattern
 2. Document newly discovered runtime bugs
 3. Update MEMORY.md with new limitations
 

@@ -53,7 +53,7 @@ Based on doc/test/uncovered_branches_analysis.md:
 ## Priority 2: Simple Implementations (2-8 hours)
 
 ### 2.1 String Parsing Functions
-**File:** `src/std/string.spl` or similar
+**File:** `src/std/text.spl` or similar
 
 Implement these if missing:
 - [ ] `ends_with` edge cases (see uncovered_branches_analysis line 121)

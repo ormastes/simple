@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-Successfully migrated all `"\n"` string literals to the `NL` constant from `std.string` in **110 test files** across the test/compiler/ and test/unit/ directories. The migration ensures cross-platform compatibility and follows the project's newline migration plan.
+Successfully migrated all `"\n"` string literals to the `NL` constant from `std.text` in **110 test files** across the test/compiler/ and test/unit/ directories. The migration ensures cross-platform compatibility and follows the project's newline migration plan.
 
 ## Results
 
@@ -23,7 +23,7 @@ Successfully migrated all `"\n"` string literals to the `NL` constant from `std.
 
 #### 1. Import Statement Added (110 files)
 ```simple
-use std.string.{NL}
+use std.text.{NL}
 ```
 
 Added after existing use statements or at the top of each file requiring the NL constant.
@@ -82,7 +82,7 @@ File.append(path, "Line 2\n")
 expect content to_equal "Line 1\nLine 2\n"
 
 # After
-use std.string.{NL}
+use std.text.{NL}
 File.write(path, "Line 1" + NL)
 File.append(path, "Line 2" + NL)
 expect content to_equal "Line 1{NL}Line 2{NL}"
@@ -94,7 +94,7 @@ expect content to_equal "Line 1{NL}Line 2{NL}"
 val lines = output.split("\n")
 
 # After
-use std.string.{NL}
+use std.text.{NL}
 val lines = output.split(NL)
 ```
 
@@ -104,7 +104,7 @@ val lines = output.split(NL)
 val source = "parent:\n    child:\n        value"
 
 # After
-use std.string.{NL}
+use std.text.{NL}
 val source = "parent:{NL}    child:{NL}        value"
 ```
 
@@ -114,7 +114,7 @@ val source = "parent:{NL}    child:{NL}        value"
 if first == "\n" or last == "\n":
 
 # After
-use std.string.{NL}
+use std.text.{NL}
 if first == NL or last == NL:
 ```
 
@@ -123,11 +123,11 @@ if first == NL or last == NL:
 ### Command Line Verification
 ```bash
 # Count files with NL import
-grep -r 'use std.string.{NL}' test/unit/ test/compiler/ --include="*.spl" -l | wc -l
+grep -r 'use std.text.{NL}' test/unit/ test/compiler/ --include="*.spl" -l | wc -l
 # Result: 110
 
 # Verify newline_constants_spec.spl was skipped
-grep 'use std.string.{NL}' test/unit/std/newline_constants_spec.spl
+grep 'use std.text.{NL}' test/unit/std/newline_constants_spec.spl
 # Result: (no match) ✓
 
 # Check remaining \n occurrences (excluding test file)
@@ -263,7 +263,7 @@ grep -r '\\n' test/unit/ test/compiler/ --include="*.spl" --exclude="newline_con
 A Python script (`migrate_nl_complete.py`) was created to automate the migration:
 - Scans all `.spl` files in test/compiler/ and test/unit/
 - Skips test/unit/std/newline_constants_spec.spl
-- Adds `use std.string.{NL}` import if not present
+- Adds `use std.text.{NL}` import if not present
 - Applies replacement patterns for common `\n` usage
 - Preserves legitimate exceptions (escape sequence testing)
 

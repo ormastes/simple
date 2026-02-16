@@ -271,7 +271,7 @@ A comprehensive 7-agent audit revealed that **95%+ of features work correctly**.
 ### For Development
 
 **IMMEDIATE ACTIONS:**
-1. Run `script/remove_skip_annotations.spl`
+1. Run `scripts/remove_skip_annotations.spl`
 2. Fix test runner timeout (1 day)
 3. Remove @skip from passing tests
 4. Run full test suite

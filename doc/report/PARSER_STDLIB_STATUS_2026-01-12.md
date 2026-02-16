@@ -223,7 +223,7 @@ fn slice(start: usize, end: usize) -> Slice<T>:
 16. `result.spl` - "expected Comma, found Colon"
 17. `string_core.spl` - "expected Colon, found Newline"
 18. `string_ops.spl` - "expected Colon, found DoubleColon"
-19. `string.spl` - "expected Fn, found Static"
+19. `text.spl` - "expected Fn, found Static"
 20. `string_traits.spl` - "expected Colon, found DoubleColon"
 21. `string_utils.spl` - "expected Newline, found Integer(1)"
 22. `sync.spl` - "expected Comma, found Colon"

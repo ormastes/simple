@@ -1,0 +1,134 @@
+#!/usr/bin/env simple
+# Test Simple on macOS VM via QEMU (OSX-KVM)
+#
+# Generates C code on the Linux host, copies to the macOS VM,
+# compiles with clang inside macOS, and verifies the output.
+#
+# Prerequisites: macOS VM running with SSH + Xcode CLI tools installed
+#
+# Usage: bin/release/simple scripts/test_macos_qemu.spl
+
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.file_shell.{shell, shell_output, file_write, file_delete}
+use app.vm.qemu_manager.{VmConfig, macos_config, vm_is_running, vm_wait_ssh, vm_exec, vm_copy_to}
+
+fn main() -> i64:
+    print "=========================================="
+    print "Simple macOS VM Test (OSX-KVM)"
+    print "=========================================="
+    print ""
+
+    val config = macos_config()
+
+    # Step 1: Check prerequisites
+    print "Step 1: Check Prerequisites"
+    print "----------------------------------------"
+    if not vm_is_running(config):
+        print "SKIP: macOS VM not running (port {config.ssh_port})"
+        print "Start it with: ~/vms/macos/start-macos.sh"
+        return 0
+
+    if not rt_file_exists("bin/release/simple"):
+        print "FAIL: Simple bootstrap binary not found"
+        return 1
+
+    # Check SSH
+    if not vm_wait_ssh(config, 10):
+        print "SKIP: macOS VM SSH not available"
+        return 0
+    print "Prerequisites OK"
+    print ""
+
+    # Step 2: Verify clang in VM
+    print "Step 2: Check Compiler in VM"
+    print "----------------------------------------"
+    val (clang_out, clang_err, clang_exit) = vm_exec(config, "clang --version 2>/dev/null")
+    if clang_exit != 0:
+        print "FAIL: clang not available in macOS VM"
+        print "Install with: xcode-select --install"
+        return 1
+    val clang_version = clang_out.split("\n")[0]
+    print "Compiler: {clang_version}"
+    print ""
+
+    # Step 3: Write multi-file test sources
+    print "Step 3: Create Multi-File Test Sources"
+    print "----------------------------------------"
+    val test_dir = "/tmp/simple_macos_test"
+    shell("mkdir -p {test_dir}")
+
+    val base_spl = "fn square(x: i64) -> i64:\n    return x * x\n\nexport square\n"
+    val mid_spl = "use base.{square}\n\nfn sum_of_squares(a: i64, b: i64) -> i64:\n    return square(a) + square(b)\n\nexport sum_of_squares\n"
+    val main_spl = "use mid.{sum_of_squares}\n\nfn main():\n    val result = sum_of_squares(3, 4)\n    print \"{result}\"\n"
+
+    file_write("{test_dir}/base.spl", base_spl)
+    file_write("{test_dir}/mid.spl", mid_spl)
+    file_write("{test_dir}/main.spl", main_spl)
+    print "Test sources created"
+    print ""
+
+    # Step 4: Generate C code on host
+    print "Step 4: Generate C Code"
+    print "----------------------------------------"
+    val gen_cmd = "bin/release/simple src/app/compile/native.spl {test_dir}/main.spl {test_dir}/test.c --gen-c-only"
+    val (gen_out, gen_err, gen_exit) = shell(gen_cmd)
+    if gen_exit != 0:
+        print "FAIL: C code generation failed"
+        if gen_err != "":
+            print gen_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print gen_out
+    print ""
+
+    # Step 5: Copy C file to macOS VM
+    print "Step 5: Copy to macOS VM"
+    print "----------------------------------------"
+    if not vm_copy_to(config, "{test_dir}/test.c", "/tmp/test.c"):
+        print "FAIL: Could not copy C file to macOS VM"
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Copied test.c to macOS VM"
+    print ""
+
+    # Step 6: Compile inside macOS VM
+    print "Step 6: Compile Inside macOS"
+    print "----------------------------------------"
+    val (cc_out, cc_err, cc_exit) = vm_exec(config, "clang -o /tmp/test_binary /tmp/test.c")
+    if cc_exit != 0:
+        print "FAIL: Compilation failed inside macOS VM"
+        if cc_err != "":
+            print cc_err
+        shell("rm -rf {test_dir}")
+        return 1
+    print "Compiled inside macOS VM"
+    print ""
+
+    # Step 7: Run and verify
+    print "Step 7: Verify Output"
+    print "----------------------------------------"
+    val (run_out, run_err, run_exit) = vm_exec(config, "/tmp/test_binary")
+    val output = run_out.trim()
+
+    # Cleanup
+    shell("rm -rf {test_dir}")
+    vm_exec(config, "rm -f /tmp/test.c /tmp/test_binary")
+
+    if output == "25":
+        print "Output: {output}"
+        print ""
+        print "=========================================="
+        print "PASS: macOS VM Test"
+        print "=========================================="
+        print ""
+        print "Summary:"
+        print "  VM: macOS (via OSX-KVM/QEMU)"
+        print "  Method: Generate C on host, compile in VM"
+        print "  Compiler: clang (Xcode CLI tools)"
+        print "  Test: 3-file dependency chain"
+        print "  Expected: 25, Got: {output}"
+        return 0
+    else:
+        print "FAIL: Expected output '25', got '{output}'"
+        return 1

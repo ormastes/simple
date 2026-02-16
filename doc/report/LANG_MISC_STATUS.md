@@ -73,7 +73,7 @@ trait ContextManager:
 **Status:** COMPLETE - Stdlib implementation exists
 
 **Implementation:**
-- File: `simple/std_lib/src/core/string.spl`
+- File: `simple/std_lib/src/core/text.spl`
 - Struct: `String` with UTF-8 support
 - Full string manipulation methods
 - Unifies `str` and `"..."` syntax
@@ -161,7 +161,7 @@ assert true.to_int() == 1
 - `simple/std_lib/src/core/context.spl` - ContextManager trait
 - `simple/std_lib/src/core/list.spl` - List[T] implementation
 - `simple/std_lib/src/core/array.spl` - Array[T, N] implementation
-- `simple/std_lib/src/core/string.spl` - String implementation
+- `simple/std_lib/src/core/text.spl` - String implementation
 - `simple/std_lib/src/core/persistent_list.spl` - PList[T] persistent list (NEW)
 - `simple/std_lib/src/core/primitives.spl` - Primitive extensions (NEW)
 

@@ -242,7 +242,7 @@ If you want to rebuild from Rust source in the future:
    ```
 3. **Run local build script**
    ```bash
-   script/build-bootstrap-multi-platform.sh
+   scripts/build-bootstrap-multi-platform.sh
    ```
 
 ## Summary

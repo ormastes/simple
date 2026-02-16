@@ -10,7 +10,7 @@
 ```
 feat: Add comprehensive macOS self-hosting tests to CI
 
-- Add script/test-macos-self-hosting.sh comprehensive test script
+- Add scripts/test-macos-self-hosting.sh comprehensive test script
 - Update bootstrap-build.yml with macOS x86_64 and ARM64 tests
 - Tests verify: bootstrap → check → native compilation → execution
 ```
@@ -26,7 +26,7 @@ Complete implementation plan covering:
 - CI integration plan
 
 ### ✅ 3. Created FreeBSD Setup Script
-**File:** `script/setup-freebsd-vm.sh`
+**File:** `scripts/setup-freebsd-vm.sh`
 
 **What it does:**
 - Checks QEMU installation
@@ -36,12 +36,12 @@ Complete implementation plan covering:
 
 **Usage:**
 ```bash
-./script/setup-freebsd-vm.sh
+./scripts/setup-freebsd-vm.sh
 # Downloads FreeBSD VM and sets up QEMU
 ```
 
 ### ✅ 4. Created FreeBSD Test Script
-**File:** `script/test-freebsd-qemu.sh`
+**File:** `scripts/test-freebsd-qemu.sh`
 
 **Tests 10 steps:**
 1. ✅ Prerequisites check (QEMU, VM image, bootstrap)
@@ -57,7 +57,7 @@ Complete implementation plan covering:
 
 **Usage:**
 ```bash
-./script/test-freebsd-qemu.sh
+./scripts/test-freebsd-qemu.sh
 # Runs complete bootstrap → native hello test
 ```
 
@@ -104,7 +104,7 @@ sudo apt-get install qemu-system-x86 qemu-utils
 
 ```bash
 # Download FreeBSD and prepare VM
-./script/setup-freebsd-vm.sh
+./scripts/setup-freebsd-vm.sh
 
 # Output:
 # ✅ QEMU installed
@@ -116,7 +116,7 @@ sudo apt-get install qemu-system-x86 qemu-utils
 
 ```bash
 # Run comprehensive test
-./script/test-freebsd-qemu.sh
+./scripts/test-freebsd-qemu.sh
 
 # Expected output:
 # ✅ FreeBSD VM: Running
@@ -146,7 +146,7 @@ kldload linux64  # Enable Linuxulator
 
 ```
 ┌─────────────────────────────────────┐
-│ ./script/test-freebsd-qemu.sh      │
+│ ./scripts/test-freebsd-qemu.sh      │
 └────────────┬────────────────────────┘
              │
              ▼
@@ -225,7 +225,7 @@ kldload linux64  # Enable Linuxulator
 ## Files Created
 
 ```
-script/
+scripts/
 ├── setup-freebsd-vm.sh           # FreeBSD VM setup
 ├── test-freebsd-qemu.sh          # Comprehensive test
 └── test-macos-self-hosting.sh    # macOS test (previous)
@@ -243,7 +243,7 @@ Documentation/
 ## Expected Test Output
 
 ```bash
-$ ./script/test-freebsd-qemu.sh
+$ ./scripts/test-freebsd-qemu.sh
 
 ==========================================
 Simple FreeBSD QEMU Bootstrap Test
@@ -347,11 +347,11 @@ Simple can run on FreeBSD! ✅
 
 ```bash
 # 1. Setup FreeBSD VM
-./script/setup-freebsd-vm.sh
+./scripts/setup-freebsd-vm.sh
 # ~5 minutes (downloads 600MB image)
 
 # 2. Run test
-./script/test-freebsd-qemu.sh
+./scripts/test-freebsd-qemu.sh
 # ~2 minutes (VM boot + tests)
 
 # 3. Manual exploration (optional)
@@ -371,10 +371,10 @@ Add to `.github/workflows/bootstrap-build.yml`:
 
     steps:
       - name: Setup FreeBSD VM
-        run: ./script/setup-freebsd-vm.sh
+        run: ./scripts/setup-freebsd-vm.sh
 
       - name: Run FreeBSD tests
-        run: ./script/test-freebsd-qemu.sh
+        run: ./scripts/test-freebsd-qemu.sh
         timeout-minutes: 20
 ```
 
@@ -450,8 +450,8 @@ ls -la /compat/linux
 - ✅ CI integration prepared
 
 **Testing:**
-- ✅ Automated test script: `script/test-freebsd-qemu.sh`
-- ✅ Setup script: `script/setup-freebsd-vm.sh`
+- ✅ Automated test script: `scripts/test-freebsd-qemu.sh`
+- ✅ Setup script: `scripts/setup-freebsd-vm.sh`
 - ✅ Documentation: `FREEBSD_BOOTSTRAP_PLAN.md`
 
 **Simple Language v0.5.0 now supports FreeBSD!** 🎉

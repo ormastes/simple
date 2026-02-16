@@ -75,7 +75,7 @@ The library uses a **PlatformConfig** struct to describe any platform (host, rem
 
 ### String Module Changes
 
-Modified `src/std/string.spl` to clearly distinguish:
+Modified `src/std/text.spl` to clearly distinguish:
 - **`_NL`** - explicit LF (`"\n"`) for byte-level comparisons
 - **`NL`** - default newline (LF for consistency)
 - **`platform_newline()`** - function returning OS-specific newline
@@ -83,7 +83,7 @@ Modified `src/std/string.spl` to clearly distinguish:
 ### Lexer Module Changes
 
 Updated `src/core/lexer_struct.spl` and `src/core/lexer.spl`:
-- Changed `use std.string.{NL}` → `use std.string.{_NL}`
+- Changed `use std.text.{NL}` → `use std.text.{_NL}`
 - Replaced all `NL` references with `_NL` (28 occurrences total)
 - Lexer now uses explicit LF for token comparison
 
@@ -179,7 +179,7 @@ The implementation builds on existing modules:
 |--------|-------|
 | `std.common.target` | TargetArch, TargetOS, Endian - foundation types |
 | `std.platform` | get_host_os(), get_host_arch() - host detection |
-| `std.string` | LF, CR, CRLF, _NL - newline constants |
+| `std.text` | LF, CR, CRLF, _NL - newline constants |
 | `app.io.mod` | file_read_text, file_write - file I/O |
 
 ## Testing Strategy

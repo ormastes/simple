@@ -6,7 +6,7 @@
 ## What Was Done
 
 ### ✅ 1. Created Comprehensive Test Script
-**File:** `script/test-macos-self-hosting.sh`
+**File:** `scripts/test-macos-self-hosting.sh`
 
 **Tests 10 steps:**
 1. Verify bootstrap binary exists
@@ -46,7 +46,7 @@
 
 #### ✅ Bootstrap Build
 ```bash
-SIMPLE_BOOTSTRAP=bin/bootstrap/simple script/build-bootstrap.sh
+SIMPLE_BOOTSTRAP=bin/bootstrap/simple scripts/build-bootstrap.sh
 # Builds new runtime using existing bootstrap
 ```
 
@@ -95,7 +95,7 @@ bin/simple compile --native -o hello hello.spl
         │                    │
         ▼                    ▼
 ┌────────────────────────────────────┐
-│ script/test-macos-self-hosting.sh  │
+│ scripts/test-macos-self-hosting.sh  │
 │                                    │
 │ ✅ Bootstrap verification          │
 │ ✅ Interpreter test                │
@@ -121,7 +121,7 @@ bin/simple compile --native -o hello hello.spl
 M .github/workflows/bootstrap-build.yml    # Updated test jobs
 
 # Created
-?? script/test-macos-self-hosting.sh       # Comprehensive test
+?? scripts/test-macos-self-hosting.sh       # Comprehensive test
 ?? BUILD_VERIFICATION.md                   # Linux verification
 ?? BOOTSTRAP_NATIVE_FIXES.md               # Native compilation docs
 ?? QEMU_MACOS_TESTING.md                   # QEMU guide
@@ -144,7 +144,7 @@ jj git push --bookmark main
 ### Option 2: Local macOS Testing
 ```bash
 # On a Mac, run:
-./script/test-macos-self-hosting.sh
+./scripts/test-macos-self-hosting.sh
 
 # Expected output:
 # ✅ Bootstrap binary: Working (31M)

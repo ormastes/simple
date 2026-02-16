@@ -144,7 +144,7 @@ fn generate_markdown(spec: SpecFile, current_time: text) -> text:
 #### get_first_line()
 **Python (implicit in code):**
 ```python
-desc = tc.docstring.split('\n')[0][:60] + "..." if len(tc.docstring) > 60 else tc.docstring
+desc = tc.doctext.split('\n')[0][:60] + "..." if len(tc.docstring) > 60 else tc.docstring
 ```
 
 **Simple (lines 195-208):**

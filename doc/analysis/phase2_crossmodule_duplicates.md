@@ -12,7 +12,7 @@ Cross-module duplication analysis reveals **7 major architectural patterns** req
 ### Key Findings
 
 1. **Backend Type Definitions:** Duplicated across `src/core/backend_types.spl` (158 lines) and `src/compiler/backend/backend_types.spl` (~400 lines)
-2. **String Utilities:** 3-way duplication across `src/core/types.spl`, `src/std/string.spl`, `src/std/template/utilities.spl`
+2. **String Utilities:** 3-way duplication across `src/core/types.spl`, `src/std/text.spl`, `src/std/template/utilities.spl`
 3. **Error Handling:** 3 separate hierarchies in `src/core/error.spl`, `src/std/error.spl`, `src/compiler/backend/codegen_errors.spl`
 4. **Loop Patterns:** 955 occurrences of `while i < arr.len()` manual iteration across 244 files
 5. **Integer-to-String Conversion:** Repeated 70+ line implementation in multiple locations
@@ -94,7 +94,7 @@ enum BackendKind:
 ### Locations
 
 1. **Core Simple:** `src/core/types.spl` (lines 14-48)
-2. **Standard Library:** `src/std/string.spl` (char_code lookup, 387+)
+2. **Standard Library:** `src/std/text.spl` (char_code lookup, 387+)
 3. **Template Engine:** `src/std/template/utilities.spl` (lines 40-180)
 4. **Legacy Concatenated:** `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
 
@@ -168,7 +168,7 @@ fn str_to_lower(s: text) -> text:
 
 **Migration:**
 1. Create `src/std/string_core.spl` with canonical implementations
-2. Update imports: `use std.string_core.{str_starts_with, ...}`
+2. Update imports: `use std.text_core.{str_starts_with, ...}`
 3. Delete duplicates from template/utilities.spl
 4. Core types delegates to string_core
 5. Mark `doc/analysis/stdlib_utils_concatenated.spl` as legacy
@@ -294,7 +294,7 @@ while i < arr.len():
 
 ### Examples
 
-**String processing (src/std/string.spl:136-140)**
+**String processing (src/std/text.spl:136-140)**
 ```simple
 fn text_hash(s: text) -> i64:
     var hash = 2166136261

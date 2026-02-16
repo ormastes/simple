@@ -42,7 +42,7 @@ Implemented intelligent wrapper (`bin/simple`) that:
 
 ### 3. Local Build System ✅
 
-Created comprehensive build script: `script/build-bootstrap-multi-platform.sh`
+Created comprehensive build script: `scripts/build-bootstrap-multi-platform.sh`
 
 **Features:**
 - Detects current platform
@@ -54,7 +54,7 @@ Created comprehensive build script: `script/build-bootstrap-multi-platform.sh`
 **Usage:**
 ```bash
 # Build all platforms
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 
 # Install cross-compilation tool (optional)
 cargo install cross --git https://github.com/cross-rs/cross
@@ -188,7 +188,7 @@ on:
 
 ```bash
 # 1. Build all platforms
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 
 # 2. Create release package
 bin/simple build package
@@ -250,7 +250,7 @@ System Status: OPERATIONAL
    - Usage instructions
    - Build guide
 
-3. **`script/build-bootstrap-multi-platform.sh`** (3.9 KB)
+3. **`scripts/build-bootstrap-multi-platform.sh`** (3.9 KB)
    - Local multi-platform build script
    - Cross-compilation support
    - Build summary

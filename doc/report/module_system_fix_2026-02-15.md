@@ -14,7 +14,7 @@ This report documents the investigation and fix for the broken SIMPLE_LIB import
 **Symptom:**
 ```simple
 # This import failed with "function not found"
-use std.string.{trim, upper}
+use std.text.{trim, upper}
 
 val result = trim("  hello  ")  # Error: function not found
 ```
@@ -35,15 +35,15 @@ The module loader resolved the module file path correctly via `SIMPLE_LIB`, but 
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ 1. Import Statement: use std.string.{trim}          │
+│ 1. Import Statement: use std.text.{trim}          │
 └──────────────────────┬──────────────────────────────┘
                        │
                        v
 ┌─────────────────────────────────────────────────────┐
 │ 2. Path Resolution:                                 │
-│    - Try local: ./std/string.spl                    │
-│    - Try SIMPLE_LIB: $SIMPLE_LIB/std/string.spl     │
-│    Result: /path/to/src/std/string.spl              │
+│    - Try local: ./std/text.spl                    │
+│    - Try SIMPLE_LIB: $SIMPLE_LIB/std/text.spl     │
+│    Result: /path/to/src/std/text.spl              │
 └──────────────────────┬──────────────────────────────┘
                        │
                        v
@@ -251,7 +251,7 @@ fn cached_exports(abs_path: text) -> [text]
 # Resolve module path (local → SIMPLE_LIB)
 fn resolve_module_path(import_path: text) -> text
 
-# Example: "std.string" → "/path/to/src/std/string.spl"
+# Example: "std.text" → "/path/to/src/std/text.spl"
 val abs = resolve_module_path("std/string")
 ```
 
@@ -272,7 +272,7 @@ fn lookup_module_function(module_path: text, symbol: text) -> any
 
 ```simple
 # Import specific functions
-use std.string.{trim, upper, lower}
+use std.text.{trim, upper, lower}
 
 # Import with nested paths
 use std.collections.list.{map, filter, reduce}
@@ -322,7 +322,7 @@ bin/simple test string_spec.spl  # Should use local symlink
 
 # Test SIMPLE_LIB import
 cd /tmp
-echo 'use std.string.{trim}; print trim("  hi  ")' > test.spl
+echo 'use std.text.{trim}; print trim("  hi  ")' > test.spl
 bin/simple test test.spl  # Should resolve via SIMPLE_LIB
 ```
 
@@ -338,8 +338,8 @@ expect(result).to_equal([2, 4, 6])
 **3. Module Caching**
 ```simple
 # Import same module twice
-use std.string.{trim}
-use std.string.{upper}
+use std.text.{trim}
+use std.text.{upper}
 
 # Only loaded once (check via debug logging)
 ```
@@ -386,13 +386,13 @@ use std.string.{upper}
 ```bash
 # Create symlinks in test directory
 cd test/unit/std
-ln -s ../../../src/std/string.spl string.spl
+ln -s ../../../src/std/text.spl text.spl
 ln -s ../../../src/std/array.spl array.spl
 ```
 
 ```simple
 # Import via symlink
-use string.{trim}  # Resolves to ./string.spl symlink
+use string.{trim}  # Resolves to ./text.spl symlink
 ```
 
 **After (using SIMPLE_LIB):**
@@ -406,7 +406,7 @@ echo 'export SIMPLE_LIB=/path/to/simple/src' >> ~/.bashrc
 
 ```simple
 # Import directly from stdlib
-use std.string.{trim}  # Resolves via SIMPLE_LIB
+use std.text.{trim}  # Resolves via SIMPLE_LIB
 ```
 
 ### Updating Existing Imports
@@ -414,28 +414,28 @@ use std.string.{trim}  # Resolves via SIMPLE_LIB
 **Pattern 1: Bare imports**
 ```simple
 # Old (broken)
-import std.string
+import std.text
 
 # New (works)
-use std.string.{trim, upper, lower}
+use std.text.{trim, upper, lower}
 ```
 
 **Pattern 2: Star imports**
 ```simple
 # Old (not supported)
-use std.string.*
+use std.text.*
 
 # New (explicit imports)
-use std.string.{trim, upper, lower, split, join}
+use std.text.{trim, upper, lower, split, join}
 ```
 
 **Pattern 3: Aliased imports**
 ```simple
 # Old (broken - 'as' keyword not supported in runtime)
-use std.string.{trim as strip}
+use std.text.{trim as strip}
 
 # New (import without alias)
-use std.string.{trim}
+use std.text.{trim}
 val strip = trim  # Create alias manually
 ```
 
@@ -480,7 +480,7 @@ val strip = trim  # Create alias manually
 ### Future Work
 
 **1. Module Namespaces**
-- Import module as namespace: `use std.string as str`
+- Import module as namespace: `use std.text as str`
 - Call with prefix: `str.trim("hello")`
 - Prevents name collisions
 

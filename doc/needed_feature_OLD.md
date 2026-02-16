@@ -390,7 +390,7 @@ All game engine components are pending/skipped:
 ### GPU/Compute (Requires Hardware)
 - **CUDA support**
   - 18 test cases in `test/feature/cuda_spec.spl` - @skip (requires_cuda tag)
-  - FFI integration tests in test-simple/lib
+  - FFI integration tests in test/lib
 
 - **Vulkan support**
   - 21 test cases in `test/feature/vulkan_spec.spl` - @skip (requires_vulkan tag)

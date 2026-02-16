@@ -73,7 +73,7 @@ static const int64_t HirType_Int = 0;             // Redefinition!
 
 ### Native FreeBSD Bootstrap (Ready to Use!)
 
-**We created:** `script/bootstrap-from-scratch-freebsd.sh`
+**We created:** `scripts/bootstrap-from-scratch-freebsd.sh`
 
 **This works because:**
 1. Uses native FreeBSD tools (gmake, clang++)
@@ -93,7 +93,7 @@ static const int64_t HirType_Int = 0;             // Redefinition!
 # 2. SSH in and bootstrap
 ssh -p 2222 root@localhost
 cd simple
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # 3. Done!
 bin/simple --version  # ✅ Full FreeBSD Simple compiler
@@ -286,8 +286,8 @@ clang++ -o myprogram myprogram.cpp
 - `doc/guide/freebsd_quick_reference.md` - Cheat sheet
 
 **Scripts:**
-- `script/bootstrap-from-scratch-freebsd.sh` - Native bootstrap
-- `script/verify_freebsd_workspace.spl` - Verification
+- `scripts/bootstrap-from-scratch-freebsd.sh` - Native bootstrap
+- `scripts/verify_freebsd_workspace.spl` - Verification
 
 ---
 

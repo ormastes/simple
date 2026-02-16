@@ -33,6 +33,7 @@ Status:  ✅ Production Ready
 - ✅ **Comprehensive Testing** - 4,067 tests, 100% pass rate
 
 **Documentation:**
+- [AGENTS.md](AGENTS.md) / [CLAUDE.md](CLAUDE.md) - Development guide, agent definitions
 - [Release Notes](doc/RELEASE_2026-02-14.md) - Complete release information
 - [Production Summary](doc/PRODUCTION_READY_SUMMARY.md) - Quick reference
 - [Test Results](doc/session/full_test_suite_results_2026-02-14.md) - Detailed test analysis

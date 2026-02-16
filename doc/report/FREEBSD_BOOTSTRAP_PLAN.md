@@ -202,7 +202,7 @@ bin/bootstrap/simple hello_freebsd.spl
 
 ### 4.1 Create Test Script
 
-**File:** `script/test-freebsd-qemu.sh`
+**File:** `scripts/test-freebsd-qemu.sh`
 
 ```bash
 #!/bin/bash
@@ -227,7 +227,7 @@ echo "--------------------------------------"
 if [ ! -f "${VM_DIR}/${VM_IMAGE}" ]; then
     echo "❌ FreeBSD VM image not found"
     echo "Please run setup first:"
-    echo "  script/setup-freebsd-vm.sh"
+    echo "  scripts/setup-freebsd-vm.sh"
     exit 1
 fi
 
@@ -359,7 +359,7 @@ echo ""
 
 ### 4.2 Create VM Setup Script
 
-**File:** `script/setup-freebsd-vm.sh`
+**File:** `scripts/setup-freebsd-vm.sh`
 
 ```bash
 #!/bin/bash
@@ -463,7 +463,7 @@ echo "  1. Start VM:    cd ${VM_DIR} && ./start-freebsd.sh"
 echo "  2. SSH to VM:   ssh -p 2222 root@localhost"
 echo "  3. Set password (first login)"
 echo "  4. Enable Linuxulator: kldload linux64"
-echo "  5. Test Simple:  script/test-freebsd-qemu.sh"
+echo "  5. Test Simple:  scripts/test-freebsd-qemu.sh"
 echo ""
 ```
 
@@ -498,11 +498,11 @@ Add FreeBSD testing job:
           sudo apt-get install -y qemu-system-x86 qemu-utils
 
           # Download FreeBSD VM image
-          ./script/setup-freebsd-vm.sh
+          ./scripts/setup-freebsd-vm.sh
 
       - name: Run FreeBSD QEMU tests
         run: |
-          ./script/test-freebsd-qemu.sh
+          ./scripts/test-freebsd-qemu.sh
         timeout-minutes: 20
 
       - name: Upload test results
@@ -585,8 +585,8 @@ ls -l /dev/kvm
 
 ## Next Steps
 
-1. ✅ Create setup script: `script/setup-freebsd-vm.sh`
-2. ✅ Create test script: `script/test-freebsd-qemu.sh`
+1. ✅ Create setup script: `scripts/setup-freebsd-vm.sh`
+2. ✅ Create test script: `scripts/test-freebsd-qemu.sh`
 3. 🔄 Test locally on Linux with QEMU
 4. 🔄 Update GitHub Actions workflow
 5. 🔄 Push and verify CI passes

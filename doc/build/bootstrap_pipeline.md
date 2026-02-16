@@ -302,7 +302,7 @@ git clone https://github.com/simple-lang/simple.git
 cd simple
 
 # Run bootstrap from scratch
-./script/bootstrap-from-scratch.sh
+./scripts/bootstrap-from-scratch.sh
 
 # Output: bin/simple (~33 MB, ELF x86-64)
 ```
@@ -350,7 +350,7 @@ sudo apt install gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
 # Build with cross-compilation toolchain
 CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ \
-    ./script/bootstrap-from-scratch.sh \
+    ./scripts/bootstrap-from-scratch.sh \
     --output=bin/release/linux-arm64/simple
 ```
 
@@ -361,7 +361,7 @@ sudo apt install gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
 
 # Build with cross-compilation toolchain
 CC=riscv64-linux-gnu-gcc CXX=riscv64-linux-gnu-g++ \
-    ./script/bootstrap-from-scratch.sh \
+    ./scripts/bootstrap-from-scratch.sh \
     --output=bin/release/linux-riscv64/simple
 ```
 
@@ -450,11 +450,11 @@ SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
 - `bin/release/freebsd-x86_64/simple` - Release binary for distribution
 
 **Bootstrap Scripts (FreeBSD-specific):**
-- `script/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap (521 lines)
-- `script/configure_freebsd_vm_ssh.sh` - QEMU VM SSH setup
-- `script/setup_freebsd_vm.spl` - VM creation helper
-- `script/test_freebsd_qemu.spl` - QEMU integration tests
-- `script/verify_freebsd_workspace.spl` - Workspace validation
+- `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap (521 lines)
+- `scripts/configure_freebsd_vm_ssh.sh` - QEMU VM SSH setup
+- `scripts/setup_freebsd_vm.spl` - VM creation helper
+- `scripts/test_freebsd_qemu.spl` - QEMU integration tests
+- `scripts/verify_freebsd_workspace.spl` - Workspace validation
 
 **QEMU Infrastructure (in bootstrap-from-scratch.sh):**
 - `detect_qemu_vm()` - Auto-detect FreeBSD VM image
@@ -483,7 +483,7 @@ git clone https://github.com/simple-lang/simple.git
 cd simple
 
 # Run FreeBSD-specific bootstrap
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Options:
 #   --skip-verify     Skip reproducibility checks (faster)
@@ -590,11 +590,11 @@ qemu-system-x86_64 \
 **Bootstrap in QEMU VM:**
 ```bash
 # From Linux host, run full QEMU bootstrap
-./script/bootstrap-from-scratch.sh --platform=freebsd
+./scripts/bootstrap-from-scratch.sh --platform=freebsd
 
 # Or use direct QEMU function
 QEMU_PORT=2222 QEMU_USER=freebsd \
-./script/bootstrap-from-scratch.sh --freebsd-vm
+./scripts/bootstrap-from-scratch.sh --freebsd-vm
 
 # Output: bin/simple (FreeBSD binary, synced from VM)
 ```
@@ -724,11 +724,11 @@ Only 2 unique binaries exist (different hashes). Non-linux-x86_64 are placeholde
 - 📝 Tested: Ubuntu 22.04 LTS host + FreeBSD 14.3 QEMU VM
 
 **FreeBSD-Specific Scripts:**
-- `script/bootstrap-from-scratch-freebsd.sh` - Native bootstrap (521 lines)
-- `script/configure_freebsd_vm_ssh.sh` - SSH setup for QEMU
-- `script/setup_freebsd_vm.spl` - VM provisioning helper
-- `script/test_freebsd_qemu.spl` - QEMU tests
-- `script/verify_freebsd_workspace.spl` - Workspace validation
+- `scripts/bootstrap-from-scratch-freebsd.sh` - Native bootstrap (521 lines)
+- `scripts/configure_freebsd_vm_ssh.sh` - SSH setup for QEMU
+- `scripts/setup_freebsd_vm.spl` - VM provisioning helper
+- `scripts/test_freebsd_qemu.spl` - QEMU tests
+- `scripts/verify_freebsd_workspace.spl` - Workspace validation
 
 ## Build Artifacts
 

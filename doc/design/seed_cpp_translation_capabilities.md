@@ -170,5 +170,5 @@ Don't use seed_cpp - use native Simple compiler once available.
 
 - `seed/seed.cpp` - Main transpiler (C++)
 - `seed/runtime.c/h` - Runtime library
-- `script/bootstrap-fixed.sh` - Bootstrap script using seed_cpp
+- `scripts/bootstrap-fixed.sh` - Bootstrap script using seed_cpp
 - `doc/report/seed_cpp_main_fix_2026-02-13.md` - Bug fix report

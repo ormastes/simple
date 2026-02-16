@@ -55,7 +55,7 @@ Unified QEMU interface:
 - Timeout and crash handling
 - Exit code interpretation
 
-### Layer 4: QEMU Infrastructure (`resources/qemu/`, `script/`)
+### Layer 4: QEMU Infrastructure (`resources/qemu/`, `scripts/`)
 
 Self-contained QEMU management:
 - **catalog.sdn:** Version catalog (4 stable versions)
@@ -143,7 +143,7 @@ resolve_qemu_path(arch)
 | Path | Purpose | Files |
 |------|---------|-------|
 | `resources/qemu/` | QEMU resources | 7 |
-| `script/` | Build scripts | 4 |
+| `scripts/` | Build scripts | 4 |
 | `examples/baremetal/` | Example programs | 18 |
 
 ### Generated/Runtime

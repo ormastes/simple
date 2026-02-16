@@ -68,10 +68,10 @@ cat needed_feature.md
 cd /home/ormastes/dev/pub/simple
 
 # Preview changes (dry run)
-bin/simple script/remove_skip_annotations.spl --dry-run
+bin/simple scripts/remove_skip_annotations.spl --dry-run
 
 # Apply changes (removes @skip from 170+ passing tests)
-bin/simple script/remove_skip_annotations.spl
+bin/simple scripts/remove_skip_annotations.spl
 ```
 
 ### 3. Verify Test Suite (30 min)

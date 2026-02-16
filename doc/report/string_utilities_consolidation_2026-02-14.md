@@ -54,7 +54,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 
 **Reason:** Circular dependency risk
 
-`core.types` is loaded very early in the bootstrap process and is imported by many core compiler files. Importing from `std.string_core` would create circular dependencies that could cause module loading issues.
+`core.types` is loaded very early in the bootstrap process and is imported by many core compiler files. Importing from `std.text_core` would create circular dependencies that could cause module loading issues.
 
 **Decision:** Keep minimal string operations inline in core.types (11 simple wrappers around built-ins)
 
@@ -88,7 +88,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 
 ### 1. Circular Dependency Avoidance
 
-**Problem:** `core.types` → `std.string_core` → `std.string` → (potential cycle)
+**Problem:** `core.types` → `std.text_core` → `std.text` → (potential cycle)
 
 **Solution:** Inlined `char_code` and `char_from_code` into `string_core` (adds ~180 lines but eliminates all external dependencies)
 

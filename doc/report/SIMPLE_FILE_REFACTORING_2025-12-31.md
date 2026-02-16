@@ -11,7 +11,7 @@ Successfully refactored 2 Simple language files over 800 lines. Deferred 3 files
 
 | File | Before | After | Reduction | Status |
 |------|--------|-------|-----------|--------|
-| **simple/std_lib/src/core/string.spl** | 806 | 18 | 98% | ✅ Complete |
+| **simple/std_lib/src/core/text.spl** | 806 | 18 | 98% | ✅ Complete |
 | **simple/std_lib/src/graphics/loaders/gltf.spl** | 847 | 26 | 97% | ✅ Complete |
 | **simple/std_lib/src/parser/treesitter/grammar_rust.spl** | 818 | - | - | ⏸️ Deferred |
 | **simple/std_lib/src/parser/treesitter/grammar_simple.spl** | 832 | - | - | ⏸️ Not attempted |
@@ -23,7 +23,7 @@ Successfully refactored 2 Simple language files over 800 lines. Deferred 3 files
 
 ## Detailed Changes
 
-### 1. simple/std_lib/src/core/string.spl (806 → 18 lines)
+### 1. simple/std_lib/src/core/text.spl (806 → 18 lines)
 
 **Problem:** Large string implementation with many methods and trait implementations
 **Solution:** Split into 4 logical modules
@@ -37,7 +37,7 @@ Successfully refactored 2 Simple language files over 800 lines. Deferred 3 files
 
 **Module Organization:**
 ```simple
-# string.spl (main file)
+# text.spl (main file)
 use core.traits.*
 use core.collections.*
 
@@ -192,7 +192,7 @@ All string functionality tests passed after refactoring, confirming:
 
 ## Files Modified
 
-1. `simple/std_lib/src/core/string.spl` - Reduced from 806 to 18 lines (wrapper)
+1. `simple/std_lib/src/core/text.spl` - Reduced from 806 to 18 lines (wrapper)
 2. `simple/std_lib/src/graphics/loaders/gltf.spl` - Reduced from 847 to 26 lines (wrapper)
 
 ## Remaining Large Simple Files
@@ -249,6 +249,6 @@ Successfully completed refactoring of 2 Simple language files over 800 lines. Bo
 **Deferred files:** 3 files with complex class structures requiring further investigation of Simple's class organization features.
 
 **Recommendation:** For remaining large files:
-1. Focus on files with clear logical sections (like string.spl and gltf.spl)
+1. Focus on files with clear logical sections (like text.spl and gltf.spl)
 2. Skip grammar/DSL builders unless class method splitting becomes clearer
 3. Investigate if physics/torch files have similar organizational opportunities
