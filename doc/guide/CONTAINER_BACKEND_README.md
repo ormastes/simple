@@ -64,7 +64,7 @@ bin/simple test test/unit/std/string_spec.spl --container
 6. **Tests & Documentation**
    - Unit tests (`test/unit/app/test_runner_new/container_backend_spec.spl`)
    - User guide (`doc/guide/test_runner_container.md`)
-   - Example config (`simple.test.container.example.sdn`)
+   - Example config (`docker/simple.test.container.sdn`)
 
 ---
 
@@ -89,7 +89,7 @@ doc/guide/
 doc/test/
   container_implementation_verification.md  # Verification report
 
-simple.test.container.example.sdn   # Configuration example
+docker/simple.test.container.sdn   # Configuration example
 ```
 
 ## Files Modified
@@ -214,7 +214,7 @@ newgrp docker
 - **User Guide**: `doc/guide/test_runner_container.md`
 - **Implementation Plan**: `doc/research/robust_test_runner_plan_2026-02-14.md`
 - **Verification Report**: `doc/test/container_implementation_verification.md`
-- **Example Config**: `simple.test.container.example.sdn`
+- **Example Config**: `docker/simple.test.container.sdn`
 
 ---
 
