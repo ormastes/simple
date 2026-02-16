@@ -1,0 +1,236 @@
+# Test suite for public comment coverage statistics
+
+use std.spec.{describe, it, expect}
+use app.doc.public_check.statistics.{
+    PublicCoverageStats,
+    calculate_public_coverage,
+    format_coverage_report,
+    coverage_to_json,
+    meets_threshold,
+    format_summary_report,
+    summary_to_json
+}
+
+describe "calculate_public_coverage":
+    it "calculates 100% coverage when all exports documented":
+        val exports = ["foo", "bar", "baz"]
+        val documented = ["foo", "bar", "baz"]
+        val stats = calculate_public_coverage("src/test/mod.spl", exports, documented)
+
+        expect(stats.module_path).to_equal("src/test/mod.spl")
+        expect(stats.total_exports).to_equal(3)
+        expect(stats.documented_exports).to_equal(3)
+        expect(stats.undocumented_exports).to_equal(0)
+        expect(stats.coverage_percentage).to_equal(100.0)
+
+    it "calculates 0% coverage when no exports documented":
+        val exports = ["foo", "bar"]
+        val documented = []
+        val stats = calculate_public_coverage("src/test/mod.spl", exports, documented)
+
+        expect(stats.total_exports).to_equal(2)
+        expect(stats.documented_exports).to_equal(0)
+        expect(stats.undocumented_exports).to_equal(2)
+        expect(stats.coverage_percentage).to_equal(0.0)
+
+    it "calculates 50% coverage for half documented":
+        val exports = ["foo", "bar", "baz", "qux"]
+        val documented = ["foo", "bar"]
+        val stats = calculate_public_coverage("src/test/mod.spl", exports, documented)
+
+        expect(stats.total_exports).to_equal(4)
+        expect(stats.documented_exports).to_equal(2)
+        expect(stats.undocumented_exports).to_equal(2)
+        expect(stats.coverage_percentage).to_equal(50.0)
+
+    it "handles empty exports list":
+        val exports = []
+        val documented = []
+        val stats = calculate_public_coverage("src/test/mod.spl", exports, documented)
+
+        expect(stats.total_exports).to_equal(0)
+        expect(stats.documented_exports).to_equal(0)
+        expect(stats.undocumented_exports).to_equal(0)
+        expect(stats.coverage_percentage).to_equal(0.0)
+
+describe "format_coverage_report":
+    it "formats report with proper alignment":
+        val stats = PublicCoverageStats(
+            module_path: "src/compiler/mdsoc",
+            total_exports: 13,
+            documented_exports: 13,
+            undocumented_exports: 0,
+            coverage_percentage: 100.0
+        )
+
+        val report = format_coverage_report(stats)
+
+        expect(report).to_contain("Public Comment Coverage - src/compiler/mdsoc")
+        expect(report).to_contain("Total exports:        13")
+        expect(report).to_contain("Documented:           13")
+        expect(report).to_contain("Undocumented:         0")
+        expect(report).to_contain("Coverage:             100.0%")
+
+    it "formats partial coverage correctly":
+        val stats = PublicCoverageStats(
+            module_path: "src/test/mod.spl",
+            total_exports: 10,
+            documented_exports: 7,
+            undocumented_exports: 3,
+            coverage_percentage: 70.0
+        )
+
+        val report = format_coverage_report(stats)
+
+        expect(report).to_contain("src/test/mod.spl")
+        expect(report).to_contain("Total exports:        10")
+        expect(report).to_contain("Documented:           7")
+        expect(report).to_contain("Undocumented:         3")
+        expect(report).to_contain("Coverage:             70.0%")
+
+describe "coverage_to_json":
+    it "generates valid JSON structure":
+        val stats = PublicCoverageStats(
+            module_path: "src/test/mod.spl",
+            total_exports: 5,
+            documented_exports: 3,
+            undocumented_exports: 2,
+            coverage_percentage: 60.0
+        )
+
+        val json_output = coverage_to_json(stats)
+
+        expect(json_output).to_contain("\"module_path\": \"src/test/mod.spl\"")
+        expect(json_output).to_contain("\"total_exports\": 5")
+        expect(json_output).to_contain("\"documented_exports\": 3")
+        expect(json_output).to_contain("\"undocumented_exports\": 2")
+        expect(json_output).to_contain("\"coverage_percentage\": 60.0")
+
+describe "meets_threshold":
+    it "returns true when coverage meets threshold":
+        val stats = PublicCoverageStats(
+            module_path: "test",
+            total_exports: 10,
+            documented_exports: 9,
+            undocumented_exports: 1,
+            coverage_percentage: 90.0
+        )
+
+        expect(meets_threshold(stats, 80.0)).to_equal(true)
+        expect(meets_threshold(stats, 90.0)).to_equal(true)
+
+    it "returns false when coverage below threshold":
+        val stats = PublicCoverageStats(
+            module_path: "test",
+            total_exports: 10,
+            documented_exports: 7,
+            undocumented_exports: 3,
+            coverage_percentage: 70.0
+        )
+
+        expect(meets_threshold(stats, 80.0)).to_equal(false)
+        expect(meets_threshold(stats, 100.0)).to_equal(false)
+
+    it "handles edge cases correctly":
+        val perfect = PublicCoverageStats(
+            module_path: "test",
+            total_exports: 5,
+            documented_exports: 5,
+            undocumented_exports: 0,
+            coverage_percentage: 100.0
+        )
+
+        val zero = PublicCoverageStats(
+            module_path: "test",
+            total_exports: 5,
+            documented_exports: 0,
+            undocumented_exports: 5,
+            coverage_percentage: 0.0
+        )
+
+        expect(meets_threshold(perfect, 100.0)).to_equal(true)
+        expect(meets_threshold(zero, 0.0)).to_equal(true)
+        expect(meets_threshold(zero, 0.1)).to_equal(false)
+
+describe "format_summary_report":
+    it "aggregates statistics across multiple modules":
+        val stats1 = PublicCoverageStats(
+            module_path: "src/mod1.spl",
+            total_exports: 10,
+            documented_exports: 10,
+            undocumented_exports: 0,
+            coverage_percentage: 100.0
+        )
+
+        val stats2 = PublicCoverageStats(
+            module_path: "src/mod2.spl",
+            total_exports: 10,
+            documented_exports: 5,
+            undocumented_exports: 5,
+            coverage_percentage: 50.0
+        )
+
+        val all_stats = [stats1, stats2]
+        val summary = format_summary_report(all_stats)
+
+        expect(summary).to_contain("Public Comment Coverage Summary")
+        expect(summary).to_contain("Modules analyzed:     2")
+        expect(summary).to_contain("Total exports:        20")
+        expect(summary).to_contain("Documented:           15")
+        expect(summary).to_contain("Undocumented:         5")
+        expect(summary).to_contain("Coverage:             75.0%")
+
+    it "includes per-module breakdown":
+        val stats1 = PublicCoverageStats(
+            module_path: "src/mod1.spl",
+            total_exports: 4,
+            documented_exports: 4,
+            undocumented_exports: 0,
+            coverage_percentage: 100.0
+        )
+
+        val stats2 = PublicCoverageStats(
+            module_path: "src/mod2.spl",
+            total_exports: 6,
+            documented_exports: 3,
+            undocumented_exports: 3,
+            coverage_percentage: 50.0
+        )
+
+        val all_stats = [stats1, stats2]
+        val summary = format_summary_report(all_stats)
+
+        expect(summary).to_contain("Per-Module Breakdown:")
+        expect(summary).to_contain("src/mod1.spl: 100.0% (4/4)")
+        expect(summary).to_contain("src/mod2.spl: 50.0% (3/6)")
+
+describe "summary_to_json":
+    it "generates JSON with summary and module details":
+        val stats1 = PublicCoverageStats(
+            module_path: "src/mod1.spl",
+            total_exports: 5,
+            documented_exports: 5,
+            undocumented_exports: 0,
+            coverage_percentage: 100.0
+        )
+
+        val stats2 = PublicCoverageStats(
+            module_path: "src/mod2.spl",
+            total_exports: 5,
+            documented_exports: 3,
+            undocumented_exports: 2,
+            coverage_percentage: 60.0
+        )
+
+        val all_stats = [stats1, stats2]
+        val json_output = summary_to_json(all_stats)
+
+        expect(json_output).to_contain("\"summary\"")
+        expect(json_output).to_contain("\"module_count\": 2")
+        expect(json_output).to_contain("\"total_exports\": 10")
+        expect(json_output).to_contain("\"documented_exports\": 8")
+        expect(json_output).to_contain("\"undocumented_exports\": 2")
+        expect(json_output).to_contain("\"coverage_percentage\": 80.0")
+        expect(json_output).to_contain("\"modules\"")
+        expect(json_output).to_contain("\"module_path\": \"src/mod1.spl\"")
+        expect(json_output).to_contain("\"module_path\": \"src/mod2.spl\"")

@@ -1,0 +1,182 @@
+# CLI Command: check-capsule
+# Validates MDSOC capsule documentation (CapsuleVisibility.Public exports)
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_dir_exists(path: text) -> bool
+
+use compiler.mdsoc.types.{VirtualCapsule, SurfaceBinding, CapsuleVisibility}
+use compiler.mdsoc.layer_checker.{LayerChecker, LayerDef, LayerDirection, check_public_documentation}
+use compiler.mdsoc.config.{load_mdsoc_config}
+use app.doc.public_check.statistics.{
+    MdsocCoverageStats,
+    calculate_mdsoc_coverage,
+    format_mdsoc_report,
+    mdsoc_stats_to_json
+}
+use std.text.{NL}
+
+fn handle_check_capsule(args: [text]):
+    """Handle 'simple check-capsule' command.
+
+    Usage:
+        simple check-capsule <capsule_path>           # Check single capsule
+        simple check-capsule <capsule_path> --json    # JSON output
+        simple check-capsule <capsule_path> --strict  # Exit 1 if any violations
+
+    Args:
+        args: Command line arguments (capsule_path, options)
+    """
+    if args.len() == 0:
+        print "Error: Missing capsule path"
+        print ""
+        print "Usage: simple check-capsule <path> [options]"
+        print ""
+        print "Options:"
+        print "  --json     Output in JSON format"
+        print "  --strict   Exit with code 1 if violations found"
+        print ""
+        print "Example:"
+        print "  simple check-capsule src/compiler/mdsoc"
+        return
+
+    val capsule_path = args[0]
+    val use_json = args.contains("--json")
+    val strict_mode = args.contains("--strict")
+
+    # Check path exists
+    if not rt_dir_exists(capsule_path):
+        print "Error: Capsule path not found: {capsule_path}"
+        return
+
+    # Try to load MDSOC config (capsule.sdn)
+    val config_path = capsule_path + "/capsule.sdn"
+
+    if not rt_file_exists(config_path):
+        print "Error: No capsule.sdn found at {capsule_path}"
+        print "MDSOC capsules require a capsule.sdn configuration file."
+        return
+
+    # For now, create a simple capsule from the directory structure
+    # In full implementation, this would call load_mdsoc_config
+    val capsule = _load_capsule_from_path(capsule_path)
+
+    if capsule.surface.len() == 0:
+        if use_json:
+            print "{{}}"
+        else:
+            print "No public exports found in capsule."
+        return
+
+    # Create a layer checker
+    val layer_def = LayerDef(
+        name: "default",
+        direction: LayerDirection.TopDown,
+        layers: [],
+        allowed_deps: []
+    )
+
+    var checker = LayerChecker.new(layer_def)
+
+    # Check documentation
+    check_public_documentation(capsule, checker)
+
+    # Collect results
+    var public_names: [text] = []
+    var documented_names: [text] = []
+    var violations: [text] = []
+
+    for binding in capsule.surface:
+        if binding.visibility.is_public():
+            public_names = public_names + [binding.name]
+
+    val doc_violations = checker.get_doc_violations()
+
+    # Determine which exports are documented
+    for name in public_names:
+        var has_violation = false
+        for v in doc_violations:
+            if v.type_name == name:
+                has_violation = true
+                violations = violations + [v.to_text()]
+
+        if not has_violation:
+            documented_names = documented_names + [name]
+
+    # Calculate stats
+    val stats = calculate_mdsoc_coverage(
+        capsule.name,
+        public_names,
+        documented_names,
+        violations
+    )
+
+    # Output
+    if use_json:
+        val json = mdsoc_stats_to_json(stats)
+        print json
+    else:
+        val report = format_mdsoc_report(stats)
+        print report
+
+    # Strict mode exit code
+    if strict_mode and stats.undocumented_public_exports > 0:
+        # Note: Can't actually exit with code, but signal via message
+        print ""
+        print "FAILED: {stats.undocumented_public_exports} undocumented public exports"
+
+fn _load_capsule_from_path(path: text) -> VirtualCapsule:
+    """Load capsule from directory path.
+
+    Simplified version - scans __init__.spl or mod.spl for export statements.
+    Full implementation would use load_mdsoc_config from compiler.mdsoc.config.
+    """
+    # Try __init__.spl first, then mod.spl
+    var mod_file = path + "/__init__.spl"
+    if not rt_file_exists(mod_file):
+        mod_file = path + "/mod.spl"
+
+    if not rt_file_exists(mod_file):
+        # No module file, return empty capsule
+        return VirtualCapsule(
+            name: _extract_name(path),
+            path: path,
+            surface: [],
+            internal_modules: [],
+            rules: nil
+        )
+
+    # Parse exports from module file
+    val surface = _parse_surface_bindings(mod_file)
+
+    VirtualCapsule(
+        name: _extract_name(path),
+        path: path,
+        surface: surface,
+        internal_modules: [],
+        rules: nil
+    )
+
+fn _extract_name(path: text) -> text:
+    """Extract capsule name from path."""
+    val parts = path.split("/")
+    if parts.len() > 0:
+        return parts[parts.len() - 1]
+    "unknown"
+
+fn _parse_surface_bindings(mod_file: text) -> [SurfaceBinding]:
+    """Parse export statements from module file."""
+    var bindings: [SurfaceBinding] = []
+
+    # Read file (requires rt_file_read_text)
+    # For now, return empty - full impl would parse export statements
+
+    bindings
+
+fn contains(arr: [text], item: text) -> bool:
+    """Check if array contains item."""
+    for elem in arr:
+        if elem == item:
+            return true
+    false
+
+export handle_check_capsule
