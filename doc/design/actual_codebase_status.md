@@ -143,7 +143,7 @@ and `mir_data.spl` + `mir_lowering.spl` (1,526 lines total).
 - **install/** - Install packages
 
 #### Miscellaneous
-- **i18n/** - Internationalization
+- **src/i18n/** - Internationalization
 - **qualify_ignore/** - Ignore qualification
 - **brief/** - Brief summaries
 - **diff/** - Diffing tools

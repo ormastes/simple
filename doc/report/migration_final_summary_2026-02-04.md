@@ -259,7 +259,7 @@ while exp > 0:
 
 1. **mir/async_sm** (233 lines) - Async state machine
 2. **smf_builder** (250 lines) - SMF file builder
-3. **i18n/registry** (226 lines) - I18n registry
+3. **src/i18n/registry** (226 lines) - I18n registry
 4. **method_registry** (239 lines) - Method registry
 
 ### Medium Targets (400-800 lines)

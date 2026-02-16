@@ -178,7 +178,7 @@ The diagnostics_minimal layer is **complete and ready for integration**. It prov
 **Key Achievements**:
 1. ✅ Complete minimal diagnostic system (338 lines)
 2. ✅ Breaks circular dependency (parser → i18n)
-3. ✅ Same API as full diagnostics (minus i18n/formatters)
+3. ✅ Same API as full diagnostics (minus src/i18n/formatters)
 4. ✅ Ready for parser integration
 
 **Status**: **Ready for testing and integration**

@@ -1201,10 +1201,10 @@
 - ❌ `compiler/concurrent_providers/mod` → `rust/compiler/src/concurrent_providers/mod.rs`
 - ❌ `compiler/concurrent_providers/registry` → `rust/compiler/src/concurrent_providers/registry.rs`
 - ❌ `compiler/concurrent_providers/std_impl` → `rust/compiler/src/concurrent_providers/std_impl.rs`
-- ❌ `compiler/i18n/locale` → `rust/compiler/src/i18n/locale.rs`
-- ❌ `compiler/i18n/mod` → `rust/compiler/src/i18n/mod.rs`
-- ❌ `compiler/i18n/registry` → `rust/compiler/src/i18n/registry.rs`
-- ❌ `compiler/i18n/extractor` → `rust/compiler/src/i18n/extractor.rs`
+- ❌ `compiler/src/i18n/locale` → `rust/compiler/src/src/i18n/locale.rs`
+- ❌ `compiler/src/i18n/mod` → `rust/compiler/src/src/i18n/mod.rs`
+- ❌ `compiler/src/i18n/registry` → `rust/compiler/src/src/i18n/registry.rs`
+- ❌ `compiler/src/i18n/extractor` → `rust/compiler/src/src/i18n/extractor.rs`
 - ❌ `compiler/interpreter/async_support` → `rust/compiler/src/interpreter/async_support.rs`
 - ❌ `compiler/interpreter/block_exec` → `rust/compiler/src/interpreter/block_exec.rs`
 - ❌ `compiler/interpreter/core_types` → `rust/compiler/src/interpreter/core_types.rs`

@@ -17,7 +17,7 @@ This document provides a comprehensive plan to integrate the i18n system with al
 ### ✅ What's Complete
 
 **Infrastructure (100%)**:
-- ✅ Core i18n crate (`src/i18n/`) - 800+ LOC, 21 tests passing
+- ✅ Core i18n crate (`src/src/i18n/`) - 800+ LOC, 21 tests passing
 - ✅ Build-time catalog compilation with phf maps
 - ✅ Runtime locale loading with fallback chain (ko_KR → ko → en)
 - ✅ CLI `--lang` flag integration in driver
@@ -25,13 +25,13 @@ This document provides a comprehensive plan to integrate the i18n system with al
 - ✅ Conversion helpers (`convert_parser_diagnostic()`)
 
 **Parser Errors (100%)**:
-- ✅ E0001-E0012 defined in `i18n/parser.spl`
-- ✅ E0001-E0012 translated in `i18n/parser.ko.spl`
+- ✅ E0001-E0012 defined in `src/i18n/parser.spl`
+- ✅ E0001-E0012 translated in `src/i18n/parser.ko.spl`
 - ✅ Conversion helper in `src/driver/src/diagnostics_conversion.rs`
 
 **Compiler Errors (50% - Catalogs Only)**:
-- ✅ E1001-E3005 defined in `i18n/compiler.spl` (24 error codes)
-- ✅ E1001-E3005 translated in `i18n/compiler.ko.spl`
+- ✅ E1001-E3005 defined in `src/i18n/compiler.spl` (24 error codes)
+- ✅ E1001-E3005 translated in `src/i18n/compiler.ko.spl`
 - ❌ Rust code NOT yet using these catalogs
 
 ### 🚧 What's Missing
@@ -169,7 +169,7 @@ This document provides a comprehensive plan to integrate the i18n system with al
 
 ### Phase 1: Extend Compiler Catalogs (2-3 hours)
 
-**Goal**: Add all missing error messages to `i18n/compiler.spl` and translate to Korean.
+**Goal**: Add all missing error messages to `src/i18n/compiler.spl` and translate to Korean.
 
 **Tasks**:
 
@@ -178,7 +178,7 @@ This document provides a comprehensive plan to integrate the i18n system with al
    - Assign error codes (continue E-series numbering)
    - Document context parameters for each message
 
-2. **Extend English Catalog** (`i18n/compiler.spl`)
+2. **Extend English Catalog** (`src/i18n/compiler.spl`)
    - Add E11xx series (remaining control flow errors)
    - Add E12xx series (actor/concurrency errors if any)
    - Add E13xx series (memory errors if any)
@@ -189,7 +189,7 @@ This document provides a comprehensive plan to integrate the i18n system with al
    - Add E40xx series (FFI errors)
    - Add E50xx series (panic/invariant violations)
 
-3. **Create Korean Translations** (`i18n/compiler.ko.spl`)
+3. **Create Korean Translations** (`src/i18n/compiler.ko.spl`)
    - Translate all new entries
    - Follow existing terminology conventions
    - Use formal polite form (합니다체)
@@ -198,8 +198,8 @@ This document provides a comprehensive plan to integrate the i18n system with al
 **Estimated new error codes**: 50-100 (depending on granularity)
 
 **Deliverables**:
-- [ ] Extended `i18n/compiler.spl` (+50-100 entries)
-- [ ] Extended `i18n/compiler.ko.spl` (+50-100 entries)
+- [ ] Extended `src/i18n/compiler.spl` (+50-100 entries)
+- [ ] Extended `src/i18n/compiler.ko.spl` (+50-100 entries)
 - [ ] Error code mapping document
 
 ### Phase 2: Integrate Compiler Errors (3-4 hours)
@@ -294,8 +294,8 @@ return Err(CompileError::from_diagnostic(
 
 1. **Add i18n to Runtime**
    - Add `simple_i18n` dependency to `runtime/Cargo.toml`
-   - Create runtime error catalog (`i18n/runtime.spl`)
-   - Translate to Korean (`i18n/runtime.ko.spl`)
+   - Create runtime error catalog (`src/i18n/runtime.spl`)
+   - Translate to Korean (`src/i18n/runtime.ko.spl`)
 
 2. **Convert FFI Errors** (`runtime/value/ffi/error_handling.rs`)
    - Replace `eprintln!()` with i18n messages
@@ -315,8 +315,8 @@ return Err(CompileError::from_diagnostic(
 - `src/runtime/src/value/ffi/error_handling.rs`
 - `src/runtime/src/value/ffi/contracts.rs`
 - `src/runtime/src/value/ffi/file_io/*.rs`
-- `i18n/runtime.spl` (new)
-- `i18n/runtime.ko.spl` (new)
+- `src/i18n/runtime.spl` (new)
+- `src/i18n/runtime.ko.spl` (new)
 
 **Deliverables**:
 - [ ] Runtime uses i18n
@@ -616,8 +616,8 @@ let diag = Diagnostic::error(&format!("cannot find variable `{}`", name));
 ### Code References
 
 - **Diagnostics Crate**: `src/diagnostics/`
-- **i18n Crate**: `src/i18n/`
-- **Catalogs**: `i18n/*.spl`, `i18n/*.ko.spl`
+- **i18n Crate**: `src/src/i18n/`
+- **Catalogs**: `src/i18n/*.spl`, `src/i18n/*.ko.spl`
 - **Conversion Helper**: `src/driver/src/diagnostics_conversion.rs`
 
 ### Error Message Locations
@@ -681,7 +681,7 @@ if binding.is_const {
 ### Catalog Entry (English)
 
 ```simple
-# i18n/compiler.spl
+# src/i18n/compiler.spl
 "E1016": {
     "id": "E1016",
     "title": "Cannot Assign to Constant",
@@ -694,7 +694,7 @@ if binding.is_const {
 ### Catalog Entry (Korean)
 
 ```simple
-# i18n/compiler.ko.spl
+# src/i18n/compiler.ko.spl
 "E1016": {
     "id": "E1016",
     "title": "상수에 할당할 수 없음",

@@ -21,7 +21,7 @@ Enable Rust compiler to reference `__init__` values with locale variants, mirror
 ### Flat Structure (RECOMMENDED)
 
 ```
-i18n/
+src/i18n/
 ├── __init__.spl           # Default locale (English) - COMPILED IN
 ├── __init__.ko.spl        # Korean locale overlay - RUNTIME LOADED
 ├── __init__.ja.spl        # Japanese locale overlay - RUNTIME LOADED
@@ -44,18 +44,18 @@ i18n/
 **File Resolution:**
 ```rust
 // Default (compile-time)
-load("i18n/__init__.spl")         → English (embedded in binary)
-load("i18n/parser.spl")           → English (embedded in binary)
+load("src/i18n/__init__.spl")         → English (embedded in binary)
+load("src/i18n/parser.spl")           → English (embedded in binary)
 
 // Runtime (on-demand)
-load("i18n/__init__.ko.spl")      → Korean (loaded from disk)
-load("i18n/parser.ko.spl")        → Korean (loaded from disk)
+load("src/i18n/__init__.ko.spl")      → Korean (loaded from disk)
+load("src/i18n/parser.ko.spl")        → Korean (loaded from disk)
 ```
 
 ### Directory Structure (Alternative)
 
 ```
-i18n/
+src/i18n/
 ├── en/
 │   ├── __init__.spl       # English - COMPILED IN
 │   ├── parser.spl
@@ -82,7 +82,7 @@ Since these are i18n data files (NOT Simple modules), we RELAX the module system
 ### Allowed in i18n `__init__.spl`:
 
 ```simple
-# i18n/__init__.spl - English default
+# src/i18n/__init__.spl - English default
 
 # Dictionary literal with severity names
 val severity = {
@@ -107,7 +107,7 @@ val compiler_version = "0.1.0"
 ### Korean variant:
 
 ```simple
-# i18n/__init__.ko.spl - Korean overlay
+# src/i18n/__init__.ko.spl - Korean overlay
 
 val severity = {
     "error": "오류",
@@ -146,9 +146,9 @@ fn main() {
     let default_locale = env::var("SIMPLE_DEFAULT_LOCALE").unwrap_or("en".to_string());
 
     // Generate Rust code with embedded catalog
-    generate_default_catalog("i18n/__init__.spl", "severity");
-    generate_default_catalog("i18n/parser.spl", "messages");
-    generate_default_catalog("i18n/compiler.spl", "messages");
+    generate_default_catalog("src/i18n/__init__.spl", "severity");
+    generate_default_catalog("src/i18n/parser.spl", "messages");
+    generate_default_catalog("src/i18n/compiler.spl", "messages");
 }
 
 fn generate_default_catalog(path: &str, var_name: &str) {
@@ -203,7 +203,7 @@ pub static DEFAULT_PARSER_MESSAGES: phf::Map<&'static str, LocalizedMessage> = p
 **Runtime catalog loader:**
 
 ```rust
-// In src/i18n/src/lib.rs
+// In src/src/i18n/src/lib.rs
 
 impl I18n {
     pub fn new(locale: Locale) -> Self {
@@ -377,8 +377,8 @@ fn main() {
 
 **Files to create:**
 - `build.rs` - Parse default `.spl` files, generate Rust code
-- `src/i18n/src/codegen/` - Code generation utilities
-- `src/i18n/src/default_catalogs.rs` - Generated defaults (git-ignored)
+- `src/src/i18n/src/codegen/` - Code generation utilities
+- `src/src/i18n/src/default_catalogs.rs` - Generated defaults (git-ignored)
 
 **Dependencies:**
 - Add `phf` = "0.11" for compile-time perfect hash maps
@@ -386,8 +386,8 @@ fn main() {
 
 **Tasks:**
 1. Create `build.rs` script
-2. Parse `i18n/__init__.spl` and extract `val severity`
-3. Parse `i18n/parser.spl` and extract `val messages`
+2. Parse `src/i18n/__init__.spl` and extract `val severity`
+3. Parse `src/i18n/parser.spl` and extract `val messages`
 4. Generate `phf::Map` declarations
 5. Write to `OUT_DIR/default_catalogs.rs`
 6. Include in `lib.rs` via `include!(concat!(env!("OUT_DIR"), "/default_catalogs.rs"));`
@@ -395,9 +395,9 @@ fn main() {
 ### Phase 2: Runtime Locale Loading
 
 **Files to modify:**
-- `src/i18n/src/lib.rs` - Add `Locale::is_default()`, `I18n::from_env()`
-- `src/i18n/src/catalog.rs` - Add `CatalogRegistry::from_defaults()`, `from_locale_files()`
-- `src/i18n/src/simple_catalog.rs` - Support locale suffix parsing
+- `src/src/i18n/src/lib.rs` - Add `Locale::is_default()`, `I18n::from_env()`
+- `src/src/i18n/src/catalog.rs` - Add `CatalogRegistry::from_defaults()`, `from_locale_files()`
+- `src/src/i18n/src/simple_catalog.rs` - Support locale suffix parsing
 
 **Tasks:**
 1. Add default locale detection
@@ -410,19 +410,19 @@ fn main() {
 **Create files:**
 ```bash
 # Default locale (English)
-touch i18n/__init__.spl
-touch i18n/parser.spl
-touch i18n/compiler.spl
+touch src/i18n/__init__.spl
+touch src/i18n/parser.spl
+touch src/i18n/compiler.spl
 
 # Korean locale
-touch i18n/__init__.ko.spl
-touch i18n/parser.ko.spl
-touch i18n/compiler.ko.spl
+touch src/i18n/__init__.ko.spl
+touch src/i18n/parser.ko.spl
+touch src/i18n/compiler.ko.spl
 ```
 
 **Populate content:**
-- Move existing content from `i18n/locales/en/*.spl` to `i18n/*.spl`
-- Move existing content from `i18n/locales/ko/*.spl` to `i18n/*.ko.spl`
+- Move existing content from `src/i18n/locales/en/*.spl` to `src/i18n/*.spl`
+- Move existing content from `src/i18n/locales/ko/*.spl` to `src/i18n/*.ko.spl`
 
 ### Phase 4: Integration Testing
 
@@ -473,7 +473,7 @@ let error_text = i18n.get_severity("error");  // Cached lookup
 
 **Current structure:**
 ```
-i18n/locales/
+src/i18n/locales/
 ├── en/
 │   ├── __init__.spl  (WRONG - violates spec)
 │   └── parser.spl
@@ -484,7 +484,7 @@ i18n/locales/
 
 **New structure:**
 ```
-i18n/
+src/i18n/
 ├── __init__.spl       # Rename from locales/en/__init__.spl
 ├── __init__.ko.spl    # Rename from locales/ko/__init__.spl
 ├── parser.spl         # Rename from locales/en/parser.spl
@@ -492,10 +492,10 @@ i18n/
 ```
 
 **Migration steps:**
-1. Create `i18n/` directory at workspace root
-2. Move `i18n/locales/en/*.spl` → `i18n/*.spl`
-3. Move `i18n/locales/ko/*.spl` → `i18n/*.ko.spl`
-4. Remove old `i18n/locales/` directory
+1. Create `src/i18n/` directory at workspace root
+2. Move `src/i18n/locales/en/*.spl` → `src/i18n/*.spl`
+3. Move `src/i18n/locales/ko/*.spl` → `src/i18n/*.ko.spl`
+4. Remove old `src/i18n/locales/` directory
 5. Update Rust code to use new paths
 
 ---
@@ -512,8 +512,8 @@ let msg = i18n.get_message("parser", "E0002", &ctx);
 ### 2. Mirrors Simple's Module System
 ```
 Simple module:     src/core/__init__.spl
-I18n catalog:      i18n/__init__.spl       (default)
-I18n catalog (ko): i18n/__init__.ko.spl    (locale variant)
+I18n catalog:      src/i18n/__init__.spl       (default)
+I18n catalog (ko): src/i18n/__init__.ko.spl    (locale variant)
 ```
 
 ### 3. Flexible Deployment
@@ -524,14 +524,14 @@ cargo build --release
 
 # With runtime locales
 cargo build --release
-cp i18n/*.ko.spl /usr/share/simple/i18n/
+cp src/i18n/*.ko.spl /usr/share/simple/src/i18n/
 # Binary: ~500KB, Locales: ~20KB per language on disk
 ```
 
 ### 4. Easy Extension
 ```bash
 # Add Japanese support
-cp i18n/__init__.spl i18n/__init__.ja.spl
+cp src/i18n/__init__.spl src/i18n/__init__.ja.spl
 # Edit Japanese translations
 simple build main.spl --lang ja
 ```
@@ -546,7 +546,7 @@ simple build main.spl --lang ja
 SIMPLE_DEFAULT_LOCALE=en cargo build
 ```
 
-1. `build.rs` parses `i18n/__init__.spl`
+1. `build.rs` parses `src/i18n/__init__.spl`
 2. Extracts `val severity = {...}`
 3. Generates `DEFAULT_SEVERITY` phf map
 4. Embeds in binary
@@ -560,7 +560,7 @@ simple build main.spl --lang ko
 1. CLI sets `SIMPLE_LANG=ko`
 2. `I18n::from_env()` detects locale
 3. Checks `locale.is_default()` → false
-4. Loads `i18n/__init__.ko.spl` from disk
+4. Loads `src/i18n/__init__.ko.spl` from disk
 5. Parses and caches
 6. Returns Korean messages
 

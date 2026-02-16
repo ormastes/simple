@@ -94,7 +94,7 @@
 | spec_coverage | 251 | Coverage tracking |
 | type_inference_config | 261 | Type inference config |
 | interpreter_extern/sdn | 222 | SDN FFI wrappers |
-| i18n/registry | 226 | i18n registry |
+| src/i18n/registry | 226 | i18n registry |
 
 ## Migration Strategy Recommendations
 
@@ -108,7 +108,7 @@ This completes a full subsystem (semantics).
 
 ### Phase 2: Small Utility Modules (200-300 lines)
 - `type_check/mod` (208 lines)
-- `i18n/registry` (226 lines)
+- `src/i18n/registry` (226 lines)
 - `weaving/types` (231 lines)
 - `mir/async_sm` (233 lines)
 - `smf_builder` (250 lines)

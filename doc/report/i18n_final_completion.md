@@ -20,7 +20,7 @@ Total implementation spans **66 tests passing**, **~4000+ lines of code**, and *
 
 ### ✅ Phase 1-5: MVP Implementation (Previous Session)
 - Unified diagnostics system (`src/diagnostics/`)
-- I18n infrastructure (`src/i18n/`)
+- I18n infrastructure (`src/src/i18n/`)
 - Parser error catalogs (English + Korean)
 - Compiler error catalogs (English + Korean)
 - CLI integration with `--lang` flag
@@ -29,8 +29,8 @@ Total implementation spans **66 tests passing**, **~4000+ lines of code**, and *
 ### ✅ Phase 6: Verification & Lint Catalogs (This Session)
 
 **Phase 6.1: Verification Error Catalogs**
-- Created `i18n/verification.spl` (English)
-- Created `i18n/verification.ko.spl` (Korean)
+- Created `src/i18n/verification.spl` (English)
+- Created `src/i18n/verification.ko.spl` (Korean)
 - **Coverage:** 21 error codes across 8 categories:
   - AOP constraints (V-AOP-001 to V-AOP-003)
   - Macro constraints (M-INTRO-001, V-MACRO-001 to V-MACRO-004)
@@ -42,8 +42,8 @@ Total implementation spans **66 tests passing**, **~4000+ lines of code**, and *
   - Ghost/Contract violations (V-GHOST-001, V-CONTRACT-001)
 
 **Phase 6.2: Lint Message Catalogs**
-- Created `i18n/lint.spl` (English)
-- Created `i18n/lint.ko.spl` (Korean)
+- Created `src/i18n/lint.spl` (English)
+- Created `src/i18n/lint.ko.spl` (Korean)
 - **Coverage:** 8 lint codes:
   - `primitive_api` - Bare primitives in public API
   - `bare_bool` - Boolean parameters
@@ -118,10 +118,10 @@ Total implementation spans **66 tests passing**, **~4000+ lines of code**, and *
 ## Files Created (This Session)
 
 ### Error Catalogs
-1. `i18n/verification.spl` - English verification errors
-2. `i18n/verification.ko.spl` - Korean verification errors
-3. `i18n/lint.spl` - English lint messages
-4. `i18n/lint.ko.spl` - Korean lint messages
+1. `src/i18n/verification.spl` - English verification errors
+2. `src/i18n/verification.ko.spl` - Korean verification errors
+3. `src/i18n/lint.spl` - English lint messages
+4. `src/i18n/lint.ko.spl` - Korean lint messages
 
 ### Integration Tests
 5. `src/diagnostics/tests/i18n_integration.rs` - 14 integration tests

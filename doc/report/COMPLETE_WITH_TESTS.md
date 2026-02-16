@@ -341,7 +341,7 @@ simple/
 │       └── package_ffi_bindings_complete_2026-01-31.md  # NEW
 ├── lib/std/src/
 │   └── package_ffi.spl             # FFI bindings (NEW)
-├── packaging/
+├── config/packaging/
 │   ├── debian/control
 │   ├── rpm/simple-lang.spec
 │   ├── homebrew/simple.rb

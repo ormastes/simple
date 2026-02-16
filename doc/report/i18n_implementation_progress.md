@@ -23,13 +23,13 @@ All Phase 1 and Phase 2 features are implemented and tested with 21 passing unit
 ### Phase 1: Runtime Locale Support ✅
 
 **Files Modified:**
-- `src/i18n/src/catalog.rs` - Locale suffix support and fallback chain
-- `src/i18n/src/simple_catalog.rs` - Simple language catalog parser
-- `src/i18n/src/lib.rs` - Main i18n API
-- `src/i18n/src/locale.rs` - Locale detection from environment
-- `src/i18n/src/message.rs` - Message interpolation
-- `src/i18n/src/error.rs` - Error types
-- `src/i18n/src/bootstrap.rs` - Hardcoded fallback messages
+- `src/src/i18n/src/catalog.rs` - Locale suffix support and fallback chain
+- `src/src/i18n/src/simple_catalog.rs` - Simple language catalog parser
+- `src/src/i18n/src/lib.rs` - Main i18n API
+- `src/src/i18n/src/locale.rs` - Locale detection from environment
+- `src/src/i18n/src/message.rs` - Message interpolation
+- `src/src/i18n/src/error.rs` - Error types
+- `src/src/i18n/src/bootstrap.rs` - Hardcoded fallback messages
 
 **Key Implementation Details:**
 
@@ -78,18 +78,18 @@ All Phase 1 and Phase 2 features are implemented and tested with 21 passing unit
 ### Phase 2: Build-time Catalog Compilation ✅
 
 **Files Created:**
-- `src/i18n/build.rs` - Build script for compile-time catalog generation
+- `src/src/i18n/build.rs` - Build script for compile-time catalog generation
 - `target/*/build/simple_i18n-*/out/generated.rs` - Generated phf maps
 
 **Files Modified:**
-- `src/i18n/Cargo.toml` - Added `phf` and `phf_codegen` dependencies
-- `src/i18n/src/lib.rs` - Included generated.rs via `include!` macro
+- `src/src/i18n/Cargo.toml` - Added `phf` and `phf_codegen` dependencies
+- `src/src/i18n/src/lib.rs` - Included generated.rs via `include!` macro
 
 **Key Implementation Details:**
 
 1. **Build Script**: `build.rs`
    - Finds workspace root by looking for `[workspace]` in Cargo.toml
-   - Parses `i18n/__init__.spl` and `i18n/parser.spl` at build time
+   - Parses `src/i18n/__init__.spl` and `src/i18n/parser.spl` at build time
    - Uses simplified text parser (avoids circular dependency on simple-parser)
    - Generates perfect hash maps (phf::Map) for O(1) lookup
    - Produces `generated.rs` with embedded catalogs
@@ -158,14 +158,14 @@ test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ```
 simple/
-├── i18n/                           # Catalog files (workspace root)
+├── src/i18n/                           # Catalog files (workspace root)
 │   ├── __init__.spl                # English severity names (default)
 │   ├── __init__.ko.spl             # Korean severity names
 │   ├── parser.spl                  # English parser errors E0001-E0012 (default)
 │   ├── parser.ko.spl               # Korean parser errors
 │   └── README.md                   # User guide for i18n directory
 │
-└── src/i18n/                       # I18n crate
+└── src/src/i18n/                       # I18n crate
     ├── Cargo.toml                  # Dependencies (phf, phf_codegen)
     ├── build.rs                    # Build script (generates catalogs)
     └── src/
@@ -274,7 +274,7 @@ simple build test.spl
 **Rationale**:
 - Simpler file organization - all files in one directory
 - Matches Simple's module system philosophy (flat structure)
-- Easier to discover available translations (`ls i18n/*.ko.spl`)
+- Easier to discover available translations (`ls src/i18n/*.ko.spl`)
 - Follows pattern used by gettext (`.po` files with locale suffixes)
 
 **Trade-offs**:
@@ -420,8 +420,8 @@ The i18n system foundation is complete and production-ready:
 ### 📁 Deliverables
 
 **Code**:
-- `src/i18n/` - Complete i18n crate (800+ LOC, 8 modules)
-- `i18n/` - Catalog files (English + Korean)
+- `src/src/i18n/` - Complete i18n crate (800+ LOC, 8 modules)
+- `src/i18n/` - Catalog files (English + Korean)
 - Build script with catalog generation
 
 **Documentation**:

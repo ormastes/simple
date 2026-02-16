@@ -21,9 +21,9 @@ Successfully expanded Simple's error catalog by adding **84 new error codes** wi
 
 ### Phase 1B: Catalog Expansion ✅
 - **Files Modified:**
-  - `i18n/__init__.spl` - Added 84 English error constants (~250 lines)
-  - `i18n/__init__.ko.spl` - Added 84 Korean translations (~250 lines)
-  - `src/i18n/Cargo.toml` - Fixed default features for testing
+  - `src/i18n/__init__.spl` - Added 84 English error constants (~250 lines)
+  - `src/i18n/__init__.ko.spl` - Added 84 Korean translations (~250 lines)
+  - `src/src/i18n/Cargo.toml` - Fixed default features for testing
 
 - **Error Code Ranges Added:**
   - E0013-E0016: Parser errors (4 codes)
@@ -201,9 +201,9 @@ Successfully expanded Simple's error catalog by adding **84 new error codes** wi
 ## Files Created/Modified
 
 ### Modified:
-1. `i18n/__init__.spl` - +250 lines (English constants)
-2. `i18n/__init__.ko.spl` - +250 lines (Korean translations)
-3. `src/i18n/Cargo.toml` - +1 line (default features)
+1. `src/i18n/__init__.spl` - +250 lines (English constants)
+2. `src/i18n/__init__.ko.spl` - +250 lines (Korean translations)
+3. `src/src/i18n/Cargo.toml` - +1 line (default features)
 
 ### Created (95 test files):
 - `test/features/errors/parser/` - 4 files

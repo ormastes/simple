@@ -7,9 +7,9 @@
 | File | Original | Final | Max Module | Modules | Status |
 |------|----------|-------|------------|---------|--------|
 | test_runner_new/main.spl | 1052 | 75 | 287 | 7 | ✅ |
-| i18n/__init__.spl | 1355 | 30 | 443 | 9 | ✅ |
-| i18n/__init__.ko.spl | 1355 | 30 | 443 | 9 | ✅ |
-| i18n/compiler.spl | 1250 | 12 | 630 | 2 | ✅ |
+| src/i18n/__init__.spl | 1355 | 30 | 443 | 9 | ✅ |
+| src/i18n/__init__.ko.spl | 1355 | 30 | 443 | 9 | ✅ |
+| src/i18n/compiler.spl | 1250 | 12 | 630 | 2 | ✅ |
 | host/common/net/types.spl | 1242 | 14 | 682 | 4 | ✅ |
 | mcp/advanced.spl | 1219 | 18 | 568 | 6 | ✅ |
 | mcp/multi_lang/rust.spl | 978 | 14 | 415 | 4 | ✅ |
@@ -97,7 +97,7 @@ These files are single types with many methods. Simple doesn't support splitting
 ### Lessons Learned
 
 1. **String constant files are refactorable**
-   - i18n/__init__.spl (1355 lines of string constants) → 9 modules
+   - src/i18n/__init__.spl (1355 lines of string constants) → 9 modules
    - Pattern: Group by error category (parser, semantic, runtime, etc.)
 
 2. **Multi-type files are refactorable**

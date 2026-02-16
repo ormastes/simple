@@ -1,0 +1,160 @@
+# Content-hash-based embedding cache on disk
+# Follows the incremental.spl pipe-delimited pattern
+
+use app.io.mod.{file_exists, file_read, file_write}
+use std.text.{NL}
+
+struct EmbeddingCacheEntry:
+    item_key: text
+    content_hash: text
+    embedding_csv: text
+
+struct EmbeddingCacheManager:
+    entries: {text: EmbeddingCacheEntry}
+    cache_path: text
+    model_name: text
+    hits: i64
+    misses: i64
+
+fn load_embedding_cache(path: text, model: text) -> EmbeddingCacheManager:
+    var manager = EmbeddingCacheManager(
+        entries: {},
+        cache_path: path,
+        model_name: model,
+        hits: 0,
+        misses: 0
+    )
+
+    if not file_exists(path):
+        return manager
+
+    val content = file_read(path) ?? ""
+    if content.len() == 0:
+        return manager
+
+    val lines = content.split(NL)
+    var stored_model = ""
+    var i = 0
+
+    while i < lines.len():
+        val line = lines[i].trim()
+
+        if line.starts_with("# model:"):
+            stored_model = line[8:].trim()
+        elif line.starts_with("#") or line.len() == 0:
+            i = i + 1
+            continue
+        else:
+            # Parse entry: key|hash|csv_floats
+            val first_pipe = find_pipe(line, 0)
+            if first_pipe > 0:
+                val key = line[0:first_pipe]
+                val rest = line[first_pipe+1:]
+                val second_pipe = find_pipe(rest, 0)
+                if second_pipe > 0:
+                    val hash = rest[0:second_pipe]
+                    val csv = rest[second_pipe+1:]
+                    manager.entries[key] = EmbeddingCacheEntry(
+                        item_key: key,
+                        content_hash: hash,
+                        embedding_csv: csv
+                    )
+
+        i = i + 1
+
+    # Invalidate cache if model changed
+    if stored_model.len() > 0 and stored_model != model:
+        manager.entries = {}
+
+    manager
+
+fn save_embedding_cache(cache: EmbeddingCacheManager):
+    var content = "# Embedding cache for semantic doc analysis" + NL
+    content = content + "# model:" + cache.model_name + NL
+    content = content + NL
+
+    val keys = cache.entries.keys()
+    for key in keys:
+        val entry = cache.entries[key]
+        content = content + entry.item_key + "|" + entry.content_hash + "|" + entry.embedding_csv + NL
+
+    file_write(cache.cache_path, content)
+
+fn get_cached(cache: EmbeddingCacheManager, key: text, hash: text) -> text:
+    if cache.entries.contains_key(key):
+        val entry = cache.entries[key]
+        if entry.content_hash == hash:
+            cache.hits = cache.hits + 1
+            return entry.embedding_csv
+    cache.misses = cache.misses + 1
+    ""
+
+fn set_cached(cache: EmbeddingCacheManager, key: text, hash: text, csv: text):
+    cache.entries[key] = EmbeddingCacheEntry(
+        item_key: key,
+        content_hash: hash,
+        embedding_csv: csv
+    )
+
+fn csv_to_floats(csv: text) -> [f64]:
+    if csv.len() == 0:
+        return []
+    val parts = csv.split(",")
+    var result: [f64] = []
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            val f = simple_parse_float(trimmed)
+            result = result + [f]
+    result
+
+fn floats_to_csv(vec: [f64]) -> text:
+    var parts: [text] = []
+    for f in vec:
+        parts = parts + ["{f}"]
+    parts.join(",")
+
+fn find_pipe(s: text, start: i64) -> i64:
+    var i = start
+    while i < s.len():
+        if s[i:i+1] == "|":
+            return i
+        i = i + 1
+    -1
+
+fn simple_parse_float(s: text) -> f64:
+    var result = 0.0
+    var negative = false
+    var decimal_place = 0
+    var decimal_divisor = 1.0
+    var i = 0
+
+    if s.len() == 0:
+        return 0.0
+    if s[0:1] == "-":
+        negative = true
+        i = 1
+
+    while i < s.len():
+        val byte = s.bytes()[i]
+        if byte >= 48 and byte <= 57:
+            val digit = (byte - 48) * 1.0
+            if decimal_place > 0:
+                decimal_divisor = decimal_divisor * 10.0
+                result = result + digit / decimal_divisor
+            else:
+                result = result * 10.0 + digit
+        elif s[i:i+1] == ".":
+            decimal_place = 1
+        elif s[i:i+1] == "e" or s[i:i+1] == "E":
+            break
+        i = i + 1
+
+    if negative:
+        result = -result
+    result
+
+export EmbeddingCacheEntry, EmbeddingCacheManager
+export load_embedding_cache, save_embedding_cache
+export get_cached, set_cached
+export csv_to_floats, floats_to_csv

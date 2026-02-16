@@ -11964,7 +11964,7 @@ This report identifies all direct calls to FFI functions (rt_*) that should idea
 
 - **Line 14**: `rt_file_exists_str()`
   ```simple
-  expect rt_file_exists_str("src/app/i18n/main.spl")
+  expect rt_file_exists_str("src/app/src/i18n/main.spl")
   ```
 - **Line 18**: `rt_file_exists_str()`
   ```simple

@@ -16,7 +16,7 @@ Phase 1 of the diagnostics i18n implementation is **complete**. All error catalo
 
 ### 1. Extended Compiler Catalogs
 
-**File**: `i18n/compiler.spl` (English)
+**File**: `src/i18n/compiler.spl` (English)
 
 **Added Error Codes**:
 
@@ -30,7 +30,7 @@ Phase 1 of the diagnostics i18n implementation is **complete**. All error catalo
 
 ### 2. Created Runtime Catalogs
 
-**Files**: `i18n/runtime.spl` (English) + `i18n/runtime.ko.spl` (Korean)
+**Files**: `src/i18n/runtime.spl` (English) + `src/i18n/runtime.ko.spl` (Korean)
 
 **New Error Categories**:
 
@@ -47,8 +47,8 @@ Phase 1 of the diagnostics i18n implementation is **complete**. All error catalo
 ### 3. Korean Translations
 
 **Files Updated**:
-- ✅ `i18n/compiler.ko.spl` - Added 19 Korean translations
-- ✅ `i18n/runtime.ko.spl` - Added 27 Korean translations (new file)
+- ✅ `src/i18n/compiler.ko.spl` - Added 19 Korean translations
+- ✅ `src/i18n/runtime.ko.spl` - Added 27 Korean translations (new file)
 
 **Translation Quality**:
 - Formal polite form (합니다체) consistently used
@@ -276,14 +276,14 @@ simple build test/error_e1011.spl --lang ko
 ## Files Created/Modified
 
 ### Created
-- ✅ `i18n/runtime.spl` (214 lines)
-- ✅ `i18n/runtime.ko.spl` (214 lines)
+- ✅ `src/i18n/runtime.spl` (214 lines)
+- ✅ `src/i18n/runtime.ko.spl` (214 lines)
 - ✅ `doc/design/diagnostics_i18n_implementation_plan.md` (comprehensive plan)
 - ✅ `doc/design/diagnostics_i18n_phase1_complete.md` (this document)
 
 ### Modified
-- ✅ `i18n/compiler.spl` - Added 19 error codes (E1011-E1018, E2003-E2009, E3006-E3009)
-- ✅ `i18n/compiler.ko.spl` - Added 19 Korean translations
+- ✅ `src/i18n/compiler.spl` - Added 19 error codes (E1011-E1018, E2003-E2009, E3006-E3009)
+- ✅ `src/i18n/compiler.ko.spl` - Added 19 Korean translations
 
 ---
 

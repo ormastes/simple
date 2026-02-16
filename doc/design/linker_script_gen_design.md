@@ -20,7 +20,7 @@ Simple can generate GNU LD linker scripts from SDN configuration files. This ena
 
 | Level | Scope | File | Use Case |
 |-------|-------|------|----------|
-| **Board** | Specific hardware | `boards/<board>.sdn` | Board-specific layout |
+| **Board** | Specific hardware | `resources/boards/<board>.sdn` | Board-specific layout |
 | **Target** | MCU family | `targets/<mcu>.sdn` | MCU memory map |
 | **Module** | Directory | `__init__: linker_*` | Module section placement |
 | **Project** | Entire project | `simple.sdn` | Default linker settings |
@@ -50,7 +50,7 @@ stack_size = 8K
 heap_size = 16K
 
 # Include paths for INCLUDE directive
-include_paths = ["linker/", "boards/"]
+include_paths = ["linker/", "resources/boards/"]
 ```
 
 ### Memory Layout Reference
@@ -58,7 +58,7 @@ include_paths = ["linker/", "boards/"]
 ```sdn
 [linker]
 # Reference external layout file
-memory_layout = "boards/stm32f407.sdn"
+memory_layout = "resources/boards/stm32f407.sdn"
 
 # Or inline memory definition
 [linker.memory]
@@ -69,12 +69,12 @@ ccm = { origin = 0x10000000, length = "64K", permissions = "rw" }
 
 ---
 
-## Level 2: Target/Board Layout (`boards/<board>.sdn`)
+## Level 2: Target/Board Layout (`resources/boards/<board>.sdn`)
 
 ### Complete Board Definition
 
 ```sdn
-# boards/stm32f407_discovery.sdn
+# resources/boards/stm32f407_discovery.sdn
 
 board:
     name: "STM32F407 Discovery"
@@ -212,7 +212,7 @@ assertions:
 ### Minimal Board Definition
 
 ```sdn
-# boards/bluepill.sdn (STM32F103C8)
+# resources/boards/bluepill.sdn (STM32F103C8)
 
 board:
     name: "Blue Pill"
@@ -362,10 +362,10 @@ __init__:
 
 ## Generated Linker Script
 
-### From `boards/stm32f407_discovery.sdn`
+### From `resources/boards/stm32f407_discovery.sdn`
 
 ```ld
-/* Auto-generated from boards/stm32f407_discovery.sdn */
+/* Auto-generated from resources/boards/stm32f407_discovery.sdn */
 /* Board: STM32F407 Discovery */
 /* MCU: STM32F407VG */
 /* Generated: 2026-02-05 */
@@ -580,7 +580,7 @@ assertions:
 
 ```bash
 # Generate linker script from SDN
-simple linker-gen boards/stm32f407.sdn -o build/linker.ld
+simple linker-gen resources/boards/stm32f407.sdn -o build/linker.ld
 
 # Build with generated script
 simple build --linker-script=build/linker.ld
@@ -597,7 +597,7 @@ board = "stm32f407_discovery"
 
 [linker]
 generate_script = true
-board_file = "boards/stm32f407_discovery.sdn"
+board_file = "resources/boards/stm32f407_discovery.sdn"
 script_path = "build/linker.ld"
 
 # Auto-regenerate on change
@@ -607,7 +607,7 @@ watch_linker_config = true
 ### Makefile Integration
 
 ```makefile
-LINKER_SDN = boards/$(BOARD).sdn
+LINKER_SDN = resources/boards/$(BOARD).sdn
 LINKER_LD = build/$(BOARD).ld
 
 $(LINKER_LD): $(LINKER_SDN)
@@ -624,7 +624,7 @@ build: $(LINKER_LD)
 ### Debug vs Release Layouts
 
 ```sdn
-# boards/stm32f407_discovery.sdn
+# resources/boards/stm32f407_discovery.sdn
 
 # Base memory (shared)
 memory:
@@ -670,7 +670,7 @@ simple build --board=stm32f407_discovery --profile=release
 ### Bootloader + Application Layout
 
 ```sdn
-# boards/stm32f407_with_bootloader.sdn
+# resources/boards/stm32f407_with_bootloader.sdn
 
 memory:
     bootloader_flash:
@@ -699,7 +699,7 @@ sections:
         memory: app_flash
 
 # Bootloader has separate config
-# boards/stm32f407_bootloader.sdn uses bootloader_flash
+# resources/boards/stm32f407_bootloader.sdn uses bootloader_flash
 ```
 
 ---
@@ -711,7 +711,7 @@ sections:
 ```
 project/
 ├── simple.sdn
-├── boards/
+├── resources/boards/
 │   ├── stm32f407_discovery.sdn
 │   ├── stm32f103_bluepill.sdn
 │   └── custom_board.sdn
@@ -791,7 +791,7 @@ __init__:
 
 ```bash
 # simple build --board=stm32f407_discovery does:
-# 1. Load boards/stm32f407_discovery.sdn
+# 1. Load resources/boards/stm32f407_discovery.sdn
 # 2. Merge with layout.sdn
 # 3. Process __init__ section overrides
 # 4. Generate build/linker.ld
@@ -806,7 +806,7 @@ __init__:
 
 ```
 --board=stm32f407_discovery
-    └── boards/stm32f407_discovery.sdn (board memory layout)
+    └── resources/boards/stm32f407_discovery.sdn (board memory layout)
             └── simple.sdn [linker] (project defaults)
                     └── layout.sdn (code locality)
                             └── __init__ linker_* (module sections)
@@ -817,9 +817,9 @@ __init__:
 
 | Scope | Setting | Syntax |
 |-------|---------|--------|
-| **Board** | Memory regions | `boards/<board>.sdn: memory:` |
-| | Sections | `boards/<board>.sdn: sections:` |
-| | Symbols | `boards/<board>.sdn: symbols:` |
+| **Board** | Memory regions | `resources/boards/<board>.sdn: memory:` |
+| | Sections | `resources/boards/<board>.sdn: sections:` |
+| | Symbols | `resources/boards/<board>.sdn: symbols:` |
 | **Project** | Default board | `simple.sdn: [build] board =` |
 | | Stack/heap | `simple.sdn: [linker.defaults]` |
 | | Output path | `simple.sdn: [linker] script_path =` |

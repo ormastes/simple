@@ -237,9 +237,9 @@ Feature: E#### - Error Name
 ### Immediate Next Steps (Week 1)
 
 **Phase 1B: Catalog Expansion**
-- [ ] Extend `i18n/parser.spl` with E0013-E0016
-- [ ] Extend `i18n/compiler.spl` with E1019-E1080, E1104-E1105, E1301-E1302, E1403
-- [ ] Extend `i18n/runtime.spl` with E4005
+- [ ] Extend `src/i18n/parser.spl` with E0013-E0016
+- [ ] Extend `src/i18n/compiler.spl` with E1019-E1080, E1104-E1105, E1301-E1302, E1403
+- [ ] Extend `src/i18n/runtime.spl` with E4005
 - [ ] Create all Korean translations
 - [ ] Test compilation
 

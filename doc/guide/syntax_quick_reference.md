@@ -11,6 +11,7 @@ A comprehensive reference for Simple's syntax features. All features listed here
 ## Table of Contents
 
 - [Variables](#variables)
+- [Type & Function Aliases](#type--function-aliases)
 - [Strings](#strings)
 - [Numbers](#numbers)
 - [Collections](#collections)
@@ -43,6 +44,74 @@ let mut items = []
 val name: text = "Alice"
 var count: i64 = 0
 ```
+
+---
+
+## Type & Function Aliases
+
+Create alternative names for existing types and functions. Useful for:
+- **API evolution** (keep old names while transitioning)
+- **Convenience** (shorter names for frequently-used items)
+- **Compatibility** (platform-specific naming)
+
+### Function Alias
+
+**Status:** ⚠️ **Parser structure exists, runtime implementation incomplete**
+
+```simple
+# Syntax (not yet working in runtime):
+fn println = print
+fn each = iter
+
+# Current workaround (use delegation):
+fn println(msg):
+    print(msg)
+```
+
+### Type Alias
+
+```simple
+# Simple type alias (using 'type' keyword)
+type Point2D = Point
+type StringList = [text]
+type ErrorCode = i64
+
+# Generic type aliases
+type IntList = List<i64>
+type StringMap<V> = Map<text, V>
+
+# Complex type aliases
+type Result<T> = Option<T>
+type Handler = fn(Event) -> ()
+```
+
+### Class Alias
+
+```simple
+# Class/struct alias (using 'alias' keyword)
+alias Optional = Option
+alias Vec = Vector
+
+# With visibility
+pub alias PublicPoint = InternalPoint
+
+# Generic class alias
+alias IntSet = Set<i64>
+```
+
+### Deprecation Pattern
+
+```simple
+# Mark old API as deprecated, provide alias to new one
+@deprecated("Use new_func instead")
+fn old_func = implementation
+
+fn new_func = old_func  # Non-deprecated alias
+
+# Usage generates warning: "old_func is deprecated. Use new_func instead"
+```
+
+**Note:** Aliases are resolved at compile-time to their targets. No runtime overhead.
 
 ---
 

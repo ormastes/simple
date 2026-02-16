@@ -313,10 +313,10 @@ Example programs and tutorials.
 | `verification/` | 4.8GB | Formal verification (Lean 4) |
 | `release/` | 160MB | Release artifacts |
 | `archive/` | 292KB | Archived/obsolete code |
-| `i18n/` | 244KB | Internationalization |
-| `editors/` | 88KB | Editor plugins |
+| `src/i18n/` | 244KB | Internationalization |
+| `src/app/` | 88KB | Editor integrations (nvim_plugin, vscode_extension) |
 | `boards/` | - | Hardware board configs |
-| `packaging/` | - | Package metadata |
+| `config/packaging/` | - | Package metadata (Debian, RPM, Homebrew, Windows) |
 | `resources/` | - | Resource files |
 | `tmp/` | - | Temporary files (gitignored) |
 

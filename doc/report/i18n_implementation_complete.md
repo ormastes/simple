@@ -22,7 +22,7 @@ Successfully implemented a complete internationalization (i18n) system for the S
 - Context helpers (`ctx1`, `ctx2`, `ctx3`, `ContextBuilder`) for message interpolation
 - Comprehensive test suite (47 tests passing)
 
-**I18n Infrastructure** (`src/i18n/`)
+**I18n Infrastructure** (`src/src/i18n/`)
 - Global i18n context with lazy-loaded message catalogs
 - Automatic locale detection from environment variables
 - Fallback chain: `ko_KR → ko → en`
@@ -44,8 +44,8 @@ Successfully implemented a complete internationalization (i18n) system for the S
 
 **Phase 7.2: Error Catalogs**
 Created comprehensive error catalogs:
-- `i18n/compiler.spl` - English compiler errors (E1001-E3005)
-- `i18n/compiler.ko.spl` - Korean translations
+- `src/i18n/compiler.spl` - English compiler errors (E1001-E3005)
+- `src/i18n/compiler.ko.spl` - Korean translations
 - Categories:
   - **Semantic errors** (E10xx): undefined variables/functions, type mismatches
   - **Control flow errors** (E11xx): break/continue/return outside context
@@ -77,7 +77,7 @@ Created comprehensive error catalogs:
   - Quality standards
 
 **Technical Documentation**
-- `i18n/README.md` - Catalog structure and format specification
+- `src/i18n/README.md` - Catalog structure and format specification
 - `src/diagnostics/ARCHITECTURE.md` - System architecture and design decisions
 - `src/diagnostics/USAGE.md` - API usage patterns and examples
 
@@ -203,13 +203,13 @@ SIMPLE_LANG=ko simple build main.spl
 11. `src/compiler/src/i18n_diagnostics.rs`
 
 ### Error Catalogs
-12. `i18n/compiler.spl`
-13. `i18n/compiler.ko.spl`
+12. `src/i18n/compiler.spl`
+13. `src/i18n/compiler.ko.spl`
 
 ### Documentation
 14. `doc/guide/i18n.md`
 15. `doc/contributing/i18n.md`
-16. `i18n/README.md`
+16. `src/i18n/README.md`
 17. `src/diagnostics/ARCHITECTURE.md`
 18. `src/diagnostics/USAGE.md`
 19. `CHANGELOG.md`

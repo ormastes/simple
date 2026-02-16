@@ -88,12 +88,12 @@ Parser → Diagnostics → I18n → Parser (.spl catalog parsing)
 **Goal**: Create English and Korean error message catalogs
 
 **Files to Create**:
-- `i18n/__init__.spl` - Common UI strings (severity names, summaries) - English
-- `i18n/__init__.ko.spl` - Common UI strings - Korean
-- `i18n/parser.spl` - Parser errors (E0001-E0012) - English
-- `i18n/parser.ko.spl` - Parser errors - Korean
-- `i18n/compiler.spl` - Compiler errors (E1001-E3005) - English (future)
-- `i18n/compiler.ko.spl` - Compiler errors - Korean (future)
+- `src/i18n/__init__.spl` - Common UI strings (severity names, summaries) - English
+- `src/i18n/__init__.ko.spl` - Common UI strings - Korean
+- `src/i18n/parser.spl` - Parser errors (E0001-E0012) - English
+- `src/i18n/parser.ko.spl` - Parser errors - Korean
+- `src/i18n/compiler.spl` - Compiler errors (E1001-E3005) - English (future)
+- `src/i18n/compiler.ko.spl` - Compiler errors - Korean (future)
 
 **Catalog Entry Format**:
 ```simple
@@ -161,7 +161,7 @@ fn convert_parser_error(parser_diag: simple_common::Diagnostic) -> simple_diagno
 **Files to Update**:
 - `doc/guide/i18n.md` - User guide for language selection (`--lang ko`)
 - `doc/contributing/i18n.md` - Contributor guide for adding translations
-- `i18n/README.md` - Translation guidelines
+- `src/i18n/README.md` - Translation guidelines
 - `CHANGELOG.md` - Document i18n feature addition
 
 ## Technical Details
@@ -234,8 +234,8 @@ simple-driver
 
 ## Next Steps
 
-1. **Create parser error catalog** (`i18n/parser.spl`, `i18n/parser.ko.spl`)
-2. **Create common UI strings** (`i18n/__init__.spl`, `i18n/__init__.ko.spl`)
+1. **Create parser error catalog** (`src/i18n/parser.spl`, `src/i18n/parser.ko.spl`)
+2. **Create common UI strings** (`src/i18n/__init__.spl`, `src/i18n/__init__.ko.spl`)
 3. **Implement conversion helpers** in driver
 4. **Test end-to-end** with Korean locale
 5. **Iterate based on feedback**

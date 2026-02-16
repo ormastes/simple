@@ -159,9 +159,9 @@ Extend error catalogs with 84 new error codes identified from Rust mapping.
 ### Task 1: Extend English Catalogs (2-3 hours)
 
 **Files to Update**:
-- `i18n/parser.spl` - Add E0013-E0016
-- `i18n/compiler.spl` - Add E1019-E1080, E1104-E1105, E1301-E1302, E1403
-- `i18n/runtime.spl` - Add E4005
+- `src/i18n/parser.spl` - Add E0013-E0016
+- `src/i18n/compiler.spl` - Add E1019-E1080, E1104-E1105, E1301-E1302, E1403
+- `src/i18n/runtime.spl` - Add E4005
 
 **Example Entry**:
 ```simple
@@ -177,9 +177,9 @@ Extend error catalogs with 84 new error codes identified from Rust mapping.
 ### Task 2: Create Korean Translations (3-4 hours)
 
 **Files to Update**:
-- `i18n/parser.ko.spl` - Add E0013-E0016
-- `i18n/compiler.ko.spl` - Add E1019-E1080, E1104-E1105, E1301-E1302, E1403
-- `i18n/runtime.ko.spl` - Add E4005
+- `src/i18n/parser.ko.spl` - Add E0013-E0016
+- `src/i18n/compiler.ko.spl` - Add E1019-E1080, E1104-E1105, E1301-E1302, E1403
+- `src/i18n/runtime.ko.spl` - Add E4005
 
 **Translation Guidelines**:
 - Use formal polite form (합니다체)

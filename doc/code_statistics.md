@@ -39,7 +39,7 @@ Simple has transitioned from a **Rust-based compiler** to a **100% self-hosting 
 | **src/** | 208,724 | 779 | 41.1% | Core implementation |
 | **release/** | 186,996 | 733 | 36.8% | Release artifacts |
 | **build/** | 93,621 | 381 | 18.4% | Build system |
-| **i18n/** | 4,756 | 29 | 0.9% | Internationalization |
+| **src/i18n/** | 4,756 | 29 | 0.9% | Internationalization |
 | **test/** | 4,347 | 70 | 0.9% | Non-test support files |
 | **examples/** | 2,080 | 17 | 0.4% | Example programs |
 | **doc/** | 827 | 5 | 0.2% | Documentation code |

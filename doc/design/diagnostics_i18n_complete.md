@@ -98,11 +98,11 @@ Parser → Diagnostics → I18n → Parser (.spl catalog parsing)
 
 ### Phase 5: Error Message Catalogs ✅
 
-**Status**: Already existed in `i18n/` directory!
+**Status**: Already existed in `src/i18n/` directory!
 
 **Catalog Files**:
 ```
-i18n/
+src/i18n/
 ├── __init__.spl              # English severity names
 ├── __init__.ko.spl           # Korean severity names
 ├── parser.spl                # English parser errors (E0001-E0012)
@@ -274,7 +274,7 @@ eprintln!("{}", formatter.format(&i18n_diag, source_code));
 
 **Tasks**:
 - [ ] Add `simple-diagnostics` dependency to `simple-compiler`
-- [ ] Create compiler error catalogs (`i18n/compiler.spl`, `i18n/compiler.ko.spl`)
+- [ ] Create compiler error catalogs (`src/i18n/compiler.spl`, `src/i18n/compiler.ko.spl`)
 - [ ] Update compiler error reporting to use `error_i18n()`
 - [ ] Convert existing compiler errors to use i18n diagnostics
 
@@ -292,7 +292,7 @@ eprintln!("{}", formatter.format(&i18n_diag, source_code));
 **Tasks**:
 - [ ] Create `doc/guide/i18n.md` - User guide for `--lang` flag
 - [ ] Create `doc/contributing/i18n.md` - Translation contributor guide
-- [ ] Create `i18n/README.md` - Translation guidelines and workflow
+- [ ] Create `src/i18n/README.md` - Translation guidelines and workflow
 - [ ] Update `CHANGELOG.md` - Document i18n feature addition
 
 ---

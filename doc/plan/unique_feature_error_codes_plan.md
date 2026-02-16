@@ -123,8 +123,8 @@ simple/std_lib/test/features/errors/
 ## Implementation Order
 
 1. **Phase 1: Error Codes** - Add codes to `src/compiler/src/error.rs`
-2. **Phase 2: i18n Messages** - Add to `i18n/__init__.spl` and `i18n/__init__.ko.spl`
-3. **Phase 3: Catalog** - Add to `i18n/compiler.spl`
+2. **Phase 2: i18n Messages** - Add to `src/i18n/__init__.spl` and `src/i18n/__init__.ko.spl`
+3. **Phase 3: Catalog** - Add to `src/i18n/compiler.spl`
 4. **Phase 4: BDD Tests** - Create spec files
 
 ## Example Error Messages
@@ -168,8 +168,8 @@ note: use 'bind Database = SqliteDatabase' in your module
 ## Success Criteria
 
 - [x] All 48 error codes added to `error.rs`
-- [x] English messages in `i18n/__init__.spl`
-- [x] Korean translations in `i18n/__init__.ko.spl`
-- [x] Catalog entries in `i18n/compiler.spl`
+- [x] English messages in `src/i18n/__init__.spl`
+- [x] Korean translations in `src/i18n/__init__.ko.spl`
+- [x] Catalog entries in `src/i18n/compiler.spl`
 - [x] 6 BDD spec files with 3+ scenarios per error code
 - [x] Code compiles successfully

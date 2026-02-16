@@ -24,7 +24,7 @@ User writes:          fn main( return 0     ← Missing )
                               ↓
 Compiler parses  →    ParseError::MissingToken { expected: ")", ... }
                               ↓
-I18n system      →    Load i18n/__init__.ko.spl
+I18n system      →    Load src/i18n/__init__.ko.spl
                               ↓
 Display:              오류[E0010]: 필요한 토큰이 누락되었습니다: )
                                    여기에 )이(가) 필요합니다
@@ -38,7 +38,7 @@ Display:              오류[E0010]: 필요한 토큰이 누락되었습니다: 
 
 ```
 simple/
-├── i18n/                      # I18n catalog directory (workspace root)
+├── src/i18n/                      # I18n catalog directory (workspace root)
 │   ├── __init__.spl           # English common UI (default)
 │   ├── __init__.ko.spl        # Korean common UI
 │   ├── parser.spl             # English parser errors
@@ -47,7 +47,7 @@ simple/
 │   └── compiler.ko.spl        # Korean compiler errors (future)
 │
 └── src/
-    └── i18n/                  # Rust i18n implementation
+    └── src/i18n/                  # Rust i18n implementation
         ├── Cargo.toml
         ├── build.rs           # Compile-time catalog generator
         └── src/
@@ -83,7 +83,7 @@ simple/
 I18n files use **Simple language** (not JSON), but with relaxed rules since they're data files:
 
 ```simple
-# i18n/__init__.spl - English common UI
+# src/i18n/__init__.spl - English common UI
 
 # Dictionary with severity names
 val severity = {
@@ -103,7 +103,7 @@ fn format_error_count(n: Int) -> String:
 ```
 
 ```simple
-# i18n/__init__.ko.spl - Korean overlay
+# src/i18n/__init__.ko.spl - Korean overlay
 
 val severity = {
     "error": "오류",
@@ -123,7 +123,7 @@ fn format_error_count(n: Int) -> String:
 ### Parser Errors
 
 ```simple
-# i18n/parser.spl
+# src/i18n/parser.spl
 
 val messages = {
     "E0001": {
@@ -172,7 +172,7 @@ val messages = {
 │ Layer 1: Build-Time Compilation                 │
 │                                                  │
 │ At cargo build:                                  │
-│  1. Parse i18n/__init__.spl                     │
+│  1. Parse src/i18n/__init__.spl                     │
 │  2. Extract val severity = {...}                │
 │  3. Generate Rust code:                         │
 │     pub const DEFAULT_SEVERITY: phf::Map = ...  │
@@ -187,7 +187,7 @@ val messages = {
 │ When user runs: simple build --lang ko          │
 │  1. Detect locale from CLI/env                  │
 │  2. Check if locale == default → No             │
-│  3. Load i18n/__init__.ko.spl from disk         │
+│  3. Load src/i18n/__init__.ko.spl from disk         │
 │  4. Parse Simple code (~1-2ms)                  │
 │  5. Cache in memory (HashMap)                   │
 │                                                  │
@@ -215,11 +215,11 @@ val messages = {
 Input: locale="ko_KR", domain="parser", id="E0002"
 
 Step 1: Try full locale
-  ├─ Check: i18n/parser.ko_KR.spl exists?
+  ├─ Check: src/i18n/parser.ko_KR.spl exists?
   └─ No → Continue to Step 2
 
 Step 2: Try language only
-  ├─ Check: i18n/parser.ko.spl exists?
+  ├─ Check: src/i18n/parser.ko.spl exists?
   ├─ Yes → Parse file
   ├─ Check: Does "E0002" exist in catalog?
   └─ Yes → Return Korean message ✓
@@ -335,7 +335,7 @@ let error_text = DEFAULT_SEVERITY.get("error");
 ```rust
 // First access - parse from disk
 let i18n = I18n::with_locale("ko");
-// Parses i18n/__init__.ko.spl (~1-2ms)
+// Parses src/i18n/__init__.ko.spl (~1-2ms)
 
 // Subsequent access - cached
 let error_text = i18n.get_severity("error");
@@ -354,8 +354,8 @@ let error_text = i18n.get_severity("error");
 
 ### ✅ Completed
 
-- [x] File structure created (`i18n/__init__.spl`, `i18n/__init__.ko.spl`)
-- [x] Basic i18n crate structure (`src/i18n/`)
+- [x] File structure created (`src/i18n/__init__.spl`, `src/i18n/__init__.ko.spl`)
+- [x] Basic i18n crate structure (`src/src/i18n/`)
 - [x] Locale detection (`Locale::from_env()`)
 - [x] Message interpolation (`MessageContext`)
 - [x] Bootstrap fallback messages
@@ -393,7 +393,7 @@ cp parser.spl parser.ja.spl
 
 **2. Translate content**
 ```simple
-# i18n/__init__.ja.spl
+# src/i18n/__init__.ja.spl
 
 val severity = {
     "error": "エラー",
@@ -439,12 +439,12 @@ export LC_ALL=ko_KR.UTF-8
 
 ### Issue: Locale file not found
 
-**Error**: `CatalogLoadError: i18n/__init__.ko.spl`
+**Error**: `CatalogLoadError: src/i18n/__init__.ko.spl`
 
 **Cause**: Locale file doesn't exist or wrong path
 
 **Solution**:
-1. Check file exists: `ls i18n/__init__.ko.spl`
+1. Check file exists: `ls src/i18n/__init__.ko.spl`
 2. Check working directory: `pwd` (should be workspace root)
 3. Verify file path in error message
 

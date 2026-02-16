@@ -16,7 +16,7 @@ Successfully completed **Phase 1** of the diagnostics i18n implementation plan. 
 
 ### 1. Error Catalog Extension ✅
 
-#### Compiler Catalog (`i18n/compiler.spl` + `compiler.ko.spl`)
+#### Compiler Catalog (`src/i18n/compiler.spl` + `compiler.ko.spl`)
 
 **Added 19 new error codes**:
 
@@ -45,7 +45,7 @@ Successfully completed **Phase 1** of the diagnostics i18n implementation plan. 
 - E3008: Function Not Found (runtime)
 - E3009: Method Not Found (runtime)
 
-#### Runtime Catalog (`i18n/runtime.spl` + `runtime.ko.spl`) - NEW ✅
+#### Runtime Catalog (`src/i18n/runtime.spl` + `runtime.ko.spl`) - NEW ✅
 
 **Created 27 new error codes**:
 
@@ -106,9 +106,9 @@ Successfully completed **Phase 1** of the diagnostics i18n implementation plan. 
 
 ### 3. Build Script Updated ✅
 
-Updated `src/i18n/build.rs` to include:
-- ✅ `i18n/compiler.spl` → DEFAULT_COMPILER_MESSAGES
-- ✅ `i18n/runtime.spl` → DEFAULT_RUNTIME_MESSAGES
+Updated `src/src/i18n/build.rs` to include:
+- ✅ `src/i18n/compiler.spl` → DEFAULT_COMPILER_MESSAGES
+- ✅ `src/i18n/runtime.spl` → DEFAULT_RUNTIME_MESSAGES
 - ✅ Proper rerun triggers for all catalog files
 
 **Result**: All catalogs now compile into binary at build time.
@@ -144,10 +144,10 @@ Updated `src/i18n/build.rs` to include:
 
 | File | Lines | Status |
 |------|-------|--------|
-| `i18n/compiler.spl` | ~230 | Extended |
-| `i18n/compiler.ko.spl` | ~230 | Extended |
-| `i18n/runtime.spl` | ~214 | NEW |
-| `i18n/runtime.ko.spl` | ~214 | NEW |
+| `src/i18n/compiler.spl` | ~230 | Extended |
+| `src/i18n/compiler.ko.spl` | ~230 | Extended |
+| `src/i18n/runtime.spl` | ~214 | NEW |
+| `src/i18n/runtime.ko.spl` | ~214 | NEW |
 | **Total** | **~888** | **Complete** |
 
 ### Translation Coverage
@@ -341,15 +341,15 @@ simple build test/error/e1011_const_assign.spl --lang ko
 ## Files Created
 
 ### Catalogs (4 files)
-- `i18n/runtime.spl` (214 lines) - NEW
-- `i18n/runtime.ko.spl` (214 lines) - NEW
+- `src/i18n/runtime.spl` (214 lines) - NEW
+- `src/i18n/runtime.ko.spl` (214 lines) - NEW
 
 ### Modified (2 files)
-- `i18n/compiler.spl` (+100 lines)
-- `i18n/compiler.ko.spl` (+100 lines)
+- `src/i18n/compiler.spl` (+100 lines)
+- `src/i18n/compiler.ko.spl` (+100 lines)
 
 ### Build System (1 file)
-- `src/i18n/build.rs` (extended to process all catalogs)
+- `src/src/i18n/build.rs` (extended to process all catalogs)
 
 ### Documentation (3 files)
 - `doc/design/diagnostics_i18n_implementation_plan.md` (~700 lines)

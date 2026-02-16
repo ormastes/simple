@@ -110,7 +110,7 @@ Total:        550 lines (-41%)
 **Target**: Enhance existing i18n modules
 
 **Current State**:
-- `i18n/*.spl` - Message translation modules
+- `src/i18n/*.spl` - Message translation modules
 - Rust diagnostics in `src/rust/diagnostics/`
 
 **Migration Strategy**:
