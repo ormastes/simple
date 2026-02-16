@@ -1,127 +1,119 @@
 # WASM Language Server Initialization Tests
-# Tests WasmLanguageServer creation, configuration, and lifecycle
+#
+# Tests ParserAdapter creation, backend selection, and WASI LSP helpers.
+# Uses real imports from parser_adapter.spl.
 
-# Local type definitions (test stubs)
+use app.lsp.parser_adapter.{ParserBackend, ParseDiagnostic, ParseResult, ParserAdapter, ParserAdapter__create_core, ParserAdapter__create_treesitter}
 
-struct Position:
-    line: i64
-    character: i64
+describe "WASM LSP Server Initialization":
 
-struct Range:
-    start: Position
-    end: Position
+    context "ParserAdapter creation":
+        it "creates core parser adapter":
+            val adapter = ParserAdapter__create_core()
+            expect(adapter.is_wasm_mode()).to_equal(true)
 
-enum DiagnosticSeverity:
-    Error
-    Warning
-    Information
-    Hint
+        it "creates treesitter adapter":
+            val adapter = ParserAdapter__create_treesitter()
+            expect(adapter.is_wasm_mode()).to_equal(false)
 
-struct Diagnostic:
-    range: Range
-    severity: DiagnosticSeverity
-    message: str
-    source: str
+        it "core adapter uses CoreParser backend":
+            val adapter = ParserAdapter__create_core()
+            expect(adapter.backend).to_equal(ParserBackend.CoreParser)
 
-enum CompletionItemKind:
-    Text = 1
-    Method = 2
-    Function = 3
-    Variable = 6
-    Keyword = 14
-    Struct = 22
+        it "treesitter adapter uses TreeSitter backend":
+            val adapter = ParserAdapter__create_treesitter()
+            expect(adapter.backend).to_equal(ParserBackend.TreeSitter)
 
-struct CompletionItem:
-    label: str
-    kind: i64
-    detail: Option<str>
-    documentation: Option<str>
-    insert_text: Option<str>
+    context "ParserBackend enum":
+        it "TreeSitter is distinct from CoreParser":
+            val ts = ParserBackend.TreeSitter
+            val core = ParserBackend.CoreParser
+            expect(ts == core).to_equal(false)
 
+    context "ParseDiagnostic":
+        it "creates diagnostic with line and column":
+            val diag = ParseDiagnostic(
+                line: 5, column: 10,
+                end_line: 5, end_column: 15,
+                message: "Unexpected token",
+                severity: 1
+            )
+            expect(diag.line).to_equal(5)
+            expect(diag.column).to_equal(10)
+            expect(diag.message).to_equal("Unexpected token")
+            expect(diag.severity).to_equal(1)
 
+        it "creates warning diagnostic":
+            val diag = ParseDiagnostic(
+                line: 1, column: 0,
+                end_line: 1, end_column: 5,
+                message: "Unused variable",
+                severity: 2
+            )
+            expect(diag.severity).to_equal(2)
 
-describe "WasmLanguageServer Initialization":
-    describe "Server Creation":
-        it "creates new server instance":
-            # Branch: WasmLanguageServer.new() path
-            val server_created = true
-            expect(server_created)
+    context "ParseResult":
+        it "creates successful result":
+            val result = ParseResult(
+                success: true,
+                diagnostics: [],
+                semantic_tokens: []
+            )
+            expect(result.success).to_equal(true)
+            expect(result.diagnostics.len()).to_equal(0)
 
-        it "initializes with default capabilities":
-            # Branch: ServerCapabilities.new() defaults
-            val has_defaults = true
-            expect(has_defaults)
+        it "creates result with diagnostics":
+            val diag = ParseDiagnostic(
+                line: 0, column: 0,
+                end_line: 0, end_column: 1,
+                message: "Error",
+                severity: 1
+            )
+            val result = ParseResult(
+                success: false,
+                diagnostics: [diag],
+                semantic_tokens: []
+            )
+            expect(result.success).to_equal(false)
+            expect(result.diagnostics.len()).to_equal(1)
 
-        it "initializes with empty handlers":
-            # Branch: handlers dict initialization
-            val handlers_empty = true
-            expect(handlers_empty)
+    context "Core parser parsing":
+        it "parses valid Simple code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 42")
+            expect(result.success).to_equal(true)
+            expect(result.diagnostics.len()).to_equal(0)
 
-        it "initializes with empty documents":
-            # Branch: documents dict initialization
-            val documents_empty = true
-            expect(documents_empty)
+        it "parses multi-line code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("fn foo():\n    val x = 1\n    x")
+            expect(result.success).to_equal(true)
 
-    describe "Capability Configuration":
-        it "sets server capabilities":
-            # Branch: set_capabilities method
-            val capabilities_set = true
-            expect(capabilities_set)
+        it "detects unmatched closing paren":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = )")
+            expect(result.success).to_equal(false)
+            expect(result.diagnostics.len()).to_be_greater_than(0)
+            expect(result.diagnostics[0].message).to_contain("parenthesis")
 
-        it "enables completion capability":
-            # Branch: enable_completion path
-            val completion_enabled = true
-            expect(completion_enabled)
+        it "detects unmatched closing bracket":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = ]")
+            expect(result.success).to_equal(false)
+            expect(result.diagnostics.len()).to_be_greater_than(0)
+            expect(result.diagnostics[0].message).to_contain("bracket")
 
-        it "enables hover capability":
-            # Branch: enable_hover path
-            val hover_enabled = true
-            expect(hover_enabled)
+        it "parses empty source":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("")
+            expect(result.success).to_equal(true)
 
-        it "enables definition capability":
-            # Branch: enable_definition path
-            val definition_enabled = true
-            expect(definition_enabled)
+        it "parses comments only":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("# This is a comment")
+            expect(result.success).to_equal(true)
 
-        it "enables references capability":
-            # Branch: enable_references path
-            val references_enabled = true
-            expect(references_enabled)
-
-        it "enables symbols capability":
-            # Branch: enable_symbols path
-            val symbols_enabled = true
-            expect(symbols_enabled)
-
-        it "enables formatting capability":
-            # Branch: enable_formatting path
-            val formatting_enabled = true
-            expect(formatting_enabled)
-
-        it "enables all capabilities at once":
-            # Branch: enable_all path
-            val all_enabled = true
-            expect(all_enabled)
-
-    describe "Server Start":
-        it "starts language server":
-            # Branch: start() method
-            val server_started = true
-            expect(server_started)
-
-        it "initializes with capabilities JSON":
-            # Branch: to_json conversion
-            val json_generated = true
-            expect(json_generated)
-
-    describe "Callback ID Allocation":
-        it "allocates unique callback IDs":
-            # Branch: allocate_callback_id increment
-            val id1 = 1
-            val id2 = 2
-            expect(id2 > id1)
-
-        it "increments next_callback_id":
-            # Branch: next_callback_id increment
-            val incremented = true
-            expect(incremented)
+        it "parses balanced parentheses":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = (1 + (2 * 3))")
+            expect(result.success).to_equal(true)

@@ -1,0 +1,293 @@
+# WASM Compilation Integration Specification
+#
+# End-to-end tests for compiling Simple programs to WebAssembly.
+# Tests both LLVM-based and WAT-based compilation paths,
+# standalone and WASI modes, and backend selection.
+#
+# Feature IDs: #WASM-COMPILE-001
+# Category: Compiler Backend
+# Status: Active
+
+use compiler.backend.wasm_backend.*
+use compiler.backend.wasm_type_mapper.{WasmTypeMapper, WasmTypeMapper__create_wasm32}
+use compiler.backend.backend_api.*
+use compiler.backend.backend_helpers.{select_backend_with_mode}
+use compiler.mir_data.*
+use core.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel}
+use std.string.{NL}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn make_test_function(name: text, body: [MirInstr]) -> MirFunction:
+    """Create a simple MIR function for testing."""
+    MirFunction(
+        name: name,
+        params: [],
+        return_type: MirType(kind: MirTypeKind.Unit),
+        body: body,
+        locals: [],
+        is_extern: false,
+        is_entry: false
+    )
+
+fn make_add_function() -> MirFunction:
+    """Create a MIR function: fn add(a: i64, b: i64) -> i64 = a + b."""
+    val params = [
+        MirParam(name: "a", ty: MirType(kind: MirTypeKind.I64)),
+        MirParam(name: "b", ty: MirType(kind: MirTypeKind.I64))
+    ]
+    val body = [
+        MirInstr(
+            op: MirOp.Add,
+            ty: MirType(kind: MirTypeKind.I64),
+            operands: [
+                MirOperand.Local(0),
+                MirOperand.Local(1)
+            ],
+            dest: MirDest.Local(2)
+        ),
+        MirInstr(
+            op: MirOp.Return,
+            ty: MirType(kind: MirTypeKind.I64),
+            operands: [MirOperand.Local(2)],
+            dest: MirDest.None
+        )
+    ]
+    MirFunction(
+        name: "add",
+        params: params,
+        return_type: MirType(kind: MirTypeKind.I64),
+        body: body,
+        locals: [MirType(kind: MirTypeKind.I64)],
+        is_extern: false,
+        is_entry: false
+    )
+
+fn make_test_module() -> MirModule:
+    """Create a simple test MIR module."""
+    MirModule(
+        name: "test_module",
+        functions: [make_add_function()],
+        globals: [],
+        types: [],
+        imports: []
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "WASM Compilation Pipeline":
+
+    context "Backend Selection for WASM targets":
+        it "selects Wasm backend for wasm32 debug":
+            val kind = select_backend_with_mode(CodegenTarget.Wasm32, BuildMode.Debug, nil)
+            expect(kind).to_equal(BackendKind.Wasm)
+
+        it "selects Wasm backend for wasm32 release":
+            val kind = select_backend_with_mode(CodegenTarget.Wasm32, BuildMode.Release, nil)
+            expect(kind).to_equal(BackendKind.Wasm)
+
+        it "selects Wasm backend for wasm64":
+            val kind = select_backend_with_mode(CodegenTarget.Wasm64, BuildMode.Debug, nil)
+            expect(kind).to_equal(BackendKind.Wasm)
+
+        it "does not select Wasm backend for x86_64":
+            val kind = select_backend_with_mode(CodegenTarget.X86_64, BuildMode.Debug, nil)
+            expect(kind).to_equal(BackendKind.Cranelift)
+
+    context "WasmBackend creation":
+        it "creates browser backend":
+            val backend = WasmBackend__create(WasmTarget.Browser)
+            expect(backend.target.to_text()).to_equal("browser")
+
+        it "creates wasi backend":
+            val backend = WasmBackend__create(WasmTarget.Wasi)
+            expect(backend.target.to_text()).to_equal("wasi")
+
+        it "creates minimal backend":
+            val backend = WasmBackend__create(WasmTarget.Minimal)
+            expect(backend.target.to_text()).to_equal("minimal")
+
+        it "browser backend needs JS glue":
+            val backend = WasmBackend__create(WasmTarget.Browser)
+            expect(backend.target.needs_js_glue()).to_equal(true)
+
+        it "wasi backend needs WASI imports":
+            val backend = WasmBackend__create(WasmTarget.Wasi)
+            expect(backend.target.needs_wasi_imports()).to_equal(true)
+
+        it "minimal backend needs neither":
+            val backend = WasmBackend__create(WasmTarget.Minimal)
+            expect(backend.target.needs_js_glue()).to_equal(false)
+            expect(backend.target.needs_wasi_imports()).to_equal(false)
+
+    context "WasmTarget properties":
+        it "browser target text":
+            expect(WasmTarget.Browser.to_text()).to_equal("browser")
+
+        it "wasi target text":
+            expect(WasmTarget.Wasi.to_text()).to_equal("wasi")
+
+        it "minimal target text":
+            expect(WasmTarget.Minimal.to_text()).to_equal("minimal")
+
+    context "CodegenTarget WASM properties":
+        it "wasm32 is 32-bit":
+            expect(CodegenTarget.Wasm32.is_32bit()).to_equal(true)
+
+        it "wasm32 is wasm":
+            expect(CodegenTarget.Wasm32.is_wasm()).to_equal(true)
+
+        it "wasm64 is wasm":
+            expect(CodegenTarget.Wasm64.is_wasm()).to_equal(true)
+
+        it "wasm32 is not 64-bit":
+            expect(CodegenTarget.Wasm32.is_64bit()).to_equal(false)
+
+        it "x86_64 is not wasm":
+            expect(CodegenTarget.X86_64.is_wasm()).to_equal(false)
+
+    context "WasmTypeMapper for WASM compilation":
+        it "maps Simple i64 to wasm i64":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.I64)
+            expect(mapper.map_type(ty)).to_equal("i64")
+
+        it "maps Simple bool to wasm i32":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.Bool)
+            expect(mapper.map_type(ty)).to_equal("i32")
+
+        it "maps Simple f64 to wasm f64":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.F64)
+            expect(mapper.map_type(ty)).to_equal("f64")
+
+        it "reports i64 size as 8 bytes":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.I64)
+            expect(mapper.size_of(ty)).to_equal(8)
+
+        it "reports bool size as 1 byte":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.Bool)
+            expect(mapper.size_of(ty)).to_equal(1)
+
+        it "reports unit size as 0 bytes":
+            val mapper = WasmTypeMapper__create_wasm32()
+            val ty = MirType(kind: MirTypeKind.Unit)
+            expect(mapper.size_of(ty)).to_equal(0)
+
+    context "WAT generation (WatBuilder)":
+        it "generates valid WAT module structure":
+            var builder = WatBuilder__create()
+            builder.begin_module("test")
+            builder.end_module()
+            val wat = builder.build()
+            expect(wat).to_contain("(module $test")
+            expect(wat).to_contain(")")
+
+        it "generates function with params and result":
+            var builder = WatBuilder__create()
+            builder.begin_func("add", [WasmType.I64, WasmType.I64], [WasmType.I64])
+            builder.emit_local_get(0)
+            builder.emit_local_get(1)
+            builder.emit_i64_add()
+            builder.emit_return()
+            builder.end_func()
+            val wat = builder.build()
+            expect(wat).to_contain("(func $add")
+            expect(wat).to_contain("(param i64)")
+            expect(wat).to_contain("(result i64)")
+            expect(wat).to_contain("i64.add")
+            expect(wat).to_contain("return")
+
+        it "generates complete module with function":
+            var builder = WatBuilder__create()
+            builder.begin_module("example")
+            builder.begin_func("main", [], [WasmType.I32])
+            builder.emit_i32_const(0)
+            builder.emit_return()
+            builder.end_func()
+            builder.end_module()
+            val wat = builder.build()
+            expect(wat).to_contain("(module $example")
+            expect(wat).to_contain("(func $main")
+            expect(wat).to_contain("i32.const 0")
+
+    context "JavaScript glue generation":
+        it "generates JS glue with WebAssembly loader":
+            var glue = JsGlueGenerator__create()
+            glue.add_binding(BrowserBinding.console_log())
+            glue.add_export("main")
+            val js = glue.generate()
+            expect(js).to_contain("WebAssembly")
+            expect(js).to_contain("memory")
+            expect(js).to_contain("loadWasm")
+
+        it "includes browser bindings":
+            var glue = JsGlueGenerator__create()
+            glue.add_binding(BrowserBinding.console_log())
+            val js = glue.generate()
+            expect(js).to_contain("browser")
+            expect(js).to_contain("log")
+
+        it "includes string decoder":
+            var glue = JsGlueGenerator__create()
+            val js = glue.generate()
+            expect(js).to_contain("readString")
+            expect(js).to_contain("TextDecoder")
+
+    context "BrowserBinding":
+        it "creates console.log binding":
+            val binding = BrowserBinding.console_log()
+            expect(binding.simple_name).to_equal("print")
+            expect(binding.js_module).to_equal("console")
+            expect(binding.js_function).to_equal("log")
+
+        it "creates alert binding":
+            val binding = BrowserBinding.alert()
+            expect(binding.simple_name).to_equal("alert")
+            expect(binding.js_module).to_equal("window")
+            expect(binding.js_function).to_equal("alert")
+
+        it "converts to WasmImport":
+            val binding = BrowserBinding.console_log()
+            val import_def = binding.to_import()
+            expect(import_def.module_name).to_equal("browser")
+            expect(import_def.field_name).to_equal("log")
+
+    context "WasmCompileResult":
+        it "creates result with WAT text":
+            val result = WasmCompileResult(
+                module_name: "test",
+                wat: "(module $test)",
+                wasm: nil,
+                js_glue: nil,
+                compile_time_ms: 0
+            )
+            expect(result.module_name).to_equal("test")
+            expect(result.wat).to_contain("module")
+
+        it "reports no JS glue when absent":
+            val result = WasmCompileResult(
+                module_name: "test",
+                wat: "(module)",
+                wasm: nil,
+                js_glue: nil,
+                compile_time_ms: 0
+            )
+            expect(result.has_js_glue()).to_equal(false)
+
+        it "reports JS glue when present":
+            val result = WasmCompileResult(
+                module_name: "test",
+                wat: "(module)",
+                wasm: nil,
+                js_glue: Some("const x = 1;"),
+                compile_time_ms: 0
+            )
+            expect(result.has_js_glue()).to_equal(true)

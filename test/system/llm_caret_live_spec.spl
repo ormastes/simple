@@ -1,0 +1,329 @@
+# LLM Caret - Live Integration Tests
+#
+# REQUIRES: claude CLI installed and authenticated
+# These tests make REAL Claude CLI calls. They are slow (~10-30s per call).
+# Run with: bin/simple test test/system/llm_caret_live_spec.spl
+#
+# Tests verify:
+#   1. Single-shot response via llm_chat
+#   2. Response content validation (non-empty, non-error)
+#   3. Multi-turn conversation with session resume
+#   4. System prompt adherence
+#   5. Direct claude_cli_send with CliResponse struct
+#   6. History tracking across turns
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# JSON helpers (inlined - same as mod.spl)
+# ============================================================================
+
+fn _LB() -> text:
+    (123 as char).to_text()
+
+fn _RB() -> text:
+    (125 as char).to_text()
+
+fn _Q() -> text:
+    "\""
+
+fn _unwrap_idx(opt) -> i64:
+    match opt:
+        Some(i): return i
+        nil: return -1
+
+fn _escape_json(s: text) -> text:
+    var result = ""
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\"":
+            result = result + "\\\""
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+        i = i + 1
+    result
+
+fn _extract_json_string(json: text, key: text) -> text:
+    val quote = "\""
+    val search = quote + key + quote + ":"
+    val idx = _unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return ""
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    if trimmed.starts_with(quote):
+        val rest = trimmed.substring(1)
+        var end = 0
+        var escaped = false
+        while end < rest.len():
+            val ch = rest[end]
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == "\"":
+                return rest.substring(0, end)
+            end = end + 1
+    ""
+
+fn _extract_json_value(json: text, key: text) -> text:
+    val search = _Q() + key + _Q() + ":"
+    val idx = _unwrap_idx(json.index_of(search))
+    if idx < 0:
+        return "null"
+    val slen = search.len()
+    val start = idx + slen
+    val after = json.substring(start)
+    val trimmed = after.trim()
+    var end = 0
+    while end < trimmed.len():
+        val ch = trimmed[end]
+        if ch == "," or ch == _RB() or ch == "]":
+            break
+        end = end + 1
+    trimmed.substring(0, end).trim()
+
+fn _extract_json_bool(json: text, key: text) -> bool:
+    val raw = _extract_json_value(json, key)
+    raw == "true"
+
+fn _extract_json_int(json: text, key: text) -> i64:
+    val raw = _extract_json_value(json, key)
+    if raw == "null" or raw == "":
+        return 0
+    int(raw)
+
+# ============================================================================
+# Inline CliResponse (avoid import issues)
+# ============================================================================
+
+struct CliResponse:
+    content: text
+    model: text
+    session_id: text
+    stop_reason: text
+    input_tokens: i64
+    output_tokens: i64
+    error: text
+    is_error: bool
+    raw: text
+
+fn parse_response(raw: text) -> CliResponse:
+    if raw.trim() == "":
+        return CliResponse(
+            content: "",
+            model: "",
+            session_id: "",
+            stop_reason: "",
+            input_tokens: 0,
+            output_tokens: 0,
+            error: "empty response",
+            is_error: true,
+            raw: ""
+        )
+    val result_text = _extract_json_string(raw, "result")
+    val model_text = _extract_json_string(raw, "model")
+    val session = _extract_json_string(raw, "session_id")
+    val is_err = _extract_json_bool(raw, "is_error")
+    val stop = _extract_json_string(raw, "stop_reason")
+    val in_tok = _extract_json_int(raw, "input_tokens")
+    val out_tok = _extract_json_int(raw, "output_tokens")
+    var error_text = ""
+    if is_err:
+        error_text = result_text
+    CliResponse(
+        content: result_text,
+        model: model_text,
+        session_id: session,
+        stop_reason: stop,
+        input_tokens: in_tok,
+        output_tokens: out_tok,
+        error: error_text,
+        is_error: is_err,
+        raw: raw
+    )
+
+# ============================================================================
+# Helper: call claude CLI directly
+# ============================================================================
+
+fn call_claude(prompt: text, system_prompt: text, session_id: text, max_turns: i64) -> CliResponse:
+    var args: [text] = []
+    args = args + ["-p", prompt]
+    args = args + ["--output-format", "json"]
+    if system_prompt != "":
+        args = args + ["--system-prompt", system_prompt]
+    if session_id != "":
+        args = args + ["--resume", session_id]
+    if max_turns > 0:
+        args = args + ["--max-turns", max_turns.to_text()]
+    val result = rt_process_run("claude", args)
+    val stdout = result.0 ?? ""
+    val stderr = result.1 ?? ""
+    val exit_code = result.2
+    if exit_code != 0:
+        var err_msg = "exit code " + exit_code.to_text()
+        if stderr != "":
+            err_msg = err_msg + ": " + stderr
+        return CliResponse(
+            content: "",
+            model: "",
+            session_id: "",
+            stop_reason: "error",
+            input_tokens: 0,
+            output_tokens: 0,
+            error: err_msg,
+            is_error: true,
+            raw: stdout
+        )
+    parse_response(stdout)
+
+fn call_claude_simple(prompt: text) -> CliResponse:
+    call_claude(prompt, "", "", 1)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "LLM Caret Live Integration":
+
+    describe "Single-shot response":
+
+        it "returns non-empty response from claude CLI":
+            val resp = call_claude_simple("Reply with exactly: HELLO_SIMPLE")
+            print "  [DEBUG] is_error: {resp.is_error}"
+            print "  [DEBUG] error: {resp.error}"
+            print "  [DEBUG] content length: {resp.content.len()}"
+            print "  [DEBUG] content: {resp.content}"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.len() > 0).to_equal(true)
+
+        it "response contains expected text for deterministic prompt":
+            val resp = call_claude_simple("What is 2 + 2? Reply with ONLY the number, nothing else.")
+            print "  [DEBUG] content: [{resp.content}]"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.to_lower().contains("4")).to_equal(true)
+
+        it "returns model name in response":
+            val resp = call_claude_simple("Say hi")
+            print "  [DEBUG] model: {resp.model}"
+            expect(resp.is_error).to_equal(false)
+            # Model field should be non-empty
+            expect(resp.model.len() > 0).to_equal(true)
+
+        it "returns session_id for conversation tracking":
+            val resp = call_claude_simple("Say hello")
+            print "  [DEBUG] session_id: {resp.session_id}"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.session_id.len() > 0).to_equal(true)
+
+        it "reports token usage":
+            val resp = call_claude_simple("Say ok")
+            print "  [DEBUG] input_tokens: {resp.input_tokens}"
+            print "  [DEBUG] output_tokens: {resp.output_tokens}"
+            expect(resp.is_error).to_equal(false)
+            # At least some tokens should be used
+            val total = resp.input_tokens + resp.output_tokens
+            expect(total > 0).to_equal(true)
+
+    describe "System prompt":
+
+        it "follows system prompt instructions":
+            val resp = call_claude("What is your name?", "You are a helpful bot named BOTX99. Always include BOTX99 in your reply.", "", 1)
+            print "  [DEBUG] content: {resp.content}"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.to_upper().contains("BOTX99")).to_equal(true)
+
+        it "system prompt affects response style":
+            val resp = call_claude("Say hello", "You must reply in ALL CAPS only. No lowercase letters.", "", 1)
+            print "  [DEBUG] content: {resp.content}"
+            expect(resp.is_error).to_equal(false)
+            # Most of the response should be uppercase
+            val upper = resp.content.to_upper()
+            expect(upper.contains("HELLO")).to_equal(true)
+
+    describe "Multi-turn conversation":
+
+        it "maintains context across turns using session resume":
+            # Turn 1: establish a fact
+            val resp1 = call_claude("Remember this secret code: ZEBRA42. Just say OK.", "", "", 1)
+            print "  [DEBUG] Turn 1 content: {resp1.content}"
+            print "  [DEBUG] Turn 1 session_id: {resp1.session_id}"
+            expect(resp1.is_error).to_equal(false)
+            expect(resp1.session_id.len() > 0).to_equal(true)
+
+            # Turn 2: ask about the fact using session resume
+            val sid = resp1.session_id
+            val resp2 = call_claude("What was the secret code I told you? Reply with ONLY the code.", "", sid, 1)
+            print "  [DEBUG] Turn 2 content: {resp2.content}"
+            expect(resp2.is_error).to_equal(false)
+            expect(resp2.content.to_upper().contains("ZEBRA42")).to_equal(true)
+
+        it "multi-turn with 3 exchanges":
+            # Turn 1
+            val r1 = call_claude("I will give you 3 items. Item 1 is APPLE. Say OK.", "", "", 1)
+            print "  [DEBUG] T1: {r1.content}"
+            expect(r1.is_error).to_equal(false)
+            val sid1 = r1.session_id
+
+            # Turn 2
+            val r2 = call_claude("Item 2 is BANANA. Say OK.", "", sid1, 1)
+            print "  [DEBUG] T2: {r2.content}"
+            expect(r2.is_error).to_equal(false)
+
+            # Turn 3: recall
+            val r3 = call_claude("List all items I gave you, separated by commas.", "", sid1, 1)
+            print "  [DEBUG] T3: {r3.content}"
+            expect(r3.is_error).to_equal(false)
+            val upper3 = r3.content.to_upper()
+            expect(upper3.contains("APPLE")).to_equal(true)
+            expect(upper3.contains("BANANA")).to_equal(true)
+
+    describe "Response validation":
+
+        it "does not return ERROR prefix for valid requests":
+            val resp = call_claude_simple("Say hello world")
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.starts_with("ERROR")).to_equal(false)
+
+        it "raw field contains original JSON":
+            val resp = call_claude_simple("Say hi")
+            print "  [DEBUG] raw length: {resp.raw.len()}"
+            expect(resp.raw.len() > 0).to_equal(true)
+            # Raw should contain JSON structure
+            expect(resp.raw.contains("result")).to_equal(true)
+
+    describe "Manual quality checks":
+
+        it "handles simple math question":
+            val resp = call_claude_simple("What is 15 * 7? Reply with ONLY the number.")
+            print "  [MANUAL CHECK] 15*7 = {resp.content}"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.contains("105")).to_equal(true)
+
+        it "handles text generation":
+            val resp = call_claude_simple("Write exactly 3 words, nothing more.")
+            print "  [MANUAL CHECK] 3 words: [{resp.content}]"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.len() > 0).to_equal(true)
+            # Should be reasonably short (3 words + maybe punctuation)
+            expect(resp.content.len() < 200).to_equal(true)
+
+        it "handles JSON-like structured response":
+            val resp = call_claude("Return a JSON object with keys name and age. name=Alice age=30. Return ONLY the JSON, no markdown.", "You are a JSON generator. Return only valid JSON, no explanation, no markdown code fences.", "", 1)
+            print "  [MANUAL CHECK] JSON: {resp.content}"
+            expect(resp.is_error).to_equal(false)
+            expect(resp.content.contains("Alice")).to_equal(true)
+            expect(resp.content.contains("30")).to_equal(true)

@@ -21,7 +21,7 @@ use core.backend_types.{CompiledModule, CompiledSymbol, CodegenTarget, Optimizat
 use compiler.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig, LlvmTargetTriple__from_target, LlvmTargetTriple__from_target_baremetal, LlvmTargetTriple__from_target_with_mode, LlvmTargetConfig__for_target, LlvmTargetConfig__for_target_baremetal, LlvmTargetConfig__for_target_with_mode, LlvmTargetConfig__compatibility_build}
 use compiler.backend.llvm_ir_builder.{LlvmPass, passes_for_level, LlvmIRBuilder, MirToLlvm, LlvmIRBuilder__create, MirToLlvm__create, MirToLlvm__create_baremetal}
 use compiler.mir_opt.mod.{optimize_module, OptLevel}
-use llvm_shared.tools (find_llc as llvm_find_llc, find_opt as llvm_find_opt, llc_available as llvm_llc_available, opt_available as llvm_opt_available)
+use llvm_shared.tools (find_llc as llvm_find_llc, find_opt as llvm_find_opt, llc_available as llvm_llc_available, opt_available as llvm_opt_available, find_wasm_ld as llvm_find_wasm_ld, find_wasm_opt as llvm_find_wasm_opt, find_wasi_sysroot as llvm_find_wasi_sysroot)
 use app.io.mod (shell, file_write, file_delete, file_exists, getpid, time_now_unix_micros)
 use std.string.{NL}
 
@@ -113,6 +113,22 @@ class LlvmBackend:
             bare_metal: false
         )
 
+    static fn create_wasm(opt_level: OptimizationLevel) -> LlvmBackend:
+        """Create backend for WASM compilation via LLVM.
+
+        Uses wasm32-wasi target triple. Compiles MIR -> LLVM IR -> .wasm
+        via llc + wasm-ld pipeline.
+        """
+        LlvmBackend(
+            target: CodegenTarget.Wasm32,
+            opt_level: opt_level,
+            cpu_override: Some("generic"),
+            emit_llvm_ir: false,
+            emit_assembly: false,
+            debug_info: false,
+            bare_metal: false
+        )
+
     static fn default_backend() -> LlvmBackend:
         """Default backend (Host target, Speed optimization, x86-64-v3 on x86_64)."""
         LlvmBackend__create(CodegenTarget.Host, OptimizationLevel.Speed)
@@ -181,6 +197,28 @@ class LlvmBackend:
             Err("opt failed: {result.stderr}")
         else:
             Ok(output_path)
+
+    fn compile_to_wasm(module: MirModule, output_path: text):
+        """Compile a MIR module to WASM via LLVM pipeline.
+
+        Returns Ok(output_path) on success, Err(message) on failure.
+        """
+        val config = LlvmTargetConfig__for_target(CodegenTarget.Wasm32, self.cpu_override)
+
+        # Run MIR optimization passes
+        val mir_opt_level = to_mir_opt_level(self.opt_level)
+        var optimized_module = optimize_module(module, mir_opt_level)
+
+        # Translate MIR to LLVM IR
+        var translator = MirToLlvm__create(optimized_module.name, CodegenTarget.Wasm32, self.cpu_override)
+
+        # Add WASM runtime declarations
+        val runtime_decls = generate_wasm_runtime_declarations(CodegenTarget.Wasm32)
+        var llvm_ir = runtime_decls + NL + NL
+        llvm_ir = llvm_ir + translator.translate_module(optimized_module)
+
+        # Compile IR to WASM
+        compile_ir_to_wasm(llvm_ir, config, self.opt_level, output_path)
 
     fn compile_module(module: MirModule):
         """Compile a MIR module using LLVM."""
@@ -280,7 +318,14 @@ fn generate_runtime_declarations_for_target(target: CodegenTarget) -> text:
     These declarations allow compiled code to call runtime functions
     for I/O, memory management, strings, collections, etc.
     Parameterized by target for correct intrinsic types on 32-bit targets.
+    Dispatches to WASM-specific declarations for Wasm32/Wasm64 targets.
     """
+    match target:
+        case Wasm32 | Wasm64:
+            return generate_wasm_runtime_declarations(target)
+        case _:
+            ()
+
     val size_ty = if target.is_32bit(): "i32" else: "i64"
     val int_ty = if target.is_32bit(): "i32" else: "i64"
     var decls = "; Runtime function declarations{NL}"
@@ -411,6 +456,18 @@ fn llc_available() -> bool:
     """Check if llc (LLVM static compiler) is available on PATH."""
     llvm_llc_available()
 
+fn find_wasm_ld() -> text:
+    """Find wasm-ld binary. Returns command name or empty string."""
+    llvm_find_wasm_ld()
+
+fn find_wasm_opt() -> text:
+    """Find wasm-opt binary. Returns command name or empty string."""
+    llvm_find_wasm_opt()
+
+fn find_wasi_sysroot() -> text:
+    """Find WASI sysroot directory. Returns path or empty string."""
+    llvm_find_wasi_sysroot()
+
 fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel):
     """Compile LLVM IR text to object code bytes via llc CLI.
 
@@ -473,6 +530,160 @@ fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: Opti
     Ok(bytes)
 
 # ============================================================================
+# WASM Runtime Declarations
+# ============================================================================
+
+fn generate_wasm_runtime_declarations(target: CodegenTarget) -> text:
+    """
+    Generate LLVM IR declarations for WASM/WASI runtime functions.
+
+    WASM uses i32 pointers and i32 size types. Runtime functions are
+    imported from the host environment (WASI or JavaScript).
+    """
+    val ptr_ty = if target == CodegenTarget.Wasm32: "i32" else: "i64"
+    val size_ty = if target == CodegenTarget.Wasm32: "i32" else: "i64"
+    var decls = "; WASM Runtime function declarations{NL}"
+
+    # Memory operations (provided by WASM runtime)
+    decls = decls + "declare ptr @rt_alloc({size_ty}){NL}"
+    decls = decls + "declare ptr @rt_realloc(ptr, {size_ty}){NL}"
+    decls = decls + "declare void @rt_free(ptr){NL}"
+
+    # String operations
+    decls = decls + "declare {size_ty} @rt_strlen(ptr){NL}"
+    decls = decls + "declare ptr @rt_strcat(ptr, ptr){NL}"
+    decls = decls + "declare ptr @rt_substr(ptr, {size_ty}, {size_ty}){NL}"
+    decls = decls + "declare {size_ty} @rt_strfind(ptr, ptr){NL}"
+    decls = decls + "declare ptr @rt_strreplace(ptr, ptr, ptr){NL}"
+    decls = decls + "declare ptr @rt_strsplit(ptr, ptr){NL}"
+    decls = decls + "declare {size_ty} @rt_strcmp(ptr, ptr){NL}"
+
+    # Array/Collection operations
+    decls = decls + "declare ptr @rt_array_new({size_ty}){NL}"
+    decls = decls + "declare {size_ty} @rt_array_len(ptr){NL}"
+    decls = decls + "declare ptr @rt_array_get(ptr, {size_ty}){NL}"
+    decls = decls + "declare void @rt_array_set(ptr, {size_ty}, ptr){NL}"
+    decls = decls + "declare ptr @rt_array_push(ptr, ptr){NL}"
+    decls = decls + "declare ptr @rt_array_pop(ptr){NL}"
+
+    # Dict/Map operations
+    decls = decls + "declare ptr @rt_dict_new(){NL}"
+    decls = decls + "declare ptr @rt_dict_get(ptr, ptr){NL}"
+    decls = decls + "declare void @rt_dict_set(ptr, ptr, ptr){NL}"
+    decls = decls + "declare i1 @rt_dict_contains(ptr, ptr){NL}"
+    decls = decls + "declare {size_ty} @rt_dict_len(ptr){NL}"
+
+    # I/O operations
+    decls = decls + "declare void @rt_print(ptr){NL}"
+    decls = decls + "declare void @rt_println(ptr){NL}"
+    decls = decls + "declare ptr @rt_readline(){NL}"
+
+    # Error handling
+    decls = decls + "declare void @rt_panic(ptr){NL}"
+
+    # Math operations
+    decls = decls + "declare double @rt_sin(double){NL}"
+    decls = decls + "declare double @rt_cos(double){NL}"
+    decls = decls + "declare double @rt_sqrt(double){NL}"
+    decls = decls + "declare double @rt_pow(double, double){NL}"
+
+    # LLVM intrinsics (i32 size type for wasm32)
+    decls = decls + "declare void @llvm.memcpy.p0.p0.{size_ty}(ptr, ptr, {size_ty}, i1){NL}"
+    decls = decls + "declare void @llvm.memset.p0.{size_ty}(ptr, i8, {size_ty}, i1){NL}"
+
+    decls
+
+# ============================================================================
+# LLVM IR -> WASM Compilation (via llc + wasm-ld)
+# ============================================================================
+
+fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: OptimizationLevel, output_path: text) -> Result<text, text>:
+    """Compile LLVM IR to a .wasm file via llc + wasm-ld.
+
+    Pipeline:
+    1. Write IR to temp .ll file
+    2. Run llc to produce .o (wasm object)
+    3. Run wasm-ld to produce .wasm
+    4. Optionally run wasm-opt for optimization
+    5. Return path to .wasm file
+    """
+    # Find required tools
+    val llc_cmd = find_llc()
+    if not llc_cmd.?:
+        return Err("llc not found. Install LLVM for WASM compilation.")
+
+    val wasm_ld_cmd = find_wasm_ld()
+    if wasm_ld_cmd == "":
+        return Err("wasm-ld not found. Install lld: apt install lld (Ubuntu) or brew install llvm (macOS)")
+
+    val llc = llc_cmd.unwrap()
+    val pid = getpid()
+    val ts = time_now_unix_micros()
+    val ir_path = "/tmp/simple_wasm_{pid}_{ts}.ll"
+    val obj_path = "/tmp/simple_wasm_{pid}_{ts}.o"
+
+    # Step 1: Write IR to temp file
+    if not file_write(ir_path, llvm_ir):
+        return Err("Failed to write LLVM IR to {ir_path}")
+
+    # Step 2: Compile IR to wasm object via llc
+    var opt_flag = "-O0"
+    if opt_level == OptimizationLevel.Size:
+        opt_flag = "-Oz"
+    elif opt_level == OptimizationLevel.Speed:
+        opt_flag = "-O2"
+    elif opt_level == OptimizationLevel.Aggressive:
+        opt_flag = "-O3"
+
+    val triple = config.triple.to_text()
+    val llc_cmd_str = "{llc} -mtriple={triple} -filetype=obj {opt_flag} -o {obj_path} {ir_path} 2>&1"
+    val llc_result = shell(llc_cmd_str)
+
+    file_delete(ir_path)
+
+    if llc_result.exit_code != 0:
+        file_delete(obj_path)
+        return Err("llc WASM compilation failed:{NL}{llc_result.stdout}")
+
+    # Step 3: Link with wasm-ld
+    var ld_args = "{wasm_ld_cmd} --export=_start --stack-first"
+    ld_args = ld_args + " -z stack-size=1048576"
+    ld_args = ld_args + " --initial-memory=4194304"
+
+    # Check for WASI sysroot
+    val sysroot = find_wasi_sysroot()
+    if sysroot != "":
+        ld_args = ld_args + " -L{sysroot}/lib/wasm32-wasi -lc"
+        ld_args = ld_args + " {sysroot}/lib/wasm32-wasi/crt1.o"
+    else:
+        # Standalone mode without libc
+        ld_args = ld_args + " --no-entry --export-all"
+
+    ld_args = ld_args + " -o {output_path} {obj_path} 2>&1"
+
+    val ld_result = shell(ld_args)
+    file_delete(obj_path)
+
+    if ld_result.exit_code != 0:
+        return Err("wasm-ld linking failed:{NL}{ld_result.stdout}")
+
+    # Step 4: Optionally optimize with wasm-opt
+    val wasm_opt_cmd = find_wasm_opt()
+    if wasm_opt_cmd != "" and opt_level != OptimizationLevel.Debug:
+        val wasm_opt_flag = if opt_level == OptimizationLevel.Size: "-Oz" else: "-O3"
+        val opt_output = "{output_path}.opt"
+        val opt_result = shell("{wasm_opt_cmd} {wasm_opt_flag} {output_path} -o {opt_output} 2>&1")
+        if opt_result.exit_code == 0:
+            # Replace original with optimized version
+            file_delete(output_path)
+            shell("mv {opt_output} {output_path}")
+        else:
+            # Optimization failed, keep unoptimized version
+            file_delete(opt_output)
+
+    Ok(output_path)
+
+# ============================================================================
 # Optimization Level Mapping
 # ============================================================================
 
@@ -498,6 +709,9 @@ fn LlvmBackend__create_baremetal(target: CodegenTarget, opt_level: OptimizationL
 fn LlvmBackend__compatibility_build(target: CodegenTarget, opt_level: OptimizationLevel) -> LlvmBackend:
     LlvmBackend.compatibility_build(target, opt_level)
 
+fn LlvmBackend__create_wasm(opt_level: OptimizationLevel) -> LlvmBackend:
+    LlvmBackend.create_wasm(opt_level)
+
 fn LlvmBackend__default_backend() -> LlvmBackend:
     LlvmBackend.default_backend()
 
@@ -519,5 +733,7 @@ export MirToLlvm__create, MirToLlvm__create_baremetal
 
 # This module's exports
 export LlvmBackend, LlvmCompileResult
-export compile_ir_to_object, llc_available, find_llc, find_opt, opt_available, generate_runtime_declarations, generate_runtime_declarations_for_target
-export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__compatibility_build, LlvmBackend__default_backend
+export compile_ir_to_object, compile_ir_to_wasm, llc_available, find_llc, find_opt, opt_available
+export generate_runtime_declarations, generate_runtime_declarations_for_target, generate_wasm_runtime_declarations
+export find_wasm_ld, find_wasm_opt, find_wasi_sysroot
+export LlvmBackend__create, LlvmBackend__create_baremetal, LlvmBackend__create_wasm, LlvmBackend__compatibility_build, LlvmBackend__default_backend

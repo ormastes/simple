@@ -1,0 +1,133 @@
+# WASM Linker - wasm-ld wrapper for WebAssembly linking
+#
+# Provides a high-level interface to wasm-ld for linking WASM object files
+# into final .wasm modules. Supports both WASI and standalone modes.
+#
+# Usage:
+#   val config = WasmLinkConfig__default()
+#   val result = link_wasm(["file.o"], config)
+
+use std.io_runtime.{shell, file_exists, file_delete}
+use llvm_shared.tools.{find_wasm_ld, find_wasm_opt, find_wasi_sysroot}
+use std.string.{NL}
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+struct WasmLinkConfig:
+    """Configuration for WASM linking."""
+    output_path: text           # Output .wasm file path
+    sysroot: text               # WASI sysroot path (empty = auto-detect)
+    initial_memory: i64         # Initial linear memory in bytes (must be multiple of 65536)
+    max_memory: i64             # Maximum linear memory in bytes (0 = unlimited)
+    stack_size: i64             # Stack size in bytes
+    standalone: bool            # Standalone mode (no WASI, export all)
+    optimize: bool              # Run wasm-opt after linking
+    verbose: bool               # Print linking commands
+
+fn WasmLinkConfig__default() -> WasmLinkConfig:
+    """Create default WASM link configuration."""
+    WasmLinkConfig(
+        output_path: "output.wasm",
+        sysroot: "",
+        initial_memory: 4194304,   # 4 MB
+        max_memory: 268435456,     # 256 MB
+        stack_size: 1048576,       # 1 MB
+        standalone: false,
+        optimize: false,
+        verbose: false
+    )
+
+# ============================================================================
+# WASM Linking
+# ============================================================================
+
+fn link_wasm(objects: [text], config: WasmLinkConfig) -> Result<text, text>:
+    """Link WASM object files into a final .wasm module.
+
+    Args:
+        objects: List of .o object file paths (wasm format)
+        config: Link configuration
+
+    Returns:
+        Ok(output_path) on success, Err(message) on failure
+    """
+    if objects.len() == 0:
+        return Err("No object files to link")
+
+    # Find wasm-ld
+    val wasm_ld = find_wasm_ld()
+    if wasm_ld == "":
+        return Err("wasm-ld not found. Install lld: apt install lld (Ubuntu) or brew install llvm (macOS)")
+
+    # Build command
+    var cmd = wasm_ld
+
+    # Stack-first layout (stack before data, prevents stack overflow into data)
+    cmd = cmd + " --stack-first"
+
+    # Stack size
+    cmd = cmd + " -z stack-size={config.stack_size}"
+
+    # Memory configuration
+    cmd = cmd + " --initial-memory={config.initial_memory}"
+    if config.max_memory > 0:
+        cmd = cmd + " --max-memory={config.max_memory}"
+
+    # Determine WASI sysroot
+    var sysroot = config.sysroot
+    if sysroot == "":
+        sysroot = find_wasi_sysroot()
+
+    if config.standalone or sysroot == "":
+        # Standalone mode: no WASI, export everything
+        cmd = cmd + " --no-entry --export-all"
+    else:
+        # WASI mode: link with libc, use _start entry
+        cmd = cmd + " --export=_start"
+        cmd = cmd + " -L{sysroot}/lib/wasm32-wasi -lc"
+        cmd = cmd + " {sysroot}/lib/wasm32-wasi/crt1.o"
+
+    # Output path
+    cmd = cmd + " -o {config.output_path}"
+
+    # Input object files
+    for obj in objects:
+        cmd = cmd + " {obj}"
+
+    cmd = cmd + " 2>&1"
+
+    if config.verbose:
+        print "[wasm-linker] {cmd}"
+
+    # Execute wasm-ld
+    val result = shell(cmd)
+    if result.exit_code != 0:
+        return Err("wasm-ld failed (exit {result.exit_code}):{NL}{result.stdout}")
+
+    # Optionally optimize with wasm-opt
+    if config.optimize:
+        val wasm_opt = find_wasm_opt()
+        if wasm_opt != "":
+            val opt_output = "{config.output_path}.opt"
+            val opt_result = shell("{wasm_opt} -O3 {config.output_path} -o {opt_output} 2>&1")
+            if opt_result.exit_code == 0:
+                file_delete(config.output_path)
+                shell("mv {opt_output} {config.output_path}")
+            else:
+                file_delete(opt_output)
+
+    if config.verbose:
+        val size_result = shell("wc -c < {config.output_path}")
+        val size = size_result.stdout.trim()
+        print "[wasm-linker] Output: {config.output_path} ({size} bytes)"
+
+    Ok(config.output_path)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export WasmLinkConfig, WasmLinkConfig__default
+export link_wasm

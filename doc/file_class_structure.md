@@ -1,381 +1,386 @@
 # Simple Language Compiler - File & Class Structure Analysis
 
-**Date:** 2026-02-14
-**Status:** Comprehensive Inventory
-**Scope:** Full codebase (2,578 .spl files, 98,916 lines)
+**Date:** 2026-02-16
+**Status:** Comprehensive Inventory & Refactoring Guide
+**Scope:** Full codebase (2,649 .spl files, 623,207 lines)
 
 ---
 
 ## Executive Summary
 
-### Codebase Statistics
+### Codebase Statistics (2026-02-16)
 
-| Metric | Value |
-|--------|-------|
-| Total .spl Files | 2,578 |
-| Total Lines of Code | 98,916 |
-| Classes | 1,254 |
-| Structs | 2,192 |
-| Enums | 1,052 |
-| Total Type Definitions | 4,498 |
+| Metric | Value | Notes |
+|--------|-------|-------|
+| **Total .spl Files** | 2,649 | +71 files since 2026-02-14 |
+| **Total Lines of Code** | 623,207 | Includes all src/ directories |
+| **Core Lines (src/)** | 111,044 | Actual source code |
+| **Test Lines (test/)** | ~512,000+ | 4,067 passing tests |
+| **Directories** | 2,567 | Full project structure |
 
 ### Distribution by Directory
 
-| Directory | Files | Lines | % of Codebase | Purpose |
-|-----------|-------|-------|---------------|---------|
-| `src/std/` | 901 | 185,046 | 187.0% | Standard library (includes utilities, overlaps with main count) |
-| `src/compiler/` | 420 | 136,623 | 138.1% | Full compiler (Full Simple) |
-| `src/app/` | 584 | 122,309 | 123.6% | Applications & tools |
-| `src/compiler_core/` | 441 | 98,874 | 99.9% | Core compiler (Core Simple) |
-| `src/lib/` | 102 | 23,992 | 24.3% | Database, actors, ML, parsers |
-| `src/core/` | 36 | 15,691 | 15.9% | Core Simple library (seed-compilable) |
-| `src/baremetal/` | 32 | 4,088 | 4.1% | Bare-metal runtime |
-| Other | 62 | 5,609 | 5.7% | Diagnostics, FFI, remote, shared |
+| Directory | Files | Lines | % of Core | Purpose |
+|-----------|-------|-------|-----------|---------|
+| `src/std/` | 909 | 192,427 | 173.3% | Standard library (utilities, data structures, protocols) |
+| `src/compiler/` | 436 | 140,341 | 126.4% | Full compiler (Full Simple) |
+| `src/app/` | 594 | 129,154 | 116.3% | Applications & tools (CLI, MCP, LSP, test runner) |
+| `src/compiler_core/` | 441 | 97,057 | 87.4% | Core compiler (Core Simple) |
+| `src/lib/` | 123 | 30,993 | 27.9% | Database, actors, ML, parsers |
+| `src/core/` | 42 | 17,871 | 16.1% | Core Simple library (seed-compilable) |
+| `src/baremetal/` | 36 | 4,829 | 4.3% | Bare-metal runtime |
+| `src/remote/` | 15 | 3,964 | 3.6% | Remote execution |
+| `src/ffi/` | 11 | 1,808 | 1.6% | FFI bridge utilities |
+| Other | 42 | 5,564 | 5.0% | Diagnostics, MCP lib, shared, test utils |
 
-**Note:** Percentages exceed 100% because `src/std/` contains many utility files that duplicate functionality across modules.
+**Note:** Percentages exceed 100% because std/ contains extensive utilities that serve the entire codebase.
 
-### Duplication Summary
+### Key Architectural Highlights
 
-| Category | Estimated Lines | Status | Priority |
-|----------|----------------|--------|----------|
-| **Intentional: compiler/ ↔ compiler_core/** | ~15,000 | Documented | N/A (bootstrap) |
-| **Lexer triplication** (core, compiler, compiler_core) | ~3,700 | Documented | Low (bootstrap) |
-| **Parser triplication** (core, compiler, lib/) | ~6,700 | Documented | Low (bootstrap) |
-| **Type mappers** (7 backends × 2 compilers) | ~4,700 | Documented | Low (backend-specific) |
-| **Phase files** (27 development files) | ~12,000 | Documented | Medium (consolidation) |
-| **Validators/Checkers** (~14 files) | ~6,400 | Structural | High (framework opportunity) |
-| **ISA encoders** (3 architectures × 2 sets) | ~4,600 | Cross-platform | Very High Risk |
-| **String/Array utilities** (std/) | ~4,200 | Scattered | Medium |
-| **FFI specs** (41 files in ffi_gen.specs/) | ~6,600 | Generated | Low (tool output) |
-
-**Total Addressable Duplication:** ~16,000 lines (excluding intentional bootstrap duplication)
-**Duplication Percentage:** ~16% of codebase
+1. **100% Pure Simple** - No Rust/C++ source (except bootstrap seed compiler)
+2. **Self-Hosting** - Compiler written in Simple, compiles itself
+3. **Multi-Backend** - LLVM, Cranelift, Native (x86-64, AArch64, RISC-V), WASM, Interpreter
+4. **Comprehensive Stdlib** - 909 files covering networking, crypto, ML, data structures
+5. **Production Ready** - 4,067/4,067 tests passing (100%)
+6. **Bootstrap Duplication** - ~15,000 lines intentionally duplicated for self-hosting
 
 ---
 
-## 1. Directory Structure
+## 1. Complete Directory Tree
 
-### 1.1 Core Simple Library (`src/core/` - 36 files, 15,691 lines)
+### 1.1 Core Simple Library (`src/core/` - 42 files, 17,871 lines)
 
-**Purpose:** Seed-compilable core library, minimal dependencies, can bootstrap itself.
+**Purpose:** Seed-compilable core library for bootstrapping. Minimal dependencies, can compile through C seed compiler.
 
-**Key Files:**
+#### Key Modules
+
+| File | Lines | Purpose | Key Types |
+|------|-------|---------|-----------|
+| `compiler/c_codegen.spl` | 2,339 | C code generation for seed | `CCodegen` |
+| `parser.spl` | 2,135 | Core parser (seed-compilable) | `CoreParser` |
+| `interpreter/eval.spl` | 1,797 | Tree-walk interpreter with JIT | `Interpreter` |
+| `ast.spl` | 922 | AST node definitions | `CoreExpr`, `CoreStmt`, `CoreDecl` |
+| `lexer.spl` | 829 | Lexical analysis | - |
+| `mir.spl` | 756 | Mid-level IR | `MirInst`, `MirBlock` |
+| `lexer_struct.spl` | 720 | Lexer state management | `CoreLexer` |
+| `types.spl` | 582 | Type system core | `TypeKind` |
+| `aop.spl` | 541 | Aspect-oriented programming | `Advice`, `AdviceKind` |
+| `type_checker.spl` | 442 | Type checking | `TypeChecker` |
+| `tokens.spl` | 446 | Token definitions | `TokenKind`, `Token` |
+| `type_inference.spl` | 415 | Type inference engine | `InferContext` |
+| `type_erasure.spl` | 302 | Generic type erasure | - |
+| `error.spl` | 178 | Error handling | `CompilerError` |
+| `backend_types.spl` | 156 | Backend type definitions | `BackendKind` |
+
+#### Subdirectories
+
+**`interpreter/` (7 files, 3,053 lines) - Core interpreter runtime**
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `compiler/c_codegen.spl` | 2,339 | C code generation (seed compiler) |
-| `parser.spl` | 2,135 | Core parser implementation |
-| `interpreter/eval.spl` | 1,797 | Tree-walk interpreter with JIT |
-| `ast.spl` | 922 | Abstract syntax tree definitions |
-| `lexer.spl` | 829 | Lexical analysis |
-| `lexer_struct.spl` | 720 | Lexer state structs |
-| `mir.spl` | 756 | Mid-level IR definitions |
-| `types.spl` | 582 | Type system core |
-| `aop.spl` | 541 | Aspect-oriented programming |
-| `type_checker.spl` | 442 | Type checking |
-| `tokens.spl` | 446 | Token definitions |
-| `type_inference.spl` | 415 | Type inference engine |
-| `type_erasure.spl` | 302 | Generic type erasure |
+| `eval.spl` | 1,797 | Expression/statement evaluation |
+| `env.spl` | 160 | Variable environment |
+| `value.spl` | 316 | Runtime values |
+| `ops.spl` | 236 | Operator implementations |
+| `module_loader.spl` | 278 | Module loading & imports |
+| `jit.spl` | 141 | JIT compilation |
+| `mod.spl` | 125 | Module entry points |
 
-**Subdirectories:**
-- `interpreter/` (7 files, 3,053 lines) - Core interpreter (eval, env, ops, value, jit, module_loader)
-- `compiler/` (3 files, 2,463 lines) - Seed C codegen, driver, tests
-
-**Key Types:**
-- **Structs:** `CoreExpr`, `CoreStmt`, `CoreDecl`, `CoreLexer`, `CoreParser`, `MirInst`
-- **Enums:** `TokenKind`, `AstNodeKind`, `TypeKind`, `MirOpcode`
-
----
-
-### 1.2 Standard Library (`src/std/` - 901 files, 185,046 lines)
-
-**Purpose:** Comprehensive standard library with utilities, data structures, protocols, ML, graphics.
-
-**Top 30 Largest Modules:**
-
-| Module | Lines | Category | Description |
-|--------|-------|----------|-------------|
-| `bcrypt/core.spl` | 1,332 | Crypto | Password hashing |
-| `cbor/core.spl` | 1,305 | Serialization | CBOR encoding/decoding |
-| `skiplist_utils.spl` | 1,105 | Data Structures | Skip list utilities |
-| `graph/utilities.spl` | 978 | Algorithms | Graph algorithms |
-| `linear_algebra/matrix_ops.spl` | 894 | Math | Matrix operations |
-| `set_utils.spl` | 777 | Collections | Set utilities |
-| `text_utils.spl` | 767 | String | Text processing |
-| `src/tooling/easy_fix/rules.spl` | 761 | Tooling | Auto-fix rules |
-| `src/di.spl` | 744 | Infrastructure | Dependency injection |
-| `search_utils.spl` | 738 | Algorithms | Search algorithms |
-| `amqp_utils.spl` | 738 | Networking | AMQP protocol |
-| `src/testing/mocking_advanced.spl` | 724 | Testing | Advanced mocking |
-| `matrix_utils.spl` | 719 | Math | Matrix utilities |
-| `udp_utils.spl` | 715 | Networking | UDP utilities |
-| `src/infra.spl` | 712 | Infrastructure | Infrastructure support |
-| `diff/utilities.spl` | 710 | Algorithms | Diff algorithms |
-| `stats_utils.spl` | 700 | Math | Statistics |
-| `src/tensor.spl` | 697 | ML | Tensor operations |
-| `comparator_utils.spl` | 693 | Collections | Comparators |
-| `binary_io.spl` | 690 | I/O | Binary I/O |
-
-**Major Categories:**
-
-| Category | Modules | Total Lines | Description |
-|----------|---------|-------------|-------------|
-| **Data Structures** | ~80 | ~25,000 | Trees, graphs, skip lists, tries, ropes |
-| **Algorithms** | ~40 | ~15,000 | Sorting, searching, graph, numeric |
-| **Networking** | ~60 | ~18,000 | HTTP, TCP, UDP, WebSocket, MQTT, Kafka |
-| **Serialization** | ~30 | ~12,000 | JSON, CBOR, YAML, XML, Protobuf, Avro |
-| **Cryptography** | ~35 | ~10,000 | AES, RSA, bcrypt, scrypt, JWT, TLS |
-| **Math/ML** | ~25 | ~15,000 | Linear algebra, FFT, tensors, optimization |
-| **Testing** | ~15 | ~5,000 | SSpec, mocking, benchmarking |
-| **Utilities** | ~200 | ~40,000 | String, array, text, validation, encoding |
-
-**Known Duplication Patterns:**
-- **String utilities:** `text_utils.spl` (767 lines), `string.spl` (626 lines), `string_extra.spl` (314 lines), `src/text_utils.spl` (230 lines) - **~1,937 lines**
-- **Array utilities:** `array.spl` (350 lines), `json/array_ops.spl` (559 lines), `src/array_builder.spl` (305 lines) - **~1,214 lines**
-- **Validation patterns:** Scattered across modules, estimated **~2,000 lines**
-
----
-
-### 1.3 Applications (`src/app/` - 584 files, 122,309 lines)
-
-**Purpose:** CLI tools, build system, MCP servers, language servers, formatters, test runners.
-
-**Top 30 Applications:**
-
-| Application | Files | Lines | Purpose |
-|-------------|-------|-------|---------|
-| `compile/` | 10 | 4,258 | C translation & codegen |
-| `build/` | 28 | 7,231 | Build system & bootstrap |
-| `dashboard/` | 5 | 1,760 | Interactive dashboard |
-| `mcp_jj/` | 19 | 4,654 | MCP server for Jujutsu VCS |
-| `mcp/` | 28 | 8,394 | MCP servers (fileio, debug, resources) |
-| `ffi_gen/` | 71 | 12,130 | FFI wrapper generator |
-| `ffi_gen.specs/` | 41 | 6,608 | FFI generation specs |
-| `parser/` | 39 | 9,176 | Parser tools & AST |
-| `test_runner_new/` | 44 | 10,213 | Test runner & SDoctest |
-| `io/` | 40 | 11,190 | I/O subsystem (CLI, JIT, window, audio, gamepad) |
-| `lsp/` | 20 | 4,525 | Language Server Protocol |
-| `dap/` | 9 | 2,141 | Debug Adapter Protocol |
-| `desugar/` | 6 | 1,454 | Static method desugaring |
-| `formatter/` | 1 | 704 | Code formatter |
-| `lint/` | 1 | 616 | Linter |
-| `cli/` | 14 | 2,602 | CLI main & commands |
-| `wrapper_gen/` | 12 | 2,376 | Wrapper code generator |
-| `verify/` | 11 | 2,217 | Verification tools |
-| `package/` | 26 | 3,615 | Package management |
-| `depgraph/` | 10 | 1,393 | Dependency graph |
-
-**Key Applications:**
-
-1. **CLI (`cli/main.spl` - 756 lines)**
-   - Entry point for `bin/simple` binary
-   - Command dispatch, help system
-   - Key functions: `main()`, `parse_args()`, `dispatch_command()`
-
-2. **Build System (`build/` - 7,231 lines)**
-   - `bootstrap_multiphase.spl` (1,544 lines) - Multi-phase bootstrap
-   - `baremetal.spl` (81 lines) - Bare-metal builds
-   - Builds compiler from source in phases
-
-3. **Test Runner (`test_runner_new/` - 10,213 lines)**
-   - `test_runner_main.spl` (704 lines) - Main runner
-   - `test_runner_execute.spl` (624 lines) - Test execution
-   - `sdoctest/` subdirectory (9 files) - Executable documentation tests
-   - Runs SSpec tests, generates reports
-
-4. **MCP Servers**
-   - `mcp/fileio_main.spl` (717 lines) - File operations MCP
-   - `mcp/debug_tools.spl` (675 lines) - Debugging MCP
-   - `mcp_jj/tools_jj.spl` (1,127 lines) - Jujutsu VCS integration
-   - `mcp_jj/tools_git.spl` (911 lines) - Git fallback
-
-5. **FFI Generator (`ffi_gen/` - 12,130 lines)**
-   - `main.spl` (1,035 lines) - Generator driver
-   - `parser.spl` - Spec parser
-   - `specs/` directory with 41 specification files
-   - Generates two/three-tier FFI wrappers
-
-**Critical Duplication:**
-- **ffi_gen.specs/**: 41 files with similar structure (enum specs, function specs, struct specs)
-  - `cranelift_core.spl` (972 lines)
-  - `runtime_value_full.spl` (658 lines) - **DUPLICATED** in `ffi_gen/specs/runtime_value_full.spl` (658 lines)
-  - Total: **~6,600 lines** with high structural similarity
-
----
-
-### 1.4 Full Compiler (`src/compiler/` - 420 files, 136,623 lines)
-
-**Purpose:** Full-featured compiler with all language features (Full Simple), requires desugaring to run on Core Simple.
-
-**Top 30 Compiler Files:**
+**`compiler/` (3 files, 2,463 lines) - Seed compiler support**
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `parser.spl` | 2,453 | Full parser with all features |
-| `treesitter/outline.spl` | 1,799 | Tree-sitter integration |
-| `mir_opt/auto_vectorize.spl` | 1,528 | Auto-vectorization pass |
-| `mir_lowering.spl` | 1,503 | HIR → MIR lowering |
-| `type_infer/inference.spl` | 1,437 | Type inference engine |
-| `monomorphize/deferred.spl` | 1,405 | Deferred monomorphization |
-| `lexer.spl` | 1,382 | Full lexer |
-| `backend/llvm_ir_builder.spl` | 1,123 | LLVM IR generation |
-| `backend/native/mod.spl` | 1,098 | Native backend entry |
-| `mir_data.spl` | 1,080 | MIR data structures |
-| `backend/interpreter.spl` | 1,057 | Interpreter backend |
-| `linker/linker_wrapper.spl` | 1,019 | Linker integration |
-| `mir_opt/loop_opt.spl` | 957 | Loop optimization |
-| `type_system/expr_infer.spl` | 928 | Expression type inference |
-| `backend/native/elf_writer.spl` | 921 | ELF file generation |
-| `resolve.spl` | 876 | Name resolution |
-| `driver.spl` | 856 | Compiler driver |
-| `backend/native/isel_x86_64.spl` | 856 | x86-64 instruction selection |
-| `parser_types.spl` | 841 | Parser type definitions |
-| `traits.spl` | 816 | Trait system |
-| `dim_constraints.spl` | 787 | Dimension checking (ML) |
-| `backend/lean_backend.spl` | 782 | Lean proof backend |
-| `smf_writer.spl` | 781 | SMF binary format writer |
-| `optimization_passes.spl` | 781 | Optimization pipeline |
-| `backend/native/isel_aarch64.spl` | 777 | AArch64 instruction selection |
-| `loader/compiler_ffi.spl` | 774 | Compiler FFI interface |
-| `backend/native/isel_riscv64.spl` | 771 | RISC-V instruction selection |
-| `build_native.spl` | 765 | Native build orchestration |
-| `backend/native/mach_inst.spl` | 753 | Machine instruction representation |
+| `c_codegen.spl` | 2,339 | C code generation |
+| `driver.spl` | 62 | Compiler driver |
+| `test.spl` | 62 | Compiler tests |
 
-**Major Subsystems:**
+---
+
+### 1.2 Standard Library (`src/std/` - 909 files, 192,427 lines)
+
+**Purpose:** Comprehensive standard library covering all common needs.
+
+#### Top 50 Modules by Size
+
+| Module | Lines | Category | Key Types | Purpose |
+|--------|-------|----------|-----------|---------|
+| `bcrypt/core.spl` | 1,332 | Crypto | `BcryptHash` | Password hashing (bcrypt algorithm) |
+| `cbor/core.spl` | 1,305 | Serialization | `CborEncoder`, `CborDecoder` | CBOR binary format |
+| `skiplist_utils.spl` | 1,105 | Data Structures | `SkipList` | Probabilistic balanced tree |
+| `graph/utilities.spl` | 978 | Algorithms | `Graph` | Dijkstra, BFS, DFS, topological sort |
+| `linear_algebra/matrix_ops.spl` | 894 | Math | `Matrix` | Matrix operations |
+| `set_utils.spl` | 777 | Collections | `Set` | Set operations (union, intersect) |
+| `text_utils.spl` | 767 | String | - | Text processing helpers |
+| `src/tooling/easy_fix/rules.spl` | 761 | Tooling | `FixRule` | Auto-fix rules for linter |
+| `src/di.spl` | 744 | Infrastructure | `Container`, `Provider` | Dependency injection |
+| `search_utils.spl` | 738 | Algorithms | - | Binary search, interpolation search |
+| `amqp_utils.spl` | 738 | Networking | `AmqpConnection` | AMQP 0-9-1 protocol |
+| `src/testing/mocking_advanced.spl` | 724 | Testing | `AdvancedMock` | Advanced mocking framework |
+| `matrix_utils.spl` | 719 | Math | - | Matrix utilities (det, inv, eigen) |
+| `udp_utils.spl` | 715 | Networking | `UdpSocket` | UDP networking |
+| `src/infra.spl` | 712 | Infrastructure | - | Infrastructure patterns |
+| `diff/utilities.spl` | 710 | Algorithms | `Differ` | Myers diff algorithm |
+| `stats_utils.spl` | 700 | Math | - | Mean, median, stddev, correlation |
+| `src/tensor.spl` | 697 | ML | `Tensor` | N-dimensional arrays for ML |
+| `spec.spl` | 694 | Testing | `ExpectHelper` | SSpec BDD framework |
+| `comparator_utils.spl` | 693 | Collections | - | Custom comparators |
+| `binary_io.spl` | 690 | I/O | `BinaryReader`, `BinaryWriter` | Binary file I/O |
+| `allocator.spl` | 683 | Memory | `Allocator`, `ArenaAllocator` | Custom memory allocators |
+| `sdn/parser.spl` | 682 | Serialization | `SdnParser` | SDN format parser |
+| `src/table.spl` | 682 | Data Structures | `Table` | Tabular data |
+| `string.spl` | 627 | String | - | Core string operations |
+| `json/core.spl` | 611 | Serialization | `JsonValue` | JSON parsing/encoding |
+| `sdn/core.spl` | 573 | Serialization | `SdnValue` | SDN (Simple Data Notation) |
+| `json/array_ops.spl` | 559 | Serialization | - | JSON array utilities |
+| `http/client.spl` | 558 | Networking | `HttpClient` | HTTP client |
+| `concurrent/thread_pool.spl` | 556 | Concurrency | `ThreadPool` | Thread pool executor |
+
+#### Major Categories
+
+| Category | Modules | Lines | Description |
+|----------|---------|-------|-------------|
+| **Data Structures** | ~85 | ~28,000 | Trees, graphs, skip lists, tries, ropes, heaps |
+| **Algorithms** | ~45 | ~16,000 | Sorting, searching, graph, numeric, string matching |
+| **Networking** | ~65 | ~20,000 | HTTP, TCP, UDP, WebSocket, MQTT, Kafka, AMQP |
+| **Serialization** | ~35 | ~14,000 | JSON, CBOR, YAML, XML, Protobuf, Avro, MessagePack |
+| **Cryptography** | ~40 | ~12,000 | AES, RSA, bcrypt, scrypt, JWT, TLS, hashing |
+| **Math/ML** | ~30 | ~17,000 | Linear algebra, FFT, tensors, optimization |
+| **Testing** | ~18 | ~6,000 | SSpec, mocking, benchmarking, property testing |
+| **Utilities** | ~220 | ~45,000 | String, array, text, validation, encoding |
+| **I/O** | ~30 | ~10,000 | File, binary, async I/O, streams |
+| **Concurrency** | ~25 | ~8,000 | Threads, actors, channels, locks |
+
+#### Platform Library (`src/std/platform/` - 6 files, 414 lines)
+
+**Purpose:** Cross-platform abstraction (endianness, newlines, paths).
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `config.spl` | 127 | Platform config detection |
+| `convert.spl` | 108 | Endian/newline conversion |
+| `wire.spl` | 82 | Wire protocol serialization |
+| `text_io.spl` | 30 | Platform-aware file I/O |
+| `newline.spl` | 39 | Newline translation |
+| `mod.spl` | 28 | Public API |
+
+---
+
+### 1.3 Applications (`src/app/` - 594 files, 129,154 lines)
+
+**Purpose:** CLI tools, build system, MCP servers, language servers, test runners.
+
+#### Top 30 Applications
+
+| Application | Files | Lines | Purpose | Key Files |
+|-------------|-------|-------|---------|-----------|
+| `io/` | 40 | 11,190 | I/O subsystem (CLI, JIT, window, audio) | `cli_ops.spl` (664), `jit_ffi.spl` (621) |
+| `ffi_gen/` | 71 | 12,130 | FFI wrapper generator | `main.spl` (1,035), `parser.spl` |
+| `test_runner_new/` | 44 | 10,213 | Test runner & SDoctest | `test_runner_main.spl` (704) |
+| `parser/` | 39 | 9,176 | Parser tools & AST | `ast.spl` (899), `modules.spl` (616) |
+| `mcp/` | 28 | 8,394 | MCP servers (fileio, debug) | `fileio_main.spl` (717), `debug_tools.spl` (675) |
+| `build/` | 28 | 7,231 | Build system & bootstrap | `bootstrap_multiphase.spl` (1,544) |
+| `ffi_gen.specs/` | 41 | 6,608 | FFI generation specs | `cranelift_core.spl` (972) |
+| `mcp_jj/` | 19 | 4,654 | Jujutsu VCS MCP | `tools_jj.spl` (1,127), `tools_git.spl` (911) |
+| `lsp/` | 20 | 4,525 | Language Server Protocol | `server.spl` (649) |
+| `compile/` | 10 | 4,258 | C translation & codegen | `c_translate.spl` (1,896) |
+| `package/` | 26 | 3,615 | Package management | - |
+| `cli/` | 14 | 2,602 | CLI main & commands | `main.spl` (756) |
+| `wrapper_gen/` | 12 | 2,376 | Wrapper code generator | - |
+| `verify/` | 11 | 2,217 | Verification tools | - |
+| `dap/` | 9 | 2,141 | Debug Adapter Protocol | `server.spl` (755) |
+| `dashboard/` | 5 | 1,760 | Interactive dashboard | - |
+| `desugar/` | 6 | 1,454 | Static method desugaring | `static_methods.spl`, `rewriter.spl` |
+| `depgraph/` | 10 | 1,393 | Dependency graph | - |
+| `formatter/` | 1 | 704 | Code formatter | - |
+| `lint/` | 1 | 616 | Linter | - |
+
+#### Key Applications Detail
+
+**1. CLI (`cli/main.spl` - 756 lines)**
+- Entry point for `bin/simple` binary
+- Command dispatch: build, test, run, compile
+- Functions: `main()`, `parse_args()`, `dispatch_command()`
+
+**2. Build System (`build/` - 7,231 lines)**
+- Multi-phase bootstrap compilation
+- Native, WASM, bare-metal builds
+- Incremental compilation support
+
+**3. Test Runner (`test_runner_new/` - 10,213 lines)**
+- SSpec test execution
+- SDoctest (executable docs) - 36/36 tests passing
+- Test report generation
+- Subdirectory: `sdoctest/` (9 files)
+
+**4. MCP Servers**
+- `mcp/fileio_main.spl` (717) - File operations
+- `mcp/debug_tools.spl` (675) - Debugging
+- `mcp_jj/tools_jj.spl` (1,127) - Jujutsu VCS
+- `mcp_jj/tools_git.spl` (911) - Git fallback
+
+**5. FFI Generator (`ffi_gen/` - 12,130 lines)**
+- Two/three-tier FFI wrapper generation
+- Parses .sdn specs, generates .spl wrappers
+- 41 spec files in `ffi_gen.specs/`
+
+---
+
+### 1.4 Full Compiler (`src/compiler/` - 436 files, 140,341 lines)
+
+**Purpose:** Full-featured compiler (Full Simple). Requires desugaring to run on Core Simple.
+
+#### Top 40 Files
+
+| File | Lines | Purpose | Key Types |
+|------|-------|---------|-----------|
+| `parser.spl` | 2,453 | Full parser with all features | `Parser` |
+| `treesitter/outline.spl` | 1,799 | Tree-sitter integration | `OutlineNode` |
+| `mir_opt/auto_vectorize.spl` | 1,528 | Auto-vectorization pass | `Vectorizer` |
+| `mir_lowering.spl` | 1,503 | HIR → MIR lowering | - |
+| `type_infer/inference.spl` | 1,437 | Type inference engine | `TypeInferencer` |
+| `monomorphize/deferred.spl` | 1,405 | Deferred monomorphization | `DeferredMonomorphizer` |
+| `lexer.spl` | 1,382 | Full lexer | `Lexer` |
+| `backend/llvm_ir_builder.spl` | 1,123 | LLVM IR generation | `LLVMIRBuilder` |
+| `backend/native/mod.spl` | 1,098 | Native backend entry | - |
+| `mir_data.spl` | 1,080 | MIR data structures | `MirInst`, `MirBlock` |
+| `backend/interpreter.spl` | 1,057 | Interpreter backend | `InterpreterBackend` |
+| `linker/linker_wrapper.spl` | 1,019 | Linker integration | - |
+| `mir_opt/loop_opt.spl` | 957 | Loop optimization | - |
+| `type_system/expr_infer.spl` | 928 | Expression type inference | - |
+| `backend/native/elf_writer.spl` | 921 | ELF file generation | - |
+| `resolve.spl` | 876 | Name resolution | - |
+| `driver.spl` | 856 | Compiler driver | - |
+| `parser_types.spl` | 841 | Parser type definitions | - |
+| `traits.spl` | 816 | Trait system | - |
+| `dim_constraints.spl` | 787 | Dimension checking (ML) | - |
+| `backend/lean_backend.spl` | 782 | Lean proof backend | - |
+| `smf_writer.spl` | 781 | SMF binary format writer | - |
+| `optimization_passes.spl` | 781 | Optimization pipeline | - |
+| `loader/compiler_ffi.spl` | 774 | Compiler FFI interface | - |
+| `build_native.spl` | 765 | Native build orchestration | - |
+| `backend/native/mach_inst.spl` | 753 | Machine instruction repr | - |
+
+#### Major Subsystems
 
 | Subsystem | Files | Lines | Description |
 |-----------|-------|-------|-------------|
-| `backend/` | 84 | ~25,000 | Code generation backends (LLVM, native, interpreter, Lean, CUDA, Vulkan, WASM) |
-| `mir_opt/` | 18 | ~8,500 | MIR optimization passes |
-| `type_system/` | 22 | ~7,200 | Type checking, inference, effects |
-| `linker/` | 15 | ~5,800 | Linking & symbol resolution |
-| `monomorphize/` | 12 | ~4,500 | Generic monomorphization |
-| `blocks/` | 8 | ~3,200 | Custom block system |
-| `gc_analysis/` | 6 | ~2,400 | Garbage collection analysis |
-| `hir_lowering/` | 10 | ~4,800 | HIR lowering passes |
+| `backend/` | 84 | ~28,000 | 8 backends (LLVM, Cranelift, Native, Interpreter, Lean, CUDA, Vulkan, WASM) |
+| `backend/native/` | 35 | ~12,000 | Native x86-64, AArch64, RISC-V (32/64) codegen |
+| `mir_opt/` | 18 | ~9,500 | MIR optimization (vectorize, inline, loop, const-fold) |
+| `type_system/` | 22 | ~8,200 | Type checking, inference, effects, traits |
+| `linker/` | 15 | ~6,800 | Linking & symbol resolution |
+| `monomorphize/` | 12 | ~5,500 | Generic monomorphization |
+| `hir_lowering/` | 10 | ~5,200 | HIR lowering passes |
+| `blocks/` | 8 | ~3,600 | Custom block system |
+| `gc_analysis/` | 6 | ~2,800 | Garbage collection analysis |
 
-**Critical Duplication:**
+#### Backend Type Mappers (7 files, 1,974 lines)
 
-1. **Phase Files (27 files, ~12,000 lines):**
-   - `bidir_phase1a-d.spl` (4 files, ~1,800 lines) - Bidirectional type checking
-   - `associated_types_phase4a-d.spl` (4 files, ~2,100 lines) - Associated types
-   - `higher_rank_poly_phase5a-d.spl` (4 files, ~2,300 lines) - Higher-rank polymorphism
-   - `variance_phase6a-d.spl` (4 files, ~1,900 lines) - Variance checking
-   - `macro_checker_phase7a-c.spl` (3 files, ~1,500 lines) - Macro validation
-   - `const_keys_phase8a-c.spl` (3 files, ~1,200 lines) - Const keys
-   - `simd_phase9a-c.spl` (3 files, ~1,200 lines) - SIMD analysis
+| File | Lines | Maps Simple types to |
+|------|-------|----------------------|
+| `backend/llvm_type_mapper.spl` | 304 | LLVM types |
+| `backend/cranelift_type_mapper.spl` | 234 | Cranelift types |
+| `backend/wasm_type_mapper.spl` | 286 | WebAssembly types |
+| `backend/interpreter_type_mapper.spl` | 236 | Interpreter values |
+| `backend/cuda_type_mapper.spl` | 317 | CUDA/PTX types |
+| `backend/vulkan_type_mapper.spl` | 384 | SPIR-V types |
+| `backend/vhdl_type_mapper.spl` | 213 | VHDL hardware types |
 
-2. **Backend Type Mappers (7 files, ~2,200 lines):**
-   - `backend/llvm_type_mapper.spl` (304 lines)
-   - `backend/cranelift_type_mapper.spl` (234 lines)
-   - `backend/wasm_type_mapper.spl` (286 lines)
-   - `backend/interpreter_type_mapper.spl` (236 lines)
-   - `backend/cuda_type_mapper.spl` (317 lines)
-   - `backend/vulkan_type_mapper.spl` (384 lines)
-   - `backend/vhdl_type_mapper.spl` (213 lines)
-   - **Pattern:** Each maps Simple types to backend-specific types
+**Pattern:** 30-40% structural overlap. Each backend has unique type requirements.
 
-3. **ISA Instruction Selection (3 files, ~2,400 lines):**
-   - `backend/native/isel_x86_64.spl` (856 lines)
-   - `backend/native/isel_aarch64.spl` (777 lines)
-   - `backend/native/isel_riscv64.spl` (771 lines)
-   - **Pattern:** Nearly identical structure, different encodings
-
-4. **ISA Encoding (3 files, ~1,700 lines):**
-   - `backend/native/encode_x86_64.spl` (620 lines)
-   - `backend/native/encode_aarch64.spl` (540 lines)
-   - `backend/native/encode_riscv64.spl` (550 lines)
-   - **Pattern:** Machine code encoding per architecture
-
----
-
-### 1.5 Core Compiler (`src/compiler_core/` - 441 files, 98,874 lines)
-
-**Purpose:** Core Simple version of the compiler (subset of Full Simple), can run on seed compiler.
-
-**Distribution:**
-- **Mirrors `src/compiler/`** structure with ~72% of the lines
-- **All phase files duplicated** (27 files, ~8,000 lines)
-- **All backend type mappers duplicated** (7 files, ~1,100 lines)
-- **All ISA files duplicated** (6 files, ~3,200 lines)
-- **All validators duplicated** (~14 files, ~3,000 lines)
-
-**Key Differences from `src/compiler/`:**
-- No Full Simple features (simplified generics, no higher-kinded types)
-- Fewer optimization passes
-- Simplified type inference
-- Can bootstrap from seed compiler
-
-**Intentional Duplication:**
-- **~15,000 lines** duplicated for bootstrap purposes
-- Documented in `src/compiler/README.md` and `src/compiler_core/README.md`
-- Required until desugaring pipeline is complete
-
----
-
-### 1.6 Libraries (`src/lib/` - 102 files, 23,992 lines)
-
-**Purpose:** Core libraries (database, actors, ML, parsers, memory management).
-
-**Top 20 Library Files:**
+#### Native Backend ISel (4 architectures, 2,480 lines)
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `parser/parser.spl` | 1,071 | Parser library (DUPLICATES core/parser.spl) |
-| `pure/parser.spl` | 1,056 | Pure functional parser (DUPLICATES above) |
-| `pure/evaluator.spl` | 962 | Pure evaluator |
-| `database/test_extended/database.spl` | 900 | Extended DB tests |
-| `pure/parser_old.spl` | 858 | Old parser implementation |
-| `qemu/debug_boot_runner.spl` | 585 | QEMU debugging |
-| `database/core.spl` | 510 | Database core (BugDB, TestDB, FeatureDB) |
-| `actor_scheduler.spl` | 458 | Actor runtime scheduler |
-| `qemu/mod.spl` | 453 | QEMU integration |
-| `memory/refc_binary.spl` | 453 | Reference-counted binary data |
-| `collections/lazy_seq.spl` | 434 | Lazy sequences |
-| `pure/test/benchmark.spl` | 424 | ML benchmarks |
-| `database/test_extended/queries.spl` | 413 | Query builder tests |
-| `perf.spl` | 405 | Performance profiling |
-| `message_transfer.spl` | 401 | Message passing |
-| `pure/autograd.spl` | 389 | Automatic differentiation |
-| `database/bug.spl` | 383 | Bug database |
-| `pure/training.spl` | 382 | ML training |
-| `pure/autograd_global.spl` | 368 | Global autograd state |
+| `backend/native/isel_x86_64.spl` | 669 | x86-64 instruction selection |
+| `backend/native/isel_aarch64.spl` | 601 | AArch64 instruction selection |
+| `backend/native/isel_riscv64.spl` | 595 | RISC-V 64-bit isel |
+| `backend/native/isel_riscv32.spl` | 615 | RISC-V 32-bit isel |
 
-**Critical Duplication:**
+**Pattern:** 60-70% structural overlap. Similar MIR → machine instruction logic.
 
-1. **Parser Triplication (~2,985 lines):**
-   - `parser/parser.spl` (1,071 lines)
-   - `pure/parser.spl` (1,056 lines)
-   - `pure/parser_old.spl` (858 lines)
-   - **Reason:** Different parsing strategies (imperative, functional, legacy)
+#### Native Backend Encoding (4 files, ~2,200 lines)
 
-2. **Lexer Files:**
-   - `parser/lexer.spl` - Accompanies parser/parser.spl
-   - `pure/lexer.spl` - Accompanies pure/parser.spl
-   - **Estimated:** ~800 lines duplicated
+| File | Lines | Purpose |
+|------|-------|---------|
+| `backend/native/encode_x86_64.spl` | ~600 | x86-64 machine code encoding |
+| `backend/native/encode_aarch64.spl` | ~550 | AArch64 encoding |
+| `backend/native/encode_riscv64.spl` | ~550 | RISC-V 64-bit encoding |
+| `backend/native/encode_riscv32.spl` | ~500 | RISC-V 32-bit encoding |
 
-**Key Libraries:**
+**Pattern:** 50-60% overlap. Architecture-specific byte encodings.
 
-1. **Database (`database/` - 6 files, 2,479 lines)**
-   - `core.spl` (510 lines) - BugDB, TestDB, FeatureDB, QueryBuilder
-   - `bug.spl` (383 lines) - Bug tracking
-   - `test_extended/` - Extended query tests
-   - **Status:** 98/115 tests passing (85.2%), production-ready
+---
 
-2. **Actor System (`actor_scheduler.spl`, `actor_heap.spl` - 565 lines)**
-   - Message-passing concurrency
-   - Actor heap management
-   - Scheduling primitives
+### 1.5 Core Compiler (`src/compiler_core/` - 441 files, 97,057 lines)
 
-3. **Pure ML (`pure/` - 12 files, 5,500 lines)**
-   - Automatic differentiation
-   - Training loops
-   - Tensor operations
-   - Hybrid acceleration (CPU/GPU)
+**Purpose:** Core Simple version of compiler (subset). Can run on seed compiler.
 
-4. **Memory Management**
-   - `memory/refc_binary.spl` (453 lines) - Reference counting
-   - String interning
+**Key Differences from `src/compiler/`:**
+- 69% of lines (97,057 vs 140,341)
+- Simplified features (no higher-kinded types)
+- Fewer optimization passes
+- Can bootstrap from seed compiler
+
+**Intentional Duplication:** ~15,000 lines for bootstrap purposes. Required until Full Simple → Core Simple desugaring is complete.
+
+**Documented in:**
+- `src/compiler/README.md`
+- `src/compiler_core/README.md`
+- `doc/report/duplication_phase3_summary.md`
+
+---
+
+### 1.6 Libraries (`src/lib/` - 123 files, 30,993 lines)
+
+**Purpose:** Core libraries (database, actors, ML, parsers).
+
+#### Top 25 Files
+
+| File | Lines | Purpose | Key Types |
+|------|-------|---------|-----------|
+| `parser/parser.spl` | 1,071 | Parser library | `Parser` |
+| `pure/parser.spl` | 1,056 | Pure functional parser | `PureParser` |
+| `pure/evaluator.spl` | 962 | Pure evaluator | `Evaluator` |
+| `database/test_extended/database.spl` | 900 | Extended DB tests | - |
+| `pure/parser_old.spl` | 858 | Old parser (legacy) | - |
+| `qemu/debug_boot_runner.spl` | 585 | QEMU debugging | `DebugBootRunner` |
+| `database/core.spl` | 510 | BugDB, TestDB, FeatureDB | `BugDB`, `TestDB`, `FeatureDB` |
+| `actor_scheduler.spl` | 458 | Actor runtime scheduler | `ActorScheduler` |
+| `memory/refc_binary.spl` | 453 | Ref-counted binary data | `BinaryRef` |
+| `qemu/mod.spl` | 453 | QEMU integration | - |
+| `collections/lazy_seq.spl` | 434 | Lazy sequences | - |
+| `pure/test/benchmark.spl` | 424 | ML benchmarks | - |
+| `database/test_extended/queries.spl` | 413 | Query builder tests | - |
+| `perf.spl` | 405 | Performance profiling | - |
+| `message_transfer.spl` | 401 | Message passing | - |
+| `pure/autograd.spl` | 389 | Automatic differentiation | `AutogradEngine` |
+| `database/bug.spl` | 383 | Bug tracking | `BugDatabase` |
+| `pure/training.spl` | 382 | ML training loops | `TrainingLoop` |
+| `pure/autograd_global.spl` | 368 | Global autograd state | - |
+| `json/builder.spl` | 354 | JSON builder (fluent API) | `JsonBuilder` |
+
+#### Key Libraries
+
+**1. Database (`database/` - 6 files, 2,479 lines)**
+- `core.spl` (510) - BugDB, TestDB, FeatureDB, QueryBuilder
+- `bug.spl` (383) - Bug tracking
+- Status: 98/115 tests passing (85.2%), production-ready
+
+**2. Actor System (2 files, 565 lines)**
+- `actor_scheduler.spl` (458) - Message-passing concurrency
+- `actor_heap.spl` (107) - Actor heap management
+
+**3. Pure ML (`pure/` - 12 files, ~5,500 lines)**
+- Automatic differentiation
+- Training loops
+- Tensor operations
+- Hybrid CPU/GPU acceleration
+
+**4. Parser Library (3 implementations, ~2,985 lines)**
+- `parser/parser.spl` (1,071) - Imperative parser
+- `pure/parser.spl` (1,056) - Functional parser
+- `pure/parser_old.spl` (858) - Legacy parser
 
 ---
 
@@ -383,794 +388,1084 @@
 
 | Directory | Files | Lines | Purpose |
 |-----------|-------|-------|---------|
-| `baremetal/` | 32 | 4,088 | Bare-metal runtime support |
-| `diagnostics/` | 10 | 1,012 | Diagnostic formatting |
-| `diagnostics_minimal/` | 5 | 328 | Minimal diagnostics |
+| `baremetal/` | 36 | 4,829 | Bare-metal runtime (no OS) |
+| `remote/` | 15 | 3,964 | Remote execution & RPC |
 | `ffi/` | 11 | 1,808 | FFI bridge utilities |
-| `mcp_lib/` | 8 | 771 | MCP protocol library |
-| `remote/` | 9 | 1,922 | Remote execution |
-| `runtime/` | 1 | 548 | Runtime support |
+| `diagnostics/` | 10 | 1,152 | Diagnostic formatting |
+| `mcp_lib/` | 8 | 796 | MCP protocol library |
 | `shared/` | 5 | 571 | Shared utilities |
+| `diagnostics_minimal/` | 5 | 328 | Minimal diagnostics |
 | `test/` | 4 | 1,728 | Test utilities |
-| `llvm_shared/` | 3 | 278 | LLVM shared code |
+| `llvm_shared/` | 3 | 369 | LLVM shared code |
+| `runtime/` | 1 | 548 | Runtime support |
 
 ---
 
-## 2. Critical Duplications
+## 2. Semantic Duplication Analysis
 
-### Ranked by Severity & Impact
+### CRITICAL DUPLICATIONS
 
-#### 1. **CRITICAL: compiler/ ↔ compiler_core/ Bootstrap Duplication**
+#### 1. String/Text Processing (3-way overlap)
 
-- **Lines:** ~15,000
-- **Status:** ✅ Documented, Intentional
-- **Priority:** N/A (required for bootstrap)
-- **Impact:** High (maintenance burden)
-- **Resolution:** Complete desugaring pipeline (future work)
+**Files involved:**
+- `src/std/string.spl` (627 lines)
+- `src/std/text_utils.spl` (767 lines)
+- `src/std/string_core.spl` (400+ lines)
+- `src/std/helpers.spl` (string functions, ~200 lines)
 
-**Documented in:**
-- `src/compiler/README.md` (96 lines)
-- `src/compiler_core/README.md` (100 lines)
-- `doc/report/duplication_phase3_summary.md`
+**Total:** ~2,000 lines
+**Estimated duplication:** ~500-700 lines (25-35%)
 
-**Breakdown:**
-- Phase files: ~8,000 lines
-- Backend type mappers: ~1,100 lines
-- Validators: ~3,000 lines
-- Core files: ~3,000 lines
+**Overlapping functions:**
+- Case conversion: `to_upper()`, `to_lower()`, `to_title_case()`, `to_snake_case()`, `to_camel_case()`
+- Trimming: `trim()`, `trim_left()`, `trim_right()`, `trim_chars()`
+- Splitting: `split()`, `split_lines()`, `split_whitespace()`
+- Character checks: `is_alpha()`, `is_digit()`, `is_alnum()`, `is_space()`
+- Padding: `pad_left()`, `pad_right()`, `center()`
+- Validation: `is_email()`, `is_url()`, `is_path()`
 
-#### 2. **HIGH: Phase Files (Development Evolution)**
+**Why it happened:**
+- Incremental stdlib development
+- Different authors adding similar functions
+- Copy-paste between modules
 
-- **Files:** 27
-- **Lines:** ~12,000 (compiler/) + ~8,000 (compiler_core/) = ~20,000 total
-- **Status:** ⚠️ Development history
-- **Priority:** Medium
-- **Impact:** Medium (bloat, confusing)
+**Impact:** Medium-High (user confusion, maintenance burden)
 
-**Examples:**
-- `bidir_phase1a.spl` through `bidir_phase1d.spl` (4 files, ~1,800 lines)
-- `associated_types_phase4a-d.spl` (4 files, ~2,100 lines)
-- `higher_rank_poly_phase5a-d.spl` (4 files, ~2,300 lines)
+---
 
-**Recommendation:**
-- **Option 1:** Consolidate into single files per feature (e.g., `bidirectional_checking.spl`)
-- **Option 2:** Move to `doc/design/phases/` as historical reference
-- **Option 3:** Keep as-is (documents incremental development)
+#### 2. Array Operations (3-way overlap)
 
-**Estimated Savings:** ~8,000 lines (67% reduction if consolidated)
+**Files involved:**
+- `src/std/array.spl` (350 lines)
+- `src/std/list_utils.spl` (250+ lines)
+- `src/std/collection_utils.spl` (estimated ~300 lines)
+- `src/std/json/array_ops.spl` (559 lines - JSON-specific)
 
-#### 3. **HIGH: Lexer Triplication**
+**Total:** ~1,450 lines
+**Estimated duplication:** ~300-400 lines (20-25%)
 
-- **Files:** 15 lexer files across codebase
-- **Lines:** ~3,700 total
-- **Status:** ⚠️ Bootstrap + functional variants
-- **Priority:** Low (bootstrap required)
-- **Impact:** Medium
+**Overlapping functions:**
+- Flatten: `flatten()`, `flatten_deep()`
+- Intersperse: `intersperse()`, `join_with()`
+- Partition: `partition()`, `group_by()`
+- Statistics: `sum()`, `product()`, `average()`, `median()`
+- Chunking: `chunk()`, `chunk_by()`, `window()`
+- Set operations: `union()`, `intersect()`, `difference()`
 
-**Breakdown:**
-```
-src/core/lexer.spl                     829 lines  (seed-compilable)
-src/compiler/lexer.spl               1,382 lines  (full features)
-src/compiler_core/lexer.spl          1,491 lines  (core features)
-src/lib/parser/lexer.spl               ~400 lines  (library parser)
-src/lib/pure/lexer.spl                 ~400 lines  (functional parser)
-src/std/sdn/lexer.spl                  ~200 lines  (SDN format)
-```
+**Why it happened:**
+- JSON library needed array ops, duplicated instead of importing
+- List utilities grew organically separate from array.spl
 
-**Reason:** Different feature sets for bootstrap stages + specialized lexers (SDN, HTML)
+**Impact:** Medium (maintenance, consistency)
 
-#### 4. **HIGH: Parser Triplication**
+---
 
-- **Files:** 30+ parser files
-- **Lines:** ~6,700 total
-- **Status:** ⚠️ Bootstrap + specialized parsers
-- **Priority:** Low (bootstrap required)
-- **Impact:** High
+#### 3. JSON Building (2 implementations)
 
-**Breakdown:**
-```
-src/core/parser.spl                  2,135 lines  (seed-compilable)
-src/compiler/parser.spl              2,453 lines  (full features)
-src/lib/parser/parser.spl            1,071 lines  (library parser)
-src/lib/pure/parser.spl              1,056 lines  (functional parser)
-src/std/sdn/parser.spl                 682 lines  (SDN format)
-src/std/json/parser.spl                ~600 lines  (JSON)
-src/std/xml/parser.spl                 ~500 lines  (XML)
+**Files involved:**
+- `src/lib/json/builder.spl` (354 lines) - **Recommended** ✅
+- `src/lib/mcp_sdk/core/json.spl` (~200 lines) - Legacy ⚠️
+
+**Pattern difference:**
+
+**OOP Fluent API (`builder.spl`):**
+```simple
+val json = JsonBuilder()
+    .add_string("name", "Alice")
+    .add_int("age", 30)
+    .build()
 ```
 
-**Reason:** Bootstrap stages + specialized parsers for different formats
-
-#### 5. **HIGH: Type Mapper Duplication**
-
-- **Files:** 16 type mapper files
-- **Lines:** ~4,700 total
-- **Status:** ✅ Documented (backend-specific + bootstrap)
-- **Priority:** Low
-- **Impact:** Medium
-
-**Breakdown:**
-```
-# compiler/ (7 files, ~2,200 lines)
-backend/llvm_type_mapper.spl           304 lines
-backend/cranelift_type_mapper.spl      234 lines
-backend/wasm_type_mapper.spl           286 lines
-backend/interpreter_type_mapper.spl    236 lines
-backend/cuda_type_mapper.spl           317 lines
-backend/vulkan_type_mapper.spl         384 lines
-backend/vhdl_type_mapper.spl           213 lines
-
-# compiler_core/ (7 files, ~1,100 lines)
-backend/llvm_type_mapper.spl           108 lines
-backend/cranelift_type_mapper.spl      101 lines
-backend/wasm_type_mapper.spl           124 lines
-backend/interpreter_type_mapper.spl     89 lines
-backend/cuda_type_mapper.spl           138 lines
-backend/vulkan_type_mapper.spl         187 lines
-# (vhdl not in core)
-
-# Plus backend_types.spl in 3 locations:
-src/compiler/backend/backend_types.spl     460 lines
-src/compiler_core/backend/backend_types.spl 218 lines
-src/core/backend_types.spl                 156 lines
+**Function Helpers (`json.spl`):**
+```simple
+val json = json_object([
+    json_pair("name", json_string("Alice")),
+    json_pair("age", json_int(30))
+])
 ```
 
-**Pattern:** Each backend has specific type representation requirements.
+**Analysis:**
+- `builder.spl` is more ergonomic (fluent API)
+- `mcp_sdk/core/json.spl` used by MCP servers (legacy)
+- Both do the same thing with different APIs
+
+**Impact:** Low (isolated to MCP servers)
+
+---
+
+#### 4. Type Mappers (8 backends, 2 compilers)
+
+**Files involved (compiler/):**
+- `backend/llvm_type_mapper.spl` (304 lines)
+- `backend/cranelift_type_mapper.spl` (234 lines)
+- `backend/wasm_type_mapper.spl` (286 lines)
+- `backend/interpreter_type_mapper.spl` (236 lines)
+- `backend/cuda_type_mapper.spl` (317 lines)
+- `backend/vulkan_type_mapper.spl` (384 lines)
+- `backend/vhdl_type_mapper.spl` (213 lines)
+- `backend/lean_type_mapper.spl` (~150 lines)
+
+**Plus duplicates in `compiler_core/` (7 files, ~800 lines)**
+
+**Total:** ~2,774 lines (compiler/) + ~800 lines (compiler_core/) = **~3,574 lines**
+**Estimated structural overlap:** 30-40% (~1,070-1,430 lines)
+
+**Common pattern:**
+```simple
+fn map_type(ty: TypeKind) -> BackendType:
+    match ty:
+        TypeKind.Int: backend_int_type()
+        TypeKind.Float: backend_float_type()
+        TypeKind.Bool: backend_bool_type()
+        TypeKind.String: backend_string_type()
+        # ... similar structure across all backends
+```
+
+**Why it exists:**
+- Each backend has unique type requirements (LLVM IR vs SPIR-V vs PTX)
+- Intentional duplication for backend isolation
 
 **Recommendation:** Extract common `TypeMapper` trait when Full Simple trait system stabilizes.
 
-#### 6. **VERY HIGH RISK: ISA Encoder Duplication**
+**Impact:** Medium (maintenance burden when adding new types)
 
-- **Files:** 6 ISA files × 2 compilers = 12 files
-- **Lines:** ~4,600 total
-- **Status:** ⚠️ Cross-platform similarity
-- **Priority:** Very High Risk (core code generation)
-- **Impact:** High (affects all native compilation)
+---
 
-**Breakdown (compiler/):**
-```
-backend/native/isel_x86_64.spl         856 lines
-backend/native/isel_aarch64.spl        777 lines
-backend/native/isel_riscv64.spl        771 lines
-backend/native/encode_x86_64.spl       620 lines
-backend/native/encode_aarch64.spl      540 lines
-backend/native/encode_riscv64.spl      550 lines
-Total: 4,114 lines
-```
+#### 5. Parser (3 implementations)
 
-**Similar pattern in `compiler_core/` (~3,200 lines)**
+**Files involved:**
+- `src/core/parser.spl` (2,135 lines) - Seed-compilable
+- `src/lib/parser/parser.spl` (1,071 lines) - Library parser
+- `src/lib/pure/parser.spl` (1,056 lines) - Functional parser
+- `src/lib/pure/parser_old.spl` (858 lines) - Legacy
 
-**Pattern:**
-1. Instruction selection (`isel_*.spl`) - MIR → machine instructions
-2. Encoding (`encode_*.spl`) - Machine instructions → bytes
+**Total:** ~5,120 lines
+**Estimated structural overlap:** 40-50% (~2,000-2,500 lines)
 
-**Recommendation:**
-- Create ISA abstraction layer (trait-based)
-- **Risk:** Very High - incorrect abstraction breaks native codegen for all platforms
-- **Timeline:** Only after Full Simple trait system is stable
+**Why it exists:**
+- `core/parser.spl` - Bootstrap (seed-compilable, minimal deps)
+- `lib/parser/parser.spl` - General-purpose library parser
+- `lib/pure/parser.spl` - Functional parser (combinator-based)
+- `lib/pure/parser_old.spl` - Legacy (should be removed)
 
-#### 7. **HIGH: Validator/Checker Pattern**
+**Common patterns:**
+- Token consumption: `expect()`, `consume()`, `peek()`
+- Expression parsing: `parse_expr()`, `parse_primary()`, `parse_binary_op()`
+- Precedence climbing
+- Error recovery
 
-- **Files:** ~14 validator files × 2 compilers = ~28 files
-- **Lines:** ~6,400 total
-- **Status:** ⚠️ Structural similarity
-- **Priority:** High
-- **Impact:** Medium (refactoring opportunity)
+**Impact:** High (maintenance burden, but required for bootstrap)
 
-**Examples:**
-```
-# compiler/
-di_validator.spl              237 lines
-visibility_checker.spl        130 lines
-safety_checker.spl            341 lines
-simd_check.spl                ~400 lines (inferred)
-verification_checker.spl      150 lines
-macro_checker_phase7a-c.spl 1,566 lines (3 files)
-blocks/validators.spl         247 lines
+---
 
-# compiler_core/ (similar structure)
-di_validator.spl              135 lines
-safety_checker.spl            335 lines
-macro_checker_phase7a-c.spl 1,166 lines (3 files)
-blocks/validators.spl         251 lines
-```
+#### 6. Native Backend ISel (4 architectures)
 
-**Pattern:** Each validator follows similar structure:
-1. Define error types
-2. Implement `validate_X(context, item)` functions
-3. Collect and report errors
-4. Integrate with compiler pipeline
+**Files involved:**
+- `compiler/backend/native/isel_x86_64.spl` (669 lines)
+- `compiler/backend/native/isel_aarch64.spl` (601 lines)
+- `compiler/backend/native/isel_riscv64.spl` (595 lines)
+- `compiler/backend/native/isel_riscv32.spl` (615 lines)
 
-**Recommendation:**
-- Extract common validation framework:
+**Plus encoding files:**
+- `encode_x86_64.spl` (~600 lines)
+- `encode_aarch64.spl` (~550 lines)
+- `encode_riscv64.spl` (~550 lines)
+- `encode_riscv32.spl` (~500 lines)
+
+**Total:** 2,480 (isel) + 2,200 (encode) = **4,680 lines**
+**Estimated overlap:** 60-70% (~2,800-3,275 lines)
+
+**Common pattern (instruction selection):**
 ```simple
-class ValidationContext:
-    errors: [ValidationError]
-    warnings: [ValidationWarning]
-
-fn run_validator(ctx: ValidationContext, rules: [ValidationRule]) -> ValidationResult
-fn report_errors(ctx: ValidationContext, formatter: ErrorFormatter)
+fn select_inst(mir: MirInst) -> MachInst:
+    match mir.opcode:
+        MirOpcode.Add:
+            # x86: ADD reg, reg
+            # ARM: ADD reg, reg, reg
+            # RISC-V: ADD rd, rs1, rs2
+        MirOpcode.Load:
+            # x86: MOV reg, [mem]
+            # ARM: LDR reg, [base, offset]
+            # RISC-V: LW rd, offset(rs1)
+        # ... 50+ opcodes with similar structure
 ```
 
-**Estimated Savings:** ~2,000 lines of boilerplate
+**Why it exists:**
+- Each architecture has different:
+  - Instruction formats (2-operand vs 3-operand)
+  - Register sets (16 vs 32 registers)
+  - Addressing modes
+  - Calling conventions
 
-**Risk:** High - validators are core to compiler correctness, extensive testing required
+**Recommendation:** Extract ISA trait (very high risk, wait for trait system).
 
-#### 8. **MEDIUM: String/Array Utility Duplication (std/)**
-
-- **Files:** ~15 files
-- **Lines:** ~4,200 total
-- **Status:** ⚠️ Scattered utilities
-- **Priority:** Medium
-- **Impact:** Medium (user-facing, maintenance)
-
-**Breakdown:**
-```
-text_utils.spl              767 lines
-string.spl                  626 lines
-json/array_ops.spl          559 lines
-string_extra.spl            314 lines
-array.spl                   350 lines
-src/array_builder.spl       305 lines
-src/text_utils.spl          230 lines
-ascii_art/text.spl          237 lines
-platform/text_io.spl         30 lines
-```
-
-**Patterns:**
-- String validation (email, URL, path)
-- String transformation (case, trim, pad)
-- Array operations (map, filter, reduce)
-- Text utilities (split, join, replace)
-
-**Recommendation:**
-- Consolidate into `src/std/string.spl` and `src/std/array.spl`
-- Move specialized utilities to subdirectories
-- Extract common patterns into `src/std/core/`
-
-**Estimated Savings:** ~1,500 lines
-
-#### 9. **LOW: FFI Specs Duplication (Tool-Generated)**
-
-- **Files:** 41 files in `src/app/ffi_gen.specs/`
-- **Lines:** ~6,600 total
-- **Status:** ✅ Tool-generated
-- **Priority:** Low (generated code)
-- **Impact:** Low
-
-**Top Files:**
-```
-cranelift_core.spl          972 lines
-runtime_value_full.spl      658 lines
-cli.spl                     ~480 lines
-collections.spl             ~480 lines
-```
-
-**Note:** `runtime_value_full.spl` appears in TWO locations:
-- `src/app/ffi_gen.specs/runtime_value_full.spl` (658 lines)
-- `src/app/ffi_gen/specs/runtime_value_full.spl` (658 lines)
-
-**Recommendation:**
-- Deduplicate the two `runtime_value_full.spl` files
-- Otherwise, keep as-is (generated code should be regenerated, not manually edited)
+**Impact:** Very High Risk (core codegen, affects all native compilation)
 
 ---
 
-## 3. Semantic Patterns
+#### 7. Testing Framework (scattered)
 
-### 3.1 Builder Pattern (8 files, ~2,500 lines)
+**Files involved:**
+- `src/std/spec.spl` (694 lines) - SSpec BDD framework
+- `src/app/test_runner_new/test_runner_main.spl` (704 lines)
+- `src/app/test_runner_new/test_runner_execute.spl` (624 lines)
+- `src/std/src/testing/mocking_advanced.spl` (724 lines)
+- Various test utilities across stdlib
 
-**Locations:**
-- `src/baremetal/table_builder.spl` (445 lines)
-- `src/compiler/blocks/builder.spl` (380 lines)
-- `src/compiler/backend/matrix_builder.spl` (154 lines)
-- `src/compiler/backend/llvm_ir_builder.spl` (1,123 lines)
-- `src/app/build/incremental_builder.spl` (620 lines)
+**Total:** ~3,000+ lines
+**Estimated duplication:** ~200-300 lines (test setup/teardown patterns)
 
-**Pattern:**
-1. `new_builder()` - Constructor
-2. `builder_add_X()` - Incremental operations
-3. `builder_build()` - Finalization
-4. Error handling and validation
+**Common patterns:**
+- Test discovery
+- Setup/teardown hooks
+- Assertion helpers
+- Mock frameworks
 
-**Recommendation:**
-- Extract generic builder trait (if Full Simple supports traits)
-- Or create builder helper macros
+**Why it happened:**
+- Incremental test infrastructure development
+- Different testing styles (unit, integration, property)
 
-**Estimated Savings:** ~500 lines of boilerplate
-
----
-
-### 3.2 Visitor Pattern (Lean Codegen, ~1,000 lines)
-
-**Locations:**
-- `src/compiler/codegen/lean/contracts.spl`
-- `src/compiler/codegen/lean/expressions.spl`
-- `src/compiler/codegen/lean/types.spl`
-- `src/compiler/codegen/lean/functions.spl`
-- `src/compiler/codegen/lean/traits.spl`
-
-**Pattern:**
-- Each implements `to_lean()`, `to_lean_name()` with identical identifier sanitization
-
-**Status:** ✅ Already using centralized `naming` module
-- All files use `super::naming::to_pascal_case()` or `super::naming::to_camel_case()`
-- `naming.spl` provides `sanitize_lean_ident()`, `to_lean_type_name()`, `to_lean_func_name()`
+**Impact:** Low-Medium (test code, not production code)
 
 ---
 
-### 3.3 Error Creation Pattern (~200 occurrences)
+### MEDIUM DUPLICATIONS
 
-**Pattern:** `LowerError::Semantic(format!(...))` repeated everywhere.
+#### 8. Lexer (3 implementations)
 
-**Duplicated messages:**
-- `"Cannot resolve module: {}"`
-- `"Cannot read module {:?}: {}"`
-- `"Cannot parse module {:?}: {}"`
+**Files involved:**
+- `src/core/lexer.spl` (829 lines) + `lexer_struct.spl` (720 lines) = 1,549 lines
+- `src/compiler/lexer.spl` (1,382 lines)
+- `src/compiler_core/lexer.spl` (~1,200 lines estimated)
 
-**Status:** ✅ Partially resolved
-- Extended `error::factory` module with 9+ factory functions
-- ~103 occurrences remain for gradual migration
+**Total:** ~4,131 lines
+**Estimated overlap:** 70-80% (~2,890-3,305 lines)
 
-**Recommendation:** Continue gradual migration to factory functions.
+**Why it exists:** Bootstrap duplication (documented, intentional)
+
+**Impact:** Medium (maintenance burden)
 
 ---
 
-### 3.4 FFI Wrapper Pattern (Two/Three-Tier)
+#### 9. Validation Predicates (scattered)
 
-**Two-Tier (Runtime):**
+**Files involved:**
+- `src/std/math.spl` - `is_finite()`, `is_nan()`, `is_infinite()`
+- `src/std/validation_utils.spl` - `is_email()`, `is_url()`, `is_path()`
+- `src/std/string.spl` - `is_alpha()`, `is_digit()`, `is_alnum()`
+
+**Total:** ~400-500 lines scattered
+**Estimated duplication:** ~100-150 lines (similar validation patterns)
+
+**Why it happened:** No central validation module
+
+**Impact:** Low (small functions, easy to consolidate)
+
+---
+
+#### 10. Option/Result Helpers (2 locations)
+
+**Files involved:**
+- `src/std/option_helpers.spl` (~200 lines)
+- `src/std/functional.spl` (Option/Result monadic operations, ~150 lines)
+
+**Overlap:** ~50-80 lines (map, flatMap, filter, getOrElse)
+
+**Why it happened:** Functional programming utilities grew separate from option helpers
+
+**Impact:** Low (minimal duplication)
+
+---
+
+### LOW-PRIORITY DUPLICATIONS
+
+#### 11. FFI Specs (tool-generated)
+
+**Files:** 41 files in `src/app/ffi_gen.specs/` (~6,600 lines)
+
+**Pattern:** All follow similar structure (enum specs, function specs, struct specs)
+
+**Why it exists:** Auto-generated by FFI generator tool
+
+**Recommendation:** Keep as-is (regenerate instead of manually editing)
+
+**Impact:** Very Low (tool output)
+
+---
+
+## 3. Merger Recommendations
+
+### Recommendation 1: Consolidate String Processing
+
+**Priority:** P1 High
+**Files to merge:**
+- `src/std/string.spl` (627 lines)
+- `src/std/text_utils.spl` (767 lines)
+- `src/std/string_core.spl` (~400 lines)
+- `src/std/helpers.spl` (string functions only, ~200 lines)
+
+**Target:** `src/std/string.spl` (expanded to ~1,200 lines)
+
+**Expected reduction:** ~800 lines (from 2,000 to ~1,200 net)
+
+**Risk:** Medium (need to update 150+ import statements)
+
+**Action plan:**
+1. **Week 1, Day 1-2:** Create comprehensive test suite
+   - Write tests for all string functions across all 4 files
+   - Verify behavior matches exactly
+   - Target: 200+ tests covering edge cases
+
+2. **Week 1, Day 3:** Merge case conversion functions
+   - Move `text_utils.spl` case functions → `string.spl`
+   - Update exports in `string.spl`
+   - Run tests (expect 200+ passing)
+
+3. **Week 1, Day 4:** Merge character predicates
+   - Move `is_alpha()`, `is_digit()`, etc. → `string.spl`
+   - Consolidate with existing predicates
+   - Verify no duplicates
+
+4. **Week 1, Day 5:** Merge trimming/padding
+   - Move `text_utils.spl` trim/pad → `string.spl`
+   - Consolidate with `string_core.spl` versions
+
+5. **Week 2, Day 1-2:** Update imports
+   - Search: `use std.text_utils.{`
+   - Replace: `use std.string.{`
+   - Update ~150 files in test/ and src/
+   - Run full test suite after each batch
+
+6. **Week 2, Day 3:** Deprecate old files
+   - Mark `text_utils.spl` as deprecated (add warning comment)
+   - Remove string functions from `helpers.spl`
+   - Keep `string_core.spl` for now (internal APIs)
+
+7. **Week 2, Day 4-5:** Verification
+   - Run full test suite (4,067 tests)
+   - Check no regressions
+   - Update documentation
+
+**Files to update:** ~150 files with imports
+
+**Rollback plan:** Keep `text_utils.spl` as deprecated forwarding module for 1 release cycle.
+
+---
+
+### Recommendation 2: Consolidate Array Operations
+
+**Priority:** P1 High
+**Files to merge:**
+- `src/std/array.spl` (350 lines)
+- `src/std/list_utils.spl` (~250 lines)
+- `src/std/collection_utils.spl` (~300 lines estimated)
+
+**Leave separate:** `src/std/json/array_ops.spl` (JSON-specific)
+
+**Target:** `src/std/array.spl` (expanded to ~600 lines)
+
+**Expected reduction:** ~300 lines (from 900 to ~600 net)
+
+**Risk:** Low-Medium (isolated to collection operations)
+
+**Action plan:**
+1. **Day 1:** Create test suite (100+ tests)
+2. **Day 2:** Merge `flatten()`, `intersperse()`, `partition()`
+3. **Day 3:** Merge statistics functions (`sum`, `mean`, `median`)
+4. **Day 4:** Update imports (~80 files)
+5. **Day 5:** Verification & documentation
+
+**Rollback plan:** Keep `list_utils.spl` as forwarding module.
+
+---
+
+### Recommendation 3: Migrate MCP JSON to JsonBuilder
+
+**Priority:** P1 High
+**Files to merge:**
+- `src/lib/mcp_sdk/core/json.spl` (~200 lines) - **Remove**
+- Use `src/lib/json/builder.spl` (354 lines) instead
+
+**Target:** All MCP servers use JsonBuilder fluent API
+
+**Expected reduction:** ~200 lines
+
+**Risk:** Low (isolated to MCP servers, 5 files affected)
+
+**Action plan:**
+1. **Day 1:** Update `mcp/fileio_main.spl`
+   - Replace `json_object()` calls with `JsonBuilder().add_*().build()`
+   - Test MCP server (manual verification)
+
+2. **Day 2:** Update `mcp/debug_tools.spl`
+   - Same pattern
+   - Test debug MCP
+
+3. **Day 3:** Update `mcp_jj/tools_jj.spl` and `tools_git.spl`
+   - Same pattern
+   - Test Jujutsu MCP
+
+4. **Day 4:** Remove `mcp_sdk/core/json.spl`
+   - Verify no remaining imports
+   - Delete file
+
+5. **Day 5:** Documentation
+   - Update MCP development guide
+   - Add JsonBuilder example
+
+**Files to update:** 5 MCP server files
+
+**Rollback plan:** Keep old `json.spl` in git history, easy to restore.
+
+---
+
+### Recommendation 4: Extract Validation Module
+
+**Priority:** P2 Medium
+**Files to consolidate:**
+- `src/std/math.spl` (numeric validation)
+- `src/std/validation_utils.spl` (string validation)
+- `src/std/string.spl` (character validation)
+
+**Target:** New `src/std/validation.spl` (~300 lines)
+
+**Expected reduction:** ~100-150 lines
+
+**Risk:** Low (pure functions, no side effects)
+
+**Action plan:**
+1. **Week 1:** Create `src/std/validation.spl`
+   - Move all `is_*()` predicates
+   - Organize by category (numeric, string, character, format)
+
+2. **Week 2:** Update imports
+   - Search for `is_email`, `is_url`, `is_nan`, etc.
+   - Update ~60 files
+
+3. **Week 3:** Deprecate old locations
+   - Keep forwarding functions for 1 release
+
+**Files to update:** ~60 files
+
+---
+
+### Recommendation 5: Consolidate Phase Files
+
+**Priority:** P2 Medium
+**Files to merge:**
+- `bidir_phase1a-d.spl` (4 files) → `bidirectional_checking.spl`
+- `associated_types_phase4a-d.spl` (4 files) → `associated_types.spl`
+- `higher_rank_poly_phase5a-d.spl` (4 files) → `higher_rank_polymorphism.spl`
+- `variance_phase6a-d.spl` (4 files) → `variance_checking.spl`
+- `macro_checker_phase7a-c.spl` (3 files) → `macro_validation.spl`
+- `const_keys_phase8a-c.spl` (3 files) → `const_keys.spl`
+- `simd_phase9a-c.spl` (3 files) → `simd_analysis.spl`
+
+**Total:** 27 files → 7 files
+
+**Expected reduction:** ~8,000 lines (from ~20,000 to ~12,000)
+
+**Risk:** Low (development history, not critical path)
+
+**Action plan:**
+1. **Week 1:** Consolidate bidirectional checking
+   - Merge phase1a-d into single file
+   - Keep most recent implementation
+   - Add comments explaining evolution
+
+2. **Week 2:** Consolidate associated types, higher-rank poly
+
+3. **Week 3:** Consolidate variance, macros, const keys, SIMD
+
+4. **Week 4:** Move originals to `doc/design/phases/` for history
+
+**Alternative:** Keep as-is (documents incremental development)
+
+**Decision:** Consult with team (value of history vs. reduced complexity)
+
+---
+
+### Recommendation 6: Type Mapper Abstraction
+
+**Priority:** P3 Long-term (wait for trait system)
+**Files affected:** 16 type mapper files (~3,574 lines)
+
+**Expected reduction:** ~1,500 lines (after trait system stabilizes)
+
+**Risk:** High (affects all backends)
+
+**Proposed design:**
 ```simple
-extern fn rt_file_read_text(path: text) -> text
-fn file_read(path: text) -> text:
-    rt_file_read_text(path)
+trait TypeMapper:
+    fn map_int(self) -> BackendType
+    fn map_float(self) -> BackendType
+    fn map_bool(self) -> BackendType
+    fn map_string(self) -> BackendType
+    fn map_struct(self, fields: [Field]) -> BackendType
+    fn map_enum(self, variants: [Variant]) -> BackendType
+
+class LLVMTypeMapper:
+    impl TypeMapper:
+        fn map_int(self): llvm_i64_type()
+        fn map_float(self): llvm_double_type()
+        # ...
 ```
 
-**Three-Tier (External):**
+**Action plan:** Defer until Full Simple trait system is production-ready.
+
+**Timeline:** 6+ months
+
+---
+
+### Recommendation 7: ISA Abstraction Layer
+
+**Priority:** P3 Long-term (very high risk)
+**Files affected:** 8 ISA files (~4,680 lines)
+
+**Expected reduction:** ~1,500 lines
+
+**Risk:** Very High (affects all native compilation)
+
+**Proposed design:**
 ```simple
-# C++/Rust FFI
-extern fn cranelift_create_context() -> i64
+trait ISA:
+    fn select_add(self, dest: Reg, src1: Reg, src2: Reg) -> MachInst
+    fn select_load(self, dest: Reg, addr: Addr) -> MachInst
+    fn encode_inst(self, inst: MachInst) -> [u8]
+    # ... 50+ methods
 
-# Simple FFI wrapper
-fn create_context() -> CraneliftContext:
-    val handle = cranelift_create_context()
-    CraneliftContext(handle: handle)
+class X86_64ISA:
+    impl ISA:
+        fn select_add(self, dest, src1, src2):
+            # x86: ADD reg, reg (2-operand, dest=src1)
+        fn encode_inst(self, inst):
+            # ModRM encoding, REX prefix, etc.
 ```
 
-**Main module:** `src/app/io/mod.spl` (11,190 lines across 40 files)
+**Action plan:**
+1. Wait for Full Simple trait system (6+ months)
+2. Design ISA trait hierarchy (1 month)
+3. Implement for x86-64 as pilot (1 month)
+4. Comprehensive testing on all platforms (1 month)
+5. Gradual migration with fallbacks (2 months)
+
+**Total timeline:** 11+ months from trait system completion
+
+**Decision:** Only attempt after trait system is mature (2-3 releases)
 
 ---
 
-## 4. File Inventory
+## 4. Removal Candidates
 
-### 4.1 src/core/ (36 files, 15,691 lines)
+### Completely Redundant (Exact Duplicates)
 
-| File | Lines | Primary Types | Key Functions | Purpose |
-|------|-------|---------------|---------------|---------|
-| `compiler/c_codegen.spl` | 2,339 | `CCodegen` | `codegen_module()`, `codegen_function()` | C code generation for seed |
-| `parser.spl` | 2,135 | `CoreParser` | `parse_module()`, `parse_expr()` | Core parser implementation |
-| `interpreter/eval.spl` | 1,797 | `Interpreter` | `eval_expr()`, `eval_stmt()` | Tree-walk interpreter |
-| `ast.spl` | 922 | `CoreExpr`, `CoreStmt`, `CoreDecl` | `ast_expr_get()`, `ast_stmt_get()` | AST node definitions |
-| `lexer.spl` | 829 | - | `lex()`, `lex_token()` | Lexical analysis |
-| `lexer_struct.spl` | 720 | `CoreLexer` | `lexer_new()`, `lexer_next_token()` | Lexer state management |
-| `mir.spl` | 756 | `MirInst`, `MirBlock` | `mir_inst_get()`, `mir_block_get()` | MIR definitions |
-| `types.spl` | 582 | `TypeKind` | `type_equals()`, `type_to_string()` | Type system core |
-| `aop.spl` | 541 | `AdviceKind`, `Advice` | `aop_match_pointcut()`, `aop_apply_advice()` | Aspect-oriented programming |
-| `type_checker.spl` | 442 | `TypeChecker` | `check_expr()`, `check_stmt()` | Type checking |
-| `tokens.spl` | 446 | `TokenKind`, `Token` | `token_kind_to_string()` | Token definitions |
-| `type_inference.spl` | 415 | `InferContext` | `infer_expr_type()`, `unify()` | Type inference |
-| `type_erasure.spl` | 302 | - | `erase_generics()` | Generic type erasure |
-| `interpreter/value.spl` | 316 | `Value` | `value_to_int()`, `value_to_string()` | Runtime values |
-| `interpreter/ops.spl` | 236 | - | `eval_binary_op()`, `eval_unary_op()` | Operator evaluation |
-| `interpreter/module_loader.spl` | 278 | `ModuleLoader` | `load_module()`, `resolve_import()` | Module loading |
-| `interpreter/jit.spl` | 141 | `JitEngine` | `jit_compile()`, `jit_execute()` | JIT compilation |
-| `interpreter/env.spl` | 160 | `Environment` | `env_get()`, `env_set()` | Variable environment |
-| `closure_analysis.spl` | 186 | - | `analyze_closure_capture()` | Closure capture warnings |
-| `backend_types.spl` | 156 | `BackendKind` | - | Backend type definitions |
+#### 1. `src/lib/pure/parser_old.spl` (858 lines)
 
-### 4.2 src/std/ Top 50 Modules (901 files, 185,046 lines)
-
-| Module | Lines | Category | Key Types | Purpose |
-|--------|-------|----------|-----------|---------|
-| `bcrypt/core.spl` | 1,332 | Crypto | `BcryptHash` | Password hashing |
-| `cbor/core.spl` | 1,305 | Serialization | `CborEncoder`, `CborDecoder` | CBOR codec |
-| `skiplist_utils.spl` | 1,105 | Data Structures | `SkipList` | Skip list operations |
-| `graph/utilities.spl` | 978 | Algorithms | `Graph`, `GraphAlgorithms` | Graph algorithms |
-| `linear_algebra/matrix_ops.spl` | 894 | Math | `Matrix` | Matrix operations |
-| `set_utils.spl` | 777 | Collections | `Set` | Set utilities |
-| `text_utils.spl` | 767 | String | - | Text processing |
-| `src/tooling/easy_fix/rules.spl` | 761 | Tooling | `FixRule` | Auto-fix rules |
-| `src/di.spl` | 744 | Infrastructure | `Container`, `Provider` | Dependency injection |
-| `search_utils.spl` | 738 | Algorithms | - | Search algorithms |
-| `amqp_utils.spl` | 738 | Networking | `AmqpConnection` | AMQP protocol |
-| `src/testing/mocking_advanced.spl` | 724 | Testing | `AdvancedMock` | Advanced mocking |
-| `matrix_utils.spl` | 719 | Math | - | Matrix utilities |
-| `udp_utils.spl` | 715 | Networking | `UdpSocket` | UDP utilities |
-| `src/infra.spl` | 712 | Infrastructure | - | Infrastructure support |
-| `diff/utilities.spl` | 710 | Algorithms | `Differ` | Diff algorithms |
-| `stats_utils.spl` | 700 | Math | - | Statistics |
-| `src/tensor.spl` | 697 | ML | `Tensor` | Tensor operations |
-| `comparator_utils.spl` | 693 | Collections | - | Comparators |
-| `binary_io.spl` | 690 | I/O | `BinaryReader`, `BinaryWriter` | Binary I/O |
-| `sdn/parser.spl` | 682 | Serialization | `SdnParser` | SDN format parser |
-| `allocator.spl` | 683 | Memory | `Allocator`, `ArenaAllocator` | Memory allocators |
-| `src/table.spl` | 682 | Data Structures | `Table` | Table data structure |
-| `string.spl` | 626 | String | - | String utilities |
-| `array.spl` | 350 | Collections | - | Array utilities |
-
-### 4.3 src/app/ Top 40 Applications (584 files, 122,309 lines)
-
-| Application | Files | Lines | Key Files | Purpose |
-|-------------|-------|-------|-----------|---------|
-| `ffi_gen/` | 71 | 12,130 | `main.spl` (1,035), `parser.spl` | FFI wrapper generator |
-| `io/` | 40 | 11,190 | `cli_ops.spl` (664), `jit_ffi.spl` (621) | I/O subsystem |
-| `test_runner_new/` | 44 | 10,213 | `test_runner_main.spl` (704) | Test runner |
-| `parser/` | 39 | 9,176 | `ast.spl` (899), `modules.spl` (616) | Parser tools |
-| `mcp/` | 28 | 8,394 | `fileio_main.spl` (717) | MCP servers |
-| `build/` | 28 | 7,231 | `bootstrap_multiphase.spl` (1,544) | Build system |
-| `ffi_gen.specs/` | 41 | 6,608 | `cranelift_core.spl` (972) | FFI specs |
-| `mcp_jj/` | 19 | 4,654 | `tools_jj.spl` (1,127) | Jujutsu MCP |
-| `lsp/` | 20 | 4,525 | `server.spl` (649) | Language server |
-| `compile/` | 10 | 4,258 | `c_translate.spl` (1,896) | C compilation |
-| `package/` | 26 | 3,615 | - | Package management |
-| `cli/` | 14 | 2,602 | `main.spl` (756) | CLI driver |
-| `wrapper_gen/` | 12 | 2,376 | - | Wrapper generator |
-| `verify/` | 11 | 2,217 | - | Verification tools |
-| `dap/` | 9 | 2,141 | `server.spl` (755) | Debug adapter |
-
-### 4.4 src/compiler/ Top 40 Files (420 files, 136,623 lines)
-
-| File | Lines | Key Types | Purpose |
-|------|-------|-----------|---------|
-| `parser.spl` | 2,453 | `Parser` | Full parser |
-| `treesitter/outline.spl` | 1,799 | `OutlineNode` | Tree-sitter integration |
-| `mir_opt/auto_vectorize.spl` | 1,528 | `Vectorizer` | Auto-vectorization |
-| `mir_lowering.spl` | 1,503 | - | HIR → MIR lowering |
-| `type_infer/inference.spl` | 1,437 | `TypeInferencer` | Type inference |
-| `monomorphize/deferred.spl` | 1,405 | `DeferredMonomorphizer` | Deferred monomorphization |
-| `lexer.spl` | 1,382 | `Lexer` | Full lexer |
-| `backend/llvm_ir_builder.spl` | 1,123 | `LLVMIRBuilder` | LLVM IR generation |
-| `backend/native/mod.spl` | 1,098 | - | Native backend |
-| `mir_data.spl` | 1,080 | `MirInst`, `MirBlock` | MIR data structures |
-| `backend/interpreter.spl` | 1,057 | `InterpreterBackend` | Interpreter backend |
-| `backend/native/isel_x86_64.spl` | 856 | - | x86-64 isel |
-| `backend/native/isel_aarch64.spl` | 777 | - | AArch64 isel |
-| `backend/native/isel_riscv64.spl` | 771 | - | RISC-V isel |
-| `backend/native/encode_x86_64.spl` | 620 | - | x86-64 encoding |
-| `backend/native/encode_aarch64.spl` | 540 | - | AArch64 encoding |
-| `backend/native/encode_riscv64.spl` | 550 | - | RISC-V encoding |
-
-### 4.5 src/lib/ Top 20 Files (102 files, 23,992 lines)
-
-| File | Lines | Key Types | Purpose |
-|------|-------|-----------|---------|
-| `parser/parser.spl` | 1,071 | `Parser` | Parser library |
-| `pure/parser.spl` | 1,056 | `PureParser` | Pure functional parser |
-| `pure/evaluator.spl` | 962 | `Evaluator` | Pure evaluator |
-| `database/test_extended/database.spl` | 900 | - | Extended DB tests |
-| `pure/parser_old.spl` | 858 | - | Old parser |
-| `qemu/debug_boot_runner.spl` | 585 | `DebugBootRunner` | QEMU debugging |
-| `database/core.spl` | 510 | `BugDB`, `TestDB`, `FeatureDB` | Database core |
-| `actor_scheduler.spl` | 458 | `ActorScheduler` | Actor scheduler |
-| `memory/refc_binary.spl` | 453 | `BinaryRef` | Ref-counted binary |
-| `pure/autograd.spl` | 389 | `AutogradEngine` | Automatic differentiation |
-| `database/bug.spl` | 383 | `BugDatabase` | Bug tracking |
-| `pure/training.spl` | 382 | `TrainingLoop` | ML training |
+**Reason:** Superseded by `pure/parser.spl`
+**Risk:** Very Low (not imported anywhere)
+**Action:** Delete immediately
+**Savings:** 858 lines
 
 ---
 
-## 5. Class/Type Index
+#### 2. Deprecated Helper Functions
 
-### 5.1 Alphabetical Index (Top 100 Types)
+**Candidates:**
+- String functions in `src/std/helpers.spl` (after string consolidation)
+- Old validation predicates (after validation module)
 
-| Type | Category | Location(s) | Lines |
-|------|----------|-------------|-------|
-| `ActorContext` | Class | `src/lib/actor_scheduler.spl:161` | - |
-| `ActorDef` | Struct | `src/app/parser/ast.spl:475`, `src/compiler/parser_types.spl:122` | - |
-| `ActorScheduler` | Class | `src/lib/actor_scheduler.spl:287` | - |
-| `AdamState` | Class | `src/std/optimization/types.spl:28` | - |
-| `AlgebraicSimplifier` | Class | `src/compiler/mir_opt/const_fold.spl:202` | - |
-| `AopWeaver` | Class | `src/compiler/aop.spl:86` | - |
-| `ArchRulesEngine` | Class | `src/compiler/arch_rules.spl:79` | - |
-| `ArmAsmGenerator` | Class | `src/compiler/backend/arm_asm.spl:64` | - |
-| `AsyncIntegration` | Class | `src/compiler/async_integration.spl:249` | - |
-| `AsyncMock` | Class | `src/std/src/testing/mocking_async.spl:27` | - |
-| `AtomicBool` | Class | `src/std/atomic.spl:144` | - |
-| `AtomicI64` | Class | `src/std/atomic.spl:66` | - |
-| `AutogradStore` | Class | `src/lib/pure/autograd_store.spl:15` | - |
-| `AutoVectorizer` | Class | `src/compiler/simd_check.spl:368` | - |
-| `Backend` | Class | `src/compiler/backend/backend_api.spl:32` | - |
-| `BackendFactory` | Class | `src/compiler/backend/backend_factory.spl:12` | - |
-| `BackendKind` | Enum | `src/compiler/backend/backend_types.spl:18`, `src/core/backend_types.spl:12` | - |
-| `BarrierAnalysis` | Class | `src/compiler/gc_analysis/barriers.spl:143` | - |
-| `BenchmarkRunner` | Class | `src/test/benchmarks.spl:209` | - |
-| `BinaryReader` | Class | `src/std/binary_io.spl:66` | - |
-| `BinaryWriter` | Class | `src/std/binary_io.spl:334` | - |
-| `BlockContext` | Class | `src/compiler/macro_validation.spl:23` | - |
-| `BugDB` | Struct | `src/lib/database/core.spl` | - |
-| `CCodegen` | Class | `src/core/compiler/c_codegen.spl` | - |
-| `CborEncoder` | Class | `src/std/cbor/core.spl` | - |
-| `CoreExpr` | Struct | `src/core/ast.spl` | - |
-| `CoreLexer` | Struct | `src/core/lexer_struct.spl` | - |
-| `CoreParser` | Struct | `src/core/parser.spl` | - |
-| `CoreStmt` | Struct | `src/core/ast.spl` | - |
-| `EffectEnv` | Class/Enum | Multiple locations (11 occurrences) | - |
-| `Environment` | Class | `src/core/interpreter/env.spl` | - |
-| `FeatureDB` | Struct | `src/lib/database/core.spl` | - |
-| `HirExpr` | Struct | Multiple locations (14 occurrences) | - |
-| `HirType` | Struct/Enum | Multiple locations (48 occurrences) | - |
-| `InferMode` | Enum | Multiple locations (12 occurrences) | - |
-| `Interpreter` | Class | `src/core/interpreter/eval.spl` | - |
-| `JitEngine` | Class | `src/core/interpreter/jit.spl` | - |
-| `LLVMIRBuilder` | Class | `src/compiler/backend/llvm_ir_builder.spl` | - |
-| `MacroDef` | Class | Multiple locations (11 occurrences) | - |
-| `Matrix` | Class | `src/std/linear_algebra/matrix_ops.spl` | - |
-| `MirInst` | Struct | `src/core/mir.spl`, `src/compiler/mir_data.spl` | - |
-| `ModuleLoader` | Class | `src/core/interpreter/module_loader.spl` | - |
-| `Parser` | Class | Multiple locations (7 occurrences) | - |
-| `QueryBuilder` | Class | `src/lib/database/core.spl` | - |
-| `Scope` | Class | Multiple locations (7 occurrences) | - |
-| `SdnValue` | Struct | Multiple locations (6 occurrences) | - |
-| `SkipList` | Class | `src/std/skiplist_utils.spl` | - |
-| `Span` | Struct | Multiple locations (12 occurrences) | - |
-| `StackFrame` | Class | Multiple locations (8 occurrences) | - |
-| `SymbolTable` | Class | Multiple locations (6 occurrences) | - |
-| `Tensor` | Class | `src/std/src/tensor.spl` | - |
-| `TestDB` | Struct | `src/lib/database/core.spl` | - |
-| `Token` | Struct | Multiple locations (12 occurrences) | - |
-| `TokenKind` | Enum | Multiple locations (9 occurrences) | - |
-| `TraitDef` | Struct | Multiple locations (9 occurrences) | - |
-| `TraitRef` | Struct | Multiple locations (14 occurrences) | - |
-| `TypeChecker` | Class | Multiple locations (7 occurrences) | - |
-| `TypeInferencer` | Class | Multiple locations (8 occurrences) | - |
-| `TypeKind` | Enum | `src/core/types.spl` | - |
-| `TypeScheme` | Class | Multiple locations (7 occurrences) | - |
-| `TypeVar` | Class | Multiple locations (8 occurrences) | - |
-| `Value` | Struct | `src/core/interpreter/value.spl` | - |
-| `Variance` | Enum | Multiple locations (8 occurrences) | - |
-| `Vec4f` | Class | Multiple locations (7 occurrences) | - |
-| `Vectorizer` | Class | `src/compiler/mir_opt/auto_vectorize.spl` | - |
-
-### 5.2 Most Duplicated Type Names
-
-| Type Name | Count | Locations |
-|-----------|-------|-----------|
-| `HirType` | 48 | Across compiler/, compiler_core/, and related modules |
-| `Effect` | 23 | Type system and effect tracking modules |
-| `TraitRef` | 14 | Trait system implementation |
-| `HirExpr` | 14 | HIR expression nodes |
-| `Token` | 12 | Lexer/parser modules |
-| `Span` | 12 | Source location tracking |
-| `InferMode` | 12 | Type inference |
-| `MacroDef` | 11 | Macro system |
-| `Expr` | 11 | Various expression representations |
-| `EffectEnv` | 11 | Effect environment tracking |
-
-**Note:** High duplication counts often indicate:
-1. Bootstrap duplication (compiler/ vs compiler_core/)
-2. Similar abstractions across different subsystems
-3. Common data structures reused in multiple contexts
+**Savings:** ~200-300 lines
 
 ---
 
-## 6. Refactoring Recommendations
+### Can Be Auto-Generated
 
-### Priority 1: Low-Hanging Fruit (Low Risk, Medium Impact)
+#### 3. FFI Specs (consider regeneration)
 
-#### 1.1 Consolidate Phase Files
-- **Files:** 27 phase files in compiler/ + compiler_core/
-- **Lines:** ~20,000 total
-- **Savings:** ~8,000 lines (if consolidated)
-- **Risk:** Low
-- **Effort:** 2-3 days
-- **Action:**
-  - Merge `bidir_phase1a-d.spl` → `bidirectional_checking.spl`
-  - Merge `associated_types_phase4a-d.spl` → `associated_types.spl`
-  - Repeat for all phase groups
-  - Move originals to `doc/design/phases/` for history
+**Files:** 41 files in `ffi_gen.specs/` (~6,600 lines)
 
-#### 1.2 Extract Builder Utilities
-- **Files:** 8 builder files
-- **Lines:** ~2,500 total
-- **Savings:** ~500 lines
-- **Risk:** Low
-- **Effort:** 1 day
-- **Action:**
-  - Create `src/compiler/utils/builder_helpers.spl`
-  - Extract common error formatting
-  - Extract common validation patterns
+**Action:** Verify these are tool output, not hand-edited
+- If tool output: Keep as-is (regenerate when needed)
+- If hand-edited: Migrate edits to tool config
 
-#### 1.3 Deduplicate FFI Specs
-- **Files:** 2 files (runtime_value_full.spl)
-- **Lines:** ~1,300 total
-- **Savings:** ~650 lines
-- **Risk:** Very Low
-- **Effort:** 1 hour
-- **Action:**
-  - Remove duplicate `src/app/ffi_gen.specs/runtime_value_full.spl`
-  - Keep only `src/app/ffi_gen/specs/runtime_value_full.spl`
-
-#### 1.4 Consolidate String/Array Utilities
-- **Files:** ~15 files in src/std/
-- **Lines:** ~4,200 total
-- **Savings:** ~1,500 lines
-- **Risk:** Medium
-- **Effort:** 2-3 days
-- **Action:**
-  - Merge `text_utils.spl`, `string_extra.spl`, `src/text_utils.spl` into `string.spl`
-  - Merge array utilities into `array.spl`
-  - Update imports across codebase
-
-**Total Priority 1 Savings:** ~10,650 lines
-**Total Priority 1 Effort:** ~5-7 days
+**Recommendation:** Document which files are generated vs. hand-edited
 
 ---
 
-### Priority 2: Medium-Term Actions (Medium Risk, High Impact)
+### Old/Unused Implementations
 
-#### 2.1 Validation Framework
-- **Files:** ~28 validator files
-- **Lines:** ~6,400 total
-- **Savings:** ~2,000 lines
-- **Risk:** High
-- **Effort:** 1-2 weeks
-- **Action:**
-  - Design `ValidationContext` class
-  - Extract common validation patterns
-  - Implement for 1-2 validators as pilot
-  - Gradual migration
+#### 4. Legacy Parser/Lexer Code
 
-#### 2.2 Type Mapper Abstraction
-- **Files:** 16 type mapper files
-- **Lines:** ~4,700 total
-- **Savings:** ~1,500 lines
-- **Risk:** High
-- **Effort:** 1-2 weeks
-- **Action:**
-  - Wait for Full Simple trait system to stabilize
-  - Design `TypeMapper` trait
-  - Implement for 1 backend as pilot
-  - Gradual migration
+**Candidates:**
+- Any files marked with `_old`, `_legacy`, `_deprecated` suffixes
 
-**Total Priority 2 Savings:** ~3,500 lines
-**Total Priority 2 Effort:** ~2-4 weeks
+**Action:** Audit and remove after verification
+
+**Estimated savings:** ~1,000-2,000 lines
 
 ---
 
-### Priority 3: Long-Term Actions (Very High Risk, Very High Impact)
+## 5. Architecture Improvements
 
-#### 3.1 ISA Abstraction Layer
-- **Files:** 12 ISA files
-- **Lines:** ~4,600 total
-- **Savings:** ~1,500 lines
-- **Risk:** Very High
-- **Effort:** 1-2 months
-- **Action:**
-  - Only attempt after Full Simple trait system is complete
-  - Design ISA trait hierarchy
-  - Comprehensive testing on all platforms
-  - Gradual migration with fallbacks
+### Module Hierarchy
 
-#### 3.2 Complete Desugaring Pipeline
-- **Impact:** ~15,000 lines (compiler/ ↔ compiler_core/)
-- **Risk:** Very High
-- **Effort:** 3-6 months
-- **Action:**
-  - Complete desugaring for all Full Simple features
-  - Eliminate need for compiler_core/ duplication
-  - Full bootstrap redesign
+**Current issue:** Flat structure in `src/std/` (909 files)
 
-**Total Priority 3 Savings:** ~16,500 lines
-**Total Priority 3 Effort:** ~4-8 months
+**Proposal:** Organize into subdirectories by category
+
+```
+src/std/
+  core/           # String, array, option, result (core data types)
+  collections/    # Advanced data structures (skiplist, graph, tree)
+  algorithms/     # Sorting, searching, graph algorithms
+  io/             # File I/O, binary I/O, streams
+  net/            # HTTP, TCP, UDP, WebSocket
+  crypto/         # Cryptography modules
+  serialization/  # JSON, CBOR, YAML, XML, etc.
+  math/           # Math, linear algebra, stats
+  ml/             # Machine learning (tensors, training)
+  testing/        # Testing utilities
+  concurrent/     # Concurrency primitives
+```
+
+**Benefits:**
+- Easier navigation
+- Clearer module relationships
+- Reduced name collisions
+
+**Risk:** Medium (breaks existing imports)
+
+**Timeline:** 2-3 weeks (gradual migration with forwarding modules)
+
+---
+
+### Naming Conventions
+
+**Current issue:** Inconsistent suffixes (`_utils`, `_helpers`, `_core`)
+
+**Proposal:** Standardize naming
+
+| Old Pattern | New Pattern | Rationale |
+|-------------|-------------|-----------|
+| `string_utils.spl` | `string.spl` | Consolidate, remove redundant suffix |
+| `text_utils.spl` | `text.spl` or merge into `string.spl` | Remove suffix |
+| `array_ops.spl` | `array.spl` | "ops" is redundant |
+| `*_helpers.spl` | `*_support.spl` or merge | Clarify purpose |
+| `*_core.spl` | `*_internal.spl` | Internal APIs |
+
+**Benefits:**
+- Consistent naming
+- Easier to remember
+- Less clutter
+
+**Risk:** Medium (breaks imports)
+
+---
+
+### Import Patterns
+
+**Current issue:** Circular dependencies in some modules
+
+**Recommendation:**
+1. Identify circular imports: `grep -r "^use " src/ | # analyze dependencies`
+2. Break cycles by extracting interfaces or moving shared code to `core/`
+3. Document dependency hierarchy in `doc/architecture/module_dependencies.md`
+
+---
+
+### Code Organization
+
+**Current issue:** Overuse of `*_utils.spl` suffix (60+ files)
+
+**Proposal:**
+- `*_utils.spl` → primary module name (e.g., `string_utils.spl` → `string.spl`)
+- Or organize into subdirectories (e.g., `collections/utils/`)
+
+**Benefits:** Clearer module purpose
+
+---
+
+## 6. Priority Matrix
+
+| Priority | Items | LOC Savings | Risk | Effort | ROI |
+|----------|-------|-------------|------|--------|-----|
+| **P1 High** | 5 | ~2,300 | Low | 2 weeks | 115 lines/day |
+| **P2 Medium** | 10-15 | ~9,500 | Med | 2 months | 120 lines/day |
+| **P3 Low** | 5-10 | ~3,000 | High | 12+ months | 8 lines/day |
+| **Total** | 20-30 | ~14,800 | - | 14+ months | - |
+
+### P1 High Priority (Quick Wins)
+
+| Item | LOC Savings | Effort | Risk | Files Affected |
+|------|-------------|--------|------|----------------|
+| 1. Consolidate string processing | ~800 | 2 weeks | Med | ~150 |
+| 2. Consolidate array operations | ~300 | 1 week | Low | ~80 |
+| 3. Migrate MCP to JsonBuilder | ~200 | 1 week | Low | 5 |
+| 4. Remove `parser_old.spl` | ~858 | 1 hour | Very Low | 1 |
+| 5. Extract validation module | ~150 | 1 week | Low | ~60 |
+| **Total P1** | **~2,308** | **5 weeks** | - | **~296** |
+
+**Timeline:** 5 weeks (1.25 months)
+**ROI:** 2,308 lines / 25 days = **92 lines/day**
+
+---
+
+### P2 Medium Priority
+
+| Item | LOC Savings | Effort | Risk | Files Affected |
+|------|-------------|--------|------|----------------|
+| 6. Consolidate phase files | ~8,000 | 4 weeks | Low | 27 |
+| 7. Reorganize std/ hierarchy | ~500 (indirect) | 3 weeks | Med | ~900 |
+| 8. Standardize naming conventions | ~200 (indirect) | 2 weeks | Med | ~100 |
+| 9. Extract builder utilities | ~500 | 1 week | Low | 8 |
+| 10. Extract validation framework | ~400 | 2 weeks | Med | ~28 |
+| **Total P2** | **~9,600** | **12 weeks** | - | **~1,063** |
+
+**Timeline:** 12 weeks (3 months)
+**ROI:** 9,600 lines / 60 days = **160 lines/day**
+
+---
+
+### P3 Low Priority (Long-term)
+
+| Item | LOC Savings | Effort | Risk | Files Affected |
+|------|-------------|--------|------|----------------|
+| 11. Type mapper abstraction | ~1,500 | 2 months | High | 16 |
+| 12. ISA abstraction layer | ~1,500 | 5 months | Very High | 8 |
+| **Total P3** | **~3,000** | **7 months** | - | **24** |
+
+**Prerequisite:** Full Simple trait system must be stable
+**Timeline:** 7 months after trait system ready
+**ROI:** 3,000 lines / 140 days = **21 lines/day**
 
 ---
 
 ### Work That Should NOT Be Done
 
-#### 1. Lexer/Parser Triplication
-- **Reason:** Required for bootstrap stages
-- **Status:** Documented
-- **Decision:** Keep as-is
+#### 1. Lexer/Parser Bootstrap Duplication
 
-#### 2. Backend Type Mappers (without trait system)
-- **Reason:** Backend-specific requirements
-- **Status:** Documented
-- **Decision:** Wait for trait system
+**Files:** `core/lexer.spl`, `compiler/lexer.spl`, `compiler_core/lexer.spl`
 
-#### 3. Specialized Parsers (SDN, JSON, XML, HTML)
-- **Reason:** Different grammars and requirements
-- **Status:** Intentional
-- **Decision:** Keep as-is
+**Reason:** Required for self-hosting bootstrap
+**Status:** Documented in `src/compiler/README.md`
+**Decision:** Keep as-is until desugaring pipeline is complete
 
 ---
 
-## 7. Summary Statistics
+#### 2. Backend-Specific Code (before trait system)
 
-### Codebase Health Metrics
+**Files:** Type mappers, ISA encoders
+
+**Reason:** Each backend has unique requirements
+**Decision:** Wait for trait system to stabilize
+
+---
+
+#### 3. Specialized Parsers
+
+**Files:** `sdn/parser.spl`, `json/parser.spl`, `xml/parser.spl`, `html/parser.spl`
+
+**Reason:** Different grammars and requirements
+**Decision:** Keep separate (not duplication, different purposes)
+
+---
+
+## 7. Implementation Roadmap
+
+### Phase 1: Quick Wins (5 weeks)
+
+**Week 1-2: String Consolidation**
+- Day 1-2: Create test suite (200+ tests)
+- Day 3-5: Merge case conversion, character predicates
+- Day 6-10: Update imports (~150 files)
+
+**Week 3: Array Consolidation**
+- Day 1: Create test suite (100+ tests)
+- Day 2-3: Merge functions
+- Day 4-5: Update imports (~80 files)
+
+**Week 4: MCP JsonBuilder Migration**
+- Day 1-4: Update 5 MCP servers
+- Day 5: Remove old `mcp_sdk/core/json.spl`
+
+**Week 5: Cleanup**
+- Day 1: Remove `parser_old.spl`
+- Day 2-5: Extract validation module
+
+**Deliverables:**
+- ~2,300 lines removed
+- ~300 files updated
+- Full test suite passing (4,067 tests)
+
+**Dependencies:** None
+
+**Rollback plan:** Keep deprecated modules for 1 release cycle
+
+---
+
+### Phase 2: Medium-term Improvements (12 weeks)
+
+**Week 1-4: Phase File Consolidation**
+- Week 1: Merge bidirectional checking (4 files → 1)
+- Week 2: Merge associated types, higher-rank poly (8 files → 2)
+- Week 3: Merge variance, macros (7 files → 2)
+- Week 4: Move originals to `doc/design/phases/`
+
+**Week 5-7: Stdlib Reorganization**
+- Week 5: Design new hierarchy, create directories
+- Week 6: Move files, create forwarding modules
+- Week 7: Update imports gradually
+
+**Week 8-9: Naming Standardization**
+- Week 8: Rename `*_utils.spl` files
+- Week 9: Update imports
+
+**Week 10: Builder Utilities**
+- Extract common builder patterns
+
+**Week 11-12: Validation Framework**
+- Design `ValidationContext` class
+- Migrate 1-2 validators as pilot
+
+**Deliverables:**
+- ~9,600 lines removed (indirect benefits from organization)
+- Cleaner module hierarchy
+- Consistent naming
+
+**Dependencies:** Phase 1 complete
+
+**Rollback plan:** Forwarding modules for 2 release cycles
+
+---
+
+### Phase 3: Long-term Refactoring (7+ months, after trait system)
+
+**Prerequisite:** Full Simple trait system must be production-ready
+
+**Month 1-2: Type Mapper Abstraction**
+- Month 1: Design `TypeMapper` trait
+- Month 2: Implement for 2 backends as pilot
+
+**Month 3-7: ISA Abstraction Layer**
+- Month 3: Design ISA trait hierarchy
+- Month 4: Implement for x86-64
+- Month 5: Comprehensive testing
+- Month 6-7: Gradual migration (ARM, RISC-V)
+
+**Deliverables:**
+- ~3,000 lines removed
+- Trait-based backend architecture
+
+**Dependencies:**
+- Trait system stable (2-3 releases)
+- Phase 1 and 2 complete
+
+**Rollback plan:** Keep old implementations in parallel, feature flag
+
+---
+
+### Test Requirements
+
+**For each phase:**
+
+1. **Regression Testing**
+   - Run full test suite (4,067 tests)
+   - Zero tolerance for failures
+   - Run after each batch of changes (not just at end)
+
+2. **Import Verification**
+   - Script to verify all imports resolve
+   - Check for missing symbols
+   - Validate no circular dependencies
+
+3. **Performance Testing**
+   - Benchmark key operations (parsing, compilation)
+   - Ensure no performance regressions
+   - Target: <5% slowdown acceptable
+
+4. **Documentation Updates**
+   - Update import examples in guides
+   - Regenerate API documentation
+   - Update CLAUDE.md if stdlib changes
+
+---
+
+### Rollback Plan
+
+**If Phase 1 goes wrong:**
+1. Revert commits (use `jj` undo)
+2. Restore deprecated modules from git history
+3. Regenerate forwarding modules
+4. Re-run tests to verify restoration
+
+**If Phase 2 goes wrong:**
+1. Forwarding modules should still work
+2. Revert directory moves
+3. Restore original imports
+
+**If Phase 3 goes wrong:**
+1. Feature flag to disable new trait-based backends
+2. Keep old implementations in parallel
+3. Gradual cutover (opt-in initially)
+
+---
+
+## 8. Summary Statistics & Health Metrics
+
+### Codebase Health (2026-02-16)
 
 | Metric | Value | Target | Status |
 |--------|-------|--------|--------|
-| Total Lines | 98,916 | - | - |
-| Type Definitions | 4,498 | - | - |
-| Intentional Duplication | ~15,000 (15%) | Documented | ✅ |
-| Addressable Duplication | ~16,000 (16%) | <10% | ⚠️ |
-| High-Risk Files | ~12 ISA files | Stable | ⚠️ |
-| Test Coverage | 4,067/4,067 (100%) | 100% | ✅ |
+| **Total Files** | 2,649 | - | - |
+| **Total Lines (src/)** | 111,044 | - | - |
+| **Test Coverage** | 4,067/4,067 (100%) | 100% | ✅ |
+| **Intentional Duplication** | ~15,000 (13.5%) | Documented | ✅ |
+| **Addressable Duplication** | ~14,800 (13.3%) | <10% | ⚠️ |
+| **High-Risk Files** | 8 ISA files | Stable | ⚠️ |
 
-### Refactoring Potential
+### Duplication Breakdown
 
-| Priority | Files | Lines | Savings | Risk | Effort |
-|----------|-------|-------|---------|------|--------|
-| **Priority 1** | ~52 | ~28,250 | ~10,650 | Low | 5-7 days |
-| **Priority 2** | ~44 | ~11,100 | ~3,500 | Medium | 2-4 weeks |
-| **Priority 3** | ~453 | ~19,600 | ~16,500 | Very High | 4-8 months |
-| **Total** | ~549 | ~58,950 | ~30,650 | - | ~5-9 months |
+| Category | Lines | % of Codebase | Status | Priority |
+|----------|-------|---------------|--------|----------|
+| **Bootstrap (compiler_core/)** | ~15,000 | 13.5% | Documented | N/A |
+| **String/Array utilities** | ~3,000 | 2.7% | Addressable | P1 |
+| **Phase files** | ~8,000 | 7.2% | Addressable | P2 |
+| **Type mappers** | ~3,500 | 3.2% | Backend-specific | P3 |
+| **Parser triplication** | ~5,100 | 4.6% | Bootstrap | N/A |
+| **ISA encoders** | ~4,700 | 4.2% | Cross-platform | P3 |
+| **Other** | ~2,000 | 1.8% | Various | P2 |
+| **Total Duplication** | ~41,300 | 37.2% | - | - |
 
-**ROI Analysis:**
-- **Quick wins (Priority 1):** 10,650 lines in 1 week = **~1,500 lines/day**
-- **Medium-term (Priority 2):** 3,500 lines in 3 weeks = **~170 lines/day**
-- **Long-term (Priority 3):** 16,500 lines in 6 months = **~90 lines/day**
+**Note:** Total exceeds addressable because bootstrap duplication is intentional.
 
-**Recommendation:** Focus on Priority 1 items for maximum ROI.
+### Refactoring ROI Analysis
+
+| Phase | Duration | Lines Saved | Files Updated | ROI (lines/day) |
+|-------|----------|-------------|---------------|-----------------|
+| **Phase 1 (Quick Wins)** | 5 weeks | 2,300 | 296 | 92 |
+| **Phase 2 (Medium-term)** | 12 weeks | 9,600 | 1,063 | 160 |
+| **Phase 3 (Long-term)** | 7 months | 3,000 | 24 | 21 |
+| **Total** | 14+ months | 14,900 | 1,383 | 36 |
+
+**Recommendation:** Focus on Phase 1 (highest ROI, lowest risk)
 
 ---
 
-## 8. Key Findings
+## 9. Key Findings & Recommendations
 
-### 8.1 Architectural Insights
+### Architectural Insights
 
-1. **Bootstrap Complexity**
+1. **Bootstrap Complexity is Acceptable**
    - 3 compiler implementations (core, compiler_core, compiler)
-   - 3 parser implementations (core, library, pure functional)
-   - 3 lexer implementations
-   - **Total:** ~25,000 lines for bootstrap support
+   - ~15,000 lines duplicated for self-hosting
+   - Well-documented, intentional
+   - **Recommendation:** Keep until desugaring pipeline complete
 
-2. **Backend Proliferation**
-   - 7 type mappers × 2 compilers = 14 files
-   - 3 ISA architectures × 2 stages × 2 compilers = 12 files
-   - **Total:** ~9,300 lines for backend support
+2. **Standard Library Needs Organization**
+   - 909 files, 192K lines
+   - Flat structure causes confusion
+   - ~3,000 lines duplicated in string/array utilities
+   - **Recommendation:** Reorganize into subdirectories (Phase 2)
 
-3. **Standard Library Growth**
-   - 901 files, 185,046 lines (187% of codebase size)
-   - Heavy utility duplication (string, array, validation)
-   - **Opportunity:** Consolidate utilities into core modules
+3. **Backend Architecture is Sound**
+   - 8 backends, each with unique requirements
+   - Type mapper duplication is acceptable for now
+   - ISA encoder duplication is high-risk to change
+   - **Recommendation:** Wait for trait system before abstracting
 
-4. **Application Ecosystem**
-   - 584 files, 122,309 lines
-   - Well-organized by function
-   - Some duplication in FFI specs (tool-generated)
+4. **Testing Infrastructure is Excellent**
+   - 4,067/4,067 tests passing (100%)
+   - SSpec BDD framework mature
+   - SDoctest system working (36/36 tests)
+   - **Recommendation:** Maintain test-first discipline during refactoring
 
-### 8.2 Code Quality
+### Strengths
 
-**Strengths:**
-- ✅ Well-documented bootstrap duplication
-- ✅ Clear directory structure
-- ✅ 100% test coverage (4,067 tests passing)
-- ✅ Consistent naming conventions
-- ✅ Extensive standard library
+✅ **Well-documented bootstrap duplication**
+✅ **Clear directory structure**
+✅ **100% test coverage**
+✅ **Consistent naming (mostly)**
+✅ **Comprehensive standard library**
+✅ **Self-hosting compiler**
 
-**Weaknesses:**
-- ⚠️ Phase files clutter compiler/ directory
-- ⚠️ String/array utilities scattered across std/
-- ⚠️ Validator pattern not abstracted
-- ⚠️ ISA code highly duplicated (acceptable for now)
+### Weaknesses
 
-### 8.3 Maintenance Burden
+⚠️ **String/array utilities scattered**
+⚠️ **Phase files clutter compiler/**
+⚠️ **Flat stdlib hierarchy**
+⚠️ **Some inconsistent naming (`*_utils` overuse)**
+⚠️ **Validator pattern not abstracted**
+
+### Maintenance Burden
 
 **High-Maintenance Areas:**
 1. compiler/ ↔ compiler_core/ synchronization (~15,000 lines)
 2. Phase files (27 files, manual tracking)
-3. Backend type mappers (14 files, backend-specific changes)
-4. ISA encoders (12 files, architecture-specific)
+3. Backend type mappers (16 files, backend-specific changes)
+4. ISA encoders (8 files, architecture-specific)
 
 **Low-Maintenance Areas:**
 1. Core interpreter (well-abstracted)
-2. Standard library (mostly independent modules)
+2. Standard library (mostly independent)
 3. Applications (clear separation of concerns)
+4. Test suite (comprehensive, stable)
+
+---
+
+## 10. Actionable Next Steps
+
+### Immediate Actions (This Week)
+
+1. **Remove `parser_old.spl`** (1 hour)
+   - Verify not imported: `grep -r "pure.parser_old" src/ test/`
+   - Delete file
+   - Commit: "refactor: Remove legacy pure/parser_old.spl (858 lines)"
+
+2. **Start String Consolidation Test Suite** (2 days)
+   - Create `test/unit/std/string_comprehensive_spec.spl`
+   - Test all functions from string.spl, text_utils.spl, string_core.spl
+   - Target: 200+ tests
+
+### This Month (Phase 1 Start)
+
+3. **Week 1-2: String Consolidation**
+   - Follow Recommendation 1 action plan
+   - Update ~150 import statements
+   - Verify 4,067 tests still pass
+
+4. **Week 3: Array Consolidation**
+   - Follow Recommendation 2 action plan
+   - Update ~80 import statements
+
+5. **Week 4: MCP JsonBuilder Migration**
+   - Follow Recommendation 3 action plan
+   - Update 5 MCP server files
+
+### Next Quarter (Phase 1 + Phase 2 Start)
+
+6. **Month 2: Extract Validation Module**
+   - Create `src/std/validation.spl`
+   - Update ~60 import statements
+
+7. **Month 3: Consolidate Phase Files**
+   - Follow Recommendation 5 action plan
+   - Merge 27 files → 7 files
+
+8. **Month 4: Start Stdlib Reorganization**
+   - Design new hierarchy
+   - Create directories, forwarding modules
+
+### Long-term (6+ months)
+
+9. **After Trait System Stabilizes:**
+   - Type mapper abstraction (Phase 3)
+   - ISA abstraction layer (Phase 3, very high risk)
 
 ---
 
 ## Appendix: Quick Reference
 
-### File Search Commands
+### Search Commands
 
 ```bash
 # Find all .spl files
@@ -1178,29 +1473,45 @@ find src/ -name "*.spl"
 
 # Count lines by directory
 for dir in src/*/; do
-  echo "$(basename "$dir"): $(find "$dir" -name "*.spl" -exec wc -l {} + | tail -1)"
+  echo "$(basename "$dir"): $(find "$dir" -name "*.spl" -exec wc -l {} + 2>/dev/null | tail -1)"
 done
 
-# Find duplicate file names
-find src/ -name "*.spl" -type f -printf "%f\n" | sort | uniq -c | sort -rn | head -20
+# Find duplicate function names across files
+grep -rh "^fn " src/ --include="*.spl" | sort | uniq -c | sort -rn | head -30
 
-# Search for specific types
-grep -rn "^class " src/ --include="*.spl" | grep "BackendFactory"
-grep -rn "^struct " src/ --include="*.spl" | grep "MirInst"
-grep -rn "^enum " src/ --include="*.spl" | grep "TokenKind"
+# Find all imports of a module
+grep -r "use std.text_utils" src/ test/
+
+# Find all type mapper files
+find src/ -name "*_type_mapper.spl"
+
+# Count ISA files
+find src/compiler/backend/native -name "isel_*.spl" -o -name "encode_*.spl"
 ```
 
-### Key Documentation
+### Key Files to Review
 
-- Bootstrap duplication: `src/compiler/README.md`, `src/compiler_core/README.md`
-- Duplication cleanup: `doc/report/duplication_recommendations.md`
-- Semantic patterns: `doc/report/semantic_duplication_analysis.md`
-- SFFI patterns: `CLAUDE.md` (SFFI section)
-- Test framework: `src/std/spec/` (SSpec)
+**Documentation:**
+- `CLAUDE.md` - Development guide (this document)
+- `src/compiler/README.md` - Compiler bootstrap duplication
+- `src/compiler_core/README.md` - Core compiler documentation
+- `doc/guide/syntax_quick_reference.md` - Language syntax
+
+**Core Implementation:**
+- `src/core/parser.spl` (2,135 lines) - Bootstrap parser
+- `src/std/spec.spl` (694 lines) - SSpec testing framework
+- `src/app/cli/main.spl` (756 lines) - CLI entry point
+- `src/compiler/driver.spl` (856 lines) - Compiler driver
+
+**Duplication Hotspots:**
+- `src/std/string.spl`, `src/std/text_utils.spl` - String processing
+- `src/compiler/backend/*_type_mapper.spl` - Backend type mappers
+- `src/compiler/backend/native/isel_*.spl` - ISA instruction selection
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-02-14
-**Maintainer:** Claude Code Explore Agent
-**Status:** Comprehensive inventory complete, recommendations provided
+**Document Version:** 2.0
+**Date:** 2026-02-16
+**Author:** Claude Sonnet 4.5 (Explore Agent)
+**Status:** Comprehensive refactoring guide with actionable recommendations
+**Next Review:** After Phase 1 completion (5 weeks)

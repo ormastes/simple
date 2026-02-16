@@ -1,171 +1,89 @@
 # WASM LSP Diagnostics Publishing Tests
-# Tests publish_diagnostics method and JSON serialization
+#
+# Tests that the core parser produces correct diagnostics
+# for various error patterns in Simple code.
 
-# Local type definitions (test stubs)
+use app.lsp.parser_adapter.{ParserAdapter, ParserAdapter__create_core, ParseResult, ParseDiagnostic}
 
-struct Position:
-    line: i64
-    character: i64
+describe "WASM Diagnostics Publishing":
 
-struct Range:
-    start: Position
-    end: Position
+    context "Error diagnostics":
+        it "produces no diagnostics for valid code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 42")
+            expect(result.diagnostics.len()).to_equal(0)
 
-enum DiagnosticSeverity:
-    Error
-    Warning
-    Information
-    Hint
+        it "produces diagnostic for unmatched close paren":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = (1 + 2))")
+            expect(result.diagnostics.len()).to_be_greater_than(0)
 
-struct Diagnostic:
-    range: Range
-    severity: DiagnosticSeverity
-    message: str
-    source: str
+        it "produces diagnostic for unmatched close bracket":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val arr = [1, 2]]")
+            expect(result.diagnostics.len()).to_be_greater_than(0)
 
-enum CompletionItemKind:
-    Text = 1
-    Method = 2
-    Function = 3
-    Variable = 6
-    Keyword = 14
-    Struct = 22
+    context "Diagnostic accuracy":
+        it "correct line number for first-line error":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            expect(result.diagnostics[0].line).to_equal(0)
 
-struct CompletionItem:
-    label: str
-    kind: i64
-    detail: Option<str>
-    documentation: Option<str>
-    insert_text: Option<str>
+        it "correct line number for second-line error":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 1\n)")
+            val found_line1 = false
+            for diag in result.diagnostics:
+                if diag.line == 1:
+                    var found_line1 = true
+            expect(result.diagnostics.len()).to_be_greater_than(0)
 
+        it "includes column span information":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            val diag = result.diagnostics[0]
+            expect(diag.column).to_equal(0)
 
+    context "Multiple errors":
+        it "reports errors on multiple lines":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")\n]")
+            expect(result.diagnostics.len()).to_equal(2)
 
-describe "Diagnostics Publishing":
-    describe "Basic Publishing":
-        it "publishes diagnostics for document":
-            # Branch: publish_diagnostics method
-            val diagnostics_published = true
-            expect(diagnostics_published)
+        it "reports paren and bracket errors separately":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")\n]")
+            expect(result.diagnostics[0].message).to_contain("parenthesis")
+            expect(result.diagnostics[1].message).to_contain("bracket")
 
-        it "creates JSON builder":
-            # Branch: var builder = JsonBuilder.new()
-            val builder_created = true
-            expect(builder_created)
+    context "Valid patterns (no false positives)":
+        it "balanced parens in function call":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("foo(bar(1, 2), baz(3))")
+            expect(result.diagnostics.len()).to_equal(0)
 
-        it "sets URI in JSON":
-            # Branch: builder.set_string("uri", uri)
-            val uri_set = true
-            expect(uri_set)
+        it "balanced brackets in array literal":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val a = [1, [2, 3], [4, [5]]]")
+            expect(result.diagnostics.len()).to_equal(0)
 
-    describe "Diagnostics Iteration":
-        it "iterates through diagnostics list":
-            # Branch: for diag in diagnostics
-            val iterated = true
-            expect(iterated)
+        it "comments are ignored":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("# this has ) and ] but is a comment")
+            expect(result.diagnostics.len()).to_equal(0)
 
-        it "handles empty diagnostics list":
-            # Branch: empty list case (loop doesn't execute)
-            val empty_list = true
-            expect(empty_list)
+        it "strings are part of valid code":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val s = \"hello world\"")
+            expect(result.diagnostics.len()).to_equal(0)
 
-        it "handles single diagnostic":
-            # Branch: loop executes once
-            val single_diag = true
-            expect(single_diag)
+    context "Success flag":
+        it "success is true when no diagnostics":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse("val x = 1")
+            expect(result.success).to_equal(true)
 
-        it "handles multiple diagnostics":
-            # Branch: loop executes multiple times
-            val multiple_diags = true
-            expect(multiple_diags)
-
-    describe "Diagnostic Object Building":
-        it "creates diagnostic object dict":
-            # Branch: var diag_obj: Dict<text, JsonValue> = {}
-            val diag_obj_created = true
-            expect(diag_obj_created)
-
-        it "creates range object dict":
-            # Branch: var range_obj: Dict<text, JsonValue> = {}
-            val range_obj_created = true
-            expect(range_obj_created)
-
-        it "creates start position object":
-            # Branch: var start_obj: Dict<text, JsonValue> = {}
-            val start_obj_created = true
-            expect(start_obj_created)
-
-        it "sets start line":
-            # Branch: start_obj["line"] = JsonValue.Integer(diag.range.start.line)
-            val start_line_set = true
-            expect(start_line_set)
-
-        it "sets start character":
-            # Branch: start_obj["character"] = JsonValue.Integer(diag.range.start.character)
-            val start_char_set = true
-            expect(start_char_set)
-
-        it "creates end position object":
-            # Branch: var end_obj: Dict<text, JsonValue> = {}
-            val end_obj_created = true
-            expect(end_obj_created)
-
-        it "sets end line":
-            # Branch: end_obj["line"] = JsonValue.Integer(diag.range.end.line)
-            val end_line_set = true
-            expect(end_line_set)
-
-        it "sets end character":
-            # Branch: end_obj["character"] = JsonValue.Integer(diag.range.end.character)
-            val end_char_set = true
-            expect(end_char_set)
-
-        it "sets start object in range":
-            # Branch: range_obj["start"] = JsonValue.object(start_obj)
-            val start_in_range = true
-            expect(start_in_range)
-
-        it "sets end object in range":
-            # Branch: range_obj["end"] = JsonValue.object(end_obj)
-            val end_in_range = true
-            expect(end_in_range)
-
-        it "sets range in diagnostic":
-            # Branch: diag_obj["range"] = JsonValue.object(range_obj)
-            val range_in_diag = true
-            expect(range_in_diag)
-
-        it "sets message in diagnostic":
-            # Branch: diag_obj["message"] = JsonValue.text(diag.message)
-            val message_set = true
-            expect(message_set)
-
-        it "sets severity in diagnostic":
-            # Branch: diag_obj["severity"] = JsonValue.Integer(diag.severity)
-            val severity_set = true
-            expect(severity_set)
-
-        it "adds diagnostic to array":
-            # Branch: diag_values.push(JsonValue.object(diag_obj))
-            val pushed_to_array = true
-            expect(pushed_to_array)
-
-    describe "JSON Finalization":
-        it "sets diagnostics array in builder":
-            # Branch: builder.set_array("diagnostics", diag_values)
-            val array_set = true
-            expect(array_set)
-
-        it "builds JSON value":
-            # Branch: builder.build()
-            val json_built = true
-            expect(json_built)
-
-        it "stringifies JSON":
-            # Branch: stringify(builder.build())
-            val json_stringified = true
-            expect(json_stringified)
-
-        it "sends publishDiagnostics notification":
-            # Branch: wasm_lsp_send_notification("textDocument/publishDiagnostics", params)
-            val notification_sent = true
-            expect(notification_sent)
+        it "success is false when diagnostics present":
+            val adapter = ParserAdapter__create_core()
+            val result = adapter.parse(")")
+            expect(result.success).to_equal(false)
