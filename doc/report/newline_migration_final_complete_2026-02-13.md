@@ -65,7 +65,7 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 - src/compiler_core/test_*.spl (18 files)
 - src/test/compiler_tests.spl
 - src/test/integration/mod.spl
-- src/test/benchmarks.spl
+- test/benchmarks/compiler_runtime.spl
 - src/test/quickcheck/mod.spl
 
 ### Agent 5: Stdlib User Strings (17 files, 100+ conversions)
