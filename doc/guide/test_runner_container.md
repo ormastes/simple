@@ -87,7 +87,7 @@ container_runtime: auto
 container_image: simple-test-runner:latest
 ```
 
-See `simple.test.container.example.sdn` for complete example.
+See `docker/simple.test.container.sdn` for complete example.
 
 ---
 
@@ -342,7 +342,7 @@ See `doc/research/robust_test_runner_plan_2026-02-14.md` for complete roadmap.
 - **Plan Document**: `doc/research/robust_test_runner_plan_2026-02-14.md`
 - **Dockerfile**: `docker/test-runner.Dockerfile`
 - **Build Script**: `script/docker-build-test-runner.sh`
-- **Example Config**: `simple.test.container.example.sdn`
+- **Example Config**: `docker/simple.test.container.sdn`
 - **Tests**: `test/unit/app/test_runner_new/container_backend_spec.spl`
 
 ---

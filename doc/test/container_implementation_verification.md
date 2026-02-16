@@ -80,7 +80,7 @@ Changes:
 - `script/docker-build-test-runner.sh` - Build script (executable)
 
 ### 3. Configuration
-- `simple.test.container.example.sdn` - Example configuration
+- `docker/simple.test.container.sdn` - Example configuration
 
 ### 4. Tests
 - `test/unit/app/test_runner_new/container_backend_spec.spl` - Unit tests
