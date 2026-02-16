@@ -214,8 +214,8 @@ target-name:
 
 ---
 
-### 10. Create std.string Module 📦 New stdlib
-**File:** `src/std/string.spl`
+### 10. Create std.text Module 📦 New stdlib
+**File:** `src/std/text.spl`
 
 **Functions:**
 - `trim()`, `trim_start()`, `trim_end()`

@@ -81,7 +81,7 @@ Unexpected token: expected -> or => or :, found Comma
 
 ## Changes Made
 
-### 1. Bootstrap Script (script/bootstrap-from-scratch.sh)
+### 1. Bootstrap Script (scripts/bootstrap-from-scratch.sh)
 
 **Bug Fix:**
 - Line 349: Fixed "clangcc" bug

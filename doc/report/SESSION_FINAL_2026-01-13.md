@@ -151,7 +151,7 @@ Updated all 4 decorator classes:
 **Failing Modules (10):**
 - collections.spl, context.spl, decorators.spl (parse only)
 - dsl.spl, graph.spl, persistent_list.spl
-- string_core.spl, string_ops.spl, string.spl, string_traits.spl
+- string_core.spl, string_ops.spl, text.spl, string_traits.spl
 
 ### Parser Limitations Catalog
 

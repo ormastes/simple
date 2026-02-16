@@ -25,11 +25,11 @@ All obsolete scripts preserved in `archive/scripts/` for historical reference.
 
 | Original | Migrated To | Lines | Status |
 |----------|-------------|-------|--------|
-| `script/build/link-bins.sh` | `src/app/build/link_bins.spl` | 97 | ✅ Done |
-| `script/build/run_quick_tests.sh` | `src/app/test/quick_runner.spl` | 203 | ✅ Done |
-| `script/build/capture_bootstrap_debug.sh` | `src/app/build/capture_debug.spl` | 97 | ✅ Done |
+| `scripts/build/link-bins.sh` | `src/app/build/link_bins.spl` | 97 | ✅ Done |
+| `scripts/build/run_quick_tests.sh` | `src/app/test/quick_runner.spl` | 203 | ✅ Done |
+| `scripts/build/capture_bootstrap_debug.sh` | `src/app/build/capture_debug.spl` | 97 | ✅ Done |
 
-**Skipped:** `script/jj-wrappers/git.sh` (kept per user request)
+**Skipped:** `scripts/jj-wrappers/git.sh` (kept per user request)
 
 **Total migrated:** ~400 lines of Simple code
 
@@ -68,7 +68,7 @@ Created foundation utilities for complex script migrations:
 
 | Original | Migrated To | Lines | Status |
 |----------|-------------|-------|--------|
-| `script/fix_ffi_calls.py` | `src/app/audit/ffi_analyzer.spl` | 287 | ✅ Done |
+| `scripts/fix_ffi_calls.py` | `src/app/audit/ffi_analyzer.spl` | 287 | ✅ Done |
 
 ---
 
@@ -124,9 +124,9 @@ archive/scripts/
 
 These 3 scripts MUST remain as Bash:
 
-1. `script/build-bootstrap.sh` - GitHub Actions first build
-2. `script/build-full.sh` - Release package builder
-3. `script/install.sh` - End-user installer
+1. `scripts/build-bootstrap.sh` - GitHub Actions first build
+2. `scripts/build-full.sh` - Release package builder
+3. `scripts/install.sh` - End-user installer
 
 ---
 

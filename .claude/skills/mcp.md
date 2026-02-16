@@ -129,7 +129,7 @@ bin/simple src/app/mcp/main.spl file_info src/compiler/driver.spl
 
 ### Automated Bug Detection
 
-**Script:** `script/mcp_debug_bootstrap.spl`
+**Script:** `scripts/mcp_debug_bootstrap.spl`
 
 ```simple
 # Tests dictionary semantics
@@ -147,7 +147,7 @@ register_bugs(bugs: [Bug])
 
 **Run:**
 ```bash
-bin/simple script/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Output:**
@@ -176,7 +176,7 @@ bin/simple script/mcp_debug_bootstrap.spl
 ### 1. Run Automated Detection
 
 ```bash
-bin/simple script/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Checks:**
@@ -247,7 +247,7 @@ doc/report/mcp_debugging_session_summary.md
 Multi-generation bootstrap tester:
 
 ```bash
-bin/simple script/bootstrap_extended.spl --generations=5
+bin/simple scripts/bootstrap_extended.spl --generations=5
 ```
 
 **Features:**
@@ -261,7 +261,7 @@ bin/simple script/bootstrap_extended.spl --generations=5
 Automated bug detection:
 
 ```bash
-bin/simple script/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 ```
 
 **Detects:**
@@ -332,7 +332,7 @@ bin/simple script/mcp_debug_bootstrap.spl
 **Example:**
 ```bash
 # Analyze with MCP
-bin/simple script/mcp_debug_bootstrap.spl
+bin/simple scripts/mcp_debug_bootstrap.spl
 
 # View results
 cat doc/bug/bug_db.sdn
@@ -521,7 +521,7 @@ SDN File Format
 - `src/app/mcp/main.spl` - MCP server implementation
 - `src/app/mcp/bugdb_resource.spl` - Bug database MCP integration
 - `src/lib/database/` - Unified database library
-- `script/mcp_debug_bootstrap.spl` - Automated debugging
+- `scripts/mcp_debug_bootstrap.spl` - Automated debugging
 - `doc/bug/bug_db.sdn` - Bug database
 - `doc/report/mcp_database_integration_2026-02-05.md` - Integration report
 - `doc/report/mcp_fixes_and_tests_2026-02-05.md` - Fixes and tests

@@ -203,10 +203,10 @@ cd rust && cargo bench --bench interpreter_bench
 cargo bench -- --baseline baseline-2026-02-04
 
 # Profile a script
-./script/profiling/profile-interpreter.sh script.spl
+./scripts/profiling/profile-interpreter.sh script.spl
 
 # Analyze hotspots
-./script/profiling/analyze-hotspots.sh
+./scripts/profiling/analyze-hotspots.sh
 ```
 
 ## Artifacts
@@ -219,8 +219,8 @@ cargo bench -- --baseline baseline-2026-02-04
 
 ### Code
 - `rust/compiler/benches/interpreter_bench.rs` - Benchmarks
-- `script/profiling/profile-interpreter.sh` - Profiling tool
-- `script/profiling/analyze-hotspots.sh` - Analysis tool
+- `scripts/profiling/profile-interpreter.sh` - Profiling tool
+- `scripts/profiling/analyze-hotspots.sh` - Analysis tool
 - `rust/compiler/src/interpreter_control.rs` - Optimized while loop
 
 ## Summary

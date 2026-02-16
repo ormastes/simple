@@ -6,10 +6,10 @@
 ## Pattern: ASCII Character Code Conversion
 
 ### Summary
-Found 7 files reimplementing `char_from_code()` function, which already exists and is exported from `std/string.spl`.
+Found 7 files reimplementing `char_from_code()` function, which already exists and is exported from `std/text.spl`.
 
 ### Files Affected:
-1. ✅ `std/string.spl` - **char_from_code()** - CANONICAL (keep)
+1. ✅ `std/text.spl` - **char_from_code()** - CANONICAL (keep)
 2. ❌ `std/serialization_utils.spl` - **char_from_code_safe()** - duplicate
 3. ❌ `std/base_encoding_utils.spl` - **char_from_code()** - duplicate
 4. ❌ `std/avro/utilities.spl` - **avro_code_to_char()** - duplicate
@@ -37,7 +37,7 @@ Each implementation is ~80 lines of identical if-statement chains converting ASC
 ## Refactoring Plan
 
 ### Step 1: Verify Canonical Implementation
-The canonical implementation in `std/string.spl` is complete and exported:
+The canonical implementation in `std/text.spl` is complete and exported:
 ```simple
 fn char_from_code(code: i64) -> text:
     # Handles all ASCII: 0-9, A-Z, a-z, special chars
@@ -88,7 +88,7 @@ Some files use different names. Need to either:
 - **Testing**: Verify each file's build after change
 
 ### Benefits:
-1. **Single Source of Truth**: Only string.spl has the implementation
+1. **Single Source of Truth**: Only text.spl has the implementation
 2. **Consistency**: All files use same function
 3. **Maintainability**: Changes only needed in one place
 4. **Performance**: No change (same code)

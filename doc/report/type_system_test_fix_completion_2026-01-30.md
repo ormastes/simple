@@ -105,7 +105,7 @@ Success rate: 88.3%
    - **Impact:** Low - panic is exported via prelude, startup itself not directly imported
    - **Workaround:** Keep as-is, use prelude export
 
-2. `core/string.spl` → `string_utils.spl` - Some parse error at line 111
+2. `core/text.spl` → `string_utils.spl` - Some parse error at line 111
    - **Impact:** Medium - may affect string operations
    - **Status:** Not investigated yet
 

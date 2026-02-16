@@ -11,7 +11,7 @@ Successfully cleaned up 18 obsolete scripts by archiving them to `archive/script
 
 - **3 migrated build scripts** (replaced by Simple implementations)
 - **15 obsolete migration scripts** (one-time migrations already executed)
-- **1 empty directory removed** (`script/migrate/`)
+- **1 empty directory removed** (`scripts/migrate/`)
 
 All archived scripts are preserved for historical reference but are no longer in active use.
 
@@ -91,19 +91,19 @@ archive/scripts/
 
 These MUST remain as Bash (run before Simple runtime exists):
 
-- ✅ `script/build-bootstrap.sh` - GitHub Actions first build
-- ✅ `script/build-full.sh` - Release package builder
-- ✅ `script/install.sh` - End-user installer
+- ✅ `scripts/build-bootstrap.sh` - GitHub Actions first build
+- ✅ `scripts/build-full.sh` - Release package builder
+- ✅ `scripts/install.sh` - End-user installer
 
 ### Active Scripts (KEEP - Still Used)
 
 Scripts that are still in use and have not been migrated yet:
 
-- `script/jj-wrappers/git.sh` - Git→JJ wrapper (kept per user request)
-- `script/fix_ffi_calls.py` - Active audit tool (Phase 2 migration)
-- `script/build/spec_gen.py` - Active doc generator (Phase 2 migration)
-- `script/verify/*.sh` - Active verification tools (Phase 3 migration)
-- `script/profiling/*.sh` - Active profiling tools (Phase 4 migration)
+- `scripts/jj-wrappers/git.sh` - Git→JJ wrapper (kept per user request)
+- `scripts/fix_ffi_calls.py` - Active audit tool (Phase 2 migration)
+- `scripts/build/spec_gen.py` - Active doc generator (Phase 2 migration)
+- `scripts/verify/*.sh` - Active verification tools (Phase 3 migration)
+- `scripts/profiling/*.sh` - Active profiling tools (Phase 4 migration)
 
 ---
 
@@ -111,7 +111,7 @@ Scripts that are still in use and have not been migrated yet:
 
 1. **Cleaner Repository:**
    - Removed 18 obsolete scripts from active paths
-   - Deleted empty `script/migrate/` directory
+   - Deleted empty `scripts/migrate/` directory
    - Clear separation of active vs historical code
 
 2. **Reduced Confusion:**
@@ -139,12 +139,12 @@ Scripts that are still in use and have not been migrated yet:
 - [ ] Commit archive with clear message
 
 ### Phase 2 (Build Tools)
-- [ ] Migrate `script/fix_ffi_calls.py` → `src/app/audit/ffi_analyzer.spl`
-- [ ] Migrate `script/build/spec_gen.py` → `src/app/doc/spec_gen/`
+- [ ] Migrate `scripts/fix_ffi_calls.py` → `src/app/audit/ffi_analyzer.spl`
+- [ ] Migrate `scripts/build/spec_gen.py` → `src/app/doc/spec_gen/`
 - [ ] Archive after successful migration
 
 ### Phase 3 (Verification)
-- [ ] Migrate `script/verify/*.sh` → `src/app/verify/*.spl`
+- [ ] Migrate `scripts/verify/*.sh` → `src/app/verify/*.spl`
 - [ ] Archive after successful migration
 
 ---
@@ -156,17 +156,17 @@ Scripts that are still in use and have not been migrated yet:
 mkdir -p archive/scripts/{build,migrate,verify,profiling}
 
 # Archive migrated build scripts
-git mv script/build/link-bins.sh archive/scripts/build/
-git mv script/build/run_quick_tests.sh archive/scripts/build/
-git mv script/build/capture_bootstrap_debug.sh archive/scripts/build/
+git mv scripts/build/link-bins.sh archive/scripts/build/
+git mv scripts/build/run_quick_tests.sh archive/scripts/build/
+git mv scripts/build/capture_bootstrap_debug.sh archive/scripts/build/
 
 # Archive obsolete migration scripts
-git mv script/migrate/*.sh archive/scripts/migrate/
-git mv script/migrate/*.py archive/scripts/migrate/
-git mv script/migrate/*.spl archive/scripts/migrate/
+git mv scripts/migrate/*.sh archive/scripts/migrate/
+git mv scripts/migrate/*.py archive/scripts/migrate/
+git mv scripts/migrate/*.spl archive/scripts/migrate/
 
 # Remove empty directory
-rmdir script/migrate/
+rmdir scripts/migrate/
 
 # Create documentation
 # (Created archive/scripts/README.md)
@@ -182,7 +182,7 @@ find archive/scripts -type f | wc -l
 # Expected: 19 (18 scripts + 1 README)
 
 # Verify originals are gone
-ls script/build/link-bins.sh 2>/dev/null
+ls scripts/build/link-bins.sh 2>/dev/null
 # Expected: No such file or directory
 
 # Verify new scripts exist

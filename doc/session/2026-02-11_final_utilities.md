@@ -202,7 +202,7 @@ val num = from_binary_string("101")  # Some(5)
 
 ### String Extra
 ```simple
-use std.string_extra
+use std.text_extra
 
 # Padding
 val padded = pad_left("42", 5, "0")  # "00042"

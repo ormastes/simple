@@ -66,7 +66,7 @@ bin\bootstrap\windows-x86_64\simple.exe your_script.spl
 cargo install cross --git https://github.com/cross-rs/cross
 
 # Build all platforms
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 ```
 
 ### Build Specific Platform
@@ -190,7 +190,7 @@ Error: Unsupported architecture: i686
 
 To add support for a new platform:
 
-1. Add platform to `PLATFORMS` in `script/build-bootstrap-multi-platform.sh`
+1. Add platform to `PLATFORMS` in `scripts/build-bootstrap-multi-platform.sh`
 2. Add platform to matrix in `.github/workflows/bootstrap-build.yml`
 3. Test on the target platform
 4. Update this README with status

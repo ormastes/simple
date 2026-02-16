@@ -54,9 +54,9 @@ cat VERSION
 ```bash
 # Stage all changes
 git add .github/workflows/bootstrap-build.yml
-git add script/test-macos-self-hosting.sh
-git add script/setup-freebsd-vm.sh
-git add script/test-freebsd-qemu.sh
+git add scripts/test-macos-self-hosting.sh
+git add scripts/setup-freebsd-vm.sh
+git add scripts/test-freebsd-qemu.sh
 git add ALPHA_RELEASE_PLAN.md
 git add ALPHA_RELEASE_CHECKLIST.md
 git add *.md  # All new docs

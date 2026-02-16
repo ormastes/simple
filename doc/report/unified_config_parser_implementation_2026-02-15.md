@@ -145,7 +145,7 @@ config.ignore_identifiers = get_config_bool(section, "ignore-identifiers", confi
 
 **Solution:**
 - Use `{text: text}` dict type, not `Dict<text, text>`
-- Use `"\n"` literal, not `NL` import from `std.string`
+- Use `"\n"` literal, not `NL` import from `std.text`
 - Keep all logic self-contained (no external dependencies)
 
 **Verified working:**

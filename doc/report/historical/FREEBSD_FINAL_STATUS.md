@@ -13,10 +13,10 @@
 - ✅ `FREEBSD_FINAL_STATUS.md` - This file
 
 **Scripts:**
-- ✅ `script/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap
-- ✅ `script/verify_freebsd_workspace.spl` - Verification tool
-- ✅ `script/setup_freebsd_vm.spl` - VM setup automation
-- ✅ `script/test_freebsd_qemu.spl` - FreeBSD testing
+- ✅ `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap
+- ✅ `scripts/verify_freebsd_workspace.spl` - Verification tool
+- ✅ `scripts/setup_freebsd_vm.spl` - VM setup automation
+- ✅ `scripts/test_freebsd_qemu.spl` - FreeBSD testing
 
 ### 2. FreeBSD VM Environment
 
@@ -106,7 +106,7 @@ ssh -p 2222 root@localhost
 # 7. Clone and bootstrap
 git clone <repo-url> simple
 cd simple
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # ✅ Full FreeBSD Simple compiler ready in bin/simple!
 ```
@@ -206,7 +206,7 @@ cat FREEBSD_WORKSPACE.md
 
 ```bash
 # Run verification
-bin/release/simple script/verify_freebsd_workspace.spl
+bin/release/simple scripts/verify_freebsd_workspace.spl
 ```
 
 ### 4. Test Seed Transpiler (Linux)
@@ -317,8 +317,8 @@ The native bootstrap inside FreeBSD:
 - `doc/guide/freebsd_quick_reference.md`
 
 **Scripts:**
-- `script/bootstrap-from-scratch-freebsd.sh`
-- `script/verify_freebsd_workspace.spl`
+- `scripts/bootstrap-from-scratch-freebsd.sh`
+- `scripts/verify_freebsd_workspace.spl`
 
 **Binaries (FreeBSD):**
 - `build/freebsd/seed_cpp` + 6 other FreeBSD binaries

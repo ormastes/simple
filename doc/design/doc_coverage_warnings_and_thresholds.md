@@ -40,7 +40,7 @@ fn is_public_function(func_name: text, file_path: text) -> bool:
 ```
 
 **Examples:**
-- `src/std/string.spl` function `str_len()` → Check `src/std/__init__.spl` exports
+- `src/std/text.spl` function `str_len()` → Check `src/std/__init__.spl` exports
 - If exported → public, requires sdoctest
 - If not exported → internal, lower threshold
 
@@ -111,7 +111,7 @@ fn is_public_function(func_name: text, file_path: text) -> bool:
 
 ```
 warning[missing_sdoctest]: Missing sdoctest for public function `str_len`
-  --> src/std/string.spl:42:1
+  --> src/std/text.spl:42:1
    |
 42 | fn str_len(s: text) -> i64:
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^ function lacks documentation example
@@ -425,7 +425,7 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
   "functions": [
     {
       "name": "str_len",
-      "file": "src/std/string.spl",
+      "file": "src/std/text.spl",
       "line": 42,
       "is_public": true,
       "has_sdoctest": true,
@@ -442,8 +442,8 @@ simple doc-coverage --thresholds --tag-file=coverage_tags.txt
 
 ```csv
 name,file,line,is_public,has_sdoctest,has_inline,has_docstring,tags
-str_len,src/std/string.spl,42,true,true,true,true,"coverage:excellent;sdoctest:present"
-str_reverse,src/std/string.spl,67,true,false,true,false,"coverage:poor;sdoctest:missing"
+str_len,src/std/text.spl,42,true,true,true,true,"coverage:excellent;sdoctest:present"
+str_reverse,src/std/text.spl,67,true,false,true,false,"coverage:poor;sdoctest:missing"
 ...
 ```
 

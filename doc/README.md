@@ -32,6 +32,10 @@
 - [needed_feature.md](needed_feature.md) - Feature status (updated)
 - [FEATURES_THAT_WORK.md](FEATURES_THAT_WORK.md) - Working features
 
+### Architecture
+- [architecture/overview.md](architecture/overview.md) - High-level architecture
+- [architecture/file_class_structure.md](architecture/file_class_structure.md) - **Comprehensive codebase inventory** (2,649 files, 623K lines)
+
 ### User Guides (4,700+ lines)
 - [guide/async_guide.md](guide/async_guide.md) - Async programming
 - [guide/lsp_integration.md](guide/lsp_integration.md) - Editor setup

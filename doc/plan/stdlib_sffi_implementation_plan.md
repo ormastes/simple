@@ -38,10 +38,10 @@ Current test suite status shows **773 failing tests** across 460 test files. Ana
 
 **Goal:** Fix string methods and type conversion issues
 **Estimated Effort:** 4-6 hours
-**Files Modified:** `src/std/string.spl` (new), `src/std/convert.spl` (new), `src/app/io/mod.spl`
+**Files Modified:** `src/std/text.spl` (new), `src/std/convert.spl` (new), `src/app/io/mod.spl`
 
 #### 1.1 String Methods (Pure Simple)
-**Location:** `src/std/string.spl` (create new file)
+**Location:** `src/std/text.spl` (create new file)
 
 ```simple
 # String extension methods
@@ -546,7 +546,7 @@ fn path_dirname(path: text) -> text:
 **Location:** Test files with naming conflicts
 **Fix:** Automated refactoring script
 
-Create `script/fix_reserved_words.spl`:
+Create `scripts/fix_reserved_words.spl`:
 ```simple
 #!/usr/bin/env simple
 use app.io
@@ -579,7 +579,7 @@ fn main():
 **Location:** Test files using `.new()` pattern
 **Fix:** Semi-automated refactoring
 
-Create `script/fix_new_constructors.spl`:
+Create `scripts/fix_new_constructors.spl`:
 ```simple
 #!/usr/bin/env simple
 use app.io
@@ -669,7 +669,7 @@ bin/simple test test/lib/std/unit/fs_spec.spl 2>/dev/null
 ## Implementation Scripts
 
 ### Central Implementation Script
-**Location:** `script/impl_stdlib_sffi.spl`
+**Location:** `scripts/impl_stdlib_sffi.spl`
 
 ```simple
 #!/usr/bin/env simple
@@ -689,28 +689,28 @@ fn main():
     print "Standard Library & SFFI Implementation"
     print "======================================"
 
-    run_phase(1, "script/impl/phase1_string_convert.spl")
-    run_phase(2, "script/impl/phase2_collections.spl")
-    run_phase(3, "script/impl/phase3_math.spl")
-    run_phase(4, "script/impl/phase4_system_sffi.spl")
-    run_phase(5, "script/impl/phase5_path.spl")
+    run_phase(1, "scripts/impl/phase1_string_convert.spl")
+    run_phase(2, "scripts/impl/phase2_collections.spl")
+    run_phase(3, "scripts/impl/phase3_math.spl")
+    run_phase(4, "scripts/impl/phase4_system_sffi.spl")
+    run_phase(5, "scripts/impl/phase5_path.spl")
 
     print "\n=== Running workarounds ==="
-    run_phase(6, "script/fix_reserved_words.spl")
-    run_phase(7, "script/fix_new_constructors.spl")
+    run_phase(6, "scripts/fix_reserved_words.spl")
+    run_phase(7, "scripts/fix_new_constructors.spl")
 
     print "\n=== Implementation Complete ==="
     print "Run: bin/simple test 2>/dev/null"
 ```
 
-### Phase-Specific Scripts (in `script/impl/`)
+### Phase-Specific Scripts (in `scripts/impl/`)
 
 Each phase gets its own implementation script:
-- `script/impl/phase1_string_convert.spl` - Create `src/std/string.spl`, `src/std/convert.spl`
-- `script/impl/phase2_collections.spl` - Create `src/std/array.spl`
-- `script/impl/phase3_math.spl` - Create `src/std/math.spl`, update `src/app/io/mod.spl`
-- `script/impl/phase4_system_sffi.spl` - Update `src/app/io/mod.spl` stubs
-- `script/impl/phase5_path.spl` - Create `src/std/path.spl`
+- `scripts/impl/phase1_string_convert.spl` - Create `src/std/text.spl`, `src/std/convert.spl`
+- `scripts/impl/phase2_collections.spl` - Create `src/std/array.spl`
+- `scripts/impl/phase3_math.spl` - Create `src/std/math.spl`, update `src/app/io/mod.spl`
+- `scripts/impl/phase4_system_sffi.spl` - Update `src/app/io/mod.spl` stubs
+- `scripts/impl/phase5_path.spl` - Create `src/std/path.spl`
 
 ---
 
@@ -784,15 +784,15 @@ Each phase gets its own implementation script:
 ## Appendix: File Locations Summary
 
 **New files to create:**
-- `src/std/string.spl` - String extension methods
+- `src/std/text.spl` - String extension methods
 - `src/std/convert.spl` - Type conversions
 - `src/std/array.spl` - Collection methods
 - `src/std/math.spl` - Pure math utilities
 - `src/std/path.spl` - Path manipulation
-- `script/impl_stdlib_sffi.spl` - Main orchestrator
-- `script/impl/phase*.spl` - Phase-specific scripts (5 files)
-- `script/fix_reserved_words.spl` - Workaround script
-- `script/fix_new_constructors.spl` - Workaround script
+- `scripts/impl_stdlib_sffi.spl` - Main orchestrator
+- `scripts/impl/phase*.spl` - Phase-specific scripts (5 files)
+- `scripts/fix_reserved_words.spl` - Workaround script
+- `scripts/fix_new_constructors.spl` - Workaround script
 
 **Files to modify:**
 - `src/app/io/mod.spl` - Add SFFI functions, update stubs

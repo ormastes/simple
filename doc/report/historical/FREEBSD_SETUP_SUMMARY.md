@@ -8,7 +8,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 
 ### 1. Bootstrap Script (NEW!)
 
-**`script/bootstrap-from-scratch-freebsd.sh`** (16KB)
+**`scripts/bootstrap-from-scratch-freebsd.sh`** (16KB)
 - Native FreeBSD bootstrap script
 - Builds Simple from scratch on FreeBSD
 - FreeBSD-specific: uses `gmake`, `sha256`, detects FreeBSD platform
@@ -17,7 +17,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 **Usage:**
 ```bash
 # Inside FreeBSD VM
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 ```
 
 ---
@@ -48,7 +48,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 
 ### 3. Verification Script (NEW!)
 
-**`script/verify_freebsd_workspace.spl`**
+**`scripts/verify_freebsd_workspace.spl`**
 - Checks QEMU installation
 - Verifies all scripts are present
 - Checks documentation
@@ -57,7 +57,7 @@ Complete FreeBSD workspace created for Simple compiler development and testing.
 
 **Usage:**
 ```bash
-bin/release/simple script/verify_freebsd_workspace.spl
+bin/release/simple scripts/verify_freebsd_workspace.spl
 ```
 
 ---
@@ -67,8 +67,8 @@ bin/release/simple script/verify_freebsd_workspace.spl
 These files were already in the project:
 
 **VM Management:**
-- `script/setup_freebsd_vm.spl` - Download and configure FreeBSD VM
-- `script/test_freebsd_qemu.spl` - Test FreeBSD compilation
+- `scripts/setup_freebsd_vm.spl` - Download and configure FreeBSD VM
+- `scripts/test_freebsd_qemu.spl` - Test FreeBSD compilation
 - `src/app/vm/qemu_manager.spl` - VM lifecycle management
 
 **Platform Support:**
@@ -83,14 +83,14 @@ These files were already in the project:
 ### Step 1: Verify Setup
 
 ```bash
-bin/release/simple script/verify_freebsd_workspace.spl
+bin/release/simple scripts/verify_freebsd_workspace.spl
 ```
 
 ### Step 2: Setup FreeBSD VM
 
 ```bash
 # Download and configure FreeBSD VM image
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 ```
 
 **This will:**
@@ -137,7 +137,7 @@ pkg install linux-c7
 
 ```bash
 # From Linux host
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 **This will:**
@@ -158,7 +158,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Bootstrap from scratch
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Verify
 bin/simple --version
@@ -175,7 +175,7 @@ simple/
 ├── FREEBSD_WORKSPACE.md                     # Main workspace guide (NEW!)
 ├── FREEBSD_SETUP_SUMMARY.md                 # This file (NEW!)
 │
-├── script/
+├── scripts/
 │   ├── bootstrap-from-scratch-freebsd.sh    # FreeBSD bootstrap (NEW!)
 │   ├── verify_freebsd_workspace.spl         # Verification script (NEW!)
 │   ├── setup_freebsd_vm.spl                 # VM setup (existing)
@@ -212,10 +212,10 @@ simple/
 
 | Tool | Purpose | Usage |
 |------|---------|-------|
-| **verify_freebsd_workspace.spl** | Check setup | `bin/release/simple script/verify_freebsd_workspace.spl` |
-| **setup_freebsd_vm.spl** | Setup VM | `bin/release/simple script/setup_freebsd_vm.spl` |
-| **test_freebsd_qemu.spl** | Test FreeBSD | `bin/release/simple script/test_freebsd_qemu.spl` |
-| **bootstrap-from-scratch-freebsd.sh** | Native build | `./script/bootstrap-from-scratch-freebsd.sh` |
+| **verify_freebsd_workspace.spl** | Check setup | `bin/release/simple scripts/verify_freebsd_workspace.spl` |
+| **setup_freebsd_vm.spl** | Setup VM | `bin/release/simple scripts/setup_freebsd_vm.spl` |
+| **test_freebsd_qemu.spl** | Test FreeBSD | `bin/release/simple scripts/test_freebsd_qemu.spl` |
+| **bootstrap-from-scratch-freebsd.sh** | Native build | `./scripts/bootstrap-from-scratch-freebsd.sh` |
 | **start-freebsd-daemon.sh** | Start VM | `~/vms/freebsd/start-freebsd-daemon.sh` |
 
 ---
@@ -262,7 +262,7 @@ simple/
 ### 1. Verify All Components
 
 ```bash
-bin/release/simple script/verify_freebsd_workspace.spl
+bin/release/simple scripts/verify_freebsd_workspace.spl
 ```
 
 **Expected output:**
@@ -275,11 +275,11 @@ FreeBSD Workspace Verification
    ✓ QEMU found: /usr/bin/qemu-system-x86_64
 
 2. Checking FreeBSD bootstrap script...
-   ✓ Found: script/bootstrap-from-scratch-freebsd.sh
+   ✓ Found: scripts/bootstrap-from-scratch-freebsd.sh
      ✓ Executable
 
 3. Checking VM setup script...
-   ✓ Found: script/setup_freebsd_vm.spl
+   ✓ Found: scripts/setup_freebsd_vm.spl
 
 ...
 
@@ -290,13 +290,13 @@ FreeBSD Workspace Verification
 
 ```bash
 # Setup
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # Start VM
 ~/vms/freebsd/start-freebsd-daemon.sh
 
 # Test compilation
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 ```
 
 **Expected test output:**
@@ -341,7 +341,7 @@ ssh -p 2222 root@localhost
 # Clone and bootstrap
 git clone <repo-url> simple
 cd simple
-./script/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap-from-scratch-freebsd.sh
 
 # Expected output:
 # ========================================================
@@ -465,10 +465,10 @@ You have successfully set up the FreeBSD workspace when:
 - **Quick Reference:** `doc/guide/freebsd_quick_reference.md`
 
 ### Verification
-- **Check Setup:** `bin/release/simple script/verify_freebsd_workspace.spl`
+- **Check Setup:** `bin/release/simple scripts/verify_freebsd_workspace.spl`
 
 ### Testing
-- **Test FreeBSD:** `bin/release/simple script/test_freebsd_qemu.spl`
+- **Test FreeBSD:** `bin/release/simple scripts/test_freebsd_qemu.spl`
 
 ---
 
@@ -484,13 +484,13 @@ You have successfully set up the FreeBSD workspace when:
 **Quick commands:**
 ```bash
 # Verify setup
-bin/release/simple script/verify_freebsd_workspace.spl
+bin/release/simple scripts/verify_freebsd_workspace.spl
 
 # Setup VM
-bin/release/simple script/setup_freebsd_vm.spl
+bin/release/simple scripts/setup_freebsd_vm.spl
 
 # Test FreeBSD
-bin/release/simple script/test_freebsd_qemu.spl
+bin/release/simple scripts/test_freebsd_qemu.spl
 
 # Read main guide
 cat FREEBSD_WORKSPACE.md

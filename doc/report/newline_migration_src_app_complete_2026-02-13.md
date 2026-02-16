@@ -24,7 +24,7 @@
 
 ### 1. Import Addition
 ```simple
-use std.string.{NL}
+use std.text.{NL}
 ```
 - Added to all 244 files after existing imports
 - Proper placement maintained
@@ -143,7 +143,7 @@ grep -r '"\n"' src/app --include="*.spl" | wc -l
 
 ### Test 2: Import Count
 ```bash
-grep -r 'use std.string.{NL}' src/app --include="*.spl" | wc -l
+grep -r 'use std.text.{NL}' src/app --include="*.spl" | wc -l
 # Result: 244 ✅
 ```
 
@@ -218,7 +218,7 @@ control = control + "Section: devel{NL}"
 
 ### Transformation Script Logic
 1. Detect files with `\n` literals
-2. Add `use std.string.{NL}` import after last existing import
+2. Add `use std.text.{NL}` import after last existing import
 3. Apply 7 regex patterns in order:
    - `.split("\n")` → `.split(NL)`
    - `.join("\n")` → `.join(NL)`
@@ -236,7 +236,7 @@ control = control + "Section: devel{NL}"
 
 **Status:** ✅ **MIGRATION COMPLETE**
 
-All 242 files in `src/app/` have been successfully migrated from hardcoded `"\n"` literals to the `NL` constant from `std.string`. The migration was verified through multiple automated checks and manual spot-checks of complex cases.
+All 242 files in `src/app/` have been successfully migrated from hardcoded `"\n"` literals to the `NL` constant from `std.text`. The migration was verified through multiple automated checks and manual spot-checks of complex cases.
 
 **Next Steps (per migration plan):**
 - src/compiler/ directory (200 files, ~150 occurrences)

@@ -85,7 +85,7 @@
 
 ### Duplicated String Functions
 - `src/core/types.spl` (lines 14-48)
-- `src/std/string.spl` (char_code lookup)
+- `src/std/text.spl` (char_code lookup)
 - `src/std/template/utilities.spl` (lines 40-180)
 - `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
 

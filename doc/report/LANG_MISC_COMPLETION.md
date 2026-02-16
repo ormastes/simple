@@ -21,7 +21,7 @@ Successfully verified and documented 6 out of 9 miscellaneous language features.
 | #1381 | `move \:` closure syntax | ✅ | AST: `ast/enums.rs` (MoveMode) |
 | #1382 | `[]` → `List[T]` promotion | ✅ | Stdlib: `core/list.spl` |
 | #1383 | `[T; N]` → `Array[T, N]` | ✅ | Stdlib: `core/array.spl` |
-| #1384 | `str` → `String` unification | ✅ | Stdlib: `core/string.spl` |
+| #1384 | `str` → `String` unification | ✅ | Stdlib: `core/text.spl` |
 
 ### Remaining Features (3/9) 📋
 
@@ -78,7 +78,7 @@ let closure = move \: x + 10  # captures x by value
 - Const generic size parameter
 
 **#1384 - String:**
-- File: `simple/std_lib/src/core/string.spl`
+- File: `simple/std_lib/src/core/text.spl`
 - UTF-8 string with full manipulation methods
 - Unifies `str` and string literal syntax
 
@@ -94,7 +94,7 @@ let closure = move \: x + 10  # captures x by value
 - `simple/std_lib/src/core/context.spl` - ContextManager trait
 - `simple/std_lib/src/core/list.spl` - List[T] implementation
 - `simple/std_lib/src/core/array.spl` - Array[T, N] implementation
-- `simple/std_lib/src/core/string.spl` - String implementation
+- `simple/std_lib/src/core/text.spl` - String implementation
 
 ### Documentation (Updated)
 - `doc/features/LANG_MISC_STATUS.md` - Detailed status report

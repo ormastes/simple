@@ -60,7 +60,7 @@ According to Docker documentation, resource constraints use Linux cgroups (contr
 
 Simple already has a working container isolation setup:
 - Docker image: `simple-test-isolation:latest` (~40MB, Alpine 3.18 + Simple runtime)
-- Helper script: `script/local-container-test.sh`
+- Helper script: `scripts/local-container-test.sh`
 - Documentation: `doc/guide/container_testing.md`
 
 ### 1.2 Container Resource Limits
@@ -739,7 +739,7 @@ simple test <args>
 
 ```
 ┌─ Edit Code ──────────────────────────────────────┐
-│ vim src/std/string.spl                            │
+│ vim src/std/text.spl                            │
 └───────────────┬───────────────────────────────────┘
                 │
 ┌─ Quick Test (Native) ────────────────────────────┐
@@ -755,7 +755,7 @@ simple test <args>
 └───────────────┬───────────────────────────────────┘
                 │
 ┌─ Pre-Commit (Container) ─────────────────────────┐
-│ script/local-container-test.sh unit               │
+│ scripts/local-container-test.sh unit               │
 │ - Full isolation (~30s)                           │
 │ - Matches CI environment                          │
 └───────────────┬───────────────────────────────────┘

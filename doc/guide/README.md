@@ -36,6 +36,14 @@ This directory contains practical guides for:
 
 ---
 
+## Project Structure & Navigation
+
+| Guide | Description |
+|-------|-------------|
+| [folder_file.md](folder_file.md) | **📂 Complete project structure guide** - Where to find everything, folder descriptions, quick navigation |
+
+---
+
 ## Language Reference
 
 | Guide | Description |

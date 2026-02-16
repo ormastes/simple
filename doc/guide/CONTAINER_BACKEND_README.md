@@ -10,7 +10,7 @@
 ### 1. Build Container Image
 
 ```bash
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 ```
 
 ### 2. Run Tests in Container
@@ -57,7 +57,7 @@ bin/simple test test/unit/std/string_spec.spl --container
 
 5. **Docker Support**
    - Dockerfile (`docker/test-runner.Dockerfile`)
-   - Build script (`script/docker-build-test-runner.sh`)
+   - Build script (`scripts/docker-build-test-runner.sh`)
    - Alpine-based image (~50-100MB)
    - Non-root user execution
 
@@ -77,7 +77,7 @@ src/app/test_runner_new/
 docker/
   test-runner.Dockerfile            # Container image definition
 
-script/
+scripts/
   docker-build-test-runner.sh       # Build automation script
 
 test/unit/app/test_runner_new/
@@ -197,7 +197,7 @@ brew install docker
 ### "Container image not found"
 Build the image:
 ```bash
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 ```
 
 ### "Permission denied"

@@ -158,9 +158,9 @@
 |------|---------|--------|
 | `src/app/cli/commands/test_batch.spl` | Batch test runner | Infrastructure |
 | `src/app/cli/commands/test_analyze.spl` | Failure analyzer | Infrastructure |
-| `script/fix_bare_imports_simple.sh` | Bare imports fixer | **108 files fixed** |
-| `script/filter_pending_tests.sh` | Pending test filter | **Critical insight** |
-| `script/build_type_database.sh` | Type database builder | 1,691 types indexed |
+| `scripts/fix_bare_imports_simple.sh` | Bare imports fixer | **108 files fixed** |
+| `scripts/filter_pending_tests.sh` | Pending test filter | **Critical insight** |
+| `scripts/build_type_database.sh` | Type database builder | 1,691 types indexed |
 | `build/active_tests.txt` | Active test list | **7 files** |
 | `build/pending_tests.txt` | Pending test list | **367 files** |
 | `doc/report/test_failure_root_cause_analysis_2026-02-07.md` | Root cause analysis | Documentation |
@@ -268,7 +268,7 @@ cat build/active_tests.txt | xargs bin/simple test
 
 ```bash
 # Build type database
-./script/build_type_database.sh
+./scripts/build_type_database.sh
 
 # Lookup type fields
 grep "^MockFunction:" build/type_database.txt

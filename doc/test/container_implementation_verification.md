@@ -77,7 +77,7 @@ Changes:
 
 ### 2. Docker Support
 - `docker/test-runner.Dockerfile` - Container image definition
-- `script/docker-build-test-runner.sh` - Build script (executable)
+- `scripts/docker-build-test-runner.sh` - Build script (executable)
 
 ### 3. Configuration
 - `docker/simple.test.container.sdn` - Example configuration
@@ -153,7 +153,7 @@ container_image: simple-test-runner:latest
 
 ```bash
 # Automated build script
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 
 # Manual build
 docker build -f docker/test-runner.Dockerfile -t simple-test-runner:latest .
@@ -275,7 +275,7 @@ Implementation follows Simple language runtime limitations:
    - All syntax verified correct
 
 2. **Image must be pre-built** - No auto-build on first use
-   - User must run `./script/docker-build-test-runner.sh` first
+   - User must run `./scripts/docker-build-test-runner.sh` first
    - Future: Auto-detect missing image and prompt to build
 
 ---

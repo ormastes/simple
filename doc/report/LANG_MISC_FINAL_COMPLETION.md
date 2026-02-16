@@ -86,7 +86,7 @@ false.then(42)        // None
 | #1381 | move closures | ✅ | `parser/ast/enums.rs` |
 | #1382 | List[T] type | ✅ | `std_lib/core/list.spl` |
 | #1383 | Array[T, N] type | ✅ | `std_lib/core/array.spl` |
-| #1384 | String type | ✅ | `std_lib/core/string.spl` |
+| #1384 | String type | ✅ | `std_lib/core/text.spl` |
 | #1385 | Persistent list | ✅ | `std_lib/core/persistent_list.spl` |
 | #1386 | Structural sharing | ✅ | `persistent_list.spl` + doc |
 | #1387 | Primitive methods | ✅ | `std_lib/core/primitives.spl` |

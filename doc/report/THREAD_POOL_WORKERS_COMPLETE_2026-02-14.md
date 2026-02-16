@@ -351,7 +351,7 @@ fn worker_loop_entry(pool_id: i64):
 1. **Rebuild Runtime Binary** (2-4 hours on CI)
    - Current binary built with old runtime library
    - New binary needs `libspl_runtime.a` with worker spawn
-   - Command: `script/bootstrap-from-scratch.sh --output=bin/simple`
+   - Command: `scripts/bootstrap-from-scratch.sh --output=bin/simple`
    - **Blocker:** Compiler_core transpilation bugs (not thread pool related)
 
 2. **Run Thread Pool Tests**

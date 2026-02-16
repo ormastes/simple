@@ -74,7 +74,7 @@ predicate_parser.spl
 ### Other
 11. `src/compiler_core/driver.spl` - Result type removal
 12. `src/compiler_core/blocks/parsers.spl` - Stubbed Err() usage
-13. `script/bootstrap-minimal.sh` - Added directory exclusions
+13. `scripts/bootstrap-minimal.sh` - Added directory exclusions
 
 **Total: 13 files modified**
 

@@ -255,7 +255,7 @@ build/smf/std/io/mod.smf: src/std/io/mod.spl
 
 # Build library archive
 build/lib/libstd.lsm: $(STD_SMF_FILES)
-    ./script/build-stdlib-archive.spl
+    ./scripts/build-stdlib-archive.spl
 
 # Install libraries
 install: build/lib/libstd.lsm
@@ -453,7 +453,7 @@ Error: Hash mismatch for module std/io/mod
 See also:
 - `src/compiler/linker/test/lib_smf_spec.spl` - Complete test suite
 - `examples/lib_smf/` - Example usage scripts
-- `script/build-stdlib-archive.spl` - Build standard library
+- `scripts/build-stdlib-archive.spl` - Build standard library
 
 ---
 

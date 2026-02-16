@@ -134,7 +134,7 @@ cp target/release/simple_runtime bin/release/*/simple
 cargo install cross --git https://github.com/cross-rs/cross
 
 # Build all platforms
-script/build-bootstrap-multi-platform.sh
+scripts/build-bootstrap-multi-platform.sh
 ```
 
 ## Unsupported Platforms

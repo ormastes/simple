@@ -36,7 +36,7 @@ fn main():
 
 **Test WITH Export Statement:**
 ```simple
-# File: src/std/string.spl (existing stdlib module)
+# File: src/std/text.spl (existing stdlib module)
 fn char_code(c: text) -> i64:
     # ... implementation ...
 
@@ -45,7 +45,7 @@ export char_code  # ← HAS export statement
 
 **Import Test:**
 ```simple
-use std.string.{char_code}
+use std.text.{char_code}
 
 fn main():
     val code = char_code('A')
@@ -97,7 +97,7 @@ use my_module.{func}  # Works even without export statement
 ❌ **Stdlib module imports (even with exports):**
 ```simple
 # Modules in src/std/ or src/app/
-use std.string.{string_trim}  # Fails: "function not found"
+use std.text.{string_trim}  # Fails: "function not found"
 use app.io.{env_get}  # Fails: "function not found"
 ```
 

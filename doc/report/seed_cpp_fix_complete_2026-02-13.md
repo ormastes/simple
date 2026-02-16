@@ -43,7 +43,7 @@ seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multip
 ### seed/CMakeLists.txt
 - Added `-mcmodel=large` compiler flag
 
-### script/bootstrap-fixed.sh (NEW)
+### scripts/bootstrap-fixed.sh (NEW)
 - Complete bootstrap script with all fixes applied
 - 89 lines, fully automated
 
@@ -65,7 +65,7 @@ seed_cpp segfaulted when processing compiler_core (439 files, 46K lines). Multip
 ## Usage
 
 ```bash
-./script/bootstrap-fixed.sh
+./scripts/bootstrap-fixed.sh
 
 # Or manual steps:
 ulimit -s 65536

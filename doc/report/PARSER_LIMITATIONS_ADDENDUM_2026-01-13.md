@@ -170,7 +170,7 @@ This is one of only **2 limitations with no workaround** (along with Associated 
 - ✗ persistent_list.spl - Generic parameter parsing
 - ✗ string_core.spl - Unknown issue
 - ✗ string_ops.spl - Associated types
-- ✗ string.spl - Associated types
+- ✗ text.spl - Associated types
 - ✗ string_traits.spl - Associated types
 - ✗ traits.spl - Associated types
 

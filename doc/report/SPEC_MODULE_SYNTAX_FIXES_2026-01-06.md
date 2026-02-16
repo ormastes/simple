@@ -43,7 +43,7 @@ Fixed 100+ syntax errors across 15 spec module files, transitioning the codebase
 - `matchers/core.spl` - 3 classes
 - `matchers/comparison.spl` - 4 classes
 - `matchers/collection.spl` - 3 classes
-- `matchers/string.spl` - 4 classes
+- `matchers/text.spl` - 4 classes
 - `matchers/error.spl` - 1 class
 
 ### 4. Invalid `static fn` Syntax (3 instances)
@@ -122,7 +122,7 @@ let result = matcher.matches(self.actual)
 8. `src/spec/matchers/core.spl` - export class/fn
 9. `src/spec/matchers/comparison.spl` - export class/fn
 10. `src/spec/matchers/collection.spl` - export class/fn
-11. `src/spec/matchers/string.spl` - export class/fn
+11. `src/spec/matchers/text.spl` - export class/fn
 12. `src/spec/matchers/error.spl` - export class/fn
 
 ### Bonus Fixes (3)

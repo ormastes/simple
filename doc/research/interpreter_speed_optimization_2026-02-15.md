@@ -33,7 +33,7 @@ Analysis of Go and Python interpreter optimization techniques, cross-referenced 
 
 **Applicable to Simple:**
 - **Frozen modules:** Pre-compile `src/std/` modules into bytecode embedded in the 33MB runtime binary. Python 3.11+ does this and achieves 50%+ startup improvement.
-- **Lazy standard library:** Only initialize `std.math`, `std.string`, `std.array` when first imported, not at startup.
+- **Lazy standard library:** Only initialize `std.math`, `std.text`, `std.array` when first imported, not at startup.
 - **Bytecode caching:** Create `.splc` cache files alongside `.spl` with hash-based invalidation. Skip lexing/parsing when cache is fresh.
 
 ### 1.2 Escape Analysis / Stack vs Heap

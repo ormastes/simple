@@ -944,7 +944,7 @@ describe "HitPredictor":
 
 ### 6.1 QEMU Setup Script
 
-**File:** `script/qemu-riscv32.sh`
+**File:** `scripts/qemu-riscv32.sh`
 
 ```bash
 #!/bin/bash
@@ -1012,7 +1012,7 @@ exec $CMD
 ```simple
 describe "QEMU Integration":
     # Requires QEMU running:
-    # ./script/qemu-riscv32.sh -n
+    # ./scripts/qemu-riscv32.sh -n
 
     slow_it "uploads and executes code":
         val debugger = GdbDebugger.connect(DebugConfig(

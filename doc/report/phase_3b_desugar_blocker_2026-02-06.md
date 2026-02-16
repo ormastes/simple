@@ -9,9 +9,9 @@ Successfully implemented systematic desugaring infrastructure, but discovered a 
 ## What Was Accomplished
 
 ✅ **Desugaring Infrastructure (Complete)**
-- Created `script/bulk_desugar_all.spl` - Systematic batch processing
-- Created `script/find_and_desugar.spl` - Pattern-based file discovery
-- Created `script/fix_exports.spl` - Automatic export generation
+- Created `scripts/bulk_desugar_all.spl` - Systematic batch processing
+- Created `scripts/find_and_desugar.spl` - Pattern-based file discovery
+- Created `scripts/fix_exports.spl` - Automatic export generation
 - Processed 520+ files successfully
 
 ✅ **Transformation Works**
@@ -169,11 +169,11 @@ This is the right long-term solution:
 ## Files Modified (This Session)
 
 **Created:**
-- `script/bulk_desugar_all.spl` (113 lines)
-- `script/find_and_desugar.spl` (142 lines)
-- `script/fix_exports.spl` (59 lines)
-- `script/desugar_lazy_seq.spl` (36 lines)
-- `script/desugar_lazy_seq_test.spl` (36 lines)
+- `scripts/bulk_desugar_all.spl` (113 lines)
+- `scripts/find_and_desugar.spl` (142 lines)
+- `scripts/fix_exports.spl` (59 lines)
+- `scripts/desugar_lazy_seq.spl` (36 lines)
+- `scripts/desugar_lazy_seq_test.spl` (36 lines)
 
 **Modified:**
 - `src/app/interpreter.lazy/lazy_seq.spl` - Desugared (11 static methods hoisted)

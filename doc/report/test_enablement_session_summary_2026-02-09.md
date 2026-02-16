@@ -100,7 +100,7 @@ val id = result.1  # Resource ID
 
 ### Phase 2.1: String Methods
 **Status:** ✅ Implementation Complete (+70 lines), ❌ Import Blocked
-**File:** `src/std/string.spl` (enhanced with +70 lines)
+**File:** `src/std/text.spl` (enhanced with +70 lines)
 
 **Functions Added:**
 ```simple
@@ -229,7 +229,7 @@ This affects:
 - **Phase 1 Total: 619 lines**
 
 ### Enhanced Code (Phase 2)
-- `src/std/string.spl`: +70 lines (Phase 2.1)
+- `src/std/text.spl`: +70 lines (Phase 2.1)
 - `src/std/array.spl`: +85 lines (Phase 2.2)
 - `src/ffi/system.spl`: 260 lines existing (Phase 2.3 - discovered)
 - **Phase 2 Total: 415 lines (155 new + 260 existing)**
@@ -381,7 +381,7 @@ Phase 3 (Runtime Core Fixes) requires:
 - `doc/report/test_enablement_session_summary_2026-02-09.md`
 
 ### Enhanced
-- `src/std/string.spl` (+70 lines) - Phase 2.1
+- `src/std/text.spl` (+70 lines) - Phase 2.1
 - `src/std/array.spl` (+85 lines) - Phase 2.2
 - `src/lib/qemu/boot_runner.spl` (+20 lines) - Phase 1.3
 
@@ -409,7 +409,7 @@ The session has:
 - ✅ Discovered existing System/Process SFFI module (260 lines)
 
 **Key Learning:** The Simple runtime import system blocks **all** module function imports - even pure extern fn wrappers with zero dependencies fail. This is a fundamental limitation affecting:
-- ❌ `use std.string.{...}` - loads but functions not callable
+- ❌ `use std.text.{...}` - loads but functions not callable
 - ❌ `use std.array.{...}` - loads but functions not callable
 - ❌ `use ffi.system.{...}` - loads but functions not callable
 - ❌ `use app.io.{...}` - loads but functions not callable

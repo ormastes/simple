@@ -103,7 +103,7 @@ fn get_file_mtime(file_path: text) -> i64:
 
 ### Bootstrap Build Issues
 
-Attempted `script/bootstrap-from-scratch.sh` but encountered compilation errors in seed compiler output (unrelated to rt_file_stat changes). These appear to be pre-existing issues in the compiler pipeline.
+Attempted `scripts/bootstrap-from-scratch.sh` but encountered compilation errors in seed compiler output (unrelated to rt_file_stat changes). These appear to be pre-existing issues in the compiler pipeline.
 
 ---
 

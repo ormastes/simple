@@ -449,7 +449,7 @@ ENTRYPOINT ["/usr/local/bin/simple"]
 CMD ["test"]
 ```
 
-**Build Script:** `script/docker-build-test-runner.sh`
+**Build Script:** `scripts/docker-build-test-runner.sh`
 
 ```bash
 #!/bin/bash
@@ -481,7 +481,7 @@ docker images simple-test-runner
 
 ```bash
 # Build image
-./script/docker-build-test-runner.sh
+./scripts/docker-build-test-runner.sh
 
 # Run single test
 docker run --rm \
@@ -1676,7 +1676,7 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Build test runner image
-        run: ./script/docker-build-test-runner.sh
+        run: ./scripts/docker-build-test-runner.sh
 
       - name: Run unit tests (native)
         run: |
@@ -1759,7 +1759,7 @@ stages:
 build-image:
   stage: build
   script:
-    - ./script/docker-build-test-runner.sh
+    - ./scripts/docker-build-test-runner.sh
     - docker tag simple-test-runner:latest $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
 
 test-unit:

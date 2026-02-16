@@ -181,7 +181,7 @@ The pre-built `bin/release/simple` WAS bootstrapped from Simple sources at some 
 - Line 4277: Call spl_main() if flag true
 - Line 3368: Added NL constant
 
-### script/bootstrap-fixed.sh
+### scripts/bootstrap-fixed.sh
 - Lines 29-44: Exclude test files, problematic modules
 - Result: 383 → 317 files
 

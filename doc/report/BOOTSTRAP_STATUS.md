@@ -129,7 +129,7 @@ vim src/compiler_core/backend/vulkan_backend.spl  # Line 190
 # OR remove AOP files from bootstrap file list
 
 # 3. Retry bootstrap (2 min)
-bash script/bootstrap-fixed.sh
+bash scripts/bootstrap-fixed.sh
 ```
 
 ### Option 2: Use Subset Build (15 minutes)

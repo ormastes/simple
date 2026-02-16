@@ -68,7 +68,7 @@ Successfully migrated ALL Python and Bash scripts to Simple - except for the 3 r
 ## 🎯 Final Script: git_wrapper.spl
 
 **Location:** `src/app/vcs/git_wrapper.spl`
-**Original:** `script/jj-wrappers/git.sh` (73 lines bash)
+**Original:** `scripts/jj-wrappers/git.sh` (73 lines bash)
 **Migrated:** 154 lines of Simple
 
 ### Purpose
@@ -250,9 +250,9 @@ src/app/
 - ❌ **NEVER use Bash (.sh)** ← Except 3 documented exceptions!
 
 **Bootstrap Exceptions (ONLY these 3):**
-1. script/build-bootstrap.sh
-2. script/build-full.sh
-3. script/install.sh
+1. scripts/build-bootstrap.sh
+2. scripts/build-full.sh
+3. scripts/install.sh
 ```
 
 **This policy is now 100% realized!** ✅

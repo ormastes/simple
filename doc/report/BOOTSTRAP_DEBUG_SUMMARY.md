@@ -81,7 +81,7 @@ bin/simple build --release
 
 # Option B: Manual bootstrap
 cd /home/ormastes/dev/pub/simple
-./script/bootstrap-minimal.sh
+./scripts/bootstrap-minimal.sh
 ```
 
 ### Issue 2: Pure Simple Compiler Not Fully Integrated
@@ -175,7 +175,7 @@ This is what I already implemented in the bootstrap script changes, but needs `b
    cd seed/build
    cmake .. && make seed_cpp
    cd ../..
-   ./script/bootstrap-from-scratch.sh
+   ./scripts/bootstrap-from-scratch.sh
    ```
 
 2. **Or manually test compilation:**

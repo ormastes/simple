@@ -104,4 +104,4 @@ All notable changes to Simple Language will be documented in this file.
 - Self-hosting parser
 - Pre-built runtime
 
-See git history for older versions.
+

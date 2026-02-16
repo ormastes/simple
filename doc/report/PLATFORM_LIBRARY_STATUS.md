@@ -83,7 +83,7 @@ Results: 1 total, 1 passed, 0 failed ✅
 
 | File | Change | Status |
 |------|--------|--------|
-| `src/std/string.spl` | Distinguished `_NL` (explicit LF) from `NL` (default) | ✅ Working |
+| `src/std/text.spl` | Distinguished `_NL` (explicit LF) from `NL` (default) | ✅ Working |
 | `src/core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
 | `src/core/lexer.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
 
@@ -193,7 +193,7 @@ The library integrates seamlessly with existing modules:
 |--------|-------|
 | `std.common.target` | Provides `TargetArch`, `TargetOS`, `Endian` types |
 | `std.platform` | Provides `get_host_os()`, `get_host_arch()` detection |
-| `std.string` | Provides `LF`, `CRLF`, `_NL`, `NL` constants |
+| `std.text` | Provides `LF`, `CRLF`, `_NL`, `NL` constants |
 | `app.io.mod` | Provides `file_read_text()`, `file_write()` I/O |
 
 **No breaking changes** - All existing code continues to work.

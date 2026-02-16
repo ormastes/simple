@@ -53,11 +53,11 @@ The tool now handles:
 ### ✅ Infrastructure Created
 
 **5 new utility scripts:**
-1. `script/bulk_desugar_all.spl` (113 lines) - Batch process target files
-2. `script/find_and_desugar.spl` (142 lines) - Pattern-based file discovery
-3. `script/fix_exports.spl` (59 lines) - Automatic export generation
-4. `script/desugar_lazy_seq.spl` (36 lines) - LazySeq-specific desugaring
-5. `script/desugar_lazy_seq_test.spl` (36 lines) - Test file desugaring
+1. `scripts/bulk_desugar_all.spl` (113 lines) - Batch process target files
+2. `scripts/find_and_desugar.spl` (142 lines) - Pattern-based file discovery
+3. `scripts/fix_exports.spl` (59 lines) - Automatic export generation
+4. `scripts/desugar_lazy_seq.spl` (36 lines) - LazySeq-specific desugaring
+5. `scripts/desugar_lazy_seq_test.spl` (36 lines) - Test file desugaring
 
 **Processed:** 520+ files with static method patterns
 
@@ -120,11 +120,11 @@ $ grep "LazySeq__empty()" src/app/interpreter.lazy/lazy_seq_fixed.spl | wc -l
 - `src/app/desugar/static_methods.spl` (+100 lines, 4 functions modified/added)
 
 ### Infrastructure
-- `script/bulk_desugar_all.spl` (new, 113 lines)
-- `script/find_and_desugar.spl` (new, 142 lines)
-- `script/fix_exports.spl` (new, 59 lines)
-- `script/desugar_lazy_seq.spl` (new, 36 lines)
-- `script/desugar_lazy_seq_test.spl` (new, 36 lines)
+- `scripts/bulk_desugar_all.spl` (new, 113 lines)
+- `scripts/find_and_desugar.spl` (new, 142 lines)
+- `scripts/fix_exports.spl` (new, 59 lines)
+- `scripts/desugar_lazy_seq.spl` (new, 36 lines)
+- `scripts/desugar_lazy_seq_test.spl` (new, 36 lines)
 
 ### Test Files
 - `src/app/interpreter.lazy/lazy_seq.spl` (desugared, 11 static methods hoisted)

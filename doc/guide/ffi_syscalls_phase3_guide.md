@@ -49,7 +49,7 @@ Run this audit script:
 
 ```bash
 # Create audit script
-cat > script/audit_ffi_wrappers.sh << 'EOF'
+cat > scripts/audit_ffi_wrappers.sh << 'EOF'
 #!/bin/bash
 cd "$(dirname "$0")/.."
 
@@ -79,8 +79,8 @@ echo "Total:"
 grep "extern fn rt_" src/app/io/mod.spl | wc -l
 EOF
 
-chmod +x script/audit_ffi_wrappers.sh
-./script/audit_ffi_wrappers.sh
+chmod +x scripts/audit_ffi_wrappers.sh
+./scripts/audit_ffi_wrappers.sh
 ```
 
 ### Decision Matrix

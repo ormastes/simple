@@ -23,9 +23,9 @@ Successfully completed Phase 2 of the Python/Bash to Simple migration:
 
 | Original | Migrated To | Lines | Status |
 |----------|-------------|-------|--------|
-| `script/fix_ffi_calls.py` | `src/app/audit/ffi_analyzer.spl` | 287 | ✅ Done |
-| `script/build/scaffold_feature_test.py` | `src/app/test/scaffold.spl` | 380 | ✅ Done |
-| `script/build/extract_tests_from_spec.py` | `src/app/test/extract.spl` | 475 | ✅ Done |
+| `scripts/fix_ffi_calls.py` | `src/app/audit/ffi_analyzer.spl` | 287 | ✅ Done |
+| `scripts/build/scaffold_feature_test.py` | `src/app/test/scaffold.spl` | 380 | ✅ Done |
+| `scripts/build/extract_tests_from_spec.py` | `src/app/test/extract.spl` | 475 | ✅ Done |
 
 **Total migrated:** ~1,142 lines of Simple code (Phase 2)
 
@@ -311,7 +311,7 @@ All obsolete one-time migration scripts (Phase 1).
 ## Impact
 
 **Before Phase 2:**
-- Python scripts scattered in `script/`
+- Python scripts scattered in `scripts/`
 - No test scaffolding tools
 - No FFI audit capabilities
 - No spec extraction automation

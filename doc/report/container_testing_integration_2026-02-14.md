@@ -189,16 +189,16 @@ CI test runner helper
 **Usage examples:**
 ```bash
 # All tests, fast profile
-script/ci-test.sh
+scripts/ci-test.sh
 
 # Unit tests, standard profile
-TEST_PROFILE=standard script/ci-test.sh test/unit/
+TEST_PROFILE=standard scripts/ci-test.sh test/unit/
 
 # Slow tests with custom image
-CONTAINER_IMAGE=simple-test:dev TEST_PROFILE=slow script/ci-test.sh test/system/
+CONTAINER_IMAGE=simple-test:dev TEST_PROFILE=slow scripts/ci-test.sh test/system/
 
 # Use Podman
-CONTAINER_RUNTIME=podman script/ci-test.sh
+CONTAINER_RUNTIME=podman scripts/ci-test.sh
 ```
 
 **Exit codes:**
@@ -232,19 +232,19 @@ Developer-friendly container test wrapper
 **Usage examples:**
 ```bash
 # Single test
-script/local-container-test.sh quick test/unit/std/string_spec.spl
+scripts/local-container-test.sh quick test/unit/std/string_spec.spl
 
 # All unit tests
-script/local-container-test.sh unit
+scripts/local-container-test.sh unit
 
 # Debug in container
-script/local-container-test.sh shell
+scripts/local-container-test.sh shell
 
 # Rebuild after Dockerfile changes
-script/local-container-test.sh build
+scripts/local-container-test.sh build
 
 # Check container status
-script/local-container-test.sh status
+scripts/local-container-test.sh status
 ```
 
 **Target audience:** Developers (daily workflow)
@@ -445,9 +445,9 @@ bin/simple test --only-slow
 **Scenario:** Developer editing Simple source code
 
 **Steps:**
-1. Edit source: `vim src/std/string.spl`
+1. Edit source: `vim src/std/text.spl`
 2. Quick test (native): `bin/simple test test/unit/std/string_spec.spl`
-3. Verify isolated: `script/local-container-test.sh quick test/unit/std/string_spec.spl`
+3. Verify isolated: `scripts/local-container-test.sh quick test/unit/std/string_spec.spl`
 4. Commit: `jj commit -m "fix: String.trim edge case"`
 
 **Time:** 5-10 seconds (quick test), 10-15 seconds (container verify)
@@ -459,7 +459,7 @@ bin/simple test --only-slow
 **Scenario:** Developer about to push to remote
 
 **Steps:**
-1. Run all unit tests: `script/local-container-test.sh unit`
+1. Run all unit tests: `scripts/local-container-test.sh unit`
 2. Or use compose: `docker-compose up unit-tests`
 3. Push if passing: `jj bookmark set main -r @ && jj git push --bookmark main`
 
@@ -472,8 +472,8 @@ bin/simple test --only-slow
 **Scenario:** Test passes locally but fails in CI
 
 **Steps:**
-1. Run exact CI command: `script/ci-test.sh test/unit/`
-2. Or interactive debug: `script/local-container-test.sh shell`
+1. Run exact CI command: `scripts/ci-test.sh test/unit/`
+2. Or interactive debug: `scripts/local-container-test.sh shell`
 3. Inside container: `simple test test/failing_spec.spl --verbose`
 
 **Output:** Full stacktrace, intermediate values, timing info
@@ -493,7 +493,7 @@ bin/simple test --only-slow
 test:
   stage: test
   script:
-    - script/ci-test.sh test/unit/
+    - scripts/ci-test.sh test/unit/
   artifacts:
     reports:
       junit: test-results-fast.json
@@ -503,7 +503,7 @@ test:
 ```groovy
 stage('Test') {
   steps {
-    sh 'script/ci-test.sh test/unit/'
+    sh 'scripts/ci-test.sh test/unit/'
     junit 'test-results-fast.json'
   }
 }
@@ -580,7 +580,7 @@ All deliverables tested manually:
 **After:**
 - Isolated, reproducible test environment (40MB container)
 - Controlled resource limits (5 profiles)
-- Easy local reproduction (`script/local-container-test.sh`)
+- Easy local reproduction (`scripts/local-container-test.sh`)
 - Fresh environment per test run
 
 **Time savings:**
@@ -690,15 +690,15 @@ All deliverables tested manually:
    docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .
 
    # Run unit tests
-   script/local-container-test.sh unit
+   scripts/local-container-test.sh unit
 
    # Check status
-   script/local-container-test.sh status
+   scripts/local-container-test.sh status
    ```
 
 2. **Update team workflows:**
    - Share `doc/guide/container_testing.md` with team
-   - Add pre-push hook: `script/local-container-test.sh unit`
+   - Add pre-push hook: `scripts/local-container-test.sh unit`
    - Update CONTRIBUTING.md to reference container testing
 
 3. **Monitor CI/CD:**
@@ -716,12 +716,12 @@ All deliverables tested manually:
    - Measure actual usage before promoting
 
 2. **Use local testing:**
-   - Run `script/local-container-test.sh quick` before every commit
-   - Run `script/local-container-test.sh unit` before every push
+   - Run `scripts/local-container-test.sh quick` before every commit
+   - Run `scripts/local-container-test.sh unit` before every push
    - Use `docker-compose up` for daily development
 
 3. **Debug in container:**
-   - Use `script/local-container-test.sh shell` for interactive debugging
+   - Use `scripts/local-container-test.sh shell` for interactive debugging
    - Run failing tests with `--verbose` flag
    - Check container logs for OOM/timeout issues
 
@@ -748,7 +748,7 @@ This implementation provides a complete, production-ready container testing infr
 
 **Next steps:**
 1. Build container: `docker build -t simple-test-isolation:latest -f docker/Dockerfile.test-isolation .`
-2. Test locally: `script/local-container-test.sh unit`
+2. Test locally: `scripts/local-container-test.sh unit`
 3. Push to trigger CI: `jj bookmark set main -r @ && jj git push --bookmark main`
 4. Monitor workflows: `.github/workflows/containerized-tests.yml`
 

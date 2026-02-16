@@ -660,7 +660,7 @@ target/coverage/
 \`\`\`
 === Simple Language Coverage ===
 
-src/lib/std/string.spl:
+src/lib/std/text.spl:
   Lines:    142/150 (94.7%)
   Branches: 28/32 (87.5%)
 
@@ -700,9 +700,9 @@ make test-contract          # Contract tests (new)
 make test-deployment        # Deployment smoke tests (new)
 
 # Run Simple language tests
-make test-simple-unit       # Simple unit tests
-make test-simple-integration # Simple integration tests
-make test-simple-system     # Simple system tests
+make test # or: bin/simple test test/unit/       # Simple unit tests
+bin/simple test test/integration/ # Simple integration tests
+bin/simple test test/system/     # Simple system tests
 
 # Run application tests
 make test-app-formatter     # Formatter tests

@@ -113,7 +113,7 @@ System/Process functions in `src/ffi/system.spl` require `extern fn` runtime cal
 Since imports don't work, functions were copied inline into test file:
 
 ```simple
-# Copy function definition from src/std/string.spl or src/std/array.spl
+# Copy function definition from src/std/text.spl or src/std/array.spl
 fn string_trim(s: text) -> text:
     var result = s
     # ... exact implementation from Phase 2 ...
@@ -182,7 +182,7 @@ string_trim("  x  ")  # SUCCESS
 
 ❌ **Fails with import:**
 ```simple
-use std.string.{string_trim}
+use std.text.{string_trim}
 string_trim("  x  ")  # ERROR: function not found
 ```
 
@@ -202,7 +202,7 @@ Phase 2 test compiles without errors to SMF format, indicating:
 
 ### What We Know
 
-1. **Module loading succeeds:** `use std.string.*` completes without errors
+1. **Module loading succeeds:** `use std.text.*` completes without errors
 2. **Function calls fail:** `string_trim(...)` reports "function not found"
 3. **Affects all functions:** Even simple extern fn wrappers fail
 4. **Inline works perfectly:** Same code works when not imported

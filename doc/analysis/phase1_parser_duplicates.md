@@ -586,7 +586,7 @@ Create modular lexer utilities:
 src/core/lexer/
   mod.spl              # Main entry point (150 lines)
   number.spl          # Number scanning (120 lines)
-  string.spl          # String scanning (80 lines)
+  text.spl          # String scanning (80 lines)
   operator.spl        # Operator scanning (100 lines)
   indentation.spl     # Indentation handling (100 lines)
   common.spl          # Shared utilities (50 lines)

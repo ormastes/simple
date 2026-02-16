@@ -304,7 +304,7 @@ Overall: ███████░░░░░░░░░░░░░  35% (12/3
 ## 🎉 Impact Summary
 
 ### Before Migration
-- Mixed Python/Bash/Simple scripts scattered across `script/`
+- Mixed Python/Bash/Simple scripts scattered across `scripts/`
 - No utility modules for common operations
 - No clear separation of active vs obsolete scripts
 - Limited Simple-native tooling

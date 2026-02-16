@@ -452,7 +452,7 @@ Contents:
 
 **6.3 Badge Generation Script**
 ```
-File: script/generate-coverage-badge.sh
+File: scripts/generate-coverage-badge.sh
 Purpose:
   - Parse coverage.json
   - Generate SVG badge

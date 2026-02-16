@@ -162,7 +162,7 @@
 5. Array comparison logic (6 occurrences, 60 lines)
 6. Predicate functions (`is_*`, 88 functions, 350 lines)
 
-**Recommendation:** Create `iteration.spl` module with map/filter/reduce. Add string transform helpers to `string.spl`. Consolidate binary search in `search_utils.spl`.
+**Recommendation:** Create `iteration.spl` module with map/filter/reduce. Add string transform helpers to `text.spl`. Consolidate binary search in `search_utils.spl`.
 
 ---
 
@@ -276,7 +276,7 @@
     - Estimated 4-6 hours
 
 13. **Create string transform helpers** (100 lines saved)
-    - Add to `src/std/string.spl`
+    - Add to `src/std/text.spl`
     - Migrate 7 string processing loops
     - Estimated 2-3 hours
 

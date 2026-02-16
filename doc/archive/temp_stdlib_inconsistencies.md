@@ -8,7 +8,7 @@
 1. `lib/std/host/async_nogc_mut/io/fs.spl` - Changed `from`/`to` to `src`/`dst` in rename/copy
 2. `lib/std/host/async_nogc_mut/net/http.spl` - Changed `to_str()` to `as_str()`
 3. `lib/std/core_nogc_immut/static_vec.spl` - Added missing methods, error type, type aliases, fixed field names
-4. `lib/std/core_nogc_immut/static_string.spl` - Added missing methods, error type, type aliases, fixed field names
+4. `lib/std/core_nogc_immut/static_text.spl` - Added missing methods, error type, type aliases, fixed field names
 5. `lib/std/host/async_gc_immut/io/term.spl` - Added missing terminal functions (cursor, screen, keyboard)
 
 ---
@@ -31,15 +31,15 @@
 |----------|---------|-----------|--------|
 | `core_nogc/fixed_vec.spl` | `const N: u64` | `const N: usize` | Consistency with static_vec |
 | `core_nogc_immut/static_vec.spl` | `const N: usize` | (reference) | Standard size type |
-| `core_nogc/fixed_string.spl` | `const N: u64` | `const N: usize` | Consistency |
-| `core_nogc_immut/static_string.spl` | `const N: usize` | (reference) | Standard size type |
+| `core_nogc/fixed_text.spl` | `const N: u64` | `const N: usize` | Consistency |
+| `core_nogc_immut/static_text.spl` | `const N: usize` | (reference) | Standard size type |
 
 ### 1.3 Field Name Inconsistencies
 
 | Location | Current | Should Be | Reason |
 |----------|---------|-----------|--------|
 | `core_nogc_immut/static_vec.spl` | `_data`, `_len` | `data`, `len` | Consistency with fixed_vec (no underscore prefix) |
-| `core_nogc_immut/static_string.spl` | `_data`, `_len` | `data`, `len` | Consistency with fixed_string |
+| `core_nogc_immut/static_text.spl` | `_data`, `_len` | `data`, `len` | Consistency with fixed_string |
 
 ## 2. Argument Order Inconsistencies
 
@@ -167,6 +167,6 @@
 3. `lib/std/host/async_gc_immut/io/fs.spl` - Already uses `src`/`dst` (good)
 4. `lib/std/host/async_gc_immut/io/term.spl` - Add missing terminal functions
 5. `lib/std/core_nogc/fixed_vec.spl` - Change `u64` -> `usize`
-6. `lib/std/core_nogc/fixed_string.spl` - Change `u64` -> `usize`
+6. `lib/std/core_nogc/fixed_text.spl` - Change `u64` -> `usize`
 7. `lib/std/core_nogc_immut/static_vec.spl` - Add missing methods, fix field names
-8. `lib/std/core_nogc_immut/static_string.spl` - Add missing methods, fix field names
+8. `lib/std/core_nogc_immut/static_text.spl` - Add missing methods, fix field names

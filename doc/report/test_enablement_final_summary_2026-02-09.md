@@ -93,7 +93,7 @@ fn is_gdb_available() -> bool:
 
 ### Phase 2.1: String Methods (8 functions)
 **Status:** ✅ Implementation Complete, ⚠️ Import Blocked
-**File:** `src/std/string.spl` (+70 lines)
+**File:** `src/std/text.spl` (+70 lines)
 
 ```simple
 # Convenience aliases
@@ -158,7 +158,7 @@ getpid, hostname, cpu_count, uuid_v4, shell, exec
 ### Problem
 Runtime import system prevents using any module functions:
 ```simple
-use std.string.{string_trim}  # ✅ Loads
+use std.text.{string_trim}  # ✅ Loads
 string_trim("  test  ")        # ❌ "function not found"
 ```
 
@@ -213,7 +213,7 @@ Testing revealed that **all module function imports fail**, regardless of implem
 
 **Evidence:**
 ```simple
-use std.string.{string_trim}      # Import succeeds
+use std.text.{string_trim}      # Import succeeds
 string_trim("x")                   # "function not found"
 
 use ffi.system.{uuid_v4}          # Import succeeds
@@ -312,7 +312,7 @@ getpid()                           # "function not found"
 1. **`src/std/table.spl`** - Production-ready table module (415 lines)
 2. **`src/std/core/resource.spl`** - Resource cleanup framework (184 lines)
 3. **`src/std/helpers.spl`** - Inline helper implementations (240 lines)
-4. **Enhanced modules:** string.spl (+70), array.spl (+85), boot_runner.spl (+20)
+4. **Enhanced modules:** text.spl (+70), array.spl (+85), boot_runner.spl (+20)
 
 ---
 
@@ -429,7 +429,7 @@ describe "Feature":
 **To:**
 ```simple
 # Use import
-use std.string.{string_trim}
+use std.text.{string_trim}
 
 describe "Feature":
     it "works":

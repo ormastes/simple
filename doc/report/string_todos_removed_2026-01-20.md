@@ -183,7 +183,7 @@ fn process_code(code: text) -> List<text>:
 ## Related Modules
 
 **String Implementation:**
-- `simple/std_lib/src/core/string.spl` - Module entry point
+- `simple/std_lib/src/core/text.spl` - Module entry point
 - `simple/std_lib/src/core/string_core.spl` - Core type definition
 - `simple/std_lib/src/core/string_ops.spl` - Operations (450+ lines)
 - `simple/std_lib/src/core/string_traits.spl` - Trait implementations

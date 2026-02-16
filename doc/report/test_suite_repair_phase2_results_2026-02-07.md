@@ -67,7 +67,7 @@
 
 **Status:** ⏳ Basic implementation complete, needs refinement
 
-**File Created:** `script/fix_new_constructors.spl` (153 lines)
+**File Created:** `scripts/fix_new_constructors.spl` (153 lines)
 
 **Limitations:**
 - Can only handle simple cases automatically
@@ -81,8 +81,8 @@
 **Status:** ✅ Complete and EXECUTED
 
 **Files Created:**
-- `script/fix_bare_imports.spl` (142 lines, Simple)
-- `script/fix_bare_imports_simple.sh` (40 lines, Bash) ← **USED**
+- `scripts/fix_bare_imports.spl` (142 lines, Simple)
+- `scripts/fix_bare_imports_simple.sh` (40 lines, Bash) ← **USED**
 
 **Execution Results:**
 - **Files fixed:** 108
@@ -136,7 +136,7 @@
 
 **Execution:**
 ```bash
-./script/fix_bare_imports_simple.sh test/lib
+./scripts/fix_bare_imports_simple.sh test/lib
 ```
 
 **Results:**
@@ -213,9 +213,9 @@ test_runs |run_id, start_time, end_time, pid, hostname, status, test_count, pass
 |------|---------|-------|--------|
 | `src/app/cli/commands/test_batch.spl` | Batch test runner | 138 | ✅ Ready |
 | `src/app/cli/commands/test_analyze.spl` | Failure analyzer | 162 | ✅ Ready |
-| `script/fix_new_constructors.spl` | Constructor fixer | 153 | ⏳ Needs refinement |
-| `script/fix_bare_imports.spl` | Import fixer (Simple) | 142 | ✅ Complete |
-| `script/fix_bare_imports_simple.sh` | Import fixer (Bash) | 40 | ✅ Executed |
+| `scripts/fix_new_constructors.spl` | Constructor fixer | 153 | ⏳ Needs refinement |
+| `scripts/fix_bare_imports.spl` | Import fixer (Simple) | 142 | ✅ Complete |
+| `scripts/fix_bare_imports_simple.sh` | Import fixer (Bash) | 40 | ✅ Executed |
 
 ### Modified Files (Phase 2)
 

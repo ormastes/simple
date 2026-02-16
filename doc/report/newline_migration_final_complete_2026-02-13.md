@@ -113,7 +113,7 @@ bin/simple test
 
 ### Import Count
 ```bash
-grep -r 'use std.string.{NL}' --include="*.spl" src/ test/ | wc -l
+grep -r 'use std.text.{NL}' --include="*.spl" src/ test/ | wc -l
 # 2,453 files ✅
 ```
 
@@ -206,7 +206,7 @@ All convertible `"\n"` literals have been migrated to the `NL` constant. The rem
 - Cross-platform ready
 - Fully tested and verified
 
-The Simple language codebase now has **consistent, maintainable, cross-platform newline handling** through the `NL` constant from `src/std/string.spl`.
+The Simple language codebase now has **consistent, maintainable, cross-platform newline handling** through the `NL` constant from `src/std/text.spl`.
 
 ---
 

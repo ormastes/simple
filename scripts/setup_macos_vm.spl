@@ -1,0 +1,145 @@
+#!/usr/bin/env simple
+# Setup macOS VM for Simple Testing (OSX-KVM)
+#
+# Guides the user through setting up a macOS VM under QEMU
+# using the OSX-KVM project for cross-platform testing.
+#
+# Usage: bin/release/simple scripts/setup_macos_vm.spl
+
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.file_shell.{shell, shell_output, file_write}
+
+fn main():
+    val home = shell_output("echo $HOME").trim()
+    val vm_dir = "{home}/vms/macos"
+    val osx_kvm_dir = "{vm_dir}/OSX-KVM"
+
+    print "======================================"
+    print "macOS VM Setup for Simple Testing"
+    print "======================================"
+    print ""
+
+    # Step 1: Check QEMU
+    print "Step 1: Verify QEMU Installation"
+    print "--------------------------------------"
+    val qemu_check = shell_output("which qemu-system-x86_64 2>/dev/null")
+    if qemu_check == "":
+        print "Error: QEMU not found"
+        print "Install: sudo apt-get install -y qemu-system-x86 qemu-utils"
+        return
+    print "QEMU available"
+    print ""
+
+    # Step 2: Create VM directory
+    print "Step 2: Create VM Directory"
+    print "--------------------------------------"
+    shell("mkdir -p {vm_dir}")
+    print "VM directory: {vm_dir}"
+    print ""
+
+    # Step 3: Clone OSX-KVM
+    print "Step 3: Clone OSX-KVM"
+    print "--------------------------------------"
+    if rt_file_exists("{osx_kvm_dir}/OpenCore-Boot.sh"):
+        print "OSX-KVM already cloned"
+    else:
+        print "Cloning OSX-KVM repository..."
+        val (out, err, exit_code) = shell("git clone --depth 1 https://github.com/kholia/OSX-KVM.git {osx_kvm_dir}")
+        if exit_code != 0:
+            print "Error: Could not clone OSX-KVM"
+            if err != "":
+                print err
+            return
+        print "Cloned OSX-KVM"
+    print ""
+
+    # Step 4: Create virtual disk
+    print "Step 4: Create Virtual Disk"
+    print "--------------------------------------"
+    val disk_path = "{vm_dir}/mac_hdd_ng.img"
+    if rt_file_exists(disk_path):
+        print "Virtual disk already exists: {disk_path}"
+    else:
+        val (out, err, exit_code) = shell("qemu-img create -f qcow2 {disk_path} 64G")
+        if exit_code != 0:
+            print "Error: Could not create virtual disk"
+            return
+        print "Created 64G virtual disk: {disk_path}"
+    print ""
+
+    # Step 5: Create start script
+    print "Step 5: Create VM Start Script"
+    print "--------------------------------------"
+    var script_content = "#!/bin/bash\n"
+    script_content = script_content + "# Start macOS VM with SSH forwarding\n"
+    script_content = script_content + "VM_DIR=\"$(dirname \"$0\")\"\n"
+    script_content = script_content + "cd \"$VM_DIR\"\n"
+    script_content = script_content + "OSX_KVM=\"$VM_DIR/OSX-KVM\"\n"
+    script_content = script_content + "if [ -f /tmp/macos-qemu.pid ]; then\n"
+    script_content = script_content + "  PID=$(cat /tmp/macos-qemu.pid)\n"
+    script_content = script_content + "  if kill -0 $PID 2>/dev/null; then\n"
+    script_content = script_content + "    echo \"macOS VM already running (PID: $PID)\"\n"
+    script_content = script_content + "    exit 0\n"
+    script_content = script_content + "  fi\n"
+    script_content = script_content + "fi\n"
+    script_content = script_content + "echo 'Starting macOS VM...'\n"
+    script_content = script_content + "qemu-system-x86_64 \\\n"
+    script_content = script_content + "  -machine type=q35,accel=kvm:tcg \\\n"
+    script_content = script_content + "  -cpu Penryn,kvm=on,vendor=GenuineIntel \\\n"
+    script_content = script_content + "  -smp 4 -m 8G \\\n"
+    script_content = script_content + "  -device isa-applesmc,osk=\"ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc\" \\\n"
+    script_content = script_content + "  -drive if=pflash,format=raw,readonly=on,file=\"$OSX_KVM/OVMF_CODE.fd\" \\\n"
+    script_content = script_content + "  -drive if=pflash,format=raw,file=\"$OSX_KVM/OVMF_VARS-1920x1080.fd\" \\\n"
+    script_content = script_content + "  -device ich9-intel-hda -device hda-duplex \\\n"
+    script_content = script_content + "  -device ich9-ahci,id=sata \\\n"
+    script_content = script_content + "  -drive id=OpenCoreBoot,if=none,snapshot=on,format=qcow2,file=\"$OSX_KVM/OpenCore/OpenCore.qcow2\" \\\n"
+    script_content = script_content + "  -device ide-hd,bus=sata.2,drive=OpenCoreBoot \\\n"
+    script_content = script_content + "  -drive id=MacHDD,if=none,file=\"$VM_DIR/mac_hdd_ng.img\",format=qcow2 \\\n"
+    script_content = script_content + "  -device ide-hd,bus=sata.4,drive=MacHDD \\\n"
+    script_content = script_content + "  -netdev user,id=net0,hostfwd=tcp::2224-:22 \\\n"
+    script_content = script_content + "  -device virtio-net-pci,netdev=net0 \\\n"
+    script_content = script_content + "  -display none -daemonize -pidfile /tmp/macos-qemu.pid\n"
+    script_content = script_content + "sleep 3\n"
+    script_content = script_content + "if [ -f /tmp/macos-qemu.pid ]; then\n"
+    script_content = script_content + "  echo \"macOS VM started (PID: $(cat /tmp/macos-qemu.pid))\"\n"
+    script_content = script_content + "  echo 'SSH: ssh -p 2224 user@localhost'\n"
+    script_content = script_content + "else\n"
+    script_content = script_content + "  echo 'Failed to start VM'\n"
+    script_content = script_content + "  exit 1\n"
+    script_content = script_content + "fi\n"
+    val start_script = "{vm_dir}/start-macos.sh"
+    file_write(start_script, script_content)
+    shell("chmod +x {start_script}")
+    print "Created: {start_script}"
+    print ""
+
+    # Summary
+    print "======================================"
+    print "macOS VM Setup Guide Complete"
+    print "======================================"
+    print ""
+    print "Next steps:"
+    print ""
+    print "  1. Download macOS installer:"
+    print "     cd {osx_kvm_dir}"
+    print "     ./fetch-macOS-v2.py"
+    print "     (Select the macOS version you want)"
+    print ""
+    print "  2. Convert the installer:"
+    print "     dmg2img -i BaseSystem.dmg BaseSystem.img"
+    print ""
+    print "  3. Install macOS:"
+    print "     Run the VM with installer attached, follow on-screen setup"
+    print ""
+    print "  4. After macOS is installed, inside the VM:"
+    print "     a. Enable SSH:"
+    print "        System Preferences > Sharing > Remote Login (enable)"
+    print "     b. Install Xcode CLI tools:"
+    print "        xcode-select --install"
+    print "     c. Verify clang:"
+    print "        clang --version"
+    print ""
+    print "  5. Test Simple:"
+    print "     bin/release/simple scripts/test_macos_qemu.spl"
+    print ""

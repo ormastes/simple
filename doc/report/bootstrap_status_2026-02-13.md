@@ -12,7 +12,7 @@
 4. ❌ **Core → full build** - **BLOCKED** (depends on #3)
 5. ❌ **Full → full self build** - **BLOCKED** (depends on #3-4)
 
-**Script Status:** `script/bootstrap-fixed.sh` automates steps 1-2 only, NOT the full chain.
+**Script Status:** `scripts/bootstrap-fixed.sh` automates steps 1-2 only, NOT the full chain.
 
 ---
 

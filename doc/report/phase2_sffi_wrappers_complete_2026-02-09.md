@@ -16,7 +16,7 @@ Phase 2 (SFFI Wrappers) is **100% complete in terms of implementation** - all St
 ## Phase 2.1: String Methods ✅
 
 **Status:** Implementation Complete (+70 lines)
-**File:** `src/std/string.spl`
+**File:** `src/std/text.spl`
 **Blocker:** Runtime import system
 
 ### Functions Added
@@ -41,7 +41,7 @@ string_split(s: text, delim: text) -> [text]  # General split function
 
 - ✅ Module loads without errors
 - ✅ Functions parse correctly
-- ❌ Import system prevents usage: `use std.string.{string_trim}` loads but `string_trim(...)` fails with "function not found"
+- ❌ Import system prevents usage: `use std.text.{string_trim}` loads but `string_trim(...)` fails with "function not found"
 
 ---
 
@@ -174,7 +174,7 @@ sleep_secs(seconds: i64)          # Sleep for seconds
 
 ```simple
 # String methods
-use std.string.{string_trim}  # ✅ Loads successfully
+use std.text.{string_trim}  # ✅ Loads successfully
 string_trim("  hello  ")      # ❌ "function not found"
 
 # Array methods
@@ -226,13 +226,13 @@ Phase 1 succeeded because it used inline implementations and explicit state pass
 
 ### 1. Wildcard Imports
 ```simple
-use std.string.*     # Loads but functions not callable
+use std.text.*     # Loads but functions not callable
 ```
 **Result:** Module loads successfully but functions still report "not found"
 
 ### 2. Specific Imports with Curly Braces
 ```simple
-use std.string.{string_trim, string_split}
+use std.text.{string_trim, string_split}
 ```
 **Result:** Module loads successfully but functions still report "not found"
 
@@ -313,7 +313,7 @@ Phase 3 (Runtime Core Fixes) requires:
 ## Files Modified
 
 ### Enhanced
-- `src/std/string.spl` (+70 lines) - String method wrappers
+- `src/std/text.spl` (+70 lines) - String method wrappers
 - `src/std/array.spl` (+85 lines) - Array method wrappers
 
 ### Verified Existing

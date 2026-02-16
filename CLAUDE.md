@@ -1,5 +1,7 @@
 # Simple Language Compiler - Development Guide
 
+**Also available as:** [AGENTS.md](AGENTS.md) (redirect to this file)
+
 Impl in simple unless it has big performance differences.
 
 **100% Pure Simple** - No Rust source. Pre-built runtime at `bin/release/simple` (33MB).
@@ -65,7 +67,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - Push: `jj bookmark set main -r @ && jj git push --bookmark main`
 
 ### Language
-- **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `script/`)
+- **ALL code in `.spl` or `.ssh`** - No Python, no Bash (except 3 bootstrap scripts in `scripts/`)
 - **Scripts:** Use `.ssh` for shell scripts that need to remain shell (e.g., container entrypoints)
 - **Generics:** `<>` not `[]` - `Option<T>`, `List<Int>`
 - **Pattern binding:** `if val` not `if let`
@@ -109,17 +111,17 @@ docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
   simple-test-isolation:latest test test/unit/        # Unit tests only
 
 # Docker Compose (easiest for local development)
-docker-compose up unit-tests         # Unit tests
-docker-compose up integration-tests  # Integration tests
-docker-compose up system-tests       # System tests
-docker-compose up all-tests          # All tests parallel
-docker-compose run dev-shell         # Interactive shell
+docker-compose -f config/docker-compose.yml up unit-tests         # Unit tests
+docker-compose -f config/docker-compose.yml up integration-tests  # Integration tests
+docker-compose -f config/docker-compose.yml up system-tests       # System tests
+docker-compose -f config/docker-compose.yml up all-tests          # All tests parallel
+docker-compose -f config/docker-compose.yml run dev-shell         # Interactive shell
 
 # Helper Scripts
-script/local-container-test.sh unit        # Unit tests in container
-script/local-container-test.sh quick path/to/spec.spl  # Single test
-script/local-container-test.sh shell       # Interactive debugging
-script/ci-test.sh                          # CI-style execution
+scripts/local-container-test.sh unit        # Unit tests in container
+scripts/local-container-test.sh quick path/to/spec.spl  # Single test
+scripts/local-container-test.sh shell       # Interactive debugging
+scripts/ci-test.sh                          # CI-style execution
 
 # Quality
 bin/simple build lint               # Linter
@@ -204,16 +206,18 @@ See `doc/guide/syntax_quick_reference.md` for complete reference.
 src/
   app/          # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
   lib/          # Libraries (database)
-  std/          # Standard library (spec, string, math, path, array, platform)
+  std/          # Standard library (spec, text, math, path, array, platform)
   core/         # Core Simple library (tokens, types, ast, mir, lexer, parser)
   compiler/     # Compiler source (seed, native)
 test/           # Test files (std, lib, app, compiler)
 doc/            # Documentation (report, design, guide, research, feature, test, bug)
 bin/            # Binaries (simple, release/simple)
 seed/           # C/C++ seed compiler sources (seed.c, runtime.c/h, startup CRT)
-script/         # Bootstrap bash scripts (3 only)
+scripts/         # Bootstrap bash scripts (3 only)
 .claude/        # Agents, skills, templates
 ```
+
+**Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).
 
 ---
 
@@ -267,7 +271,7 @@ See MEMORY.md and code agent for full list. Key issues:
 **Permission denied:** `chmod +x bin/release/simple` or `sudo usermod -aG docker $USER && newgrp docker`
 **Out of memory:** Increase `--memory=512m` to `--memory=1g` or `--memory=2g`
 **Timeout errors:** Use correct profile: `--profile=slow` (10 min) or `--profile=intensive` (30 min)
-**Tests pass locally, fail in CI:** Run exact CI command: `script/ci-test.sh test/unit/`
+**Tests pass locally, fail in CI:** Run exact CI command: `scripts/ci-test.sh test/unit/`
 
 ### Common Issues
 
@@ -277,7 +281,7 @@ See MEMORY.md and code agent for full list. Key issues:
 
 2. **Container build fails:**
    - Check runtime exists: `ls -lh bin/release/simple` (should be ~33MB)
-   - If missing: `script/install.sh` or download from releases
+   - If missing: `scripts/install.sh` or download from releases
 
 3. **jq not installed (parse errors):**
    - Ubuntu: `sudo apt install jq`
@@ -291,12 +295,12 @@ See MEMORY.md and code agent for full list. Key issues:
 
 ```bash
 # Run specific test tier
-docker-compose up unit-tests
-docker-compose up integration-tests
-docker-compose up system-tests
+docker-compose -f config/docker-compose.yml up unit-tests
+docker-compose -f config/docker-compose.yml up integration-tests
+docker-compose -f config/docker-compose.yml up system-tests
 
 # Interactive debugging
-docker-compose run dev-shell
+docker-compose -f config/docker-compose.yml run dev-shell
 # Inside: simple test test/unit/failing_spec.spl --verbose
 
 # Rebuild after Dockerfile changes

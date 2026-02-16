@@ -35,7 +35,7 @@ Tested all 19 core stdlib modules systematically:
 - persistent_list.spl - Generic parameter parsing
 - string_core.spl - Unknown issue
 - string_ops.spl - Associated types
-- string.spl - Associated types
+- text.spl - Associated types
 - string_traits.spl - Associated types
 - traits.spl - Associated types
 

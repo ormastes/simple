@@ -373,7 +373,7 @@ simple/std_lib/src/
 │   ├── arena.spl
 │   ├── bump.spl
 │   ├── fixed_vec.spl
-│   ├── fixed_string.spl
+│   ├── fixed_text.spl
 │   ├── small_vec.spl   # Small-buffer optimized vector
 │   ├── small_map.spl   # Static maps/dictionaries
 │   └── string_view.spl # Borrowed read-only string view

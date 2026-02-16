@@ -166,7 +166,7 @@ Each platform test verifies:
 - `src/app/compile/llvm_direct.spl` - LLVM optimization pipeline
 - `src/app/compile/c_codegen.spl` - Simple → C code generator
 - `bin/simple` - Multi-platform bootstrap loader
-- `script/build-bootstrap.sh` - Bootstrap package builder
+- `scripts/build-bootstrap.sh` - Bootstrap package builder
 
 ## Conclusion
 

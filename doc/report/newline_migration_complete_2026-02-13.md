@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` constant from `src/std/string.spl` across the entire Simple language codebase.
+Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` constant from `src/std/text.spl` across the entire Simple language codebase.
 
 ### Final Metrics
 
@@ -43,7 +43,7 @@ Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` 
 - **Files:** 33 files
 - **Occurrences:** ~90 replacements
 - **Key files:** ascii_art/, diff/, fsm/, yaml/, xml/, regex_engine/
-- **Skipped:** string.spl (defines NL), protocol files (ftp_utils.spl)
+- **Skipped:** text.spl (defines NL), protocol files (ftp_utils.spl)
 
 ### Agent 5: test/compiler/ + test/unit/ ✅
 - **Files:** 110 files
@@ -75,7 +75,7 @@ Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` 
 ### 1. Import Addition
 ```simple
 # Added to top of file (after existing imports)
-use std.string.{NL}
+use std.text.{NL}
 ```
 
 ### 2. String Interpolation
@@ -121,7 +121,7 @@ if ch == NL
 The remaining 335 `"\n"` literals are **correct and should not be changed**:
 
 ### 1. Constant Definitions (5 files)
-- **src/std/string.spl** - Defines `val NL = "\n"` and related constants
+- **src/std/text.spl** - Defines `val NL = "\n"` and related constants
 - Lines 113-114, 122-126, 410, 410
 
 ### 2. Test Files (15 files)
@@ -182,7 +182,7 @@ bin/simple test --list
 
 ### Import Verification
 ```bash
-grep -r 'use std.string.{NL}' --include="*.spl" src/ test/ | wc -l
+grep -r 'use std.text.{NL}' --include="*.spl" src/ test/ | wc -l
 # ✅ 2,381 files with NL import
 ```
 
@@ -263,6 +263,6 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 
 ## Conclusion
 
-The newline migration is **complete and successful**. All 7,167 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/string.spl`, with 335 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
+The newline migration is **complete and successful**. All 7,167 replaceable `"\n"` literals have been converted to use the `NL` constant from `src/std/text.spl`, with 335 occurrences correctly preserved for escape sequences, protocol specs, and constant definitions.
 
 The codebase is now more maintainable, cross-platform compatible, and consistent in its newline handling.

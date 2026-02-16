@@ -70,7 +70,7 @@ Documentation Coverage:
   Missing SDoctest:     186 (54%)
 
 Top functions needing examples:
-  - src/std/string.spl:split_lines
+  - src/std/text.spl:split_lines
   - src/std/array.spl:flatten
   - src/core/parser.spl:parse_expression
 ```
@@ -269,7 +269,7 @@ warning[doc-missing]: missing documentation for function `parse_expr`
   = help: add sdoctest example in doc/guide/parsing.md
 
 info[sdoctest-missing]: public function lacks usage example
-  --> src/std/string.spl:89
+  --> src/std/text.spl:89
   |
   = note: function is documented but has no sdoctest
   = help: add example to README.md or doc/guide/stdlib.md

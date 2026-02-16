@@ -58,7 +58,7 @@ src/app/interpreter/
 ├── extern/            (15 files, ~3.5K lines)
 │   ├── coverage.spl   - Code coverage
 │   ├── math.spl       - Math functions
-│   ├── string.spl     - String operations
+│   ├── text.spl     - String operations
 │   └── ... (12 more)
 │
 ├── ffi/               (9 files, ~1.8K lines)

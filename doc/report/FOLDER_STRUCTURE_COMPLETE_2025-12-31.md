@@ -175,7 +175,7 @@ simple/
 | graphics/loaders/gltf.spl | 847 | GLTF loader - split by section type |
 | parser/treesitter/grammar_simple.spl | 832 | Grammar - split by rule category |
 | ui/gui/vulkan_async.spl | 788 | Vulkan rendering - split by pipeline stage |
-| core/string.spl | 806 | String utilities - split by operation type |
+| core/text.spl | 806 | String utilities - split by operation type |
 | core/list.spl | 602 | List implementation - split by operation |
 
 **B. Variant Duplication:**
@@ -646,7 +646,7 @@ simple/std_lib/src/ui/gui/vulkan/
 └── sync.spl                  # Synchronization (100 lines)
 ```
 
-**core/string.spl (806 lines) →**
+**core/text.spl (806 lines) →**
 ```
 simple/std_lib/src/core/string/
 ├── __init__.spl

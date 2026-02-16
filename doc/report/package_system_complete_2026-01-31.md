@@ -92,11 +92,11 @@ Successfully implemented a **complete, production-ready package installation sys
 
 | Script | Lines | Purpose | Status |
 |--------|-------|---------|--------|
-| `script/build-bootstrap.sh` | 175 | Build bootstrap package | ✅ Tested |
-| `script/build-full.sh` | 65 | Build full package | ✅ Ready |
-| `script/build-deb.sh` | 145 | Build Debian package | ✅ Ready |
-| `script/install.sh` | 165 | Quick installer | ✅ Ready |
-| `script/prepare-release.sh` | 180 | Release automation | ✅ Ready |
+| `scripts/build-bootstrap.sh` | 175 | Build bootstrap package | ✅ Tested |
+| `scripts/build-full.sh` | 65 | Build full package | ✅ Ready |
+| `scripts/build-deb.sh` | 145 | Build Debian package | ✅ Ready |
+| `scripts/install.sh` | 165 | Quick installer | ✅ Ready |
+| `scripts/prepare-release.sh` | 180 | Release automation | ✅ Ready |
 
 **Makefile Targets:**
 
@@ -129,7 +129,7 @@ Successfully implemented a **complete, production-ready package installation sys
 | Platform | File | Status |
 |----------|------|--------|
 | Debian/Ubuntu | `packaging/debian/control` | ✅ |
-| Debian/Ubuntu | `script/build-deb.sh` (145 lines) | ✅ |
+| Debian/Ubuntu | `scripts/build-deb.sh` (145 lines) | ✅ |
 | Red Hat/Fedora | `packaging/rpm/simple-lang.spec` | ✅ |
 | macOS Homebrew | `packaging/homebrew/simple.rb` | ✅ |
 | Windows MSI | `packaging/windows/simple.wxs` | ✅ |
@@ -170,7 +170,7 @@ Successfully implemented a **complete, production-ready package installation sys
 ### Build Testing ✅
 
 ```bash
-$ ./script/build-bootstrap.sh
+$ ./scripts/build-bootstrap.sh
 Building Simple Bootstrap Package
 Platform: linux-x86_64
 Version:  0.3.0
@@ -297,7 +297,7 @@ simple/
 │           └── value/
 │               └── ffi/
 │                   └── package.rs         # Package FFI layer
-├── script/
+├── scripts/
 │   ├── build-bootstrap.sh                 # Build bootstrap package
 │   ├── build-full.sh                      # Build full package
 │   ├── build-deb.sh                       # Build Debian package
@@ -423,7 +423,7 @@ simple/
 2. **Test Platform Installers**
    ```bash
    # Test Debian package build
-   ./script/build-deb.sh
+   ./scripts/build-deb.sh
    sudo dpkg -i simple-lang_0.3.0_amd64.deb
 
    # Test installation

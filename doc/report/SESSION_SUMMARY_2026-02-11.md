@@ -86,7 +86,7 @@ The interpreter's `eval_expr()` function did not handle `EXPR_SLICE` expressions
 
 **Caveat:**
 The fix is in Simple interpreter code (`src/core/interpreter/eval.spl`). The current `bin/simple` is a **pre-built Rust runtime**. Changes require:
-- Rebuilding the runtime with `script/build-bootstrap.sh` or equivalent
+- Rebuilding the runtime with `scripts/build-bootstrap.sh` or equivalent
 - Incorporating Simple interpreter changes into the runtime build
 
 **Testing Once Rebuilt:**

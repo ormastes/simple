@@ -14,19 +14,19 @@ These run BEFORE Simple compiler exists and must remain as shell:
 
 | Script | Purpose | Status |
 |--------|---------|--------|
-| `script/bootstrap-from-scratch.sh` | Main bootstrap (Linux/macOS) | **KEEP** |
-| `script/bootstrap-from-scratch-freebsd.sh` | FreeBSD bootstrap | **KEEP** |
-| `script/bootstrap-from-scratch.bat` | Windows bootstrap | **KEEP** |
-| `script/bootstrap-minimal.sh` | Minimal bootstrap variant | **KEEP** |
-| `script/bootstrap-ultra-minimal.sh` | Ultra-minimal variant | **KEEP** |
-| `script/bootstrap-fixed.sh` | Fixed variant | **KEEP** |
-| `script/bootstrap-types-only.sh` | Types-only variant | **KEEP** |
-| `script/bootstrap-core-only.sh` | Core-only variant | **KEEP** |
-| `script/bootstrap-full-core.sh` | Full core variant | **KEEP** |
-| `script/install.sh` | Web installer (`curl \| sh`) | **KEEP** |
-| `script/build-bootstrap.sh` | Multi-step bootstrap build | **KEEP** |
-| `script/build-bootstrap-multi-platform.sh` | Multi-platform bootstrap | **KEEP** |
-| `script/setup-bootstrap-binaries.sh` | Pre-built bootstrap setup | **KEEP** |
+| `scripts/bootstrap-from-scratch.sh` | Main bootstrap (Linux/macOS) | **KEEP** |
+| `scripts/bootstrap-from-scratch-freebsd.sh` | FreeBSD bootstrap | **KEEP** |
+| `scripts/bootstrap-from-scratch.bat` | Windows bootstrap | **KEEP** |
+| `scripts/bootstrap-minimal.sh` | Minimal bootstrap variant | **KEEP** |
+| `scripts/bootstrap-ultra-minimal.sh` | Ultra-minimal variant | **KEEP** |
+| `scripts/bootstrap-fixed.sh` | Fixed variant | **KEEP** |
+| `scripts/bootstrap-types-only.sh` | Types-only variant | **KEEP** |
+| `scripts/bootstrap-core-only.sh` | Core-only variant | **KEEP** |
+| `scripts/bootstrap-full-core.sh` | Full core variant | **KEEP** |
+| `scripts/install.sh` | Web installer (`curl \| sh`) | **KEEP** |
+| `scripts/build-bootstrap.sh` | Multi-step bootstrap build | **KEEP** |
+| `scripts/build-bootstrap-multi-platform.sh` | Multi-platform bootstrap | **KEEP** |
+| `scripts/setup-bootstrap-binaries.sh` | Pre-built bootstrap setup | **KEEP** |
 | `bin/build-minimal-bootstrap.sh` | Minimal bootstrap build | **KEEP** |
 | `seed/run_coverage.sh` | Seed compiler coverage | **KEEP** |
 | `seed/test-windows-builds.sh` | Seed build testing | **KEEP** |
@@ -42,18 +42,18 @@ These run BEFORE Simple compiler exists and must remain as shell:
 | `src/app/test/docker_runner.spl` (fix) | Fixed `dir_exists` → `is_dir` | ✅ **DONE** |
 | `src/app/test/container_test.spl` (fix) | Verified correct | ✅ **DONE** |
 | `bin/freebsd/simple-wrapper.sh` | `src/app/build/freebsd_wrapper.spl` | ✅ **DONE** |
-| `script/jj-wrappers/git.bat` | `src/app/jj/git_wrapper.spl` | ✅ **DONE** |
-| `script/build/link-bins.bat` | `src/app/build/link_bins.spl` | ✅ **DONE** |
+| `scripts/jj-wrappers/git.bat` | `src/app/jj/git_wrapper.spl` | ✅ **DONE** |
+| `scripts/build/link-bins.bat` | `src/app/build/link_bins.spl` | ✅ **DONE** |
 
 ### Batch 2: Docker/Verification Scripts ✅
 
 | Source (deleted) | .spl Equivalent | Status |
 |-----------------|-----------------|--------|
-| `script/docker-build-test-runner.sh` | `src/app/test/build_runner.spl` | ✅ **DONE** |
-| `script/verify-docker-setup.sh` | `src/app/verify/docker_setup.spl` | ✅ **DONE** |
-| `script/verify-baremetal-setup.sh` | `src/app/verify/baremetal.spl` | ✅ **DONE** |
-| `script/build_type_database.sh` | `src/app/build/type_db.spl` | ✅ **DONE** |
-| `script/build-full.sh` | `src/app/build/full.spl` | ✅ **DONE** |
+| `scripts/docker-build-test-runner.sh` | `src/app/test/build_runner.spl` | ✅ **DONE** |
+| `scripts/verify-docker-setup.sh` | `src/app/verify/docker_setup.spl` | ✅ **DONE** |
+| `scripts/verify-baremetal-setup.sh` | `src/app/verify/baremetal.spl` | ✅ **DONE** |
+| `scripts/build_type_database.sh` | `src/app/build/type_db.spl` | ✅ **DONE** |
+| `scripts/build-full.sh` | `src/app/build/full.spl` | ✅ **DONE** |
 | `test_mcp_working.sh` | `src/app/mcp/health_check.spl` | ✅ **DONE** |
 | `src/tools/test_desugared.sh` | `src/app/test/test_desugared.spl` | ✅ **DONE** |
 
@@ -61,28 +61,28 @@ These run BEFORE Simple compiler exists and must remain as shell:
 
 | Source (deleted) | .spl Equivalent | Status |
 |-----------------|-----------------|--------|
-| `script/fix_bare_imports_simple.sh` | `src/app/fix/imports.spl` | ✅ **DONE** |
-| `script/fix_constructors_smart.sh` | `src/app/fix/constructors.spl` | ✅ **DONE** |
-| `script/migrate_tests.sh` | `src/app/migrate/tests.spl` | ✅ **DONE** |
+| `scripts/fix_bare_imports_simple.sh` | `src/app/fix/imports.spl` | ✅ **DONE** |
+| `scripts/fix_constructors_smart.sh` | `src/app/fix/constructors.spl` | ✅ **DONE** |
+| `scripts/migrate_tests.sh` | `src/app/migrate/tests.spl` | ✅ **DONE** |
 | `src/build_tools.sh` | `src/app/build/tools.spl` | ✅ **DONE** |
 
 ### Batch 4: Cross-Compilation and Build Scripts ✅
 
 | Source (deleted) | .spl Equivalent | Status |
 |-----------------|-----------------|--------|
-| `script/build-cross-compile-all.sh` | `src/app/build/cross_compile.spl` | ✅ **DONE** |
-| `script/verify-cross-builds.sh` | `src/app/verify/cross_builds.spl` | ✅ **DONE** |
-| `script/build_custom_qemu.sh` | `src/app/build/qemu_builder.spl` | ✅ **DONE** |
+| `scripts/build-cross-compile-all.sh` | `src/app/build/cross_compile.spl` | ✅ **DONE** |
+| `scripts/verify-cross-builds.sh` | `src/app/verify/cross_builds.spl` | ✅ **DONE** |
+| `scripts/build_custom_qemu.sh` | `src/app/build/qemu_builder.spl` | ✅ **DONE** |
 | `bin/freebsd/build-freebsd-full-compiler.sh` | `src/app/build/freebsd_compiler.spl` | ✅ **DONE** |
 
 ### Batch 5: FreeBSD/macOS/QEMU Test Scripts ✅
 
 | Source (deleted) | .spl Equivalent | Status |
 |-----------------|-----------------|--------|
-| `script/configure_freebsd_vm_ssh.sh` | `src/app/setup/freebsd_ssh.spl` | ✅ **DONE** |
-| `script/test-freebsd-qemu-setup.sh` | `src/app/test/freebsd_qemu_setup.spl` | ✅ **DONE** |
-| `script/test-freebsd-qemu-basic.sh` | `src/app/test/freebsd_basic.spl` | ✅ **DONE** |
-| `script/test-macos-self-hosting.sh` | `src/app/test/macos_selfhost.spl` | ✅ **DONE** |
+| `scripts/configure_freebsd_vm_ssh.sh` | `src/app/setup/freebsd_ssh.spl` | ✅ **DONE** |
+| `scripts/test-freebsd-qemu-setup.sh` | `src/app/test/freebsd_qemu_setup.spl` | ✅ **DONE** |
+| `scripts/test-freebsd-qemu-basic.sh` | `src/app/test/freebsd_basic.spl` | ✅ **DONE** |
+| `scripts/test-macos-self-hosting.sh` | `src/app/test/macos_selfhost.spl` | ✅ **DONE** |
 
 ### Batch 6: MCP and Bootstrap Test Scripts ✅
 
@@ -122,10 +122,10 @@ These run BEFORE Simple compiler exists and must remain as shell:
 
 | Source (deleted) | .spl Equivalent | Status |
 |-----------------|-----------------|--------|
-| `script/filter_pending_tests.sh` | `src/app/test/filter_pending.spl` | ✅ **DONE** |
-| `script/ci-test.sh` | `src/app/test/ci_runner.spl` | ✅ **DONE** |
-| `script/docker-test.sh` | `src/app/test/docker_runner.spl` | ✅ **DONE** |
-| `script/local-container-test.sh` | `src/app/test/container_test.spl` | ✅ **DONE** |
+| `scripts/filter_pending_tests.sh` | `src/app/test/filter_pending.spl` | ✅ **DONE** |
+| `scripts/ci-test.sh` | `src/app/test/ci_runner.spl` | ✅ **DONE** |
+| `scripts/docker-test.sh` | `src/app/test/docker_runner.spl` | ✅ **DONE** |
+| `scripts/local-container-test.sh` | `src/app/test/container_test.spl` | ✅ **DONE** |
 
 ---
 
@@ -133,7 +133,7 @@ These run BEFORE Simple compiler exists and must remain as shell:
 
 ### 1. filter_pending.spl ✅
 
-**Original:** `script/filter_pending_tests.sh` (51 lines bash)
+**Original:** `scripts/filter_pending_tests.sh` (51 lines bash)
 **New:** `src/app/test/filter_pending.spl` (116 lines Simple)
 **Status:** Complete, tested
 
@@ -149,7 +149,7 @@ These run BEFORE Simple compiler exists and must remain as shell:
 - `file_read()`, `file_write()`, `file_exists()` - File I/O
 - `dir_list()`, `is_dir()`, `dir_create_all()` - Directory ops
 - `get_args()` - Command-line arguments
-- `std.string.{starts_with, trim, ends_with}` - String utilities
+- `std.text.{starts_with, trim, ends_with}` - String utilities
 - `std.path.{join}` - Path manipulation
 
 **Key differences from bash:**
@@ -161,7 +161,7 @@ These run BEFORE Simple compiler exists and must remain as shell:
 **Usage:**
 ```bash
 # Old (bash)
-./script/filter_pending_tests.sh test/lib
+./scripts/filter_pending_tests.sh test/lib
 
 # New (Simple)
 bin/simple run src/app/test/filter_pending.spl test/lib
@@ -169,7 +169,7 @@ bin/simple run src/app/test/filter_pending.spl test/lib
 
 ### 2. ci_runner.spl ✅
 
-**Original:** `script/ci-test.sh` (293 lines bash)
+**Original:** `scripts/ci-test.sh` (293 lines bash)
 **New:** `src/app/test/ci_runner.spl` (279 lines Simple)
 **Status:** Complete
 
@@ -187,7 +187,7 @@ bin/simple run src/app/test/filter_pending.spl test/lib
 - `shell()`, `shell_bool()`, `shell_output()` - Process execution
 - `file_read()`, `file_exists()` - File I/O
 - `env_get()`, `cwd()`, `get_args()`, `exit()` - Environment
-- `std.string.{contains, starts_with, trim, split}` - String ops
+- `std.text.{contains, starts_with, trim, split}` - String ops
 - `std.path.{join}` - Path utilities
 
 **Resource Profiles:**
@@ -216,7 +216,7 @@ critical   - 4GB,   8.0 CPU, 3600s (QEMU/baremetal)
 **Usage:**
 ```bash
 # Old (bash)
-TEST_PROFILE=standard ./script/ci-test.sh test/unit/
+TEST_PROFILE=standard ./scripts/ci-test.sh test/unit/
 
 # New (Simple)
 TEST_PROFILE=standard bin/simple run src/app/test/ci_runner.spl test/unit/

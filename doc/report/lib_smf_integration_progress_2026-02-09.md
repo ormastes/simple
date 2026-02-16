@@ -119,13 +119,13 @@ Successfully implemented Library SMF format and created integration layer for th
 ### Phase 5: Build System Integration ✅ 100% COMPLETE
 
 **Files Created:**
-1. `script/build_libstd.spl` (200 lines)
+1. `scripts/build_libstd.spl` (200 lines)
    - Automated libstd.lsm generation
    - Scans src/std/ for SMF files
    - Module name derivation
    - Progress reporting
 
-2. `script/lib_tool.spl` (450 lines)
+2. `scripts/lib_tool.spl` (450 lines)
    - `list` - List modules in library
    - `info` - Show library details
    - `verify` - Integrity checking

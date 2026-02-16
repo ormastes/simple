@@ -147,7 +147,7 @@ pytorch_fn!(rt_torch_add, (a: RuntimeValue, b: RuntimeValue), {
 | **layers/attention.rs** | ~280 | 3 (MultiheadAttention, PositionalEncoding) | ✅ COMPLETE |
 | **layers/transformer.rs** | ~450 | 4 (Encoder/Decoder new/forward) | ✅ COMPLETE |
 | **optimizers.rs** | ~120 | 1 (RMSProp new) | ✅ COMPLETE |
-| **serialization.rs** | ~260 | 8 (JIT script/trace/load/save, model load/save) | ✅ COMPLETE |
+| **serialization.rs** | ~260 | 8 (JIT scripts/trace/load/save, model load/save) | ✅ COMPLETE |
 | **onnx.rs** | ~180 | 5 (ONNX export/import/run/check/free) | ✅ COMPLETE |
 | **datasets.rs** | ~200 | 4 (MNIST/CIFAR-10 download/load) | ✅ COMPLETE |
 | **distributed.rs** | ~180 | 8 (DDP, allreduce, broadcast, etc.) | ✅ COMPLETE |

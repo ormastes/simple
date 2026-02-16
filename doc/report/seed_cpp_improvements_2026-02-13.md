@@ -130,7 +130,7 @@ switch (mode) {
 ## Files Modified
 
 - `seed/seed.cpp` (4 fixes applied)
-- `script/bootstrap-minimal.sh` (test file exclusions)
+- `scripts/bootstrap-minimal.sh` (test file exclusions)
 
 ## Technical Details
 

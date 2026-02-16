@@ -52,7 +52,7 @@ reader.get_object(module_name) -> Result<[u8], text>
 - Symbol resolution + object extraction pipeline complete
 
 **Build Tools:**
-- `script/build_libstd.spl` updated with `--with-objects` flag
+- `scripts/build_libstd.spl` updated with `--with-objects` flag
 - Auto-detects companion `.o` files during library building
 
 ### Test Suite Complete
@@ -94,7 +94,7 @@ reader.get_object(module_name) -> Result<[u8], text>
 - `src/compiler/linker/lib_smf_reader.spl` (+60 lines)
 - `src/compiler/linker/smf_getter.spl` (+30 lines)
 - `src/compiler/linker/linker_wrapper_lib_support.spl` (+80 lines)
-- `script/build_libstd.spl` (+80 lines)
+- `scripts/build_libstd.spl` (+80 lines)
 - `examples/lib_smf/test_lib_with_objects.spl` (+100 lines)
 
 **Tests (4 files, ~1,030 lines):**
@@ -372,7 +372,7 @@ fn type_check_impl() -> (CompileContext, bool):
 - `src/compiler/linker/lib_smf_reader.spl`
 - `src/compiler/linker/smf_getter.spl`
 - `src/compiler/linker/linker_wrapper_lib_support.spl`
-- `script/build_libstd.spl`
+- `scripts/build_libstd.spl`
 - `examples/lib_smf/test_lib_with_objects.spl`
 
 **Tests:**

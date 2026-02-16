@@ -11,7 +11,7 @@ Implemented **build system integration** for Library SMF - created scripts to ge
 ## What Was Built
 
 ### 1. Standard Library Builder
-**File:** `script/build_libstd.spl` (200 lines)
+**File:** `scripts/build_libstd.spl` (200 lines)
 
 **Features:**
 - Scans `src/std/` for all `.smf` files
@@ -23,10 +23,10 @@ Implemented **build system integration** for Library SMF - created scripts to ge
 
 **Usage:**
 ```bash
-#!/usr/bin/env simple script/build_libstd.spl
+#!/usr/bin/env simple scripts/build_libstd.spl
 
 # With options
-simple script/build_libstd.spl --output=custom/path.lsm --verbose
+simple scripts/build_libstd.spl --output=custom/path.lsm --verbose
 ```
 
 **Workflow:**
@@ -52,13 +52,13 @@ simple script/build_libstd.spl --output=custom/path.lsm --verbose
 ```
 
 ### 2. Library Management Tool
-**File:** `script/lib_tool.spl` (450 lines)
+**File:** `scripts/lib_tool.spl` (450 lines)
 
 **Commands:**
 
 #### `list` - List Modules
 ```bash
-simple script/lib_tool.spl list build/lib/libstd.lsm
+simple scripts/lib_tool.spl list build/lib/libstd.lsm
 # Output:
 # Modules (42):
 #   - std/io/mod
@@ -69,7 +69,7 @@ simple script/lib_tool.spl list build/lib/libstd.lsm
 
 #### `info` - Detailed Information
 ```bash
-simple script/lib_tool.spl info build/lib/libstd.lsm
+simple scripts/lib_tool.spl info build/lib/libstd.lsm
 # Output:
 # Library Information
 # ===================
@@ -88,7 +88,7 @@ simple script/lib_tool.spl info build/lib/libstd.lsm
 
 #### `verify` - Integrity Check
 ```bash
-simple script/lib_tool.spl verify build/lib/libstd.lsm
+simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 # Output:
 # Checking 42 modules...
 #   ✓ std/io/mod
@@ -102,7 +102,7 @@ simple script/lib_tool.spl verify build/lib/libstd.lsm
 
 #### `extract` - Extract Module
 ```bash
-simple script/lib_tool.spl extract libstd.lsm std/io/mod --output=io_mod.smf
+simple scripts/lib_tool.spl extract libstd.lsm std/io/mod --output=io_mod.smf
 # Output:
 # Extracting module: std/io/mod
 # From library: libstd.lsm
@@ -113,7 +113,7 @@ simple script/lib_tool.spl extract libstd.lsm std/io/mod --output=io_mod.smf
 
 #### `create` - Create Library
 ```bash
-simple script/lib_tool.spl create mylib.lsm mod1.smf mod2.smf mod3.smf
+simple scripts/lib_tool.spl create mylib.lsm mod1.smf mod2.smf mod3.smf
 # Output:
 # Creating library: mylib.lsm
 # Input files: 3
@@ -150,7 +150,7 @@ src/std/math.smf            → std/math
 ```bash
 # After building standard library
 simple build
-simple script/build_libstd.spl
+simple scripts/build_libstd.spl
 ```
 
 **Option 2: Build Script Integration** (Future)
@@ -158,7 +158,7 @@ simple script/build_libstd.spl
 # In src/app/build/tasks.spl
 fn build_stdlib_library():
     """Build libstd.lsm from compiled modules."""
-    val result = shell("simple script/build_libstd.spl --verbose")
+    val result = shell("simple scripts/build_libstd.spl --verbose")
     if result.exit_code != 0:
         return Err("Failed to build standard library")
     Ok(())
@@ -213,8 +213,8 @@ link_with_libraries(objects, output, config)?
 ## File Structure
 
 **New Files:**
-- `script/build_libstd.spl` (200 lines)
-- `script/lib_tool.spl` (450 lines)
+- `scripts/build_libstd.spl` (200 lines)
+- `scripts/lib_tool.spl` (450 lines)
 
 **Total New Code:** 650 lines
 
@@ -230,15 +230,15 @@ echo "test" > test_smf/mod1.smf
 echo "test" > test_smf/mod2.smf
 
 # Test library creation
-simple script/lib_tool.spl create test.lsm test_smf/*.smf
+simple scripts/lib_tool.spl create test.lsm test_smf/*.smf
 
 # Verify creation
-simple script/lib_tool.spl info test.lsm
-simple script/lib_tool.spl list test.lsm
-simple script/lib_tool.spl verify test.lsm
+simple scripts/lib_tool.spl info test.lsm
+simple scripts/lib_tool.spl list test.lsm
+simple scripts/lib_tool.spl verify test.lsm
 
 # Test extraction
-simple script/lib_tool.spl extract test.lsm mod1
+simple scripts/lib_tool.spl extract test.lsm mod1
 
 # Cleanup
 rm -rf test_smf test.lsm mod1.smf
@@ -252,13 +252,13 @@ rm -rf test_smf test.lsm mod1.smf
 bin/simple build
 
 # 2. Build standard library archive
-simple script/build_libstd.spl --verbose
+simple scripts/build_libstd.spl --verbose
 
 # 3. Verify library
-simple script/lib_tool.spl verify build/lib/libstd.lsm
+simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
 # 4. List contents
-simple script/lib_tool.spl list build/lib/libstd.lsm
+simple scripts/lib_tool.spl list build/lib/libstd.lsm
 
 # 5. Use in module loader
 bin/simple examples/lib_smf/load_from_library.spl
@@ -294,7 +294,7 @@ vim src/std/io/file.spl
 bin/simple build
 
 # 3. Rebuild library
-simple script/build_libstd.spl
+simple scripts/build_libstd.spl
 
 # 4. Test changes
 bin/simple test src/std/io/test/file_spec.spl
@@ -308,10 +308,10 @@ bin/simple build --clean
 bin/simple build --release
 
 # 2. Build standard library archive
-simple script/build_libstd.spl --output=dist/lib/libstd.lsm
+simple scripts/build_libstd.spl --output=dist/lib/libstd.lsm
 
 # 3. Verify integrity
-simple script/lib_tool.spl verify dist/lib/libstd.lsm
+simple scripts/lib_tool.spl verify dist/lib/libstd.lsm
 
 # 4. Package for distribution
 tar czf simple-stdlib-v0.5.0.tar.gz dist/lib/libstd.lsm
@@ -324,8 +324,8 @@ tar czf simple-stdlib-v0.5.0.tar.gz dist/lib/libstd.lsm
 - name: Build Standard Library
   run: |
     bin/simple build
-    simple script/build_libstd.spl --verbose
-    simple script/lib_tool.spl verify build/lib/libstd.lsm
+    simple scripts/build_libstd.spl --verbose
+    simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
 - name: Upload Library Artifact
   uses: actions/upload-artifact@v3
@@ -342,15 +342,15 @@ The `lib_tool` CLI follows familiar patterns:
 
 **Git-style:**
 ```bash
-git log          → simple script/lib_tool.spl list
-git show         → simple script/lib_tool.spl info
-git fsck         → simple script/lib_tool.spl verify
+git log          → simple scripts/lib_tool.spl list
+git show         → simple scripts/lib_tool.spl info
+git fsck         → simple scripts/lib_tool.spl verify
 ```
 
 **Cargo-style:**
 ```bash
-cargo build      → simple script/build_libstd.spl
-cargo package    → simple script/lib_tool.spl create
+cargo build      → simple scripts/build_libstd.spl
+cargo package    → simple scripts/lib_tool.spl create
 ```
 
 ### Future: Integrated CLI

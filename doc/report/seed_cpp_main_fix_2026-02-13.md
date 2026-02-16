@@ -109,8 +109,8 @@ These are **translation limitations**, not main() bugs. Full compiler bootstrap 
 ## Files Modified
 
 - `seed/seed.cpp` (2 bug fixes)
-- `script/bootstrap-fixed.sh` (updated bootstrap script)
-- `script/bootstrap-minimal.sh` (created, excludes complex features)
+- `scripts/bootstrap-fixed.sh` (updated bootstrap script)
+- `scripts/bootstrap-minimal.sh` (created, excludes complex features)
 
 ## Test Results
 

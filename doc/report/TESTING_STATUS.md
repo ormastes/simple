@@ -33,7 +33,7 @@ test result: ok. 2 passed; 0 failed; 0 ignored
 
 ```bash
 # Package build
-$ ./script/build-bootstrap.sh
+$ ./scripts/build-bootstrap.sh
 ✓ Package created: 6.4 MB
 
 # Package extraction

@@ -108,7 +108,7 @@ bin/simple -c 'val arr = [1,2,3,4,5]; val end = 3; val result = arr[:end]; print
 
 ### Next Steps
 
-1. Rebuild runtime with: `script/build-bootstrap.sh` or equivalent
+1. Rebuild runtime with: `scripts/build-bootstrap.sh` or equivalent
 2. Run tests: `bin/simple test test/unit/std/runtime_parser_bugs_spec.spl`
 3. Verify fix resolves BUG-RT-001
 

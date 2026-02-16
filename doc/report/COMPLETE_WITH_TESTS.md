@@ -257,7 +257,7 @@ $ cargo build --profile release-opt
 make package-bootstrap    # 6.4 MB bootstrap package
 make package-full         # Full source distribution
 make package-all          # Both packages
-./script/build-deb.sh     # Debian package
+./scripts/build-deb.sh     # Debian package
 ```
 
 ### Install/Test
@@ -288,7 +288,7 @@ cd rust && cargo test --package simple-runtime --lib ffi::package
 ### Release
 
 ```bash
-./script/prepare-release.sh 0.3.1   # Prepare new release
+./scripts/prepare-release.sh 0.3.1   # Prepare new release
 git tag v0.3.0                      # Create release tag
 git push origin v0.3.0              # Trigger CI/CD
 ```
@@ -348,7 +348,7 @@ simple/
 │   └── windows/simple.wxs
 ├── rust/runtime/src/value/ffi/
 │   └── package.rs                  # FFI implementation
-├── script/
+├── scripts/
 │   ├── build-bootstrap.sh
 │   ├── build-full.sh
 │   ├── build-deb.sh

@@ -36,7 +36,7 @@
 - std/smtp/utilities.spl
 - std/buffer/utilities.spl
 
-**Canonical implementation**: std/string.spl (already exported)
+**Canonical implementation**: std/text.spl (already exported)
 
 **See**: CHAR_FROM_CODE_OPPORTUNITY.md for details
 

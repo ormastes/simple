@@ -67,10 +67,10 @@ simple compile mylib/math.spl --emit-smf -o math.smf
 simple compile mylib/hello.spl --emit-smf -o hello.smf
 
 # Create library
-simple script/lib_tool.spl create mylib.lsm math.smf hello.smf
+simple scripts/lib_tool.spl create mylib.lsm math.smf hello.smf
 
 # Verify
-simple script/lib_tool.spl list mylib.lsm
+simple scripts/lib_tool.spl list mylib.lsm
 ```
 
 **Output:**
@@ -114,13 +114,13 @@ Create libraries from existing SMF files:
 
 ```bash
 # Basic creation
-simple script/lib_tool.spl create output.lsm module1.smf module2.smf
+simple scripts/lib_tool.spl create output.lsm module1.smf module2.smf
 
 # With wildcards
-simple script/lib_tool.spl create libstd.lsm build/smf/*.smf
+simple scripts/lib_tool.spl create libstd.lsm build/smf/*.smf
 
 # Verbose output
-simple script/lib_tool.spl create mylib.lsm *.smf --verbose
+simple scripts/lib_tool.spl create mylib.lsm *.smf --verbose
 ```
 
 ### Method 2: Using LibSmfBuilder (Programmatic)
@@ -151,10 +151,10 @@ Build the complete standard library:
 
 ```bash
 # Compile stdlib
-simple script/compile_with_objects.spl --input-dir=src/std
+simple scripts/compile_with_objects.spl --input-dir=src/std
 
 # Build library
-simple script/build_libstd.spl --verbose
+simple scripts/build_libstd.spl --verbose
 
 # Result: build/lib/libstd.lsm
 ```
@@ -235,7 +235,7 @@ simple compile module.spl --emit-smf -o module.smf
 simple compile module.spl --emit-obj -o module.o
 
 # Or use helper script
-simple script/compile_with_objects.spl --input-dir=src
+simple scripts/compile_with_objects.spl --input-dir=src
 ```
 
 ### Basic Linking
@@ -303,7 +303,7 @@ The linker automatically:
 ### List Modules
 
 ```bash
-simple script/lib_tool.spl list mylib.lsm
+simple scripts/lib_tool.spl list mylib.lsm
 ```
 
 **Output:**
@@ -321,7 +321,7 @@ Modules (5):
 ### Show Library Information
 
 ```bash
-simple script/lib_tool.spl info mylib.lsm
+simple scripts/lib_tool.spl info mylib.lsm
 ```
 
 **Output:**
@@ -344,7 +344,7 @@ Module List:
 ### Verify Integrity
 
 ```bash
-simple script/lib_tool.spl verify mylib.lsm
+simple scripts/lib_tool.spl verify mylib.lsm
 ```
 
 **Output:**
@@ -369,10 +369,10 @@ Results:
 
 ```bash
 # Extract to default name
-simple script/lib_tool.spl extract mylib.lsm math/add
+simple scripts/lib_tool.spl extract mylib.lsm math/add
 
 # Extract to custom path
-simple script/lib_tool.spl extract mylib.lsm math/add --output=my_add.smf
+simple scripts/lib_tool.spl extract mylib.lsm math/add --output=my_add.smf
 ```
 
 ---
@@ -431,13 +431,13 @@ Use clear, hierarchical names:
 
 ```bash
 # 1. Compile source to SMF + objects
-simple script/compile_with_objects.spl --input-dir=src
+simple scripts/compile_with_objects.spl --input-dir=src
 
 # 2. Build library
-simple script/build_libstd.spl
+simple scripts/build_libstd.spl
 
 # 3. Verify
-simple script/lib_tool.spl verify build/lib/libstd.lsm
+simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
 # 4. Install (optional)
 sudo cp build/lib/libstd.lsm /usr/lib/simple/
@@ -449,9 +449,9 @@ sudo cp build/lib/libstd.lsm /usr/lib/simple/
 # .github/workflows/build.yml
 - name: Build Standard Library
   run: |
-    simple script/compile_with_objects.spl --input-dir=src/std
-    simple script/build_libstd.spl
-    simple script/lib_tool.spl verify build/lib/libstd.lsm
+    simple scripts/compile_with_objects.spl --input-dir=src/std
+    simple scripts/build_libstd.spl
+    simple scripts/lib_tool.spl verify build/lib/libstd.lsm
 
 - name: Upload Library
   uses: actions/upload-artifact@v3
@@ -479,7 +479,7 @@ Error: Module not found: 'std/io/mod'
 
 2. Check library contains module:
    ```bash
-   simple script/lib_tool.spl list libstd.lsm | grep "io/mod"
+   simple scripts/lib_tool.spl list libstd.lsm | grep "io/mod"
    ```
 
 3. Verify library path:
@@ -504,7 +504,7 @@ Error: Object file not found for module 'std/io/mod'
 
 2. Use helper script:
    ```bash
-   simple script/compile_with_objects.spl --input-dir=src/std
+   simple scripts/compile_with_objects.spl --input-dir=src/std
    ```
 
 3. Check object location:
@@ -524,7 +524,7 @@ Error: Hash mismatch for module 'math/add'
 **Solutions:**
 1. Rebuild library:
    ```bash
-   simple script/build_libstd.spl
+   simple scripts/build_libstd.spl
    ```
 
 2. Verify SMF file integrity:
@@ -534,7 +534,7 @@ Error: Hash mismatch for module 'math/add'
 
 3. Check for corruption:
    ```bash
-   simple script/lib_tool.spl verify mylib.lsm
+   simple scripts/lib_tool.spl verify mylib.lsm
    ```
 
 ### Undefined Symbol
@@ -553,7 +553,7 @@ Error: Undefined symbol 'unknown_function'
 
 2. Verify module is compiled:
    ```bash
-   simple script/lib_tool.spl list mylib.lsm
+   simple scripts/lib_tool.spl list mylib.lsm
    ```
 
 3. Check library is in path:
@@ -663,7 +663,7 @@ export mul
 # Compile and package
 simple compile math/add.spl --emit-smf -o add.smf
 simple compile math/mul.spl --emit-smf -o mul.smf
-simple script/lib_tool.spl create libmath.lsm add.smf mul.smf
+simple scripts/lib_tool.spl create libmath.lsm add.smf mul.smf
 ```
 
 **Use:**
@@ -710,11 +710,11 @@ fn main():
 **Package for distribution:**
 ```bash
 # Build
-simple script/compile_with_objects.spl --input-dir=mylib
-simple script/build_libstd.spl --output=dist/mylib.lsm
+simple scripts/compile_with_objects.spl --input-dir=mylib
+simple scripts/build_libstd.spl --output=dist/mylib.lsm
 
 # Verify
-simple script/lib_tool.spl verify dist/mylib.lsm
+simple scripts/lib_tool.spl verify dist/mylib.lsm
 
 # Package
 tar czf mylib-1.0.0.tar.gz dist/mylib.lsm README.md LICENSE

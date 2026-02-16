@@ -63,7 +63,7 @@ bin/simple test --batch test/lib --abort-threshold=50
 
 #### 1.1 Fix Constructor Anti-Pattern Script ✅
 
-**File Created:** `script/fix_new_constructors.spl`
+**File Created:** `scripts/fix_new_constructors.spl`
 
 **Features:**
 - Detect `ClassName.new(...)` patterns
@@ -82,7 +82,7 @@ bin/simple fix-new-constructors test/lib --test-after-fix --rollback-on-fail
 
 #### 1.2 Fix Bare Imports Script ✅
 
-**File Created:** `script/fix_bare_imports.spl`
+**File Created:** `scripts/fix_bare_imports.spl`
 
 **Features:**
 - Detect bare `use module` statements
@@ -102,14 +102,14 @@ bin/simple fix-bare-imports test/lib --strategy=wildcard
 
 **Status:** Not yet implemented
 
-**Next Step:** Create `script/fix_inline_if_else.spl`
+**Next Step:** Create `scripts/fix_inline_if_else.spl`
 
 #### 1.4 Add Missing Type Imports Script (PLANNED)
 
 **Status:** Not yet implemented
 
 **Dependencies:** Build type index first
-**Next Step:** Create `script/fix_missing_types.spl`
+**Next Step:** Create `scripts/fix_missing_types.spl`
 
 ---
 
@@ -164,8 +164,8 @@ cp build/bootstrap/simple bin/bootstrap/simple
 |------|---------|-------|--------|
 | `src/app/cli/commands/test_batch.spl` | Batch test runner | 138 | ✅ Complete |
 | `src/app/cli/commands/test_analyze.spl` | Failure analyzer | 162 | ✅ Complete |
-| `script/fix_new_constructors.spl` | Constructor fixer | 153 | ✅ Complete |
-| `script/fix_bare_imports.spl` | Import fixer | 142 | ✅ Complete |
+| `scripts/fix_new_constructors.spl` | Constructor fixer | 153 | ✅ Complete |
+| `scripts/fix_bare_imports.spl` | Import fixer | 142 | ✅ Complete |
 
 ### Modified Files
 

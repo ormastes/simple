@@ -79,7 +79,7 @@ Push status: SUCCESS ✅
 **Duration:** ~5-10 minutes
 **Purpose:** Test macOS self-hosting
 
-**Script:** `script/test-macos-self-hosting.sh`
+**Script:** `scripts/test-macos-self-hosting.sh`
 
 **Tests:**
 - Bootstrap verification
@@ -99,7 +99,7 @@ Push status: SUCCESS ✅
 **Duration:** ~5-10 minutes
 **Purpose:** Test macOS self-hosting on ARM64
 
-**Script:** `script/test-macos-self-hosting.sh`
+**Script:** `scripts/test-macos-self-hosting.sh`
 
 **Tests:** Same as test-macos-x86_64
 

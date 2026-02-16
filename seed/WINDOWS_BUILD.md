@@ -444,7 +444,7 @@ After successfully building:
 
 1. **Run tests:** `runtime_test.exe` (should pass all 202 tests)
 2. **Test transpilation:** `seed_cpp.exe example.spl > example.cpp`
-3. **Bootstrap compiler:** See `../script/bootstrap-from-scratch.sh`
+3. **Bootstrap compiler:** See `../scripts/bootstrap-from-scratch.sh`
 4. **Read main docs:** `../README.md` and `../doc/guide/bootstrap.md`
 
 For issues, see [Troubleshooting](#troubleshooting) or file a bug report.

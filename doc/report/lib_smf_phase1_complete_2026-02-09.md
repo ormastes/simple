@@ -129,7 +129,7 @@ fn extract_objects_from_resolved(
 - Writes object data to temp files using `write_bytes_to_file()`
 - Includes temp object files in final link command
 
-### 6. Updated Build Script (script/build_libstd.spl)
+### 6. Updated Build Script (scripts/build_libstd.spl)
 
 **New command-line options:**
 - `--with-objects` - Include object files in library
@@ -230,7 +230,7 @@ fn write_bytes_to_file(path: text, data: [u8]) -> bool:
 | `src/compiler/linker/lib_smf_reader.spl` | +60 | Added object extraction methods |
 | `src/compiler/linker/smf_getter.spl` | +30 | Added get_object() method |
 | `src/compiler/linker/linker_wrapper_lib_support.spl` | +80 | Object extraction and linking |
-| `script/build_libstd.spl` | +80 | --with-objects option |
+| `scripts/build_libstd.spl` | +80 | --with-objects option |
 | `examples/lib_smf/test_lib_with_objects.spl` | +100 (new) | Integration test |
 | **Total** | **~500 lines** | - |
 
@@ -245,7 +245,7 @@ fn write_bytes_to_file(path: text, data: [u8]) -> bool:
 bin/simple build src/std --emit-obj -o build/obj/
 
 # Build library with object files
-bin/simple script/build_libstd.spl --with-objects --obj-dir=build/obj
+bin/simple scripts/build_libstd.spl --with-objects --obj-dir=build/obj
 
 # Verify library contents
 bin/simple lib list build/lib/libstd.lsm
@@ -299,7 +299,7 @@ val obj_data = reader.get_object("std/io/mod")?
    bin/simple build src/std --emit-obj -o build/obj/
 
    # Then create library
-   bin/simple script/build_libstd.spl --with-objects --verbose
+   bin/simple scripts/build_libstd.spl --with-objects --verbose
    ```
    Expected: Reports "N modules with object files"
 

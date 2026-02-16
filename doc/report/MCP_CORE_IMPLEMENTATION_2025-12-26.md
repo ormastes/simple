@@ -313,7 +313,7 @@ Filed 5 improvement requests in `simple/improve_request.md`:
    - `write_file(path: String, content: String) -> Result[(), IoError]`
    - Wire to existing Rust runtime functions
 
-2. **Add string methods** to `simple/std_lib/src/core/string.spl`
+2. **Add string methods** to `simple/std_lib/src/core/text.spl`
    - `substring()`, `find()`, `char_at()`, `strip()` at minimum
    - Consider full Python/JS-like string API
 

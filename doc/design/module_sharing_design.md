@@ -750,7 +750,7 @@ current working implementation lives in:
 │  STANDARD LIBRARY (already in Simple)                                   │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │  log.spl, db.spl, config.spl, di.spl, time.spl                  │   │
-│  │  map.spl, set.spl, list.spl, string.spl                         │   │
+│  │  map.spl, set.spl, list.spl, text.spl                         │   │
 │  │  file.spl, net.spl, json.spl, regex.spl                         │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │

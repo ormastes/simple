@@ -555,7 +555,7 @@ Simple LSP uses **incremental sync** for efficiency.
 
 3. **Check imports:**
    ```simple
-   use std.string  # Import required for resolution
+   use std.text  # Import required for resolution
    ```
 
 ### Problem: Diagnostics are slow

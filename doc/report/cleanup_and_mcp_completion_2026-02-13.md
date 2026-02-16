@@ -163,7 +163,7 @@ From the original TODO plan (269 items remaining):
 6. bcrypt/CBOR refactoring (3-5 days each) - DEFERRED
 
 **High Priority (Unblocked):**
-- Dead code elimination in std.string, std.array, std.math (grep-based, ~2 days)
+- Dead code elimination in std.text, std.array, std.math (grep-based, ~2 days)
 - Duplicate test removal (grep `expect.*\.to_equal.*\.to_equal`, ~4 hours)
 - Add comprehensive SDN parser tests (~1 day)
 

@@ -176,7 +176,7 @@ bin/simple test_import_fix.spl  # ✅ Works!
 
 ### Phase 2.1: String Methods (100+ tests)
 ```simple
-use std.string.{string_trim, string_split, to_int_or}
+use std.text.{string_trim, string_split, to_int_or}
 
 fn main():
     val trimmed = string_trim("  hello  ")        # ✅ Will work

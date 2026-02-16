@@ -12,13 +12,13 @@ All three bootstrap scripts now support building the Simple compiler in a QEMU F
 ### Linux/macOS
 ```bash
 # Auto-detect and use FreeBSD VM
-./script/bootstrap-from-scratch.sh --qemu-freebsd
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd
 
 # Specify VM path
-./script/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=/path/to/freebsd.qcow2
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=/path/to/freebsd.qcow2
 
 # Custom SSH port
-./script/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
 ```
 
 ### Windows
@@ -33,10 +33,10 @@ script\bootstrap-from-scratch.bat --qemu-freebsd --qemu-vm=C:\VMs\freebsd.qcow2
 ### Simple Language
 ```bash
 # Using the Simple script
-bin/release/simple script/bootstrap-multiphase.spl --qemu-freebsd
+bin/release/simple scripts/bootstrap-multiphase.spl --qemu-freebsd
 
 # With custom settings
-bin/release/simple script/bootstrap-multiphase.spl --qemu-freebsd --qemu-vm=/path/to/vm --qemu-port=10022
+bin/release/simple scripts/bootstrap-multiphase.spl --qemu-freebsd --qemu-vm=/path/to/vm --qemu-port=10022
 ```
 
 ## Prerequisites
@@ -72,7 +72,7 @@ The scripts auto-detect VM images in these locations:
 Download FreeBSD VM:
 ```bash
 # Using Simple's download script
-bin/simple script/download_qemu.spl freebsd
+bin/simple scripts/download_qemu.spl freebsd
 
 # Or manually from FreeBSD.org
 wget https://download.freebsd.org/releases/VM-IMAGES/14.3-RELEASE/amd64/Latest/FreeBSD-14.3-RELEASE-amd64.qcow2.xz
@@ -131,7 +131,7 @@ Default SSH port: `10022` (host) → `22` (guest)
 
 Change with `--qemu-port=N`:
 ```bash
-./script/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
 ```
 
 ### VM Resources
@@ -208,7 +208,7 @@ Default QEMU settings:
 ### Build Failures
 
 **Error**: `FreeBSD VM bootstrap failed`
-- **Fix**: Check FreeBSD script exists: `script/bootstrap-from-scratch-freebsd.sh`
+- **Fix**: Check FreeBSD script exists: `scripts/bootstrap-from-scratch-freebsd.sh`
 - **Fix**: Ensure dependencies installed in VM: `cmake`, `gmake`, `clang`
 
 ## Performance
@@ -236,10 +236,10 @@ Default QEMU settings:
 Run multiple FreeBSD versions:
 ```bash
 # FreeBSD 14
-./script/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd14.qcow2 --qemu-port=10022
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd14.qcow2 --qemu-port=10022
 
 # FreeBSD 13
-./script/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd13.qcow2 --qemu-port=10023
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd13.qcow2 --qemu-port=10023
 ```
 
 ### Headless Server
@@ -248,7 +248,7 @@ The scripts use QEMU's `-nographic` mode, suitable for headless servers:
 ```bash
 # Works over SSH
 ssh build-server
-./script/bootstrap-from-scratch.sh --qemu-freebsd
+./scripts/bootstrap-from-scratch.sh --qemu-freebsd
 ```
 
 ### CI/CD Integration
@@ -266,7 +266,7 @@ Example GitHub Actions:
     mv FreeBSD-14.3-RELEASE-amd64.qcow2 build/freebsd/vm/
 
 - name: Bootstrap FreeBSD Build
-  run: ./script/bootstrap-from-scratch.sh --qemu-freebsd --skip-verify
+  run: ./scripts/bootstrap-from-scratch.sh --qemu-freebsd --skip-verify
 ```
 
 ## Architecture
@@ -300,7 +300,7 @@ Excluded directories (not synced to VM):
 Included:
 - `src/` (all source code)
 - `seed/` (seed compiler sources)
-- `script/` (bootstrap scripts)
+- `scripts/` (bootstrap scripts)
 - `test/` (test suite)
 - `doc/` (documentation)
 

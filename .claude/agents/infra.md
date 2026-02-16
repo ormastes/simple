@@ -55,7 +55,7 @@ db.save()
 
 | Module | Location | Functions |
 |--------|----------|-----------|
-| String | `src/std/string.spl` | String utilities |
+| String | `src/std/text.spl` | String utilities |
 | Math | `src/std/math.spl` | Math functions |
 | Path | `src/std/path.spl` | Path utilities (13 functions) |
 | Array | `src/std/array.spl` | Collection methods |

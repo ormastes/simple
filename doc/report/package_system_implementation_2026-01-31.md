@@ -59,7 +59,7 @@ src/app/package/
 ├── verify.spl            # Package verification ✅
 └── upgrade.spl           # Package upgrade ✅
 
-script/
+scripts/
 ├── build-bootstrap.sh    # Bootstrap builder ✅
 ├── build-full.sh         # Full package builder ✅
 └── install.sh            # Quick installer ✅
@@ -114,7 +114,7 @@ simple-bootstrap-0.3.0-linux-x86_64.spk
 ### Build Test ✅
 
 ```bash
-$ ./script/build-bootstrap.sh
+$ ./scripts/build-bootstrap.sh
 Building Simple Bootstrap Package
 Platform: linux-x86_64
 Version:  0.3.0

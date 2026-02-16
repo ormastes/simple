@@ -205,7 +205,7 @@ print y.shape()  # [32, 64] - shape tracking works
 To enable full PyTorch integration:
 
 1. **Modify seed compiler build** to link `libsimple_torch_ffi.so`
-2. **Rebuild runtime** with `script/install.sh` (or equivalent)
+2. **Rebuild runtime** with `scripts/install.sh` (or equivalent)
 3. **Verify symbols** with `nm bin/release/simple | grep rt_torch`
 4. **Test examples** with `bin/simple examples/torch/basics/01_tensor_creation.spl`
 5. **Run test suite** with `bin/simple test test/system/dl_examples_system_spec.spl`

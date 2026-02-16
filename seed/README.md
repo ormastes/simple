@@ -231,7 +231,7 @@ Step 4: Full1 (Core2 compiles full compiler)
 Step 5: Full2 (Full1 self-compiles for reproducibility)
 ```
 
-See `../script/bootstrap-from-scratch.sh` for the complete bootstrap process.
+See `../scripts/bootstrap-from-scratch.sh` for the complete bootstrap process.
 
 ## License
 
@@ -240,7 +240,7 @@ Part of the Simple Language project. See top-level LICENSE file.
 ## References
 
 - **Main Project:** `../README.md`
-- **Bootstrap Script:** `../script/bootstrap-from-scratch.sh`
+- **Bootstrap Script:** `../scripts/bootstrap-from-scratch.sh`
 - **Windows Build Guide:** `WINDOWS_BUILD.md` (ClangCL and MinGW instructions)
 - **Platform API:** `platform/PLATFORM_API.md` (Platform abstraction layer)
 - **Architecture:** `ARCHITECTURE.md` (Seed compiler design)

@@ -189,7 +189,7 @@ Time: 41ms
 - ⏸️ Platform-specific object file formats
 
 **Deferred (Integration with Build System):**
-- ⏸️ Build script integration (script/build_libstd.spl)
+- ⏸️ Build script integration (scripts/build_libstd.spl)
 - ⏸️ Compiler driver integration
 - ⏸️ Real stdlib linking
 

@@ -138,8 +138,8 @@ Switch from C codegen to native x86-64/ARM64:
 - `doc/report/seed_cpp_main_fix_2026-02-13.md` - Bug fix details
 - `doc/design/seed_cpp_translation_capabilities.md` - Feature matrix
 - `doc/report/bootstrap_progress_2026-02-13.md` - This file
-- `script/bootstrap-fixed.sh` - Updated bootstrap script
-- `script/bootstrap-minimal.sh` - Minimal bootstrap (excludes complex files)
+- `scripts/bootstrap-fixed.sh` - Updated bootstrap script
+- `scripts/bootstrap-minimal.sh` - Minimal bootstrap (excludes complex files)
 
 ## Metrics
 
