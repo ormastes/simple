@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 42531ms |
+| Duration | 44151ms |
 
 **Status: PASS**
 
@@ -90,7 +90,7 @@
 | test/unit/compiler/bidir_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bidir_type_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bitfield_mir_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 5ms |
+| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 4ms |
 | test/unit/compiler/blocks/block_outline_info_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/block_skip_policy_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/builder_api_basic_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -165,6 +165,7 @@
 | test/unit/compiler/execution_manager_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/extensions_phases_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/extensions_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/feature_ports_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/gc_safety_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/generic_template_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/hir_async_errors_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -281,6 +282,7 @@
 | test/unit/compiler/state_enum_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/suspension_analysis_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/target/riscv32_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/transform_adapters_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/type_checker/type_inference_executable_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/type_checker/type_inference_v2_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/type_infer_comprehensive_spec.spl | 0 | 0 | 0 | 0 | 0ms |
