@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 42392ms |
+| Duration | 42531ms |
 
 **Status: PASS**
 
@@ -90,7 +90,7 @@
 | test/unit/compiler/bidir_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bidir_type_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bitfield_mir_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 4ms |
+| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 5ms |
 | test/unit/compiler/blocks/block_outline_info_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/block_skip_policy_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/builder_api_basic_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -178,6 +178,7 @@
 | test/unit/compiler/import_resolution_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/inline_asm_constraints_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/inline_asm_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/interpreter_backend_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/jit_context_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/lexer_comprehensive_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/lexer_import_debug_spec.spl | 0 | 0 | 0 | 0 | 0ms |
