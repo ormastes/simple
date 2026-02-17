@@ -11,6 +11,7 @@ use mcp_lib.helpers.{LB, RB, Q, jp, js, jo1, jo2, jo3, parse_int, min_int, extra
 use app.mcp.helpers.{escape_json, register_tool}
 use app.mcp.diag_core.{DiagEntry, DiagResult, run_diagnostics, overlay_virtual_text, diag_result_to_json, severity_tag, diag_entries_to_json}
 use std.text.{NL}
+use app.mcp.outline_renderer.{render_outline, expand_at_source}
 
 # ============================================================================
 # Tool Schemas
@@ -19,7 +20,7 @@ use std.text.{NL}
 fn schema_simple_read() -> text:
     val path_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file to read")))
     val hints_prop = jo2(jp("type", js("string")), jp("description", js("Show easyfix hints (true/false, default: true)")))
-    val fold_prop = jo2(jp("type", js("string")), jp("description", js("Fold mode: compact or expanded (default: compact)")))
+    val fold_prop = jo2(jp("type", js("string")), jp("description", js("Fold mode: full (inline annotations, default), outline (block-mark collapsed), compact (block-mark grouped)")))
     val offset_prop = jo2(jp("type", js("string")), jp("description", js("Start line number (1-based, default: 1)")))
     val limit_prop = jo2(jp("type", js("string")), jp("description", js("Maximum lines to show (default: all)")))
     var props = LB()
@@ -68,6 +69,8 @@ fn handle_simple_read(id: text, body: text) -> text:
     var fold = "compact"
     if fold_mode == "expanded":
         fold = "expanded"
+    elif fold_mode == "full":
+        fold = "compact"
 
     val offset_str = extract_arg(body, "offset")
     var offset = 1
@@ -92,6 +95,19 @@ fn handle_simple_read(id: text, body: text) -> text:
 
     # Run diagnostics
     val diag = run_diagnostics(path)
+
+    # Handle outline/compact modes via outline renderer (no offset/limit)
+    val use_outline = fold_mode == "outline" or fold_mode == "compact"
+    if use_outline:
+        val outlined = render_outline(source, diag.entries, fold_mode)
+        var ol_header = "-- " + path
+        if diag.error_count > 0 or diag.warning_count > 0:
+            ol_header = ol_header + " [" + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W]"
+        else:
+            ol_header = ol_header + " [clean]"
+        ol_header = ol_header + " --" + NL
+        val ol_output = ol_header + outlined
+        return make_tool_result(id, ol_output)
 
     # Apply offset/limit to source
     val all_lines = source.split(NL)
@@ -124,7 +140,7 @@ fn handle_simple_read(id: text, body: text) -> text:
         header = header + " [" + diag.error_count.to_string() + "E " + diag.warning_count.to_string() + "W]"
     else:
         header = header + " [clean]"
-    header = header + " --{NL}"
+    header = header + " --" + NL
 
     # Build footer
     var footer = "-- " + diag.error_count.to_string() + " error(s), " + diag.warning_count.to_string() + " warning(s) --"
@@ -284,6 +300,38 @@ fn handle_simple_status(id: text, body: text) -> text:
 
     make_tool_result(id, output)
 
+fn schema_expand_at() -> text:
+    val path_prop = jo2(jp("type", js("string")), jp("description", js("Path to .spl file")))
+    val selector_prop = jo2(jp("type", js("string")), jp("description", js("Symbol name or line:N to expand")))
+    val what_prop = jo2(jp("type", js("string")), jp("description", js("What to return: body, signature, or all (default)")))
+    var props = LB()
+    props = props + jp("path", path_prop)
+    props = props + "," + jp("selector", selector_prop)
+    props = props + "," + jp("what", what_prop)
+    props = props + RB()
+    make_tool_schema_multi("simple_expand_at", "Expand a single symbol in block-mark format", props, "[" + js("path") + "," + js("selector") + "]", true, false, true)
+
+fn handle_expand_at(id: text, body: text) -> text:
+    val path = extract_arg(body, "path")
+    if path == "":
+        return make_error_response(id, -32602, "Missing required parameter: path")
+
+    val selector = extract_arg(body, "selector")
+    if selector == "":
+        return make_error_response(id, -32602, "Missing required parameter: selector")
+
+    val what = extract_arg(body, "what")
+    var what_mode = "all"
+    if what == "body" or what == "signature":
+        what_mode = what
+
+    val source = file_read(path)
+    if source == "":
+        return make_error_response(id, -32602, "Could not read file: " + path)
+
+    val result = expand_at_source(source, selector, what_mode)
+    make_tool_result(id, result)
+
 # ============================================================================
 # Symbol extraction helpers
 # ============================================================================
@@ -315,5 +363,5 @@ fn extract_signature(line: text) -> text:
 # Exports
 # ============================================================================
 
-export handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status
-export schema_simple_read, schema_simple_check, schema_simple_symbols, schema_simple_status
+export handle_simple_read, handle_simple_check, handle_simple_symbols, handle_simple_status, handle_expand_at
+export schema_simple_read, schema_simple_check, schema_simple_symbols, schema_simple_status, schema_expand_at
