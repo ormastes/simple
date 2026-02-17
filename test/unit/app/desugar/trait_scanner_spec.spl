@@ -1,0 +1,109 @@
+# Trait Scanner Unit Tests
+#
+# Tests the trait_scanner module which scans Simple source text
+# for trait definitions and extracts method signatures.
+#
+# This scanner is used by the forwarding desugar pass to generate
+# delegation methods from `alias TraitName = field` declarations.
+
+use app.desugar.trait_scanner (scan_traits, find_trait, ScannedTrait, TraitMethod)
+use std.text.{NL}
+
+describe "scan_traits":
+
+    it "finds a simple trait with fn methods":
+        var src = "trait Sizeable:" + NL
+        src = src + "    fn size() -> i64" + NL
+        src = src + "    fn is_empty() -> bool" + NL
+        val traits = scan_traits(src)
+        expect(traits.len()).to_equal(1)
+        expect(traits[0].name).to_equal("Sizeable")
+        expect(traits[0].methods.len()).to_equal(2)
+        expect(traits[0].methods[0].name).to_equal("size")
+        expect(traits[0].methods[0].is_me).to_equal(false)
+        expect(traits[0].methods[1].name).to_equal("is_empty")
+
+    it "detects me methods":
+        var src = "trait Writable:" + NL
+        src = src + "    me write(data: text)" + NL
+        src = src + "    me clear()" + NL
+        src = src + "    fn count() -> i64" + NL
+        val traits = scan_traits(src)
+        expect(traits.len()).to_equal(1)
+        val t = traits[0]
+        expect(t.methods.len()).to_equal(3)
+        expect(t.methods[0].name).to_equal("write")
+        expect(t.methods[0].is_me).to_equal(true)
+        expect(t.methods[1].name).to_equal("clear")
+        expect(t.methods[1].is_me).to_equal(true)
+        expect(t.methods[2].name).to_equal("count")
+        expect(t.methods[2].is_me).to_equal(false)
+
+    it "extracts parameter names":
+        var src = "trait Processor:" + NL
+        src = src + "    fn process(input: text, count: i64) -> text" + NL
+        val traits = scan_traits(src)
+        val t = traits[0]
+        expect(t.methods[0].param_names.len()).to_equal(2)
+        expect(t.methods[0].param_names[0]).to_equal("input")
+        expect(t.methods[0].param_names[1]).to_equal("count")
+
+    it "finds multiple traits":
+        var src = "trait A:" + NL
+        src = src + "    fn a_method() -> i64" + NL
+        src = src + NL
+        src = src + "trait B:" + NL
+        src = src + "    me b_method()" + NL
+        val traits = scan_traits(src)
+        expect(traits.len()).to_equal(2)
+        expect(traits[0].name).to_equal("A")
+        expect(traits[1].name).to_equal("B")
+
+    it "skips comment and type lines":
+        var src = "trait Iter:" + NL
+        src = src + "    # This is a comment" + NL
+        src = src + "    type Item" + NL
+        src = src + "    fn next() -> Item" + NL
+        val traits = scan_traits(src)
+        expect(traits[0].methods.len()).to_equal(1)
+        expect(traits[0].methods[0].name).to_equal("next")
+
+    it "detects default method implementations":
+        var src = "trait Eq:" + NL
+        src = src + "    fn eq(other: Self) -> bool" + NL
+        src = src + "    fn ne(other: Self) -> bool:" + NL
+        src = src + "        not self.eq(other)" + NL
+        val traits = scan_traits(src)
+        val t = traits[0]
+        expect(t.methods.len()).to_equal(2)
+        expect(t.methods[0].name).to_equal("eq")
+        expect(t.methods[0].has_default).to_equal(false)
+        expect(t.methods[1].name).to_equal("ne")
+        expect(t.methods[1].has_default).to_equal(true)
+
+describe "find_trait":
+
+    it "returns matching trait":
+        var src = "trait Display:" + NL
+        src = src + "    fn to_string() -> text" + NL
+        val traits = scan_traits(src)
+        val found = find_trait("Display", traits)
+        expect(found.name).to_equal("Display")
+        expect(found.methods.len()).to_equal(1)
+
+    it "returns empty trait when not found":
+        var src = "trait Display:" + NL
+        src = src + "    fn to_string() -> text" + NL
+        val traits = scan_traits(src)
+        val found = find_trait("Unknown", traits)
+        expect(found.name).to_equal("Unknown")
+        expect(found.methods.len()).to_equal(0)
+
+    it "handles zero-arg methods":
+        var src = "trait Closeable:" + NL
+        src = src + "    me close()" + NL
+        val traits = scan_traits(src)
+        val t = traits[0]
+        expect(t.methods[0].name).to_equal("close")
+        expect(t.methods[0].param_names.len()).to_equal(0)
+        expect(t.methods[0].is_me).to_equal(true)

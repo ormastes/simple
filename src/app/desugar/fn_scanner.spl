@@ -1,0 +1,266 @@
+# Function Scanner - Text-Level Function Definition Scanner
+#
+# Scans raw Simple source text to find module-level function definitions and
+# extract their signatures. This is a TEXT-LEVEL scanner that runs before the
+# parser, processing raw source lines to identify fn definitions.
+#
+# Pairs with trait_scanner.spl for scanning trait definitions.
+#
+# Scanned patterns:
+#   fn greet(name: text) -> text:
+#       "Hello, {name}"
+#
+#   fn add(a: i64, b: i64) -> i64:
+#       a + b
+#
+#   fn no_args() -> i64:
+#       42
+#
+# Output:
+#   A list of ScannedFn structs, each containing the function name and a list
+#   of parameter names (without types).
+#
+# Algorithm:
+#   1. Split source by newlines
+#   2. Find lines at indent 0 matching "fn NAME(...)" pattern (module-level only)
+#   3. Extract function name and parameter names
+#   4. Return list of ScannedFn
+#
+# NOTE: This module runs on the current runtime, so it MUST NOT use
+# try/catch/throw, generics, or static fn patterns.
+# NOTE: Chained method calls are broken - use intermediate vars.
+
+use std.text.{NL}
+
+export scan_functions, find_function, ScannedFn
+
+# ================================================================
+# Output Struct
+# ================================================================
+
+struct ScannedFn:
+    name: text
+    param_names: [text]   # just names, not types: ["name"], ["a", "b"], []
+
+# ================================================================
+# Main API
+# ================================================================
+
+# Scan source text for all module-level function definitions and extract
+# their signatures.
+#
+# Splits the source into lines, identifies function definitions by their
+# header pattern ("fn NAME(...)") at indent level 0 (module-level only),
+# and parses parameter names from each function signature.
+#
+# Parameters:
+#   source: Raw Simple source code as text
+#
+# Returns:
+#   List of ScannedFn structs, one per module-level function found
+fn scan_functions(source: text) -> [ScannedFn]:
+    val lines = source.split(NL)
+    var fns = []
+    var i = 0
+
+    while i < lines.len():
+        val line = lines[i]
+
+        # Only consider lines at indent 0 (module-level)
+        if get_indent(line) != 0:
+            i = i + 1
+            continue
+
+        val trimmed = line.trim()
+
+        # Skip blank lines and comments
+        if trimmed == "":
+            i = i + 1
+            continue
+        if trimmed.starts_with("#"):
+            i = i + 1
+            continue
+
+        # Check if this line starts a function definition
+        if not trimmed.starts_with("fn "):
+            i = i + 1
+            continue
+
+        # Extract signature from after "fn "
+        val sig_rest = trimmed[3:]
+
+        # Extract function name
+        val fn_name = extract_fn_name(sig_rest)
+        if fn_name == "":
+            i = i + 1
+            continue
+
+        # Extract parameter names
+        val params = extract_param_names(sig_rest)
+
+        fns.push(ScannedFn(name: fn_name, param_names: params))
+        i = i + 1
+
+    fns
+
+# Look up a function by name from a list of scanned functions.
+#
+# Searches through the provided list for a function matching the given name.
+# If not found, returns a ScannedFn with the given name and empty param_names
+# list, allowing callers to safely use the result without nil checks.
+#
+# Parameters:
+#   name: The function name to search for
+#   fns: List of ScannedFn to search through
+#
+# Returns:
+#   The matching ScannedFn, or a ScannedFn with empty params if not found
+fn find_function(name: text, fns: [ScannedFn]) -> ScannedFn:
+    var idx = 0
+    while idx < fns.len():
+        val f = fns[idx]
+        if f.name == name:
+            return f
+        idx = idx + 1
+    # Not found - return empty
+    ScannedFn(name: name, param_names: [])
+
+# ================================================================
+# Name and Parameter Extraction
+# ================================================================
+
+# Extract the function name from the rest of a signature line (after "fn ").
+# The name is everything up to the first '(' or end of line.
+fn extract_fn_name(sig_rest: text) -> text:
+    var name = ""
+    var ci = 0
+    val slen = sig_rest.len()
+    while ci < slen:
+        val ch = sig_rest[ci:ci + 1]
+        if ch == "(" or ch == " " or ch == ":":
+            break
+        name = name + ch
+        ci = ci + 1
+    name
+
+# Extract parameter names from a function signature.
+# Given "fn_name(a: i64, b: text) -> i64:", extracts ["a", "b"].
+# Only extracts the parameter names (before the colon in each param).
+fn extract_param_names(sig_rest: text) -> [text]:
+    # Find the opening parenthesis
+    val open_paren = find_char(sig_rest, "(")
+    if open_paren < 0:
+        return []
+
+    # Find the matching closing parenthesis
+    val close_paren = find_matching_paren(sig_rest, open_paren)
+    if close_paren < 0:
+        return []
+
+    # Extract the parameter string between parens
+    val param_start = open_paren + 1
+    val params_text = sig_rest[param_start:close_paren]
+    val trimmed_params = params_text.trim()
+    if trimmed_params == "":
+        return []
+
+    # Split on commas and extract names
+    split_param_names(trimmed_params)
+
+# ================================================================
+# Self-Contained Helper Functions
+# ================================================================
+
+# Count leading spaces of a line (tabs count as 4 spaces).
+fn get_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+# Find the first occurrence of a character in a string.
+# Returns the index or -1 if not found.
+fn find_char(s: text, ch: text) -> i64:
+    var idx = 0
+    val slen = s.len()
+    while idx < slen:
+        val c = s[idx:idx + 1]
+        if c == ch:
+            return idx
+        idx = idx + 1
+    -1
+
+# Find the matching closing parenthesis for an opening paren at the given index.
+# Handles nested parentheses. Returns index of closing paren or -1.
+fn find_matching_paren(s: text, open_idx: i64) -> i64:
+    var depth = 0
+    var ci = open_idx
+    val slen = s.len()
+    while ci < slen:
+        val ch = s[ci:ci + 1]
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return ci
+        ci = ci + 1
+    -1
+
+# Split a parameter string like "a: i64, b: text" into just the names ["a", "b"].
+# For each comma-separated segment, extracts the portion before the first colon.
+# If a segment has no colon, the entire trimmed segment is used as the name.
+fn split_param_names(s: text) -> [text]:
+    var names = []
+    var current = ""
+    var idx = 0
+    val slen = s.len()
+    var paren_depth = 0
+
+    while idx < slen:
+        val ch = s[idx:idx + 1]
+        if ch == "(":
+            paren_depth = paren_depth + 1
+            current = current + ch
+        elif ch == ")":
+            paren_depth = paren_depth - 1
+            current = current + ch
+        elif ch == "," and paren_depth == 0:
+            # End of one parameter - extract name
+            val param_name = extract_name_from_param(current)
+            if param_name != "":
+                names.push(param_name)
+            current = ""
+        else:
+            current = current + ch
+        idx = idx + 1
+
+    # Handle the last parameter
+    val last_name = extract_name_from_param(current)
+    if last_name != "":
+        names.push(last_name)
+
+    names
+
+# Extract the parameter name from a single parameter declaration.
+# Given "name: Type" returns "name". Given "name" returns "name".
+fn extract_name_from_param(param: text) -> text:
+    val trimmed = param.trim()
+    if trimmed == "":
+        return ""
+
+    # Find colon - name is everything before it
+    val colon_idx = find_char(trimmed, ":")
+    if colon_idx > 0:
+        val name_part = trimmed[0:colon_idx]
+        return name_part.trim()
+
+    # No colon - the whole thing is the name
+    trimmed

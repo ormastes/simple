@@ -23,6 +23,35 @@ fn record_decision(file: text, line: i64, taken: bool):
 # Basic runtime type checking for function parameters
 
 use core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name}
+
+# ===== Structural Subtyping =====
+# Check if a struct value has all the fields declared in a named struct type.
+# This implements Go-style structural subtyping / duck typing:
+# if struct A has all fields of struct B, then A satisfies B.
+#
+# Parameters:
+#   vid           - value_id of the struct value being checked
+#   expected_name - name of the expected struct type (e.g. "OrderRepoPort")
+#
+# Returns true if the value has all required fields, false otherwise.
+fn struct_satisfies(vid: i64, expected_name: text) -> bool:
+    # Look up the expected struct declaration by name
+    val decl_id = struct_table_lookup(expected_name)
+    if decl_id < 0:
+        # Unknown expected type — allow (cannot validate)
+        return true
+    # Get the field names that the expected type requires
+    val required_fields = decl_get_fields(decl_id)
+    if required_fields.len() == 0:
+        # No required fields — any struct satisfies an empty struct
+        return true
+    # Check that the actual struct value has each required field
+    for fname in required_fields:
+        val fi = val_struct_find_field_idx(vid, fname)
+        if fi < 0:
+            return false
+    true
 
 fn type_check_value(value_id: i64, expected_type: i64) -> bool:
     # TYPE_ANY or TYPE_VOID means no constraint
@@ -48,6 +77,28 @@ fn type_check_value(value_id: i64, expected_type: i64) -> bool:
         return kind == VAL_FLOAT
     if expected_type == TYPE_TEXT:
         return kind == VAL_TEXT
+
+    # Structural subtyping for named struct types (TYPE_NAMED_BASE + id)
+    # If expected type is a named struct, check structural compatibility:
+    # the actual value must be a struct with all required fields.
+    if expected_type >= TYPE_NAMED_BASE:
+        if kind != VAL_STRUCT:
+            # Non-struct value cannot satisfy a struct type
+            return false
+        val nid = expected_type - TYPE_NAMED_BASE
+        val expected_name = named_type_name(nid)
+        if expected_name == "":
+            return true
+        # Same type name — exact match, always compatible
+        val actual_name = val_get_struct_name(value_id)
+        if actual_name == expected_name:
+            return true
+        # Different type name — apply structural subtyping check
+        return struct_satisfies(value_id, expected_name)
+
+    # TYPE_STRUCT (generic struct tag) — any struct satisfies
+    if expected_type == TYPE_STRUCT:
+        return kind == VAL_STRUCT
 
     # Default: allow if we don't recognize the type
     true
@@ -1064,7 +1115,9 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
     last_val
 
 fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
-    val field_names = decl_get(decl_id).field_names
+    val d_node = decl_get(decl_id)
+    val field_names = d_node.field_names
+    val field_defaults = d_node.field_defaults
     var field_values: [i64] = []
 
     # Evaluate arguments (positional mapping to fields)
@@ -1073,13 +1126,20 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
         if eval_had_error: return -1
         field_values.push(av)
 
-    # Fill remaining fields with nil (only push for fields not yet filled)
+    # Fill remaining fields with defaults or nil
     val num_filled = field_values.len()
-    val num_fields = field_names.len()
     var i: i64 = 0
     for unused in field_names:
         if i >= num_filled:
-            field_values.push(val_make_nil())
+            var fv: i64 = -1
+            if i < field_defaults.len():
+                val def_eid = field_defaults[i]
+                if def_eid >= 0:
+                    fv = eval_expr(def_eid)
+                    if eval_had_error: return -1
+            if fv < 0:
+                fv = val_make_nil()
+            field_values.push(fv)
         i = i + 1
 
     val_make_struct(name, field_names, field_values)

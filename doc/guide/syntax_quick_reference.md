@@ -1,6 +1,6 @@
 # Simple Language Syntax Quick Reference
 
-**Last Updated:** 2026-01-26
+**Last Updated:** 2026-02-17
 
 A comprehensive reference for Simple's syntax features. All features listed here are **implemented and working**.
 
@@ -26,6 +26,7 @@ A comprehensive reference for Simple's syntax features. All features listed here
 - [Tensor & Matrix Operators](#tensor--matrix-operators)
 - [Ranges](#ranges)
 - [Resource Cleanup](#resource-cleanup)
+- [Traits](#traits)
 
 ---
 
@@ -86,6 +87,8 @@ type Handler = fn(Event) -> ()
 ```
 
 ### Class Alias
+
+**Note:** `alias` creates an alternative **name** for an existing class -- it is NOT inheritance. Simple does not support `class Child(Parent):` syntax. See [Not Part of Simple's Design](#not-part-of-simples-design) for alternatives.
 
 ```simple
 # Class/struct alias (using 'alias' keyword)
@@ -980,6 +983,66 @@ impl MyResource:
 
 ---
 
+## Traits
+
+The `trait` keyword defines an interface as a struct-with-fn-fields. Traits desugar at compile time
+via the desugar pass (`src/app/desugar/trait_scanner.spl`, `src/app/desugar/forwarding.spl`).
+
+### Declaring a Trait
+
+```simple
+trait OrderRepo:
+    fn save(order: text)
+    fn find(id: text) -> text
+    fn list() -> [text]
+```
+
+Abstract methods (no body) become fn-fields in the generated struct. Methods with a default body are
+skipped -- concrete implementations provide them.
+
+### Implementing a Trait
+
+```simple
+impl OrderRepo for sql:
+    fn save(order: text): sql_insert(order)
+    fn find(id: text) -> text: sql_select(id)
+    fn list() -> [text]: sql_select_all()
+```
+
+This generates a factory function `sql_as_OrderRepo() -> OrderRepo` that constructs the struct with
+the provided implementations.
+
+### Forwarding a Trait to a Field
+
+Use `alias Trait = field` inside a class body to forward all abstract methods of the trait to a
+composed field:
+
+```simple
+class Logger with Printable, Clickable:
+    printer: Printer
+    handler: Handler
+    alias Printable = printer    # all Printable abstract methods forwarded to printer
+    alias Clickable = handler    # all Clickable abstract methods forwarded to handler
+    fn on_click(event: Event):   # explicit fn overrides forwarded method
+        handle_click(event)
+```
+
+See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16.md) for full
+forwarding syntax and design rationale.
+
+### Existing Trait Example (Resource)
+
+The built-in `Resource` trait uses the same syntax:
+
+```simple
+trait Resource:
+    fn close()
+    fn is_open() -> bool
+    fn resource_name() -> text
+```
+
+---
+
 ## Not Yet Implemented
 
 These features are **not available**:
@@ -989,6 +1052,20 @@ These features are **not available**:
 | Byte strings `b"..."` | Use array of bytes |
 | For-else | Use flag variable |
 | Elvis `?:` | Use `??` instead |
+
+### Not Part of Simple's Design
+
+**Class inheritance (`class Child(Parent):`) is NOT supported** and will not be implemented. Simple intentionally avoids implementation inheritance. Use these patterns instead:
+
+| Pattern | Syntax | Purpose |
+|---------|--------|---------|
+| **Composition** | `class X: inner: OtherType` | Embed and delegate to fields |
+| **Alias forwarding** | `alias TraitName = field` | Auto-forward trait methods to a field |
+| **Traits/mixins** | `struct X with Mixin:` | Mix in shared behavior |
+| **Type alias** | `type NewName = Existing` | Create alternative type names |
+| **Class alias** | `alias NewName = Existing` | Create alternative class names |
+
+See [No-Inheritance Ergonomics](../research/no_inheritance_ergonomics_2026-02-16.md) for the full design rationale.
 
 ---
 

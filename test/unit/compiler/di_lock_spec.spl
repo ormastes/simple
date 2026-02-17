@@ -1,0 +1,141 @@
+# DI Container System Test Lock
+#
+# Tests that DI modifications are blocked during system tests
+# unless @di_test tag is present.
+
+use compiler.di.{DiContainer, di_is_system_test_locked}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text)
+
+describe "DI Container Lock":
+
+    describe "explicit lock":
+        it "blocks bind when locked":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("Foo", 42)
+            expect(di.has("Foo")).to_equal(true)
+
+            di.lock()
+            di.bind_instance("Bar", 99)
+            expect(di.has("Bar")).to_equal(false)
+
+        it "blocks bind factory when locked":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.lock()
+            di.bind("Baz", fn(): 123)
+            expect(di.has("Baz")).to_equal(false)
+
+        it "allows bind after unlock":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.lock()
+            di.bind_instance("Foo", 42)
+            expect(di.has("Foo")).to_equal(false)
+
+            di.unlock()
+            di.bind_instance("Foo", 42)
+            expect(di.has("Foo")).to_equal(true)
+
+        it "is_locked returns true when locked":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            expect(di.is_locked()).to_equal(false)
+            di.lock()
+            expect(di.is_locked()).to_equal(true)
+
+        it "resolve still works when locked":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("Svc", "hello")
+            di.lock()
+            expect(di.resolve("Svc")).to_equal("hello")
+
+    describe "env-var based lock":
+        it "blocks bind when SIMPLE_SYSTEM_TEST=1":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("MockService", "mock")
+            expect(di.has("MockService")).to_equal(false)
+
+            # Cleanup
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+
+        it "allows bind when SIMPLE_SYSTEM_TEST=0":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("RealService", "real")
+            expect(di.has("RealService")).to_equal(true)
+
+        it "allows bind when @di_test bypasses lock":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+            rt_env_set("SIMPLE_DI_TEST", "1")
+
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("TestMock", "mock")
+            expect(di.has("TestMock")).to_equal(true)
+
+            # Cleanup
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+        it "is_locked reflects env state":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            expect(di.is_locked()).to_equal(true)
+
+            rt_env_set("SIMPLE_DI_TEST", "1")
+            expect(di.is_locked()).to_equal(false)
+
+            # Cleanup
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+    describe "di_is_system_test_locked":
+        it "returns false when no env var set":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "")
+            rt_env_set("SIMPLE_DI_TEST", "")
+            expect(di_is_system_test_locked()).to_equal(false)
+
+        it "returns true when system test without di_test":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+            expect(di_is_system_test_locked()).to_equal(true)
+
+            # Cleanup
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+
+        it "returns false when di_test allows":
+            rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+            rt_env_set("SIMPLE_DI_TEST", "1")
+            expect(di_is_system_test_locked()).to_equal(false)
+
+            # Cleanup
+            rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+            rt_env_set("SIMPLE_DI_TEST", "0")
+
+    describe "locked preserves existing bindings":
+        it "pre-lock bindings remain resolvable":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("Backend", "production-backend")
+            di.bind_instance("Logger", "file-logger")
+            di.lock()
+
+            # Existing bindings work
+            expect(di.resolve("Backend")).to_equal("production-backend")
+            expect(di.resolve("Logger")).to_equal("file-logger")
+
+            # New bindings rejected
+            di.bind_instance("Backend", "mock-backend")
+            expect(di.resolve("Backend")).to_equal("production-backend")
+
+        it "resolve_or works when locked":
+            val di = DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+            di.bind_instance("Config", "prod-config")
+            di.lock()
+
+            expect(di.resolve_or("Config", "default")).to_equal("prod-config")
+            expect(di.resolve_or("Missing", "fallback")).to_equal("fallback")

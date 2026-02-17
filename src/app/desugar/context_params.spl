@@ -1,0 +1,405 @@
+# Context Parameter Desugaring
+#
+# Transforms implicit context parameter declarations into module-level variables,
+# and with_context blocks into save/set/restore sequences.
+#
+# The module-variable approach is used because module-level closures work correctly
+# in Simple (verified), while nested function closures cannot modify outer variables.
+#
+# INPUT:
+#   context val logger: Logger
+#
+#   fn compile(source: text):
+#       logger.log("compiling...")
+#       parse(source)
+#
+#   with_context(logger: file_logger):
+#       compile(source)
+#
+# OUTPUT:
+#   var __ctx_logger: Logger = nil
+#
+#   fn compile(source: text):
+#       __ctx_logger.log("compiling...")
+#       parse(source)
+#
+#   val __saved_logger_0 = __ctx_logger
+#   __ctx_logger = file_logger
+#   compile(source)
+#   __ctx_logger = __saved_logger_0
+#
+# NOTE: This module runs on the Rust runtime. No static fn patterns.
+# All BUG workarounds applied (no try/catch/throw, no multi-line bools).
+
+use std.text.{NL}
+
+export desugar_context_params
+
+# Module-level state: collected context declarations in the current source
+var _ctx_names: [text] = []
+var _ctx_types: [text] = []
+
+# Reset module-level state
+fn _ctx_reset():
+    _ctx_names = []
+    _ctx_types = []
+
+# Check if a name is a known context variable
+fn _is_ctx_name(name: text) -> bool:
+    var found = false
+    var i = 0
+    while i < _ctx_names.len():
+        if _ctx_names[i] == name:
+            found = true
+        i = i + 1
+    found
+
+# ================================================================
+# Pass 1: Collect context declarations
+# ================================================================
+
+# Scan for lines of the form:
+#   context val name: Type
+# and record name/type in _ctx_names / _ctx_types.
+# Returns the source with all context declaration lines removed.
+fn _collect_context_decls(source: text) -> text:
+    val lines = source.split(NL)
+    var result_lines = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("context val "):
+            # Parse:  context val NAME: TYPE
+            val rest = trimmed[12:]       # after "context val "
+            val colon_pos = _find_char(rest, ":")
+            if colon_pos >= 0:
+                val name = rest[0:colon_pos].trim()
+                val type_part = rest[colon_pos + 1:].trim()
+                _ctx_names.push(name)
+                _ctx_types.push(type_part)
+                # Remove the context declaration line (replaced in Pass 2)
+            else:
+                # Malformed - keep as-is
+                result_lines.push(line)
+        else:
+            result_lines.push(line)
+        i = i + 1
+    result_lines.join(NL)
+
+# ================================================================
+# Pass 2: Emit module-level var declarations
+# ================================================================
+
+# Prepend one  var __ctx_NAME: TYPE = nil  line per context variable.
+fn _emit_ctx_vars(source: text) -> text:
+    if _ctx_names.len() == 0:
+        return source
+    var header = ""
+    var i = 0
+    while i < _ctx_names.len():
+        val name = _ctx_names[i]
+        val type_name = _ctx_types[i]
+        header = header + "var __ctx_{name}: {type_name} = nil" + NL
+        i = i + 1
+    header + source
+
+# ================================================================
+# Pass 3: Replace context-variable references in function bodies
+# ================================================================
+
+# Replace every occurrence of "NAME." with "__ctx_NAME." where NAME is a
+# context variable name, so that code like  logger.log(...)  becomes
+# __ctx_logger.log(...) .
+#
+# To avoid false positives the replacement is identifier-aware:
+#   - Only replaces NAME when the character before NAME is a word boundary
+#     (start of line, space, tab, '(', ',', '=', '+', '-', '*', '/', '!', etc.)
+#   - NAME must be immediately followed by '.'
+fn _replace_ctx_refs(source: text) -> text:
+    var result = source
+    var i = 0
+    while i < _ctx_names.len():
+        val name = _ctx_names[i]
+        val target = name + "."
+        val replacement = "__ctx_" + name + "."
+        result = _replace_word_boundary(result, target, replacement)
+        i = i + 1
+    result
+
+# Replace all occurrences of `target` in `source` that are at a word boundary.
+# A word boundary means the character immediately before the match is NOT
+# alphanumeric and NOT '_'.
+fn _replace_word_boundary(source: text, target: text, replacement: text) -> text:
+    val tlen = target.len()
+    val slen = source.len()
+    var result = ""
+    var i = 0
+    while i < slen:
+        # Check if target matches here
+        val remaining = slen - i
+        if remaining >= tlen:
+            val chunk = source[i:i + tlen]
+            if chunk == target:
+                # Check word boundary: char before i must not be [a-z A-Z 0-9 _]
+                val at_boundary = _is_word_boundary(source, i)
+                if at_boundary:
+                    result = result + replacement
+                    i = i + tlen
+                    continue
+        result = result + source[i:i + 1]
+        i = i + 1
+    result
+
+fn _is_word_boundary(source: text, pos: i64) -> bool:
+    if pos == 0:
+        return true
+    val prev = source[pos - 1:pos]
+    # Not a boundary if previous char is a word character
+    val is_word_char = _is_alpha_num_underscore(prev)
+    not is_word_char
+
+fn _is_alpha_num_underscore(ch: text) -> bool:
+    if ch == "_":
+        return true
+    val code = ch.bytes()[0]
+    # a-z: 97-122, A-Z: 65-90, 0-9: 48-57
+    val is_lower = code >= 97 and code <= 122
+    val is_upper = code >= 65 and code <= 90
+    val is_digit = code >= 48 and code <= 57
+    val result = is_lower or is_upper
+    result or is_digit
+
+# ================================================================
+# Pass 4: Transform with_context blocks
+# ================================================================
+
+# Transform:
+#   with_context(logger: expr, config: expr2):
+#       body lines...
+#
+# Into:
+#   val __saved_logger_N = __ctx_logger
+#   __ctx_logger = expr
+#   val __saved_config_N = __ctx_config
+#   __ctx_config = expr2
+#   body lines...
+#   __ctx_logger = __saved_logger_N
+#   __ctx_config = __saved_config_N
+#
+# N is a unique integer counter to avoid name collisions in nested blocks.
+var _with_ctx_counter: i64 = 0
+
+fn _transform_with_context(source: text) -> text:
+    _with_ctx_counter = 0
+    val lines = source.split(NL)
+    var result_lines = []
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if trimmed.starts_with("with_context("):
+            val indent_str = _get_indent_str(line)
+            val counter = _with_ctx_counter
+            _with_ctx_counter = _with_ctx_counter + 1
+
+            # Parse the with_context header to extract name:expr pairs
+            # with_context(logger: file_logger, config: cfg):
+            val header_end = _find_char(trimmed, ":")
+            if header_end < 0:
+                result_lines.push(line)
+                i = i + 1
+                continue
+
+            # Extract the argument list between the first ( and the last ) before :
+            val paren_open = _find_char(trimmed, "(")
+            val paren_close = _find_last_paren_close(trimmed, header_end)
+            if paren_open < 0 or paren_close < 0:
+                result_lines.push(line)
+                i = i + 1
+                continue
+
+            val args_text = trimmed[paren_open + 1:paren_close]
+            val pairs = _parse_ctx_pairs(args_text)
+
+            # Emit save + set lines
+            var pair_i = 0
+            while pair_i < pairs.len():
+                val pair = pairs[pair_i]
+                val ctx_name = pair.ctx_name
+                val ctx_expr = pair.ctx_expr
+                result_lines.push("{indent_str}val __saved_{ctx_name}_{counter} = __ctx_{ctx_name}")
+                result_lines.push("{indent_str}__ctx_{ctx_name} = {ctx_expr}")
+                pair_i = pair_i + 1
+
+            # Collect body lines (indented more than the with_context line)
+            val base_indent = _get_indent(line)
+            var body_lines = []
+            var j = i + 1
+            while j < lines.len():
+                val body_line = lines[j]
+                if body_line.trim() == "":
+                    body_lines.push(body_line)
+                    j = j + 1
+                elif _get_indent(body_line) > base_indent:
+                    body_lines.push(body_line)
+                    j = j + 1
+                else:
+                    break
+
+            # Emit body lines (de-indented by 4 spaces to remove with_context indent)
+            for body_line in body_lines:
+                if body_line.trim() == "":
+                    result_lines.push(body_line)
+                else:
+                    val body_indent = _get_indent(body_line)
+                    val new_indent = body_indent - 4
+                    val new_indent = if new_indent < 0: 0 else: new_indent
+                    val new_indent_str = " ".repeat(new_indent)
+                    result_lines.push("{new_indent_str}{body_line.trim()}")
+
+            # Emit restore lines (in reverse order)
+            var rlen = pairs.len()
+            var pair_r = rlen - 1
+            while pair_r >= 0:
+                val pair = pairs[pair_r]
+                val ctx_name = pair.ctx_name
+                result_lines.push("{indent_str}__ctx_{ctx_name} = __saved_{ctx_name}_{counter}")
+                pair_r = pair_r - 1
+
+            i = j
+        else:
+            result_lines.push(line)
+            i = i + 1
+
+    result_lines.join(NL)
+
+# ================================================================
+# Pair parsing for with_context arguments
+# ================================================================
+
+struct CtxPair:
+    ctx_name: text
+    ctx_expr: text
+
+fn _parse_ctx_pairs(args_text: text) -> [CtxPair]:
+    # Split on commas that are NOT inside nested parens
+    val parts = _split_top_level_commas(args_text)
+    var pairs = []
+    var i = 0
+    while i < parts.len():
+        val part = parts[i].trim()
+        val colon = _find_char(part, ":")
+        if colon >= 0:
+            val name = part[0:colon].trim()
+            val expr = part[colon + 1:].trim()
+            if name != "" and expr != "":
+                pairs.push(CtxPair(ctx_name: name, ctx_expr: expr))
+        i = i + 1
+    pairs
+
+# Split a text on commas that are at the top (nesting depth 0)
+fn _split_top_level_commas(s: text) -> [text]:
+    var parts = []
+    var depth = 0
+    var current = ""
+    var i = 0
+    val slen = s.len()
+    while i < slen:
+        val ch = s[i:i + 1]
+        if ch == "(" or ch == "[":
+            depth = depth + 1
+            current = current + ch
+        elif ch == ")" or ch == "]":
+            depth = depth - 1
+            current = current + ch
+        elif ch == "," and depth == 0:
+            parts.push(current)
+            current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.trim() != "":
+        parts.push(current)
+    parts
+
+# ================================================================
+# Helpers
+# ================================================================
+
+fn _find_char(s: text, target: text) -> i64:
+    var i = 0
+    val slen = s.len()
+    while i < slen:
+        val ch = s[i:i + 1]
+        if ch == target:
+            return i
+        i = i + 1
+    -1
+
+# Find the last ')' that occurs before position `limit` in `s`
+fn _find_last_paren_close(s: text, limit: i64) -> i64:
+    var last = -1
+    var i = 0
+    while i < limit:
+        val ch = s[i:i + 1]
+        if ch == ")":
+            last = i
+        i = i + 1
+    last
+
+fn _get_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+fn _get_indent_str(line: text) -> text:
+    val n = _get_indent(line)
+    " ".repeat(n)
+
+# ================================================================
+# Main entry point
+# ================================================================
+
+# Desugar context parameters in source text.
+#
+# Applies four passes:
+#   1. Collect `context val name: Type` declarations, remove those lines
+#   2. Emit `var __ctx_name: Type = nil` at the top
+#   3. Replace references like `name.` with `__ctx_name.` in function bodies
+#   4. Transform `with_context(name: expr): body` into save/set/body/restore
+#
+# Parameters:
+#   source: Original Simple source code as text
+#
+# Returns:
+#   Transformed source code with context patterns desugared
+fn desugar_context_params(source: text) -> text:
+    # Reset module state
+    _ctx_reset()
+
+    # Pass 1: Collect context declarations and remove them from source
+    val pass1 = _collect_context_decls(source)
+
+    # If no context declarations found, nothing to do
+    if _ctx_names.len() == 0:
+        return source
+
+    # Pass 2: Emit __ctx_NAME vars at top
+    val pass2 = _emit_ctx_vars(pass1)
+
+    # Pass 3: Replace references to context variable names
+    val pass3 = _replace_ctx_refs(pass2)
+
+    # Pass 4: Transform with_context blocks
+    val pass4 = _transform_with_context(pass3)
+
+    pass4
