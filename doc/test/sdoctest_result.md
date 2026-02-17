@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 41425ms |
+| Duration | 42392ms |
 
 **Status: PASS**
 
@@ -90,7 +90,7 @@
 | test/unit/compiler/bidir_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bidir_type_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/bitfield_mir_spec.spl | 0 | 0 | 0 | 0 | 0ms |
-| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 3ms |
+| test/unit/compiler/blocks/block_definition_three_level_spec.spl | 1 | 1 | 0 | 0 | 4ms |
 | test/unit/compiler/blocks/block_outline_info_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/block_skip_policy_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/blocks/builder_api_basic_spec.spl | 0 | 0 | 0 | 0 | 0ms |
@@ -271,8 +271,10 @@
 | test/unit/compiler/.simple/build/auto_coverage_9_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/.simple/build/auto_vectorize_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/.simple/build/backend_port_phases_spec.smf | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/.simple/build/compilation_context_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/.simple/build/compiler_services_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/.simple/build/di_lock_spec.smf | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/.simple/build/di_validation_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/.simple/build/extensions_spec.smf | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/source_position_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/state_enum_spec.spl | 0 | 0 | 0 | 0 | 0ms |
