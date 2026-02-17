@@ -1,0 +1,90 @@
+# Supervisor spec
+#
+# Tests for src/std/supervisor.spl
+
+use std.supervisor.{
+    Supervisor, SupervisorConfig, ChildSpec,
+    RESTART_PERMANENT, RESTART_TEMPORARY, RESTART_TRANSIENT,
+    STRATEGY_ONE_FOR_ONE, STRATEGY_ONE_FOR_ALL,
+    SHUTDOWN_BRUTAL_KILL,
+    supervisor_config_default, child_spec, supervisor_new
+}
+
+describe "Supervisor stdlib":
+    describe "constants":
+        it "restart strategies are defined":
+            expect(RESTART_PERMANENT).to_equal("permanent")
+            expect(RESTART_TEMPORARY).to_equal("temporary")
+            expect(RESTART_TRANSIENT).to_equal("transient")
+
+        it "supervisor strategies are defined":
+            expect(STRATEGY_ONE_FOR_ONE).to_equal("one_for_one")
+            expect(STRATEGY_ONE_FOR_ALL).to_equal("one_for_all")
+
+    describe "supervisor_config_default":
+        it "creates default config":
+            val config = supervisor_config_default()
+            expect(config.strategy).to_equal("one_for_one")
+            expect(config.max_restarts).to_equal(3)
+            expect(config.max_seconds).to_equal(5)
+
+    describe "child_spec":
+        it "creates child spec with id":
+            val cs = child_spec("worker1")
+            expect(cs.id).to_equal("worker1")
+            expect(cs.restart).to_equal("permanent")
+
+    describe "supervisor_new":
+        it "creates supervisor with strategy":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            expect(sup.is_running()).to_equal(false)
+            expect(sup.child_count()).to_equal(0)
+            expect(sup.config.strategy).to_equal("one_for_one")
+
+    describe "adding and removing children":
+        it "adds a child":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec("worker1"))
+            expect(sup.child_count()).to_equal(1)
+
+        it "removes a child":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec("worker1"))
+            sup.add_child(child_spec("worker2"))
+            sup.remove_child("worker1")
+            expect(sup.child_count()).to_equal(1)
+
+    describe "start and stop":
+        it "starts the supervisor":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.start()
+            expect(sup.is_running()).to_equal(true)
+
+        it "stops the supervisor":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.start()
+            sup.stop()
+            expect(sup.is_running()).to_equal(false)
+
+    describe "restart tracking":
+        it "records restart count":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec("worker1"))
+            sup.record_restart("worker1")
+            sup.record_restart("worker1")
+            expect(sup.restart_count("worker1")).to_equal(2)
+
+        it "checks within restart limits":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec("worker1"))
+            expect(sup.within_limits()).to_equal(true)
+
+        it "should_restart returns true for permanent":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec("worker1"))
+            expect(sup.should_restart("worker1")).to_equal(true)
+
+        it "should_restart returns false for temporary":
+            val sup = supervisor_new(STRATEGY_ONE_FOR_ONE)
+            sup.add_child(child_spec_with_restart("temp_worker", RESTART_TEMPORARY))
+            expect(sup.should_restart("temp_worker")).to_equal(false)

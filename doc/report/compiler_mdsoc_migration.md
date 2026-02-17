@@ -1,7 +1,7 @@
 # Compiler MDSoC Migration Status
 
 **Last Updated:** 2026-02-17
-**Overall Status:** Phases 0-7 + 3f + Feature Ports COMPLETE ✅
+**Overall Status:** Phases 0-7 + 3f + Feature Ports + Span Entity + Remaining Transforms COMPLETE ✅
 
 ## Summary
 
@@ -85,13 +85,16 @@ All 12 pipeline stages now have ports (7 original + 3 new + event bus + module l
 ### Phase 3: Transform Dimension
 **New directory:** `src/compiler/transform/feature/`
 
-All 6 D_transform stage boundaries now implemented (5 original + 1 new):
+All 9 D_transform stage boundaries now implemented (5 original + 4 added 2026-02-17):
 - `typing_to_hir/entity_view/TypedAstView.spl` — TypedAstContext
 - `hir_to_mir/entity_view/HirView.spl` — CfgContext
 - `mir_to_backend/entity_view/MirView.spl` — MirProgram, MirDebugInfo
 - `parsing_to_desugaring/entity_view/AstView.spl` — AstDesugarView
 - `desugaring_to_typing/entity_view/DesugarView.spl` — DesugarTypingView
-- `lexing_to_parsing/entity_view/TokenStreamView.spl` — TokenStreamView (added 2026-02-17)
+- `lexing_to_parsing/entity_view/TokenStreamView.spl` — TokenStreamView (Phase 3f)
+- `mir_to_optimizer/entity_view/MirOptView.spl` — MirOptView (added 2026-02-17)
+- `backend_to_linker/entity_view/ObjectFileView.spl` — ObjectFileView (added 2026-02-17)
+- `loading_to_parsing/entity_view/LoadedModuleView.spl` — LoadedModuleView (added 2026-02-17)
 - Each with `__init__.spl` arch config
 
 ### Phase 4: Architecture Enforcement
@@ -123,6 +126,7 @@ src/
       hir/
       mir/
       types/
+      span/          ← source location span (added 2026-02-17)
   compiler/
     feature/         ← D_feature: pipeline stages (Phase 2)
       lexing/
@@ -147,6 +151,9 @@ src/
         parsing_to_desugaring/
         desugaring_to_typing/
         lexing_to_parsing/    ← Phase 3f (added 2026-02-17)
+        mir_to_optimizer/     ← (added 2026-02-17)
+        backend_to_linker/    ← (added 2026-02-17)
+        loading_to_parsing/   ← (added 2026-02-17)
     adapters/        ← outbound/inbound adapters
       out/           ← file system, disk
       in/            ← language server, profiler
@@ -169,17 +176,16 @@ compiler/adapters/**    ← implements feature ports, no cross-adapter imports
 | Phases 2–6 complete | 239/239 | baseline |
 | Phase 7 event bus | 241/241 | +2 port struct tests |
 | Phase 3f + feature ports + spec fixes | 242/242 | +9 transform tests, +18 feature port tests |
+| Span entity + 3 transform boundaries | 243/243 | +16 span tests, +24 transform tests |
 
-## Future Work (Design Doc Items Not Yet Implemented)
+## Future Work
 
-The following items appear in the design doc but are not yet implemented:
+All originally planned items are now complete. The architecture is fully covered:
 
-1. `src/core/entity/span/` — source location span entity (e.g., `Span`, `SourceRange`)
-2. `src/compiler/transform/feature/mir_to_optimizer/` — MIR → optimizer stage boundary view
-3. `src/compiler/transform/feature/backend_to_linker/` — backend → linker stage boundary view
-4. `src/compiler/transform/feature/loading_to_parsing/` — module loading → parsing boundary view
-
-These are low priority; the core pipeline is fully covered.
+- **D_entity:** 13 entity files (`token/`, `ast/`, `hir/`, `mir/`, `types/`, `span/`)
+- **D_feature:** 12 pipeline stage port files
+- **D_transform:** 9 stage boundary view files
+- **D_adapters:** inbound (language server, profiler) and outbound (file, memory)
 
 ## References
 

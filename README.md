@@ -124,7 +124,7 @@ simple build --release --features=vulkan
 
 ```sdoctest
 # hello.spl
->>>  fn main() -> i64:
+>>> fn main() -> i64:
 ...     0  # Entry point, returns exit code
 ```
 

@@ -63,13 +63,17 @@ All planned MDSOC dimensions are now fully populated:
 - **D_transform:** 6 stage boundary views in `src/compiler/transform/feature/`
 - **D_adapters:** inbound (language server, profiler) and outbound (file, memory) adapters
 
-## Future Work
+## Follow-up (same session)
 
-Four design-doc items not yet implemented (low priority):
+All 4 future-work items implemented:
 
-1. `src/core/entity/span/` — source location span entity (`Span`, `SourceRange`)
-2. `src/compiler/transform/feature/mir_to_optimizer/` — MIR to optimizer boundary view
-3. `src/compiler/transform/feature/backend_to_linker/` — backend to linker boundary view
-4. `src/compiler/transform/feature/loading_to_parsing/` — module loading to parsing boundary view
+1. `src/core/entity/span/Span.spl` — `SourceLocation` (line, col, to_text, at) + `Span` (start, end_loc, is_single_line, contains_line, line_count, single_line, empty)
+2. `src/compiler/transform/feature/mir_to_optimizer/entity_view/MirOptView.spl` — bridges MIR lowering → optimizer; has_functions, is_optimized, average_insts_per_fn
+3. `src/compiler/transform/feature/backend_to_linker/entity_view/ObjectFileView.spl` — bridges codegen output → linker; is_empty, has_symbols, from_codegen, failed
+4. `src/compiler/transform/feature/loading_to_parsing/entity_view/LoadedModuleView.spl` — bridges module loader → parser; has_source, is_empty, from_source, empty
 
-The core pipeline path (lexing through codegen) is fully covered. The 4 missing transforms are for late-stage passes that are not yet wired into the compiler driver.
+Tests added:
+- `test/unit/core/entity/entity_span_spec.spl` — 16 tests for SourceLocation + Span
+- `test/unit/compiler/transform_adapters_spec.spl` — +24 tests (8 each for MirOptView, ObjectFileView, LoadedModuleView)
+
+All 9 D_transform boundaries now complete (was 6/9 after phase 3f, now 9/9).
