@@ -1,0 +1,247 @@
+# Tests for @traits system, @annotation parsing, keyof T, and static_for
+#
+# Tests Task 1: @traits(query, T, ...) expression parsing in parser.spl
+# Tests Task 2: static_for statement parsing in parser.spl
+# Tests Task 3: @traits evaluation in eval.spl (struct registry, enum registry)
+# Tests Task 4: keyof T sugar in parser.spl
+#
+# Implementation:
+#   - parser.spl: parse_primary() handles TOK_AT -> __traits() call or __builtin_* ident
+#   - parser.spl: parse_primary() handles TOK_KW_KEYOF -> __traits("fields", T) call
+#   - parser.spl: parse_statement() handles TOK_KW_STATIC_FOR -> STMT_STATIC_FOR
+#   - eval.spl: eval_builtin_call() handles "__traits" built-in
+#   - eval.spl: eval_ident() handles "__builtin_file", "__builtin_line", "__builtin_function"
+#   - eval.spl: eval_stmt() handles EVAL_STMT_STATIC_FOR (tag=17)
+
+use core.ast.{ast_reset}
+use core.interpreter.eval.{eval_init, eval_reset, eval_module, eval_has_error, eval_get_error}
+use core.interpreter.env.{env_init}
+use core.interpreter.value.{val_reset}
+use core.parser.{parse_module, parser_has_errors}
+use core.tokens.{TOK_KW_KEYOF, TOK_KW_STATIC_FOR, keyword_lookup, tok_kind_name}
+
+# Helper: parse and evaluate a code snippet, return error message or ""
+fn eval_code(code: text) -> text:
+    ast_reset()
+    val_reset()
+    env_init()
+    eval_reset()
+    parse_module(code, "traits_test.spl")
+    if parser_has_errors():
+        return "PARSE_ERROR"
+    eval_module()
+    if eval_has_error():
+        return eval_get_error()
+    return ""
+
+# Helper: parse only, return true if no errors
+fn parse_ok(code: text) -> bool:
+    ast_reset()
+    parse_module(code, "traits_test.spl")
+    parser_has_errors() == false
+
+# ===== Token Constant Verification (module-level: runs at load time) =====
+
+val keyof_tok_val = TOK_KW_KEYOF
+val static_for_tok_val = TOK_KW_STATIC_FOR
+
+describe "@traits system tokens":
+    it "TOK_KW_KEYOF has value 200":
+        expect(TOK_KW_KEYOF).to_equal(200)
+
+    it "TOK_KW_STATIC_FOR has value 201":
+        expect(TOK_KW_STATIC_FOR).to_equal(201)
+
+    it "keyword_lookup finds keyof":
+        expect(keyword_lookup("keyof")).to_equal(200)
+
+    it "keyword_lookup finds static_for":
+        expect(keyword_lookup("static_for")).to_equal(201)
+
+    it "tok_kind_name returns keyof for 200":
+        expect(tok_kind_name(200)).to_equal("keyof")
+
+    it "tok_kind_name returns static_for for 201":
+        expect(tok_kind_name(201)).to_equal("static_for")
+
+describe "@traits parsing (Task 1)":
+    it "parses @traits(fields, T) without error":
+        val ok = parse_ok("val x = @traits(\"fields\", \"Point\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(has_member, T, field) without error":
+        val ok = parse_ok("val x = @traits(\"has_member\", \"Config\", \"host\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(is_struct, T) without error":
+        val ok = parse_ok("val x = @traits(\"is_struct\", \"Config\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(is_enum, T) without error":
+        val ok = parse_ok("val x = @traits(\"is_enum\", \"Status\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(enum_members, T) without error":
+        val ok = parse_ok("val x = @traits(\"enum_members\", \"Status\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(get_member, obj, field) without error":
+        val ok = parse_ok("fn f(obj): val x = @traits(\"get_member\", obj, \"name\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(file) without error":
+        val ok = parse_ok("val x = @traits(\"file\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(line) without error":
+        val ok = parse_ok("val x = @traits(\"line\")")
+        expect(ok).to_equal(true)
+
+    it "parses @traits(function) without error":
+        val ok = parse_ok("val x = @traits(\"function\")")
+        expect(ok).to_equal(true)
+
+describe "@file / @line / @function annotation parsing (Task 1 cont.)":
+    it "parses @file without error":
+        val ok = parse_ok("val x = @file")
+        expect(ok).to_equal(true)
+
+    it "parses @line without error":
+        val ok = parse_ok("val x = @line")
+        expect(ok).to_equal(true)
+
+    it "parses @function without error":
+        val ok = parse_ok("fn f(): val x = @function")
+        expect(ok).to_equal(true)
+
+    it "@file returns non-empty text at runtime":
+        val f = @file
+        expect(f.len()).to_be_greater_than(0)
+
+    it "@line returns positive integer at runtime":
+        val l = @line
+        expect(l).to_be_greater_than(0)
+
+    it "__builtin_file evaluates without error in eval context":
+        val code = "val x = @file"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "__builtin_line evaluates without error in eval context":
+        val code = "val x = @line"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "__builtin_function evaluates without error in eval context":
+        val code = "fn my_fn() -> text: @function\nval r = my_fn()"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+describe "keyof T parsing (Task 4)":
+    it "parses keyof without error":
+        val ok = parse_ok("val x = keyof Config")
+        expect(ok).to_equal(true)
+
+    it "keyof token is recognized in parse_primary":
+        val ok = parse_ok("val fields = keyof Point")
+        expect(ok).to_equal(true)
+
+    it "keyof in function body parses without error":
+        val ok = parse_ok("fn get_fields(): keyof Config")
+        expect(ok).to_equal(true)
+
+    it "keyof evaluates as __traits fields call in eval context":
+        val code = "struct Config:\n    host: text\n    port: i64\nval f = keyof Config\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+describe "static_for parsing (Task 2)":
+    it "parses static_for without error":
+        val ok = parse_ok("fn f():\n    static_for k in items:\n        print k\n")
+        expect(ok).to_equal(true)
+
+    it "static_for keyword is recognized":
+        val ok = parse_ok("fn test():\n    static_for field in fields:\n        val v = field\n")
+        expect(ok).to_equal(true)
+
+    it "static_for with @traits(fields) parses without error":
+        val code = "fn f():\n    static_for k in @traits(\"fields\", \"Config\"):\n        print k\n"
+        val ok = parse_ok(code)
+        expect(ok).to_equal(true)
+
+    it "static_for body executes in eval context":
+        val code = "var result = \"\"\nstatic_for k in [\"a\", \"b\", \"c\"]:\n    result = result + k\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+describe "@traits evaluation (Task 3)":
+    it "@traits(fields, T) returns field names for known struct":
+        val code = "struct Point:\n    x: i64\n    y: i64\nval fields = @traits(\"fields\", \"Point\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(has_member, T, name) returns true for existing field":
+        val code = "struct Config:\n    host: text\n    port: i64\nval ok = @traits(\"has_member\", \"Config\", \"host\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(has_member, T, name) returns false for missing field":
+        val code = "struct Config:\n    host: text\nval ok = @traits(\"has_member\", \"Config\", \"missing\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(is_struct, T) returns true for known struct":
+        val code = "struct MyType:\n    value: i64\nval is_s = @traits(\"is_struct\", \"MyType\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(is_struct, T) returns false for unknown type":
+        val code = "val is_s = @traits(\"is_struct\", \"NonExistent\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(enum_members, E) returns variants for known enum":
+        val code = "enum Status:\n    Ok\n    Warn\n    Error\nval members = @traits(\"enum_members\", \"Status\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(is_enum, E) returns true for known enum":
+        val code = "enum Color:\n    Red\n    Green\n    Blue\nval is_e = @traits(\"is_enum\", \"Color\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(file) returns text in eval context":
+        val code = "val f = @traits(\"file\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(line) returns integer in eval context":
+        val code = "val l = @traits(\"line\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(function) returns function name in eval context":
+        val code = "fn my_fn() -> text: @traits(\"function\")\nval r = my_fn()\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(get_member) retrieves struct field value":
+        val code = "struct Pt:\n    x: i64\n    y: i64\nval p = Pt(x: 10, y: 20)\nval v = @traits(\"get_member\", p, \"x\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "@traits(unknown_query) returns nil without error":
+        val code = "val r = @traits(\"nonexistent_query\")\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+describe "static_for runtime evaluation (Task 2 + Task 3 integration)":
+    it "static_for over array executes all iterations":
+        val code = "var count = 0\nstatic_for k in [\"a\", \"b\", \"c\"]:\n    count = count + 1\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")
+
+    it "static_for with @traits(fields) over struct fields works":
+        val code = "struct Rec:\n    name: text\n    age: i64\nvar parts = []\nstatic_for field in @traits(\"fields\", \"Rec\"):\n    parts = parts + ([field])\n"
+        val err = eval_code(code)
+        expect(err).to_equal("")

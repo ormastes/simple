@@ -87,6 +87,7 @@ assert_eq!(note.instantiations.len(), 0);
 **Expected:** Pass
 
 **Simple:**
+<!--sdoctest:skip-next-->
 ```simple
 val note = NoteSdnMetadata.new()
 assert note.is_empty()

@@ -1,0 +1,166 @@
+# Comptime Semantic Checker
+#
+# Warns when comptime/const fn expressions contain operations that cannot
+# be evaluated at compile time.
+#
+# Non-CT operations include:
+# - Calls to non-const functions (extern fn, I/O functions)
+# - Mutable variable access (captures that mutate)
+# - Unbounded loops (while true:)
+# - System calls, I/O operations
+#
+# Usage:
+#   comptime_checker_reset()
+#   comptime_check_expr("my_fn", "sqrt(x)", "math call")
+#   val warnings = comptime_checker_get_warnings()
+
+# ============================================================================
+# Module State
+# ============================================================================
+
+var checker_warnings: [text] = []
+var checker_error_count: i64 = 0
+
+# ============================================================================
+# Warning Registry
+# ============================================================================
+
+# Known non-CT function prefixes (functions that cannot run at compile time)
+val NON_CT_PREFIXES: [text] = [
+    "rt_",        # runtime SFFI functions
+    "shell",      # shell operations
+    "print",      # I/O operations
+    "file_",      # file I/O
+    "env_",       # environment access
+    "thread_",    # threading
+    "process_",   # process operations
+]
+
+# Known non-CT function names
+val NON_CT_NAMES: [text] = [
+    "input",
+    "sleep",
+    "rand",
+    "random",
+    "now",
+    "time",
+    "date",
+]
+
+# ============================================================================
+# API
+# ============================================================================
+
+fn comptime_checker_reset():
+    # Clear all accumulated warnings.
+    checker_warnings = []
+    checker_error_count = 0
+
+fn comptime_checker_get_warnings() -> [text]:
+    # Return list of accumulated warning messages.
+    checker_warnings
+
+fn comptime_checker_error_count() -> i64:
+    # How many non-CT operations were detected.
+    checker_error_count
+
+fn comptime_add_warning(fn_name: text, expr_text: text, reason: text):
+    # Record a new comptime violation warning.
+    val msg = "WARN[comptime]: in '" + fn_name + "' — '" + expr_text + "' " + reason
+    checker_warnings.push(msg)
+    checker_error_count = checker_error_count + 1
+
+# ============================================================================
+# Expression Checkers
+# ============================================================================
+
+fn is_non_ct_name(name: text) -> bool:
+    # Check if a function/variable name is known to be non-CT.
+    for non_ct in NON_CT_NAMES:
+        if name == non_ct:
+            return true
+    false
+
+fn has_non_ct_prefix(name: text) -> bool:
+    # Check if name starts with a known non-CT prefix.
+    for prefix in NON_CT_PREFIXES:
+        val plen = prefix.len()
+        if name.len() >= plen:
+            val head = name[0:plen]
+            if head == prefix:
+                return true
+    false
+
+fn comptime_check_call(fn_name: text, callee: text) -> bool:
+    # Check if a function call is valid in a comptime context.
+    # Returns true if non-CT (violation found).
+    if has_non_ct_prefix(callee):
+        comptime_add_warning(fn_name, callee + "()", "is a runtime-only call (non-CT prefix)")
+        return true
+    if is_non_ct_name(callee):
+        comptime_add_warning(fn_name, callee + "()", "is a runtime-only function")
+        return true
+    false
+
+fn comptime_check_io(fn_name: text, expr_text: text):
+    # Warn that I/O operations are not allowed in comptime contexts.
+    comptime_add_warning(fn_name, expr_text, "is an I/O operation (not allowed at compile time)")
+
+fn comptime_check_extern_call(fn_name: text, extern_name: text):
+    # Warn that extern fn calls cannot run at compile time.
+    comptime_add_warning(fn_name, extern_name + "()", "is an extern fn call (cannot evaluate at compile time)")
+
+fn comptime_check_mutable_capture(fn_name: text, var_name: text):
+    # Warn that mutating a captured variable is not allowed in comptime.
+    comptime_add_warning(fn_name, var_name, "is a mutable variable access (mutation not allowed in comptime)")
+
+fn comptime_check_unbounded_loop(fn_name: text):
+    # Warn about potentially unbounded loops.
+    comptime_add_warning(fn_name, "while true", "is an unbounded loop (not safe for compile-time evaluation)")
+
+fn comptime_check_expr(fn_name: text, expr_text: text, kind: text):
+    # General expression checker - routes to specific checker based on kind.
+    match kind:
+        case "io_call":
+            comptime_check_io(fn_name, expr_text)
+        case "extern_call":
+            comptime_check_extern_call(fn_name, expr_text)
+        case "mutable_var":
+            comptime_check_mutable_capture(fn_name, expr_text)
+        case "unbounded_loop":
+            comptime_check_unbounded_loop(fn_name)
+        case "fn_call":
+            comptime_check_call(fn_name, expr_text)
+        case _:
+            comptime_add_warning(fn_name, expr_text, "may not be evaluatable at compile time (" + kind + ")")
+
+# ============================================================================
+# Batch Analysis
+# ============================================================================
+
+fn comptime_check_calls_in_fn(fn_name: text, call_names: [text]) -> i64:
+    # Check a list of call names in a const fn body.
+    # Returns the number of violations found.
+    val before = checker_error_count
+    for callee in call_names:
+        comptime_check_call(fn_name, callee)
+    checker_error_count - before
+
+fn comptime_format_report() -> text:
+    # Format all collected warnings as a human-readable report.
+    if checker_error_count == 0:
+        return "Comptime checker: no violations found."
+    var report = "Comptime checker: " + text(checker_error_count) + " violation(s) found:\n"
+    for w in checker_warnings:
+        report = report + "  " + w + "\n"
+    report
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export comptime_checker_reset, comptime_checker_get_warnings, comptime_checker_error_count
+export comptime_check_expr, comptime_check_call, comptime_check_io
+export comptime_check_extern_call, comptime_check_mutable_capture, comptime_check_unbounded_loop
+export comptime_check_calls_in_fn, comptime_format_report, comptime_add_warning
+export is_non_ct_name, has_non_ct_prefix

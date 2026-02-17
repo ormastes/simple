@@ -133,6 +133,8 @@ struct FunctionAttr:
     has_section: bool
     section: text           # @section("X") - ELF section placement
     is_interrupt: bool      # @interrupt - interrupt handler
+    has_callconv: bool      # @callconv("X") - explicit calling convention
+    callconv: text          # calling convention name: "C", "Fastcall", etc.
 
 fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     """Extract function attributes from a list of attributes.
@@ -150,6 +152,8 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
     var section: text = nil
     var has_section = false
     var is_interrupt = false
+    var has_callconv = false
+    var callconv: text = ""
 
     for attr in attrs:
         match attr.name:
@@ -167,6 +171,12 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
                         has_section = true
             case "interrupt":
                 is_interrupt = true
+            case "callconv":
+                if attr.args.len() > 0:
+                    val conv_name = extract_string_arg(attr.args[0])
+                    if conv_name.len() > 0:
+                        callconv = conv_name
+                        has_callconv = true
             case _:
                 pass
 
@@ -176,7 +186,9 @@ fn parse_function_attrs(attrs: [Attribute]) -> FunctionAttr:
         is_noreturn: is_noreturn,
         has_section: has_section,
         section: section,
-        is_interrupt: is_interrupt
+        is_interrupt: is_interrupt,
+        has_callconv: has_callconv,
+        callconv: callconv
     )
 
 fn FunctionAttr__default() -> FunctionAttr:
@@ -187,7 +199,9 @@ fn FunctionAttr__default() -> FunctionAttr:
         is_noreturn: false,
         has_section: false,
         section: "",
-        is_interrupt: false
+        is_interrupt: false,
+        has_callconv: false,
+        callconv: ""
     )
 
 # ============================================================================
@@ -207,12 +221,35 @@ fn parse_layout_attrs(attrs: [Attribute]) -> LayoutAttr:
 
     Returns default LayoutAttr if no layout attributes found.
     """
-    # Stub: Complex attribute parsing not supported in seed_cpp
+    var layout_kind = LayoutKind.Simple
+    var has_explicit_align = false
+    var explicit_align: i64 = 0
+    var is_packed = false
+    for attr in attrs:
+        if attr.name == "repr":
+            if attr.args.len() > 0:
+                val repr_str = extract_string_arg(attr.args[0])
+                if repr_str == "C":
+                    layout_kind = LayoutKind.C
+                elif repr_str == "packed":
+                    layout_kind = LayoutKind.Packed
+                    is_packed = true
+                elif repr_str == "transparent":
+                    layout_kind = LayoutKind.Transparent
+        elif attr.name == "packed":
+            layout_kind = LayoutKind.Packed
+            is_packed = true
+        elif attr.name == "align":
+            if attr.args.len() > 0:
+                val align_val = extract_int_arg(attr.args[0]) ?? 0
+                if align_val > 0:
+                    has_explicit_align = true
+                    explicit_align = align_val
     LayoutAttr(
-        layout_kind: LayoutKind.Simple,
-        has_explicit_align: false,
-        explicit_align: 0,
-        is_packed: false
+        layout_kind: layout_kind,
+        has_explicit_align: has_explicit_align,
+        explicit_align: explicit_align,
+        is_packed: is_packed
     )
 
 # Extract string value from an expression (for @repr("C"))

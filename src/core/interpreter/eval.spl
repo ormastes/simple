@@ -202,6 +202,12 @@ fn mono_create_specialization(generic_decl_id: i64, type_params: [text], arg_val
 
     cloned_decl_id
 
+# ===== Local AST Constants for static_for and comptime =====
+# STMT_STATIC_FOR = 17 (from ast.spl, avoids import dependency)
+val EVAL_STMT_STATIC_FOR: i64 = 17
+# STMT_COMPTIME = 18 (from ast.spl, avoids import dependency)
+val EVAL_STMT_COMPTIME: i64 = 18
+
 # ===== Control Flow Flags =====
 var eval_returning: bool = false
 var eval_return_value: i64 = -1
@@ -209,6 +215,20 @@ var eval_breaking: bool = false
 var eval_continuing: bool = false
 var eval_had_error: bool = false
 var eval_error_msg: text = ""
+# Labeled break/continue: target label name (empty = unlabeled)
+var eval_break_label: text = ""
+var eval_continue_label: text = ""
+# Label stack: names of currently active loop labels (innermost last)
+var eval_label_stack: [text] = []
+
+# ===== Defer Stack =====
+# Flat parallel arrays: expression IDs and their block scope depth.
+var eval_defer_eids: [i64] = []
+var eval_defer_depths: [i64] = []
+var eval_defer_depth: i64 = 0
+
+# ===== Yield Accumulator Stack =====
+var eval_yield_stack: [[i64]] = []
 
 # ===== LOAD_FAST: Current Function Tracking =====
 var eval_current_decl_id: i64 = -1
@@ -227,7 +247,19 @@ fn eval_reset():
     eval_had_error = false
     eval_error_msg = ""
     eval_warnings = []
+    eval_break_label = ""
+    eval_continue_label = ""
+    eval_label_stack = []
+    init_functions = []
+    teardown_functions = []
+    when_disabled_decls = []
     eval_current_decl_id = -1
+    eval_defer_eids = []
+    eval_defer_depths = []
+    eval_defer_depth = 0
+    eval_yield_stack = []
+    enum_reg_names = []
+    enum_reg_variants = []
 
 fn eval_set_error(msg: text):
     eval_had_error = true
@@ -258,6 +290,30 @@ var mu_reasons: [text] = []
 var mu_buckets: [i64] = []
 var mu_nexts: [i64] = []
 var must_use_critical_mode: bool = false
+
+# @init and @teardown function name lists
+var init_functions: [text] = []
+var teardown_functions: [text] = []
+
+# @when conditional compilation — skipped decl names
+var when_disabled_decls: [text] = []
+
+fn when_check_condition(condition: text) -> bool:
+    # Evaluate @when condition: os=linux, os=windows, feature=X, debug, release
+    # Strip whitespace
+    var cond = condition
+    # Simple runtime checks
+    if cond == "true": return true
+    if cond == "false": return false
+    if cond == "debug": return true     # Always true in interpreter mode
+    if cond == "release": return false  # False in interpreter mode
+    if cond == "interpreter": return true
+    if cond == "compiled": return false
+    # Feature flag: @when(feature=X) — always false (not set)
+    if cond.starts_with("feature="):
+        return false
+    # Unknown condition: default to true (don't skip)
+    true
 
 fn func_table_reset():
     ft_keys = []
@@ -380,6 +436,9 @@ fn must_use_scan_source(source: text):
     # Scan for annotations
     var pending_must_use: bool = false
     var pending_reason: text = ""
+    var pending_init: bool = false
+    var pending_teardown: bool = false
+    var pending_when: text = ""
     var li: i64 = 0
     for line in lines:
         # Trim leading spaces
@@ -399,6 +458,31 @@ fn must_use_scan_source(source: text):
         # Check for @profile(critical)
         if trimmed.starts_with("# @profile(critical)"):
             must_use_critical_mode = true
+        # Check for @tailrec annotation — marks function for tail-call optimization
+        if trimmed.starts_with("# @tailrec"):
+            pending_init = false  # @tailrec isn't @init
+            pending_teardown = false
+            # Simply note the next fn as tailrec-annotated for warning purposes
+
+        # Check for @init annotation
+        if trimmed.starts_with("# @init"):
+            pending_init = true
+        # Check for @teardown annotation
+        if trimmed.starts_with("# @teardown"):
+            pending_teardown = true
+        # Check for @when(condition) conditional compilation
+        if trimmed.starts_with("# @when("):
+            # Extract condition: "# @when(condition)"
+            var when_cond_chars: [text] = []
+            var wci: i64 = 8
+            for _wc in trimmed:
+                if wci >= trimmed.len(): break
+                val wch = trimmed[wci]
+                if wch == ")": break
+                when_cond_chars.push(wch)
+                wci = wci + 1
+            val when_cond = when_cond_chars.join("")
+            pending_when = when_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
             pending_must_use = true
@@ -446,6 +530,37 @@ fn must_use_scan_source(source: text):
                 # Non-comment, non-empty line without fn => cancel pending
                 pending_must_use = false
                 pending_reason = ""
+        # Handle @init and @teardown function registration
+        if pending_init or pending_teardown or pending_when != "":
+            if trimmed.starts_with("fn ") or trimmed.starts_with("val ") or trimmed.starts_with("var "):
+                # Extract declaration name
+                var anno_fname_chars: [text] = []
+                var anno_fi: i64 = 3
+                if trimmed.starts_with("val ") or trimmed.starts_with("var "):
+                    anno_fi = 4
+                for _afc in trimmed:
+                    if anno_fi >= trimmed.len(): break
+                    val afc2 = trimmed[anno_fi]
+                    if afc2 == "(" or afc2 == " " or afc2 == ":" or afc2 == "=": break
+                    anno_fname_chars.push(afc2)
+                    anno_fi = anno_fi + 1
+                val anno_fname = anno_fname_chars.join("")
+                if anno_fname != "":
+                    if pending_init:
+                        init_functions.push(anno_fname)
+                    if pending_teardown:
+                        teardown_functions.push(anno_fname)
+                    if pending_when != "":
+                        val when_ok = when_check_condition(pending_when)
+                        if when_ok == false:
+                            when_disabled_decls.push(anno_fname)
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
+            elif trimmed.starts_with("# ") == false and trimmed != "":
+                pending_init = false
+                pending_teardown = false
+                pending_when = ""
         li = li + 1
 
 # ===== Struct Definition Table (Hash Map) =====
@@ -483,6 +598,142 @@ fn struct_table_lookup(name: text) -> i64:
             return st_vals[idx]
         idx = st_nexts[idx]
     -1
+
+# ===== Enum Type Registry =====
+# Tracks enum type names and their variants for exhaustiveness checking.
+# Variants stored as comma-separated text to avoid [[text]] arrays.
+var enum_reg_names: [text] = []
+var enum_reg_variants: [text] = []
+
+fn enum_table_reset():
+    enum_reg_names = []
+    enum_reg_variants = []
+
+fn enum_table_register(name: text, variants: [text]):
+    # Check if already registered
+    var i: i64 = 0
+    for existing in enum_reg_names:
+        if existing == name:
+            return
+        i = i + 1
+    enum_reg_names.push(name)
+    enum_reg_variants.push(variants.join(","))
+
+fn enum_table_lookup(name: text) -> text:
+    # Returns comma-separated variants, or "" if not found
+    var i: i64 = 0
+    for ename in enum_reg_names:
+        if ename == name:
+            return enum_reg_variants[i]
+        i = i + 1
+    ""
+
+# ===== Match Exhaustiveness Helpers =====
+
+fn match_arm_is_wildcard(pattern_eid: i64) -> bool:
+    # Returns true if pattern_eid is a wildcard (_) or bare identifier (binding)
+    # A pattern_eid < 0 means unconditional match
+    if pattern_eid < 0: return true
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_IDENT:
+        val pname = e_node.s_val
+        if pname == "_": return true
+        # A bare identifier is a binding pattern — also catches all
+        return true
+    false
+
+fn match_arm_get_enum_type(pattern_eid: i64) -> text:
+    # Extracts enum type name from a pattern like Status.Ok (EXPR_FIELD_ACCESS)
+    # Returns "" if pattern is not an enum variant pattern
+    if pattern_eid < 0: return ""
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_FIELD_ACCESS:
+        val base_eid = e_node.left
+        if base_eid >= 0:
+            val base_node = expr_get(base_eid)
+            if base_node.tag == EXPR_IDENT:
+                return base_node.s_val
+    ""
+
+fn match_arm_get_variant_name(pattern_eid: i64) -> text:
+    # Extracts variant name from a pattern like Status.Ok -> "Ok"
+    if pattern_eid < 0: return ""
+    val e_node = expr_get(pattern_eid)
+    val tag = e_node.tag
+    if tag == EXPR_FIELD_ACCESS:
+        return e_node.s_val
+    ""
+
+fn check_match_exhaustive(arm_ids: [i64], type_name: text):
+    # Check if match arms cover all variants of the given enum type.
+    # Emits a warning if variants are missing and no wildcard present.
+    if type_name == "": return
+    val variants_csv = enum_table_lookup(type_name)
+    if variants_csv == "": return
+
+    # Check if any arm is a wildcard (catches all)
+    var has_wildcard: bool = false
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        if match_arm_is_wildcard(pattern_eid):
+            has_wildcard = true
+    if has_wildcard: return
+
+    # Collect covered variant names from arms
+    var covered: [text] = []
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val variant = match_arm_get_variant_name(pattern_eid)
+        if variant != "":
+            covered.push(variant)
+
+    # Split variants_csv into individual variants
+    var all_variants: [text] = []
+    var chars: [text] = []
+    var ci2: i64 = 0
+    for _c2 in variants_csv:
+        if ci2 >= variants_csv.len(): break
+        val ch2 = variants_csv[ci2]
+        if ch2 == ",":
+            if chars.len() > 0:
+                all_variants.push(chars.join(""))
+                chars = []
+        else:
+            chars.push(ch2)
+        ci2 = ci2 + 1
+    if chars.len() > 0:
+        all_variants.push(chars.join(""))
+
+    # Find missing variants
+    var missing: [text] = []
+    for variant in all_variants:
+        var found: bool = false
+        for cov in covered:
+            if cov == variant:
+                found = true
+        if found == false:
+            missing.push(variant)
+
+    if missing.len() > 0:
+        var msg = "warning: non-exhaustive match on '" + type_name + "' — missing: "
+        var mi: i64 = 0
+        for mv in missing:
+            if mi > 0:
+                msg = msg + ", "
+            msg = msg + mv
+            mi = mi + 1
+        eval_warnings.push(msg)
+
+fn infer_match_enum_type(arm_ids: [i64]) -> text:
+    # Try to infer enum type from match arms by looking for EXPR_FIELD_ACCESS patterns
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val etype = match_arm_get_enum_type(pattern_eid)
+        if etype != "":
+            return etype
+    ""
 
 # ===== Expression Evaluation =====
 
@@ -549,6 +800,8 @@ fn eval_expr(eid: i64) -> i64:
     if tag == EXPR_AWAIT: return eval_await_expr(eid)
     if tag == EXPR_YIELD: return eval_yield_expr(eid)
     if tag == EXPR_SPAWN: return eval_spawn_expr(eid)
+    if tag == EXPR_DO_BLOCK: return eval_do_block(eid)
+    if tag == EXPR_ATOM: return eval_atom_expr(eid)
 
     # String interpolation
     if tag == EXPR_INTERPOLATED_STRING: return eval_interpolated_string(eid)
@@ -669,6 +922,34 @@ fn eval_ident(eid: i64) -> i64:
             if fast_val >= 0: return fast_val
     # Slow path: hash map lookup
     val name = expr_get(eid).s_val
+    # Annotation intrinsics: @file, @line, @function
+    if name == "@file":
+        return val_make_text(module_get_path())
+    if name == "__builtin_file":
+        return val_make_text(module_get_path())
+    if name == "@line":
+        # Best-effort: return 1 (line info not preserved in current AST)
+        return val_make_int(1)
+    if name == "__builtin_line":
+        return val_make_int(1)
+    if name == "@function":
+        if eval_current_decl_id >= 0:
+            val fn_decl_node = decl_get(eval_current_decl_id)
+            return val_make_text(fn_decl_node.name)
+        return val_make_text("<module>")
+    if name == "__builtin_function":
+        if eval_current_decl_id >= 0:
+            val bi_fn_node = decl_get(eval_current_decl_id)
+            return val_make_text(bi_fn_node.name)
+        return val_make_text("<module>")
+    if name == "__builtin_test_mode":
+        return val_make_bool(false)
+    if name == "@test_mode":
+        return val_make_bool(false)
+    if name == "__builtin_debug_mode":
+        return val_make_bool(false)
+    if name == "@debug_mode":
+        return val_make_bool(false)
     val vid = env_lookup(name)
     if vid >= 0: return vid
     # Check function table
@@ -736,6 +1017,9 @@ fn eval_block_expr(eid: i64) -> i64:
 
 fn eval_block(stmts: [i64], value_expr: i64) -> i64:
     env_push_scope()
+    eval_defer_depth = eval_defer_depth + 1
+    val my_depth = eval_defer_depth
+
     var last_val = val_make_nil()
 
     for sid in stmts:
@@ -749,6 +1033,36 @@ fn eval_block(stmts: [i64], value_expr: i64) -> i64:
         val ctrl_interrupted = eval_had_error or eval_returning or eval_breaking or eval_continuing
         if ctrl_interrupted == false:
             last_val = eval_expr(value_expr)
+
+    # Execute deferred expressions at this depth in reverse order (LIFO)
+    val saved_returning = eval_returning
+    val saved_had_error = eval_had_error
+    eval_returning = false
+    eval_had_error = false
+    val total_deferred = eval_defer_eids.len()
+    # Collect indices to run (those at my_depth)
+    var defer_to_run: [i64] = []
+    for di in 0..total_deferred:
+        if eval_defer_depths[di] == my_depth:
+            defer_to_run.push(eval_defer_eids[di])
+    # Execute in reverse
+    val run_count = defer_to_run.len()
+    for ri in 0..run_count:
+        val ridx = run_count - 1 - ri
+        eval_expr(defer_to_run[ridx])
+    eval_returning = saved_returning
+    eval_had_error = saved_had_error
+
+    # Remove all defer entries at this depth
+    var new_eids: [i64] = []
+    var new_depths: [i64] = []
+    for di in 0..total_deferred:
+        if eval_defer_depths[di] != my_depth:
+            new_eids.push(eval_defer_eids[di])
+            new_depths.push(eval_defer_depths[di])
+    eval_defer_eids = new_eids
+    eval_defer_depths = new_depths
+    eval_defer_depth = eval_defer_depth - 1
 
     env_pop_scope()
     last_val
@@ -903,6 +1217,10 @@ fn eval_match_expr(eid: i64) -> i64:
     if eval_had_error: return -1
     val arm_ids = e_node.args
 
+    # Exhaustiveness check: warn if enum variants are not all covered
+    val inferred_type = infer_match_enum_type(arm_ids)
+    check_match_exhaustive(arm_ids, inferred_type)
+
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
         val guard_eid = arm_get_guard(arm_id)
@@ -918,6 +1236,10 @@ fn eval_match_expr(eid: i64) -> i64:
                     continue
             # Execute arm body
             env_push_scope()
+            # Pattern binding: case X as name: — bind scrutinee to name
+            val binding_name = arm_get_binding(arm_id)
+            if binding_name != "":
+                env_define(binding_name, scrutinee)
             var last_val = val_make_nil()
             for sid in body_stmts:
                 if eval_had_error: break
@@ -926,7 +1248,10 @@ fn eval_match_expr(eid: i64) -> i64:
             env_pop_scope()
             return last_val
 
-    # No arm matched
+    # No arm matched — emit exhaustiveness warning
+    val kind = val_get_kind(scrutinee)
+    val val_name = val_kind_name(kind)
+    eval_warnings.push("warning: non-exhaustive match - no arm matched value of type " + val_name)
     val_make_nil()
 
 fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
@@ -1095,6 +1420,11 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
                 env_set_local(pi, pval)
         pi = pi + 1
 
+    # Generator detection: push yield accumulator if body contains yield
+    val is_gen = stmts_contain_yield(body_stmts)
+    if is_gen:
+        eval_yield_stack.push([])
+
     # Execute body
     var last_val = val_make_nil()
     for sid in body_stmts:
@@ -1103,10 +1433,20 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64]) -> i64:
         last_val = eval_stmt(sid)
 
     # Handle return
+    var had_explicit_return = false
     if eval_returning:
         last_val = eval_return_value
         eval_returning = false
         eval_return_value = -1
+        had_explicit_return = true
+
+    # Generator: pop accumulator and return collected array
+    if is_gen:
+        val ys_len = eval_yield_stack.len()
+        val yielded = eval_yield_stack[ys_len - 1]
+        eval_yield_stack = eval_yield_stack[0:ys_len - 1]
+        if had_explicit_return == false:
+            last_val = val_make_array(yielded)
 
     env_pop_scope()
     if local_count > 0:
@@ -1120,23 +1460,48 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64]) -> i64:
     val field_defaults = d_node.field_defaults
     var field_values: [i64] = []
 
-    # Evaluate arguments (positional mapping to fields)
+    # Check for struct update spread (..base) - usually the last arg
+    var base_struct: i64 = -1
+    var spread_at: i64 = -1
+    var spread_idx: i64 = 0
     for aeid in arg_eids:
-        val av = eval_expr(aeid)
-        if eval_had_error: return -1
-        field_values.push(av)
+        val etag = expr_get_tag(aeid)
+        if etag == EXPR_SPREAD:
+            spread_at = spread_idx
+        spread_idx = spread_idx + 1
 
-    # Fill remaining fields with defaults or nil
+    # Evaluate non-spread arguments (positional mapping to fields)
+    var explicit_pos: i64 = 0
+    for aeid in arg_eids:
+        val etag = expr_get_tag(aeid)
+        if etag == EXPR_SPREAD:
+            # Evaluate base struct for spread
+            val inner_eid = expr_get_left(aeid)
+            base_struct = eval_expr(inner_eid)
+            if eval_had_error: return -1
+        else:
+            val av = eval_expr(aeid)
+            if eval_had_error: return -1
+            field_values.push(av)
+
+    # Fill remaining fields: use base struct then defaults then nil
     val num_filled = field_values.len()
     var i: i64 = 0
-    for unused in field_names:
+    for fname in field_names:
         if i >= num_filled:
             var fv: i64 = -1
-            if i < field_defaults.len():
-                val def_eid = field_defaults[i]
-                if def_eid >= 0:
-                    fv = eval_expr(def_eid)
-                    if eval_had_error: return -1
+            # Try base struct field
+            if base_struct >= 0:
+                val bfv = val_struct_get_field(base_struct, fname)
+                if bfv >= 0:
+                    fv = bfv
+            # Try declared default
+            if fv < 0:
+                if i < field_defaults.len():
+                    val def_eid = field_defaults[i]
+                    if def_eid >= 0:
+                        fv = eval_expr(def_eid)
+                        if eval_had_error: return -1
             if fv < 0:
                 fv = val_make_nil()
             field_values.push(fv)
@@ -1613,6 +1978,154 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
             return val_make_text(val_to_text(arg_val))
         return val_make_text("")
 
+    # Annotation intrinsic: @static_assert(condition, message)
+    # Evaluates condition at module load time; panics if false
+    if name == "@static_assert":
+        if arg_eids.len() >= 2:
+            val sa_cond = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_truthy(sa_cond) == false:
+                val sa_msg_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val sa_msg = val_to_text(sa_msg_val)
+                eval_set_error("static_assert failed: " + sa_msg)
+                return -1
+        elif arg_eids.len() == 1:
+            val sa_cond2 = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            if val_is_truthy(sa_cond2) == false:
+                eval_set_error("static_assert failed")
+                return -1
+        return val_make_nil()
+
+    # @traits(query, T, ...) — compile-time introspection built-in
+    if name == "__traits":
+        if arg_eids.len() < 1:
+            return val_make_array([])
+        val tr_query_val = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        val tr_query = val_to_text(tr_query_val)
+
+        # @traits("fields", "TypeName") — returns [text] of field names
+        if tr_query == "fields":
+            if arg_eids.len() >= 2:
+                val tr_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_type_name = val_to_text(tr_type_val)
+                val tr_struct_decl = struct_table_lookup(tr_type_name)
+                if tr_struct_decl >= 0:
+                    val tr_field_names = decl_get_fields(tr_struct_decl)
+                    var tr_result: [i64] = []
+                    for tr_fname in tr_field_names:
+                        tr_result.push(val_make_text(tr_fname))
+                    return val_make_array(tr_result)
+            return val_make_array([])
+
+        # @traits("has_member", "TypeName", "fieldName") — bool
+        if tr_query == "has_member":
+            if arg_eids.len() >= 3:
+                val tr_type_val2 = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_member_val = eval_expr(arg_eids[2])
+                if eval_had_error: return -1
+                val tr_type_name2 = val_to_text(tr_type_val2)
+                val tr_member_name = val_to_text(tr_member_val)
+                val tr_struct_decl2 = struct_table_lookup(tr_type_name2)
+                if tr_struct_decl2 >= 0:
+                    val tr_fields2 = decl_get_fields(tr_struct_decl2)
+                    for tr_f2 in tr_fields2:
+                        if tr_f2 == tr_member_name:
+                            return val_make_bool(true)
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("enum_members", "EnumName") — returns [text] of variant names
+        if tr_query == "enum_members":
+            if arg_eids.len() >= 2:
+                val tr_enum_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_enum_name = val_to_text(tr_enum_type_val)
+                val tr_variants_csv = enum_table_lookup(tr_enum_name)
+                if tr_variants_csv != "":
+                    var tr_enum_result: [i64] = []
+                    var tr_vi = 0
+                    var tr_vstart = 0
+                    while tr_vi <= tr_variants_csv.len():
+                        val tr_at_end = tr_vi == tr_variants_csv.len()
+                        var tr_is_comma = false
+                        if tr_at_end == false:
+                            val tr_ch = tr_variants_csv[tr_vi:tr_vi+1]
+                            tr_is_comma = tr_ch == ","
+                        val tr_split = tr_at_end or tr_is_comma
+                        if tr_split:
+                            if tr_vi > tr_vstart:
+                                val tr_variant = tr_variants_csv[tr_vstart:tr_vi]
+                                tr_enum_result.push(val_make_text(tr_variant))
+                            tr_vstart = tr_vi + 1
+                        tr_vi = tr_vi + 1
+                    return val_make_array(tr_enum_result)
+            return val_make_array([])
+
+        # @traits("is_struct", "TypeName") — bool
+        if tr_query == "is_struct":
+            if arg_eids.len() >= 2:
+                val tr_is_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_is_type_name = val_to_text(tr_is_type_val)
+                val tr_is_struct_decl = struct_table_lookup(tr_is_type_name)
+                return val_make_bool(tr_is_struct_decl >= 0)
+            return val_make_bool(false)
+
+        # @traits("is_enum", "TypeName") — bool
+        if tr_query == "is_enum":
+            if arg_eids.len() >= 2:
+                val tr_ie_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ie_type_name = val_to_text(tr_ie_type_val)
+                val tr_ie_variants = enum_table_lookup(tr_ie_type_name)
+                return val_make_bool(tr_ie_variants != "")
+            return val_make_bool(false)
+
+        # @traits("get_member", obj, "fieldName") — value of field by name
+        if tr_query == "get_member":
+            if arg_eids.len() >= 3:
+                val tr_gm_obj = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_gm_field_val = eval_expr(arg_eids[2])
+                if eval_had_error: return -1
+                val tr_gm_field = val_to_text(tr_gm_field_val)
+                val tr_gm_fields = val_get_struct_fields(tr_gm_obj)
+                val tr_gm_values = val_get_struct_values(tr_gm_obj)
+                var tr_gm_i = 0
+                for tr_gm_f in tr_gm_fields:
+                    if tr_gm_f == tr_gm_field:
+                        if tr_gm_i < tr_gm_values.len():
+                            return tr_gm_values[tr_gm_i]
+                    tr_gm_i = tr_gm_i + 1
+            return val_make_nil()
+
+        # @traits("type_name", "TypeName") — returns type name as text
+        if tr_query == "type_name":
+            if arg_eids.len() >= 2:
+                val tr_tn_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                return val_make_text(val_to_text(tr_tn_val))
+            return val_make_text("unknown")
+
+        # @traits("file"), @traits("line"), @traits("function") — source location
+        if tr_query == "file":
+            return val_make_text(module_get_path())
+        if tr_query == "line":
+            return val_make_int(1)
+        if tr_query == "function":
+            if eval_current_decl_id >= 0:
+                val tr_fn_node = decl_get(eval_current_decl_id)
+                return val_make_text(tr_fn_node.name)
+            return val_make_text("<module>")
+
+        # Unknown query — return nil
+        return val_make_nil()
+
     # Not a builtin
     -2
 
@@ -1635,15 +2148,67 @@ fn eval_stmt(sid: i64) -> i64:
     if tag == STMT_RETURN: return eval_stmt_return(sid)
     if tag == STMT_IF: return eval_stmt_if(sid)
     if tag == STMT_FOR: return eval_stmt_for(sid)
+    if tag == EVAL_STMT_STATIC_FOR: return eval_stmt_static_for(sid)
+    if tag == EVAL_STMT_COMPTIME: return eval_stmt_comptime(sid)
     if tag == STMT_WHILE: return eval_stmt_while(sid)
     if tag == STMT_MATCH: return eval_stmt_match(sid)
     if tag == STMT_BLOCK: return eval_stmt_block(sid)
     if tag == STMT_BREAK:
         eval_breaking = true
+        val break_lbl = stmt_get(sid).name
+        eval_break_label = break_lbl
         return val_make_nil()
     if tag == STMT_CONTINUE:
         eval_continuing = true
+        val cont_lbl = stmt_get(sid).name
+        eval_continue_label = cont_lbl
         return val_make_nil()
+    if tag == STMT_LABELED_LOOP:
+        return eval_labeled_loop(sid)
+    if tag == STMT_DEFER:
+        # Add deferred expression to flat defer arrays with current depth
+        val defer_eid = stmt_get(sid).expr_idx
+        eval_defer_eids.push(defer_eid)
+        eval_defer_depths.push(eval_defer_depth)
+        return val_make_nil()
+    if tag == STMT_ERRDEFER:
+        # errdefer: same as defer for now (full error tracking not yet implemented)
+        val errdefer_eid = stmt_get(sid).expr_idx
+        eval_defer_eids.push(errdefer_eid)
+        eval_defer_depths.push(eval_defer_depth)
+        return val_make_nil()
+
+    if tag == STMT_RECEIVE:
+        # Interpreter stub: no real mailbox. If after arm exists, run it.
+        # Otherwise run first arm's body stmts if any arms exist.
+        val s_node_recv = stmt_get(sid)
+        val recv_timeout_body = s_node_recv.type_tag   # after body stmt index, or -1
+        if recv_timeout_body >= 0:
+            return eval_stmt(recv_timeout_body)
+        val recv_arms = s_node_recv.body               # arm pool indices
+        if recv_arms.len() > 0:
+            val first_arm_body = arm_get_body(recv_arms[0])
+            var recv_last: i64 = val_make_nil()
+            for recv_sid in first_arm_body:
+                if eval_had_error: break
+                if eval_returning: break
+                recv_last = eval_stmt(recv_sid)
+            return recv_last
+        return val_make_nil()
+
+    if tag == STMT_BIND:
+        # bind x = expr inside ce: block — treat like val declaration
+        # Short-circuits (returns nil) if RHS evaluates to nil
+        val s_node_bind = stmt_get(sid)
+        val bind_name = s_node_bind.name
+        val bind_rhs_idx = s_node_bind.expr_idx
+        val bind_rhs_val = eval_expr(bind_rhs_idx)
+        if eval_had_error: return -1
+        val bind_is_nil = val_kind(bind_rhs_val) == 0   # VAL_NIL = 0
+        if bind_is_nil:
+            return bind_rhs_val
+        env_define(bind_name, bind_rhs_val)
+        return bind_rhs_val
 
     eval_set_error("unsupported statement kind: " + "{tag}")
     -1
@@ -1938,6 +2503,51 @@ fn eval_stmt_for(sid: i64) -> i64:
     eval_set_error("cannot iterate over " + val_kind_name(val_get_kind(iterable)))
     -1
 
+# static_for — at interpreter level behaves like a regular for loop.
+# Compile-time unrolling is a future compiler-phase optimization.
+fn eval_stmt_static_for(sid: i64) -> i64:
+    val sf_node = stmt_get(sid)
+    val sf_iter_name = sf_node.name
+    val sf_iterable_eid = sf_node.expr_idx
+    val sf_body_stmts = sf_node.body
+
+    val sf_iterable = eval_expr(sf_iterable_eid)
+    if eval_had_error: return -1
+
+    if val_is_array(sf_iterable):
+        val sf_elements = val_get_array(sf_iterable)
+        var sf_last_val = val_make_nil()
+        for sf_elem_vid in sf_elements:
+            if eval_had_error: break
+            if eval_returning: break
+            if eval_breaking: break
+            eval_continuing = false
+            env_push_scope()
+            env_define(sf_iter_name, sf_elem_vid)
+            for sf_sid in sf_body_stmts:
+                if eval_had_error: break
+                if eval_returning: break
+                if eval_breaking: break
+                if eval_continuing: break
+                sf_last_val = eval_stmt(sf_sid)
+            env_pop_scope()
+        eval_breaking = false
+        eval_continuing = false
+        return sf_last_val
+
+    eval_set_error("static_for: cannot iterate over " + val_kind_name(val_get_kind(sf_iterable)))
+    -1
+
+fn eval_stmt_comptime(sid: i64) -> i64:
+    # Execute the body statements immediately (they run at module-load time)
+    val ct_node = stmt_get(sid)
+    val ct_body = ct_node.body
+    var ct_last = val_make_nil()
+    for ct_sid in ct_body:
+        if eval_had_error: break
+        ct_last = eval_stmt(ct_sid)
+    ct_last
+
 fn eval_stmt_while(sid: i64) -> i64:
     val s_node = stmt_get(sid)
     val cond_eid = s_node.expr_idx
@@ -1975,6 +2585,10 @@ fn eval_stmt_match(sid: i64) -> i64:
 
     val scrutinee = eval_expr(scrutinee_eid)
     if eval_had_error: return -1
+
+    # Exhaustiveness check: warn if enum variants are not all covered
+    val inferred_type2 = infer_match_enum_type(arm_ids)
+    check_match_exhaustive(arm_ids, inferred_type2)
 
     for arm_id in arm_ids:
         val pattern_eid = arm_get_pattern(arm_id)
@@ -2016,6 +2630,12 @@ fn eval_decl(did: i64) -> i64:
     val d_node = decl_get(did)
     val tag = d_node.tag
 
+    # Check @when conditional compilation: skip disabled decls
+    val decl_name = d_node.name
+    for disabled_name in when_disabled_decls:
+        if disabled_name == decl_name:
+            return val_make_nil()
+
     if tag == DECL_FN:
         val name = d_node.name
         val ret_type = d_node.ret_type
@@ -2056,6 +2676,8 @@ fn eval_decl(did: i64) -> i64:
         for variant_name in variants:
             env_define_global(variant_name, val_make_int(vi))
             vi = vi + 1
+        # Register enum in registry for exhaustiveness checking
+        enum_table_register(name, variants)
         return val_make_nil()
 
     if tag == DECL_USE:
@@ -2082,6 +2704,11 @@ fn eval_decl(did: i64) -> i64:
         # Export declarations - handled during module loading
         # No runtime action needed
         return val_make_nil()
+
+    if tag == DECL_CE:
+        # ce NAME: block — treat like a do: block (evaluate body, return last value)
+        val ce_body = d_node.body_stmts
+        return eval_block(ce_body, -1)
 
     # DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
     val_make_nil()
@@ -2115,11 +2742,30 @@ fn eval_module() -> i64:
         if tag == DECL_ENUM:
             eval_decl(did)
 
-    # Phase 3: Call main() if it exists
+    # Phase 3: Call @init functions in order (before main)
+    for init_fn_name in init_functions:
+        if eval_had_error: break
+        val init_decl = func_table_lookup(init_fn_name)
+        if init_decl >= 0:
+            var init_args: [i64] = []
+            eval_function_call(init_decl, init_args)
+
+    # Phase 4: Call main() if it exists
     val main_decl = func_table_lookup("main")
     if main_decl >= 0:
         var empty_args: [i64] = []
         last_val = eval_function_call(main_decl, empty_args)
+
+    # Phase 5: Call @teardown functions in reverse order (after main)
+    val teardown_len = teardown_functions.len()
+    var tdi: i64 = teardown_len - 1
+    while tdi >= 0:
+        val td_fn_name = teardown_functions[tdi]
+        val td_decl = func_table_lookup(td_fn_name)
+        if td_decl >= 0:
+            var td_args: [i64] = []
+            eval_function_call(td_decl, td_args)
+        tdi = tdi - 1
 
     last_val
 
@@ -2152,16 +2798,13 @@ fn eval_await_expr(eid: i64) -> i64:
     result
 
 fn eval_yield_expr(eid: i64) -> i64:
-    """Evaluate a yield expression: yield value
-
-    Basic stub: evaluates and returns the value.
-    Full generator support requires state machine transformation.
-    """
     val e_node = expr_get(eid)
     val value_eid = e_node.left
-    # For now, just evaluate the value
     val result = eval_expr(value_eid)
     if eval_had_error: return -1
+    if eval_yield_stack.len() > 0:
+        val top_idx = eval_yield_stack.len() - 1
+        eval_yield_stack[top_idx].push(result)
     result
 
 fn eval_spawn_expr(eid: i64) -> i64:
@@ -2176,6 +2819,55 @@ fn eval_spawn_expr(eid: i64) -> i64:
     val result = eval_expr(call_eid)
     if eval_had_error: return -1
     result
+
+fn eval_labeled_loop(sid: i64) -> i64:
+    # Evaluate a labeled loop: push label, run inner loop, pop label
+    # If break/continue targets this label, consume the break state
+    val s_node = stmt_get(sid)
+    val my_label = s_node.name
+    val body_stmts = s_node.body
+    eval_label_stack.push(my_label)
+    # Execute the inner loop stmt
+    var result = val_make_nil()
+    if body_stmts.len() > 0:
+        val inner_sid = body_stmts[0]
+        result = eval_stmt(inner_sid)
+    # Pop label
+    val stack_len = eval_label_stack.len()
+    if stack_len > 0:
+        val new_stack: [text] = eval_label_stack[0:stack_len - 1]
+        eval_label_stack = new_stack
+    # If break targeted this label, consume it
+    if eval_breaking:
+        if eval_break_label == my_label:
+            eval_breaking = false
+            eval_break_label = ""
+    # If continue targeted this label, consume it (already consumed by loop)
+    if eval_continuing:
+        if eval_continue_label == my_label:
+            eval_continuing = false
+            eval_continue_label = ""
+    result
+
+fn eval_do_block(eid: i64) -> i64:
+    # Evaluates a do: block expression, returning the value of the last statement
+    val e_node = expr_get(eid)
+    val body_stmts = e_node.stmts
+    env_push_scope()
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+    env_pop_scope()
+    last_val
+
+fn eval_atom_expr(eid: i64) -> i64:
+    # Evaluates an atom literal `symbol — stored as an interned text value
+    val e_node = expr_get(eid)
+    val atom_name = e_node.s_val
+    # Atoms are represented as text with a special prefix for identity comparison
+    val_make_text("`" + atom_name)
 
 export eval_reset, eval_set_error, eval_get_error, eval_has_error, eval_get_warnings
 export eval_returning, eval_return_value, eval_breaking, eval_continuing
