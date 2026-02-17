@@ -1,0 +1,440 @@
+# Trait Scanner - Text-Level Trait Definition Scanner
+#
+# Scans raw Simple source text to find trait definitions and extract their
+# method signatures. This is a TEXT-LEVEL scanner that runs before the parser,
+# processing raw source lines to identify trait blocks and their contents.
+#
+# Scanned patterns:
+#   trait Display:
+#       fn to_string() -> text
+#
+#   trait MutableContainer:
+#       me add(item: i64)
+#       me remove(idx: i64) -> i64
+#       fn size() -> i64
+#
+# Output:
+#   A list of ScannedTrait structs, each containing the trait name and a list
+#   of TraitMethod structs describing each method's name, mutability, parameter
+#   names, and whether it has a default implementation body.
+#
+# Algorithm:
+#   1. Split source by newlines
+#   2. Detect "trait NAME:" lines
+#   3. Collect subsequent indented lines as trait body
+#   4. Parse fn/me method signatures from the body
+#   5. Determine if methods have default bodies (deeper indent on next line)
+#
+# NOTE: This module runs on the current runtime, so it MUST NOT use
+# try/catch/throw, generics, or static fn patterns.
+# NOTE: Chained method calls are broken - use intermediate vars.
+
+use std.text.{NL}
+
+export scan_traits, find_trait, ScannedTrait, TraitMethod
+
+# ================================================================
+# Output Structs
+# ================================================================
+
+struct TraitMethod:
+    name: text
+    is_me: bool
+    param_names: [text]
+    has_default: bool  # true = has body, no forwarding needed
+
+struct ScannedTrait:
+    name: text
+    methods: [TraitMethod]
+
+# ================================================================
+# Main API
+# ================================================================
+
+# Scan source text for all trait definitions and extract their method signatures.
+#
+# Splits the source into lines, identifies trait blocks by their header pattern
+# ("trait NAME:"), collects indented body lines, and parses method signatures
+# from each trait body.
+#
+# Parameters:
+#   source: Raw Simple source code as text
+#
+# Returns:
+#   List of ScannedTrait structs, one per trait found in the source
+fn scan_traits(source: text) -> [ScannedTrait]:
+    val lines = source.split(NL)
+    var traits = []
+    var i = 0
+
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Check if this line starts a trait definition
+        val trait_name = parse_trait_header(trimmed)
+        if trait_name != "":
+            val trait_indent = get_indent(line)
+            val body_indent = trait_indent + 4
+
+            # Collect body lines (deeper indent than trait header)
+            var body_lines = []
+            var j = i + 1
+            while j < lines.len():
+                val next_line = lines[j]
+                val next_trimmed = next_line.trim()
+                # Empty lines inside the trait body are part of it
+                if next_trimmed == "":
+                    body_lines.push(next_line)
+                    j = j + 1
+                # Lines with deeper indent are part of the body
+                elif get_indent(next_line) > trait_indent:
+                    body_lines.push(next_line)
+                    j = j + 1
+                # Lines at same or lesser indent end the body
+                else:
+                    break
+
+            # Parse methods from the collected body lines
+            val methods = parse_trait_body(body_lines, body_indent)
+            traits.push(ScannedTrait(name: trait_name, methods: methods))
+            i = j
+        else:
+            i = i + 1
+
+    traits
+
+# Look up a trait by name from a list of scanned traits.
+#
+# Searches through the provided list for a trait matching the given name.
+# If not found, returns a ScannedTrait with the given name and empty methods
+# list, allowing callers to safely use the result without nil checks.
+#
+# Parameters:
+#   name: The trait name to search for
+#   traits: List of ScannedTrait to search through
+#
+# Returns:
+#   The matching ScannedTrait, or a ScannedTrait with empty methods if not found
+fn find_trait(name: text, traits: [ScannedTrait]) -> ScannedTrait:
+    var idx = 0
+    while idx < traits.len():
+        val t = traits[idx]
+        if t.name == name:
+            return t
+        idx = idx + 1
+    # Not found - return empty trait
+    ScannedTrait(name: name, methods: [])
+
+# ================================================================
+# Trait Header Parsing
+# ================================================================
+
+# Parse a trimmed line as a trait header. Returns the trait name if the line
+# matches "trait NAME:", or empty text if it does not.
+fn parse_trait_header(trimmed: text) -> text:
+    if not trimmed.starts_with("trait "):
+        return ""
+    if not trimmed.ends_with(":"):
+        return ""
+
+    # Extract name between "trait " and ":"
+    val tlen = trimmed.len()
+    val name_part = trimmed[6:tlen - 1]
+    val name = name_part.trim()
+
+    # Validate: name must be non-empty and start with uppercase
+    if name == "":
+        return ""
+    val first_ch = name[0:1]
+    if not is_upper_char(first_ch):
+        return ""
+
+    name
+
+# ================================================================
+# Trait Body Parsing
+# ================================================================
+
+# Parse method signatures from trait body lines.
+#
+# Scans body lines for fn/me method declarations. Determines whether each
+# method has a default implementation by checking if the line following the
+# signature is indented deeper (indicating a body).
+#
+# Skips comments (#), associated type declarations (type), and blank lines.
+fn parse_trait_body(body_lines: [text], body_indent: i64) -> [TraitMethod]:
+    var methods = []
+    var i = 0
+
+    while i < body_lines.len():
+        val line = body_lines[i]
+        val trimmed = line.trim()
+
+        # Skip blank lines
+        if trimmed == "":
+            i = i + 1
+            continue
+
+        # Skip comment lines
+        if trimmed.starts_with("#"):
+            i = i + 1
+            continue
+
+        # Skip associated type declarations
+        if trimmed.starts_with("type "):
+            i = i + 1
+            continue
+
+        # Check for fn or me method signature
+        var is_me = false
+        var sig_rest = ""
+
+        if trimmed.starts_with("fn "):
+            sig_rest = trimmed[3:]
+        elif trimmed.starts_with("me "):
+            is_me = true
+            sig_rest = trimmed[3:]
+        else:
+            # Not a method line - skip
+            i = i + 1
+            continue
+
+        # Extract method name (everything before '(' or ':' or end of line)
+        val method_name = extract_method_name(sig_rest)
+        if method_name == "":
+            i = i + 1
+            continue
+
+        # Extract parameter names from the signature
+        val param_names = extract_param_names(sig_rest)
+
+        # Determine if there's a default body
+        # A method has a default body if:
+        #   - The signature line ends with ":"
+        #   - OR the next non-blank line is indented deeper than this method line
+        val current_indent = get_indent(line)
+        var has_default = false
+
+        # Check if the signature itself has a single-line body (ends with ": expr")
+        # We look for a colon at the end of the signature (after return type)
+        if trimmed.ends_with(":"):
+            # Check if next line exists and is indented deeper
+            var k = i + 1
+            while k < body_lines.len():
+                val next_line = body_lines[k]
+                if next_line.trim() != "":
+                    if get_indent(next_line) > current_indent:
+                        has_default = true
+                    break
+                k = k + 1
+        else:
+            # Signature doesn't end with ":" - check if it has an inline body
+            # e.g., "fn size() -> i64: self.items.len()"
+            # Look for ": " after the return type arrow
+            val has_inline = has_inline_body(trimmed)
+            if has_inline:
+                has_default = true
+
+        methods.push(TraitMethod(
+            name: method_name,
+            is_me: is_me,
+            param_names: param_names,
+            has_default: has_default))
+
+        # Skip past any body lines of this method
+        if has_default:
+            var j = i + 1
+            while j < body_lines.len():
+                val next_line = body_lines[j]
+                val next_trimmed = next_line.trim()
+                if next_trimmed == "":
+                    j = j + 1
+                elif get_indent(next_line) > current_indent:
+                    j = j + 1
+                else:
+                    break
+            i = j
+        else:
+            i = i + 1
+
+    methods
+
+# ================================================================
+# Method Signature Parsing
+# ================================================================
+
+# Extract the method name from the rest of a signature line (after "fn " or "me ").
+# The name is everything up to the first '(', ':', '<', or ' '.
+fn extract_method_name(sig_rest: text) -> text:
+    var name = ""
+    var ci = 0
+    val slen = sig_rest.len()
+    while ci < slen:
+        val ch = sig_rest[ci:ci + 1]
+        if ch == "(" or ch == ":" or ch == "<" or ch == " ":
+            break
+        name = name + ch
+        ci = ci + 1
+    name
+
+# Extract parameter names from a method signature.
+# Given "method_name(a: i64, b: text) -> i64:", extracts ["a", "b"].
+# Only extracts the parameter names (before the colon in each param).
+fn extract_param_names(sig_rest: text) -> [text]:
+    # Find the opening parenthesis
+    val open_paren = find_char(sig_rest, "(")
+    if open_paren < 0:
+        return []
+
+    # Find the matching closing parenthesis
+    val close_paren = find_matching_paren(sig_rest, open_paren)
+    if close_paren < 0:
+        return []
+
+    # Extract the parameter string between parens
+    val param_start = open_paren + 1
+    val params_text = sig_rest[param_start:close_paren]
+    val trimmed_params = params_text.trim()
+    if trimmed_params == "":
+        return []
+
+    # Split on commas and extract names
+    split_param_names(trimmed_params)
+
+# Check if a trimmed method signature has an inline body.
+# Looks for a pattern like "fn name(...) -> type: expr" where the colon-space
+# after the return type (or after params if no return type) indicates an inline body.
+fn has_inline_body(trimmed: text) -> bool:
+    # Find the closing paren of parameters
+    val open_paren = find_char(trimmed, "(")
+    if open_paren < 0:
+        return false
+
+    val close_paren = find_matching_paren(trimmed, open_paren)
+    if close_paren < 0:
+        return false
+
+    # After close paren, look for ": " that indicates inline body
+    # Skip past optional "-> type" first
+    var ci = close_paren + 1
+    val tlen = trimmed.len()
+
+    while ci < tlen:
+        val ch = trimmed[ci:ci + 1]
+        if ch == ":":
+            # Check if there's content after the colon (not just end of line)
+            val after_colon = ci + 1
+            if after_colon < tlen:
+                val after = trimmed[after_colon:]
+                val after_trimmed = after.trim()
+                if after_trimmed != "":
+                    return true
+            return false
+        ci = ci + 1
+
+    false
+
+# ================================================================
+# Self-Contained Helper Functions
+# ================================================================
+
+# Count leading spaces of a line (tabs count as 4 spaces).
+fn get_indent(line: text) -> i64:
+    var count = 0
+    val llen = line.len()
+    while count < llen:
+        val ch = line[count:count + 1]
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
+
+# Find the first occurrence of a character in a string.
+# Returns the index or -1 if not found.
+fn find_char(s: text, ch: text) -> i64:
+    var idx = 0
+    val slen = s.len()
+    while idx < slen:
+        val c = s[idx:idx + 1]
+        if c == ch:
+            return idx
+        idx = idx + 1
+    -1
+
+# Find the matching closing parenthesis for an opening paren at the given index.
+# Handles nested parentheses. Returns index of closing paren or -1.
+fn find_matching_paren(s: text, open_idx: i64) -> i64:
+    var depth = 0
+    var ci = open_idx
+    val slen = s.len()
+    while ci < slen:
+        val ch = s[ci:ci + 1]
+        if ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return ci
+        ci = ci + 1
+    -1
+
+# Split a parameter string like "a: i64, b: text" into just the names ["a", "b"].
+# For each comma-separated segment, extracts the portion before the first colon.
+# If a segment has no colon, the entire trimmed segment is used as the name.
+fn split_param_names(s: text) -> [text]:
+    var names = []
+    var current = ""
+    var idx = 0
+    val slen = s.len()
+    var paren_depth = 0
+
+    while idx < slen:
+        val ch = s[idx:idx + 1]
+        if ch == "(":
+            paren_depth = paren_depth + 1
+            current = current + ch
+        elif ch == ")":
+            paren_depth = paren_depth - 1
+            current = current + ch
+        elif ch == "," and paren_depth == 0:
+            # End of one parameter - extract name
+            val param_name = extract_name_from_param(current)
+            if param_name != "":
+                names.push(param_name)
+            current = ""
+        else:
+            current = current + ch
+        idx = idx + 1
+
+    # Handle the last parameter
+    val last_name = extract_name_from_param(current)
+    if last_name != "":
+        names.push(last_name)
+
+    names
+
+# Extract the parameter name from a single parameter declaration.
+# Given "name: Type" returns "name". Given "name" returns "name".
+fn extract_name_from_param(param: text) -> text:
+    val trimmed = param.trim()
+    if trimmed == "":
+        return ""
+
+    # Find colon - name is everything before it
+    val colon_idx = find_char(trimmed, ":")
+    if colon_idx > 0:
+        val name_part = trimmed[0:colon_idx]
+        return name_part.trim()
+
+    # No colon - the whole thing is the name
+    trimmed
+
+# Check if a single character is uppercase A-Z.
+fn is_upper_char(ch: text) -> bool:
+    if ch.len() != 1:
+        return false
+    ch >= "A" and ch <= "Z"

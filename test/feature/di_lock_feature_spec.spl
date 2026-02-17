@@ -1,0 +1,259 @@
+# DI Lock Feature Spec
+#
+# Feature 9: DI Lock
+#
+# DiContainer with lock()/unlock() — once locked, no new bindings can be added.
+# Covers all phases: lock state, locked behavior, lock semantics, integration,
+# and full system test.
+
+use compiler.di.{DiContainer, di_is_system_test_locked}
+
+extern fn rt_env_set(key: text, value: text)
+
+fn make_di() -> DiContainer:
+    DiContainer(bindings: {}, singletons: {}, profile: "dev", all_bindings: [], locked: false)
+
+# ============================================================================
+# Phase 1 - Lock state
+# ============================================================================
+
+describe "DI Lock Feature: Phase 1 - Lock state":
+
+    it "starts unlocked":
+        val di = make_di()
+        expect(di.locked).to_equal(false)
+
+    it "lock() transitions to locked state":
+        val di = make_di()
+        di.lock()
+        expect(di.locked).to_equal(true)
+
+    it "is_locked() returns true after lock":
+        val di = make_di()
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+
+    it "unlock() transitions back to unlocked":
+        val di = make_di()
+        di.lock()
+        di.unlock()
+        expect(di.locked).to_equal(false)
+
+    it "is_locked() returns false after unlock":
+        val di = make_di()
+        di.lock()
+        di.unlock()
+        expect(di.is_locked()).to_equal(false)
+
+    it "is_locked() returns false on fresh container":
+        val di = make_di()
+        expect(di.is_locked()).to_equal(false)
+
+# ============================================================================
+# Phase 2 - Locked behavior
+# ============================================================================
+
+describe "DI Lock Feature: Phase 2 - Locked behavior":
+
+    it "locked container rejects bind_instance":
+        val di = make_di()
+        di.lock()
+        di.bind_instance("Bar", 99)
+        expect(di.has("Bar")).to_equal(false)
+
+    it "locked container rejects bind":
+        val di = make_di()
+        di.lock()
+        di.bind("Baz", fn(): 123)
+        expect(di.has("Baz")).to_equal(false)
+
+    it "locked container still allows resolve":
+        val di = make_di()
+        di.bind_instance("Svc", "hello")
+        di.lock()
+        val result = di.resolve("Svc")
+        expect(result).to_equal("hello")
+
+    it "locked container still allows resolve_or":
+        val di = make_di()
+        di.bind_instance("Svc", "hello")
+        di.lock()
+        val result = di.resolve_or("Svc", "default")
+        expect(result).to_equal("hello")
+
+    it "locked container still allows has check":
+        val di = make_di()
+        di.bind_instance("Svc", "hello")
+        di.lock()
+        expect(di.has("Svc")).to_equal(true)
+
+    it "locked container resolve_or returns default for missing":
+        val di = make_di()
+        di.lock()
+        val result = di.resolve_or("Missing", "fallback")
+        expect(result).to_equal("fallback")
+
+    it "locked container rejects bind_tagged":
+        val di = make_di()
+        di.lock()
+        di.bind_tagged("Tagged", ["api"], fn(): "tagged-val")
+        expect(di.has("Tagged")).to_equal(false)
+
+# ============================================================================
+# Phase 3 - Lock semantics
+# ============================================================================
+
+describe "DI Lock Feature: Phase 3 - Lock semantics":
+
+    it "can lock and unlock multiple times":
+        val di = make_di()
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+        di.unlock()
+        expect(di.is_locked()).to_equal(false)
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+        di.unlock()
+        expect(di.is_locked()).to_equal(false)
+
+    it "bindings before lock are preserved after lock":
+        val di = make_di()
+        di.bind_instance("Backend", "production-backend")
+        di.bind_instance("Logger", "file-logger")
+        di.lock()
+        expect(di.resolve("Backend")).to_equal("production-backend")
+        expect(di.resolve("Logger")).to_equal("file-logger")
+
+    it "unlock allows new bindings again":
+        val di = make_di()
+        di.lock()
+        di.bind_instance("Foo", 42)
+        expect(di.has("Foo")).to_equal(false)
+        di.unlock()
+        di.bind_instance("Foo", 42)
+        expect(di.has("Foo")).to_equal(true)
+
+    it "pre-lock binding not overwritten when locked":
+        val di = make_di()
+        di.bind_instance("Backend", "production-backend")
+        di.lock()
+        di.bind_instance("Backend", "mock-backend")
+        val result = di.resolve("Backend")
+        expect(result).to_equal("production-backend")
+
+    it "locked state does not affect resolve_or nil default":
+        val di = make_di()
+        di.lock()
+        val result = di.resolve_or("NoSuch", nil)
+        expect(result).to_be_nil()
+
+# ============================================================================
+# Phase 4 - Integration
+# ============================================================================
+
+describe "DI Lock Feature: Phase 4 - Integration":
+
+    it "container locked after setup phase":
+        val di = make_di()
+        # Setup phase: register services
+        di.bind_instance("Service1", "svc1")
+        di.bind_instance("Service2", "svc2")
+        # Lock to prevent further modification
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+
+    it "runtime resolution works on locked container":
+        val di = make_di()
+        di.bind_instance("Config", "prod-config")
+        di.lock()
+        val result = di.resolve("Config")
+        expect(result).to_equal("prod-config")
+
+    it "locked container with resolve_singleton works":
+        val di = make_di()
+        di.bind("Singleton", fn(): "singleton-value")
+        di.lock()
+        val result = di.resolve("Singleton")
+        expect(result).to_equal("singleton-value")
+
+    it "multiple services still resolvable after lock":
+        val di = make_di()
+        di.bind_instance("A", "alpha")
+        di.bind_instance("B", "beta")
+        di.bind_instance("C", "gamma")
+        di.lock()
+        expect(di.resolve("A")).to_equal("alpha")
+        expect(di.resolve("B")).to_equal("beta")
+        expect(di.resolve("C")).to_equal("gamma")
+
+    it "env-var lock blocks bind_instance":
+        rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+        rt_env_set("SIMPLE_DI_TEST", "0")
+        val di = make_di()
+        di.bind_instance("MockService", "mock")
+        expect(di.has("MockService")).to_equal(false)
+        # Cleanup
+        rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+
+    it "env-var di_test bypass allows bind_instance":
+        rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+        rt_env_set("SIMPLE_DI_TEST", "1")
+        val di = make_di()
+        di.bind_instance("TestMock", "mock")
+        expect(di.has("TestMock")).to_equal(true)
+        # Cleanup
+        rt_env_set("SIMPLE_SYSTEM_TEST", "0")
+        rt_env_set("SIMPLE_DI_TEST", "0")
+
+# ============================================================================
+# Phase 5 - System test
+# ============================================================================
+
+describe "DI Lock Feature: Phase 5 - System test":
+
+    it "full registration-lock-resolve cycle works":
+        val di = make_di()
+        di.bind_instance("key1", "val1")
+        di.bind_instance("key2", "val2")
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+        expect(di.resolve("key1")).to_equal("val1")
+        expect(di.resolve("key2")).to_equal("val2")
+
+    it "complete lifecycle: register, lock, reject, unlock, register again":
+        val di = make_di()
+        # Phase 1: register core bindings
+        di.bind_instance("Core", "core-impl")
+        # Phase 2: lock the container
+        di.lock()
+        expect(di.is_locked()).to_equal(true)
+        # Phase 3: locked — new bindings rejected
+        di.bind_instance("Extra", "extra-impl")
+        expect(di.has("Extra")).to_equal(false)
+        # Phase 4: core bindings still work
+        expect(di.resolve("Core")).to_equal("core-impl")
+        # Phase 5: unlock — new bindings accepted
+        di.unlock()
+        di.bind_instance("Extra", "extra-impl")
+        expect(di.has("Extra")).to_equal(true)
+
+    it "factory bindings registered before lock resolve correctly":
+        val di = make_di()
+        di.bind("LazyService", fn(): "created-on-demand")
+        di.lock()
+        val result = di.resolve("LazyService")
+        expect(result).to_equal("created-on-demand")
+
+    it "di_is_system_test_locked returns false with no env vars":
+        rt_env_set("SIMPLE_SYSTEM_TEST", "")
+        rt_env_set("SIMPLE_DI_TEST", "")
+        val locked = di_is_system_test_locked()
+        expect(locked).to_equal(false)
+
+    it "di_is_system_test_locked returns true with SIMPLE_SYSTEM_TEST=1":
+        rt_env_set("SIMPLE_SYSTEM_TEST", "1")
+        rt_env_set("SIMPLE_DI_TEST", "0")
+        val locked = di_is_system_test_locked()
+        expect(locked).to_equal(true)
+        # Cleanup
+        rt_env_set("SIMPLE_SYSTEM_TEST", "0")

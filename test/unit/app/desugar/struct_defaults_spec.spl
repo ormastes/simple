@@ -1,0 +1,114 @@
+# Struct Default Field Values — Desugar Passthrough Tests
+#
+# Feature 3: Default Field Values
+# Syntax: `field: Type = expr` inside struct/class bodies.
+#
+# Investigation Result: NO desugar pass needed.
+#
+# The core runtime (parser.spl + ast.spl + eval.spl) already handles
+# struct default field values natively:
+#
+#   parser.spl  — parse_struct_decl() detects `=` after the type annotation
+#                 and calls parse_expr() to capture the default expression.
+#   ast.spl     — decl_field_defaults: [[i64]] stores per-field default
+#                 expression indices; decl_struct_def() and decl_get() expose
+#                 them; CoreDecl.field_defaults is populated on every struct.
+#   eval.spl    — eval_struct_constructor() iterates over unfilled fields and
+#                 calls eval_expr(def_eid) for each default expression when the
+#                 caller omits those fields.
+#
+# Because Approach A (core-level) is already implemented, Approach B
+# (text-level desugar at the desugar pipeline) is neither required nor
+# desirable. Adding a desugar pass would duplicate logic and could conflict
+# with the already-working runtime behaviour.
+#
+# These tests verify that the existing desugar pipeline passes struct
+# declarations with default values through unchanged, i.e. that none of
+# the existing passes corrupt or drop default initialiser expressions.
+
+use app.desugar.mod.{desugar_source}
+use std.text.{NL}
+
+describe "struct default field values — desugar passthrough":
+
+    it "passes struct with single integer default unchanged":
+        val input = "struct Counter:{NL}    count: i64 = 0"
+        val output = desugar_source(input)
+        expect(output).to_contain("count: i64 = 0")
+
+    it "passes struct with multiple defaults unchanged":
+        val input = "struct Point:{NL}    x: i64 = 0{NL}    y: i64 = 0"
+        val output = desugar_source(input)
+        expect(output).to_contain("x: i64 = 0")
+        expect(output).to_contain("y: i64 = 0")
+
+    it "passes struct with text default unchanged":
+        val input = "struct Config:{NL}    name: text = \"default\""
+        val output = desugar_source(input)
+        expect(output).to_contain("name: text = \"default\"")
+
+    it "passes struct with bool default unchanged":
+        val input = "struct Flags:{NL}    enabled: bool = true"
+        val output = desugar_source(input)
+        expect(output).to_contain("enabled: bool = true")
+
+    it "passes struct with float default unchanged":
+        val input = "struct Scale:{NL}    factor: f64 = 1.0"
+        val output = desugar_source(input)
+        expect(output).to_contain("factor: f64 = 1.0")
+
+    it "passes struct mixing fields with and without defaults":
+        val input = "struct Node:{NL}    id: i64{NL}    count: i64 = 0"
+        val output = desugar_source(input)
+        expect(output).to_contain("id: i64")
+        expect(output).to_contain("count: i64 = 0")
+
+    it "does not corrupt struct name when default is present":
+        val input = "struct Timer:{NL}    ticks: i64 = 0"
+        val output = desugar_source(input)
+        expect(output).to_contain("struct Timer:")
+
+    it "preserves default expr after static method extraction":
+        # Pass 1 (static constants) and Pass 2 (static methods) should not
+        # touch field declarations — only lines inside impl blocks.
+        val input = "struct Counter:{NL}    count: i64 = 0{NL}{NL}impl Counter:{NL}    static fn zero() -> Counter:{NL}        Counter()"
+        val output = desugar_source(input)
+        expect(output).to_contain("count: i64 = 0")
+        expect(output).to_contain("fn Counter__zero()")
+
+    it "preserves default expr after call-site rewriting":
+        # Pass 4 (rewrite_static_calls) rewrites Type.method() patterns.
+        # It must not misinterpret the `= value` as a static call.
+        val input = "struct Config:{NL}    timeout: i64 = 30"
+        val output = desugar_source(input)
+        expect(output).to_contain("timeout: i64 = 30")
+
+    it "passes struct with expression default (arithmetic) unchanged":
+        val input = "struct Buffer:{NL}    capacity: i64 = 4 * 1024"
+        val output = desugar_source(input)
+        expect(output).to_contain("capacity: i64 = 4 * 1024")
+
+    it "passes class body with default fields unchanged":
+        val input = "class Counter:{NL}    count: i64 = 0{NL}    fn get() -> i64:{NL}        self.count"
+        val output = desugar_source(input)
+        expect(output).to_contain("count: i64 = 0")
+        expect(output).to_contain("fn get() -> i64:")
+
+    it "preserves default through context_params pass":
+        # Pass -2 (context params) should not touch struct field defaults.
+        val input = "struct Logger:{NL}    level: i64 = 1"
+        val output = desugar_source(input)
+        expect(output).to_contain("level: i64 = 1")
+
+    it "preserves default through trait desugar pass":
+        # Pass -1 (trait desugar) rewrites trait declarations but must not
+        # alter struct field default syntax.
+        val input = "struct Entity:{NL}    active: bool = true"
+        val output = desugar_source(input)
+        expect(output).to_contain("active: bool = true")
+
+    it "handles multiple structs each with defaults":
+        val input = "struct A:{NL}    x: i64 = 1{NL}{NL}struct B:{NL}    y: i64 = 2"
+        val output = desugar_source(input)
+        expect(output).to_contain("x: i64 = 1")
+        expect(output).to_contain("y: i64 = 2")

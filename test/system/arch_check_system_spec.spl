@@ -1,0 +1,423 @@
+# Architecture Check System Tests
+#
+# Comprehensive system-level tests for Feature 8: Architecture Validation (check-arch).
+# Tests all 5 phases of the check-arch implementation:
+#   Phase 1: Pattern matching rules (_match_pattern)
+#   Phase 2: Arch block parsing (_parse_arch_block, _parse_pattern_list)
+#   Phase 3: Import scanning (_parse_imports_from_content)
+#   Phase 4: Rule application (_is_import_allowed, _file_is_under_module)
+#   Phase 5: Full validation (check_arch, run_arch_check)
+
+use app.cli.arch_check (
+    _str_trim, _parse_pattern_list, _parse_arch_block,
+    _module_path_from_init_file, _parse_imports_from_content,
+    _match_pattern, _is_import_allowed,
+    _file_is_under_module,
+    ArchRule, FileImports, ArchViolation
+)
+use app.io.mod (shell)
+use std.text.{NL}
+
+# ============================================================================
+# Phase 1: Pattern Matching Rules
+# ============================================================================
+
+describe "arch_check system: Phase 1 - Pattern matching rules":
+
+    it "exact pattern matches exact import path":
+        val result = _match_pattern("core/ast", "core/ast")
+        expect(result).to_equal(true)
+
+    it "exact pattern does not match different path":
+        val result = _match_pattern("core/ast", "std/text")
+        expect(result).to_equal(false)
+
+    it "wildcard /** matches direct child path":
+        val result = _match_pattern("compiler/backend", "compiler/**")
+        expect(result).to_equal(true)
+
+    it "wildcard /** matches deeply nested path":
+        val result = _match_pattern("compiler/feature/lexing/token", "compiler/**")
+        expect(result).to_equal(true)
+
+    it "wildcard /** does not match sibling path":
+        val result = _match_pattern("core/ast", "compiler/**")
+        expect(result).to_equal(false)
+
+    it "wildcard /* matches single level child":
+        val result = _match_pattern("std/text", "std/*")
+        expect(result).to_equal(true)
+
+    it "wildcard /* does not match multi-level path":
+        val result = _match_pattern("std/text/util", "std/*")
+        expect(result).to_equal(false)
+
+    it "prefix match with slash boundary applies":
+        val result = _match_pattern("compiler/backend/jit", "compiler/backend")
+        expect(result).to_equal(true)
+
+    it "partial prefix without boundary does not match":
+        val result = _match_pattern("compiler_other/ast", "compiler")
+        expect(result).to_equal(false)
+
+    it "exact match of top-level module works":
+        val result = _match_pattern("std", "std")
+        expect(result).to_equal(true)
+
+    it "pattern does not match empty import path":
+        val result = _match_pattern("", "core/ast")
+        expect(result).to_equal(false)
+
+    it "/** prefix is stripped correctly for matching":
+        val result = _match_pattern("core/ast/parser", "core/**")
+        expect(result).to_equal(true)
+
+    it "/* prefix is stripped correctly for matching":
+        val result = _match_pattern("core/ast", "core/*")
+        expect(result).to_equal(true)
+
+    it "/* requires at least one path component after prefix":
+        val result = _match_pattern("core", "core/*")
+        expect(result).to_equal(false)
+
+# ============================================================================
+# Phase 2: Rule Parsing
+# ============================================================================
+
+describe "arch_check system: Phase 2 - Rule parsing":
+
+    it "detects absence of arch block":
+        val content = "# no arch block here\nfn main():\n    pass\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(false)
+
+    it "detects presence of arch block":
+        var content = "arch {\n"
+        content = content + "  dimension = \"service\"\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+
+    it "parses allow list with single pattern":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    allow = [\"core/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        val allow_list = result.1
+        expect(allow_list.len()).to_equal(1)
+        expect(allow_list[0]).to_equal("core/**")
+
+    it "parses allow list with multiple patterns":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    allow = [\"core/**\", \"std/**\", \"shared\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        val allow_list = result.1
+        expect(allow_list.len()).to_equal(3)
+        expect(allow_list[0]).to_equal("core/**")
+        expect(allow_list[1]).to_equal("std/**")
+        expect(allow_list[2]).to_equal("shared")
+
+    it "parses deny list with single pattern":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    deny = [\"compiler/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        val deny = result.2
+        expect(deny.len()).to_equal(1)
+        expect(deny[0]).to_equal("compiler/**")
+
+    it "parses deny list with multiple patterns":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    deny = [\"compiler/**\", \"app/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        val deny = result.2
+        expect(deny.len()).to_equal(2)
+        expect(deny[0]).to_equal("compiler/**")
+        expect(deny[1]).to_equal("app/**")
+
+    it "parses both allow and deny lists together":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    allow = [\"core/**\", \"std/**\"]\n"
+        content = content + "    deny = [\"core/compiler/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.1.len()).to_equal(2)
+        expect(result.2.len()).to_equal(1)
+        expect(result.2[0]).to_equal("core/compiler/**")
+
+    it "returns empty patterns when no imports block present":
+        var content = "arch {\n"
+        content = content + "  dimension = \"entity\"\n"
+        content = content + "  visibility = \"private\"\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.1.len()).to_equal(0)
+        expect(result.2.len()).to_equal(0)
+
+    it "parses pattern list with single-quoted strings":
+        val line = "allow = ['core/**', 'std/**']"
+        val result = _parse_pattern_list(line)
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal("core/**")
+        expect(result[1]).to_equal("std/**")
+
+    it "returns empty list when no brackets found":
+        val line = "allow = core, std"
+        val result = _parse_pattern_list(line)
+        expect(result.len()).to_equal(0)
+
+    it "returns empty list for empty bracket":
+        val line = "deny = []"
+        val result = _parse_pattern_list(line)
+        expect(result.len()).to_equal(0)
+
+# ============================================================================
+# Phase 3: Import Scanning
+# ============================================================================
+
+describe "arch_check system: Phase 3 - Import scanning":
+
+    it "extracts single use statement":
+        val content = "use core.ast (AstNode)\nfn main():\n    pass\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("core/ast")
+
+    it "extracts multiple use statements":
+        var content = "use core.ast (AstNode)\n"
+        content = content + "use std.text.{NL}\n"
+        content = content + "use app.io.mod (shell)\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(3)
+        expect(result[0]).to_equal("core/ast")
+        expect(result[1]).to_equal("std/text")
+        expect(result[2]).to_equal("app/io/mod")
+
+    it "converts dot notation to slash notation":
+        val content = "use app.desugar.trait_scanner (scan_traits)\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("app/desugar/trait_scanner")
+
+    it "ignores comment lines":
+        var content = "# use core.ast (AstNode)\n"
+        content = content + "fn foo():\n"
+        content = content + "    pass\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(0)
+
+    it "ignores non-use lines":
+        var content = "struct Foo:\n"
+        content = content + "    x: i64\n"
+        content = content + "fn bar():\n"
+        content = content + "    pass\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(0)
+
+    it "handles use with wildcard syntax":
+        val content = "use std.text.*\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("std/text")
+
+    it "strips trailing dot from module path":
+        val content = "use app.io.\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("app/io")
+
+    it "handles empty content":
+        val content = ""
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(0)
+
+    it "extracts deeply nested module paths":
+        val content = "use compiler.backend.jit.codegen (JitBackend)\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("compiler/backend/jit/codegen")
+
+# ============================================================================
+# Phase 4: Rule Application
+# ============================================================================
+
+describe "arch_check system: Phase 4 - Rule application":
+
+    it "allows import when no rules defined":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: [],
+            deny_patterns: []
+        )
+        val result = _is_import_allowed("anything/at/all", rule)
+        expect(result).to_equal(true)
+
+    it "denies import matching deny pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: [],
+            deny_patterns: ["compiler/**"]
+        )
+        val result = _is_import_allowed("compiler/backend", rule)
+        expect(result).to_equal(false)
+
+    it "allows import not matching any deny pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: [],
+            deny_patterns: ["compiler/**"]
+        )
+        val result = _is_import_allowed("core/ast", rule)
+        expect(result).to_equal(true)
+
+    it "allows import matching allow pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**", "std/**"],
+            deny_patterns: []
+        )
+        val result = _is_import_allowed("core/ast", rule)
+        expect(result).to_equal(true)
+
+    it "denies import not matching any allow pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**", "std/**"],
+            deny_patterns: []
+        )
+        val result = _is_import_allowed("app/io", rule)
+        expect(result).to_equal(false)
+
+    it "deny takes precedence over allow":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**"],
+            deny_patterns: ["core/compiler/**"]
+        )
+        val result = _is_import_allowed("core/compiler/backend", rule)
+        expect(result).to_equal(false)
+
+    it "allows other paths when deny only targets subset":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**"],
+            deny_patterns: ["core/compiler/**"]
+        )
+        val result = _is_import_allowed("core/ast", rule)
+        expect(result).to_equal(true)
+
+    it "file under module path matches correctly":
+        val file = "/project/src/core/ast.spl"
+        val result = _file_is_under_module(file, "src/core", "/project")
+        expect(result).to_equal(true)
+
+    it "file not under module path does not match":
+        val file = "/project/src/compiler/backend.spl"
+        val result = _file_is_under_module(file, "src/core", "/project")
+        expect(result).to_equal(false)
+
+    it "empty module path matches all files":
+        val file = "/project/src/any/file.spl"
+        val result = _file_is_under_module(file, "", "/project")
+        expect(result).to_equal(true)
+
+    it "module path extraction from deeply nested init file":
+        val path = "/workspace/src/compiler/backend/jit/__init__.spl"
+        val root = "/workspace"
+        val result = _module_path_from_init_file(path, root)
+        expect(result).to_equal("src/compiler/backend/jit")
+
+    it "module path extraction strips root prefix":
+        val path = "/home/user/myproject/src/core/__init__.spl"
+        val root = "/home/user/myproject"
+        val result = _module_path_from_init_file(path, root)
+        expect(result).to_equal("src/core")
+
+# ============================================================================
+# Phase 5: Full validation (integration)
+# ============================================================================
+
+describe "arch_check system: Phase 5 - Full validation":
+
+    it "arch_check.spl source file exists in project":
+        val result = shell("test -f src/app/cli/arch_check.spl && echo yes")
+        val trimmed = result.stdout.trim()
+        expect(trimmed).to_equal("yes")
+
+    it "arch_check exports run_arch_check function":
+        val result = shell("grep -c 'export run_arch_check' src/app/cli/arch_check.spl")
+        val count = int(result.stdout.trim())
+        expect(count > 0).to_equal(true)
+
+    it "arch_check exports scan_arch_rules function":
+        val result = shell("grep -c 'export scan_arch_rules' src/app/cli/arch_check.spl")
+        val count = int(result.stdout.trim())
+        expect(count > 0).to_equal(true)
+
+    it "arch_check exports check_arch function":
+        val result = shell("grep -c 'export check_arch' src/app/cli/arch_check.spl")
+        val count = int(result.stdout.trim())
+        expect(count > 0).to_equal(true)
+
+    it "check-arch is registered in main CLI":
+        val result = shell("grep -c 'check-arch' src/app/cli/main.spl")
+        val count = int(result.stdout.trim())
+        expect(count > 0).to_equal(true)
+
+    it "string trimming handles tabs":
+        val result = _str_trim("\thello\t")
+        expect(result).to_equal("hello")
+
+    it "string trimming handles carriage returns":
+        val result = _str_trim("hello\r")
+        expect(result).to_equal("hello")
+
+    it "string trimming returns empty for whitespace-only":
+        val result = _str_trim("   \t  ")
+        expect(result).to_equal("")
+
+    it "pattern matching handles path with multiple segments correctly":
+        # core/ast matches the exact path "core/ast"
+        expect(_match_pattern("core/ast", "core/ast")).to_equal(true)
+        # core/parser is also matched if we use core/**
+        expect(_match_pattern("core/parser", "core/**")).to_equal(true)
+        # compiler does not match core/**
+        expect(_match_pattern("compiler/ast", "core/**")).to_equal(false)
+
+    it "combined allow and deny rules work end-to-end":
+        val rule = ArchRule(
+            init_file: "/project/src/app/__init__.spl",
+            module_path: "src/app",
+            allow_patterns: ["std/**", "core/**"],
+            deny_patterns: ["core/compiler/**"]
+        )
+        # Allowed paths
+        expect(_is_import_allowed("std/text", rule)).to_equal(true)
+        expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+        # Denied by explicit deny
+        expect(_is_import_allowed("core/compiler/backend", rule)).to_equal(false)
+        # Denied by not matching allow (app/io not in allow list)
+        expect(_is_import_allowed("app/io", rule)).to_equal(false)

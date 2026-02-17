@@ -1,0 +1,533 @@
+# Architecture Check Unit Tests
+#
+# Tests for the check-arch command that validates architecture dependency rules.
+
+use app.cli.arch_check (
+    _str_trim, _parse_pattern_list, _parse_string_value, _parse_arch_block,
+    _module_path_from_init_file, _parse_imports_from_content,
+    _match_pattern, _is_import_allowed,
+    _file_is_under_module,
+    _infer_dimension_from_file, _infer_dimension_from_import,
+    _dim_allows_import, _arch_explicitly_allows, _transform_allows_entity_import,
+    ArchRule, FileImports, ArchViolation
+)
+use app.io.mod (shell)
+use std.text.{NL}
+
+# ============================================================================
+# String helpers
+# ============================================================================
+
+describe "arch_check: _str_trim":
+    it "trims leading spaces":
+        val result = _str_trim("  hello")
+        expect(result).to_equal("hello")
+
+    it "trims trailing spaces":
+        val result = _str_trim("hello  ")
+        expect(result).to_equal("hello")
+
+    it "trims both sides":
+        val result = _str_trim("  hello world  ")
+        expect(result).to_equal("hello world")
+
+    it "returns unchanged string when no whitespace":
+        val result = _str_trim("hello")
+        expect(result).to_equal("hello")
+
+    it "returns empty string for all whitespace":
+        val result = _str_trim("   ")
+        expect(result).to_equal("")
+
+# ============================================================================
+# Pattern list parsing
+# ============================================================================
+
+describe "arch_check: _parse_pattern_list":
+    it "parses single pattern":
+        val result = _parse_pattern_list("allow = [\"core\"]")
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("core")
+
+    it "parses multiple patterns":
+        val result = _parse_pattern_list("allow = [\"core\", \"std\"]")
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal("core")
+        expect(result[1]).to_equal("std")
+
+    it "parses glob patterns":
+        val result = _parse_pattern_list("deny = [\"compiler/**\", \"app.io\"]")
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal("compiler/**")
+
+    it "returns empty for missing brackets":
+        val result = _parse_pattern_list("allow = core")
+        expect(result.len()).to_equal(0)
+
+    it "handles empty list":
+        val result = _parse_pattern_list("deny = []")
+        expect(result.len()).to_equal(0)
+
+# ============================================================================
+# String value parsing
+# ============================================================================
+
+describe "arch_check: _parse_string_value":
+    it "parses double-quoted value":
+        val result = _parse_string_value("dimension = \"entity\"")
+        expect(result).to_equal("entity")
+
+    it "parses single-quoted value":
+        val result = _parse_string_value("dimension = 'transform'")
+        expect(result).to_equal("transform")
+
+    it "returns empty when no equals sign":
+        val result = _parse_string_value("no equals here")
+        expect(result).to_equal("")
+
+    it "trims whitespace around value":
+        val result = _parse_string_value("dimension =   \"feature\"  ")
+        expect(result).to_equal("feature")
+
+# ============================================================================
+# Arch block parsing
+# ============================================================================
+
+describe "arch_check: _parse_arch_block":
+    it "returns false when no arch block":
+        val content = "mod simple\nexport foo.*\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(false)
+
+    it "returns true when arch block exists":
+        var content = "arch {\n"
+        content = content + "  dimension = \"entity\"\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+
+    it "parses allow patterns from imports block":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    allow = [\"core/entity/**\", \"shared/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        val allow_list = result.1
+        expect(allow_list.len()).to_equal(2)
+        expect(allow_list[0]).to_equal("core/entity/**")
+        expect(allow_list[1]).to_equal("shared/**")
+
+    it "parses deny patterns from imports block":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    deny = [\"compiler/**\", \"feature/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        val deny = result.2
+        expect(deny.len()).to_equal(2)
+        expect(deny[0]).to_equal("compiler/**")
+        expect(deny[1]).to_equal("feature/**")
+
+    it "parses both allow and deny":
+        var content = "arch {\n"
+        content = content + "  imports {\n"
+        content = content + "    allow = [\"core/entity/**\"]\n"
+        content = content + "    deny = [\"compiler/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.1.len()).to_equal(1)
+        expect(result.2.len()).to_equal(1)
+
+    it "returns empty patterns when no imports block":
+        var content = "arch {\n"
+        content = content + "  dimension = \"entity\"\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.1.len()).to_equal(0)
+        expect(result.2.len()).to_equal(0)
+
+    it "parses dimension from arch block":
+        var content = "arch {\n"
+        content = content + "  dimension = \"transform\"\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.3).to_equal("transform")
+
+    it "parses transform allow_from":
+        var content = "arch {\n"
+        content = content + "  transform {\n"
+        content = content + "    allow_from = [\"entity/Identity/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        val tf = result.4
+        expect(tf.len()).to_equal(1)
+        expect(tf[0]).to_equal("entity/Identity/**")
+
+    it "parses dimension and transform allow_from together":
+        var content = "arch {\n"
+        content = content + "  dimension = \"transform\"\n"
+        content = content + "  transform {\n"
+        content = content + "    allow_from = [\"entity/Identity/**\", \"entity/Shared/**\"]\n"
+        content = content + "  }\n"
+        content = content + "}\n"
+        val result = _parse_arch_block(content)
+        expect(result.0).to_equal(true)
+        expect(result.3).to_equal("transform")
+        val tf = result.4
+        expect(tf.len()).to_equal(2)
+        expect(tf[0]).to_equal("entity/Identity/**")
+        expect(tf[1]).to_equal("entity/Shared/**")
+
+# ============================================================================
+# Module path extraction
+# ============================================================================
+
+describe "arch_check: _module_path_from_init_file":
+    it "extracts module path from absolute init file":
+        val path = "/home/user/project/src/core/entity/__init__.spl"
+        val root = "/home/user/project"
+        val result = _module_path_from_init_file(path, root)
+        expect(result).to_equal("src/core/entity")
+
+    it "handles top-level init file":
+        val path = "/project/src/__init__.spl"
+        val root = "/project"
+        val result = _module_path_from_init_file(path, root)
+        expect(result).to_equal("src")
+
+    it "handles deeply nested path":
+        val path = "/root/src/compiler/feature/lexing/__init__.spl"
+        val root = "/root"
+        val result = _module_path_from_init_file(path, root)
+        expect(result).to_equal("src/compiler/feature/lexing")
+
+# ============================================================================
+# Import parsing
+# ============================================================================
+
+describe "arch_check: _parse_imports_from_content":
+    it "extracts simple use statements":
+        var content = "use app.io.mod (file_read)\n"
+        content = content + "fn main():\n"
+        content = content + "    pass\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("app/io/mod")
+
+    it "extracts multiple use statements":
+        var content = "use app.io.mod (file_read)\n"
+        content = content + "use std.text.{NL}\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(2)
+        expect(result[0]).to_equal("app/io/mod")
+        expect(result[1]).to_equal("std/text")
+
+    it "converts dots to slashes":
+        # Build content string without brace interpolation issues
+        val open_b = "{"
+        val close_b = "}"
+        val content = "use core.ast." + open_b + "CoreExpr" + close_b + NL
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("core/ast")
+
+    it "ignores non-use lines":
+        var content = "# Comment\n"
+        content = content + "fn foo():\n"
+        content = content + "    pass\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(0)
+
+    it "handles use with wildcard":
+        val content = "use app.io.*\n"
+        val result = _parse_imports_from_content(content)
+        expect(result.len()).to_equal(1)
+        expect(result[0]).to_equal("app/io")
+
+# ============================================================================
+# Pattern matching
+# ============================================================================
+
+describe "arch_check: _match_pattern":
+    it "matches exact paths":
+        expect(_match_pattern("core/ast", "core/ast")).to_equal(true)
+
+    it "does not match different paths":
+        expect(_match_pattern("core/ast", "std/text")).to_equal(false)
+
+    it "matches glob with /** for sub-paths":
+        expect(_match_pattern("compiler/feature/lexing", "compiler/**")).to_equal(true)
+
+    it "matches glob /** for direct child":
+        expect(_match_pattern("compiler/backend", "compiler/**")).to_equal(true)
+
+    it "does not match sibling with /**":
+        expect(_match_pattern("core/ast", "compiler/**")).to_equal(false)
+
+    it "matches prefix with / boundary":
+        expect(_match_pattern("compiler/backend/jit", "compiler/backend")).to_equal(true)
+
+    it "does not match partial prefix without boundary":
+        expect(_match_pattern("compiler_other/ast", "compiler")).to_equal(false)
+
+    it "matches exact with no subpath":
+        expect(_match_pattern("std", "std")).to_equal(true)
+
+# ============================================================================
+# Import allowed check
+# ============================================================================
+
+describe "arch_check: _is_import_allowed":
+    it "allows import when no allow or deny rules":
+        val rule = ArchRule(
+            init_file: "test/__init__.spl",
+            module_path: "test",
+            allow_patterns: [],
+            deny_patterns: [],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("app/io/mod", rule)).to_equal(true)
+
+    it "denies import matching deny pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: [],
+            deny_patterns: ["compiler/**"],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("compiler/backend", rule)).to_equal(false)
+
+    it "allows import not matching deny pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: [],
+            deny_patterns: ["compiler/**"],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+
+    it "allows import matching allow pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**", "std/**"],
+            deny_patterns: [],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+
+    it "denies import not matching allow pattern":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**", "std/**"],
+            deny_patterns: [],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("app/io", rule)).to_equal(false)
+
+    it "deny takes precedence over allow":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**"],
+            deny_patterns: ["core/compiler/**"],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("core/compiler/backend", rule)).to_equal(false)
+
+    it "allows core/ast when core allowed and core/compiler denied":
+        val rule = ArchRule(
+            init_file: "src/__init__.spl",
+            module_path: "src",
+            allow_patterns: ["core/**"],
+            deny_patterns: ["core/compiler/**"],
+            dimension: "",
+            transform_allow_from: []
+        )
+        expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+
+# ============================================================================
+# File under module check
+# ============================================================================
+
+describe "arch_check: _file_is_under_module":
+    it "returns true for file under module path":
+        val file = "/project/src/core/entity/ast.spl"
+        val result = _file_is_under_module(file, "src/core/entity", "/project")
+        expect(result).to_equal(true)
+
+    it "returns false for file not under module path":
+        val file = "/project/src/compiler/backend.spl"
+        val result = _file_is_under_module(file, "src/core/entity", "/project")
+        expect(result).to_equal(false)
+
+    it "returns true for empty module path (matches all)":
+        val file = "/project/src/anything/file.spl"
+        val result = _file_is_under_module(file, "", "/project")
+        expect(result).to_equal(true)
+
+# ============================================================================
+# Dimension inference from file path
+# ============================================================================
+
+describe "arch_check: _infer_dimension_from_file":
+    it "infers feature from feature/ directory":
+        val result = _infer_dimension_from_file("/project/src/feature/Auth/Login.spl", "/project")
+        expect(result).to_equal("feature")
+
+    it "infers entity from entity/ directory":
+        val result = _infer_dimension_from_file("/project/src/entity/Identity/User.spl", "/project")
+        expect(result).to_equal("entity")
+
+    it "infers transform from transform/ directory":
+        val result = _infer_dimension_from_file("/project/src/transform/Auth/LoginFlow.spl", "/project")
+        expect(result).to_equal("transform")
+
+    it "returns unknown for core/ directory":
+        val result = _infer_dimension_from_file("/project/src/core/parser.spl", "/project")
+        expect(result).to_equal("unknown")
+
+    it "returns unknown for app/ directory":
+        val result = _infer_dimension_from_file("/project/src/app/cli/main.spl", "/project")
+        expect(result).to_equal("unknown")
+
+    it "infers correct dimension for deeply nested path":
+        val result = _infer_dimension_from_file("/project/src/entity/User/Profile/Address.spl", "/project")
+        expect(result).to_equal("entity")
+
+# ============================================================================
+# Dimension inference from import path
+# ============================================================================
+
+describe "arch_check: _infer_dimension_from_import":
+    it "infers feature from feature/ prefix":
+        expect(_infer_dimension_from_import("feature/Auth/login")).to_equal("feature")
+
+    it "infers entity from entity/ prefix":
+        expect(_infer_dimension_from_import("entity/Identity/user")).to_equal("entity")
+
+    it "infers transform from transform/ prefix":
+        expect(_infer_dimension_from_import("transform/Auth/flow")).to_equal("transform")
+
+    it "returns unknown for std/ prefix":
+        expect(_infer_dimension_from_import("std/text")).to_equal("unknown")
+
+    it "returns unknown for bare module name":
+        expect(_infer_dimension_from_import("core/ast")).to_equal("unknown")
+
+# ============================================================================
+# Dimension allows import rules
+# ============================================================================
+
+describe "arch_check: _dim_allows_import":
+    it "feature cannot import entity":
+        expect(_dim_allows_import("feature", "entity")).to_equal(false)
+
+    it "feature can import transform":
+        expect(_dim_allows_import("feature", "transform")).to_equal(true)
+
+    it "entity cannot import feature":
+        expect(_dim_allows_import("entity", "feature")).to_equal(false)
+
+    it "entity cannot import transform":
+        expect(_dim_allows_import("entity", "transform")).to_equal(false)
+
+    it "entity can import entity":
+        expect(_dim_allows_import("entity", "entity")).to_equal(true)
+
+    it "transform cannot import feature":
+        expect(_dim_allows_import("transform", "feature")).to_equal(false)
+
+    it "transform can import entity":
+        expect(_dim_allows_import("transform", "entity")).to_equal(true)
+
+    it "unknown dimension allows any import":
+        expect(_dim_allows_import("unknown", "entity")).to_equal(true)
+
+    it "any import from unknown dimension is allowed":
+        expect(_dim_allows_import("feature", "unknown")).to_equal(true)
+
+# ============================================================================
+# Arch explicitly allows override
+# ============================================================================
+
+describe "arch_check: _arch_explicitly_allows":
+    it "returns true when applicable rule allows the import":
+        val rule = ArchRule(
+            init_file: "/project/src/feature/Auth/__init__.spl",
+            module_path: "src/feature/Auth",
+            allow_patterns: ["entity/Identity/**"],
+            deny_patterns: [],
+            dimension: "feature",
+            transform_allow_from: []
+        )
+        val rules: [ArchRule] = [rule]
+        val result = _arch_explicitly_allows(
+            "entity/Identity/User",
+            rules,
+            "/project/src/feature/Auth/Login.spl",
+            "/project"
+        )
+        expect(result).to_equal(true)
+
+    it "returns false when rule does not match the import":
+        val rule = ArchRule(
+            init_file: "/project/src/feature/Auth/__init__.spl",
+            module_path: "src/feature/Auth",
+            allow_patterns: ["entity/Identity/**"],
+            deny_patterns: [],
+            dimension: "feature",
+            transform_allow_from: []
+        )
+        val rules: [ArchRule] = [rule]
+        val result = _arch_explicitly_allows(
+            "entity/Other/Data",
+            rules,
+            "/project/src/feature/Auth/Login.spl",
+            "/project"
+        )
+        expect(result).to_equal(false)
+
+    it "returns false when no rules exist":
+        val rules: [ArchRule] = []
+        val result = _arch_explicitly_allows(
+            "entity/Identity/User",
+            rules,
+            "/project/src/feature/Auth/Login.spl",
+            "/project"
+        )
+        expect(result).to_equal(false)
+
+# ============================================================================
+# File existence check
+# ============================================================================
+
+describe "arch_check: implementation file exists":
+    it "arch_check.spl source file exists":
+        val result = shell("test -f src/app/cli/arch_check.spl && echo yes")
+        expect(result.stdout.trim()).to_equal("yes")
+
+    it "check-arch is wired in main.spl":
+        val result = shell("grep -c 'check-arch' src/app/cli/main.spl")
+        val trimmed = result.stdout.trim()
+        val count = int(trimmed)
+        expect(count > 0).to_equal(true)

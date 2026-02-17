@@ -5,15 +5,16 @@
 #
 # Orchestrates multi-pass desugaring that transforms high-level Simple code
 # into forms the current runtime can execute. This module implements a
-# four-pass pipeline that rewrites source text to remove syntax features
-# not yet supported by the runtime (static methods, static constants, enum
-# constructors).
+# five-pass pipeline that rewrites source text to remove syntax features
+# not yet supported by the runtime (forwarding aliases, static methods,
+# static constants, enum constructors).
 #
 # Pipeline Stages:
-#   Pass 0: Static constant extraction - hoist static consts from impl blocks
-#   Pass 1: Static method extraction - transform Type::method -> Type__method
-#   Pass 2: Enum constructor generation - create factory functions for variants
-#   Pass 3: Call site rewriting - rewrite Type.method() -> Type__method()
+#   Pass 0: Forwarding alias generation - generate delegation methods from alias fn/me lines
+#   Pass 1: Static constant extraction - hoist static consts from impl blocks
+#   Pass 2: Static method extraction - transform Type::method -> Type__method
+#   Pass 3: Enum constructor generation - create factory functions for variants
+#   Pass 4: Call site rewriting - rewrite Type.method() -> Type__method()
 #
 # Each pass operates on source text (not AST) for compatibility with the
 # current runtime parser. The transformations are purely syntactic - no
@@ -21,6 +22,7 @@
 #
 # Architecture:
 #   - desugar_module: Main entry point, coordinates passes
+#   - forwarding: Generates delegation methods from alias-based forwarding declarations
 #   - static_constants: Extracts static consts from impl blocks
 #   - static_methods: Extracts static methods from impl blocks
 #   - enum_constructors: Generates factory functions for enum variants
@@ -101,6 +103,7 @@
 #   simple desugar <file.spl> [-o <output.spl>]
 #
 # See Also:
+#   - forwarding.spl - Alias-based forwarding delegation method generation
 #   - static_methods.spl - Static method extraction logic
 #   - static_constants.spl - Static constant extraction logic
 #   - enum_constructors.spl - Enum variant factory generation
@@ -109,10 +112,13 @@
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
+use app.desugar.forwarding (desugar_forwarding)
+use app.desugar.trait_desugar (desugar_traits)
 use app.desugar.static_constants (desugar_static_constants)
 use app.desugar.static_methods (desugar_static_methods)
 use app.desugar.enum_constructors (desugar_enum_constructors)
 use app.desugar.rewriter (rewrite_static_calls)
+use app.desugar.context_params (desugar_context_params)
 use std.log.{error}
 
 export desugar_file, desugar_source
@@ -148,15 +154,19 @@ fn desugar_file(input_path: text, output_path: text) -> bool:
 
 # Desugar source text, returning transformed source.
 #
-# Applies all four desugaring passes in sequence:
+# Applies all desugaring passes in sequence:
+#  -1. Desugar context parameters (context val / with_context)
+#   0. Generate delegation methods from alias forwarding declarations
 #   1. Extract static constants from impl blocks
 #   2. Extract static methods from impl blocks
 #   3. Generate enum variant factory functions
 #   4. Rewrite call sites to use desugared names
 #
 # Each pass operates on the output of the previous pass, building up
-# the complete transformation. The passes are order-dependent: extraction
-# must happen before rewriting.
+# the complete transformation. The passes are order-dependent: context
+# params must run first so that the generated module vars are visible to
+# subsequent passes, forwarding stripping must happen before extraction,
+# and extraction before rewriting.
 #
 # Parameters:
 #   source: Original Simple source code as text
@@ -169,28 +179,53 @@ fn desugar_file(input_path: text, output_path: text) -> bool:
 #   val desugared = desugar_source(original)
 #   # desugared now contains: "fn Foo__bar() -> i64:\n    42\n"
 fn desugar_source(source: text) -> text:
-    # Pass 0: Extract static constant definitions from impl blocks,
+    # Pass -2: Desugar implicit context parameters.
+    #          Transforms `context val name: Type` declarations into
+    #          module-level `var __ctx_name: Type = nil` variables, replaces
+    #          uses of context variables with `__ctx_name`, and rewrites
+    #          `with_context(name: expr): body` into save/set/body/restore.
+    #
+    # Example: "context val logger: Logger\nwith_context(logger: x):\n    f()"
+    #       -> "var __ctx_logger: Logger = nil\n...\n__ctx_logger = x\nf()\n..."
+    val pass_ctx = desugar_context_params(source)
+
+    # Pass -1: Transform trait declarations into struct-with-fn-fields.
+    #          Must run before forwarding so that `alias TraitName = field`
+    #          in class bodies can still reference the generated struct.
+    #
+    # Example: "trait Repo:\n    fn find(id: text) -> Item"
+    #       -> "struct Repo:\n    find_fn: fn(text) -> Item"
+    val pass_trait = desugar_traits(pass_ctx)
+
+    # Pass 0: Generate delegation methods from alias-based forwarding
+    #         declarations in class/struct bodies.
+    #
+    # Example: "class Stack:\n    inner: [i64]\n    alias fn push(item) = inner.push"
+    #       -> "class Stack:\n    inner: [i64]\n    fn push(item):\n        self.inner.push(item)"
+    val pass0 = desugar_forwarding(pass_trait)
+
+    # Pass 1: Extract static constant definitions from impl blocks,
     #         hoist them as module-level values named TypeName__CONSTANT
     #
     # Example: "impl Math:\n    static val PI = 3.14159"
     #       -> "val Math__PI = 3.14159"
-    val pass0 = desugar_static_constants(source)
+    val pass1 = desugar_static_constants(pass0)
 
-    # Pass 1: Extract static method definitions from impl blocks,
+    # Pass 2: Extract static method definitions from impl blocks,
     #         hoist them as module-level functions named TypeName__method_name
     #
     # Example: "impl Point:\n    static fn origin() -> Point:\n        Point(x: 0, y: 0)"
     #       -> "fn Point__origin() -> Point:\n    Point(x: 0, y: 0)"
-    val pass1 = desugar_static_methods(pass0)
+    val pass2 = desugar_static_methods(pass1)
 
-    # Pass 2: Extract enum variants and generate factory functions
+    # Pass 3: Extract enum variants and generate factory functions
     #         named EnumName__VariantName
     #
     # Example: "enum Option:\n    Some(val)\n    None"
     #       -> "fn Option__Some(val):\n    ...\nfn Option__None():\n    ..."
-    val pass2 = desugar_enum_constructors(pass1)
+    val pass3 = desugar_enum_constructors(pass2)
 
-    # Pass 3: Rewrite Type.method(args) and Type.CONSTANT calls to
+    # Pass 4: Rewrite Type.method(args) and Type.CONSTANT calls to
     #         TypeName__method_name(args) and TypeName__CONSTANT
     #         This handles static methods, constants, and enum constructors
     #
@@ -198,9 +233,9 @@ fn desugar_source(source: text) -> text:
     #       -> "val p = Point__origin()"
     # Example: "val pi = Math.PI"
     #       -> "val pi = Math__PI"
-    val pass3 = rewrite_static_calls(pass2)
+    val pass4 = rewrite_static_calls(pass3)
 
-    pass3
+    pass4
 
 # Main entry point for CLI: simple desugar <file> [-o <output>]
 #

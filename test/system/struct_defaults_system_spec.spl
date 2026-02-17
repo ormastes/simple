@@ -1,0 +1,168 @@
+# Struct Default Field Values — System Tests
+#
+# Feature 3: Default Field Values in Structs
+# Syntax: `field: Type = default_expr` in struct declarations
+# Fields with defaults can be omitted at construction
+# Missing fields use their declared default value
+#
+# Implementation status: Core runtime fully supports this.
+# parser.spl parses `= expr` after type annotation,
+# ast.spl stores defaults in decl_field_defaults,
+# eval.spl evaluates defaults in eval_struct_constructor().
+
+describe "Struct Defaults: Phase 1 - Parser supports default syntax":
+
+    it "struct with integer default parses":
+        struct TestConfig:
+            timeout: i64 = 30
+            retries: i64 = 3
+        val cfg = TestConfig()
+        expect(cfg.timeout).to_equal(30)
+        expect(cfg.retries).to_equal(3)
+
+    it "struct with text default works":
+        struct Named:
+            name: text = "unnamed"
+        val n = Named()
+        expect(n.name).to_equal("unnamed")
+
+    it "struct with bool default works":
+        struct Flags:
+            enabled: bool = true
+            debug: bool = false
+        val f = Flags()
+        expect(f.enabled).to_equal(true)
+        expect(f.debug).to_equal(false)
+
+    it "struct with float default works":
+        struct Scale:
+            factor: f64 = 1.0
+        val s = Scale()
+        expect(s.factor).to_equal(1.0)
+
+    it "can override specific defaults":
+        struct Config:
+            mode: text = "debug"
+            verbose: bool = false
+        val c = Config(mode: "release")
+        expect(c.mode).to_equal("release")
+        expect(c.verbose).to_equal(false)
+
+    it "explicit value overrides default":
+        struct Point:
+            x: i64 = 0
+            y: i64 = 0
+        val p = Point(x: 10, y: 20)
+        expect(p.x).to_equal(10)
+        expect(p.y).to_equal(20)
+
+    it "backward compatible - struct without defaults still works":
+        struct NoDefaults:
+            x: i64
+            y: i64
+        val p = NoDefaults(x: 1, y: 2)
+        expect(p.x).to_equal(1)
+        expect(p.y).to_equal(2)
+
+describe "Struct Defaults: Phase 2 - Integration":
+
+    it "struct with arithmetic expression default":
+        struct Buffer:
+            capacity: i64 = 4 * 1024
+        val b = Buffer()
+        expect(b.capacity).to_equal(4096)
+
+    it "struct mixing fields with and without defaults":
+        struct Node:
+            id: i64
+            count: i64 = 0
+        val n = Node(id: 5)
+        expect(n.id).to_equal(5)
+        expect(n.count).to_equal(0)
+
+    it "struct with array default field works":
+        struct Collection:
+            items: [text] = []
+            name: text = "default"
+        val c = Collection()
+        expect(c.name).to_equal("default")
+
+    it "nested struct definitions each with own defaults":
+        struct Inner:
+            value: i64 = 42
+        struct Outer:
+            label: text = "outer"
+        val o = Outer()
+        expect(o.label).to_equal("outer")
+
+    it "multiple structs each with defaults in same scope":
+        struct A:
+            x: i64 = 1
+        struct B:
+            y: i64 = 2
+        val a = A()
+        val b = B()
+        expect(a.x).to_equal(1)
+        expect(b.y).to_equal(2)
+
+    it "only partially provided fields use defaults for the rest":
+        struct ThreeField:
+            a: i64 = 10
+            b: i64 = 20
+            c: i64 = 30
+        val t = ThreeField(b: 99)
+        expect(t.a).to_equal(10)
+        expect(t.b).to_equal(99)
+        expect(t.c).to_equal(30)
+
+describe "Struct Defaults: Phase 3 - System integration":
+
+    it "compiler options struct with all defaults is usable":
+        struct CompilerConfig:
+            mode: text = "interpret"
+            verbose: bool = false
+            output: text = "out"
+        val default_config = CompilerConfig()
+        expect(default_config.mode).to_equal("interpret")
+        expect(default_config.verbose).to_equal(false)
+        expect(default_config.output).to_equal("out")
+
+    it "can partially override compiler config defaults":
+        struct BuildConfig:
+            target: text = "debug"
+            optimize: bool = false
+            warnings: bool = true
+        val release = BuildConfig(target: "release", optimize: true)
+        expect(release.target).to_equal("release")
+        expect(release.optimize).to_equal(true)
+        expect(release.warnings).to_equal(true)
+
+    it "struct defaults work correctly in function return":
+        struct Result:
+            ok: bool = true
+            code: i64 = 0
+            msg: text = "success"
+
+        fn make_default_result() -> Result:
+            Result()
+
+        val r = make_default_result()
+        expect(r.ok).to_equal(true)
+        expect(r.code).to_equal(0)
+        expect(r.msg).to_equal("success")
+
+    it "struct with defaults can be stored in variable and accessed":
+        struct Settings:
+            max_retries: i64 = 3
+            timeout_ms: i64 = 5000
+            log_level: text = "info"
+
+        var settings = Settings()
+        expect(settings.max_retries).to_equal(3)
+        expect(settings.timeout_ms).to_equal(5000)
+        expect(settings.log_level).to_equal("info")
+
+        val custom = Settings(max_retries: 10, log_level: "debug")
+        expect(custom.max_retries).to_equal(10)
+        expect(custom.timeout_ms).to_equal(5000)
+        expect(custom.log_level).to_equal("debug")

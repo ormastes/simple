@@ -73,6 +73,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 - **Pattern binding:** `if val` not `if let`
 - **Constructors:** `Point(x: 3, y: 4)` not `.new()`
 - **`?` is operator only** - never in names. Use `.?` over `is_*` predicates
+- **NO inheritance** - `class Child(Parent)` is NOT supported. Use composition, alias forwarding, traits, or mixins instead
 - **SDN format** for all config/data files, not JSON/YAML
 
 ### Tests

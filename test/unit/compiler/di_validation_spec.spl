@@ -1,10 +1,12 @@
 # DI Constructor Injection Validation Specification
 #
-# Tests for dependency injection validation rules
+# Tests for dependency injection validation rules.
+# Uses DiValidation struct: ok/error_kind/message
 
-use compiler.di_validator.*
+use compiler.di_validator.{ParamInfo, ConstructorInfo, DiValidation, validate_constructor}
 
 describe "Constructor Injection Validation":
+
     it "accepts all params with @inject":
         val ctor = ConstructorInfo.create(
             "UserService",
@@ -15,7 +17,8 @@ describe "Constructor Injection Validation":
             ]
         )
         val result = validate_constructor(ctor)
-        expect result.is_ok()
+        expect(result.ok).to_equal(true)
+        expect(result.error_kind).to_equal("")
 
     it "accepts no params with @inject":
         val ctor = ConstructorInfo.create(
@@ -27,9 +30,9 @@ describe "Constructor Injection Validation":
             ]
         )
         val result = validate_constructor(ctor)
-        expect result.is_ok()
+        expect(result.ok).to_equal(true)
 
-    it "accepts @sys.inject on class":
+    it "accepts @sys.inject on class with no param annotations":
         val ctor = ConstructorInfo.create(
             "OrderService",
             has_sys_inject: true,
@@ -39,7 +42,8 @@ describe "Constructor Injection Validation":
             ]
         )
         val result = validate_constructor(ctor)
-        expect result.is_ok()
+        expect(result.ok).to_equal(true)
+        expect(result.error_kind).to_equal("")
 
     it "rejects mixed injection":
         val ctor = ConstructorInfo.create(
@@ -51,11 +55,10 @@ describe "Constructor Injection Validation":
             ]
         )
         val result = validate_constructor(ctor)
-        expect result.is_err()
-        val error = result.unwrap_err()
-        expect error.kind == DiErrorKind.MixedInjection
+        expect(result.ok).to_equal(false)
+        expect(result.error_kind).to_equal("MixedInjection")
 
-    it "rejects mixing @sys.inject with @inject":
+    it "rejects mixing @sys.inject with @inject on params":
         val ctor = ConstructorInfo.create(
             "PaymentService",
             has_sys_inject: true,
@@ -65,6 +68,62 @@ describe "Constructor Injection Validation":
             ]
         )
         val result = validate_constructor(ctor)
-        expect result.is_err()
-        val error = result.unwrap_err()
-        expect error.kind == DiErrorKind.MixedAnnotations
+        expect(result.ok).to_equal(false)
+        expect(result.error_kind).to_equal("MixedAnnotations")
+
+    it "accepts empty params":
+        val ctor = ConstructorInfo.create(
+            "EmptyService",
+            has_sys_inject: false,
+            params: []
+        )
+        val result = validate_constructor(ctor)
+        expect(result.ok).to_equal(true)
+
+    it "accepts @sys.inject with empty params":
+        val ctor = ConstructorInfo.create(
+            "Marker",
+            has_sys_inject: true,
+            params: []
+        )
+        val result = validate_constructor(ctor)
+        expect(result.ok).to_equal(true)
+
+    it "rejects when only some of three params have @inject":
+        val ctor = ConstructorInfo.create(
+            "Multi",
+            has_sys_inject: false,
+            params: [
+                ParamInfo.create("a", "A", true),
+                ParamInfo.create("b", "B", false),
+                ParamInfo.create("c", "C", true)
+            ]
+        )
+        val result = validate_constructor(ctor)
+        expect(result.ok).to_equal(false)
+        expect(result.error_kind).to_equal("MixedInjection")
+
+    it "error message contains class name for MixedInjection":
+        val ctor = ConstructorInfo.create(
+            "BrokenService",
+            has_sys_inject: false,
+            params: [
+                ParamInfo.create("a", "A", true),
+                ParamInfo.create("b", "B", false)
+            ]
+        )
+        val result = validate_constructor(ctor)
+        expect(result.ok).to_equal(false)
+        expect(result.message.contains("BrokenService")).to_equal(true)
+
+    it "error message contains class name for MixedAnnotations":
+        val ctor = ConstructorInfo.create(
+            "AnnotatedService",
+            has_sys_inject: true,
+            params: [
+                ParamInfo.create("dep", "Dep", true)
+            ]
+        )
+        val result = validate_constructor(ctor)
+        expect(result.ok).to_equal(false)
+        expect(result.message.contains("AnnotatedService")).to_equal(true)
