@@ -11,7 +11,7 @@
 | Failed | 0 |
 | Skipped | 0 |
 | Errors | 0 |
-| Duration | 44151ms |
+| Duration | 41958ms |
 
 **Status: PASS**
 
@@ -136,6 +136,7 @@
 | test/unit/compiler/compilation_context_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/compiler_services_phases_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/compiler_services_spec.spl | 0 | 0 | 0 | 0 | 0ms |
+| test/unit/compiler/compiler_shared_di_check_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/config/literal_config_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/const_keys_spec.spl | 0 | 0 | 0 | 0 | 0ms |
 | test/unit/compiler/dependency/access_policy_spec.spl | 0 | 0 | 0 | 0 | 0ms |

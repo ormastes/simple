@@ -562,6 +562,26 @@ fn file_path_to_uri(file_path: String) -> String:
                                 transport.write_response(id, symbols)?
                                 Ok(nil)
 
+    # Handle textDocument/foldingRange request
+    fn handle_folding_range(id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case nil:
+                transport.write_response(id, [])?
+                Ok(nil)
+            case Some(p):
+                val text_document_data = p.get("textDocument")?
+                val doc_id = protocol.TextDocumentIdentifier__from_json(text_document_data)?
+
+                match self.documents.get(doc_id.uri):
+                    case nil:
+                        transport.write_response(id, [])?
+                        Ok(nil)
+                    case Some(doc_info):
+                        val ranges = compute_folding_ranges(doc_info.text)
+                        val ranges_json = ranges.map(fn(r): r.to_json())
+                        transport.write_response(id, ranges_json)?
+                        Ok(nil)
+
     # Main request dispatcher
     fn handle_request(request: protocol.JsonRpcRequest) -> Result<Nil, String>:
         match request.method:
@@ -569,6 +589,8 @@ fn file_path_to_uri(file_path: String) -> String:
                 self.handle_initialize(request.id, request.params)
             case "shutdown":
                 self.handle_shutdown(request.id)
+            case "textDocument/foldingRange":
+                self.handle_folding_range(request.id, request.params)
             case "textDocument/semanticTokens/full":
                 self.handle_semantic_tokens_full(request.id, request.params)
             case "textDocument/hover":
@@ -642,6 +664,64 @@ fn file_path_to_uri(file_path: String) -> String:
                     transport.log_error("Unknown message type: {msg_type}")
 
         Ok(nil)
+
+# Compute folding ranges from source text using line-based heuristic
+fn compute_folding_ranges(source: String) -> List<protocol.FoldingRange>:
+    val lines = source.split("\n")
+    var ranges: List<protocol.FoldingRange> = []
+    var line_num = 0
+
+    # Track symbol start lines with their indent level
+    var sym_starts: List<(Int, Int)> = []  # (start_line, indent)
+
+    for line in lines:
+        val trimmed = line.trim()
+        val indent = count_leading_spaces(line)
+
+        # Detect top-level symbol starts (indent == 0, keyword line)
+        val is_sym = (
+            trimmed.starts_with("fn ") or
+            trimmed.starts_with("me ") or
+            trimmed.starts_with("static fn ") or
+            trimmed.starts_with("async fn ") or
+            trimmed.starts_with("class ") or
+            trimmed.starts_with("struct ") or
+            trimmed.starts_with("enum ") or
+            trimmed.starts_with("trait ") or
+            trimmed.starts_with("impl ")
+        )
+
+        if is_sym and indent == 0 and trimmed != "":
+            sym_starts.push((line_num, indent))
+
+        line_num = line_num + 1
+
+    # Convert starts to ranges: each sym ends just before the next
+    val total_lines = lines.len()
+    val sym_count = sym_starts.len()
+    var si = 0
+
+    for sym_start in sym_starts:
+        val start_ln = sym_start.0
+        var end_ln = total_lines - 1
+        if si + 1 < sym_count:
+            end_ln = sym_starts[si + 1].0 - 1
+        if end_ln > start_ln:
+            ranges.push(protocol.FoldingRange.new(start_ln, end_ln))
+        si = si + 1
+
+    ranges
+
+fn count_leading_spaces(line: String) -> Int:
+    var count = 0
+    for ch in line:
+        if ch == " ":
+            count = count + 1
+        elif ch == "\t":
+            count = count + 4
+        else:
+            break
+    count
 
 # Export classes and types
 export LspServer

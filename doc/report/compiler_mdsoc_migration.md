@@ -1,7 +1,7 @@
 # Compiler MDSoC Migration Status
 
 **Last Updated:** 2026-02-17
-**Overall Status:** Phases 0-6 COMPLETE ✅
+**Overall Status:** Phases 0-7 + 3f + Feature Ports COMPLETE ✅
 
 ## Summary
 
@@ -20,15 +20,20 @@
 | Phase 2e: hir_lowering stage | ✅ DONE | +2 files | 239/239 |
 | Phase 2f: mir_lowering stage | ✅ DONE | +2 files | 239/239 |
 | Phase 2g: codegen stage | ✅ DONE | +2 files | 239/239 |
+| Phase 2h: monomorphization stage | ✅ DONE | +2 files | 242/242 |
+| Phase 2i: optimization stage | ✅ DONE | +2 files | 242/242 |
+| Phase 2j: linking stage | ✅ DONE | +2 files | 242/242 |
 | Phase 3a: typing→hir | ✅ DONE | +3 files | 239/239 |
 | Phase 3b: hir→mir | ✅ DONE | +3 files | 239/239 |
 | Phase 3c: mir→backend | ✅ DONE | +3 files | 239/239 |
 | Phase 3d: parse→desugar | ✅ DONE | +3 files | 239/239 |
 | Phase 3e: desugar→type | ✅ DONE | +3 files | 239/239 |
+| Phase 3f: lexing→parsing | ✅ DONE | +3 files | 242/242 |
 | Phase 4: arch enforcement | ✅ DONE | +2 files | 239/239 |
 | Phase 5: module loader | ✅ DONE | +5 files | 239/239 |
 | Phase 6: interp backend | ✅ DONE | +3 files | 239/239 |
 | Phase 7: event bus | ✅ DONE | +4 files | 239/239 |
+| doc_validation_spec fixes | ✅ DONE | 1 file | 242/242 |
 
 ## Phase Details
 
@@ -62,6 +67,8 @@
 
 ### Phase 2: Feature Dimension
 **New directory:** `src/compiler/feature/`
+
+All 12 pipeline stages now have ports (7 original + 3 new + event bus + module loading):
 - `lexing/app/ports.spl` — LexerInputPort, LexerOutputPort
 - `parsing/app/ports.spl` — ParseError, ParserInputPort, ParserOutputPort
 - `desugaring/app/ports.spl` — DesugarInputPort, DesugarOutputPort
@@ -69,16 +76,22 @@
 - `hir_lowering/app/ports.spl` — HirLowerInputPort, HirFunction, HirLowerOutputPort
 - `mir_lowering/app/ports.spl` — MirLowerInputPort, MirLowerOutputPort
 - `codegen/app/ports.spl` — CodegenInputPort, CodegenOutputPort
+- `monomorphization/app/ports.spl` — MonomorphizeInputPort, MonomorphizeOutputPort (added 2026-02-17)
+- `optimization/app/ports.spl` — OptimizeInputPort, OptimizeOutputPort (added 2026-02-17)
+- `linking/app/ports.spl` — LinkerInputPort, LinkerOutputPort (added 2026-02-17)
 - `events/ports.spl` — CompilationEventPort, create_noop_event_port
 - Each with `__init__.spl` arch config
 
 ### Phase 3: Transform Dimension
 **New directory:** `src/compiler/transform/feature/`
+
+All 6 D_transform stage boundaries now implemented (5 original + 1 new):
 - `typing_to_hir/entity_view/TypedAstView.spl` — TypedAstContext
 - `hir_to_mir/entity_view/HirView.spl` — CfgContext
 - `mir_to_backend/entity_view/MirView.spl` — MirProgram, MirDebugInfo
 - `parsing_to_desugaring/entity_view/AstView.spl` — AstDesugarView
 - `desugaring_to_typing/entity_view/DesugarView.spl` — DesugarTypingView
+- `lexing_to_parsing/entity_view/TokenStreamView.spl` — TokenStreamView (added 2026-02-17)
 - Each with `__init__.spl` arch config
 
 ### Phase 4: Architecture Enforcement
@@ -121,6 +134,9 @@ src/
       codegen/
         backends/
           interpreter/  ← interpreter as backend (Phase 6)
+      monomorphization/ ← mono ports (added 2026-02-17)
+      optimization/     ← opt ports (added 2026-02-17)
+      linking/          ← linker ports (added 2026-02-17)
       events/           ← event bus (Phase 7)
       module_loading/   ← module loader ports (Phase 5)
     transform/       ← D_transform: stage boundaries (Phase 3)
@@ -130,6 +146,7 @@ src/
         mir_to_backend/
         parsing_to_desugaring/
         desugaring_to_typing/
+        lexing_to_parsing/    ← Phase 3f (added 2026-02-17)
     adapters/        ← outbound/inbound adapters
       out/           ← file system, disk
       in/            ← language server, profiler
@@ -145,9 +162,29 @@ compiler/transform/**   ← imports entity types only, no feature imports
 compiler/adapters/**    ← implements feature ports, no cross-adapter imports
 ```
 
+## Test Counts
+
+| Milestone | Compiler Tests | Notes |
+|-----------|---------------|-------|
+| Phases 2–6 complete | 239/239 | baseline |
+| Phase 7 event bus | 241/241 | +2 port struct tests |
+| Phase 3f + feature ports + spec fixes | 242/242 | +9 transform tests, +18 feature port tests |
+
+## Future Work (Design Doc Items Not Yet Implemented)
+
+The following items appear in the design doc but are not yet implemented:
+
+1. `src/core/entity/span/` — source location span entity (e.g., `Span`, `SourceRange`)
+2. `src/compiler/transform/feature/mir_to_optimizer/` — MIR → optimizer stage boundary view
+3. `src/compiler/transform/feature/backend_to_linker/` — backend → linker stage boundary view
+4. `src/compiler/transform/feature/loading_to_parsing/` — module loading → parsing boundary view
+
+These are low priority; the core pipeline is fully covered.
+
 ## References
 
 - Design: `doc/research/compiler_mdsoc_design.md`
 - Plan: `doc/report/compiler_mdsoc_impl_plan.md`
 - Standard Architecture: `doc/guide/standard_architecture.md`
 - MDSOC Guide: `doc/guide/mdsoc_guide.md`
+- Session report: `doc/report/mdsoc_phase3f_feature_ports_2026-02-17.md`

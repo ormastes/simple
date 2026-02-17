@@ -133,16 +133,43 @@ function M.run_build(args)
 end
 
 --- Activate brief view: fold all definitions to show only signatures
+--- Prefers LSP foldingRange (via vim.lsp.foldexpr) when available (nvim 0.10+),
+--- falling back to heuristic _fold_expr when no LSP client is attached.
 function M.brief_view()
-  -- Set fold expression for Simple signature folding
-  vim.wo.foldmethod = "expr"
-  vim.wo.foldexpr = "v:lua.require('simple.commands')._fold_expr(v:lnum)"
-  vim.wo.foldlevel = 0
-  vim.wo.foldminlines = 1
-  vim.wo.foldtext = "v:lua.require('simple.commands')._fold_text()"
+  local buf = vim.api.nvim_get_current_buf()
 
-  vim.cmd("normal! zM")
-  vim.notify("Simple Brief View: showing signatures only. Use :SimpleBriefExpand to expand.", vim.log.levels.INFO)
+  -- Check if an LSP client that supports foldingRange is attached
+  local has_lsp_fold = false
+  if vim.lsp and vim.lsp.get_clients then
+    local clients = vim.lsp.get_clients({ bufnr = buf })
+    for _, client in ipairs(clients) do
+      local caps = client.server_capabilities or {}
+      if caps.foldingRangeProvider then
+        has_lsp_fold = true
+        break
+      end
+    end
+  end
+
+  if has_lsp_fold and vim.lsp.foldexpr then
+    -- Use LSP-backed fold expression (nvim 0.10+)
+    vim.wo.foldmethod = "expr"
+    vim.wo.foldexpr = "v:lua.vim.lsp.foldexpr()"
+    vim.wo.foldlevel = 0
+    vim.wo.foldminlines = 1
+    vim.wo.foldtext = "v:lua.require('simple.commands')._fold_text()"
+    vim.cmd("normal! zM")
+    vim.notify("Simple Brief View: LSP folds active. Use :SimpleBriefExpand to expand.", vim.log.levels.INFO)
+  else
+    -- Fallback: heuristic fold expression
+    vim.wo.foldmethod = "expr"
+    vim.wo.foldexpr = "v:lua.require('simple.commands')._fold_expr(v:lnum)"
+    vim.wo.foldlevel = 0
+    vim.wo.foldminlines = 1
+    vim.wo.foldtext = "v:lua.require('simple.commands')._fold_text()"
+    vim.cmd("normal! zM")
+    vim.notify("Simple Brief View: showing signatures only. Use :SimpleBriefExpand to expand.", vim.log.levels.INFO)
+  end
 end
 
 --- Fold expression for brief view

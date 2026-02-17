@@ -1,0 +1,592 @@
+# Poll Loop Generation for Async State Machines
+#
+# Generates the poll() function that drives an async function's state machine.
+# The poll function takes the current state and a waker, executes the next
+# chunk of work, and returns the new state plus a Poll result.
+#
+# Example generated poll function:
+#   fn poll(state: FetchState, waker: Waker) -> (FetchState, Poll<text>):
+#       match state:
+#           case State0:
+#               val future = get_data()
+#               (State1(future: future), Poll.Pending)
+#           case State1(future):
+#               match future.poll(waker):
+#                   case Ready(data):
+#                       (State0, Poll.Ready(data))
+#                   case Pending:
+#                       (State1(future: future), Poll.Pending)
+
+use compiler.parser_types.*
+use compiler.desugar.suspension_analysis.{SuspensionPoint, SuspensionAnalysis}
+use compiler.desugar.state_enum.{StateEnum, StateVariant}
+use lexer.Span
+
+# ================================================================
+# Data Structures
+# ================================================================
+
+struct PollFunction:
+    """Generated poll function for an async state machine.
+
+    The poll function is the core of the state machine - it takes the
+    current state and waker, executes code, and returns the next state
+    plus a Poll<T> result.
+
+    Fields:
+        name: Function name (e.g., "poll_fetch")
+        state_param: State parameter name
+        waker_param: Waker parameter name
+        return_type: Return type (State, Poll<T>)
+        body: Function body (match expression on state)
+        doc_comment: Generated documentation
+    """
+    name: text
+    state_param: text
+    waker_param: text
+    return_type: Type
+    body: Block
+    doc_comment: text
+
+# ================================================================
+# Poll Function Generation
+# ================================================================
+
+fn generate_poll_function(
+    func_name: text,
+    func_body: Block,
+    analysis: SuspensionAnalysis,
+    state_enum: StateEnum
+) -> PollFunction:
+    """Generate poll function for an async state machine.
+
+    Creates a function that:
+    1. Matches on the current state
+    2. For State0: executes code until first await, transitions to State1
+    3. For State1..N: polls the future, either continues or returns Pending
+    4. Returns (new_state, Poll<T>)
+
+    Args:
+        func_name: Name of the async function
+        func_body: Original async function body
+        analysis: Suspension point analysis
+        state_enum: Generated state enum
+
+    Returns:
+        Generated poll function
+    """
+    val poll_name = "poll_{func_name}"
+    val state_param = "state"
+    val waker_param = "waker"
+
+    # Generate match arms for each state
+    var match_arms = []
+
+    # State0: Initial state - execute until first await
+    val state0_arm = generate_state0_arm(func_body, analysis, state_enum)
+    match_arms = match_arms_push(match_arms, state0_arm)
+
+    # State1..N: Resume after each await
+    for i in 0..analysis.suspension_points_len(suspension_points):
+        val sp = analysis.suspension_points[i]
+        val variant = state_enum.variants[i + 1]  # +1 because State0 is at index 0
+        val arm = generate_resume_arm(sp, variant, func_body, analysis, state_enum, waker_param)
+        match_arms = match_arms_push(match_arms, arm)
+
+    # Create match expression on state
+    val match_expr = Expr(
+        kind: ExprKind.Match(
+            Expr(kind: exprkind_Ident(state_param), span: dummy_span()),
+            match_arms
+        ),
+        span: dummy_span()
+    )
+
+    # Wrap in block
+    val body = Block(
+        stmts: [Stmt(
+            kind: stmtkind_Expr(match_expr),
+            span: dummy_span()
+        )],
+        span: dummy_span()
+    )
+
+    # val _tv_0 = [StateEnum, Poll<T>]
+    # Create return type: _tv_0
+    val return_type = make_poll_return_type(state_enum.name)
+
+    val doc = generate_poll_doc(func_name, analysis)
+
+    PollFunction(
+        name: poll_name,
+        state_param: state_param,
+        waker_param: waker_param,
+        return_type: return_type,
+        body: body,
+        doc_comment: doc
+    )
+
+fn generate_state0_arm(
+    func_body: Block,
+    analysis: SuspensionAnalysis,
+    state_enum: StateEnum
+) -> MatchArm:
+    """Generate match arm for State0 (initial state).
+
+    This arm executes code from the function start until the first await.
+    It creates the future and transitions to State1.
+
+    Returns match arm like:
+        case State0:
+            # Code before first await
+            val future = get_data()
+            [State1(future: future), Poll.Pending]
+    """
+    # Pattern: State0
+    val pattern = Pattern(
+        kind: PatternKind.EnumVariant("State0", []),
+        span: dummy_span()
+    )
+
+    # Body: execute until first await, then create future and transition
+    var body_stmts = []
+
+    if analysis.suspension_points_len(suspension_points) > 0:
+        val first_sp = analysis.suspension_points[0]
+
+        # Extract code before first await from func_body
+        # Find statements before the first suspension point and include them
+        var pre_await_stmts: [Stmt] = []
+        for stmt in func_body.stmts:
+            if stmt.span.start < first_sp.span.start:
+                pre_await_stmts_push(pre_await_stmts, stmt)
+        body_stmts = body_stmts + pre_await_stmts
+
+        val future_binding = Stmt(
+            kind: StmtKind.Val(
+                "future",
+                nil,
+                first_sp.awaited_future
+            ),
+            span: dummy_span()
+        )
+        body_stmts = body_stmts_push(body_stmts, future_binding)
+
+        # Return (State1(future: future), Poll.Pending)
+        val next_state = make_state_constructor("State1", ["future"])
+        val return_expr = make_poll_tuple(next_state, make_pending())
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
+    else:
+        # No awaits - immediately return ready
+        # Extract return value from function body's last expression
+        val return_val = if func_body.stmts_len(stmts) > 0:
+            val last_stmt = func_body.stmts[func_body.stmts_len(stmts) - 1]
+            match last_stmt.kind:
+                case Expr(e): e
+                case Return(e): e
+                case _: Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+        else:
+            Expr(kind: ExprKind.UnitLiteral, span: dummy_span())
+        val return_expr = make_poll_tuple(
+            make_state_constructor("State0", []),
+            make_ready(return_val)
+        )
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
+
+    make_match_arm(pattern, body_stmts)
+
+fn generate_resume_arm(
+    sp: SuspensionPoint,
+    variant: StateVariant,
+    func_body: Block,
+    analysis: SuspensionAnalysis,
+    state_enum: StateEnum,
+    waker_param: text
+) -> MatchArm:
+    """Generate match arm for resumption state.
+
+    This arm:
+    1. Polls the future from the previous await
+    2. If Ready: extracts value, continues to next await or returns
+    3. If Pending: returns same state with Pending
+
+    Returns match arm like:
+        case State1(a, future):
+            match future_poll(future, waker):
+                case Ready(value):
+                    # Continue to next await or return
+                    ...
+                case Pending:
+                    [State1(a: a, future: future), Poll.Pending]
+    """
+    # Pattern: State{N}(field1, field2, ..., future)
+    var pattern_bindings = []
+    for field in variant.fields:
+        pattern_bindings = pattern_bindings_push(pattern_bindings, field.name)
+
+    val pattern = Pattern(
+        kind: patternkind_EnumVariant(variant.name, pattern_bindings),
+        span: dummy_span()
+    )
+
+    # Body: poll the future, handle Ready/Pending
+    var body_stmts = []
+
+    # val poll_result = future.poll(waker)
+    val poll_call = make_poll_call("future", waker_param)
+    val poll_binding = Stmt(
+        kind: StmtKind.Val("poll_result", nil, poll_call),
+        span: dummy_span()
+    )
+    body_stmts = body_stmts_push(body_stmts, poll_binding)
+
+    # match poll_result:
+    #     case Ready(value): ...
+    #     case Pending: ...
+    val ready_arm = generate_ready_arm(sp, variant, func_body, analysis, state_enum)
+    val pending_arm = generate_pending_arm(variant)
+
+    val poll_match = Expr(
+        kind: ExprKind.Match(
+            Expr(kind: ExprKind.Ident("poll_result"), span: dummy_span()),
+            [ready_arm, pending_arm]
+        ),
+        span: dummy_span()
+    )
+
+    body_stmts = body_stmts.push(Stmt(
+        kind: stmtkind_Expr(poll_match),
+        span: dummy_span()
+    ))
+
+    make_match_arm(pattern, body_stmts)
+
+fn generate_ready_arm(
+    sp: SuspensionPoint,
+    variant: StateVariant,
+    func_body: Block,
+    analysis: SuspensionAnalysis,
+    state_enum: StateEnum
+) -> MatchArm:
+    """Generate Ready arm of poll result match.
+
+    If the future is ready, extract the value and either:
+    - Continue to next await (create next future, transition to next state)
+    - Return final value (if this was the last await)
+    """
+    val pattern = Pattern(
+        kind: PatternKind.EnumVariant("Ready", ["value"]),
+        span: dummy_span()
+    )
+
+    var body_stmts = []
+
+    val next_sp_index = sp.id + 1
+    if next_sp_index < analysis.suspension_points_len(suspension_points):
+        # More awaits to go - transition to next state
+        val next_sp = analysis.suspension_points[next_sp_index]
+
+        # val next_future = <next_awaited_expr>
+        val future_binding = Stmt(
+            kind: StmtKind.Val("next_future", nil, next_sp.awaited_future),
+            span: dummy_span()
+        )
+        body_stmts = body_stmts_push(body_stmts, future_binding)
+
+        # Construct next state with live vars + next_future
+        var field_names = []
+        for field in variant.fields:
+            if field.name != "future":
+                field_names = field_names_push(field_names, field.name)
+        field_names = field_names.push("value")  # Add the newly resolved value
+        field_names = field_names.push("next_future")
+
+        val next_state_name = "State{next_sp_index + 1}"
+        val next_state = make_state_constructor(next_state_name, field_names)
+        val return_expr = make_poll_tuple(next_state, make_pending())
+
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
+    else:
+        # This was the last await - apply post-await computation and return
+        # Extract statements from func_body that come after the last suspension point
+        var post_await_stmts: [Stmt] = []
+        for stmt in func_body.stmts:
+            if stmt.span.start > sp.span.start:
+                post_await_stmts = post_await_stmts_push(post_await_stmts, stmt)
+        body_stmts = body_stmts + post_await_stmts
+
+        # Determine final return value: use the last expression from post-await
+        # statements if any, otherwise use the resolved await value directly
+        val final_value = if post_await_stmts_len(post_await_stmts) > 0:
+            val last_stmt = post_await_stmts[post_await_stmts_len(post_await_stmts) - 1]
+            match last_stmt.kind:
+                case Expr(e): e
+                case Return(e): e
+                case _: Expr(kind: ExprKind.Ident("value"), span: dummy_span())
+        else:
+            Expr(kind: ExprKind.Ident("value"), span: dummy_span())
+
+        val return_expr = make_poll_tuple(
+            make_state_constructor(variant.name, []),
+            make_ready(final_value)
+        )
+
+        body_stmts = body_stmts.push(make_expr_stmt(return_expr))
+
+    make_match_arm(pattern, body_stmts)
+
+fn generate_pending_arm(variant: StateVariant) -> MatchArm:
+    """Generate Pending arm of poll result match.
+
+    If the future is still pending, return the same state and Pending.
+
+    Returns:
+        case Pending:
+            [State{N}(field1: field1, ...), Poll.Pending]
+    """
+    val pattern = Pattern(
+        kind: PatternKind.EnumVariant("Pending", []),
+        span: dummy_span()
+    )
+
+    # Reconstruct the same state with all fields
+    var field_names = []
+    for field in variant.fields:
+        field_names = field_names_push(field_names, field.name)
+
+    val same_state = make_state_constructor(variant.name, field_names)
+    val return_expr = make_poll_tuple(same_state, make_pending())
+
+    make_match_arm(pattern, [make_expr_stmt(return_expr)])
+
+# ================================================================
+# AST Helper Functions
+# ================================================================
+
+fn dummy_span() -> Span:
+    """Create a dummy span for generated code."""
+    span_new(0, 0, 1, 1)
+
+fn make_poll_return_type(state_enum_name: text) -> Type:
+    # val _tv_1 = [StateEnum, Poll<T>]
+    """Create return type: _tv_1.
+
+    Args:
+        state_enum_name: Name of state enum
+
+    Returns:
+        Tuple type (StateEnum, Poll<Inferred>)
+    """
+    Type(
+        kind: TypeKind.Tuple([
+            Type(kind: typekind_Named(state_enum_name), span: dummy_span()),
+            Type(
+                kind: TypeKind.Generic("Poll", [
+                    Type(kind: TypeKind.Inferred, span: dummy_span())
+                ]),
+                span: dummy_span()
+            )
+        ]),
+        span: dummy_span()
+    )
+
+fn make_state_constructor(state_name: text, field_names: [text]) -> Expr:
+    """Create state constructor call: State{N}(field1: field1, ...).
+
+    Args:
+        state_name: Name of state variant
+        field_names: List of field names
+
+    Returns:
+        Constructor call expression
+    """
+    var args = []
+    for name in field_names:
+        args = args.push(CallArg(
+            value: Expr(kind: exprkind_Ident(name), span: dummy_span()),
+            name: name
+        ))
+
+    Expr(
+        kind: ExprKind.Call(
+            Expr(kind: exprkind_Ident(state_name), span: dummy_span()),
+            args
+        ),
+        span: dummy_span()
+    )
+
+fn make_poll_call(future_name: text, waker_name: text) -> Expr:
+    """Create future.poll(waker) call.
+
+    Args:
+        future_name: Variable name of the future
+        waker_name: Variable name of the waker
+
+    Returns:
+        Method call expression
+    """
+    Expr(
+        kind: ExprKind.Call(
+            Expr(
+                kind: ExprKind.Field(
+                    Expr(kind: exprkind_Ident(future_name), span: dummy_span()),
+                    "poll"
+                ),
+                span: dummy_span()
+            ),
+            [CallArg(
+                value: Expr(kind: exprkind_Ident(waker_name), span: dummy_span()),
+                name: nil
+            )]
+        ),
+        span: dummy_span()
+    )
+
+fn make_poll_tuple(state: Expr, poll_result: Expr) -> Expr:
+    """Create tuple (state, poll_result).
+
+    Args:
+        state: State expression
+        poll_result: Poll<T> expression
+
+    Returns:
+        Tuple expression
+    """
+    Expr(
+        kind: exprkind_Tuple([state, poll_result]),
+        span: dummy_span()
+    )
+
+fn make_pending() -> Expr:
+    """Create Poll.Pending expression."""
+    Expr(
+        kind: ExprKind.Field(
+            Expr(kind: ExprKind.Ident("Poll"), span: dummy_span()),
+            "Pending"
+        ),
+        span: dummy_span()
+    )
+
+fn make_ready(value: Expr) -> Expr:
+    """Create Poll.Ready(value) expression.
+
+    Args:
+        value: Value to wrap in Ready
+
+    Returns:
+        Poll.Ready constructor call
+    """
+    Expr(
+        kind: ExprKind.Call(
+            Expr(
+                kind: ExprKind.Field(
+                    Expr(kind: ExprKind.Ident("Poll"), span: dummy_span()),
+                    "Ready"
+                ),
+                span: dummy_span()
+            ),
+            [CallArg(
+                value: value,
+                #  # DESUGARED: name: nil
+                span: dummy_span()
+            )]
+        ),
+        span: dummy_span()
+    )
+
+fn make_match_arm(pattern: Pattern, body_stmts: [Stmt]) -> MatchArm:
+    """Create a MatchArm from pattern and body statements.
+    
+    Args:
+        pattern: Pattern to match
+        body_stmts: Statements for the match arm body
+    
+    Returns:
+        Constructed MatchArm
+    """
+    val body = Block(stmts: body_stmts, span: dummy_span())
+    MatchArm(
+        pattern: pattern,
+        #  # DESUGARED: guard: nil
+        body: body
+    )
+
+fn make_expr_stmt(expr: Expr) -> Stmt:
+    """Create a statement that evaluates an expression.
+    
+    Args:
+        expr: Expression to wrap
+    
+    Returns:
+        Statement containing the expression
+    """
+    Stmt(
+        kind: stmtkind_Expr(expr),
+        span: dummy_span()
+    )
+
+fn generate_poll_doc(func_name: text, analysis: SuspensionAnalysis) -> text:
+    """Generate documentation for poll function.
+
+    Args:
+        func_name: Function name
+        analysis: Suspension analysis
+
+    Returns:
+        Documentation string
+    """
+    "Poll function for async function '{func_name}'. Drives state machine with {analysis.suspension_points.len()} suspension points."
+
+# ================================================================
+# Poll Function Conversion to AST
+# ================================================================
+
+fn poll_function_to_ast(poll_func: PollFunction, span: Span) -> Function:
+    """Convert PollFunction to AST Function node.
+
+    Args:
+        poll_func: Generated poll function
+        span: Source location
+
+    Returns:
+        AST Function node ready for insertion
+    """
+    Function(
+        name: poll_func.name,
+        type_params: [],
+        params: [
+            Param(
+                name: poll_func.state_param,
+                # # DESUGARED: type_: nil
+            type_: nil,  # TODO: provide default
+                #  # DESUGARED: default: nil
+                span: span
+            ),
+            Param(
+                name: poll_func.waker_param,
+                # # DESUGARED: type_: nil
+            type_: nil,  # TODO: provide default
+                #  # DESUGARED: default: nil
+                span: span
+            )
+        ],
+        return_type: poll_func.return_type,
+        body: poll_func.body,
+        is_async: false,
+        is_static: false,
+        is_public: false,  # Implementation detail
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_kernel: false,
+        doc_comment: poll_func.doc_comment,
+        span: span
+    )
+
+# ================================================================
+# Exports
+# ================================================================
+
+export PollFunction
+export generate_poll_function
+export poll_function_to_ast

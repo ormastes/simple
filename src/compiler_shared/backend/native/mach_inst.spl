@@ -1,0 +1,611 @@
+# Machine Instruction IR
+#
+# Low-level machine instruction representation, sitting between MIR and raw bytes.
+# Architecture-parameterized through opcode values.
+#
+# Pipeline: MIR -> ISel (MachInst) -> RegAlloc -> Encode (bytes) -> ELF
+
+# ============================================================================
+# Machine Registers
+# ============================================================================
+
+enum MachRegKind:
+    Virtual(id: i64)
+    Physical(arch_reg: i64)
+
+struct MachReg:
+    kind: MachRegKind
+
+fn virtual_reg(id: i64) -> MachReg:
+    MachReg(kind: machregkind_Virtual(id))
+
+fn physical_reg(id: i64) -> MachReg:
+    MachReg(kind: machregkind_Physical(id))
+
+fn reg_is_virtual(reg: MachReg) -> bool:
+    match reg.kind:
+        case Virtual(_): true
+        case Physical(_): false
+
+fn reg_is_physical(reg: MachReg) -> bool:
+    match reg.kind:
+        case Physical(_): true
+        case Virtual(_): false
+
+fn reg_id(reg: MachReg) -> i64:
+    match reg.kind:
+        case Virtual(id): id
+        case Physical(id): id
+
+# ============================================================================
+# x86_64 Physical Register IDs
+# ============================================================================
+
+val X86_RAX = 0
+val X86_RCX = 1
+val X86_RDX = 2
+val X86_RBX = 3
+val X86_RSP = 4
+val X86_RBP = 5
+val X86_RSI = 6
+val X86_RDI = 7
+val X86_R8 = 8
+val X86_R9 = 9
+val X86_R10 = 10
+val X86_R11 = 11
+val X86_R12 = 12
+val X86_R13 = 13
+val X86_R14 = 14
+val X86_R15 = 15
+
+# x86_64 SysV ABI argument registers
+val X86_ARG_REGS = [X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9]
+val X86_ARG_REG_COUNT = 6
+
+# x86_64 callee-saved registers
+val X86_CALLEE_SAVED = [X86_RBX, X86_R12, X86_R13, X86_R14, X86_R15]
+val X86_CALLEE_SAVED_COUNT = 5
+
+# x86_64 caller-saved (scratch) registers
+val X86_CALLER_SAVED = [X86_RAX, X86_RCX, X86_RDX, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11]
+
+# x86_64 allocatable registers (excludes rsp, rbp)
+# Callee-saved registers first so values survive across CALL instructions
+val X86_ALLOCATABLE = [X86_RBX, X86_R12, X86_R13, X86_R14, X86_R15, X86_RAX, X86_RCX, X86_RDX, X86_RSI, X86_RDI, X86_R8, X86_R9, X86_R10, X86_R11]
+val X86_ALLOCATABLE_COUNT = 14
+
+fn x86_reg_name(id: i64) -> text:
+    if id == X86_RAX: "rax"
+    elif id == X86_RCX: "rcx"
+    elif id == X86_RDX: "rdx"
+    elif id == X86_RBX: "rbx"
+    elif id == X86_RSP: "rsp"
+    elif id == X86_RBP: "rbp"
+    elif id == X86_RSI: "rsi"
+    elif id == X86_RDI: "rdi"
+    elif id == X86_R8: "r8"
+    elif id == X86_R9: "r9"
+    elif id == X86_R10: "r10"
+    elif id == X86_R11: "r11"
+    elif id == X86_R12: "r12"
+    elif id == X86_R13: "r13"
+    elif id == X86_R14: "r14"
+    elif id == X86_R15: "r15"
+    else: "r?"
+
+# ============================================================================
+# AArch64 Physical Register IDs
+# ============================================================================
+
+val AARCH64_X0 = 0
+val AARCH64_X1 = 1
+val AARCH64_X2 = 2
+val AARCH64_X3 = 3
+val AARCH64_X4 = 4
+val AARCH64_X5 = 5
+val AARCH64_X6 = 6
+val AARCH64_X7 = 7
+val AARCH64_X8 = 8
+val AARCH64_X9 = 9
+val AARCH64_X10 = 10
+val AARCH64_X11 = 11
+val AARCH64_X12 = 12
+val AARCH64_X13 = 13
+val AARCH64_X14 = 14
+val AARCH64_X15 = 15
+val AARCH64_X16 = 16
+val AARCH64_X17 = 17
+val AARCH64_X18 = 18
+val AARCH64_X19 = 19
+val AARCH64_X20 = 20
+val AARCH64_X21 = 21
+val AARCH64_X22 = 22
+val AARCH64_X23 = 23
+val AARCH64_X24 = 24
+val AARCH64_X25 = 25
+val AARCH64_X26 = 26
+val AARCH64_X27 = 27
+val AARCH64_X28 = 28
+val AARCH64_X29 = 29  # FP
+val AARCH64_X30 = 30  # LR
+val AARCH64_SP = 31    # SP / XZR depending on context
+
+val AARCH64_ARG_REGS = [AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7]
+val AARCH64_CALLEE_SAVED = [AARCH64_X19, AARCH64_X20, AARCH64_X21, AARCH64_X22, AARCH64_X23, AARCH64_X24, AARCH64_X25, AARCH64_X26, AARCH64_X27, AARCH64_X28]
+
+fn aarch64_reg_name(id: i64) -> text:
+    if id == AARCH64_X29: "x29"
+    elif id == AARCH64_X30: "x30"
+    elif id == AARCH64_SP: "sp"
+    else: "x{id}"
+
+# ============================================================================
+# RISC-V Physical Register IDs
+# ============================================================================
+
+val RV_X0 = 0   # zero
+val RV_X1 = 1   # ra
+val RV_X2 = 2   # sp
+val RV_X3 = 3   # gp
+val RV_X4 = 4   # tp
+val RV_X5 = 5   # t0
+val RV_X6 = 6   # t1
+val RV_X7 = 7   # t2
+val RV_X8 = 8   # s0/fp
+val RV_X9 = 9   # s1
+val RV_X10 = 10  # a0
+val RV_X11 = 11  # a1
+val RV_X12 = 12  # a2
+val RV_X13 = 13  # a3
+val RV_X14 = 14  # a4
+val RV_X15 = 15  # a5
+val RV_X16 = 16  # a6
+val RV_X17 = 17  # a7
+val RV_X18 = 18  # s2
+val RV_X19 = 19  # s3
+val RV_X20 = 20  # s4
+val RV_X21 = 21  # s5
+val RV_X22 = 22  # s6
+val RV_X23 = 23  # s7
+val RV_X24 = 24  # s8
+val RV_X25 = 25  # s9
+val RV_X26 = 26  # s10
+val RV_X27 = 27  # s11
+val RV_X28 = 28  # t3
+val RV_X29 = 29  # t4
+val RV_X30 = 30  # t5
+val RV_X31 = 31  # t6
+
+val RV_ARG_REGS = [RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17]
+val RV_CALLEE_SAVED = [RV_X8, RV_X9, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27]
+
+fn rv_reg_name(id: i64) -> text:
+    if id == RV_X0: "zero"
+    elif id == RV_X1: "ra"
+    elif id == RV_X2: "sp"
+    elif id == RV_X3: "gp"
+    elif id == RV_X4: "tp"
+    elif id == RV_X5: "t0"
+    elif id == RV_X6: "t1"
+    elif id == RV_X7: "t2"
+    elif id == RV_X8: "s0"
+    elif id == RV_X9: "s1"
+    elif id == RV_X10: "a0"
+    elif id == RV_X11: "a1"
+    elif id == RV_X12: "a2"
+    elif id == RV_X13: "a3"
+    elif id == RV_X14: "a4"
+    elif id == RV_X15: "a5"
+    elif id == RV_X16: "a6"
+    elif id == RV_X17: "a7"
+    elif id == RV_X18: "s2"
+    elif id == RV_X19: "s3"
+    elif id == RV_X20: "s4"
+    elif id == RV_X21: "s5"
+    elif id == RV_X22: "s6"
+    elif id == RV_X23: "s7"
+    elif id == RV_X24: "s8"
+    elif id == RV_X25: "s9"
+    elif id == RV_X26: "s10"
+    elif id == RV_X27: "s11"
+    elif id == RV_X28: "t3"
+    elif id == RV_X29: "t4"
+    elif id == RV_X30: "t5"
+    elif id == RV_X31: "t6"
+    else: "x{id}"
+
+# ============================================================================
+# Machine Instruction Operands
+# ============================================================================
+
+enum OperandKind:
+    Reg(reg: MachReg)
+    Imm(value: i64)
+    Mem(base: MachReg, offset: i64)
+    Label(block_id: i64)
+    Sym(name: text)
+
+struct Operand:
+    kind: OperandKind
+
+fn op_reg(reg: MachReg) -> Operand:
+    Operand(kind: operandkind_Reg(reg))
+
+fn op_phys(id: i64) -> Operand:
+    Operand(kind: operandkind_Reg(physical_reg(id)))
+
+fn op_virt(id: i64) -> Operand:
+    Operand(kind: operandkind_Reg(virtual_reg(id)))
+
+fn op_imm(value: i64) -> Operand:
+    Operand(kind: operandkind_Imm(value))
+
+fn op_mem(base: MachReg, offset: i64) -> Operand:
+    Operand(kind: operandkind_Mem(base, offset))
+
+fn op_label(block_id: i64) -> Operand:
+    Operand(kind: operandkind_Label(block_id))
+
+fn op_sym(name: text) -> Operand:
+    Operand(kind: operandkind_Sym(name))
+
+fn operand_is_reg(op: Operand) -> bool:
+    match op.kind:
+        case Reg(_): true
+        case _: false
+
+fn operand_get_reg(op: Operand) -> MachReg:
+    match op.kind:
+        case Reg(r): r
+        case _: virtual_reg(0)
+
+# ============================================================================
+# x86_64 Opcodes
+# ============================================================================
+
+# Arithmetic
+val X86_OP_MOV_REG_REG = 1
+val X86_OP_MOV_REG_IMM = 2
+val X86_OP_MOV_REG_MEM = 3
+val X86_OP_MOV_MEM_REG = 4
+val X86_OP_ADD = 5
+val X86_OP_SUB = 6
+val X86_OP_IMUL = 7
+val X86_OP_IDIV = 8
+val X86_OP_AND = 9
+val X86_OP_OR = 10
+val X86_OP_XOR = 11
+val X86_OP_SHL = 12
+val X86_OP_SAR = 13
+val X86_OP_SHR = 14
+val X86_OP_NEG = 15
+val X86_OP_NOT = 16
+
+# Comparison
+val X86_OP_CMP = 20
+val X86_OP_TEST = 21
+val X86_OP_SETE = 22
+val X86_OP_SETNE = 23
+val X86_OP_SETL = 24
+val X86_OP_SETLE = 25
+val X86_OP_SETG = 26
+val X86_OP_SETGE = 27
+val X86_OP_SETB = 28
+val X86_OP_SETBE = 29
+val X86_OP_SETA = 30
+val X86_OP_SETAE = 31
+
+# Control flow
+val X86_OP_JMP = 40
+val X86_OP_JE = 41
+val X86_OP_JNE = 42
+val X86_OP_JL = 43
+val X86_OP_JLE = 44
+val X86_OP_JG = 45
+val X86_OP_JGE = 46
+val X86_OP_JNZ = 47
+val X86_OP_JZ = 48
+val X86_OP_CALL = 49
+val X86_OP_RET = 50
+
+# Stack
+val X86_OP_PUSH = 60
+val X86_OP_POP = 61
+
+# Misc
+val X86_OP_LEA = 70
+val X86_OP_MOVZX = 71
+val X86_OP_CQO = 72
+val X86_OP_NOP = 73
+val X86_OP_INT3 = 74
+val X86_OP_SYSCALL = 75
+val X86_OP_ADD_IMM = 76
+val X86_OP_SUB_IMM = 77
+val X86_OP_CMP_IMM = 78
+val X86_OP_MOV_REG_IMM32 = 79
+val X86_OP_CALL_INDIRECT = 80
+
+# ============================================================================
+# AArch64 Opcodes
+# ============================================================================
+
+val A64_OP_MOV = 100
+val A64_OP_MOVZ = 101
+val A64_OP_MOVK = 102
+val A64_OP_ADD = 103
+val A64_OP_SUB = 104
+val A64_OP_MUL = 105
+val A64_OP_SDIV = 106
+val A64_OP_AND = 107
+val A64_OP_ORR = 108
+val A64_OP_EOR = 109
+val A64_OP_LSL = 110
+val A64_OP_ASR = 111
+val A64_OP_LSR = 112
+val A64_OP_NEG = 113
+val A64_OP_CMP = 114
+val A64_OP_CSET = 115
+val A64_OP_B = 116
+val A64_OP_BEQ = 117
+val A64_OP_BNE = 118
+val A64_OP_BLT = 119
+val A64_OP_BGE = 120
+val A64_OP_BGT = 121
+val A64_OP_BLE = 122
+val A64_OP_BL = 123
+val A64_OP_RET = 124
+val A64_OP_LDR = 125
+val A64_OP_STR = 126
+val A64_OP_STP = 127
+val A64_OP_LDP = 128
+val A64_OP_ADRP = 129
+val A64_OP_ADD_IMM = 130
+val A64_OP_SUB_IMM = 131
+val A64_OP_NOP = 132
+val A64_OP_CBZ = 133
+val A64_OP_CBNZ = 134
+
+# ============================================================================
+# RISC-V Opcodes
+# ============================================================================
+
+val RV_OP_ADD = 200
+val RV_OP_SUB = 201
+val RV_OP_MUL = 202
+val RV_OP_DIV = 203
+val RV_OP_REM = 204
+val RV_OP_AND = 205
+val RV_OP_OR = 206
+val RV_OP_XOR = 207
+val RV_OP_SLL = 208
+val RV_OP_SRA = 209
+val RV_OP_SRL = 210
+val RV_OP_SLT = 211
+val RV_OP_SLTU = 212
+val RV_OP_ADDI = 213
+val RV_OP_LUI = 214
+val RV_OP_AUIPC = 215
+val RV_OP_JAL = 216
+val RV_OP_JALR = 217
+val RV_OP_BEQ = 218
+val RV_OP_BNE = 219
+val RV_OP_BLT = 220
+val RV_OP_BGE = 221
+val RV_OP_LD = 222
+val RV_OP_SD = 223
+val RV_OP_LW = 224
+val RV_OP_SW = 225
+val RV_OP_MV = 226
+val RV_OP_LI = 227
+val RV_OP_NOP = 228
+val RV_OP_RET = 229
+val RV_OP_CALL = 230
+val RV_OP_NEG = 231
+val RV_OP_NOT = 232
+val RV_OP_SEQZ = 233
+val RV_OP_SNEZ = 234
+
+# ============================================================================
+# Machine Instruction
+# ============================================================================
+
+struct MachInst:
+    opcode: i64
+    operands: [Operand]
+    size: i64
+
+fn new_mach_inst(opcode: i64, operands: [Operand]) -> MachInst:
+    MachInst(opcode: opcode, operands: operands, size: 0)
+
+fn mach_inst_with_size(opcode: i64, operands: [Operand], size: i64) -> MachInst:
+    MachInst(opcode: opcode, operands: operands, size: size)
+
+# ============================================================================
+# Machine Block and Function
+# ============================================================================
+
+struct MachBlock:
+    label: text
+    insts: [MachInst]
+    block_id: i64
+    offset: i64
+
+fn new_mach_block(label: text, block_id: i64) -> MachBlock:
+    MachBlock(label: label, insts: [], block_id: block_id, offset: 0)
+
+fn mach_block_add_inst(block: MachBlock, inst: MachInst) -> MachBlock:
+    var new_insts = block.insts
+    new_insts = new_insts + [inst]
+    MachBlock(label: block.label, insts: new_insts, block_id: block.block_id, offset: block.offset)
+
+struct MachFunction:
+    name: text
+    blocks: [MachBlock]
+    frame_size: i64
+    num_virtual_regs: i64
+    used_callee_saved: [i64]
+
+fn new_mach_function(name: text) -> MachFunction:
+    MachFunction(
+        name: name,
+        blocks: [],
+        frame_size: 0,
+        num_virtual_regs: 0,
+        used_callee_saved: []
+    )
+
+fn mach_func_add_block(func: MachFunction, block: MachBlock) -> MachFunction:
+    var new_blocks = func.blocks
+    new_blocks = new_blocks + [block]
+    MachFunction(
+        name: func.name,
+        blocks: new_blocks,
+        frame_size: func.frame_size,
+        num_virtual_regs: func.num_virtual_regs,
+        used_callee_saved: func.used_callee_saved
+    )
+
+fn mach_func_set_frame_size(func: MachFunction, size: i64) -> MachFunction:
+    MachFunction(
+        name: func.name,
+        blocks: func.blocks,
+        frame_size: size,
+        num_virtual_regs: func.num_virtual_regs,
+        used_callee_saved: func.used_callee_saved
+    )
+
+struct MachModule:
+    name: text
+    functions: [MachFunction]
+    data_sections: [DataEntry]
+    extern_symbols: [text]
+
+struct DataEntry:
+    name: text
+    data: [i64]
+    is_readonly: bool
+
+fn new_mach_module(name: text) -> MachModule:
+    MachModule(name: name, functions: [], data_sections: [], extern_symbols: [])
+
+fn mach_module_add_func(module: MachModule, func: MachFunction) -> MachModule:
+    var new_funcs = module.functions
+    new_funcs = new_funcs + [func]
+    MachModule(
+        name: module.name,
+        functions: new_funcs,
+        data_sections: module.data_sections,
+        extern_symbols: module.extern_symbols
+    )
+
+fn mach_module_add_data(module: MachModule, entry: DataEntry) -> MachModule:
+    var new_data = module.data_sections
+    new_data = new_data + [entry]
+    MachModule(
+        name: module.name,
+        functions: module.functions,
+        data_sections: new_data,
+        extern_symbols: module.extern_symbols
+    )
+
+fn mach_module_add_extern(module: MachModule, name: text) -> MachModule:
+    var new_ext = module.extern_symbols
+    new_ext = new_ext + [name]
+    MachModule(
+        name: module.name,
+        functions: module.functions,
+        data_sections: module.data_sections,
+        extern_symbols: new_ext
+    )
+
+# ============================================================================
+# Encoded Function (after encoding pass)
+# ============================================================================
+
+struct EncodedReloc:
+    offset: i64
+    symbol_name: text
+    reloc_type: i64
+    addend: i64
+
+struct EncodedFunction:
+    name: text
+    code: [i64]
+    relocations: [EncodedReloc]
+
+fn new_encoded_function(name: text) -> EncodedFunction:
+    EncodedFunction(name: name, code: [], relocations: [])
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export MachReg, MachRegKind, virtual_reg, physical_reg
+export reg_is_virtual, reg_is_physical, reg_id
+export Operand, OperandKind
+export op_reg, op_phys, op_virt, op_imm, op_mem, op_label, op_sym
+export operand_is_reg, operand_get_reg
+export MachInst, new_mach_inst, mach_inst_with_size
+export MachBlock, new_mach_block, mach_block_add_inst
+export MachFunction, new_mach_function, mach_func_add_block, mach_func_set_frame_size
+export MachModule, DataEntry, new_mach_module, mach_module_add_func, mach_module_add_data, mach_module_add_extern
+export EncodedReloc, EncodedFunction, new_encoded_function
+
+# x86_64
+export X86_RAX, X86_RCX, X86_RDX, X86_RBX, X86_RSP, X86_RBP, X86_RSI, X86_RDI
+export X86_R8, X86_R9, X86_R10, X86_R11, X86_R12, X86_R13, X86_R14, X86_R15
+export X86_ARG_REGS, X86_ARG_REG_COUNT, X86_CALLEE_SAVED, X86_CALLEE_SAVED_COUNT, X86_CALLER_SAVED, X86_ALLOCATABLE, X86_ALLOCATABLE_COUNT
+export x86_reg_name
+
+# x86_64 opcodes
+export X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG
+export X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV
+export X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR
+export X86_OP_NEG, X86_OP_NOT
+export X86_OP_CMP, X86_OP_TEST
+export X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE
+export X86_OP_SETB, X86_OP_SETBE, X86_OP_SETA, X86_OP_SETAE
+export X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JL, X86_OP_JLE, X86_OP_JG, X86_OP_JGE
+export X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET
+export X86_OP_PUSH, X86_OP_POP
+export X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_SYSCALL
+export X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32
+export X86_OP_CALL_INDIRECT
+
+# AArch64
+export AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5
+export AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X10, AARCH64_X11
+export AARCH64_X12, AARCH64_X13, AARCH64_X14, AARCH64_X15, AARCH64_X16, AARCH64_X17
+export AARCH64_X18, AARCH64_X19, AARCH64_X20, AARCH64_X21, AARCH64_X22, AARCH64_X23
+export AARCH64_X24, AARCH64_X25, AARCH64_X26, AARCH64_X27, AARCH64_X28, AARCH64_X29
+export AARCH64_X30, AARCH64_SP
+export AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED
+export aarch64_reg_name
+
+# AArch64 opcodes
+export A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK
+export A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV
+export A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR
+export A64_OP_NEG, A64_OP_CMP, A64_OP_CSET
+export A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE
+export A64_OP_BL, A64_OP_RET
+export A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP
+export A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP
+export A64_OP_CBZ, A64_OP_CBNZ
+
+# RISC-V
+export RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7
+export RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15
+export RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23
+export RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31
+export RV_ARG_REGS, RV_CALLEE_SAVED
+export rv_reg_name
+
+# RISC-V opcodes
+export RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM
+export RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL
+export RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC
+export RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE
+export RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW
+export RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL
+export RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ
