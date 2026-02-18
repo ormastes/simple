@@ -18,8 +18,135 @@ extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_exists(path: text) -> bool
 
 use app.io.mod (cwd, shell)
-use app.grammar_doc.tier_check (load_tier_keywords, is_allowed_in_tier, check_file_tier)
 use std.text.{NL}
+
+# ============================================================================
+# Tier keyword data (passed as parameter, no module-level mutable state)
+# ============================================================================
+
+struct TierKeywords:
+    seed: [text]
+    core: [text]
+    full: [text]
+
+fn load_tier_kw(sdn_path: text) -> TierKeywords:
+    """Load tier_keywords.sdn and return keyword sets."""
+    var seed: [text] = []
+    var core: [text] = []
+    var full: [text] = []
+
+    val text_content = rt_file_read_text(sdn_path) ?? ""
+    if text_content == "":
+        return TierKeywords(seed: seed, core: core, full: full)
+
+    var current_section = ""
+    val lines = text_content.split("\n")
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed == "": continue
+        if trimmed.starts_with("#"): continue
+
+        if trimmed.starts_with("["):
+            var header = trimmed.replace("[", "")
+            header = header.replace("]", "")
+            val parts = header.split(".")
+            current_section = parts[0]
+            continue
+
+        if current_section != "keywords": continue
+
+        if trimmed.contains("="):
+            val eq_idx = trimmed.index_of("=") ?? -1
+            if eq_idx > 0:
+                val key = trimmed.slice(0, eq_idx).trim()
+                var value_part = trimmed.slice(eq_idx + 1, trimmed.len()).trim()
+                value_part = value_part.replace("\"", "")
+
+                if value_part == "seed":
+                    seed = seed + [key]
+                elif value_part == "core":
+                    core = core + [key]
+                elif value_part == "full":
+                    full = full + [key]
+    TierKeywords(seed: seed, core: core, full: full)
+
+fn kw_is_allowed(keyword: text, tier: text, kw: TierKeywords) -> bool:
+    """Check if a keyword is allowed in the given tier."""
+    for k in kw.seed:
+        if k == keyword: return true
+    if tier == "seed": return false
+    for k in kw.core:
+        if k == keyword: return true
+    if tier == "core": return false
+    for k in kw.full:
+        if k == keyword: return true
+    false
+
+fn kw_is_any(word: text, kw: TierKeywords) -> bool:
+    """Check if a word is any known keyword."""
+    for k in kw.seed:
+        if k == word: return true
+    for k in kw.core:
+        if k == word: return true
+    for k in kw.full:
+        if k == word: return true
+    false
+
+fn extract_words(line: text) -> [text]:
+    """Extract identifier-like words from a line of code."""
+    var words: [text] = []
+    var current = ""
+    for ch in line:
+        val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
+        val is_digit = ch >= "0" and ch <= "9"
+        if is_letter or is_digit:
+            current = current + ch
+        else:
+            if current != "":
+                words.push(current)
+                current = ""
+    if current != "":
+        words.push(current)
+    words
+
+fn find_word_col(line: text, word: text) -> i64:
+    """Find the column position of a word in a line."""
+    val idx = line.index_of(word) ?? -1
+    if idx >= 0: return idx + 1
+    1
+
+fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
+    """Check if a file stays within the given tier's grammar.
+    Returns number of violations found."""
+    val source = rt_file_read_text(file_path) ?? ""
+    if source == "":
+        print "Error: could not read {file_path}"
+        return -1
+
+    var violations = 0
+    var line_num = 1
+    val lines = source.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        if trimmed == "":
+            line_num = line_num + 1
+            continue
+        if trimmed.starts_with("#"):
+            line_num = line_num + 1
+            continue
+
+        val words = extract_words(trimmed)
+        for word in words:
+            if kw_is_any(word, kw):
+                if not kw_is_allowed(word, tier, kw):
+                    val word_col = find_word_col(line, word)
+                    print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
+                    violations = violations + 1
+
+        line_num = line_num + 1
+    violations
 
 # ============================================================================
 # String helper (local, avoids import issues)
@@ -284,7 +411,8 @@ fn run_check_tier(args: [text]) -> i64:
 
     # Load tier keyword definitions
     val sdn_path = "doc/spec/grammar/tier_keywords.sdn"
-    if not load_tier_keywords(sdn_path):
+    val kw = load_tier_kw(sdn_path)
+    if kw.seed.len() == 0 and kw.core.len() == 0 and kw.full.len() == 0:
         print "Error: could not load {sdn_path}"
         return 1
 
@@ -364,12 +492,12 @@ fn run_check_tier(args: [text]) -> i64:
     var total_violations = 0
 
     for f in seed_files:
-        val v = check_file_tier(f, "seed")
+        val v = check_one_file(f, "seed", kw)
         if v > 0:
             total_violations = total_violations + v
 
     for f in core_files:
-        val v = check_file_tier(f, "core")
+        val v = check_one_file(f, "core", kw)
         if v > 0:
             total_violations = total_violations + v
 
@@ -386,4 +514,4 @@ fn run_check_tier(args: [text]) -> i64:
 export run_check_tier
 export read_project_tier, read_module_tier, read_file_tier
 export resolve_effective_tier, scan_module_tiers
-export ModuleTier
+export ModuleTier, TierKeywords
