@@ -23,7 +23,7 @@ fn record_decision(file: text, line: i64, taken: bool):
 # Basic runtime type checking for function parameters
 
 use core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
-use core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name}
+use core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag_name}
 
 # ===== Structural Subtyping =====
 # Check if a struct value has all the fields declared in a named struct type.
@@ -207,6 +207,8 @@ fn mono_create_specialization(generic_decl_id: i64, type_params: [text], arg_val
 val EVAL_STMT_STATIC_FOR: i64 = 17
 # STMT_COMPTIME = 18 (from ast.spl, avoids import dependency)
 val EVAL_STMT_COMPTIME: i64 = 18
+# STMT_BIND = 20 (from ast.spl, avoids import dependency)
+val EVAL_STMT_BIND: i64 = 20
 
 # ===== Control Flow Flags =====
 var eval_returning: bool = false
@@ -627,6 +629,24 @@ fn enum_table_lookup(name: text) -> text:
             return enum_reg_variants[i]
         i = i + 1
     ""
+
+# ===== Phantom Struct Registry =====
+# Tracks struct names explicitly registered as phantom types.
+var phantom_reg_names: [text] = []
+
+fn phantom_struct_register(name: text):
+    # Register a struct name as a phantom type marker
+    for existing in phantom_reg_names:
+        if existing == name: return
+    phantom_reg_names.push(name)
+
+fn phantom_struct_is_registered(name: text) -> bool:
+    for pname in phantom_reg_names:
+        if pname == name: return true
+    false
+
+fn phantom_reg_reset():
+    phantom_reg_names = []
 
 # ===== Match Exhaustiveness Helpers =====
 
@@ -1939,6 +1959,14 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
             print ""
         return val_make_nil()
 
+    # pragma_msg(expr) — prints expr value at eval time (compile-time diagnostic)
+    if name == "pragma_msg":
+        if arg_eids.len() > 0:
+            val pm_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            print val_to_text(pm_val)
+        return val_make_nil()
+
     if name == "int":
         if arg_eids.len() > 0:
             val arg_val = eval_expr(arg_eids[0])
@@ -2086,6 +2114,15 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                 return val_make_bool(tr_ie_variants != "")
             return val_make_bool(false)
 
+        # @traits("is_phantom", "TypeName") — bool: true if struct is registered as phantom
+        if tr_query == "is_phantom":
+            if arg_eids.len() >= 2:
+                val tr_ip_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ip_type_name = val_to_text(tr_ip_type_val)
+                return val_make_bool(phantom_struct_is_registered(tr_ip_type_name))
+            return val_make_bool(false)
+
         # @traits("get_member", obj, "fieldName") — value of field by name
         if tr_query == "get_member":
             if arg_eids.len() >= 3:
@@ -2142,6 +2179,248 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                     eval_set_error("static_assert failed")
                     return -1
             return val_make_nil()
+
+        # @traits("methods", "TypeName") — return method names for a struct type
+        # Methods are registered in func_table as "TypeName__methodName"
+        if tr_query == "methods":
+            if arg_eids.len() >= 2:
+                val tr_mth_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_mth_type_name = val_to_text(tr_mth_type_val)
+                val tr_mth_prefix = tr_mth_type_name + "__"
+                val tr_mth_prefix_len = tr_mth_prefix.len()
+                var tr_mth_result: [i64] = []
+                for tr_mth_key in ft_keys:
+                    if tr_mth_key.len() > tr_mth_prefix_len:
+                        val tr_mth_kpfx = tr_mth_key[0:tr_mth_prefix_len]
+                        if tr_mth_kpfx == tr_mth_prefix:
+                            val tr_mth_mname = tr_mth_key[tr_mth_prefix_len:tr_mth_key.len()]
+                            tr_mth_result.push(val_make_text(tr_mth_mname))
+                return val_make_array(tr_mth_result)
+            return val_make_array([])
+
+        # @traits("all_members", "TypeName") — fields + methods combined
+        if tr_query == "all_members":
+            if arg_eids.len() >= 2:
+                val tr_am_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_am_type_name = val_to_text(tr_am_type_val)
+                var tr_am_result: [i64] = []
+                # Add fields
+                val tr_am_struct_decl = struct_table_lookup(tr_am_type_name)
+                if tr_am_struct_decl >= 0:
+                    val tr_am_field_names = decl_get_fields(tr_am_struct_decl)
+                    for tr_am_fname in tr_am_field_names:
+                        tr_am_result.push(val_make_text(tr_am_fname))
+                # Add methods
+                val tr_am_prefix = tr_am_type_name + "__"
+                val tr_am_prefix_len = tr_am_prefix.len()
+                for tr_am_key in ft_keys:
+                    if tr_am_key.len() > tr_am_prefix_len:
+                        val tr_am_kpfx = tr_am_key[0:tr_am_prefix_len]
+                        if tr_am_kpfx == tr_am_prefix:
+                            val tr_am_mname = tr_am_key[tr_am_prefix_len:tr_am_key.len()]
+                            tr_am_result.push(val_make_text(tr_am_mname))
+                return val_make_array(tr_am_result)
+            return val_make_array([])
+
+        # @traits("enum_count", "EnumName") — count of enum variants
+        if tr_query == "enum_count":
+            if arg_eids.len() >= 2:
+                val tr_ec_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ec_type_name = val_to_text(tr_ec_type_val)
+                val tr_ec_variants_csv = enum_table_lookup(tr_ec_type_name)
+                if tr_ec_variants_csv == "":
+                    return val_make_int(0)
+                var tr_ec_count = 1
+                var tr_ec_i = 0
+                while tr_ec_i < tr_ec_variants_csv.len():
+                    val tr_ec_ch = tr_ec_variants_csv[tr_ec_i:tr_ec_i+1]
+                    if tr_ec_ch == ",":
+                        tr_ec_count = tr_ec_count + 1
+                    tr_ec_i = tr_ec_i + 1
+                return val_make_int(tr_ec_count)
+            return val_make_int(0)
+
+        # @traits("is_class", "TypeName") — true if type has struct decl AND registered methods
+        if tr_query == "is_class":
+            if arg_eids.len() >= 2:
+                val tr_ic_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ic_type_name = val_to_text(tr_ic_type_val)
+                val tr_ic_struct_decl = struct_table_lookup(tr_ic_type_name)
+                if tr_ic_struct_decl < 0:
+                    return val_make_bool(false)
+                val tr_ic_prefix = tr_ic_type_name + "__"
+                val tr_ic_prefix_len = tr_ic_prefix.len()
+                for tr_ic_key in ft_keys:
+                    if tr_ic_key.len() > tr_ic_prefix_len:
+                        val tr_ic_kpfx = tr_ic_key[0:tr_ic_prefix_len]
+                        if tr_ic_kpfx == tr_ic_prefix:
+                            return val_make_bool(true)
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("is_fn", "funcName") — true if function name exists in func_table
+        if tr_query == "is_fn":
+            if arg_eids.len() >= 2:
+                val tr_if_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_if_name = val_to_text(tr_if_val)
+                val tr_if_decl = func_table_lookup(tr_if_name)
+                return val_make_bool(tr_if_decl >= 0)
+            return val_make_bool(false)
+
+        # @traits("is_integral", "typeName") — true if integral numeric type
+        if tr_query == "is_integral":
+            if arg_eids.len() >= 2:
+                val tr_ii_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ii_name = val_to_text(tr_ii_val)
+                if tr_ii_name == "i64": return val_make_bool(true)
+                if tr_ii_name == "i32": return val_make_bool(true)
+                if tr_ii_name == "i16": return val_make_bool(true)
+                if tr_ii_name == "i8": return val_make_bool(true)
+                if tr_ii_name == "u64": return val_make_bool(true)
+                if tr_ii_name == "u32": return val_make_bool(true)
+                if tr_ii_name == "u16": return val_make_bool(true)
+                if tr_ii_name == "u8": return val_make_bool(true)
+                if tr_ii_name == "isize": return val_make_bool(true)
+                if tr_ii_name == "usize": return val_make_bool(true)
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("is_float", "typeName") — true if floating-point type
+        if tr_query == "is_float":
+            if arg_eids.len() >= 2:
+                val tr_ifl_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ifl_name = val_to_text(tr_ifl_val)
+                if tr_ifl_name == "f64": return val_make_bool(true)
+                if tr_ifl_name == "f32": return val_make_bool(true)
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("is_numeric", "typeName") — true if integral or float
+        if tr_query == "is_numeric":
+            if arg_eids.len() >= 2:
+                val tr_in_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_in_name = val_to_text(tr_in_val)
+                if tr_in_name == "i64": return val_make_bool(true)
+                if tr_in_name == "i32": return val_make_bool(true)
+                if tr_in_name == "i16": return val_make_bool(true)
+                if tr_in_name == "i8": return val_make_bool(true)
+                if tr_in_name == "u64": return val_make_bool(true)
+                if tr_in_name == "u32": return val_make_bool(true)
+                if tr_in_name == "u16": return val_make_bool(true)
+                if tr_in_name == "u8": return val_make_bool(true)
+                if tr_in_name == "isize": return val_make_bool(true)
+                if tr_in_name == "usize": return val_make_bool(true)
+                if tr_in_name == "f64": return val_make_bool(true)
+                if tr_in_name == "f32": return val_make_bool(true)
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("is_array", "typeName") — true if type name starts with "["
+        if tr_query == "is_array":
+            if arg_eids.len() >= 2:
+                val tr_ia_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_ia_name = val_to_text(tr_ia_val)
+                if tr_ia_name.len() >= 2:
+                    val tr_ia_first = tr_ia_name[0:1]
+                    return val_make_bool(tr_ia_first == "[")
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("is_dict", "typeName") — true if type name starts with "{"
+        if tr_query == "is_dict":
+            if arg_eids.len() >= 2:
+                val tr_id_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_id_name = val_to_text(tr_id_val)
+                if tr_id_name.len() >= 2:
+                    val tr_id_first = tr_id_name[0:1]
+                    return val_make_bool(tr_id_first == "{")
+                return val_make_bool(false)
+            return val_make_bool(false)
+
+        # @traits("member_type", "TypeName", "fieldName") — field type as text from struct decl
+        if tr_query == "member_type":
+            if arg_eids.len() >= 3:
+                val tr_mt_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_mt_field_val = eval_expr(arg_eids[2])
+                if eval_had_error: return -1
+                val tr_mt_type_name = val_to_text(tr_mt_type_val)
+                val tr_mt_field_name = val_to_text(tr_mt_field_val)
+                val tr_mt_struct_decl = struct_table_lookup(tr_mt_type_name)
+                if tr_mt_struct_decl >= 0:
+                    val tr_mt_field_names = decl_get_fields(tr_mt_struct_decl)
+                    val tr_mt_field_types = decl_get_field_types(tr_mt_struct_decl)
+                    var tr_mt_i = 0
+                    for tr_mt_fname in tr_mt_field_names:
+                        if tr_mt_fname == tr_mt_field_name:
+                            if tr_mt_i < tr_mt_field_types.len():
+                                return val_make_text(tr_mt_field_types[tr_mt_i])
+                            return val_make_text("unknown")
+                        tr_mt_i = tr_mt_i + 1
+                return val_make_text("")
+            return val_make_text("")
+
+        # @traits("set_member", obj, "fieldName", value) — set struct field by name
+        if tr_query == "set_member":
+            if arg_eids.len() >= 4:
+                val tr_sm_obj = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val tr_sm_field_val = eval_expr(arg_eids[2])
+                if eval_had_error: return -1
+                val tr_sm_new_val = eval_expr(arg_eids[3])
+                if eval_had_error: return -1
+                val tr_sm_field = val_to_text(tr_sm_field_val)
+                val_struct_set_field(tr_sm_obj, tr_sm_field, tr_sm_new_val)
+                return val_make_nil()
+            return val_make_nil()
+
+        # @traits("compiles", expr) — returns bool true if expr evaluates without error
+        if tr_query == "compiles":
+            if arg_eids.len() >= 2:
+                val old_had_error = eval_had_error
+                val old_error_msg = eval_error_msg
+                eval_had_error = false
+                eval_error_msg = ""
+                val comp_eid = arg_eids[1]
+                eval_expr(comp_eid)
+                val compiled_ok = not eval_had_error
+                eval_had_error = old_had_error
+                eval_error_msg = old_error_msg
+                return val_make_bool(compiled_ok)
+            return val_make_bool(false)
+
+        # @traits("get_annotations", "sym_name") — returns [text] of known annotations
+        if tr_query == "get_annotations":
+            if arg_eids.len() >= 2:
+                val ann_sym = val_to_text(eval_expr(arg_eids[1]))
+                if eval_had_error: return -1
+                var ann_list: [i64] = []
+                if must_use_is_registered(ann_sym):
+                    ann_list.push(val_make_text("must_use"))
+                return val_make_array(ann_list)
+            return val_make_array([])
+
+        # @traits("has_annotation", "sym_name", "ann_name") — returns bool
+        if tr_query == "has_annotation":
+            if arg_eids.len() >= 3:
+                val ha_sym = val_to_text(eval_expr(arg_eids[1]))
+                if eval_had_error: return -1
+                val ha_ann = val_to_text(eval_expr(arg_eids[2]))
+                if eval_had_error: return -1
+                if ha_ann == "must_use":
+                    return val_make_bool(must_use_is_registered(ha_sym))
+                return val_make_bool(false)
+            return val_make_bool(false)
 
         # Unknown query — return nil
         return val_make_nil()
@@ -2726,9 +3005,49 @@ fn eval_decl(did: i64) -> i64:
         return val_make_nil()
 
     if tag == DECL_CE:
-        # ce NAME: block — treat like a do: block (evaluate body, return last value)
+        # ce NAME: block — evaluate with appropriate CE semantics.
+        # For seq/seq_ce builders: collect yield values into array.
+        # For other builders: monadic bind with nil short-circuit.
+        val ce_builder = d_node.name
         val ce_body = d_node.body_stmts
-        return eval_block(ce_body, -1)
+        env_push_scope()
+        var ce_last: i64 = val_make_nil()
+        var ce_short_circuit: bool = false
+        val ce_is_seq = (ce_builder == "seq" or ce_builder == "seq_ce")
+        if ce_is_seq:
+            val new_acc: [i64] = []
+            eval_yield_stack.push(new_acc)
+        for ce_sid in ce_body:
+            if eval_had_error: break
+            if eval_returning: break
+            if ce_short_circuit: break
+            val ce_stmt_tag = stmt_get(ce_sid).tag
+            if ce_stmt_tag == EVAL_STMT_BIND and not ce_is_seq:
+                # Monadic bind: eval rhs, short-circuit on nil
+                val ce_bind_node = stmt_get(ce_sid)
+                val ce_bind_name = ce_bind_node.name
+                val ce_bind_rhs = eval_expr(ce_bind_node.expr_idx)
+                if eval_had_error:
+                    ce_last = -1
+                else:
+                    val ce_bind_is_nil = val_kind(ce_bind_rhs) == 0
+                    if ce_bind_is_nil:
+                        ce_last = ce_bind_rhs
+                        ce_short_circuit = true
+                    else:
+                        env_define(ce_bind_name, ce_bind_rhs)
+                        ce_last = ce_bind_rhs
+            else:
+                ce_last = eval_stmt(ce_sid)
+        if ce_is_seq:
+            val ys_len = eval_yield_stack.len()
+            if ys_len > 0:
+                val collected = eval_yield_stack[ys_len - 1]
+                eval_yield_stack = eval_yield_stack[0:ys_len - 1]
+                env_pop_scope()
+                return val_make_array(collected)
+        env_pop_scope()
+        return ce_last
 
     # DECL_EXTERN_FN, DECL_IMPL, DECL_CLASS — skip for now
     val_make_nil()
@@ -2898,3 +3217,4 @@ export eval_block, eval_function_call, eval_builtin_call
 export eval_init
 export must_use_scan_source, must_use_register, must_use_is_registered
 export must_use_get_reason, must_use_is_critical
+export phantom_struct_register, phantom_struct_is_registered, phantom_reg_reset
