@@ -1959,6 +1959,41 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
             print ""
         return val_make_nil()
 
+    # __mixin(code_text) — compile-time code generation
+    # Parses code_text as Simple source and registers new declarations into the
+    # current module's function/struct tables so they can be called immediately.
+    if name == "__mixin":
+        if arg_eids.len() >= 1:
+            val mx_code_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val mx_code = val_to_text(mx_code_val)
+            val mx_old_count = module_get_decls().len()
+            parse_module_file(mx_code, "mixin_generated.spl")
+            val mx_all_decls = module_get_decls()
+            val mx_new_count = mx_all_decls.len()
+            var mx_i = mx_old_count
+            while mx_i < mx_new_count:
+                val mx_did = mx_all_decls[mx_i]
+                val mx_tag = decl_get(mx_did).tag
+                if mx_tag == DECL_FN:
+                    val mx_fn_name = decl_get(mx_did).name
+                    func_table_register(mx_fn_name, mx_did)
+                    func_register_return_type(mx_fn_name, decl_get(mx_did).ret_type)
+                if mx_tag == DECL_STRUCT:
+                    val mx_struct_name = decl_get(mx_did).name
+                    struct_table_register(mx_struct_name, mx_did)
+                mx_i = mx_i + 1
+            mx_i = mx_old_count
+            while mx_i < mx_new_count:
+                if eval_had_error: break
+                val mx_did2 = mx_all_decls[mx_i]
+                val mx_tag2 = decl_get(mx_did2).tag
+                if mx_tag2 == DECL_VAL or mx_tag2 == DECL_VAR or mx_tag2 == DECL_ENUM:
+                    eval_decl(mx_did2)
+                mx_i = mx_i + 1
+            return val_make_nil()
+        return val_make_nil()
+
     # pragma_msg(expr) — prints expr value at eval time (compile-time diagnostic)
     if name == "pragma_msg":
         if arg_eids.len() > 0:
@@ -2421,6 +2456,21 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                     return val_make_bool(must_use_is_registered(ha_sym))
                 return val_make_bool(false)
             return val_make_bool(false)
+
+        # @traits("module_name") — returns current module path as text
+        if tr_query == "module_name":
+            return val_make_text(module_get_path())
+
+        # @traits("identifier", sym_expr) — returns the text name of a symbol
+        if tr_query == "identifier":
+            if arg_eids.len() >= 2:
+                val id_eid = arg_eids[1]
+                if expr_get(id_eid).tag == 6:
+                    return val_make_text(expr_get(id_eid).s_val)
+                val id_val = eval_expr(id_eid)
+                if eval_had_error: return -1
+                return val_make_text(val_to_text(id_val))
+            return val_make_text("")
 
         # Unknown query — return nil
         return val_make_nil()
