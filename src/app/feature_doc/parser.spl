@@ -1,0 +1,300 @@
+# Feature Documentation Generator - Parser
+#
+# Parses _spec.spl files to extract structure (describe/context/it blocks),
+# docstrings, and metadata. Reuses patterns from sspec_docgen and spec_gen.
+
+use app.io.mod (file_read)
+use app.feature_doc.types.*
+use std.text.{NL}
+
+# ============================================================================
+# String Helpers
+# ============================================================================
+
+fn extract_quoted(line: text) -> text:
+    """Extract the first double-quoted string from a line."""
+    val q1 = line.index_of("\"") ?? -1
+    if q1 < 0:
+        return ""
+    val after = line[q1 + 1:]
+    val q2 = after.index_of("\"") ?? -1
+    if q2 < 0:
+        return ""
+    after[:q2]
+
+fn extract_field_value(line: text, prefix: text) -> text:
+    """Extract value after a metadata prefix like '**Status:**'."""
+    if not line.starts_with(prefix):
+        return ""
+    val value_part = line[prefix.len():]
+    value_part.trim()
+
+fn get_indent_level(line: text) -> i64:
+    """Count leading spaces in a line."""
+    var count = 0
+    var i = 0
+    while i < line.len():
+        if line[i:i + 1] == " ":
+            count = count + 1
+        else:
+            break
+        i = i + 1
+    count
+
+# ============================================================================
+# Metadata Extraction
+# ============================================================================
+
+fn extract_metadata_from_docs(doc_blocks: [text]) -> FeatureFileMeta:
+    """Extract Feature IDs, Category, Status from doc block content."""
+    var meta = FeatureFileMeta.empty()
+
+    for block in doc_blocks:
+        val lines = block.split(NL)
+        for line in lines:
+            val trimmed = line.trim()
+
+            if trimmed.starts_with("**Feature IDs:**"):
+                val v = extract_field_value(trimmed, "**Feature IDs:**")
+                if v != "":
+                    meta = FeatureFileMeta(feature_ids: v, category: meta.category, status: meta.status)
+            elif trimmed.starts_with("**Feature ID:**"):
+                val v = extract_field_value(trimmed, "**Feature ID:**")
+                if v != "":
+                    meta = FeatureFileMeta(feature_ids: v, category: meta.category, status: meta.status)
+            elif trimmed.starts_with("**Category:**"):
+                val v = extract_field_value(trimmed, "**Category:**")
+                if v != "":
+                    meta = FeatureFileMeta(feature_ids: meta.feature_ids, category: v, status: meta.status)
+            elif trimmed.starts_with("**Status:**"):
+                val v = extract_field_value(trimmed, "**Status:**")
+                if v != "":
+                    meta = FeatureFileMeta(feature_ids: meta.feature_ids, category: meta.category, status: v)
+
+    meta
+
+# ============================================================================
+# Main Parser
+# ============================================================================
+
+fn parse_feature_file(path: text) -> FeatureFileInfo:
+    """Parse a _spec.spl file and extract structure, docs, and metadata."""
+    val content = file_read(path) ?? ""
+    if content == "":
+        return FeatureFileInfo(
+            file_path: path,
+            title: "",
+            metadata: FeatureFileMeta.empty(),
+            doc_blocks: [],
+            describes: [],
+            test_type: ""
+        )
+
+    val lines = content.split(NL)
+    var doc_blocks: [text] = []
+    var describes: [DescribeBlock] = []
+    var title = ""
+
+    # State tracking
+    var cur_describe_name = ""
+    var cur_describe_doc = ""
+    var cur_contexts: [ContextBlock] = []
+
+    var cur_context_name = ""
+    var cur_context_doc = ""
+    var cur_its: [ItBlock] = []
+
+    var cur_it_name = ""
+    var cur_it_expects: [text] = []
+
+    var in_describe = false
+    var in_context = false
+    var in_it = false
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+
+        # Triple-quote doc blocks
+        if trimmed == "\"\"\"":
+            val start = i
+            i = i + 1
+            var block_content = ""
+            var found_end = false
+
+            while i < lines.len():
+                val bl = lines[i]
+                if bl.trim() == "\"\"\"":
+                    found_end = true
+                    break
+                block_content = block_content + bl + NL
+                i = i + 1
+
+            if found_end:
+                val block_trimmed = block_content.trim()
+                doc_blocks.push(block_trimmed)
+
+                # Extract title from first doc block
+                if title == "" and block_trimmed.contains("# "):
+                    val blines = block_trimmed.split(NL)
+                    for bl in blines:
+                        val bt = bl.trim()
+                        if bt.starts_with("# ") and not bt.starts_with("## "):
+                            title = bt[2:].trim()
+                            break
+
+                # Associate doc with current describe or context
+                if in_context:
+                    cur_context_doc = block_trimmed
+                elif in_describe:
+                    cur_describe_doc = block_trimmed
+
+            i = i + 1
+            continue
+
+        # describe block
+        if trimmed.starts_with("describe "):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                # Flush previous describe
+                if in_describe:
+                    # Flush current context
+                    if in_context:
+                        # Flush current it
+                        if in_it:
+                            cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+                            cur_it_name = ""
+                            cur_it_expects = []
+                            in_it = false
+                        cur_contexts.push(ContextBlock(name: cur_context_name, doc: cur_context_doc, its: cur_its))
+                        cur_context_name = ""
+                        cur_context_doc = ""
+                        cur_its = []
+                        in_context = false
+                    elif in_it:
+                        # it directly under describe (no context)
+                        cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+                        cur_it_name = ""
+                        cur_it_expects = []
+                        in_it = false
+                        # Create implicit context for bare its
+                        if cur_its.len() > 0:
+                            cur_contexts.push(ContextBlock(name: "", doc: "", its: cur_its))
+                            cur_its = []
+                    describes.push(DescribeBlock(name: cur_describe_name, doc: cur_describe_doc, contexts: cur_contexts))
+                    cur_contexts = []
+                    cur_describe_doc = ""
+
+                cur_describe_name = name
+                in_describe = true
+                in_context = false
+                in_it = false
+
+            i = i + 1
+            continue
+
+        # context block
+        if trimmed.starts_with("context "):
+            val name = extract_quoted(trimmed)
+            if name != "" and in_describe:
+                # Flush current context
+                if in_context:
+                    if in_it:
+                        cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+                        cur_it_name = ""
+                        cur_it_expects = []
+                        in_it = false
+                    cur_contexts.push(ContextBlock(name: cur_context_name, doc: cur_context_doc, its: cur_its))
+                    cur_its = []
+                    cur_context_doc = ""
+                elif in_it:
+                    # Bare it before this context
+                    cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+                    cur_it_name = ""
+                    cur_it_expects = []
+                    in_it = false
+                    if cur_its.len() > 0:
+                        cur_contexts.push(ContextBlock(name: "", doc: "", its: cur_its))
+                        cur_its = []
+
+                cur_context_name = name
+                in_context = true
+                in_it = false
+
+            i = i + 1
+            continue
+
+        # it block
+        if trimmed.starts_with("it "):
+            val name = extract_quoted(trimmed)
+            if name != "":
+                # Flush previous it
+                if in_it:
+                    cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+                    cur_it_expects = []
+
+                cur_it_name = name
+                in_it = true
+
+            i = i + 1
+            continue
+
+        # expect lines inside it blocks
+        if in_it and trimmed.starts_with("expect"):
+            cur_it_expects.push(trimmed)
+            i = i + 1
+            continue
+
+        # val/var lines inside it blocks (for Given steps)
+        if in_it and (trimmed.starts_with("val ") or trimmed.starts_with("var ")):
+            cur_it_expects.push(trimmed)
+            i = i + 1
+            continue
+
+        i = i + 1
+
+    # Flush remaining state
+    if in_it:
+        cur_its.push(ItBlock(name: cur_it_name, expects: cur_it_expects))
+    if in_context:
+        cur_contexts.push(ContextBlock(name: cur_context_name, doc: cur_context_doc, its: cur_its))
+    elif cur_its.len() > 0:
+        cur_contexts.push(ContextBlock(name: "", doc: "", its: cur_its))
+    if in_describe:
+        describes.push(DescribeBlock(name: cur_describe_name, doc: cur_describe_doc, contexts: cur_contexts))
+
+    # Extract metadata
+    val meta = extract_metadata_from_docs(doc_blocks)
+
+    # Determine test type from path
+    var test_type = "usage"
+    if path.contains("/app/"):
+        test_type = "app"
+
+    FeatureFileInfo(
+        file_path: path,
+        title: if title != "": title else: extract_title_from_path(path),
+        metadata: meta,
+        doc_blocks: doc_blocks,
+        describes: describes,
+        test_type: test_type
+    )
+
+fn extract_title_from_path(path: text) -> text:
+    """Derive a title from the file path."""
+    val parts = path.split("/")
+    val filename = parts[-1]
+    var name = filename
+    if name.ends_with("_spec.spl"):
+        name = name[:-9]
+    elif name.ends_with("_test.spl"):
+        name = name[:-9]
+    elif name.ends_with(".spl"):
+        name = name[:-4]
+    # Convert underscores to spaces and capitalize
+    name = name.replace("_", " ")
+    name
+
+export extract_quoted, extract_field_value, get_indent_level
+export extract_metadata_from_docs, parse_feature_file, extract_title_from_path
