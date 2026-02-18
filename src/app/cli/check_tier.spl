@@ -92,28 +92,120 @@ fn kw_is_any(word: text, kw: TierKeywords) -> bool:
         if k == word: return true
     false
 
-fn extract_words(line: text) -> [text]:
-    """Extract identifier-like words from a line of code."""
-    var words: [text] = []
-    var current = ""
-    for ch in line:
-        val is_letter = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
-        val is_digit = ch >= "0" and ch <= "9"
-        if is_letter or is_digit:
-            current = current + ch
-        else:
-            if current != "":
-                words.push(current)
-                current = ""
-    if current != "":
-        words.push(current)
-    words
-
 fn find_word_col(line: text, word: text) -> i64:
     """Find the column position of a word in a line."""
     val idx = line.index_of(word) ?? -1
     if idx >= 0: return idx + 1
     1
+
+# Operator tier data (hardcoded since they're character patterns, not words)
+struct OpPattern:
+    pattern: text
+    tier: text
+    name: text
+
+fn get_core_op_patterns() -> [OpPattern]:
+    """Return operator patterns that are core-tier (not available in seed)."""
+    var ops: [OpPattern] = []
+    ops = ops + [OpPattern(pattern: "??", tier: "core", name: "null_coalesce")]
+    ops = ops + [OpPattern(pattern: ".?", tier: "core", name: "optional_chain")]
+    ops = ops + [OpPattern(pattern: "?.", tier: "core", name: "optional_chain")]
+    ops = ops + [OpPattern(pattern: "|>", tier: "core", name: "pipe_forward")]
+    ops = ops + [OpPattern(pattern: "**", tier: "core", name: "power")]
+    ops = ops + [OpPattern(pattern: "..=", tier: "core", name: "inclusive_range")]
+    ops = ops + [OpPattern(pattern: ":=", tier: "core", name: "walrus")]
+    ops
+
+fn get_full_op_patterns() -> [OpPattern]:
+    """Return operator patterns that are full-tier (not available in core)."""
+    var ops: [OpPattern] = []
+    ops = ops + [OpPattern(pattern: ".+", tier: "full", name: "broadcast_add")]
+    ops = ops + [OpPattern(pattern: ".-", tier: "full", name: "broadcast_sub")]
+    ops = ops + [OpPattern(pattern: ".*", tier: "full", name: "broadcast_mul")]
+    ops = ops + [OpPattern(pattern: "./", tier: "full", name: "broadcast_div")]
+    ops = ops + [OpPattern(pattern: ".^", tier: "full", name: "broadcast_pow")]
+    ops = ops + [OpPattern(pattern: "~>", tier: "full", name: "layer_connect")]
+    ops = ops + [OpPattern(pattern: "<<<", tier: "full", name: "gpu_launch_start")]
+    ops = ops + [OpPattern(pattern: ">>>", tier: "full", name: "gpu_launch_end")]
+    ops
+
+fn check_line_operators(code_line: text, tier: text) -> [OpPattern]:
+    """Check a code line for operator patterns not allowed in the given tier.
+    Returns list of violated patterns."""
+    var violations: [OpPattern] = []
+
+    if tier == "seed":
+        val core_ops = get_core_op_patterns()
+        for op in core_ops:
+            if code_line.contains(op.pattern):
+                violations = violations + [op]
+
+    if tier == "seed" or tier == "core":
+        val full_ops = get_full_op_patterns()
+        for op in full_ops:
+            if code_line.contains(op.pattern):
+                violations = violations + [op]
+
+    violations
+
+fn check_line_lambda(code_line: text, tier: text) -> bool:
+    """Check if a code line contains lambda syntax (backslash + identifier).
+    Lambda is core-tier, not available in seed."""
+    if tier != "seed":
+        return false
+    # Lambda pattern: \ followed by a letter (not in a string since code_line is stripped)
+    var i = 0
+    val n = code_line.len()
+    while i < n:
+        val ch = code_line[i : i + 1]
+        if ch == "\\":
+            if i + 1 < n:
+                val next = code_line[i + 1 : i + 2]
+                # Lambda: \x or \name
+                if (next >= "a" and next <= "z") or (next >= "A" and next <= "Z"):
+                    return true
+        i = i + 1
+    false
+
+fn strip_strings_and_comments(line: text) -> text:
+    """Remove string literal contents and inline comments from a code line.
+    String content is replaced with spaces; everything after # is removed."""
+    var result = ""
+    var in_str = false
+    var i = 0
+    val n = line.len()
+
+    while i < n:
+        val ch = line[i : i + 1]
+
+        if in_str:
+            if ch == "\\":
+                # Skip escaped character
+                result = result + "  "
+                i = i + 2
+                continue
+            if ch == "\"":
+                in_str = false
+                result = result + " "
+            else:
+                result = result + " "
+            i = i + 1
+            continue
+
+        # Not in string
+        if ch == "#":
+            # Inline comment - skip rest of line
+            break
+        if ch == "\"":
+            in_str = true
+            result = result + " "
+            i = i + 1
+            continue
+
+        result = result + ch
+        i = i + 1
+
+    result
 
 fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
     """Check if a file stays within the given tier's grammar.
@@ -125,6 +217,7 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
 
     var violations = 0
     var line_num = 1
+    var in_docstring = false
     val lines = source.split("\n")
 
     for line in lines:
@@ -133,17 +226,98 @@ fn check_one_file(file_path: text, tier: text, kw: TierKeywords) -> i64:
         if trimmed == "":
             line_num = line_num + 1
             continue
+
+        # --- Docstring tracking ---
+        if in_docstring:
+            if trimmed.contains("\"\"\""):
+                in_docstring = false
+            line_num = line_num + 1
+            continue
+
+        # Check for opening """ (docstring)
+        if trimmed.contains("\"\"\""):
+            val first_idx = trimmed.index_of("\"\"\"") ?? -1
+            if first_idx >= 0:
+                val after_first = trimmed.slice(first_idx + 3, trimmed.len())
+                if not after_first.contains("\"\"\""):
+                    # Opening of multi-line docstring - skip line
+                    in_docstring = true
+                    line_num = line_num + 1
+                    continue
+                # Single-line docstring (""" ... """) - skip this line entirely
+                line_num = line_num + 1
+                continue
+
+        # Skip comment-only lines
         if trimmed.starts_with("#"):
             line_num = line_num + 1
             continue
 
-        val words = extract_words(trimmed)
-        for word in words:
+        # Skip import/use/from lines - module paths contain identifiers, not keyword usage
+        if trimmed.starts_with("use ") or trimmed.starts_with("import ") or trimmed.starts_with("from "):
+            line_num = line_num + 1
+            continue
+
+        # Skip export lines - just re-exporting symbols
+        if trimmed.starts_with("export "):
+            line_num = line_num + 1
+            continue
+
+        # Strip string literal contents and inline comments
+        val code_only = strip_strings_and_comments(trimmed)
+
+        # Inline word extraction: replace punctuation with spaces, split, filter empties
+        var cleaned = code_only
+        cleaned = cleaned.replace("(", " ")
+        cleaned = cleaned.replace(")", " ")
+        cleaned = cleaned.replace(":", " ")
+        cleaned = cleaned.replace(",", " ")
+        cleaned = cleaned.replace(".", " ")
+        cleaned = cleaned.replace("[", " ")
+        cleaned = cleaned.replace("]", " ")
+        cleaned = cleaned.replace("{", " ")
+        cleaned = cleaned.replace("}", " ")
+        cleaned = cleaned.replace("<", " ")
+        cleaned = cleaned.replace(">", " ")
+        cleaned = cleaned.replace("=", " ")
+        cleaned = cleaned.replace("+", " ")
+        cleaned = cleaned.replace("-", " ")
+        cleaned = cleaned.replace("*", " ")
+        cleaned = cleaned.replace("/", " ")
+        cleaned = cleaned.replace("!", " ")
+        cleaned = cleaned.replace("@", " ")
+        cleaned = cleaned.replace("$", " ")
+        cleaned = cleaned.replace("%", " ")
+        cleaned = cleaned.replace("^", " ")
+        cleaned = cleaned.replace("&", " ")
+        cleaned = cleaned.replace("|", " ")
+        cleaned = cleaned.replace("~", " ")
+        cleaned = cleaned.replace("`", " ")
+        cleaned = cleaned.replace("?", " ")
+        cleaned = cleaned.replace(";", " ")
+        cleaned = cleaned.replace("\"", " ")
+        val parts = cleaned.split(" ")
+
+        for word in parts:
+            if word.len() == 0:
+                continue
             if kw_is_any(word, kw):
                 if not kw_is_allowed(word, tier, kw):
                     val word_col = find_word_col(line, word)
                     print "{file_path}:{line_num}:{word_col}: error: '{word}' not available in {tier} tier"
                     violations = violations + 1
+
+        # --- Operator/construct checks (on stripped code, before punctuation replacement) ---
+        val op_violations = check_line_operators(code_only, tier)
+        for op in op_violations:
+            val op_col = find_word_col(line, op.pattern)
+            print "{file_path}:{line_num}:{op_col}: error: '{op.pattern}' ({op.name}) not available in {tier} tier"
+            violations = violations + 1
+
+        if check_line_lambda(code_only, tier):
+            val lam_col = find_word_col(line, "\\")
+            print "{file_path}:{line_num}:{lam_col}: error: lambda (\\x:) not available in {tier} tier"
+            violations = violations + 1
 
         line_num = line_num + 1
     violations

@@ -298,35 +298,35 @@ if result == 0 {
 
 ### Platform Detection
 ```simple
-// Platform-specific code
+# Platform-specific code
 val platform = rt_platform_name();
 if platform == "windows" {
-    // Windows-specific logic
+    # Windows-specific logic
 } else if platform == "linux" {
-    // Linux-specific logic
+    # Linux-specific logic
 } else if platform == "macos" {
-    // macOS-specific logic
+    # macOS-specific logic
 }
 ```
 
 ### Coverage Instrumentation (Future)
 ```simple
-// Compiler-inserted probes for coverage tracking
-if condition {  // rt_decision_probe(123, true) inserted here
-    // Branch taken
-} else {        // rt_decision_probe(123, false) inserted here
-    // Branch not taken
+# Compiler-inserted probes for coverage tracking
+if condition {  # rt_decision_probe(123, true) inserted here
+    # Branch taken
+} else {        # rt_decision_probe(123, false) inserted here
+    # Branch not taken
 }
 
-// MC/DC coverage for compound conditions
-if a && b {     // rt_condition_probe(456, 0, a_result) and
-                // rt_condition_probe(456, 1, b_result) inserted
-    // ...
+# MC/DC coverage for compound conditions
+if a && b {     # rt_condition_probe(456, 0, a_result) and
+                # rt_condition_probe(456, 1, b_result) inserted
+    # ...
 }
 
-// Path coverage
-{               // rt_path_probe(789, 0) inserted at block entry
-    // ...
+# Path coverage
+{               # rt_path_probe(789, 0) inserted at block entry
+    # ...
 }
 ```
 

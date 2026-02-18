@@ -259,26 +259,26 @@ use simple_runtime::value::ffi::sync::{
 
 ### Condition Variables
 ```simple
-// Create condition variable and mutex
+# Create condition variable and mutex
 val cond = rt_condvar_new();
 val mutex = rt_mutex_new();
 
-// Producer thread
+# Producer thread
 fn producer():
     rt_mutex_lock(mutex);
-    // ... produce data ...
-    rt_condvar_notify_one(cond);  // Wake one consumer
+    # ... produce data ...
+    rt_condvar_notify_one(cond);  # Wake one consumer
     rt_mutex_unlock(mutex);
 
-// Consumer thread
+# Consumer thread
 fn consumer():
     rt_mutex_lock(mutex);
-    rt_condvar_wait(cond, mutex);  // Wait for data
-    // ... consume data ...
+    rt_condvar_wait(cond, mutex);  # Wait for data
+    # ... consume data ...
     rt_mutex_unlock(mutex);
 
-// With timeout
-val result = rt_condvar_wait_timeout(cond, mutex, 1000);  // 1 second
+# With timeout
+val result = rt_condvar_wait_timeout(cond, mutex, 1000);  # 1 second
 if result == 0:
     print("Timeout waiting for condition");
 elif result == 1:
@@ -287,57 +287,57 @@ elif result == 1:
 
 ### Thread-Local Storage
 ```simple
-// Create thread-local storage slot
+# Create thread-local storage slot
 val tls_slot = rt_thread_local_new();
 
-// Main thread
+# Main thread
 rt_thread_local_set(tls_slot, "main_thread_data");
 val data = rt_thread_local_get(tls_slot);
-print("Main thread: {data}");  // "main_thread_data"
+print("Main thread: {data}");  # "main_thread_data"
 
-// Spawn worker thread
+# Spawn worker thread
 spawn fn worker():
     val data = rt_thread_local_get(tls_slot);
-    print("Worker: {data}");  // NIL - thread-local!
+    print("Worker: {data}");  # NIL - thread-local!
 
     rt_thread_local_set(tls_slot, "worker_data");
     val data2 = rt_thread_local_get(tls_slot);
-    print("Worker: {data2}");  // "worker_data"
+    print("Worker: {data2}");  # "worker_data"
 
-// Main thread still has original value
+# Main thread still has original value
 val main_data = rt_thread_local_get(tls_slot);
-print("Main: {main_data}");  // "main_thread_data"
+print("Main: {main_data}");  # "main_thread_data"
 
 rt_thread_local_free(tls_slot);
 ```
 
 ### Spin Loop Optimization
 ```simple
-// Busy-wait with CPU optimization
+# Busy-wait with CPU optimization
 val flag = rt_atomic_flag_new();
 
 fn spin_until_ready():
     while !rt_atomic_flag_test_and_set(flag):
-        rt_spin_loop_hint();  // Tell CPU we're spinning
-        // Reduces power and improves performance
+        rt_spin_loop_hint();  # Tell CPU we're spinning
+        # Reduces power and improves performance
 
 rt_atomic_flag_free(flag);
 ```
 
 ### RwLock API Compatibility
 ```simple
-// For compatibility with C-like APIs
+# For compatibility with C-like APIs
 val lock = rt_rwlock_new();
 
-// Read lock (auto-unlocked via RAII)
+# Read lock (auto-unlocked via RAII)
 rt_rwlock_read(lock);
-// ... read data ...
-rt_rwlock_unlock_read(lock);  // No-op, but compatible with C API
+# ... read data ...
+rt_rwlock_unlock_read(lock);  # No-op, but compatible with C API
 
-// Write lock (auto-unlocked via RAII)
+# Write lock (auto-unlocked via RAII)
 rt_rwlock_write(lock);
-// ... write data ...
-rt_rwlock_unlock_write(lock);  // No-op, but compatible with C API
+# ... write data ...
+rt_rwlock_unlock_write(lock);  # No-op, but compatible with C API
 
 rt_rwlock_free(lock);
 ```

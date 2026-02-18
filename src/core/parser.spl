@@ -63,12 +63,14 @@ use core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pas
 use core.ast.{expr_dict_lit}
 use core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use core.ast.{expr_match_expr, expr_block}
-use core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, EXPR_SPREAD}
+use core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert, EXPR_SPREAD}
+use core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
+use core.ast.{STMT_ASM_ASSERT, stmt_asm_assert}
 use core.ast.{expr_get_tag, expr_get_str, expr_get_left}
-use core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL}
+use core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_LAZY_VAL_DECL}
 use core.ast.{STMT_RETURN, STMT_IF, STMT_FOR, STMT_WHILE}
 use core.ast.{STMT_MATCH, STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFER}
-use core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_var_decl}
+use core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
 use core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
 use core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
@@ -77,10 +79,10 @@ use core.ast.{STMT_RECEIVE, stmt_receive_stmt, STMT_BIND, stmt_bind_stmt}
 use core.ast.{DECL_CE, decl_ce_block}
 use core.ast.{stmt_assign_stmt, stmt_compound_assign_stmt, stmt_defer_stmt, stmt_errdefer_stmt}
 use core.ast.{DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_USE, DECL_EXPORT}
-use core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM}
+use core.ast.{DECL_VAL, DECL_VAR, DECL_ENUM, DECL_LAZY_VAL}
 use core.ast.{decl_fn, decl_extern_fn, decl_struct_def}
-use core.ast.{decl_val_binding, decl_var_binding}
-use core.ast.{decl_use_import, decl_export_names, decl_enum_def}
+use core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
+use core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_set_lazy}
 use core.ast.{decl_impl_block}
 use core.ast.{arm_new, arm_new_with_binding}
 use core.ast.{elif_new}
@@ -96,6 +98,8 @@ use core.types.{int_to_str}
 use core.types.{named_type_register, named_type_find}
 use core.types.{union_type_register}
 
+extern fn rt_env_get(key: text) -> text
+
 # ===== Parser State =====
 
 var par_kind: i64 = 0
@@ -105,6 +109,618 @@ var par_col: i64 = 0
 var par_errors: [text] = []
 var par_had_error: bool = false
 var par_struct_names: [text] = []
+
+# ===== Conditional Compilation (@when/@cfg and #if/#elif/#else/#endif) =====
+
+var _pp_tokens: [text] = []
+var _pp_pos: i64 = 0
+
+fn _pp_env(key: text) -> text:
+    val value = rt_env_get(key)
+    if value == nil:
+        return ""
+    value
+
+fn _pp_strip_quotes(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2:
+        val first = trimmed[0:1]
+        val last = trimmed[trimmed.len() - 1:trimmed.len()]
+        val is_double = first == "\"" and last == "\""
+        val is_single = first == "'" and last == "'"
+        if is_double or is_single:
+            return trimmed[1:trimmed.len() - 1]
+    trimmed
+
+fn _pp_normalize_os(raw: text) -> text:
+    val value = _pp_strip_quotes(raw).trim()
+    if value == "":
+        return ""
+
+    val is_win = value == "win" or value == "WIN"
+    val is_win2 = value == "windows" or value == "Windows"
+    val is_win3 = value == "Windows_NT" or value.contains("Windows")
+    if is_win or is_win2 or is_win3:
+        return "windows"
+
+    val is_linux = value == "linux" or value == "Linux"
+    val is_linux2 = value.contains("linux") or value.contains("Linux")
+    if is_linux or is_linux2:
+        return "linux"
+
+    val is_macos = value == "mac" or value == "macos"
+    val is_macos2 = value == "MacOS" or value == "darwin" or value == "Darwin"
+    val is_macos3 = value.contains("darwin") or value.contains("Darwin")
+    val is_macos4 = value.contains("macOS") or value.contains("Mac")
+    if is_macos or is_macos2 or is_macos3 or is_macos4:
+        return "macos"
+
+    val is_freebsd = value == "freebsd" or value == "FreeBSD"
+    val is_freebsd2 = value.contains("freebsd") or value.contains("FreeBSD")
+    if is_freebsd or is_freebsd2:
+        return "freebsd"
+
+    val is_openbsd = value == "openbsd" or value == "OpenBSD"
+    val is_openbsd2 = value.contains("openbsd") or value.contains("OpenBSD")
+    if is_openbsd or is_openbsd2:
+        return "openbsd"
+
+    val is_netbsd = value == "netbsd" or value == "NetBSD"
+    val is_netbsd2 = value.contains("netbsd") or value.contains("NetBSD")
+    if is_netbsd or is_netbsd2:
+        return "netbsd"
+
+    val is_android = value == "android" or value == "Android"
+    val is_android2 = value.contains("android") or value.contains("Android")
+    if is_android or is_android2:
+        return "android"
+
+    val is_unix = value == "unix" or value == "Unix"
+    val is_unix2 = value.contains("unix") or value.contains("Unix")
+    if is_unix or is_unix2:
+        return "unix"
+
+    ""
+
+fn _pp_normalize_arch(raw: text) -> text:
+    val value = _pp_strip_quotes(raw).trim()
+    if value == "":
+        return ""
+
+    val is_x64 = value == "x86_64" or value == "amd64" or value == "AMD64"
+    val is_x64_2 = value == "x64" or value == "X64"
+    val is_x64_3 = value.contains("x86_64") or value.contains("amd64") or value.contains("AMD64")
+    if is_x64 or is_x64_2 or is_x64_3:
+        return "x86_64"
+
+    val is_x86 = value == "x86" or value == "X86"
+    val is_x86_2 = value == "i386" or value == "i686"
+    val is_x86_3 = value.contains("i386") or value.contains("i686")
+    if is_x86 or is_x86_2 or is_x86_3:
+        return "x86"
+
+    val is_aarch64 = value == "aarch64" or value == "arm64" or value == "ARM64"
+    val is_aarch64_2 = value.contains("aarch64") or value.contains("arm64")
+    if is_aarch64 or is_aarch64_2:
+        return "aarch64"
+
+    val is_arm = value == "arm" or value == "ARM"
+    val is_arm2 = value == "armv7" or value == "armv6"
+    val is_arm3 = value.contains("armv7") or value.contains("armv6")
+    if is_arm or is_arm2 or is_arm3:
+        return "arm"
+
+    val is_riscv64 = value == "riscv64" or value.contains("riscv64")
+    if is_riscv64:
+        return "riscv64"
+
+    val is_riscv32 = value == "riscv32" or value.contains("riscv32")
+    if is_riscv32:
+        return "riscv32"
+
+    val is_ppc64le = value == "ppc64le" or value.contains("ppc64le")
+    if is_ppc64le:
+        return "ppc64le"
+
+    ""
+
+fn _pp_detect_os() -> text:
+    val forced = _pp_normalize_os(_pp_env("SIMPLE_TARGET_OS"))
+    if forced != "":
+        return forced
+
+    val from_os = _pp_normalize_os(_pp_env("OS"))
+    if from_os != "":
+        return from_os
+
+    val from_ostype = _pp_normalize_os(_pp_env("OSTYPE"))
+    if from_ostype != "":
+        return from_ostype
+
+    val from_platform = _pp_normalize_os(_pp_env("PLATFORM"))
+    if from_platform != "":
+        return from_platform
+
+    val from_uname = _pp_normalize_os(_pp_env("UNAME"))
+    if from_uname != "":
+        return from_uname
+
+    "unknown"
+
+fn _pp_detect_arch() -> text:
+    val forced = _pp_normalize_arch(_pp_env("SIMPLE_TARGET_ARCH"))
+    if forced != "":
+        return forced
+
+    val from_arch = _pp_normalize_arch(_pp_env("PROCESSOR_ARCHITECTURE"))
+    if from_arch != "":
+        return from_arch
+
+    val from_hosttype = _pp_normalize_arch(_pp_env("HOSTTYPE"))
+    if from_hosttype != "":
+        return from_hosttype
+
+    val from_machtype = _pp_normalize_arch(_pp_env("MACHTYPE"))
+    if from_machtype != "":
+        return from_machtype
+
+    val from_cpu = _pp_normalize_arch(_pp_env("CPU"))
+    if from_cpu != "":
+        return from_cpu
+
+    "unknown"
+
+fn _pp_detect_cpu() -> text:
+    val forced = _pp_normalize_arch(_pp_env("SIMPLE_TARGET_CPU"))
+    if forced != "":
+        return forced
+
+    val from_id = _pp_normalize_arch(_pp_env("PROCESSOR_IDENTIFIER"))
+    if from_id != "":
+        return from_id
+
+    _pp_detect_arch()
+
+fn _pp_eval_key_value(key_raw: text, value_raw: text) -> bool:
+    val key = _pp_strip_quotes(key_raw).trim()
+    val value = _pp_strip_quotes(value_raw).trim()
+
+    if key == "os":
+        val expected = _pp_normalize_os(value)
+        return expected != "" and _pp_detect_os() == expected
+    if key == "platform":
+        val expected = _pp_normalize_os(value)
+        return expected != "" and _pp_detect_os() == expected
+    if key == "arch":
+        val expected = _pp_normalize_arch(value)
+        return expected != "" and _pp_detect_arch() == expected
+    if key == "cpu":
+        val expected = _pp_normalize_arch(value)
+        return expected != "" and _pp_detect_cpu() == expected
+    if key == "feature":
+        # Feature-gated conditionals are unset in core parser mode.
+        return false
+
+    false
+
+fn _pp_eval_atom(token: text) -> bool:
+    val t = _pp_strip_quotes(token).trim()
+    if t == "":
+        return false
+    if t == "true":
+        return true
+    if t == "false":
+        return false
+    if t == "debug":
+        return true
+    if t == "release":
+        return false
+    if t == "compiled":
+        return true
+    if t == "interpreter":
+        return false
+
+    if t == "win" or t == "windows":
+        return _pp_detect_os() == "windows"
+    if t == "linux":
+        return _pp_detect_os() == "linux"
+    if t == "mac" or t == "macos" or t == "darwin":
+        return _pp_detect_os() == "macos"
+    if t == "freebsd":
+        return _pp_detect_os() == "freebsd"
+    if t == "openbsd":
+        return _pp_detect_os() == "openbsd"
+    if t == "netbsd":
+        return _pp_detect_os() == "netbsd"
+    if t == "unix":
+        val os = _pp_detect_os()
+        val is_unix = os == "linux" or os == "macos"
+        val is_unix2 = os == "freebsd" or os == "openbsd"
+        val is_unix3 = os == "netbsd" or os == "android"
+        return is_unix or is_unix2 or is_unix3
+
+    if t == "x86_64" or t == "amd64" or t == "x64":
+        return _pp_detect_arch() == "x86_64"
+    if t == "x86" or t == "i386" or t == "i686":
+        return _pp_detect_arch() == "x86"
+    if t == "aarch64" or t == "arm64":
+        return _pp_detect_arch() == "aarch64"
+    if t == "arm" or t == "armv7" or t == "armv6":
+        return _pp_detect_arch() == "arm"
+    if t == "riscv64":
+        return _pp_detect_arch() == "riscv64"
+    if t == "riscv32":
+        return _pp_detect_arch() == "riscv32"
+
+    if t.contains("=="):
+        val parts = t.split("==")
+        if parts.len() >= 2:
+            return _pp_eval_key_value(parts[0], parts[1])
+    if t.contains("="):
+        val parts = t.split("=")
+        if parts.len() >= 2:
+            return _pp_eval_key_value(parts[0], parts[1])
+
+    false
+
+fn _pp_tokenize_condition(condition: text) -> [text]:
+    var tokens: [text] = []
+    var current: [text] = []
+    var i: i64 = 0
+
+    for _ in condition:
+        if i >= condition.len():
+            break
+        val ch = condition[i]
+
+        val is_ws = ch == " " or ch == "\t" or ch == "\r"
+        if is_ws:
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            i = i + 1
+            continue
+
+        val is_paren = ch == "(" or ch == ")"
+        if is_paren:
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            tokens.push(ch)
+            i = i + 1
+            continue
+
+        if ch == "&" and i + 1 < condition.len() and condition[i + 1] == "&":
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            tokens.push("&&")
+            i = i + 2
+            continue
+
+        if ch == "|" and i + 1 < condition.len() and condition[i + 1] == "|":
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            tokens.push("||")
+            i = i + 2
+            continue
+
+        if ch == "!":
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            tokens.push("!")
+            i = i + 1
+            continue
+
+        current.push(ch)
+        i = i + 1
+
+    if current.len() > 0:
+        tokens.push(current.join(""))
+
+    tokens
+
+fn _pp_peek() -> text:
+    if _pp_pos >= _pp_tokens.len():
+        return ""
+    _pp_tokens[_pp_pos]
+
+fn _pp_take() -> text:
+    val token = _pp_peek()
+    if token != "":
+        _pp_pos = _pp_pos + 1
+    token
+
+fn _pp_parse_or() -> bool:
+    var left = _pp_parse_and()
+    for _ in 0..1024:
+        val tok = _pp_peek()
+        val is_or = tok == "or" or tok == "||"
+        if not is_or:
+            break
+        _pp_take()
+        val right = _pp_parse_and()
+        left = left or right
+    left
+
+fn _pp_parse_and() -> bool:
+    var left = _pp_parse_not()
+    for _ in 0..1024:
+        val tok = _pp_peek()
+        val is_and = tok == "and" or tok == "&&"
+        if not is_and:
+            break
+        _pp_take()
+        val right = _pp_parse_not()
+        left = left and right
+    left
+
+fn _pp_parse_not() -> bool:
+    val tok = _pp_peek()
+    val is_not = tok == "not" or tok == "!"
+    if is_not:
+        _pp_take()
+        return not _pp_parse_not()
+    _pp_parse_primary()
+
+fn _pp_parse_primary() -> bool:
+    val tok = _pp_peek()
+    if tok == "(":
+        _pp_take()
+        val value = _pp_parse_or()
+        if _pp_peek() == ")":
+            _pp_take()
+        return value
+
+    val atom = _pp_take()
+    _pp_eval_atom(atom)
+
+fn _pp_eval_condition(condition: text) -> bool:
+    _pp_tokens = _pp_tokenize_condition(condition)
+    _pp_pos = 0
+    if _pp_tokens.len() == 0:
+        return false
+    _pp_parse_or()
+
+fn _pp_extract_directive_condition(trimmed: text, prefix_len: i64) -> text:
+    if trimmed.len() <= prefix_len:
+        return ""
+    var cond = trimmed[prefix_len:].trim()
+    # Accept optional trailing ':' in hash directives (e.g. #if linux:)
+    if cond.ends_with(":") and cond.len() >= 1:
+        cond = cond[0:cond.len() - 1].trim()
+    if cond.starts_with("(") and cond.ends_with(")") and cond.len() >= 2:
+        cond = cond[1:cond.len() - 1].trim()
+    cond
+
+fn _pp_extract_paren_condition(line: text) -> text:
+    # Extract condition from @when(condition): or @cfg(condition) etc.
+    # Finds '(' and reads until matching ')'.
+    var start: i64 = -1
+    var i: i64 = 0
+    for _ in line:
+        if i >= line.len(): break
+        if line[i] == "(":
+            start = i + 1
+            break
+        i = i + 1
+    if start < 0:
+        return ""
+    var depth: i64 = 1
+    var chars: [text] = []
+    var j: i64 = start
+    for _ in line:
+        if j >= line.len(): break
+        val ch = line[j]
+        if ch == "(":
+            depth = depth + 1
+        if ch == ")":
+            depth = depth - 1
+            if depth == 0: break
+        chars.push(ch)
+        j = j + 1
+    chars.join("").trim()
+
+fn _pp_extract_cfg_condition(line: text) -> text:
+    # Extract from @cfg(condition) or @cfg("key", "value")
+    # For key-value form, convert to key=value for eval
+    val raw = _pp_extract_paren_condition(line)
+    if raw.contains(","):
+        val parts = raw.split(",")
+        if parts.len() >= 2:
+            val key = _pp_strip_quotes(parts[0].trim())
+            val value = _pp_strip_quotes(parts[1].trim())
+            return "{key}={value}"
+    raw
+
+fn _pp_split_lines(source: text) -> [text]:
+    var lines: [text] = []
+    var line_chars: [text] = []
+    var i: i64 = 0
+    for _ in source:
+        if i >= source.len():
+            break
+        val ch = source[i]
+        if ch == "\n":
+            lines.push(line_chars.join(""))
+            line_chars = []
+        else:
+            line_chars.push(ch)
+        i = i + 1
+    lines.push(line_chars.join(""))
+    lines
+
+fn _pp_preprocess_conditionals(source: text) -> text:
+    val lines = _pp_split_lines(source)
+    var out_lines: [text] = []
+
+    var stack_parent_active: [bool] = []
+    var stack_branch_taken: [bool] = []
+    var stack_branch_active: [bool] = []
+    var depth: i64 = 0
+    var active: bool = true
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        val is_when = trimmed.starts_with("@when(")
+        val is_if = trimmed.starts_with("#if ")
+        val is_if2 = trimmed.starts_with("#if(")
+        val is_if_directive = is_if or is_if2
+        if is_when or is_if_directive:
+            val cond = if is_when:
+                _pp_extract_paren_condition(trimmed)
+            else:
+                _pp_extract_directive_condition(trimmed, 3)
+            val parent = active
+            val cond_ok = _pp_eval_condition(cond)
+            val current = parent and cond_ok
+
+            if depth >= stack_parent_active.len():
+                stack_parent_active.push(parent)
+                stack_branch_taken.push(current)
+                stack_branch_active.push(current)
+            else:
+                stack_parent_active[depth] = parent
+                stack_branch_taken[depth] = current
+                stack_branch_active[depth] = current
+            depth = depth + 1
+            active = current
+            out_lines.push("")
+            continue
+
+        val is_elif = trimmed.starts_with("@elif(")
+        val is_hash_elif = trimmed.starts_with("#elif ")
+        val is_hash_elif2 = trimmed.starts_with("#elif(")
+        val is_elif_directive = is_elif or is_hash_elif or is_hash_elif2
+        if is_elif_directive:
+            if depth > 0:
+                val idx = depth - 1
+                val parent = stack_parent_active[idx]
+                var taken = stack_branch_taken[idx]
+                var current = false
+                if parent and not taken:
+                    val cond = if is_elif:
+                        _pp_extract_paren_condition(trimmed)
+                    else:
+                        _pp_extract_directive_condition(trimmed, 5)
+                    current = _pp_eval_condition(cond)
+                    if current:
+                        taken = true
+                stack_branch_taken[idx] = taken
+                stack_branch_active[idx] = current
+                active = current
+            out_lines.push("")
+            continue
+
+        val is_else = trimmed == "@else" or trimmed == "@else:" or trimmed == "#else" or trimmed == "#else:"
+        if is_else:
+            if depth > 0:
+                val idx = depth - 1
+                val parent = stack_parent_active[idx]
+                val taken = stack_branch_taken[idx]
+                val current = parent and (not taken)
+                stack_branch_taken[idx] = taken or current
+                stack_branch_active[idx] = current
+                active = current
+            out_lines.push("")
+            continue
+
+        val is_end = trimmed == "@end" or trimmed == "#endif" or trimmed == "#endif:"
+        if is_end:
+            if depth > 0:
+                depth = depth - 1
+            if depth <= 0:
+                active = true
+            else:
+                active = stack_branch_active[depth - 1]
+            out_lines.push("")
+            continue
+
+        if active:
+            out_lines.push(line)
+        else:
+            # Keep line count stable for diagnostics.
+            out_lines.push("")
+
+    # Second pass: @cfg(condition) per-declaration conditionals
+    var final_lines: [text] = []
+    var skip_until_dedent: bool = false
+    var skip_indent: i64 = -1
+    var i: i64 = 0
+    for _ in out_lines:
+        if i >= out_lines.len(): break
+        val ol = out_lines[i]
+        val ot = ol.trim()
+
+        if skip_until_dedent:
+            if ot == "":
+                final_lines.push("")
+                skip_until_dedent = false
+                skip_indent = -1
+                i = i + 1
+                continue
+            var cur_indent: i64 = 0
+            var ci: i64 = 0
+            for _ in ol:
+                if ci >= ol.len(): break
+                val c = ol[ci]
+                if c == " ":
+                    cur_indent = cur_indent + 1
+                elif c == "\t":
+                    cur_indent = cur_indent + 4
+                else:
+                    break
+                ci = ci + 1
+            if cur_indent > skip_indent:
+                final_lines.push("")
+                i = i + 1
+                continue
+            else:
+                skip_until_dedent = false
+                skip_indent = -1
+
+        if ot.starts_with("@cfg("):
+            val cfg_cond = _pp_extract_cfg_condition(ot)
+            val cfg_ok = _pp_eval_condition(cfg_cond)
+            if cfg_ok:
+                # Condition true: blank @cfg line, keep declaration
+                final_lines.push("")
+            else:
+                # Condition false: blank @cfg line + following declaration
+                final_lines.push("")
+                # Calculate indent of the next declaration line
+                if i + 1 < out_lines.len():
+                    val next_line = out_lines[i + 1]
+                    val next_trimmed = next_line.trim()
+                    var next_indent: i64 = 0
+                    var ni: i64 = 0
+                    for _ in next_line:
+                        if ni >= next_line.len(): break
+                        val nc = next_line[ni]
+                        if nc == " ":
+                            next_indent = next_indent + 1
+                        elif nc == "\t":
+                            next_indent = next_indent + 4
+                        else:
+                            break
+                        ni = ni + 1
+                    # Blank the declaration line
+                    i = i + 1
+                    final_lines.push("")
+                    # If declaration ends with ':', blank its body too
+                    if next_trimmed.ends_with(":"):
+                        skip_until_dedent = true
+                        skip_indent = next_indent
+            i = i + 1
+            continue
+
+        final_lines.push(ol)
+        i = i + 1
+
+    final_lines.join("\n")
 
 # ===== Parser Init =====
 
@@ -964,6 +1580,79 @@ fn parse_primary() -> i64:
         val mixin_callee = expr_ident("__mixin", 0)
         return expr_call(mixin_callee, mixin_args_list, 0)
 
+    # asm "..." | asm: "..." | asm { "..." } | asm match: | asm assert [...]
+    if par_kind == TOK_KW_ASM:
+        parser_advance()
+
+        # asm match: — multi-target dispatch
+        if par_kind == TOK_KW_MATCH:
+            parser_advance()
+            parser_expect(TOK_COLON)
+            return parse_asm_match()
+
+        # asm assert [...] — compile-time target guard (parsed as expression, handled as stmt)
+        if par_kind == TOK_IDENT and par_text == "assert":
+            parser_advance()
+            return parse_asm_assert_expr()
+
+        if par_kind == TOK_STRING_LIT:
+            val inline_asm = par_text
+            parser_advance()
+            return expr_asm(inline_asm, 0)
+
+        if par_kind == TOK_COLON:
+            parser_advance()
+            parser_skip_newlines()
+            if par_kind != TOK_INDENT:
+                parser_error("expected indented asm block after 'asm:'")
+                return expr_asm("", 0)
+            parser_advance()
+            var asm_lines: [text] = []
+            for ai in 0..100000:
+                parser_skip_newlines()
+                if par_kind == TOK_DEDENT:
+                    parser_advance()
+                    break
+                if par_kind == TOK_EOF:
+                    break
+                if par_kind == TOK_STRING_LIT:
+                    asm_lines.push(par_text)
+                    parser_advance()
+                    continue
+                parser_error("expected string literal in asm block")
+                for aj in 0..10000:
+                    val is_nl = par_kind == TOK_NEWLINE
+                    val is_ded = par_kind == TOK_DEDENT
+                    val is_eof = par_kind == TOK_EOF
+                    if is_nl or is_ded or is_eof:
+                        break
+                    parser_advance()
+            return expr_asm(asm_lines.join("\n"), 0)
+
+        if par_kind == TOK_LBRACE:
+            parser_advance()
+            var asm_parts: [text] = []
+            for ai in 0..100000:
+                if par_kind == TOK_RBRACE:
+                    parser_advance()
+                    break
+                if par_kind == TOK_EOF:
+                    parser_error("unterminated asm { ... } block")
+                    break
+                if par_kind == TOK_NEWLINE or par_kind == TOK_COMMA or par_kind == TOK_SEMICOLON:
+                    parser_advance()
+                    continue
+                if par_kind == TOK_STRING_LIT:
+                    asm_parts.push(par_text)
+                    parser_advance()
+                    continue
+                parser_error("expected string literal in asm { ... } block")
+                parser_advance()
+            return expr_asm(asm_parts.join("\n"), 0)
+
+        parser_error("expected string literal, ':' block, or '{...}' after 'asm'")
+        return expr_asm("", 0)
+
     if par_kind == TOK_INT_LIT:
         val int_text = par_text
         parser_advance()
@@ -1275,6 +1964,250 @@ fn parse_primary() -> i64:
     parser_advance()
     expr_nil_lit(0)
 
+# ===== Asm Match/Assert Parsing =====
+
+fn parse_asm_target_spec() -> i64:
+    """Parse target spec: [arch | arch2, os, abi, backend >= ver]
+    Returns index into asm_arm_* arena (as spec, not full arm).
+    """
+    parser_expect(TOK_LBRACKET)
+    # Parse arch(es) with pipe grouping
+    var archs: [text] = []
+    if par_kind == TOK_IDENT:
+        archs.push(par_text)
+        parser_advance()
+        # Check for pipe groups: arch | arch2
+        for pi in 0..20:
+            if par_kind == TOK_PIPE:
+                parser_advance()
+                if par_kind == TOK_IDENT:
+                    archs.push(par_text)
+                    parser_advance()
+                else:
+                    parser_error("expected architecture name after '|'")
+            else:
+                break
+    else:
+        parser_error("expected architecture name in target spec")
+
+    # Parse optional os, abi, backend (comma-separated)
+    var os_val = ""
+    var abi_val = ""
+    var backend_val = ""
+    var ver_ops: [text] = []
+    var ver_vals: [i64] = []
+    var field_pos = 1  # 1=os, 2=abi, 3=backend
+
+    for fi in 0..3:
+        if par_kind != TOK_COMMA:
+            break
+        parser_advance()
+        if par_kind == TOK_UNDERSCORE:
+            # Wildcard _
+            parser_advance()
+            field_pos = field_pos + 1
+            continue
+        if par_kind == TOK_IDENT:
+            val field_text = par_text
+            parser_advance()
+            if field_pos == 1:
+                os_val = field_text
+            elif field_pos == 2:
+                abi_val = field_text
+            elif field_pos == 3:
+                backend_val = field_text
+                # Check for version constraints after backend
+                for vi in 0..4:
+                    if par_kind == TOK_GEQ:
+                        parser_advance()
+                        if par_kind == TOK_INT_LIT:
+                            ver_ops.push(">=")
+                            ver_vals.push(parse_int_text(par_text))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '>='")
+                    elif par_kind == TOK_EQ:
+                        # Could be == (two tokens) or a single ==
+                        parser_advance()
+                        if par_kind == TOK_EQ:
+                            parser_advance()
+                        if par_kind == TOK_INT_LIT:
+                            ver_ops.push("==")
+                            ver_vals.push(parse_int_text(par_text))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '=='")
+                    elif par_kind == TOK_LT:
+                        parser_advance()
+                        if par_kind == TOK_INT_LIT:
+                            ver_ops.push("<")
+                            ver_vals.push(parse_int_text(par_text))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '<'")
+                    elif par_kind == TOK_IDENT and par_text == "~=":
+                        parser_advance()
+                        if par_kind == TOK_INT_LIT:
+                            ver_ops.push("~=")
+                            ver_vals.push(parse_int_text(par_text))
+                            parser_advance()
+                        else:
+                            parser_error("expected version number after '~='")
+                    else:
+                        break
+            field_pos = field_pos + 1
+        else:
+            parser_error("expected identifier or '_' in target spec")
+            break
+
+    parser_expect(TOK_RBRACKET)
+
+    val arm_idx = asm_arm_new(archs, os_val, abi_val, backend_val,
+                              ver_ops, ver_vals, "", false, "", false)
+    arm_idx
+
+fn parse_int_text(txt: text) -> i64:
+    """Parse integer from text (simple decimal)."""
+    var result = 0
+    for i in 0..txt.len():
+        val ch = txt[i]
+        if ch >= "0" and ch <= "9":
+            result = result * 10 + (ch.ord() - 48)
+    result
+
+fn parse_asm_match() -> i64:
+    """Parse asm match: block with case arms.
+
+    Syntax:
+        asm match:
+            case [spec]: asm_body
+            case _: compile_error("msg")
+    """
+    parser_skip_newlines()
+    if par_kind != TOK_INDENT:
+        parser_error("expected indented block after 'asm match:'")
+        return expr_asm("", 0)
+    parser_advance()
+
+    var arm_indices: [i64] = []
+    for mi in 0..100:
+        parser_skip_newlines()
+        if par_kind == TOK_DEDENT:
+            parser_advance()
+            break
+        if par_kind == TOK_EOF:
+            break
+
+        # Each arm starts with 'case'
+        if par_kind != TOK_KW_CASE:
+            parser_error("expected 'case' in asm match arm")
+            parser_advance()
+            continue
+
+        parser_advance()  # consume 'case'
+
+        # Check for wildcard: case _:
+        if par_kind == TOK_UNDERSCORE:
+            parser_advance()
+            parser_expect(TOK_COLON)
+
+            # Parse body: either compile_error("msg") or asm lines
+            parser_skip_newlines()
+            if par_kind == TOK_INDENT:
+                parser_advance()
+                parser_skip_newlines()
+
+            if par_kind == TOK_IDENT and par_text == "compile_error":
+                parser_advance()
+                parser_expect(TOK_LPAREN)
+                var err_msg = ""
+                if par_kind == TOK_STRING_LIT:
+                    err_msg = par_text
+                    parser_advance()
+                parser_expect(TOK_RPAREN)
+                val arm_idx = asm_arm_new([], "", "", "", [], [], "", true, err_msg, true)
+                arm_indices.push(arm_idx)
+                # Skip to end of arm
+                parser_skip_newlines()
+                if par_kind == TOK_DEDENT:
+                    parser_advance()
+            else:
+                # Wildcard with asm body
+                var asm_lines: [text] = []
+                for ai in 0..10000:
+                    parser_skip_newlines()
+                    if par_kind == TOK_DEDENT or par_kind == TOK_EOF:
+                        break
+                    if par_kind == TOK_KW_CASE:
+                        break
+                    if par_kind == TOK_STRING_LIT:
+                        asm_lines.push(par_text)
+                        parser_advance()
+                    else:
+                        parser_advance()
+                val asm_text = asm_lines.join("\n")
+                val arm_idx = asm_arm_new([], "", "", "", [], [], asm_text, false, "", true)
+                arm_indices.push(arm_idx)
+                if par_kind == TOK_DEDENT:
+                    parser_advance()
+            continue
+
+        # case [spec]:
+        val spec_idx = parse_asm_target_spec()
+        parser_expect(TOK_COLON)
+
+        # Parse body: either compile_error("msg") or asm lines
+        parser_skip_newlines()
+        if par_kind == TOK_INDENT:
+            parser_advance()
+            parser_skip_newlines()
+
+        if par_kind == TOK_IDENT and par_text == "compile_error":
+            parser_advance()
+            parser_expect(TOK_LPAREN)
+            var err_msg = ""
+            if par_kind == TOK_STRING_LIT:
+                err_msg = par_text
+                parser_advance()
+            parser_expect(TOK_RPAREN)
+            # Update the arm to be compile_error
+            asm_arm_is_compile_error[spec_idx] = true
+            asm_arm_error_msg[spec_idx] = err_msg
+            arm_indices.push(spec_idx)
+            parser_skip_newlines()
+            if par_kind == TOK_DEDENT:
+                parser_advance()
+        else:
+            # Collect asm body lines
+            var asm_lines: [text] = []
+            for ai in 0..10000:
+                parser_skip_newlines()
+                if par_kind == TOK_DEDENT or par_kind == TOK_EOF:
+                    break
+                if par_kind == TOK_KW_CASE:
+                    break
+                if par_kind == TOK_STRING_LIT:
+                    asm_lines.push(par_text)
+                    parser_advance()
+                else:
+                    parser_advance()
+            val asm_text = asm_lines.join("\n")
+            asm_arm_asm_text[spec_idx] = asm_text
+            arm_indices.push(spec_idx)
+            if par_kind == TOK_DEDENT:
+                parser_advance()
+
+    return expr_asm_match(arm_indices, 0)
+
+fn parse_asm_assert_expr() -> i64:
+    """Parse asm assert [spec] — compile-time target guard.
+
+    Returns an expression (value is 0/unit in interpreter).
+    Uses EXPR_ASM_MATCH with i_val=1 to distinguish from asm match.
+    """
+    val spec_idx = parse_asm_target_spec()
+    return expr_asm_assert(spec_idx, 0)
+
 # ===== Statement Parsing =====
 
 fn parse_block() -> [i64]:
@@ -1304,9 +2237,8 @@ fn parse_statement() -> i64:
         return parse_val_decl_stmt()
 
     if par_kind == TOK_KW_LAZY:
-        # lazy val name = expr — treat like val for interpreter
         parser_advance()
-        return parse_val_decl_stmt()
+        return parse_lazy_val_decl_stmt()
 
     if par_kind == TOK_KW_VAR:
         return parse_var_decl_stmt()
@@ -1540,6 +2472,24 @@ fn parse_val_decl_stmt() -> i64:
         type_tag = infer_expr_type_from_parse(init)
 
     stmt_val_decl(name, type_tag, init, 0)
+
+fn parse_lazy_val_decl_stmt() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+
+    if type_tag == 0:
+        type_tag = infer_expr_type_from_parse(init)
+
+    stmt_lazy_val_decl(name, type_tag, init, 0)
 
 fn parse_var_decl_stmt() -> i64:
     parser_advance()
@@ -2102,6 +3052,11 @@ fn parse_enum_decl() -> i64:
 
 fn parse_use_decl() -> i64:
     parser_advance()
+    # Check for 'use lazy' modifier
+    var is_lazy = 0
+    if par_kind == TOK_KW_LAZY:
+        is_lazy = 1
+        parser_advance()
     # Handle relative imports: use .X or use ..X
     var module_path: text = ""
     if par_kind == TOK_DOTDOT:
@@ -2133,13 +3088,19 @@ fn parse_use_decl() -> i64:
         # Wildcard import: use X.*
         if par_kind == TOK_STAR:
             parser_advance()
-            return decl_use_import(module_path, [], 0)
+            val wc_result = decl_use_import(module_path, [], 0)
+            if is_lazy == 1:
+                decl_set_lazy(wc_result)
+            return wc_result
         module_path = module_path + "." + par_text
         parser_expect(TOK_IDENT)
         # Check for trailing * without dot: use ffi.io*
         if par_kind == TOK_STAR:
             parser_advance()
-            return decl_use_import(module_path, [], 0)
+            val wc2_result = decl_use_import(module_path, [], 0)
+            if is_lazy == 1:
+                decl_set_lazy(wc2_result)
+            return wc2_result
 
     # Optional import list: .{name1, name2} or .(name1, name2)
     var imported_names: [text] = []
@@ -2179,7 +3140,10 @@ fn parse_use_decl() -> i64:
         if is_close:
             parser_advance()
 
-    decl_use_import(module_path, imported_names, 0)
+    val use_result = decl_use_import(module_path, imported_names, 0)
+    if is_lazy == 1:
+        decl_set_lazy(use_result)
+    use_result
 
 fn parse_export_decl() -> i64:
     parser_advance()
@@ -2207,6 +3171,20 @@ fn parse_val_decl() -> i64:
     parser_expect(TOK_ASSIGN)
     val init = parse_expr()
     decl_val_binding(name, type_tag, init, 0)
+
+fn parse_lazy_val_decl() -> i64:
+    parser_advance()
+    val name = par_text
+    parser_expect(TOK_IDENT)
+
+    var type_tag = 0
+    if par_kind == TOK_COLON:
+        parser_advance()
+        type_tag = parser_parse_type_with_union()
+
+    parser_expect(TOK_ASSIGN)
+    val init = parse_expr()
+    decl_lazy_val_binding(name, type_tag, init, 0)
 
 fn parse_var_decl() -> i64:
     parser_advance()
@@ -2417,9 +3395,8 @@ fn parse_module_body():
             val d = parse_val_decl()
             module_add_decl(d)
         elif par_kind == TOK_KW_LAZY:
-            # lazy val name = expr — treat like val (deferred eval is interpreter-side)
             parser_advance()
-            val d = parse_val_decl()
+            val d = parse_lazy_val_decl()
             module_add_decl(d)
         elif par_kind == TOK_KW_VAR:
             val d = parse_var_decl()
@@ -2503,18 +3480,9 @@ fn parse_module_body():
                 parser_advance()
             parser_skip_newlines_and_semicolons()
         elif par_kind == TOK_KW_ASM:
-            # asm block — skip it
-            parser_advance()
-            # Skip the asm block (usually triple-quoted string + body)
-            for j in 0..10000:
-                val asm_is_nl: bool = par_kind == TOK_NEWLINE
-                val asm_is_ded: bool = par_kind == TOK_DEDENT
-                val asm_is_eof: bool = par_kind == TOK_EOF
-                val asm_done: bool = asm_is_nl or asm_is_ded
-                val asm_done2: bool = asm_done or asm_is_eof
-                if asm_done2:
-                    break
-                parser_advance()
+            val asm_expr = parse_expr()
+            val d = decl_val_binding("_asm_" + int_to_str(i), -1, asm_expr, 0)
+            module_add_decl(d)
             parser_skip_newlines_and_semicolons()
         elif par_kind == TOK_INDENT:
             # Stray indent at module level — skip it
@@ -2622,18 +3590,23 @@ fn parse_module_body():
                 parser_skip_newlines_and_semicolons()
 
 fn parse_module(source: text, path: text):
-    parser_init(source)
+    val preprocessed = _pp_preprocess_conditionals(source)
+    parser_init(preprocessed)
     module_set_path(path)
     parse_module_body()
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST
-    lex_init(source)
+    val preprocessed = _pp_preprocess_conditionals(source)
+    lex_init(preprocessed)
     par_errors = []
     par_had_error = false
     parser_advance()
     module_set_path(path)
     parse_module_body()
+
+fn preprocess_conditionals(source: text) -> text:
+    _pp_preprocess_conditionals(source)
 
 fn parser_has_errors() -> bool:
     par_had_error
@@ -2654,13 +3627,14 @@ export parse_comparison, parse_null_coalesce, parse_range
 export parse_addition, parse_multiplication, parse_unary, parse_postfix, parse_primary
 export parse_call_arg, parse_postfix_on, parse_binary_from
 export parse_block, parse_statement
-export parse_val_decl_stmt, parse_var_decl_stmt
+export parse_val_decl_stmt, parse_lazy_val_decl_stmt, parse_var_decl_stmt
 export parse_if_stmt, parse_for_stmt, parse_while_stmt, parse_match_stmt
 export parse_receive_stmt, parse_bind_stmt, parse_ce_decl
 export parse_if_expr, parse_for_expr, parse_while_expr
 export parse_fn_decl, parse_extern_fn_decl, parse_struct_decl, parse_enum_decl
 export parse_impl_decl, parse_class_body_method
-export parse_use_decl, parse_export_decl, parse_val_decl, parse_var_decl
+export parse_use_decl, parse_export_decl, parse_val_decl, parse_lazy_val_decl, parse_var_decl
 export parse_module, parse_module_file, parse_module_body
+export preprocess_conditionals
 export parser_has_errors, parser_get_errors, parser_error_count
 export par_kind, par_text, par_line, par_col, par_errors, par_had_error

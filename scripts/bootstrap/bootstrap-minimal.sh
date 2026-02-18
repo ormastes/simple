@@ -26,34 +26,34 @@ echo "✅ seed_cpp built ($(ls -lh seed/build/seed_cpp | awk '{print $5}'))"
 # Step 2: Generate file list (EXCLUDE problematic files)
 echo ""
 echo "[2/4] Preparing source files..."
-find src/compiler_core -name '*.spl' -type f | \
+find src/compiler -name '*.spl' -type f | \
     grep -v '/test' | \
     grep -v '_test\.spl$' | \
     grep -v '_spec\.spl$' | \
     grep -v '_phase[0-9]' | \
     grep -v 'associated_types' | \
-    grep -v '^src/compiler_core/aop' | \
-    grep -v '^src/compiler_core/arch_rules' | \
-    grep -v '^src/compiler_core/async_integration' | \
-    grep -v '^src/compiler_core/borrow_check' | \
-    grep -v '^src/compiler_core/effects' | \
-    grep -v '^src/compiler_core/trait' | \
-    grep -v '^src/compiler_core/bidir' | \
-    grep -v '^src/compiler_core/const_keys' | \
-    grep -v '^src/compiler_core/higher_rank' | \
-    grep -v '^src/compiler_core/macro_checker' | \
-    grep -v '^src/compiler_core/simd' | \
-    grep -v '^src/compiler_core/variance' | \
-    grep -v '^src/compiler_core/monomorphize' | \
-    grep -v '^src/compiler_core/module_resolver' | \
-    grep -v '^src/compiler_core/backend/lean_borrow' | \
-    grep -v '^src/compiler_core/linker' | \
-    grep -v '^src/compiler_core/blocks' | \
-    grep -v '^src/compiler_core/codegen' | \
-    grep -v '^src/compiler_core/backend/llvm_backend' | \
-    grep -v '^src/compiler_core/backend/sdn' | \
-    grep -v '^src/compiler_core/backend/cuda_backend' | \
-    grep -v '^src/compiler_core/backend/vulkan_backend' | \
+    grep -v '^src/compiler/aop' | \
+    grep -v '^src/compiler/arch_rules' | \
+    grep -v '^src/compiler/async_integration' | \
+    grep -v '^src/compiler/borrow_check' | \
+    grep -v '^src/compiler/effects' | \
+    grep -v '^src/compiler/trait' | \
+    grep -v '^src/compiler/bidir' | \
+    grep -v '^src/compiler/const_keys' | \
+    grep -v '^src/compiler/higher_rank' | \
+    grep -v '^src/compiler/macro_checker' | \
+    grep -v '^src/compiler/simd' | \
+    grep -v '^src/compiler/variance' | \
+    grep -v '^src/compiler/monomorphize' | \
+    grep -v '^src/compiler/module_resolver' | \
+    grep -v '^src/compiler/backend/lean_borrow' | \
+    grep -v '^src/compiler/linker' | \
+    grep -v '^src/compiler/blocks' | \
+    grep -v '^src/compiler/codegen' | \
+    grep -v '^src/compiler/backend/llvm_backend' | \
+    grep -v '^src/compiler/backend/sdn' | \
+    grep -v '^src/compiler/backend/cuda_backend' | \
+    grep -v '^src/compiler/backend/vulkan_backend' | \
     grep -v 'bitfield\.spl$' | \
     grep -v 'init\.spl$' | \
     grep -v 'predicate_parser\.spl$' | \
@@ -61,7 +61,7 @@ find src/compiler_core -name '*.spl' -type f | \
     sort > /tmp/core_files_minimal_bs.txt
 
 # Add bootstrap_main.spl at the end
-echo "src/compiler_core/bootstrap_main.spl" >> /tmp/core_files_minimal_bs.txt
+echo "src/compiler/bootstrap_main.spl" >> /tmp/core_files_minimal_bs.txt
 
 echo "✅ $(wc -l < /tmp/core_files_minimal_bs.txt) files selected"
 

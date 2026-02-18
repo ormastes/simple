@@ -82,7 +82,7 @@ def fix_file(file_path: Path) -> bool:
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 fix_struct_init.py <directory>")
-        print("Example: python3 fix_struct_init.py src/compiler_core")
+        print("Example: python3 fix_struct_init.py src/compiler")
         sys.exit(1)
     
     directory = Path(sys.argv[1])

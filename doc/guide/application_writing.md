@@ -1,15 +1,17 @@
 # Application Writing Guide
 
-**Purpose:** Guide for building Simple applications with links to language manuals and generated specs.
+**Purpose:** Guide for building Simple applications — project structure, app lifecycle, dependency injection, and framework integration.
 
 ---
 
 ## Overview
 
-This guide covers building applications in Simple with references to:
-- Generated specification documents
-- Language manuals
-- GUI/TUI framework guides
+This guide covers:
+- Project structure and entry points
+- **App lifecycle** — `init()`, `reset()`, `main()` convention
+- **Dependency injection** — manual composition, service registries, lazy initialization
+- GUI/TUI/Web/CLI framework integration
+- Links to language manuals and generated specs
 
 ---
 
@@ -20,8 +22,9 @@ This guide covers building applications in Simple with references to:
 ```
 my_app/
 ├── __init__.spl           # Module manifest
-├── main.spl               # Entry point
-├── config.spl             # Configuration
+├── main.spl               # Entry point (calls init → run)
+├── config.spl             # Configuration loading
+├── services.spl           # Service registry (DI wiring)
 ├── domain/                # Domain types
 │   ├── __init__.spl
 │   └── models.spl
@@ -36,13 +39,168 @@ my_app/
 
 ```simple
 # main.spl
-import config.{AppConfig, load_config}
-import service.{start_server}
+use config.{AppConfig, load_config}
+use service.{start_server}
 
 fn main():
-    config = load_config()
-    start_server(config)
+    init()
+    start_server(services.app_config)
+
+fn init():
+    # Register/wire services — actual creation is lazy
+    pass_do_nothing
+
+fn reset():
+    # Tear down and rebuild state — used in tests only
+    pass_do_nothing
 ```
+
+---
+
+## App Lifecycle
+
+Simple uses a naming convention (no special syntax) for application lifecycle:
+
+| Function | Purpose | Called by |
+|----------|---------|-----------|
+| `main()` | Program entry; calls `init()` then starts work | Runtime or test harness |
+| `init()` | Wire DI; register services | `main()` or test setup |
+| `reset()` | Destroy and re-init state | Test `before_each` / `after_each` hooks |
+
+**Key principle:** `init()` only *registers* things — it does not *create* them. Creation happens lazily on first use.
+
+```simple
+# main.spl
+fn main():
+    init()          # wire the DI container
+    run_app()       # do the work
+
+fn init():
+    # Register all services (lazy — not created yet)
+    pass_do_nothing
+
+fn reset():
+    # Clear caches, reset singletons — test isolation
+    pass_do_nothing
+```
+
+---
+
+## Dependency Injection
+
+### Manual Composition (Current)
+
+The simplest DI approach — wire dependencies explicitly in `main()`:
+
+```simple
+struct DatabaseConfig:
+    url: text
+    pool_size: i64
+
+fn main():
+    val db_config = DatabaseConfig(url: env_var("DB_URL"), pool_size: 10)
+    val db = Database(config: db_config)
+    val user_svc = UserService(db: db)
+    run(user_svc)
+```
+
+**Strengths:** Explicit, no magic, easy to trace.
+**Weaknesses:** Wiring grows unwieldy; no lazy init; hard to override in tests.
+
+### Service Registry Pattern
+
+Create a `services.spl` module that declares all application services:
+
+```simple
+# services.spl
+use config
+use database
+use logging
+
+val app_config = load_config()
+val logger = ConsoleLogger(level: app_config.log_level)
+val db = Database(DatabaseConfig(
+    url: app_config.db_url,
+    pool_size: app_config.db_pool_size
+))
+val user_repo = UserRepository(db: db)
+val user_service = UserService(repo: user_repo, log: logger)
+```
+
+Wire in `main()`:
+
+```simple
+# main.spl
+use services
+
+fn main():
+    init()
+    val svc = services.user_service
+    run_server(svc)
+```
+
+**Strengths:** Centralized wiring, easy to find all dependencies.
+**Weaknesses:** All services created at startup (no lazy init).
+
+### Service Registry with `lazy val` (Proposed)
+
+When `lazy val` is available, services are created on first access:
+
+```simple
+# services.spl
+use config
+use database
+use logging
+
+lazy val app_config = load_config()
+lazy val logger = ConsoleLogger(level: app_config.log_level)
+lazy val db = Database(DatabaseConfig(
+    url: app_config.db_url,
+    pool_size: app_config.db_pool_size
+))
+lazy val user_repo = UserRepository(db: db)
+lazy val user_service = UserService(repo: user_repo, log: logger)
+```
+
+**How `lazy val` works:**
+- `lazy val x = expr` — `expr` is evaluated the **first time `x` is accessed**
+- Subsequent accesses return the cached value
+- Dependencies between `lazy val`s are resolved by access order
+
+```simple
+val svc = services.user_service
+# ^ triggers chain: app_config → db → user_repo → user_service
+```
+
+### Test Override Pattern
+
+Override services before they are accessed:
+
+```simple
+# test/app/user_service_spec.spl
+use services
+
+before_each:
+    # Override before lazy init fires
+    services.db = MockDatabase()
+    services.logger = SilentLogger()
+
+after_each:
+    services.reset()   # clear all lazy vals back to uninitialized
+```
+
+**Key insight:** `reset()` sets all lazy flags back to uninitialized. Next access re-creates everything fresh — test isolation without restarting the app.
+
+### Lazy Import (`use lazy`) (Proposed)
+
+Defer module loading until first use — reduces startup time:
+
+```simple
+use lazy database       # NOT loaded until a symbol from database is accessed
+use logging             # loaded immediately (current behavior)
+```
+
+On first access of `database.something`, the module is loaded and executed. This is analogous to Python's `importlib.util.LazyLoader`.
 
 ---
 
@@ -454,6 +612,11 @@ simple build --release
 - [design_writing.md](design_writing.md) - Design with diagrams
 - [architecture_writing.md](architecture_writing.md) - Architecture patterns
 - [sspec_writing.md](sspec_writing.md) - Test writing
+- [constructor_patterns_guide.md](constructor_patterns_guide.md) - Constructor patterns
+- [module_system.md](module_system.md) - Module system and imports
+
+### Design Documents
+- [DI, Lazy Init, and App Lifecycle Design](../design/di_lazy_init_app_lifecycle.md) - Detailed research and implementation roadmap for `lazy val`, `use lazy`, and DI container patterns
 
 ### Specs
 - [doc/spec/README.md](../spec/README.md) - All specifications index

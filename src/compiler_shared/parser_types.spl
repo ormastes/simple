@@ -31,6 +31,7 @@ struct Import:
     """Import declaration."""
     module: text
     items: [ImportItem]
+    is_lazy: bool
     span: Span
 
 struct ImportItem:
@@ -515,6 +516,9 @@ enum ExprKind:
     # Inline assembly - must be within unsafe block
     AsmBlock(AsmExpr)            # asm "mov eax, ebx" or asm volatile(...)
 
+    # Target-qualified inline assembly - multi-target dispatch
+    AsmMatch([AsmMatchArm])      # asm match: case [spec]: ...
+
     # Generic custom block (user-defined blocks like sh{}, sql{}, re{})
     CustomBlock(text, BlockValue)
 
@@ -666,6 +670,7 @@ enum StmtKind:
     Yield(Expr?)
     Throw(Expr)
     With([WithItem], Block)         # with statement - context managers
+    AsmAssert(AsmTargetSpec)        # asm assert [spec] - compile-time target guard
 
 """Assignment operator."""
 enum AssignOp:
@@ -797,6 +802,53 @@ enum AsmLocation:
     Imm         # Immediate value
 
 # ============================================================================
+# Target-Qualified ASM Types
+# ============================================================================
+
+struct AsmTargetSpec:
+    """Target specifier for asm match/assert.
+
+    Format: [arch, os, abi, backend version_constraint]
+    All fields after arch are optional (nil = wildcard).
+    """
+    archs: [text]                          # ["x86_64"] or ["x86_64", "x86"]
+    # # DESUGARED: os: text
+    has_os: bool
+    os: text                               # "linux" or nil (wildcard)
+    # # DESUGARED: abi: text
+    has_abi: bool
+    abi: text                              # "gnu" or nil (wildcard)
+    # # DESUGARED: backend: text
+    has_backend: bool
+    backend: text                          # "llvm" or nil (wildcard)
+    version_constraints: [AsmVersionConstraint]
+    span: Span
+
+struct AsmVersionConstraint:
+    """Version constraint for backend in asm target spec.
+
+    Examples: >= 15, == 17, < 18, ~= 17
+    """
+    op: text                               # ">=", "==", "<", "~="
+    version: i64
+
+struct AsmMatchArm:
+    """Single arm in an asm match expression.
+
+    Either a target-qualified asm body or a compile_error.
+    """
+    # # DESUGARED: spec: AsmTargetSpec
+    has_spec: bool
+    spec: AsmTargetSpec                    # nil = wildcard (_)
+    is_wildcard: bool
+    # # DESUGARED: asm_body: AsmExpr
+    has_asm_body: bool
+    asm_body: AsmExpr                      # nil if compile_error
+    is_compile_error: bool
+    error_message: text
+    span: Span
+
+# ============================================================================
 # Parser
 # ============================================================================
 
@@ -855,11 +907,11 @@ fn parse_float_int_part(s: text) -> f64:
     var start = 0
     if s.len() > 0:
         if s[0] == "-":
-        negative = true
-        start = 1
+            negative = true
+            start = 1
     elif s.len() > 0:
         if s[0] == "+":
-        start = 1
+            start = 1
     var i = start
     while i < s_len(s):
         val ch = s[i]
@@ -867,7 +919,7 @@ fn parse_float_int_part(s: text) -> f64:
             val code = ch_ord(ch)
             if code >= 48:
                 if code <= 57:
-                result = result * 10[0] + (code - 48) as f64
+                    result = result * 10[0] + (code - 48) as f64
         i = i + 1
     if negative:
         -result
@@ -883,8 +935,8 @@ fn parse_fractional(s: text) -> f64:
             val code = ch_ord(ch)
             if code >= 48:
                 if code <= 57:
-                result = result + (code - 48) as f64 / divisor
-                divisor = divisor * 10[0]
+                    result = result + (code - 48) as f64 / divisor
+                    divisor = divisor * 10[0]
     result
 
 fn split_exponent(s: text) -> [text]:
@@ -932,3 +984,4 @@ export Parser
 export DType, Device, Backend, TensorSuffix
 export GpuIntrinsicKind
 export AsmExpr, AsmConstraint, AsmConstraintKind, AsmLocation
+export AsmTargetSpec, AsmVersionConstraint, AsmMatchArm

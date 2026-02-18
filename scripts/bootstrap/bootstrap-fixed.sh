@@ -26,39 +26,39 @@ echo "✅ seed_cpp built ($(ls -lh seed/build/seed_cpp | awk '{print $5}'))"
 # Step 2: Generate file list (exclude tests and problematic files)
 echo ""
 echo "[2/4] Preparing source files..."
-find src/compiler_core -name '*.spl' -type f | \
+find src/compiler -name '*.spl' -type f | \
     grep -v '/test_' | \
     grep -v '_test\.spl$' | \
     grep -v 'codegen\.spl$' | \
     grep -v '_phase[0-9]' | \
     grep -v 'exhaustiveness_validator\.spl$' | \
     grep -v 'link_wrapper\.spl$' | \
-    grep -v '^src/compiler_core/effects' | \
-    grep -v '^src/compiler_core/trait' | \
-    grep -v '^src/compiler_core/bidir' | \
-    grep -v '^src/compiler_core/const_keys' | \
-    grep -v '^src/compiler_core/higher_rank' | \
-    grep -v '^src/compiler_core/macro_checker' | \
-    grep -v '^src/compiler_core/simd' | \
-    grep -v '^src/compiler_core/variance' | \
-    grep -v '^src/compiler_core/monomorphize' | \
-    grep -v '^src/compiler_core/module_resolver' | \
+    grep -v '^src/compiler/effects' | \
+    grep -v '^src/compiler/trait' | \
+    grep -v '^src/compiler/bidir' | \
+    grep -v '^src/compiler/const_keys' | \
+    grep -v '^src/compiler/higher_rank' | \
+    grep -v '^src/compiler/macro_checker' | \
+    grep -v '^src/compiler/simd' | \
+    grep -v '^src/compiler/variance' | \
+    grep -v '^src/compiler/monomorphize' | \
+    grep -v '^src/compiler/module_resolver' | \
     grep -v '/main\.spl$' | \
     grep -v 'config\.spl$' | \
     grep -v 'aop' | \
     sort > /tmp/core_files_bootstrap_tmp.txt
 
 # Put config.spl first (defines Logger and other types used by AOP)
-echo "src/compiler_core/config.spl" > /tmp/core_files_bootstrap.txt
+echo "src/compiler/config.spl" > /tmp/core_files_bootstrap.txt
 
 # Add AOP files after config (they depend on Logger from config)
-find src/compiler_core -name '*aop*.spl' -type f | sort >> /tmp/core_files_bootstrap.txt
+find src/compiler -name '*aop*.spl' -type f | sort >> /tmp/core_files_bootstrap.txt
 
 # Add rest of files
 cat /tmp/core_files_bootstrap_tmp.txt >> /tmp/core_files_bootstrap.txt
 
 # Add bootstrap_main.spl at the end (must come after dependencies)
-echo "src/compiler_core/bootstrap_main.spl" >> /tmp/core_files_bootstrap.txt
+echo "src/compiler/bootstrap_main.spl" >> /tmp/core_files_bootstrap.txt
 
 echo "✅ $(wc -l < /tmp/core_files_bootstrap.txt) files selected"
 

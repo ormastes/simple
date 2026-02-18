@@ -6,10 +6,10 @@ This tool transforms Full Simple code into Core Simple compatible code.
 
 ```bash
 # Manual prototype already created:
-cat src/compiler_core/lexer_desugared.spl
+cat src/compiler/lexer_desugared.spl
 
 # To desugar all compiler files (TODO):
-simple src/tools/desugarer.spl --input-dir src/compiler --output-dir src/compiler_core
+simple src/tools/desugarer.spl --input-dir src/compiler --output-dir src/compiler
 ```
 
 ## Transformation Passes
@@ -24,7 +24,7 @@ simple src/tools/desugarer.spl --input-dir src/compiler --output-dir src/compile
 ## Status
 
 - [x] Architecture designed
-- [x] Manual prototype: `src/compiler_core/lexer_desugared.spl`
+- [x] Manual prototype: `src/compiler/lexer_desugared.spl`
 - [ ] Automated tool (TODO)
 
 ## See Also

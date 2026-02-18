@@ -491,8 +491,62 @@ describe "ModuleLoader Loading":
         """
 
         it "unloads successfully":
-            # TODO: Load then unload
-            pass
+            var loader = ModuleLoader__with_defaults()
+
+            # Seed one module-owned symbol and one unrelated symbol.
+            loader.modules["owned_mod.smf"] = create_test_module("owned_mod.smf")
+            loader.global_symbols["owned_generic"] = (
+                "owned_mod.smf",
+                create_test_symbol("owned_generic", true)
+            )
+            loader.global_symbols["other_symbol"] = (
+                "other_mod.smf",
+                create_test_symbol("other_symbol", false)
+            )
+
+            # Seed JIT caches to verify unload purges module-owned JIT cache too.
+            loader.jit.set_cache_for_test("owned_generic", [1, 2, 3], 0x1111)
+            loader.jit.set_cache_for_test("other_symbol", [4, 5], 0x2222)
+
+            val _ = loader.reload("owned_mod.smf")
+
+            expect(loader.global_symbols.contains_key("owned_generic")).to_equal(false)
+            expect(loader.global_symbols.contains_key("other_symbol")).to_equal(true)
+            expect(loader.jit.jit_cache.contains_key("owned_generic")).to_equal(false)
+            expect(loader.jit.jit_cache.contains_key("other_symbol")).to_equal(true)
+
+        it "cleans module-owned jit mapping and cache on unload":
+            var loader = ModuleLoader__with_defaults()
+            val owner_path = "jit_owner_mod.smf"
+            loader.modules[owner_path] = create_test_module(owner_path)
+
+            val mapped = loader.jit.jit_mapper.map(
+                loader.jit.exec_mapper,
+                owner_path,
+                "jit_owned_fn",
+                [195]
+            )
+            expect(mapped.is_ok()).to_equal(true)
+            val fn_addr = mapped.unwrap()
+
+            loader.jit.set_cache_for_test("jit_owned_fn", [195], fn_addr)
+
+            val resolved = loader.resolve_symbol("jit_owned_fn")
+            match resolved:
+                case JitCompiled(sym, _):
+                    expect(sym.name).to_equal("jit_owned_fn")
+                case _:
+                    fail("Expected JitCompiled before unload")
+
+            expect(loader.global_symbols.contains_key("jit_owned_fn")).to_equal(true)
+            expect(loader.jit.jit_cache.contains_key("jit_owned_fn")).to_equal(true)
+            expect(loader.jit.exec_mapper.lookup("jit_owned_fn").?).to_equal(true)
+
+            val _ = loader.reload(owner_path)
+
+            expect(loader.global_symbols.contains_key("jit_owned_fn")).to_equal(false)
+            expect(loader.jit.jit_cache.contains_key("jit_owned_fn")).to_equal(false)
+            expect(loader.jit.exec_mapper.lookup("jit_owned_fn").?).to_equal(false)
 
         it "removes from global symbols":
             # TODO: Verify symbols removed
@@ -568,6 +622,45 @@ describe "ModuleLoader Symbol Resolution":
                     expect(name).to_equal("unknown_jit_disabled")
                 case _:
                     fail("Expected NotFound with JIT disabled")
+
+        it "returns Found for pre-registered JIT symbol without module entry":
+            var loader = ModuleLoader__with_defaults()
+            val jit_symbol = create_test_symbol("jit_cached_fn", true)
+            loader.global_symbols["jit_cached_fn"] = ("__jit__", jit_symbol)
+
+            val result = loader.resolve_symbol("jit_cached_fn")
+            match result:
+                case Found(sym, _):
+                    expect(sym.name).to_equal("jit_cached_fn")
+                    expect(sym.is_jit).to_equal(true)
+                case _:
+                    fail("Expected Found for pre-registered JIT symbol")
+
+        it "uses mapper owner for jit-compiled symbol registration":
+            var loader = ModuleLoader__with_defaults()
+            val owner_path = "owner_from_mapper.smf"
+
+            val mapped = loader.jit.jit_mapper.map(
+                loader.jit.exec_mapper,
+                owner_path,
+                "jit_owner_registered_fn",
+                [195]
+            )
+            expect(mapped.is_ok()).to_equal(true)
+            val fn_addr = mapped.unwrap()
+
+            loader.jit.set_cache_for_test("jit_owner_registered_fn", [195], fn_addr)
+
+            val result = loader.resolve_symbol("jit_owner_registered_fn")
+            match result:
+                case JitCompiled(sym, _):
+                    expect(sym.address).to_equal(fn_addr)
+                case _:
+                    fail("Expected JitCompiled")
+
+            expect(loader.global_symbols.contains_key("jit_owner_registered_fn")).to_equal(true)
+            val owner_entry = loader.global_symbols["jit_owner_registered_fn"]
+            expect(owner_entry[0]).to_equal(owner_path)
 
         it "triggers JIT compilation on miss":
             # TODO: Enable JIT, resolve missing generic

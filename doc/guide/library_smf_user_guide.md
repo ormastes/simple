@@ -131,15 +131,15 @@ use compiler.linker.lib_smf_writer.{LibSmfBuilder}
 fn main():
     var builder = LibSmfBuilder.new()
 
-    // Add modules from files
+    # Add modules from files
     builder.add_module("math/add", "math_add.smf")?
     builder.add_module("math/sub", "math_sub.smf")?
 
-    // Add modules from memory
+    # Add modules from memory
     val smf_bytes = compile_module_to_smf("string/reverse.spl")?
     builder.add_module_data("string/reverse", smf_bytes)?
 
-    // Write library
+    # Write library
     builder.write("mylib.lsm")?
 
     print("Library created successfully!")
@@ -169,16 +169,16 @@ simple scripts/build_libstd.spl --verbose
 use compiler.loader.module_loader_lib_support.{ModuleLoaderWithLibs}
 
 fn main():
-    // Create loader
+    # Create loader
     var loader = ModuleLoaderWithLibs.new(config)
 
-    // Add library
+    # Add library
     loader.add_library("mylib.lsm")?
 
-    // Load module
+    # Load module
     val module = loader.load_module("math/operations")?
 
-    // Access module contents
+    # Access module contents
     val header = module.get_header()
     val symbols = module.exported_symbols()
 
@@ -192,16 +192,16 @@ use compiler.loader.module_loader_lib_support.{ModuleLoaderLibConfig}
 
 var config = ModuleLoaderLibConfig.default()
 
-// Enable verbose logging
+# Enable verbose logging
 config.verbose = true
 
-// Enable library support
+# Enable library support
 config.enable_libraries = true
 
-// Set module search paths
+# Set module search paths
 config.search_paths = ["./lib", "/usr/lib/simple"]
 
-// Set library search paths
+# Set library search paths
 config.library_paths = ["./lib", "/usr/lib/simple"]
 ```
 
@@ -211,12 +211,12 @@ config.library_paths = ["./lib", "/usr/lib/simple"]
 var loader = ModuleLoaderWithLibs.new(config)
 loader.add_library("libstd.lsm")?
 
-// List all modules
+# List all modules
 val modules = loader.list_available_modules()
 for module_name in modules:
     print("  - {module_name}")
 
-// Check if module exists
+# Check if module exists
 if loader.has_module("std/io/mod"):
     print("Module available!")
 ```
@@ -245,15 +245,15 @@ use compiler.linker.linker_wrapper_lib_support.{link_with_libraries}
 use compiler.linker.linker_wrapper.{NativeLinkConfig}
 
 fn main():
-    // Configure linking
+    # Configure linking
     var config = NativeLinkConfig.default()
     config.library_paths = ["build/lib", "/usr/lib/simple"]
     config.verbose = true
 
-    // Object files to link
+    # Object files to link
     val objects = ["app/main.o", "app/utils.o"]
 
-    // Link with libraries
+    # Link with libraries
     val result = link_with_libraries(objects, "myapp", config)
 
     match result:
@@ -268,13 +268,13 @@ fn main():
 
 ```simple
 var config = NativeLinkConfig(
-    libraries: ["c", "pthread", "m"],      // System libraries
-    library_paths: ["build/lib"],          // Library search paths
-    runtime_path: "/opt/simple/runtime",   // Runtime library path
-    pie: true,                             // Position-independent executable
-    debug: true,                           // Include debug info
-    verbose: true,                         // Verbose output
-    extra_flags: ["-O2", "-flto"]         // Extra linker flags
+    libraries: ["c", "pthread", "m"],      # System libraries
+    library_paths: ["build/lib"],          # Library search paths
+    runtime_path: "/opt/simple/runtime",   # Runtime library path
+    pie: true,                             # Position-independent executable
+    debug: true,                           # Include debug info
+    verbose: true,                         # Verbose output
+    extra_flags: ["-O2", "-flto"]         # Extra linker flags
 )
 ```
 
@@ -635,13 +635,13 @@ use compiler.linker.linker_wrapper.{NativeLinkConfig}
 
 var config = NativeLinkConfig.default()
 
-config.libraries: [text]         // System libraries to link
-config.library_paths: [text]     // Paths to search for .lsm files
-config.runtime_path: text        // Path to runtime library
-config.pie: bool                 // Position-independent executable
-config.debug: bool               // Include debug info
-config.verbose: bool             // Verbose output
-config.extra_flags: [text]       // Extra linker flags
+config.libraries: [text]         # System libraries to link
+config.library_paths: [text]     # Paths to search for .lsm files
+config.runtime_path: text        # Path to runtime library
+config.pie: bool                 # Position-independent executable
+config.debug: bool               # Include debug info
+config.verbose: bool             # Verbose output
+config.extra_flags: [text]       # Extra linker flags
 ```
 
 ---
@@ -672,7 +672,7 @@ use libmath.add.{add}
 use libmath.mul.{mul}
 
 fn main():
-    val result = add(mul(2, 3), 4)  // (2 * 3) + 4
+    val result = add(mul(2, 3), 4)  # (2 * 3) + 4
     print("Result: {result}")
 ```
 
@@ -702,7 +702,7 @@ fn main():
     for name in plugin_names:
         val module = loader.load_module("plugins/{name}")?
         print("Loaded plugin: {name}")
-        // Initialize and execute plugin
+        # Initialize and execute plugin
     ```
 
 ### Example 3: Distributed Library

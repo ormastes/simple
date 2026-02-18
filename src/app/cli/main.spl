@@ -147,11 +147,11 @@ fn print_help():
     print "  --gc-off       Disable garbage collection"
     print ""
     print "Execution Mode:"
-    print "  --run-config=interpreter|compiler  Set execution behavior (default: interpreter)"
+    print "  --run-config=shared|interpreter|compiler|legacy  Set execution behavior (default: shared)"
     print "  --backend=auto|cranelift|llvm  Select JIT backend (default: auto)"
     print "  --interpret                    Force interpreter mode (no JIT)"
-    print "  --interpret-optimized          Interpreter mode without GC/FFI overhead"
-    print "  --interpreter-mode=classic|optimized  Select interpreter mode"
+    print "  --interpret-optimized          Alias for shared/optimized interpreter mode"
+    print "  --interpreter-mode=optimized|classic  Select interpreter mode (classic is legacy)"
     print "  SIMPLE_EXECUTION_MODE env var  jit|interpret|interpret-optimized|cranelift|llvm"
     print ""
     print "Fault Detection:"
@@ -242,8 +242,8 @@ struct GlobalFlags:
     stack_overflow_detection: bool
     backend: text        # "auto", "cranelift", "llvm" - JIT backend selection
     force_interpret: bool  # --interpret flag to force interpreter mode
-    interpreter_mode: text  # "classic" or "optimized" - interpreter mode selection
-    run_config: text        # "interpreter" or "compiler" (public-facing flag)
+    interpreter_mode: text  # "optimized" (default), "classic" (legacy)
+    run_config: text        # "shared" (default), "interpreter"/"compiler" (compat), "legacy"
     no_jit: bool            # --no-jit flag to disable JIT compilation
     jit_threshold: i64      # --jit-threshold=N for JIT compilation threshold
 
@@ -258,7 +258,7 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
     var has_stack_overflow_flag = false
     var backend = "auto"
     var force_interpret = false
-    var interpreter_mode = "classic"
+    var interpreter_mode = "optimized"
     var run_config = ""
     var no_jit = false
     var jit_threshold = 10
@@ -348,11 +348,16 @@ fn parse_global_flags(args: [str]) -> GlobalFlags:
         run_config = read_sdn_run_config()
 
     # Map run_config to interpreter_mode
-    if run_config == "compiler":
+    if run_config == "compiler" or run_config == "shared":
         interpreter_mode = "optimized"
         force_interpret = true
     elif run_config == "interpreter":
+        # Backward-compatible alias: "interpreter" now means shared/default mode.
+        interpreter_mode = "optimized"
+        force_interpret = true
+    elif run_config == "legacy":
         interpreter_mode = "classic"
+        force_interpret = true
 
     GlobalFlags(gc_log: gc_log, gc_off: gc_off, use_notui: use_notui,
         max_recursion_depth: max_recursion_depth, timeout_secs: timeout_secs,
@@ -432,7 +437,7 @@ fn handle_init(args: [str]) -> i64:
 
     # Write simple.sdn manifest atomically
     val tier_line = if tier != "" and tier != "full": "{NL}  tier: {tier}" else: ""
-    val manifest = "# Simple Package Manifest{NL}# SDN (Simple Data Notation) format{NL}{NL}package:{NL}  name: {name}{NL}  version: 0.1.0{NL}  license: MIT{NL}  main: src/main.spl{tier_line}{NL}{NL}execution:{NL}  run-config: interpreter{NL}"
+    val manifest = "# Simple Package Manifest{NL}# SDN (Simple Data Notation) format{NL}{NL}package:{NL}  name: {name}{NL}  version: 0.1.0{NL}  license: MIT{NL}  main: src/main.spl{tier_line}{NL}{NL}execution:{NL}  run-config: shared{NL}"
     val write_result = atomic_write("{current_dir}/simple.sdn", manifest, DbConfig__defaults())
     if not write_result.is_ok():
         print_error("Failed to write simple.sdn: {write_result.unwrap_err()}")

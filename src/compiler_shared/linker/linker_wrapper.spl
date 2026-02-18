@@ -19,7 +19,8 @@ use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, fi
 use std.text.{NL}
 
 use compiler.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
-use compiler_shared.linker.object_provider_adapter.{ObjectProvider, ObjectProviderConfig}
+use compiler_shared.linker.object_provider_adapter.{ObjectProvider, ObjectProviderConfig, ObjectCodeUnit}
+use compiler_shared.linker.object_emitter.{assemble_code_units}
 use compiler.linker.smf_getter.{SmfGetter}
 use compiler.linker.smf_enums.{Platform, Arch}
 
@@ -247,15 +248,16 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
         return Err("Multiple SMF inputs not yet supported")
 
     val path = smf_inputs[0]
+    val verbose = config.verbose
+    val provider = create_default_provider(verbose)
 
     # .lsm library: extract objects and link
     if path.ends_with(".lsm"):
-        val getter = SmfGetter.new()
-        val add_res = getter.add_library(path)
+        val add_res = provider.add_library(path)
         if add_res.is_err():
             return Err(add_res.unwrap_err())
 
-        val modules = getter.list_modules()
+        val modules = provider.list_modules()
         if modules.len() == 0:
             return Err("No modules found in {path}")
 
@@ -265,25 +267,35 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
 
         var objs: [text] = []
         for m in modules:
-            val obj_res = getter.get_object(m)
-            if obj_res.is_err():
+            # Prefer embedded object from archive
+            val obj_res = provider.get_object(m)
+            if obj_res.is_ok():
+                val obj_bytes = obj_res.unwrap()
+                val safe = m.replace("/", "_")
+                val obj_path = "{tmp_dir}/{safe}.o"
+                if write_bytes_to_file(obj_path, obj_bytes):
+                    objs.push(obj_path)
                 continue
-            val obj_bytes = obj_res.unwrap()
-            val safe = m.replace("/", "_")
-            val obj_path = "{tmp_dir}/{safe}.o"
-            if write_bytes_to_file(obj_path, obj_bytes):
-                objs.push(obj_path)
+
+            # Fallback to exported code
+            val code_res = provider.get_exported_code(m)
+            if code_res.is_err():
+                if verbose:
+                    print "[linker-wrapper] missing object for {m}: {code_res.unwrap_err()}"
+                continue
+            val obj_paths = materialize_code_units(code_res.unwrap(), tmp_dir, verbose)
+            for p in obj_paths:
+                objs.push(p)
 
         if objs.len() == 0:
             cleanup_temp_dir(tmp_dir)
             return Err("No object data available in {path}")
 
-    val link_res = link_native_unix(objs, output, config)
+        val link_res = link_native_unix(objs, output, config)
         cleanup_temp_dir(tmp_dir)
         return link_res
 
-    # Try to convert SMF to object via ObjectProvider when possible
-    val provider = create_default_provider(config.verbose)
+    # Try to convert single SMF to object via ObjectProvider when possible
     val obj_result = provider.get_object(path)
     if obj_result.is_ok():
         val tmp_dir = create_temp_dir()
@@ -297,6 +309,19 @@ fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -
         val link_res = link_native_unix([obj_path], output, config)
         cleanup_temp_dir(tmp_dir)
         return link_res
+
+    # Fallback: generate objects from exported code
+    val code_result = provider.get_exported_code(path)
+    if code_result.is_ok():
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for SMF code")
+        val obj_paths = materialize_code_units(code_result.unwrap(), tmp_dir, verbose)
+        if obj_paths.len() > 0:
+            val link_res = link_native_unix(obj_paths, output, config)
+            cleanup_temp_dir(tmp_dir)
+            return link_res
+        cleanup_temp_dir(tmp_dir)
 
     # Fallback: self-contained binary
     val data = file_read_bytes(path)
@@ -319,39 +344,18 @@ fn create_default_provider(verbose: bool) -> ObjectProvider:
         prefer_backend: nil
     ))
 
-fn code_to_obj_asm(code: [u8], symbol: text, asm_path: text, obj_path: text, verbose: bool) -> Result<(), text>:
-    # Generate tiny assembly that embeds raw bytes; assemble with cc -c
-    var asm = ""
-    asm = asm + ".text\n"
-    asm = asm + ".globl " + symbol + "\n"
-    asm = asm + ".type " + symbol + ", @function\n"
-    asm = asm + symbol + ":\n"
-    asm = asm + "    .byte "
-
-    var i = 0
-    while i < code.len():
-        val b = code[i]
-        asm = asm + "{b}"
-        if i + 1 < code.len():
-            asm = asm + ","
-        i = i + 1
-    asm = asm + "\n"
-    asm = asm + "    .size " + symbol + ", .-" + symbol + "\n"
-
-    # Write asm to file
-    val asm_res = shell("printf '%s' \"{asm}\" > '{asm_path}'")
-    if asm_res.exit_code != 0:
-        return Err("Failed to write asm")
-
-    # Assemble
-    val cc_res = shell("cc -c '{asm_path}' -o '{obj_path}'")
-    if cc_res.exit_code != 0:
-        return Err(cc_res.stderr ?? "cc failed")
-
-    if verbose:
-        val size = file_size_raw(obj_path)
-        print "[linker-wrapper] generated obj {obj_path} ({size} bytes) for {symbol}"
-    Ok(())
+fn materialize_code_units(units: [ObjectCodeUnit], tmp_dir: text, verbose: bool) -> [text]:
+    """Convert exported code units into temporary .o files."""
+    var paths: [text] = []
+    for code_unit in units:
+        val safe = code_unit.name.replace("/", "_")
+        val obj_path = "{tmp_dir}/{safe}.o"
+        val asm_res = assemble_code_units([code_unit], obj_path, verbose)
+        if asm_res.is_ok():
+            paths.push(obj_path)
+        elif verbose:
+            print "[linker-wrapper] failed to assemble {code_unit.name}: {asm_res.unwrap_err()}"
+    paths
 
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:

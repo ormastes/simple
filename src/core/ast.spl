@@ -59,6 +59,8 @@ val EXPR_ASYNC_BLOCK = 42 # async { ... }
 val EXPR_DO_BLOCK = 44   # do: block expression (returns last value)
 val EXPR_ATOM = 45       # `symbol atom literal (interned text, identity comparison)
 val EXPR_SPREAD = 46     # ..expr spread in struct update syntax
+val EXPR_ASM = 47        # asm text block/string (lowered by backend)
+val EXPR_ASM_MATCH = 48  # asm match: multi-target dispatch
 
 # ===== Expression Arena Pools =====
 # Each expression has:
@@ -250,6 +252,64 @@ fn expr_spread(inner: i64, span_id: i64) -> i64:
     expr_left[idx] = inner
     idx
 
+fn expr_asm(text_value: text, span_id: i64) -> i64:
+    val idx = expr_alloc(EXPR_ASM, span_id)
+    expr_s_val[idx] = text_value
+    idx
+
+# ===== Asm Match Arm Arena =====
+# Parallel arrays for target-qualified asm match arms
+var asm_arm_archs: [[text]] = []       # arch list per arm (pipe groups)
+var asm_arm_os: [text] = []            # os per arm ("" = wildcard)
+var asm_arm_abi: [text] = []           # abi per arm ("" = wildcard)
+var asm_arm_backend: [text] = []       # backend per arm ("" = wildcard)
+var asm_arm_ver_ops: [[text]] = []     # version constraint ops per arm
+var asm_arm_ver_vals: [[i64]] = []     # version constraint values per arm
+var asm_arm_asm_text: [text] = []      # asm body text per arm
+var asm_arm_is_compile_error: [bool] = []  # is compile_error arm
+var asm_arm_error_msg: [text] = []     # error message for compile_error arms
+var asm_arm_is_wildcard: [bool] = []   # is wildcard (_) arm
+
+fn asm_arm_new(archs: [text], os: text, abi: text, backend: text,
+               ver_ops: [text], ver_vals: [i64], asm_text: text,
+               is_compile_error: bool, error_msg: text, is_wildcard: bool) -> i64:
+    """Allocate a new asm match arm, returns its index."""
+    val idx = asm_arm_archs.len()
+    asm_arm_archs.push(archs)
+    asm_arm_os.push(os)
+    asm_arm_abi.push(abi)
+    asm_arm_backend.push(backend)
+    asm_arm_ver_ops.push(ver_ops)
+    asm_arm_ver_vals.push(ver_vals)
+    asm_arm_asm_text.push(asm_text)
+    asm_arm_is_compile_error.push(is_compile_error)
+    asm_arm_error_msg.push(error_msg)
+    asm_arm_is_wildcard.push(is_wildcard)
+    idx
+
+fn expr_asm_match(arm_indices: [i64], span_id: i64) -> i64:
+    """Create asm match expression. arm_indices are indices into asm_arm_* arrays."""
+    val idx = expr_alloc(EXPR_ASM_MATCH, span_id)
+    expr_args[idx] = arm_indices
+    idx
+
+fn expr_asm_assert(arm_idx: i64, span_id: i64) -> i64:
+    """Create asm assert expression. arm_idx is index into asm_arm_* arrays.
+    Distinguished from asm match by i_val = 1.
+    """
+    val idx = expr_alloc(EXPR_ASM_MATCH, span_id)
+    expr_args[idx] = [arm_idx]
+    expr_i_val[idx] = 1
+    idx
+
+fn stmt_asm_assert(archs: [text], os: text, abi: text, backend: text,
+                   ver_ops: [text], ver_vals: [i64], span_id: i64) -> i64:
+    """Create asm assert statement. Stores target spec in a single asm arm."""
+    val arm_idx = asm_arm_new(archs, os, abi, backend, ver_ops, ver_vals, "", false, "", false)
+    val idx = stmt_alloc(STMT_ASM_ASSERT, span_id)
+    stmt_expr[idx] = arm_idx
+    idx
+
 fn expr_range(start_expr: i64, end_expr: i64, inclusive: i64, span_id: i64) -> i64:
     val idx = expr_alloc(EXPR_RANGE, span_id)
     expr_left[idx] = start_expr
@@ -422,6 +482,8 @@ val STMT_STATIC_FOR = 17   # static_for compile-time loop unrolling
 val STMT_COMPTIME = 18     # comptime: block — evaluated eagerly at module load time
 val STMT_RECEIVE = 19    # receive: block statement (Erlang mailbox receive)
 val STMT_BIND = 20       # bind x = expr (inside ce: blocks, monadic bind)
+val STMT_LAZY_VAL_DECL = 21  # lazy val name = expr (deferred initialization)
+val STMT_ASM_ASSERT = 22     # asm assert [spec] - compile-time target guard
 
 # ===== Statement Arena Pools =====
 var stmt_tag: [i64] = []
@@ -453,6 +515,13 @@ fn stmt_expr_stmt(expression: i64, span_id: i64) -> i64:
 
 fn stmt_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_VAL_DECL, span_id)
+    stmt_name[idx] = name
+    stmt_type_tag[idx] = type_tag
+    stmt_expr[idx] = init_expr
+    idx
+
+fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = stmt_alloc(STMT_LAZY_VAL_DECL, span_id)
     stmt_name[idx] = name
     stmt_type_tag[idx] = type_tag
     stmt_expr[idx] = init_expr
@@ -613,6 +682,7 @@ val DECL_ENUM = 8
 val DECL_IMPL = 9
 val DECL_CLASS = 10
 val DECL_CE = 11         # ce NAME: computation expression invocation
+val DECL_LAZY_VAL = 12   # lazy val name = expr (module-level deferred init)
 
 # ===== Declaration Arena Pools =====
 var decl_tag: [i64] = []
@@ -631,6 +701,7 @@ var decl_is_pub: [i64] = []
 var decl_is_async: [i64] = []
 var decl_is_comptime: [i64] = []
 var decl_type_params: [[text]] = []
+var decl_is_lazy: [i64] = []
 
 fn decl_count() -> i64:
     decl_tag.len()
@@ -653,6 +724,7 @@ fn decl_alloc(tag: i64, span_id: i64) -> i64:
     decl_is_async.push(0)
     decl_is_comptime.push(0)
     decl_type_params.push([])
+    decl_is_lazy.push(0)
     idx
 
 # ===== Declaration Constructors =====
@@ -687,6 +759,15 @@ fn decl_struct_def(name: text, field_names: [text], field_types: [i64], field_de
 
 fn decl_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = decl_alloc(DECL_VAL, span_id)
+    decl_name[idx] = name
+    decl_ret_type[idx] = type_tag
+    var body: [i64] = []
+    body.push(init_expr)
+    decl_body_stmts[idx] = body
+    idx
+
+fn decl_lazy_val_binding(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
+    val idx = decl_alloc(DECL_LAZY_VAL, span_id)
     decl_name[idx] = name
     decl_ret_type[idx] = type_tag
     var body: [i64] = []
@@ -788,6 +869,14 @@ fn decl_get_is_comptime(idx: i64) -> bool:
     if idx < 0: return false
     if idx >= decl_is_comptime.len(): return false
     decl_is_comptime[idx] == 1
+
+fn decl_set_lazy(idx: i64):
+    decl_is_lazy[idx] = 1
+
+fn decl_get_is_lazy(idx: i64) -> i64:
+    if idx < 0: return 0
+    if idx >= decl_is_lazy.len(): return 0
+    decl_is_lazy[idx]
 
 # ===== Match Arm Arena =====
 # A match arm is (pattern_expr, guard_expr, body_stmts, binding_name)
@@ -1000,6 +1089,8 @@ fn expr_kind_name(tag: i64) -> text:
     if tag == EXPR_DO_BLOCK: return "DoBlock"
     if tag == EXPR_ATOM: return "Atom"
     if tag == EXPR_SPREAD: return "Spread"
+    if tag == EXPR_ASM: return "Asm"
+    if tag == EXPR_ASM_MATCH: return "AsmMatch"
     "Unknown({tag})"
 
 fn expr_contains_yield(eid: i64) -> bool:
@@ -1037,7 +1128,7 @@ export EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_DICT_LIT, EXPR_LAMBDA
 export EXPR_STRUCT_LIT, EXPR_TUPLE, EXPR_SLICE
 export EXPR_NULL_COALESCE, EXPR_OPTIONAL_CHAIN, EXPR_CAST
 export EXPR_UNIT, EXPR_INTERPOLATED_STRING, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN, EXPR_SUFFIXED_LIT
-export EXPR_DO_BLOCK, EXPR_ATOM, EXPR_SPREAD
+export EXPR_DO_BLOCK, EXPR_ATOM, EXPR_SPREAD, EXPR_ASM, EXPR_ASM_MATCH
 export expr_count, expr_alloc
 export expr_int_lit, expr_float_lit, expr_string_lit, expr_bool_lit, expr_nil_lit
 export expr_ident, expr_binary, expr_unary, expr_call, expr_index
@@ -1049,7 +1140,7 @@ export expr_struct_lit, expr_tuple, expr_slice
 export expr_null_coalesce, expr_optional_chain, expr_cast
 export expr_unit, expr_interpolated_string, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn
 export expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool
-export expr_do_block, expr_atom, expr_spread
+export expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert
 export stmts_contain_yield
 export expr_get_tag, expr_get_span, expr_get_int, expr_get_float, expr_get_str
 export expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
@@ -1067,12 +1158,19 @@ export STMT_STATIC_FOR, stmt_static_for_stmt
 export STMT_COMPTIME, stmt_comptime_block
 export STMT_RECEIVE, stmt_receive_stmt
 export STMT_BIND, stmt_bind_stmt
+export STMT_LAZY_VAL_DECL, stmt_lazy_val_decl
+export STMT_ASM_ASSERT, stmt_asm_assert
+export asm_arm_new, asm_arm_archs, asm_arm_os, asm_arm_abi, asm_arm_backend
+export asm_arm_ver_ops, asm_arm_ver_vals, asm_arm_asm_text
+export asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_is_wildcard
 export decl_set_comptime, decl_get_is_comptime
+export decl_set_lazy, decl_get_is_lazy
 export stmt_get_tag, stmt_get_span, stmt_get_expr, stmt_get_name
 export stmt_get_type, stmt_get_body
 export DECL_FN, DECL_EXTERN_FN, DECL_STRUCT, DECL_VAL, DECL_VAR
 export DECL_USE, DECL_EXPORT, DECL_ENUM, DECL_IMPL, DECL_CLASS
 export DECL_CE, decl_ce_block
+export DECL_LAZY_VAL, decl_lazy_val_binding
 export decl_count, decl_alloc
 export decl_fn, decl_extern_fn, decl_struct_def
 export decl_val_binding, decl_var_binding

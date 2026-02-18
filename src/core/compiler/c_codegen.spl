@@ -28,7 +28,9 @@ use core.ast.{EXPR_IF, EXPR_MATCH, EXPR_FOR, EXPR_WHILE, EXPR_BLOCK}
 use core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE, EXPR_RANGE}
 use core.ast.{EXPR_ASSIGN, EXPR_COMPOUND_ASSIGN, EXPR_STRUCT_LIT}
 use core.ast.{EXPR_UNIT, EXPR_PASS, EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN, EXPR_INTERPOLATED_STRING}
-use core.ast.{EXPR_SLICE, EXPR_NULL_COALESCE, EXPR_CAST}
+use core.ast.{EXPR_SLICE, EXPR_NULL_COALESCE, EXPR_CAST, EXPR_ASM, EXPR_ASM_MATCH}
+use core.ast.{asm_arm_archs, asm_arm_os, asm_arm_abi, asm_arm_backend}
+use core.ast.{asm_arm_asm_text, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_is_wildcard}
 use core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN}
 use core.ast.{STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK}
 use core.ast.{STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN}
@@ -322,6 +324,10 @@ fn cg_infer_expr_type(idx: i64) -> i64:
         return TYPE_ARRAY_I64
     if tag == EXPR_RANGE:
         return TYPE_I64
+    if tag == EXPR_ASM:
+        return TYPE_I64
+    if tag == EXPR_ASM_MATCH:
+        return TYPE_I64
     if tag == EXPR_SLICE:
         return TYPE_TEXT
     # Default
@@ -497,6 +503,19 @@ fn cg_expr(idx: i64) -> text:
 
     if tag == EXPR_RANGE:
         return cg_range_expr(idx)
+
+    if tag == EXPR_ASM:
+        val asm_src = expr_get_str(idx)
+        val asm_escaped = cg_escape_string(asm_src)
+        return "([&](){ asm volatile(\"" + asm_escaped + "\"); return (int64_t)0; })()"
+
+    if tag == EXPR_ASM_MATCH:
+        val is_assert = expr_get_int(idx) == 1
+        val arm_indices = expr_get_args(idx)
+        if is_assert:
+            return cg_asm_assert(arm_indices)
+        else:
+            return cg_asm_match(arm_indices)
 
     if tag == EXPR_ASSIGN:
         val assign_left = expr_get_left(idx)
@@ -2335,5 +2354,105 @@ fn codegen_program() -> text:
     cg_emit_main()
 
     cg_output
+
+# ===== Asm Match/Assert Code Generation =====
+
+fn cg_arch_to_cpp_macro(arch: text) -> text:
+    """Map Simple arch name to C preprocessor check."""
+    val lower = arch.lower()
+    if lower == "x86_64" or lower == "amd64" or lower == "x64":
+        return "defined(__x86_64__) || defined(_M_X64)"
+    if lower == "x86" or lower == "i686" or lower == "i386":
+        return "defined(__i386__) || defined(_M_IX86)"
+    if lower == "aarch64" or lower == "arm64":
+        return "defined(__aarch64__) || defined(_M_ARM64)"
+    if lower == "arm" or lower == "armv7":
+        return "defined(__ARM_ARCH)"
+    if lower == "riscv64":
+        return "defined(__riscv) && (__riscv_xlen == 64)"
+    if lower == "riscv32":
+        return "defined(__riscv) && (__riscv_xlen == 32)"
+    if lower == "wasm32":
+        return "defined(__wasm32__)"
+    if lower == "wasm64":
+        return "defined(__wasm64__)"
+    if lower == "avr":
+        return "defined(__AVR__)"
+    if lower == "msp430":
+        return "defined(__MSP430__)"
+    if lower == "mcs51":
+        return "defined(__SDCC_mcs51)"
+    return "0 /* unknown arch: " + arch + " */"
+
+fn cg_arm_condition(arm_idx: i64) -> text:
+    """Generate C preprocessor condition for an asm arm."""
+    val archs = asm_arm_archs[arm_idx]
+    var parts: [text] = []
+    for arch in archs:
+        parts.push("(" + cg_arch_to_cpp_macro(arch) + ")")
+    if parts.len() == 0:
+        return "1"
+    if parts.len() == 1:
+        return parts[0]
+    return parts.join(" || ")
+
+fn cg_asm_match(arm_indices: [i64]) -> text:
+    """Generate C preprocessor guards for asm match expression."""
+    var result = "([&]() -> int64_t { "
+    var first = true
+    for i in 0..arm_indices.len():
+        val arm_idx = arm_indices[i]
+        val is_wildcard = asm_arm_is_wildcard[arm_idx]
+        val is_ce = asm_arm_is_compile_error[arm_idx]
+
+        if is_wildcard:
+            if first:
+                result = result + "\n#if 1\n"
+            else:
+                result = result + "\n#else\n"
+            if is_ce:
+                val msg = asm_arm_error_msg[arm_idx]
+                result = result + "#error \"" + msg + "\"\n"
+                result = result + "return (int64_t)0;\n"
+            else:
+                val asm_text = asm_arm_asm_text[arm_idx]
+                val escaped = cg_escape_string(asm_text)
+                result = result + "asm volatile(\"" + escaped + "\"); return (int64_t)0;\n"
+        else:
+            val cond = cg_arm_condition(arm_idx)
+            if first:
+                result = result + "\n#if " + cond + "\n"
+                first = false
+            else:
+                result = result + "#elif " + cond + "\n"
+            if is_ce:
+                val msg = asm_arm_error_msg[arm_idx]
+                result = result + "#error \"" + msg + "\"\n"
+                result = result + "return (int64_t)0;\n"
+            else:
+                val asm_text = asm_arm_asm_text[arm_idx]
+                val escaped = cg_escape_string(asm_text)
+                result = result + "asm volatile(\"" + escaped + "\"); return (int64_t)0;\n"
+
+    if first:
+        # No arms at all
+        result = result + "\n#error \"no asm match cases\"\n"
+    result = result + "#endif\n"
+    result = result + "return (int64_t)0; })()"
+    result
+
+fn cg_asm_assert(arm_indices: [i64]) -> text:
+    """Generate C static_assert for asm assert expression."""
+    if arm_indices.len() == 0:
+        return "(int64_t)0"
+    val arm_idx = arm_indices[0]
+    val cond = cg_arm_condition(arm_idx)
+    # Emit as an immediately-invoked lambda that includes the static_assert
+    var result = "([&]() -> int64_t { "
+    result = result + "\n#if !(" + cond + ")\n"
+    result = result + "#error \"asm assert: target does not match\"\n"
+    result = result + "#endif\n"
+    result = result + "return (int64_t)0; })()"
+    result
 
 export codegen_program

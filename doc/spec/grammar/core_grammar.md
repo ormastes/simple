@@ -117,3 +117,67 @@
 ---
 
 **Summary:** 46 keywords, 33 operators, 13 constructs
+
+## Conditional Compilation (Platform/CPU)
+
+Core parser supports source-level conditional directives:
+
+- `#if <condition>`
+- `#elif <condition>`
+- `#else`
+- `#endif`
+
+Optional trailing `:` is accepted on hash directives (for example `#if linux:` and `#else:`).
+
+Core also supports annotation-based conditionals:
+
+- `@when(condition): ... @elif(...) ... @else ... @end`
+- `@cfg(condition)` and `@cfg("key", "value")` on declarations
+
+### Supported condition atoms
+
+- OS: `win`, `windows`, `linux`, `mac`, `macos`, `darwin`, `freebsd`, `openbsd`, `netbsd`, `unix`
+- CPU/arch: `x86_64`, `amd64`, `x64`, `aarch64`, `arm64`, `riscv64`, `riscv32`, `arm`
+- Key/value: `os=linux`, `platform=windows`, `arch=x86_64`, `cpu=arm64`
+- Boolean: `true`, `false`, `and`/`&&`, `or`/`||`, `not`/`!`
+- Build: `debug`, `release`, `compiled`, `interpreter`
+
+### Target override environment variables
+
+- `SIMPLE_TARGET_OS`
+- `SIMPLE_TARGET_ARCH`
+- `SIMPLE_TARGET_CPU`
+
+`@when(...)` annotations in core interpreter evaluate platform/CPU predicates.
+`@cfg(...)` annotations work identically for per-declaration conditionals.
+Full compiler frontend (`src/compiler/frontend.spl`) uses the same core preprocessor path for `#if/#elif/#else/#endif`.
+
+## Binary Completeness Gaps (2026-02-18)
+
+> Hand-maintained status notes. Generated tables above are unchanged.
+
+### Current Core Limitations For "Generate Any Binary"
+
+| Capability needed for low-level complete binaries | Current core behavior | Evidence |
+|---|---|---|
+| Inline asm as real IR/codegen input | `asm` is tokenized, but module parser skips asm blocks | `src/core/tokens.spl:46`, `src/core/parser.spl:2549` |
+| `union` declarations with explicit layout | Only union *type operator* (`A | B | C`) exists; no `union` declaration keyword path | `src/core/parser.spl:317`, `src/core/tokens.spl:329` |
+| Stable union lowering/storage model | Registered union types collapse to `TYPE_UNION`, and C mapping becomes dynamic `SplValue` | `src/core/types.spl:475`, `src/core/types.spl:350` |
+| `bitfield` declarations | Not present in core token/keyword path; classified as full-tier | `src/core/tokens.spl:329`, `doc/spec/grammar/tier_keywords.sdn:35` |
+| Packed/layout attributes (`@packed`, `@repr`, `@align`) | Not represented in core parser pipeline; full compiler parser types define them | `src/compiler_shared/parser_types.spl:105`, `src/compiler_shared/parser_types.spl:120` |
+| Type alias semantics | Parsed then discarded at module level | `src/core/parser.spl:2535` |
+| Trait semantics | Trait blocks are parsed through struct path, not dedicated trait lowering | `src/core/parser.spl:2505` |
+| Generic custom blocks (`sh{}`, `sql{}`, `asm{}`-style payloads) | No core AST/custom-block expression variant; full AST includes `CustomBlock` | `src/compiler_shared/parser_types.spl:519` |
+
+### Minimum Additions Needed In Core
+
+1. Add declaration grammar and lowering for `bitfield`, `union`, and packed/repr/aligned data layout.
+2. Replace asm-skip behavior with full parse -> AST -> lowering -> backend emission for inline asm.
+3. Add parser+AST support for custom payload blocks so backend-specific blocks can survive frontend passes.
+4. Add ABI and placement attributes needed for real binaries (`@link_section`, `@addr_space`, `@callconv`, `@naked`, `@interrupt`) by aligning with full modules:
+`src/compiler/link_attrs.spl:1`, `src/compiler/attributes.spl:3`, `src/compiler/callconv_bridge.spl:1`.
+5. Expand core low-level type surface beyond the current narrow primitive set used in `parser_parse_type` (`i64`, `f64`, `text`, `bool`) for deterministic binary interfaces (`src/core/parser.spl:233`).
+
+### Cross-Tier Blocker To Track
+
+- Full compiler monomorphization still marks full union support as incomplete (`src/compiler_shared/monomorphize/util.spl:240`, `src/compiler_shared/monomorphize/util.spl:505`), so seed/core union work should align with that upstream completion.

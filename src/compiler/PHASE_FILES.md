@@ -155,7 +155,7 @@ If phase files are consolidated in the future:
 
 - `DESUGARING_PLAN.md` - How Full Simple → Core Simple transformation works
 - `src/compiler/README.md` - Compiler architecture overview
-- `src/compiler_core/README.md` - Core Simple constraints
+- `src/compiler/README.md` - Current bootstrap and consolidation status
 
 ---
 

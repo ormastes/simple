@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Windows build script: Transpile compiler_core with core2 (self-hosted core compiler).
+Windows build script: Transpile compiler with core2 (self-hosted core compiler).
 
 Usage:
     python src/compiler_core_win/build_win.py
 
 Pipeline:
-    1. Collect compiler_core .spl files (with exclusions)
+    1. Collect compiler .spl files (with exclusions)
     2. Desugar lambdas, optional chaining, bitwise ops
     3. Transpile with core2_new.exe
     4. Post-process C++ (fix_cpp.py)
@@ -24,7 +24,7 @@ IS_WINDOWS = sys.platform == 'win32'
 
 # === Configuration ===
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-SRC = os.path.join(ROOT, 'src', 'compiler_core')
+SRC = os.path.join(ROOT, 'src', 'compiler')
 SHIM = os.path.join(ROOT, 'src', 'compiler_core_win', 'ffi_shim.spl')
 CORE2 = os.path.join(ROOT, 'build', 'bootstrap', 'core2_new.exe')
 OUTDIR = os.path.join(ROOT, 'build', 'bootstrap')
@@ -509,7 +509,7 @@ def run_stub_broken(input_cpp, error_lines_file, output_cpp):
 
 def main():
     print("=" * 60)
-    print("Building compiler_core with core2 (self-hosted core compiler)")
+    print("Building compiler with core2 (self-hosted core compiler)")
     print("=" * 60)
 
     # Check prerequisites
@@ -523,7 +523,7 @@ def main():
         sys.exit(1)
 
     # Phase 1: Collect files
-    print("\n[Phase 1] Collecting compiler_core files...")
+    print("\n[Phase 1] Collecting compiler files...")
     file_list = collect_files()
     print(f"  Found {len(file_list)} files")
 

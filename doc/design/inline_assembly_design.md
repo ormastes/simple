@@ -630,7 +630,65 @@ fn arch_semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
 
 ---
 
-## 15. Open Questions
+## 15. Target-Qualified Assembly (`asm match`)
+
+**Full spec:** [`doc/feature/usage/target_qualified_asm.md`](../../feature/usage/target_qualified_asm.md)
+
+Plain `asm` blocks (Sections 6-11) work for single-platform code where the target is set by
+`@platform` or the build configuration. For **multi-platform** code that must dispatch to
+different assembly per architecture/OS/ABI/backend, use `asm match`.
+
+### Key constraints
+
+- Target-qualified asm **only** works with `asm match:` or `asm assert [...]`
+- Standalone `asm[spec]{ ... }` is **not supported** — always use `asm match`
+- Each `case [spec]` qualifier uses the existing type system:
+  `[TargetArch, TargetOS, ABI, BackendKind version_constraint]`
+- Non-exhaustive `asm match` (no `_` catch-all) emits a compiler **warning**
+- `_` catch-all should use `compile_error("message")` or provide a fallback implementation
+
+### Quick example
+
+```simple
+fn memory_fence():
+    asm match:
+        case [x86_64]:
+            "mfence"
+        case [aarch64]:
+            "dmb ish"
+        case [riscv64]:
+            "fence rw, rw"
+        case _:
+            compile_error("memory_fence: unsupported arch")
+```
+
+### Version constraints
+
+Backend version requirements use `>=`, `==`, `<`, or `~=` (recommended/proper version):
+
+```simple
+asm match:
+    case [x86_64, _, _, llvm >= 15]:
+        "vmovaps ymm0, [{0}]"
+    case _:
+        compile_error("requires llvm 15+")
+```
+
+`~=` is a soft constraint: compiles on any version but emits a **note** if the version differs.
+
+### Compile-time assert
+
+```simple
+fn kernel_main():
+    asm assert [x86_64, linux, gnu, llvm >= 15]
+    # Compile error if target doesn't match
+    asm:
+        "cli"
+```
+
+---
+
+## 16. Open Questions
 
 1. **Should `asm` require explicit `unsafe`?**
    - Rust requires it, D requires `@trusted`
@@ -650,7 +708,7 @@ fn arch_semi_host_call(op: i32, arg0: i32, arg1: i32) -> i32:
 
 ---
 
-## 16. References
+## 17. References
 
 - [Rust Inline Assembly RFC](https://rust-lang.github.io/rfcs/2873-inline-asm.html)
 - [Zig Assembly Documentation](https://ziglang.org/documentation/master/)

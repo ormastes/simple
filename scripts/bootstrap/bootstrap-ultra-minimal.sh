@@ -28,16 +28,14 @@ echo ""
 echo "[2/4] Preparing minimal source files..."
 
 cat > /tmp/core_files_ultra_minimal.txt <<'EOF'
-src/compiler_core/lexer_types.spl
-src/compiler_core/parser_types.spl
-src/compiler_core/hir_types.spl
-src/compiler_core/backend_types.spl
-src/compiler_core/ast.spl
-src/compiler_core/attributes.spl
-src/compiler_core/error.spl
-src/compiler_core/lexer.spl
-src/compiler_core/parser.spl
-src/compiler_core/bootstrap_main_minimal.spl
+src/compiler/lexer_types.spl
+src/compiler/parser_types.spl
+src/compiler/hir_types.spl
+src/compiler/backend_types.spl
+src/compiler/ast.spl
+src/compiler/attributes.spl
+src/compiler/error.spl
+src/compiler/bootstrap_main_minimal.spl
 EOF
 
 echo "✅ $(wc -l < /tmp/core_files_ultra_minimal.txt) files selected"
@@ -45,7 +43,7 @@ echo "✅ $(wc -l < /tmp/core_files_ultra_minimal.txt) files selected"
 # Step 3: Create minimal bootstrap_main
 echo ""
 echo "[2.5/4] Creating minimal bootstrap main..."
-cat > src/compiler_core/bootstrap_main_minimal.spl <<'MAIN'
+cat > src/compiler/bootstrap_main_minimal.spl <<'MAIN'
 # Ultra-Minimal Bootstrap Main
 # Purpose: Prove that enum/type fixes allow successful transpilation and compilation
 

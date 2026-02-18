@@ -195,10 +195,10 @@ def main():
         print("These are FALSE POSITIVES and won't affect compilation.")
         print()
         print("To verify, try compiling a file with the Core Simple parser:")
-        print("  simple parse src/compiler_core/lexer.spl")
+        print("  simple parse src/compiler/lexer.spl")
         print()
         print("Or use the seed compiler:")
-        print("  cd bootstrap/build && ./seed ../../src/compiler_core/lexer.spl")
+        print("  cd bootstrap/build && ./seed ../../src/compiler/lexer.spl")
         print()
     else:
         print("✅ No syntax issues found!")

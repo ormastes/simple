@@ -473,8 +473,8 @@ describe "User validation":
 
         Example:
         ```simple
-        validate_email("user@example.com") // ✓ valid
-        validate_email("invalid.email")     // ✗ invalid
+        validate_email("user@example.com") # ✓ valid
+        validate_email("invalid.email")     # ✗ invalid
         ```
         """
         val email = "user@example.com"

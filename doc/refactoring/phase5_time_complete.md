@@ -285,13 +285,13 @@ print("Time: {hour:02}:{minute:02}:{second:02}");
 
 ### Timestamp Construction
 ```simple
-// Create timestamp from components
+# Create timestamp from components
 val birthday = rt_timestamp_from_components(
-    1990, 6, 15,  // June 15, 1990
-    14, 30, 0, 0  // 14:30:00.000000
+    1990, 6, 15,  # June 15, 1990
+    14, 30, 0, 0  # 14:30:00.000000
 );
 
-// Calculate age in days
+# Calculate age in days
 val now = rt_time_now_unix_micros();
 val age_days = rt_timestamp_diff_days(now, birthday);
 ```

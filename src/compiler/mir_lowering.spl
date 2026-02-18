@@ -234,6 +234,9 @@ impl MirLowering:
             case Block(block):
                 self.lower_block(block)
 
+            case AsmAssert(spec):
+                self.lower_asm_assert(spec, stmt.span)
+
     me lower_assign(target: HirExpr, op: HirAssignOp?, value_local: LocalId):
         """Lower assignment."""
         match target.kind:
@@ -484,6 +487,10 @@ impl MirLowering:
             # Inline assembly
             case InlineAsm(asm):
                 self.lower_inline_asm(asm)
+
+            # Target-qualified inline assembly
+            case InlineAsmMatch(arms):
+                self.lower_inline_asm_match(arms)
 
             # Field access: obj.field_name
             case Field(base, field_name, resolved):
@@ -1491,6 +1498,151 @@ impl MirLowering:
                     nil
         else:
             nil
+
+    me lower_inline_asm_match(arms: [HirAsmMatchArm]) -> LocalId?:
+        """Lower target-qualified asm match by resolving against current target.
+
+        Evaluates each arm's target spec against the build target.
+        The first matching arm is compiled; all others are discarded.
+        """
+        use std.common.target_spec.{match_target_spec, check_exhaustiveness, all_target_archs, MatchResult}
+
+        # Get current target info from compilation context
+        val target_arch = self.get_target_arch()
+        val target_os = self.get_target_os()
+        val target_abi = self.get_target_abi()
+        val target_backend = self.get_target_backend()
+        val target_backend_version = self.get_target_backend_version()
+
+        # Collect arm specs for exhaustiveness checking
+        var arms_archs: [[text]] = []
+        var arms_is_wildcard: [bool] = []
+        for arm in arms:
+            arms_is_wildcard.push(arm.is_wildcard)
+            if arm.has_spec:
+                arms_archs.push(arm.spec.archs)
+            else:
+                arms_archs.push([])
+
+        # Check exhaustiveness - warn if no wildcard
+        var has_wildcard = false
+        for arm in arms:
+            if arm.is_wildcard:
+                has_wildcard = true
+                break
+        if not has_wildcard:
+            val missing = check_exhaustiveness(arms_archs, arms_is_wildcard, all_target_archs())
+            if missing.len() > 0:
+                val missing_str = missing.join(", ")
+                self.error("asm match is non-exhaustive, missing: {missing_str}. Add 'case _: compile_error(\"...\")' for exhaustive matching", nil)
+
+        # Find matching arm
+        for arm in arms:
+            if arm.is_wildcard:
+                # Wildcard matches everything
+                if arm.is_compile_error:
+                    self.error(arm.error_message, Some(arm.span))
+                    return nil
+                if arm.has_asm_body:
+                    return self.lower_inline_asm(arm.asm_body)
+                return nil
+
+            if arm.has_spec:
+                val spec = arm.spec
+                val ver_ops: [text] = []
+                val ver_vals: [i64] = []
+                for vc in spec.version_constraints:
+                    ver_ops.push(vc.op)
+                    ver_vals.push(vc.version)
+
+                val result = match_target_spec(
+                    spec.archs, spec.has_os, spec.os,
+                    spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+                    ver_ops, ver_vals,
+                    target_arch, target_os, target_abi, target_backend,
+                    target_backend_version
+                )
+
+                match result:
+                    case MatchResult.Matched:
+                        if arm.is_compile_error:
+                            self.error(arm.error_message, Some(arm.span))
+                            return nil
+                        if arm.has_asm_body:
+                            return self.lower_inline_asm(arm.asm_body)
+                        return nil
+                    case MatchResult.MatchedWithNote(note):
+                        # Still matches, but emit a note
+                        self.error("note: {note}", Some(arm.span))
+                        if arm.is_compile_error:
+                            self.error(arm.error_message, Some(arm.span))
+                            return nil
+                        if arm.has_asm_body:
+                            return self.lower_inline_asm(arm.asm_body)
+                        return nil
+                    case MatchResult.NotMatched:
+                        pass_dn  # Continue to next arm
+
+        # No arm matched
+        self.error("no asm match case for target {target_arch}-{target_os}", nil)
+        nil
+
+    me lower_asm_assert(spec: AsmTargetSpec, span: Span?):
+        """Lower asm assert by checking spec against current target.
+
+        Emits a compile error if the target doesn't match.
+        """
+        use std.common.target_spec.{match_target_spec, MatchResult}
+
+        val target_arch = self.get_target_arch()
+        val target_os = self.get_target_os()
+        val target_abi = self.get_target_abi()
+        val target_backend = self.get_target_backend()
+        val target_backend_version = self.get_target_backend_version()
+
+        val ver_ops: [text] = []
+        val ver_vals: [i64] = []
+        for vc in spec.version_constraints:
+            ver_ops.push(vc.op)
+            ver_vals.push(vc.version)
+
+        val result = match_target_spec(
+            spec.archs, spec.has_os, spec.os,
+            spec.has_abi, spec.abi, spec.has_backend, spec.backend,
+            ver_ops, ver_vals,
+            target_arch, target_os, target_abi, target_backend,
+            target_backend_version
+        )
+
+        match result:
+            case MatchResult.NotMatched:
+                val spec_str = spec.archs.join("|")
+                self.error("asm assert failed: target {target_arch}-{target_os} does not match [{spec_str}]", span)
+            case MatchResult.MatchedWithNote(note):
+                self.error("note: {note}", span)
+            case MatchResult.Matched:
+                pass_dn  # OK, no action needed
+
+    me get_target_arch() -> text:
+        """Get current target architecture from compilation context."""
+        # Default to host arch - actual implementation reads from compiler context
+        "x86_64"
+
+    me get_target_os() -> text:
+        """Get current target OS from compilation context."""
+        "linux"
+
+    me get_target_abi() -> text:
+        """Get current target ABI from compilation context."""
+        "gnu"
+
+    me get_target_backend() -> text:
+        """Get current backend from compilation context."""
+        "llvm"
+
+    me get_target_backend_version() -> i64:
+        """Get current backend version from compilation context."""
+        15
 
     me error(message: text, span: Span?):
         """Record a lowering error."""

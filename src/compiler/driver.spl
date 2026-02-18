@@ -10,10 +10,7 @@
 use std.text.{NL}
 use compiler.hir.*
 use compiler.mir.*
-use core.lexer.*
-use core.parser.*
-use compiler.desugar_async.{desugar_module}
-use compiler.treesitter.*
+use compiler.frontend.{parse_full_frontend}
 use compiler.backend.*
 use compiler.type_infer.*
 use compiler.ffi.*
@@ -23,7 +20,6 @@ use compiler.async_integration.{AsyncIntegration, AsyncStateMachine, process_asy
 use compiler.borrow_check.*
 use compiler.visibility_integration.{check_module_visibility}
 use compiler.const_eval.{eval_static_assert, ConstEvalError}
-use blocks.*
 use config.*
 use driver_types.*
 use compiler.linker.linker_wrapper.{link_to_native, link_to_smf, link_to_self_contained, NativeLinkConfig, NativeLinkConfig__default, SelfContainedConfig, SelfContainedConfig__default, write_elf_bytes_to_file}
@@ -172,29 +168,7 @@ class CompilerDriver:
         not self.ctx.has_errors()
 
     fn parse_source(source: SourceFile) -> Module:
-        val log = self.ctx.logger
-
-        # Phase 2a: Outline parsing (TreeSitter)
-        log.trace("2a: outline parsing...")
-        var ts = TreeSitter__new(source.content)
-        val outline = ts.parse_outline()
-
-        # Phase 2b: Block resolution
-        log.trace("2b: resolving blocks...")
-        var resolver = create_block_resolver()
-        resolver = resolver.with_file(source.path)
-        resolver = resolver.with_module(source.module_name)
-        val (resolved, block_diagnostics) = resolver.resolve(outline)
-
-        # Phase 2c: Full parse with resolved blocks
-        log.trace("2c: full parse...")
-        var parser = Parser__with_resolved_blocks(source.content, resolved)
-        val module = parser.parse()
-
-        # Phase 2d: Desugar async/await/spawn/actor syntax
-        log.trace("2d: desugaring...")
-        val desugared_module = desugar_module(module)
-        desugared_module
+        parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
 
     # --------------------------------------------------------------------------
     # Phase 3: Combined HIR Lowering + Method Resolution + Type Checking
@@ -375,24 +349,38 @@ class CompilerDriver:
     # --------------------------------------------------------------------------
 
     fn interpret() -> CompileResult:
-        # Delegate to simple_old runtime for interpretation
-        # The bootstrap compiler's struct field access has codegen issues
-        # that prevent the self-hosted interpreter/JIT from working
-        if self.ctx.options.input_files.len() == 0:
-            return CompileResult.Error("No source file specified for interpret mode")
-        val source_file = self.ctx.options.input_files[0]
+        self.interpret_pipeline()
 
-        val simple_old = find_simple_old_binary()
-        if simple_old == "":
-            return CompileResult.Error("Cannot find simple_old binary for interpretation")
+    fn interpret_pipeline() -> CompileResult:
+        val log = self.ctx.logger
+        val backend_port = self.ctx.backend
+        var last_result: Any = BackendResult.Unit
+        var has_result = false
 
-        val result = rt_shell("{simple_old} {source_file}")
-        if result.stdout.?:
-            print result.stdout
-        if result.exit_code != 0:
-            if result.stderr.?:
-                return CompileResult.Error(result.stderr)
-            return CompileResult.Error("Interpret failed with exit code {result.exit_code}")
+        if self.ctx.sources.len() == 0:
+            return CompileResult.RuntimeError("No source file specified for interpret mode")
+
+        log.debug("interpret: running {self.ctx.sources.len()} modules through compiler frontend output")
+
+        var src_idx = 0
+        while src_idx < self.ctx.sources.len():
+            val source = self.ctx.sources[src_idx]
+            val name = source.module_name
+            val hir_module = self.ctx.hir_modules[name]
+            if hir_module == nil:
+                src_idx = src_idx + 1
+                continue
+
+            match backend_port.run_fn(hir_module):
+                case Ok(value):
+                    last_result = value
+                    has_result = true
+                case Err(e):
+                    return CompileResult.RuntimeError("Interpret error in {name}: {e.message}")
+            src_idx = src_idx + 1
+
+        if has_result:
+            return CompileResult.Success(last_result)
         CompileResult.Success(BackendResult.Unit)
 
     fn run_module(backend: Backend, module: HirModule) -> CompileResult:
@@ -745,31 +733,6 @@ fn find_runtime_lib_dir() -> text:
     "rust/target/debug"
 
 # ------------------------------------------------------------------------------
-# Binary Discovery
-# ------------------------------------------------------------------------------
-
-fn find_simple_old_binary() -> text:
-    # Check env vars (new name first, then legacy)
-    val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH")
-    if runtime_path.? and runtime_path != "":
-        return runtime_path
-    val env_path = rt_env_get("SIMPLE_OLD_PATH")
-    if env_path.? and env_path != "":
-        return env_path
-    # Check dev paths (new name first, then legacy)
-    if rt_file_exists("./bin/release/simple"):
-        return "./bin/release/simple"
-    if rt_file_exists("./rust/target/debug/simple"):
-        return "./rust/target/debug/simple"
-    if rt_file_exists("./rust/target/release/simple"):
-        return "./rust/target/release/simple"
-    if rt_file_exists("./rust/target/debug/simple_old"):
-        return "./rust/target/debug/simple_old"
-    if rt_file_exists("./rust/target/release/simple_old"):
-        return "./rust/target/release/simple_old"
-    ""
-
-# ------------------------------------------------------------------------------
 # Convenience Functions
 # ------------------------------------------------------------------------------
 
@@ -842,14 +805,13 @@ fn compile_to_smf(path: text, output: text) -> Result<text, text>:
 extern fn sys_get_args() -> [text]
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn rt_shell(cmd: text) -> text
 
 # ============================================================================
 # Exports
 # ============================================================================
 
 export CheckBackendImpl, CompilerDriver
-export find_runtime_lib_dir, find_simple_old_binary
+export find_runtime_lib_dir
 export compile_file, compile_files, interpret_file, jit_file, aot_file, check_file, parse_sdn_file, compile_to_smf
 
 # Re-export types from driver_types for convenience

@@ -5,7 +5,7 @@ Transforms Full Simple code to Core Simple compatible code.
 
 Usage:
     python3 desugarer.py input.spl output.spl
-    python3 desugarer.py --dir src/compiler --output-dir src/compiler_core
+    python3 desugarer.py --dir src/compiler --output-dir src/compiler
 """
 
 import re
@@ -400,7 +400,7 @@ class SimpleDesugarer:
 def main():
     if len(sys.argv) < 3:
         print("Usage: python3 desugarer.py input.spl output.spl")
-        print("   or: python3 desugarer.py --dir src/compiler --output-dir src/compiler_core")
+        print("   or: python3 desugarer.py --dir src/compiler --output-dir src/compiler")
         sys.exit(1)
     
     if sys.argv[1] == '--dir':
