@@ -1,6 +1,8 @@
 # std.coverage - Coverage Check Module for Simple Language
 #
 # Provides check_coverage() API for validating code coverage thresholds.
+# Use the # @deployment_coverage file-level tag on spec files that contain
+# coverage checks — the test runner handles the 2-phase execution.
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_file_exists(path: text) -> bool
@@ -26,24 +28,10 @@ struct CoverageResult:
     minimum_check: bool
     details: [FileResult]
 
-var _coverage_tag_enabled: bool = false
 var _coverage_data_loaded: bool = false
 var _coverage_data_path: text = ""
 var _coverage_files: [FileResult] = []
 var _coverage_last_error: text = ""
-
-fn enable_coverage_tag():
-    _coverage_tag_enabled = true
-
-fn disable_coverage_tag():
-    _coverage_tag_enabled = false
-
-fn is_coverage_tag_enabled() -> bool:
-    _coverage_tag_enabled
-
-fn _validate_coverage_access():
-    if not _coverage_tag_enabled:
-        _coverage_error("CoverageNotEnabledException: check_coverage() requires @coverage tag.")
 
 fn _coverage_error(msg: text):
     _coverage_last_error = msg
@@ -111,36 +99,16 @@ fn _calculate_coverage(coverage_type: text, files: [FileResult]) -> f64:
     0.0
 
 fn check_coverage(coverage_type: text, pattern: text, minimum: f64 = 0.0, maximum: f64 = 100.0, minimum_check: bool = true) -> CoverageResult:
-    _validate_coverage_access()
-    if _coverage_last_error != "":
-        return CoverageResult { passed: false, actual: 0.0, threshold: minimum, files_matched: 0, coverage_type: coverage_type, pattern: pattern, minimum_check: minimum_check, details: [] }
-    
     _load_coverage_data()
     if _coverage_last_error != "":
         return CoverageResult { passed: false, actual: 0.0, threshold: minimum, files_matched: 0, coverage_type: coverage_type, pattern: pattern, minimum_check: minimum_check, details: [] }
-    
+
     val matched = _coverage_files.filter(\f: _match_pattern(pattern, f.path))
     val actual = _calculate_coverage(coverage_type, matched)
     val threshold = if minimum_check: minimum else: maximum
     val passed = if minimum_check: actual >= minimum else: actual <= maximum
-    
+
     CoverageResult { passed: passed, actual: actual, threshold: threshold, files_matched: matched.len(), coverage_type: coverage_type, pattern: pattern, minimum_check: minimum_check, details: matched }
-
-fn coverage_describe(name: text, block: fn()):
-    enable_coverage_tag()
-    print name
-    block()
-    disable_coverage_tag()
-
-fn coverage_it(name: text, block: fn()):
-    enable_coverage_tag()
-    clear_coverage_error()
-    block()
-    if _coverage_last_error != "":
-        print "  it " + name + " ... FAILED"
-    else:
-        print "  it " + name + " ... ok"
-    disable_coverage_tag()
 
 fn get_coverage_summary() -> text:
     "Coverage: loaded=" + _coverage_data_loaded.to_string()
