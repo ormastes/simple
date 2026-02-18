@@ -571,12 +571,14 @@ var st_keys: [text] = []
 var st_vals: [i64] = []
 var st_buckets: [i64] = []
 var st_nexts: [i64] = []
+var st_module_paths: [text] = []
 
 fn struct_table_reset():
     st_keys = []
     st_vals = []
     st_buckets = hm_make_global_buckets()
     st_nexts = []
+    st_module_paths = []
 
 fn struct_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -584,6 +586,7 @@ fn struct_table_register(name: text, decl_id: i64):
     while idx != -1:
         if st_keys[idx] == name:
             st_vals[idx] = decl_id
+            st_module_paths[idx] = module_get_path()
             return
         idx = st_nexts[idx]
     val new_idx = st_keys.len()
@@ -591,6 +594,7 @@ fn struct_table_register(name: text, decl_id: i64):
     st_vals.push(decl_id)
     st_nexts.push(st_buckets[bucket])
     st_buckets[bucket] = new_idx
+    st_module_paths.push(module_get_path())
 
 fn struct_table_lookup(name: text) -> i64:
     val bucket = hm_hash_text(name) % HM_SIZE
@@ -600,6 +604,15 @@ fn struct_table_lookup(name: text) -> i64:
             return st_vals[idx]
         idx = st_nexts[idx]
     -1
+
+fn struct_table_get_module(name: text) -> text:
+    val bucket = hm_hash_text(name) % HM_SIZE
+    var idx = st_buckets[bucket]
+    while idx != -1:
+        if st_keys[idx] == name:
+            return st_module_paths[idx]
+        idx = st_nexts[idx]
+    ""
 
 # ===== Enum Type Registry =====
 # Tracks enum type names and their variants for exhaustiveness checking.
@@ -2472,6 +2485,79 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                 return val_make_text(val_to_text(id_val))
             return val_make_text("")
 
+        # @traits("module_file", "dotted.module.name") → File struct
+        if tr_query == "module_file":
+            if arg_eids.len() >= 2:
+                val mf_mod_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val mf_mod_name = val_to_text(mf_mod_val)
+                val mf_file_path = module_get_file_path(mf_mod_name)
+                val mf_exists = mf_file_path != ""
+                var mf_fields: [text] = ["path", "module_name", "exists"]
+                var mf_vals: [i64] = []
+                mf_vals.push(val_make_text(mf_file_path))
+                mf_vals.push(val_make_text(mf_mod_name))
+                mf_vals.push(val_make_bool(mf_exists))
+                return val_make_struct("File", mf_fields, mf_vals)
+            return val_make_nil()
+
+        # @traits("class_info", "TypeName") → Class struct
+        if tr_query == "class_info":
+            if arg_eids.len() >= 2:
+                val ci_type_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val ci_type_name = val_to_text(ci_type_val)
+                val ci_struct_decl = struct_table_lookup(ci_type_name)
+                if ci_struct_decl < 0:
+                    return val_make_nil()
+                val ci_field_names = decl_get_fields(ci_struct_decl)
+                var ci_fields_arr: [i64] = []
+                for ci_fn in ci_field_names:
+                    ci_fields_arr.push(val_make_text(ci_fn))
+                val ci_prefix = ci_type_name + "__"
+                val ci_prefix_len = ci_prefix.len()
+                var ci_methods_arr: [i64] = []
+                for ci_key in ft_keys:
+                    if ci_key.len() > ci_prefix_len:
+                        val ci_kpfx = ci_key[0:ci_prefix_len]
+                        if ci_kpfx == ci_prefix:
+                            val ci_mname = ci_key[ci_prefix_len:ci_key.len()]
+                            ci_methods_arr.push(val_make_text(ci_mname))
+                val ci_mod = struct_table_get_module(ci_type_name)
+                val ci_file = module_get_file_path(ci_mod)
+                var ci_s_fields: [text] = ["name", "module_name", "file_path", "fields", "methods", "field_count", "method_count"]
+                var ci_s_vals: [i64] = []
+                ci_s_vals.push(val_make_text(ci_type_name))
+                ci_s_vals.push(val_make_text(ci_mod))
+                ci_s_vals.push(val_make_text(ci_file))
+                ci_s_vals.push(val_make_array(ci_fields_arr))
+                ci_s_vals.push(val_make_array(ci_methods_arr))
+                ci_s_vals.push(val_make_int(ci_field_names.len()))
+                ci_s_vals.push(val_make_int(ci_methods_arr.len()))
+                return val_make_struct("Class", ci_s_fields, ci_s_vals)
+            return val_make_nil()
+
+        # @traits("module_wildcard", "dotted.prefix") → [File]
+        if tr_query == "module_wildcard":
+            if arg_eids.len() >= 2:
+                val mw_prefix_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val mw_prefix = val_to_text(mw_prefix_val) + "."
+                var mw_result: [i64] = []
+                var mw_i: i64 = 0
+                for mw_path in loaded_module_paths:
+                    if mw_path.starts_with(mw_prefix):
+                        val mw_fp = loaded_module_file_paths[mw_i]
+                        var mw_f_fields: [text] = ["path", "module_name", "exists"]
+                        var mw_f_vals: [i64] = []
+                        mw_f_vals.push(val_make_text(mw_fp))
+                        mw_f_vals.push(val_make_text(mw_path))
+                        mw_f_vals.push(val_make_bool(true))
+                        mw_result.push(val_make_struct("File", mw_f_fields, mw_f_vals))
+                    mw_i = mw_i + 1
+                return val_make_array(mw_result)
+            return val_make_array([])
+
         # Unknown query — return nil
         return val_make_nil()
 
@@ -3261,7 +3347,7 @@ fn eval_atom_expr(eid: i64) -> i64:
 export eval_reset, eval_set_error, eval_get_error, eval_has_error, eval_get_warnings
 export eval_returning, eval_return_value, eval_breaking, eval_continuing
 export func_table_reset, func_table_register, func_table_lookup
-export struct_table_reset, struct_table_register, struct_table_lookup
+export struct_table_reset, struct_table_register, struct_table_lookup, struct_table_get_module
 export eval_expr, eval_stmt, eval_decl, eval_module
 export eval_block, eval_function_call, eval_builtin_call
 export eval_init

@@ -16,6 +16,8 @@
 
 use lib.database.core.{SdnDatabase, SdnTable, SdnRow, StringInterner}
 use lib.database.query
+use lib.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
+    check_empty_required, check_file_refs, check_enum_values, check_orphan_refs}
 # Removed 'use app.io' - it shadows core.spl's local function declarations
 # and causes scope resolution failures in bootstrap runtime
 
@@ -310,7 +312,7 @@ class BugDatabase:
             health: health
         )
 
-    # Validation
+    # Validation (legacy methods)
     fn validate_test_links() -> [text]:
         var errors = []
         val bugs = self.all_bugs()
@@ -331,6 +333,108 @@ class BugDatabase:
                 errors.push("Bug {bug.id}: critical bug missing fix strategy")
 
         errors
+
+    # Unified validation returning DbIssue list
+    fn validate() -> [DbIssue]:
+        var issues: [DbIssue] = []
+        val db_name = "bug"
+
+        val bugs_table_opt = self.db.get_table("bugs")
+        if not bugs_table_opt.?:
+            issues.push(DbIssue(
+                db_name: db_name,
+                severity: "error",
+                issue_type: "missing_table",
+                message: "Expected 'bugs' table not found in bug database",
+                auto_fixable: false
+            ))
+            return issues
+
+        val bugs_table = bugs_table_opt.unwrap()
+
+        # Duplicate ID check
+        val dup_issues = check_duplicate_ids(bugs_table, "id", db_name)
+        for issue in dup_issues:
+            issues.push(issue)
+
+        # Valid column check
+        val valid_issues = check_valid_column(bugs_table, db_name)
+        for issue in valid_issues:
+            issues.push(issue)
+
+        # Severity values check
+        val valid_severities = ["P0", "P1", "P2", "P3", "Important"]
+        val sev_issues = check_enum_values(bugs_table, "severity", valid_severities, db_name)
+        for issue in sev_issues:
+            issues.push(issue)
+
+        # Status values check
+        val valid_statuses = ["Open", "Investigating", "Confirmed", "Fixed", "Closed", "Wontfix"]
+        val status_issues = check_enum_values(bugs_table, "status", valid_statuses, db_name)
+        for issue in status_issues:
+            issues.push(issue)
+
+        # File references exist
+        val file_issues = check_file_refs(bugs_table, "file", db_name)
+        for issue in file_issues:
+            issues.push(issue)
+
+        # Empty required fields
+        val empty_title = check_empty_required(bugs_table, "title", db_name)
+        for issue in empty_title:
+            issues.push(issue)
+
+        val empty_id = check_empty_required(bugs_table, "id", db_name)
+        for issue in empty_id:
+            issues.push(issue)
+
+        # Orphaned entries in auxiliary tables
+        val desc_table_opt = self.db.get_table("bug_descriptions")
+        if desc_table_opt.?:
+            val desc_table = desc_table_opt.unwrap()
+            val orphan_issues = check_orphan_refs(desc_table, "bug_id", bugs_table, "id", db_name)
+            for issue in orphan_issues:
+                issues.push(issue)
+
+        val fix_table_opt = self.db.get_table("bug_fix_strategies")
+        if fix_table_opt.?:
+            val fix_table = fix_table_opt.unwrap()
+            val orphan_issues = check_orphan_refs(fix_table, "bug_id", bugs_table, "id", db_name)
+            for issue in orphan_issues:
+                issues.push(issue)
+
+        val log_table_opt = self.db.get_table("bug_investigation_logs")
+        if log_table_opt.?:
+            val log_table = log_table_opt.unwrap()
+            val orphan_issues = check_orphan_refs(log_table, "bug_id", bugs_table, "id", db_name)
+            for issue in orphan_issues:
+                issues.push(issue)
+
+        # Test links (from legacy validation)
+        val bugs = self.all_bugs()
+        for bug in bugs:
+            if not bug.reproducible_by.?:
+                issues.push(DbIssue(
+                    db_name: db_name,
+                    severity: "warning",
+                    issue_type: "missing_test_link",
+                    message: "Bug {bug.id}: missing test case link (reproducible_by)",
+                    auto_fixable: false
+                ))
+
+        # Fix strategy for critical bugs
+        for bug in bugs:
+            val is_critical = bug.severity == BugSeverity.P0 or bug.severity == BugSeverity.P1
+            if is_critical and not bug.fix_strategy.?:
+                issues.push(DbIssue(
+                    db_name: db_name,
+                    severity: "warning",
+                    issue_type: "missing_fix_strategy",
+                    message: "Bug {bug.id}: critical bug ({severity_to_string(bug.severity)}) missing fix strategy",
+                    auto_fixable: false
+                ))
+
+        issues
 
 # ============================================================================
 # Helper Functions

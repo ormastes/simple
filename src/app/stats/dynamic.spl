@@ -20,9 +20,39 @@ fn count_files(pattern: text) -> i64:
     val output = run_cmd(cmd)
     output.to_int()
 
-# Count lines of code
+# Count compiler files = total src minus known named categories
+fn count_compiler_files() -> i64:
+    val total = count_files("src")
+    val app = count_files("src/app")
+    val lib = count_files("src/lib")
+    val mcp_lib = count_files("src/mcp_lib")
+    val std = count_files("src/std")
+    val i18n = count_files("src/i18n")
+    val core = count_files("src/core")
+    val known = app + lib + mcp_lib + std + i18n + core
+    total - known
+
+# Count total lines of code (excluding release/build dirs)
 fn count_lines(pattern: text) -> i64:
-    val cmd = "find {pattern} -name '*.spl' -exec cat {{}} \\; 2>/dev/null | wc -l"
+    val cmd = "find {pattern} -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' -exec cat {{}} \\; 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Count code lines (non-blank, non-comment lines)
+fn count_code_lines(pattern: text) -> i64:
+    val cmd = "find {pattern} -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' 2>/dev/null | xargs grep -v -E '^[[:space:]]*(#|$)' 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Count comment lines (lines starting with #)
+fn count_comment_lines(pattern: text) -> i64:
+    val cmd = "find {pattern} -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' 2>/dev/null | xargs grep -E '^[[:space:]]*#' 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Count blank lines
+fn count_blank_lines(pattern: text) -> i64:
+    val cmd = "find {pattern} -name '*.spl' -not -path '*/release/*' -not -path '*/build/*' 2>/dev/null | xargs grep -c '^[[:space:]]*$' 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}'"
     val output = run_cmd(cmd)
     output.to_int()
 
@@ -34,19 +64,65 @@ fn count_in_file(file: text, pattern: text) -> i64:
     val output = run_cmd(cmd)
     output.to_int()
 
-# Extract test count from test_result.md
+# Extract test count from test_result.md (format: | Total | 4125 |)
 fn get_test_count() -> i64:
     if not file_exists("doc/test/test_result.md"):
         return 0
-    val cmd = "grep '^\\*\\*Total Tests:\\*\\*' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    val cmd = "grep '| Total |' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
     val output = run_cmd(cmd)
     output.to_int()
 
-# Extract pass count from test_result.md
+# Extract pass count from test_result.md (format: | Passed | 21 |)
 fn get_pass_count() -> i64:
     if not file_exists("doc/test/test_result.md"):
         return 0
-    val cmd = "grep '| ✅ Passed |' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    val cmd = "grep '| Passed |' doc/test/test_result.md | grep -oE '[0-9]+' | head -1"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+fn get_bug_total() -> i64:
+    if not file_exists("doc/bug/bug_db.sdn"):
+        return 0
+    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/bug/bug_db.sdn | grep -v ', invalid,' | wc -l"
+    run_cmd(cmd).to_int()
+
+fn get_bug_open() -> i64:
+    if not file_exists("doc/bug/bug_db.sdn"):
+        return 0
+    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/bug/bug_db.sdn | grep -c ', open,' 2>/dev/null || echo 0"
+    run_cmd(cmd).to_int()
+
+fn get_bug_closed() -> i64:
+    if not file_exists("doc/bug/bug_db.sdn"):
+        return 0
+    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/bug/bug_db.sdn | grep -c ', closed,' 2>/dev/null || echo 0"
+    run_cmd(cmd).to_int()
+
+fn get_bug_critical() -> i64:
+    if not file_exists("doc/bug/bug_db.sdn"):
+        return 0
+    val cmd = "grep -v '^#\\|^bugs\\|^$' doc/bug/bug_db.sdn | grep -v ', invalid,' | grep -c ', P0,' 2>/dev/null || echo 0"
+    run_cmd(cmd).to_int()
+
+# Count spec files in a directory tier
+fn count_spec_files(dir: text) -> i64:
+    val cmd = "find {dir} -name '*_spec.spl' 2>/dev/null | wc -l"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Get sdoctest block count for .spl files
+fn get_sdoctest_code_count() -> i64:
+    if not file_exists("doc/test/sdoctest_result.md"):
+        return 0
+    val cmd = "grep '| .*\\.spl |' doc/test/sdoctest_result.md 2>/dev/null | awk -F'|' '{gsub(/ /,\"\",$3); if ($3~/^[0-9]+$/) sum+=$3} END {print sum+0}'"
+    val output = run_cmd(cmd)
+    output.to_int()
+
+# Get sdoctest block count for .md files
+fn get_sdoctest_md_count() -> i64:
+    if not file_exists("doc/test/sdoctest_result.md"):
+        return 0
+    val cmd = "grep '| .*\\.md |' doc/test/sdoctest_result.md 2>/dev/null | awk -F'|' '{gsub(/ /,\"\",$3); if ($3~/^[0-9]+$/) sum+=$3} END {print sum+0}'"
     val output = run_cmd(cmd)
     output.to_int()
 
@@ -119,35 +195,66 @@ fn run_stats(args: [text]):
             print ""
 
     # File counts
-    val total_src = count_files("src")
     val app_files = count_files("src/app")
-    val lib_files = count_files("src/lib")
-    val std_files = count_files("src/std")
+    val lib_files_a = count_files("src/lib")
+    val lib_files_b = count_files("src/mcp_lib")
+    val lib_files = lib_files_a + lib_files_b
+    val std_files_a = count_files("src/std")
+    val std_files_b = count_files("src/i18n")
+    val std_files = std_files_a + std_files_b
+    val core_files = count_files("src/core")
+    val compiler_files = count_compiler_files()
+    val total_src = app_files + lib_files + std_files + core_files + compiler_files
     val test_files = count_files("test")
 
     if not is_json:
         print "Files:"
-        print "  Total:   {total_src} source files"
-        print "    app:   {app_files} files"
-        print "    lib:   {lib_files} files"
-        print "    std:   {std_files} files"
-        print "  Tests:   {test_files} test files"
+        print "  Total:      {total_src} source files"
+        print "    app:        {app_files} files"
+        print "    lib:        {lib_files} files"
+        print "    std:        {std_files} files"
+        print "    core:       {core_files} files"
+        print "    compiler:   {compiler_files} files"
+        print "  Tests:      {test_files} test files"
         print ""
 
     # Line counts (skip if --quick)
     var total_lines = 0
+    var code_lines = 0
+    var comment_lines = 0
+    var blank_lines = 0
     if not is_quick:
         total_lines = count_lines("src")
+        code_lines = count_code_lines("src")
+        comment_lines = count_comment_lines("src")
+        blank_lines = count_blank_lines("src")
 
     if not is_json:
         if total_lines > 0:
+            val code_pct = (code_lines * 100) / total_lines
+            val comment_pct = (comment_lines * 100) / total_lines
+            val blank_pct = (blank_lines * 100) / total_lines
             print "Lines of Code:"
             print "  Total:   {total_lines} lines"
+            print "    Code:    {code_lines} ({code_pct}%)"
+            print "    Comment: {comment_lines} ({comment_pct}%)"
+            print "    Blank:   {blank_lines} ({blank_pct}%)"
             print ""
 
     # Test statistics
     val test_count = get_test_count()
     val pass_count = get_pass_count()
+
+    # Test tier spec file counts (always shown, fast)
+    val unit_specs = count_spec_files("test/unit")
+    val integration_specs = count_spec_files("test/integration")
+    val system_specs = count_spec_files("test/system")
+    val all_specs = count_spec_files("test")
+    val other_specs = all_specs - unit_specs - integration_specs - system_specs
+
+    # SDoctest counts
+    val sdoctest_code = get_sdoctest_code_count()
+    val sdoctest_md = get_sdoctest_md_count()
 
     if not is_json:
         if test_count > 0:
@@ -156,8 +263,25 @@ fn run_stats(args: [text]):
             print "  Total:   {test_count} tests"
             print "  Passed:  {pass_count} ({pass_rate}%)"
             if pass_count == test_count:
-                print "  Status:  ✅ ALL PASSING"
+                print "  Status:  ALL PASSING"
             print ""
+        else:
+            print "Tests:"
+            print "  (No test data available)"
+            print ""
+
+        print "Test Files by Tier:"
+        print "  Unit:         {unit_specs} spec files  (test/unit/)"
+        print "  Integration:  {integration_specs} spec files  (test/integration/)"
+        print "  System:       {system_specs} spec files  (test/system/)"
+        if other_specs > 0:
+            print "  Other SSpec:  {other_specs} spec files  (remaining test/)"
+        print ""
+
+        print "SDoctest:"
+        print "  In code (.spl): {sdoctest_code} blocks"
+        print "  In docs (.md):  {sdoctest_md} blocks"
+        print ""
 
     # Feature counts
     val feat_complete = count_in_file("doc/feature/feature_db.sdn", ", complete,")
@@ -172,6 +296,30 @@ fn run_stats(args: [text]):
             print "  Complete:    {feat_complete}"
             print "  In Progress: {feat_progress}"
             print "  Planned:     {feat_planned}"
+            print ""
+        else:
+            print "Features:"
+            print "  (No feature data available)"
+            print ""
+
+    # Bug counts
+    val bug_total    = get_bug_total()
+    val bug_open     = get_bug_open()
+    val bug_closed   = get_bug_closed()
+    val bug_critical = get_bug_critical()
+
+    if not is_json:
+        if bug_total > 0:
+            print "Bugs:"
+            print "  Total:    {bug_total}"
+            print "  Open:     {bug_open}"
+            print "  Closed:   {bug_closed}"
+            if bug_critical > 0:
+                print "  Critical: {bug_critical} (P0)"
+            print ""
+        else:
+            print "Bugs:"
+            print "  (No bug data available)"
             print ""
 
     # Documentation coverage (skip if --quick)
@@ -251,6 +399,8 @@ fn run_stats(args: [text]):
             print "  - src/app (application code)"
             print "  - src/lib (library code)"
             print "  - src/std (standard library)"
+            print "  - src/core (core language)"
+            print "  - src/compiler* (compiler implementation)"
             print "  - test (test files)"
             print ""
 
@@ -273,9 +423,13 @@ fn run_stats(args: [text]):
                 lib_documented = doc_stats.10
 
         val json = format_json(
-            total_src, app_files, lib_files, std_files, test_files,
-            total_lines, test_count, pass_count,
+            total_src, app_files, lib_files, std_files, core_files, compiler_files,
+            test_files, total_lines, code_lines, comment_lines, blank_lines,
+            test_count, pass_count,
+            unit_specs, integration_specs, system_specs,
+            sdoctest_code, sdoctest_md,
             feat_total, feat_complete, feat_progress, feat_planned,
+            bug_total, bug_open, bug_closed, bug_critical,
             total_public, documented, with_sdoctest, with_inline, with_docstring,
             std_total, std_documented, core_total, core_documented, lib_total, lib_documented
         )

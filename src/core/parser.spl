@@ -64,6 +64,7 @@ use core.ast.{expr_dict_lit}
 use core.ast.{expr_suffixed_int, expr_suffixed_float, expr_suffixed_bool}
 use core.ast.{expr_match_expr, expr_block}
 use core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, EXPR_SPREAD}
+use core.ast.{expr_get_tag, expr_get_str, expr_get_left}
 use core.ast.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL}
 use core.ast.{STMT_RETURN, STMT_IF, STMT_FOR, STMT_WHILE}
 use core.ast.{STMT_MATCH, STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFER}
@@ -662,12 +663,59 @@ fn parse_call_arg() -> i64:
         return parse_binary_from(postfix_result)
     parse_expr()
 
+fn extract_dotted_path(eid: i64) -> text:
+    val ep_tag = expr_get_tag(eid)
+    if ep_tag == EXPR_IDENT:
+        return expr_get_str(eid)
+    if ep_tag == EXPR_FIELD_ACCESS:
+        val ep_base_path = extract_dotted_path(expr_get_left(eid))
+        if ep_base_path != "":
+            return ep_base_path + "." + expr_get_str(eid)
+    ""
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     var base = base_expr
     for i in 0..1000:
         if par_kind == TOK_DOT:
             parser_advance()
+
+            # --- .FILE → __traits("module_file", "dotted.path") ---
+            if par_kind == TOK_IDENT and par_text == "FILE":
+                val ppo_dotted = extract_dotted_path(base)
+                if ppo_dotted != "":
+                    parser_advance()
+                    var ppo_mf_args: [i64] = []
+                    ppo_mf_args.push(expr_string_lit("module_file", 0))
+                    ppo_mf_args.push(expr_string_lit(ppo_dotted, 0))
+                    val ppo_mf_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_mf_callee, ppo_mf_args, 0)
+                    continue
+
+            # --- .class → __traits("class_info", "TypeName") ---
+            if par_kind == TOK_KW_CLASS:
+                val ppo_type_name = extract_dotted_path(base)
+                if ppo_type_name != "":
+                    parser_advance()
+                    var ppo_ci_args: [i64] = []
+                    ppo_ci_args.push(expr_string_lit("class_info", 0))
+                    ppo_ci_args.push(expr_string_lit(ppo_type_name, 0))
+                    val ppo_ci_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_ci_callee, ppo_ci_args, 0)
+                    continue
+
+            # --- .* → __traits("module_wildcard", "dotted.prefix") ---
+            if par_kind == TOK_STAR:
+                val ppo_prefix = extract_dotted_path(base)
+                if ppo_prefix != "":
+                    parser_advance()
+                    var ppo_mw_args: [i64] = []
+                    ppo_mw_args.push(expr_string_lit("module_wildcard", 0))
+                    ppo_mw_args.push(expr_string_lit(ppo_prefix, 0))
+                    val ppo_mw_callee = expr_ident("__traits", 0)
+                    base = expr_call(ppo_mw_callee, ppo_mw_args, 0)
+                    continue
+
             val field_name = par_text
             if par_kind != TOK_IDENT:
                 parser_error("expected field name after '.'")
@@ -749,6 +797,43 @@ fn parse_postfix() -> i64:
     for i in 0..1000:
         if par_kind == TOK_DOT:
             parser_advance()
+
+            # --- .FILE → __traits("module_file", "dotted.path") ---
+            if par_kind == TOK_IDENT and par_text == "FILE":
+                val pp_dotted = extract_dotted_path(base)
+                if pp_dotted != "":
+                    parser_advance()
+                    var pp_mf_args: [i64] = []
+                    pp_mf_args.push(expr_string_lit("module_file", 0))
+                    pp_mf_args.push(expr_string_lit(pp_dotted, 0))
+                    val pp_mf_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_mf_callee, pp_mf_args, 0)
+                    continue
+
+            # --- .class → __traits("class_info", "TypeName") ---
+            if par_kind == TOK_KW_CLASS:
+                val pp_type_name = extract_dotted_path(base)
+                if pp_type_name != "":
+                    parser_advance()
+                    var pp_ci_args: [i64] = []
+                    pp_ci_args.push(expr_string_lit("class_info", 0))
+                    pp_ci_args.push(expr_string_lit(pp_type_name, 0))
+                    val pp_ci_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_ci_callee, pp_ci_args, 0)
+                    continue
+
+            # --- .* → __traits("module_wildcard", "dotted.prefix") ---
+            if par_kind == TOK_STAR:
+                val pp_prefix = extract_dotted_path(base)
+                if pp_prefix != "":
+                    parser_advance()
+                    var pp_mw_args: [i64] = []
+                    pp_mw_args.push(expr_string_lit("module_wildcard", 0))
+                    pp_mw_args.push(expr_string_lit(pp_prefix, 0))
+                    val pp_mw_callee = expr_ident("__traits", 0)
+                    base = expr_call(pp_mw_callee, pp_mw_args, 0)
+                    continue
+
             val field_name = par_text
             if par_kind != TOK_IDENT:
                 parser_error("expected field name after '.'")

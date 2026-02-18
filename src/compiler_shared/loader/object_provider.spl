@@ -1,0 +1,76 @@
+# Object Provider - unified access to SMF modules and instantiated objects
+#
+# Wraps SmfGetter (module discovery, .smf/.lsm reading) and ObjTaker
+# (template/deferred instantiation) behind a single API so loader and linker
+# can share caches and instantiation logic.
+
+use compiler.linker.smf_getter.{SmfGetter, SmfLocation}
+use compiler_shared.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult}
+use compiler_shared.linker.obj_taker.{Template, TypeInfo, SmfReader}
+use compiler_shared.loader.compiler_ffi.{CompilerContext, compiler_create_context}
+
+struct ObjectProviderConfig:
+    search_paths: [text]
+    libraries: [text]
+    enable_cache: bool
+    verbose: bool
+
+struct ObjectProvider:
+    getter: SmfGetter
+    obj_taker: ObjTaker
+    verbose: bool
+
+impl ObjectProvider:
+    static fn new(config: ObjectProviderConfig) -> ObjectProvider:
+        var getter = SmfGetter.new()
+        for p in config.search_paths:
+            getter.add_search_path(p)
+        for lib in config.libraries:
+            _ = getter.add_library(lib)
+
+        val ctx = compiler_create_context()
+        val ot_config = ObjTakerConfig(
+            enable_caching: config.enable_cache,
+            max_cache_size: 10_000,
+            verbose: config.verbose,
+            allow_deferred: true
+        )
+        ObjectProvider(
+            getter: getter,
+            obj_taker: ObjTaker__with_compiler_context(ctx, ot_config),
+            verbose: config.verbose
+        )
+
+    me add_search_path(path: text):
+        if not self.getter.search_paths.contains(path):
+            self.getter.add_search_path(path)
+
+    me add_library(lib_path: text) -> Result<(), text>:
+        self.getter.add_library(lib_path)
+
+    fn get_module(self: ObjectProvider, module_name: text) -> Result<[u8], text>:
+        self.getter.get(module_name)
+
+    fn get_object(self: ObjectProvider, module_or_path: text) -> Result<[u8], text>:
+        # Accept module name or direct path; delegate to SmfGetter for both cases.
+        val obj_result = self.getter.get_object(module_or_path)
+        if obj_result.is_ok():
+            return obj_result
+        Err("Object not found for {module_or_path}")
+
+    fn instantiate_symbol(self: ObjectProvider, reader: SmfReader, symbol: text, type_args: [TypeInfo]) -> Result<[u8], text>:
+        val take_result = self.obj_taker.take_with_types(reader, symbol, type_args)
+        match take_result:
+            case Code(bytes, _, _):
+                Ok(bytes)
+            case Error(msg):
+                Err(msg)
+            case _:
+                Err("Unsupported instantiation result for {symbol}")
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export ObjectProvider
+export ObjectProviderConfig

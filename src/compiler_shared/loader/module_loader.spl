@@ -14,7 +14,9 @@
 use ..loader.compiler_ffi.*
 use ..linker.obj_taker.*
 use ..linker.smf_reader.*
+use ..loader.object_provider.{ObjectProvider, ObjectProviderConfig}
 use .jit_instantiator.*
+use ..loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_free_exec_memory}
 
 # ============================================================================
 # Loaded Module
@@ -35,6 +37,8 @@ struct LoadedSymbol:
     size: i64
     ty: SymbolType
     is_jit: bool
+    # Offset within the SMF (for possible reload/relocs)
+    file_offset: i64
 
 
 # ============================================================================
@@ -93,6 +97,8 @@ struct ModuleLoader:
     compiler_ctx: CompilerContext
     # ObjTaker for extraction and instantiation
     obj_taker: ObjTaker
+    # Shared object provider (finder + instantiator)
+    provider: ObjectProvider
     # JIT instantiator
     jit: JitInstantiator
     # Loaded modules cache: path -> module
@@ -116,6 +122,12 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             verbose: config.verbose,
             allow_deferred: true
         )
+        val provider = ObjectProvider__new(ObjectProviderConfig(
+            search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+            libraries: [],
+            enable_cache: config.enable_cache,
+            verbose: config.verbose
+        ))
         val jit_config = JitInstantiatorConfig(
             update_smf: false,
             max_depth: 50,
@@ -126,6 +138,7 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
         ModuleLoader(
             compiler_ctx: compiler_ctx,
             obj_taker: ObjTaker__with_compiler_context(compiler_ctx, obj_taker_config),
+            provider: provider,
             jit: JitInstantiator__new(jit_config),
             modules: {},
             global_symbols: {},
@@ -150,12 +163,12 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
                 return loadresult_AlreadyLoaded(module: self.modules[path])
             else:
                 # Unload for reload
-                self.unload(path)
+                moduleloader_unload(self, path)
 
         if self.config.verbose:
             print "[loader] Loading: {path}"
 
-        # Open SMF file
+        # Open SMF file (provider can still leverage SmfReaderImpl)
         val reader_result = SmfReaderImpl__open(path)
         if reader_result_is_err(reader_result):
             return loadresult_Error(message: reader_result.unwrap_err())
@@ -170,12 +183,24 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         # Build loaded module
         var symbols: Dict<text, LoadedSymbol> = {}
         for smf_sym in reader_exported_symbols(reader):
+            # Read code bytes for symbol
+            val code_result = reader.read_code(smf_sym)
+            if code_result_is_err(code_result):
+                return loadresult_Error(message: code_result.unwrap_err())
+
+            val code = code_result_value
+            # Allocate executable memory and write code
+            val exec_addr = moduleloader_allocate_exec(self, code)
+            if exec_addr == 0:
+                return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+
             val loaded_sym = LoadedSymbol(
                 name: smf_sym.name,
-                address: 0,  # Will be set when actually loaded into memory
+                address: exec_addr,
                 size: smf_sym.size,
                 ty: smf_sym.ty,
-                is_jit: false
+                is_jit: false,
+                file_offset: smf_sym.offset
             )
             symbols[smf_sym.name] = loaded_sym
             self.global_symbols[smf_sym.name] = (path, loaded_sym)
@@ -198,7 +223,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
 fn moduleloader_reload(self: ModuleLoader, path: text) -> LoadResult:
         """Reload a module (hot reload)."""
-        self.unload(path)
+        moduleloader_unload(self, path)
         self.load(path)
 
 
@@ -211,36 +236,28 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
             val symbol = _destruct_0[1]
             val module = self.modules[mod_path]
 
-            # Get code for symbol
-            val code_result = module.reader.read_code(SmfSymbol(
-                name: symbol.name,
-                section_index: 0,
-                offset: symbol.address,
-                size: symbol.size,
-                ty: symbol.ty,
-                binding: SymbolBinding.Global,
-                is_generic_template: false,
-                template_param_count: 0,
-                template_offset: 0
-            ))
-
-            if code_result_is_ok(code_result):
-                return symbolresult_Found(symbol: symbol, code: code_result_value)
-            else:
-                return symbolresult_Error(message: code_result.unwrap_err())
+            # Return already-installed executable symbol
+            return symbolresult_Found(symbol: symbol, code: [])
 
         # Try JIT instantiation
         if self.config.enable_jit:
             val jit_result = self.jit_try_jit_instantiate(jit, name)
             match jit_result:
                 case Success(code, sym_name, address):
+                    val exec_addr = if address.?:
+                        address.unwrap()
+                    else:
+                        moduleloader_allocate_exec(self, code)
+                    if exec_addr == 0:
+                        return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
                     val loaded_sym = LoadedSymbol(
                         name: sym_name,
-                        address: address ?? 0,
+                        address: exec_addr,
                         val _as_0 = code_len(code) as i64
                         size: _as_0,
                         ty: SymbolType.Function,
-                        is_jit: true
+                        is_jit: true,
+                        file_offset: 0
                     )
                     self.global_symbols[sym_name] = ("__jit__", loaded_sym)
                     return symbolresult_JitCompiled(symbol: loaded_sym, code: code)
@@ -280,13 +297,17 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                     )
                     match result:
                         case Code(bytes, sym, _):
+                            val exec_addr = moduleloader_allocate_exec(self, bytes)
+                            if exec_addr == 0:
+                                return symbolresult_Error(message: "Failed to allocate executable memory for {mangled}")
                             val loaded_sym = LoadedSymbol(
                                 name: mangled,
-                                address: 0,
+                                address: exec_addr,
                                 val _as_1 = bytes_len(bytes) as i64
                                 size: _as_1,
                                 ty: sym.ty,
-                                is_jit: true
+                                is_jit: true,
+                                file_offset: 0
                             )
                             self.global_symbols[mangled] = (path, loaded_sym)
                             return symbolresult_JitCompiled(symbol: loaded_sym, code: bytes)
@@ -323,6 +344,47 @@ extern fn rt_time_now_unix_micros() -> i64
 fn current_time() -> i64:
     """Get current timestamp in microseconds."""
     rt_time_now_unix_micros()
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn moduleloader_unload(self: ModuleLoader, path: text):
+    """Unload module and free executable memory."""
+    if not self.modules_contains_key(modules, path):
+        return
+
+    val module = self.modules[path]
+    for _item in module.symbols:
+        val sym = _item[1]
+        if sym.address != 0 and sym.size > 0:
+            native_free_exec_memory(sym.address, sym.size)
+        # Remove from global symbol table if present
+        if self.global_symbols_contains_key(global_symbols, sym.name):
+            self.global_symbols_remove(global_symbols, sym.name)
+    self.modules_remove(modules, path)
+
+fn moduleloader_allocate_exec(self: ModuleLoader, code: [u8]) -> i64:
+    """Allocate executable memory and copy code."""
+    val size = code_len(code) as i64
+    if size == 0:
+        return 0
+
+    val addr = native_alloc_exec_memory(size)
+    if addr == 0:
+        return 0
+
+    val written = native_write_exec_memory(addr, code, 0)
+    if written != size:
+        native_free_exec_memory(addr, size)
+        return 0
+
+    val ok = native_make_executable(addr, size)
+    if not ok:
+        native_free_exec_memory(addr, size)
+        return 0
+
+    addr
 
 # ============================================================================
 # Exports
