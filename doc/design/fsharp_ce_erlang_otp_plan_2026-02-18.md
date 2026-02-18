@@ -1,7 +1,7 @@
 # F# Computation Expressions + Erlang/OTP — Implementation Plan
 
 **Date:** 2026-02-18
-**Status:** Plan — Not Started
+**Status:** ✅ COMPLETE — Implemented 2026-02-18
 **Companion research:** [`doc/research/missing_language_features_2026-02-17.md`](../research/missing_language_features_2026-02-17.md)
 
 ---
@@ -640,15 +640,15 @@ The safety profile notes are consistent with the baseline constraints in the res
 
 ## Next Steps (Checklist)
 
-- [ ] Phase 1: Add four new tokens to `src/core/tokens.spl`
-- [ ] Phase 1: Update `src/core/lexer.spl` keyword table
-- [ ] Phase 1: Add STMT_RECEIVE, STMT_BIND, DECL_CE to `src/core/ast.spl`
-- [ ] Phase 1: Add parser productions for `receive:`, `bind`, `ce NAME:`
-- [ ] Phase 1: Write tests — receive_spec, bind_stmt_spec, ce_block_spec
-- [ ] Phase 2: Implement `src/std/mailbox.spl` + tests
-- [ ] Phase 2: Implement `src/std/monitor.spl` + tests
-- [ ] Phase 3: Implement `src/std/gen_server.spl`, `gen_statem.spl`, `gen_event.spl` + tests
-- [ ] Phase 4: Implement CE builder protocol + result_ce, option_ce, seq_ce
-- [ ] Phase 5: Add eval handlers in `src/core/interpreter/eval.spl`
-- [ ] Phase 5: Sync `src/core/entity/token/kinds.spl`
-- [ ] Run full test suite after each phase — zero regressions required
+- [x] Phase 1: Add four new tokens to `src/core/tokens.spl`
+- [x] Phase 1: Update `src/core/lexer.spl` keyword table
+- [x] Phase 1: Add STMT_RECEIVE, STMT_BIND, DECL_CE to `src/core/ast.spl`
+- [x] Phase 1: Add parser productions for `receive:`, `bind`, `ce NAME:`
+- [x] Phase 1: Write tests — receive_spec, bind_stmt_spec, ce_block_spec
+- [x] Phase 2: Implement `src/std/mailbox.spl` + tests
+- [x] Phase 2: Implement `src/std/monitor.spl` + tests
+- [x] Phase 3: Implement `src/std/gen_server.spl`, `gen_statem.spl`, `gen_event.spl` + tests
+- [x] Phase 4: Implement CE builder protocol + result_ce, option_ce, seq_ce
+- [x] Phase 5: Add eval handlers in `src/core/interpreter/eval.spl`
+- [x] Phase 5: Sync `src/core/entity/token/kinds.spl`
+- [x] Run full test suite after each phase — zero regressions required
