@@ -96,7 +96,8 @@ describe "Parser deplyomeent coverage":
     parser_test.check_coverage(core.parser.llvm_backend.FILE, 50/*branch coverage*/) # it make coverage check callback and register llvm_backe.spl to generate coverage.
   it "should cover CranliftBackend codegen class":
     val cranlift_backend_test = test_group([test.parser.cranlift_backend.*])
-    check_coverage(core.parser.cranlift_backend.FILE, 50, core.parser.cranlift_backend.Codegen.class) # it check Codegen class coverage.
+    cranlift_backend_test.check_coverage(core.parser.cranlift_backend.FILE, 50, core.parser.cranlift_backend.Codegen.class) # it check Codegen class coverage.
+    creanlift_backend_test.check_coverage(.....)
 
 
 ```
