@@ -88,4 +88,15 @@ will result by coverage verifier.
 Test runner to check file coverage which deployment coverage testcase monitoring to gen coverage on different directories.
 before to go 2. step, make link files to overall coverage directory and make each depoyment coverage tests directoy and make link on there.
 It can specify coverage listen target by file(however it not specify filename self but module path), and threashold by file or class.
+```simple
+# @deplyment_coverage
+describe "Parser deplyomeent coverage":
+  it "should cover LLVMBackend":
+    val parser_test = test_group([test.parser.*])
+    parser_test.check_coverage(core.parser.llvm_backend.FILE, 50/*branch coverage*/) # it make coverage check callback and register llvm_backe.spl to generate coverage.
+  it "should cover CranliftBackend codegen class":
+    val cranlift_backend_test = test_group([test.parser.cranlift_backend.*])
+    check_coverage(core.parser.cranlift_backend.FILE, 50, core.parser.cranlift_backend.Codegen.class) # it check Codegen class coverage.
 
+
+```
