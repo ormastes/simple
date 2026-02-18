@@ -1,0 +1,121 @@
+# Feature Documentation Generator - Usage (Cucumber-like) Doc Generator
+#
+# Generates Cucumber-style documentation from test/feature/usage/ spec files.
+# Maps: context -> Scenario, it -> Example, expect -> Then step
+
+use app.io.mod (file_write, dir_create)
+use app.feature_doc.types.*
+use std.text.{NL}
+
+# ============================================================================
+# Usage Doc Generation
+# ============================================================================
+
+fn generate_usage_doc(info: FeatureFileInfo, output_dir: text) -> text:
+    """Generate a Cucumber-like markdown doc from a feature file.
+
+    Returns the output path on success, empty string on failure.
+    """
+    var md = ""
+
+    # Title
+    md = md + "# {info.title}{NL}"
+    md = md + "*Source:* `{info.file_path}`{NL}"
+
+    # Metadata line
+    var meta_parts: [text] = []
+    if info.metadata.feature_ids != "":
+        meta_parts.push("**Feature IDs:** {info.metadata.feature_ids}")
+    if info.metadata.category != "":
+        meta_parts.push("**Category:** {info.metadata.category}")
+    if info.metadata.status != "":
+        meta_parts.push("**Status:** {info.metadata.status}")
+    if meta_parts.len() > 0:
+        md = md + meta_parts.join("  |  ") + NL
+    md = md + NL
+
+    # Overview from first doc block
+    if info.doc_blocks.len() > 0:
+        md = md + "## Overview{NL}{NL}"
+        val first_block = info.doc_blocks[0]
+        # Skip the title line if it starts with #
+        val blines = first_block.split(NL)
+        var skip_title = true
+        for bl in blines:
+            val bt = bl.trim()
+            if skip_title and bt.starts_with("# ") and not bt.starts_with("## "):
+                skip_title = false
+                continue
+            # Also skip metadata lines
+            if bt.starts_with("**Feature") or bt.starts_with("**Category") or bt.starts_with("**Status") or bt.starts_with("**Keywords") or bt.starts_with("**Difficulty"):
+                continue
+            if bt == "":
+                md = md + NL
+            else:
+                md = md + bl + NL
+        md = md + NL
+
+    # Describe blocks -> Feature sections
+    for desc in info.describes:
+        md = md + "## Feature: {desc.name}{NL}{NL}"
+
+        if desc.doc != "":
+            md = md + desc.doc + NL + NL
+
+        # Context blocks -> Scenario sections
+        for ctx in desc.contexts:
+            if ctx.name != "":
+                md = md + "### Scenario: {ctx.name}{NL}{NL}"
+            else:
+                md = md + "### Scenario: General{NL}{NL}"
+
+            if ctx.doc != "":
+                md = md + ctx.doc + NL + NL
+
+            # Examples table
+            if ctx.its.len() > 0:
+                md = md + "| # | Example | Status |{NL}"
+                md = md + "|---|---------|--------|{NL}"
+                var idx = 1
+                for it_block in ctx.its:
+                    var status = "pass"
+                    # Check if any expect line contains pass_todo
+                    for exp in it_block.expects:
+                        if exp.contains("pass_todo"):
+                            status = "pending"
+                    md = md + "| {idx} | {it_block.name} | {status} |{NL}"
+                    idx = idx + 1
+                md = md + NL
+
+            # Expanded examples with Given/Then
+            for it_block in ctx.its:
+                if it_block.expects.len() > 0:
+                    md = md + "**Example:** {it_block.name}{NL}"
+                    for exp in it_block.expects:
+                        val et = exp.trim()
+                        if et.starts_with("val ") or et.starts_with("var "):
+                            md = md + "    Given {et}{NL}"
+                        elif et.starts_with("expect"):
+                            md = md + "    Then  {et}{NL}"
+                    md = md + NL
+
+    # Write output
+    val filename = extract_doc_filename(info.file_path)
+    val output_path = "{output_dir}/{filename}.md"
+    dir_create(output_dir, true)
+    file_write(output_path, md)
+    output_path
+
+fn extract_doc_filename(file_path: text) -> text:
+    """Get doc filename from spec path (strip _spec.spl)."""
+    val parts = file_path.split("/")
+    val filename = parts[-1]
+    if filename.ends_with("_spec.spl"):
+        return filename[:-9]
+    if filename.ends_with("_test.spl"):
+        return filename[:-9]
+    if filename.ends_with(".spl"):
+        return filename[:-4]
+    filename
+
+export generate_usage_doc, extract_doc_filename
