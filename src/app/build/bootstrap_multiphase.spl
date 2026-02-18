@@ -20,8 +20,8 @@ enum PipelineStage:
 # producing working native binaries through a 4-phase chain:
 #
 #   Phase 0: Prerequisites check (seed_cpp, clang++, runtime libs)
-#   Phase 1 (Core1): seed_cpp transpiles compiler_core → C++ → clang++ → native
-#   Phase 2 (Core2): Core1 recompiles compiler_core (reproducibility check)
+#   Phase 1 (Core1): seed_cpp transpiles compiler → C++ → clang++ → native
+#   Phase 2 (Core2): Core1 recompiles compiler (reproducibility check)
 #   Phase 3 (Full1): Core2 compiles the full compiler
 #   Phase 4 (Full2): Full1 recompiles itself (reproducibility check)
 #
@@ -42,7 +42,7 @@ use std.text.{NL}
 enum BootstrapPhase:
     Phase0    # Prerequisites check
     Phase1    # Core1: seed_cpp → C++ → clang → native
-    Phase2    # Core2: Core1 recompiles compiler_core
+    Phase2    # Core2: Core1 recompiles compiler
     Phase3    # Full1: Core2 compiles full compiler
     Phase4    # Full2: Full1 recompiles itself (reproducibility)
 
@@ -63,7 +63,7 @@ struct MultiphaseConfig:
     clang_path: text                # Path to clang++
     runtime_lib: text               # Path to libspl_runtime.a
     crt_lib: text                   # Path to libspl_crt_linux_x86_64.a
-    compiler_core_dir: text         # Path to src/compiler_core/
+    compiler_dir: text         # Path to src/compiler/
     seed_include_dir: text          # Path to seed/ (for runtime.h)
 
 # Phase result
@@ -153,7 +153,7 @@ fn extract_deps_from_file(file_path: text) -> [text]:
                 deps.push(mod_path)
     deps
 
-# Convert a module path like "compiler_core.lexer_desugared" to a file path
+# Convert a module path like "compiler.lexer_desugared" to a file path
 fn module_to_file(mod_path: text, base_dir: text) -> text:
     # Try direct mapping: dots → slashes
     val rel = mod_path.replace(".", "/")
@@ -227,7 +227,7 @@ class MultiphaseBootstrap:
         if not phase0_result.success:
             return early_exit(phase0_result)
 
-        # Phase 1: Core1 — seed_cpp transpiles compiler_core
+        # Phase 1: Core1 — seed_cpp transpiles compiler
         print "Phase 1: Core1 (seed_cpp -> C++ -> clang++ -> native)"
         print "----------------------------------------------------------------"
         val phase1_result = run_phase1_seed(config)
@@ -239,8 +239,8 @@ class MultiphaseBootstrap:
             val fallback = run_interpreter_fallback(config)
             return early_exit_after_phase1(phase0_result, fallback)
 
-        # Phase 2: Core2 — Core1 recompiles compiler_core
-        print "Phase 2: Core2 (Core1 compiles compiler_core)"
+        # Phase 2: Core2 — Core1 recompiles compiler
+        print "Phase 2: Core2 (Core1 compiles compiler)"
         print "----------------------------------------------------------------"
         val phase2_result = run_phase2_core(config, phase1_result)
         print phase2_result.summary()
@@ -372,12 +372,12 @@ fn run_phase0(config: MultiphaseConfig) -> PhaseResult:
         print "  FAIL {config.crt_lib} not found"
         all_ok = false
 
-    # Check compiler_core directory
-    val core_files = discover_spl_files(config.compiler_core_dir)
+    # Check compiler directory
+    val core_files = discover_spl_files(config.compiler_dir)
     if core_files.len() > 0:
-        print "  OK {config.compiler_core_dir} ({core_files.len()} .spl files)"
+        print "  OK {config.compiler_dir} ({core_files.len()} .spl files)"
     else:
-        print "  FAIL {config.compiler_core_dir} has no .spl files"
+        print "  FAIL {config.compiler_dir} has no .spl files"
         all_ok = false
 
     # Check seed include dir (for runtime.h)
@@ -407,15 +407,15 @@ fn run_phase0(config: MultiphaseConfig) -> PhaseResult:
         backend: CompilationBackend.Interpreter
     )
 
-# Phase 1: seed_cpp transpiles compiler_core → C++ → clang++ → native binary
+# Phase 1: seed_cpp transpiles compiler → C++ → clang++ → native binary
 fn run_phase1_seed(config: MultiphaseConfig) -> PhaseResult:
     val start_time = current_time_ms()
     val core1_cpp = "{config.output_dir}/core1.cpp"
     val core1_bin = "{config.output_dir}/core1"
 
     # Step 1: Build ordered file list
-    print "  Discovering compiler_core files..."
-    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    print "  Discovering compiler files..."
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
     print "  Found {ordered_files.len()} files"
 
     # Step 2: Run seed_cpp to transpile to C++
@@ -498,19 +498,19 @@ fn run_phase1_seed(config: MultiphaseConfig) -> PhaseResult:
         backend: CompilationBackend.SeedCpp
     )
 
-# Phase 2: Core1 recompiles compiler_core (reproducibility)
+# Phase 2: Core1 recompiles compiler (reproducibility)
 fn run_phase2_core(config: MultiphaseConfig, phase1: PhaseResult) -> PhaseResult:
     val start_time = current_time_ms()
     val core2_bin = "{config.output_dir}/core2"
 
-    # Use Core1 to compile compiler_core
-    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    # Use Core1 to compile compiler
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
     var file_args = ""
     for f in ordered_files:
         file_args = file_args + " " + f
 
     val compile_cmd = "{phase1.binary_path} compile{file_args} -o {core2_bin}"
-    print "  Running Core1 to compile compiler_core..."
+    print "  Running Core1 to compile compiler..."
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -647,7 +647,7 @@ fn run_interpreter_fallback(config: MultiphaseConfig) -> PhaseResult:
         print "  WARN Some interpreter tests may have failed"
 
     # Hash source files for integrity
-    val source_hash = shell("find src/compiler_core/ -name '*.spl' -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1")
+    val source_hash = shell("find src/compiler/ -name '*.spl' -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1")
     val hash = source_hash.stdout.trim()
     print "  Source integrity hash: {hash}"
 
@@ -790,7 +790,7 @@ fn default_multiphase_config() -> MultiphaseConfig:
         clang_path: "clang++",
         runtime_lib: "seed/build/libspl_runtime.a",
         crt_lib: "seed/build/startup/libspl_crt_linux_x86_64.a",
-        compiler_core_dir: "src/compiler_core",
+        compiler_dir: "src/compiler",
         seed_include_dir: "seed"
     )
 
@@ -806,12 +806,12 @@ fn quick_multiphase_bootstrap() -> MultiphaseResult:
 #
 #   check → bootstrap → build → seed → core1 → core2 → full1 → full2
 #
-# check:     Verify prerequisites (clang, cmake, runtime.h, src/compiler_core/)
+# check:     Verify prerequisites (clang, cmake, runtime.h, src/compiler/)
 # bootstrap: Verify pre-built binary bin/release/simple exists and is valid
 # build:     Build seed_cpp from C++ source via cmake + clang
-# seed:      Run seed_cpp to transpile compiler_core → core1.cpp
+# seed:      Run seed_cpp to transpile compiler → core1.cpp
 # core1:     Compile core1.cpp → native core1 binary via clang++
-# core2:     Core1 recompiles compiler_core (reproducibility check)
+# core2:     Core1 recompiles compiler (reproducibility check)
 # full1:     Core2 compiles full compiler (src/app/cli/main.spl)
 # full2:     Full1 recompiles itself (reproducibility, hash should match full1)
 
@@ -838,7 +838,7 @@ struct PipelineConfig:
     seed_build_dir: text         # Path to seed/build/ (cmake output)
     clang_path: text             # clang++ path
     cmake_path: text             # cmake path
-    compiler_core_dir: text      # src/compiler_core/
+    compiler_dir: text      # src/compiler/
     seed_include_dir: text       # seed/ (for runtime.h)
     from_stage: PipelineStage    # Start from this stage (default: Check)
     to_stage: PipelineStage      # Stop after this stage (default: Full2)
@@ -1000,12 +1000,12 @@ fn run_check(config: PipelineConfig) -> StageResult:
         print "  FAIL {config.seed_include_dir}/runtime.h not found"
         all_ok = false
 
-    # Check compiler_core directory
-    val core_files = discover_spl_files(config.compiler_core_dir)
+    # Check compiler directory
+    val core_files = discover_spl_files(config.compiler_dir)
     if core_files.len() > 0:
-        print "  OK {config.compiler_core_dir} ({core_files.len()} .spl files)"
+        print "  OK {config.compiler_dir} ({core_files.len()} .spl files)"
     else:
-        print "  FAIL {config.compiler_core_dir} has no .spl files"
+        print "  FAIL {config.compiler_dir} has no .spl files"
         all_ok = false
 
     if not all_ok:
@@ -1099,15 +1099,15 @@ fn run_build(config: PipelineConfig) -> StageResult:
         output_text: ""
     )
 
-# Stage: seed — run seed_cpp to transpile compiler_core → core1.cpp
+# Stage: seed — run seed_cpp to transpile compiler → core1.cpp
 fn run_seed(config: PipelineConfig) -> StageResult:
     val start_time = current_time_ms()
     val core1_cpp = "{config.output_dir}/core1.cpp"
     val seed_cpp_path = "{config.seed_build_dir}/seed_cpp"
 
     # Discover and order .spl files
-    print "  Discovering compiler_core files..."
-    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    print "  Discovering compiler files..."
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
     print "  Found {ordered_files.len()} files"
 
     # Run seed_cpp to transpile
@@ -1203,18 +1203,18 @@ fn run_core1(config: PipelineConfig) -> StageResult:
         output_text: output_text
     )
 
-# Stage: core2 — core1 recompiles compiler_core (reproducibility check)
+# Stage: core2 — core1 recompiles compiler (reproducibility check)
 fn run_core2(config: PipelineConfig, core1_result: StageResult) -> StageResult:
     val start_time = current_time_ms()
     val core2_bin = "{config.output_dir}/core2"
 
-    val ordered_files = build_ordered_file_list(config.compiler_core_dir)
+    val ordered_files = build_ordered_file_list(config.compiler_dir)
     var file_args = ""
     for f in ordered_files:
         file_args = file_args + " " + f
 
     val compile_cmd = "{core1_result.binary_path} compile{file_args} -o {core2_bin}"
-    print "  Running Core1 to compile compiler_core..."
+    print "  Running Core1 to compile compiler..."
     val compile_result = shell(compile_cmd)
 
     if compile_result.exit_code != 0:
@@ -1422,7 +1422,7 @@ class Pipeline:
 
         # Stage: seed
         if stage_in_range(PipelineStage.Seed, config.from_stage, config.to_stage):
-            print "[seed] Transpiling compiler_core to C++"
+            print "[seed] Transpiling compiler to C++"
             print "----------------------------------------------------------------"
             val result = run_seed(config)
             print result.summary()
@@ -1445,7 +1445,7 @@ class Pipeline:
 
         # Stage: core2
         if stage_in_range(PipelineStage.Core2, config.from_stage, config.to_stage):
-            print "[core2] Core1 recompiles compiler_core"
+            print "[core2] Core1 recompiles compiler"
             print "----------------------------------------------------------------"
             val result = run_core2(config, core1_result)
             print result.summary()
@@ -1554,7 +1554,7 @@ fn default_pipeline_config() -> PipelineConfig:
         seed_build_dir: "seed/build",
         clang_path: "clang++",
         cmake_path: "cmake",
-        compiler_core_dir: "src/compiler_core",
+        compiler_dir: "src/compiler",
         seed_include_dir: "seed",
         from_stage: index_to_stage(from_stage_int),
         to_stage: index_to_stage(to_stage_int)

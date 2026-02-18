@@ -141,7 +141,7 @@ enum Node:
 
 **Input**: AST
 **Output**: Resolved AST (with custom blocks expanded)
-**Module**: `simple/compiler/blocks/resolver.spl`
+**Module**: `src/compiler/blocks/resolver.spl`
 
 Resolves custom block syntax (user-defined DSLs):
 ```simple
@@ -198,7 +198,7 @@ Infers types using Hindley-Milner algorithm with extensions:
 
 **Type Variables**:
 ```simple
-fn identity(x):   // Type: ∀T. T → T
+fn identity(x):   # Type: ∀T. T → T
     x
 ```
 
@@ -218,8 +218,8 @@ fn identity<T>(x: T) -> T:
 
 **Call Sites**:
 ```simple
-identity(42)      // Generates identity$Int
-identity(3.14)    // Generates identity$Float
+identity(42)      # Generates identity$Int
+identity(3.14)    # Generates identity$Float
 ```
 
 **Specialized Output**:

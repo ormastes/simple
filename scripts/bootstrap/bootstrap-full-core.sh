@@ -1,6 +1,6 @@
 #!/bin/bash
-# Full compiler_core Bootstrap - Include everything
-# Attempt to compile the complete compiler_core with seed_cpp
+# Full compiler Bootstrap - Include everything
+# Attempt to compile the complete compiler with seed_cpp
 
 set -euo pipefail
 
@@ -24,15 +24,15 @@ echo "✅ seed_cpp built ($(ls -lh seed/build/seed_cpp | awk '{print $5}'))"
 
 # Step 2: Generate file list (INCLUDE EVERYTHING except tests)
 echo ""
-echo "[2/4] Preparing ALL compiler_core source files..."
-find src/compiler_core -name '*.spl' -type f | \
+echo "[2/4] Preparing ALL compiler source files..."
+find src/compiler -name '*.spl' -type f | \
     grep -v '/test' | \
     grep -v '_test\.spl$' | \
     grep -v '_spec\.spl$' | \
     sort > /tmp/core_files_full.txt
 
 # Add bootstrap_main.spl at the end
-echo "src/compiler_core/bootstrap_main.spl" >> /tmp/core_files_full.txt
+echo "src/compiler/bootstrap_main.spl" >> /tmp/core_files_full.txt
 
 echo "✅ $(wc -l < /tmp/core_files_full.txt) files selected"
 

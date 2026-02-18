@@ -328,12 +328,12 @@ use simple_runtime::value::ffi::concurrent::{
 ### Arena: Request-Scoped Allocation
 ```simple
 val arena = rt_arena_new(4096)
-// Allocate many small objects during request processing
+# Allocate many small objects during request processing
 val ptr1 = rt_arena_alloc(arena, 64, 8)
 val ptr2 = rt_arena_alloc(arena, 32, 4)
-// ... use the allocations ...
-// Free everything at once
-rt_arena_reset(arena) // or rt_arena_free(arena)
+# ... use the allocations ...
+# Free everything at once
+rt_arena_reset(arena) # or rt_arena_free(arena)
 ```
 
 ### Map: Shared Configuration

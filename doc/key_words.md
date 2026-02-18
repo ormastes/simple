@@ -1,65 +1,203 @@
 # Key words and key points
 
 ## Linker Wrapper
-It read smf file and call native linker to link file.
-In most case, mold is used as native linker if possible.
-Smf Getting happen by SmfGetter.
-It return obj buffer and linker wrapper send it to native linker.
+Linker wrapper is the native link entry point.
+
+- Input can be `.o`, `.smf`, or `.lsm`.
+- For native objects it calls platform linker directly (prefer `mold`, then `lld`, then `ld`/`cc` fallback).
+- For `.smf`/`.lsm` it asks ObjectProvider for object bytes.
+- If object bytes are missing, it falls back to exported code units and assembles temporary `.o` files through shared `object_emitter`.
+- Then it links all resolved objects into final native binary (or self-contained fallback when needed).
 
 ## Smf Getter 
-It read requested smf file and return obj buffer.
-However template class or type inference deffered obj are may not generated yet.
-In that case, Smf Geteter will compile and generate obj buffer and return obj buffer.
-Right after return obj buffer, Smf Getter will update smf file with new generated obj buffer.
-Smd Getter may request maximum expected memory for obj buffer to allocator and return only remains after obj buffer is placed.
+SmfGetter locates and reads requested SMF/LSM modules.
+
+- Supports both direct `.smf` files and indexed `.lsm` libraries.
+- Returns raw SMF bytes and, when present, embedded object bytes.
+- ObjectProvider composes SmfGetter + ObjTaker and adds cache/shared policy:
+- SMF byte cache
+- object byte cache
+- deferred/template symbol materialization through ObjTaker
+- exported code-unit fallback for modules without embedded `.o`
 
 ## Smf Loader
-It load obj through smf getter.
-Mapping obj buffer to memory with obj mapper.
-It may need to update obj buffer especially when obj is not PIC built or some other reason.
-When it get location and size of obj buffer. it transform obj buffer if needed.
-However, currently, Obj is compiled only with PIC, so may not needed to transform obj buffer.
-It will place on execution memory by call memory copyer. and most case will do nothing.
-It will share many logic with remote interpreter.
+Loader runtime path:
 
-## Obj mapper
-It manage symbol location and symbol size of obj buffer.
-It maintain symbol table.
-It do alloc space for new object.
-It do defregments obj buffer with memory copyer
-It do calc fregmentation rate.
-In real implementation, to load obj buffer, smf loader send obj mapper as memory allocator to Smf getter. To minimize, memcpy
+1. Resolve module through ObjectProvider.
+2. Read exported symbols/code.
+3. Allocate executable memory.
+4. Copy code into memory, then apply RW->RX protection.
+5. Register loaded symbols in global symbol table.
+6. JIT/ObjTaker path handles deferred/generic symbols on demand.
+
+PIC rule:
+- Loader assumes PIC for direct code embedding path.
+- Non-PIC modules are rejected for raw-code embedding path.
+
+## Obj mapper (Loader + JIT shared)
+Compact research result for sharing SMF loader mapper and JIT mapper.
+
+Current state:
+- Loader path already maps bytes with native mmap helpers (`native_alloc_exec_memory`, `native_write_exec_memory`, `native_make_executable`) and tracks symbols in loader table.
+- JIT path still has local exec-memory stubs (`alloc_exec_memory`, `write_exec_memory`, `flush_icache`) and a separate `jit_cache` + `symbol_table`.
+- This duplicates symbol/address ownership logic and can diverge on lifecycle rules.
+
+Option A: one mapper + mode config
+- One `ObjectMapper` type with `mode: Loader | Jit`.
+- Pros: minimal type surface.
+- Cons: quickly grows conditionals for very different lifecycles (module unload vs symbol replace/re-JIT).
+
+Option B: shared mapper core + thin wrappers (recommended)
+- Build one low-level shared core: `SharedExecMapper`.
+- Build two policy wrappers:
+  - `LoaderMapper` (module ownership, bulk unload by module path)
+  - `JitMapper` (symbol ownership, replace-on-recompile, JIT cache binding)
+- Pros: shared alloc/write/protect/free path and stats, but lifecycle policy stays clean.
+- Cons: small wrapper layer to maintain.
+
+Option C: keep separate mappers, share allocator only
+- Lowest refactor risk.
+- Still leaves duplicate symbol table + ownership code.
+
+Recommended architecture (Option B):
+- Shared core responsibilities:
+  - Allocate RW memory, copy bytes, switch to RX, optional icache flush.
+  - Track mapped records: `{owner_id, symbol, address, size, generation}`.
+  - Support `lookup(symbol)`, `unmap_owner(owner_id)`, `replace(symbol)`, `stats()`.
+- Loader wrapper config:
+  - `owner_id = module_path`
+  - disallow `replace(symbol)` unless hot-reload enabled
+  - unload by module path on reload/unload
+- JIT wrapper config:
+  - `owner_id = "__jit__"` or per-template bucket
+  - allow `replace(symbol)` for re-instantiation
+  - bind to JIT metadata cache
+
+Security/performance rules:
+- Prefer W^X flow: RW allocate -> write -> RX protect (not long-lived RWX).
+- Keep icache flush hook in shared core (no-op on x86_64, required on ARM/RISC-V).
+- Page-align arena chunks and keep per-owner free lists to reduce mmap churn.
+
+Implementation order:
+1. Add `src/compiler_shared/loader/object_mapper.spl` as shared core + config structs.
+2. Replace loader local helper (`moduleloader_allocate_exec`) to call shared mapper.
+3. Replace JIT exec stubs to call shared mapper; keep JIT compile logic unchanged.
+4. Add tests:
+   - loader + JIT both map via shared mapper
+   - module unload frees owner allocations
+   - JIT replace updates symbol address safely
+
+Current gaps found and better way:
+- Keep shared core (`SharedExecMapper`) but split policy into two facades:
+  - `LoaderMapper`: strict module ownership + unload cleanup
+  - `JitMapper`: replace-friendly JIT policy + cache integration
+- Avoid global JIT owner for module-linked instantiations:
+  - Prefer `owner_id = smf_path` for JIT-compiled symbols originating from a module.
+  - This lets module unload/hot-reload reclaim JIT mappings correctly.
+- Unload should remove all global symbol-table entries by owner path, not only base exported symbols.
+  - Generic/JIT-added symbols can otherwise leave stale entries after memory unmap.
+- Keep one source of truth for executable mapping lifecycle:
+  - no direct mmap/write/protect calls outside shared mapper
+  - no per-component free logic outside mapper API
+
+Decision:
+- Best tradeoff is **shared core + Loader/JIT policy wrappers**.
+- One mapper with only config flags is workable but tends to grow mode conditionals and weak ownership rules.
 
 ## Remote interpreter
-It run program in remote device.
-It generate jit code Obj mapper manage jit codes and symbols.
-Take memory jit to place let ask maximum jit code size expected to obj mapper and return remain memory after placed.
-let memory copyer to place jit code to memory. in this case, remote device.
-but for local interpreter actually do nothing.
-Local interpeter is actually same except memory copyer
+Remote interpreter executes same frontend/lowering contract but targets remote memory.
+
+- Generates JIT/native code units.
+- Requests exec allocation from remote mapper.
+- Uses memory copier bridge (gdb/trace32/etc.) to place bytes remotely.
+- Keeps local/remote behavior identical except memory transport backend.
 
 ## Remote Smf Loader
-Not yet available. 
-However with Remote interpreter. it will easy impl.
+Not fully enabled yet.
+Design is the same as local loader + remote memory copier backend.
 
 ## Memory copyer
-It copy memory from source to destination. 
-In most location case, it do nothing.
-For remote basemetal, it coy memory from host to remote device by gdb or trace32 debugger.
+Memory copier abstracts byte transfer.
+
+- Local: plain memcpy/no-op abstraction layer.
+- Remote baremetal: host -> target transfer via debugger/transport.
 
 ## Switchable backend
-Simple has 2 backends. LLVM and Cranlift.
-LLVM for release and native build.
-Cranlift for debugging and development and smf. 
-when it is release build smf is built with LLVM and it should tagged with compile options to distinguish Cranlift obj in smf.
-when release build Linker Wrapper request smf Getter to llvm gen obj buffer. So, during release build smf should compiled with LLVM rather default Cranlift.
+Simple uses two codegen backends:
+
+- LLVM: release/native-focused builds.
+- Cranelift: fast debug/dev path.
+
+Policy:
+- Release/native link path should prefer LLVM-compatible object generation.
+- Debug/dev can keep Cranelift path.
+- SMF metadata/flags must carry enough backend/PIC info so loader/linker can enforce compatibility.
 
 ## Fully shared frontend
-Lexer, Treesitter, Parser. should share code without duplication.
-Lexer used by Treesitter and Treesitter used by parser in layered arch.
-Interpreter, Loader, compiler use same frontend.
-Common logic should applied to frontend or right after it to avoid code duplication.
-Intereter, loaader, compiler will be distinguished by configure.
+Frontend must be one shared implementation: Lexer -> Treesitter -> Parser.
+No duplicated parser logic in interpreter, loader, or compiler.
+
+### Shared pipeline
+1. Lexer creates normalized tokens (same keyword and trivia rules).
+2. Treesitter builds stable concrete syntax tree (CST).
+3. Parser converts CST to shared AST/HIR entry model.
+
+### Consumers
+- Compiler, loader, local interpreter, and remote interpreter all consume the same AST/HIR contract.
+- Feature flags only change backend/runtime behavior, not frontend syntax behavior.
+
+### Where specialization is allowed
+- After frontend output: lowering, optimization, codegen, loading, execution.
+- Runtime-specific validation can be added after parse step, but must not fork grammar rules.
+
+### Rule for logic sharing
+- If logic is syntax/structure related, place it in frontend layer.
+- If logic is runtime/link/load related, place it after frontend layer.
+- This keeps one language behavior and avoids drift between tools.
+
+### Frontend ownership boundary (must share)
+- Keyword table, operator precedence/associativity, and token kinds are single source.
+- Indentation/newline/trivia normalization is single source.
+- CST node shape and AST/HIR entry conversion rules are single source.
+- Parse diagnostics format (file/line/column/message) is single source.
+
+### What must NOT happen
+- Interpreter must not have private keyword or grammar branch.
+- Loader/linker must not parse custom syntax with duplicated rules.
+- Tooling parsers can be lightweight scanners, but they must not redefine language grammar.
+
+### Extension workflow for new syntax
+1. Add token/keyword once in shared lexer definitions.
+2. Add CST handling once in shared Treesitter layer.
+3. Add AST/HIR lowering once in shared parser layer.
+4. Add/update shared tests for tokenization, CST, parse output, and diagnostics.
+5. Only then add backend/runtime behavior (lowering/codegen/interpreter/load).
+
+### Compatibility and rollout rule
+- Old and new frontend versions must both parse existing code during migration window.
+- If behavior changes, version the feature gate at frontend boundary, not in runtime.
+- Remove temporary forks after migration; keep one final shared path.
+
+### Done checklist (frontend sharing complete)
+- Same source text produces same AST/HIR for compiler and interpreter path.
+- Same syntax error gives same diagnostic message and location in all consumers.
+- No duplicated parser grammar file exists for Simple core language.
+- CI includes cross-path parse parity tests.
+
+### Minimal flow contract (reference)
+```text
+source -> shared lexer -> shared treesitter(CST) -> shared parser(AST/HIR)
+      -> (compiler lower/codegen) OR (interpreter eval) OR (loader/link path)
+```
+
+### Current shared entrypoints (2026-02-18)
+- Core frontend runner: `src/core/frontend.spl`
+- Full frontend runner: `src/compiler/frontend.spl`
+- Core consumers now call shared core frontend entrypoints:
+  - `core_frontend_parse_reset`
+  - `core_frontend_parse_append`
+  - `core_frontend_parse_isolated`
+- Full compiler driver now calls `parse_full_frontend` instead of inlining phase 2 logic.
 
 
 ## Boostrap

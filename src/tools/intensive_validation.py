@@ -279,7 +279,7 @@ class DesugarValidator:
 def main():
     if len(sys.argv) < 2:
         print("Usage: python3 intensive_validation.py <directory>")
-        print("Example: python3 intensive_validation.py src/compiler_core")
+        print("Example: python3 intensive_validation.py src/compiler")
         sys.exit(1)
     
     directory = sys.argv[1]

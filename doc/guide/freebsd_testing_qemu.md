@@ -105,7 +105,7 @@ Rsync project files to VM:
 ### Step 3: Build Compiler
 
 Bootstrap Simple compiler in FreeBSD:
-- Uses `scripts/bootstrap-from-scratch-freebsd.sh`
+- Uses `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
 - CMake + Clang 19+ + C++20
 - Skipped if `--skip-build` flag used
 - Verifies binary is FreeBSD ELF
@@ -146,7 +146,7 @@ Download compiled binary from VM:
 #
 # [test-freebsd-basic] Step 3: Building Simple compiler
 # [bootstrap] Step 1: Building seed C++ transpiler
-# [bootstrap] Step 2: Transpiling compiler_core to C++
+# [bootstrap] Step 2: Transpiling compiler to C++
 # ... (3-6 minutes of build output)
 # ✓ Bootstrap completed successfully
 # ✓ Binary verified: FreeBSD ELF
@@ -255,7 +255,7 @@ cmake --version    # Should be 3.20+
 
 # Run bootstrap manually with verbose output
 cd ~/simple
-./scripts/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 ### Issue: Tests Fail
@@ -456,6 +456,6 @@ ssh -p 2222 freebsd@localhost "cd ~/simple && bin/simple test <path>"
 
 - **Full QEMU Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Quick Start:** `README_FREEBSD_QEMU.md`
-- **Bootstrap Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
+- **Bootstrap Script:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
 - **Setup Test:** `scripts/test-freebsd-qemu-setup.sh`
 - **Basic Test:** `scripts/test-freebsd-qemu-basic.sh`

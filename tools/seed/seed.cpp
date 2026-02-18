@@ -73,6 +73,7 @@
 #define MAX_ENUMS 2048         /* Increased for large codebases (2x) */
 #define MAX_VARIANTS 512       /* Increased for enums with many variants */
 #define MAX_METHODS 16384      /* Increased for large codebases (2x) */
+#define MAX_ASM_TEXT (MAX_LINE * 4)
 
 /* ===== Output Buffer ===== */
 static char *output = nullptr;  /* Dynamically allocated to avoid .bss overflow */
@@ -168,7 +169,27 @@ static void load_file(const char *path) {
             source_lines[num_lines++] = strdup("");
             continue;
         }
-        strip_inline_comment(buf);
+        /* Keep conditional directives intact; they are handled in a pre-pass. */
+        const char *comment_probe = buf;
+        while (*comment_probe == ' ' || *comment_probe == '\t') comment_probe++;
+        bool is_conditional_directive =
+            strncmp(comment_probe, "@when(", 6) == 0 ||
+            strncmp(comment_probe, "@elif(", 6) == 0 ||
+            strcmp(comment_probe, "@else") == 0 ||
+            strncmp(comment_probe, "@else:", 6) == 0 ||
+            strcmp(comment_probe, "@end") == 0 ||
+            strncmp(comment_probe, "@cfg(", 5) == 0 ||
+            strncmp(comment_probe, "#if ", 4) == 0 ||
+            strncmp(comment_probe, "#if(", 4) == 0 ||
+            strncmp(comment_probe, "#elif ", 6) == 0 ||
+            strncmp(comment_probe, "#elif(", 6) == 0 ||
+            strcmp(comment_probe, "#else") == 0 ||
+            strcmp(comment_probe, "#else:") == 0 ||
+            strcmp(comment_probe, "#endif") == 0 ||
+            strcmp(comment_probe, "#endif:") == 0;
+        if (!is_conditional_directive) {
+            strip_inline_comment(buf);
+        }
         source_lines[num_lines++] = strdup(buf);
     }
     int file_end = num_lines;
@@ -261,6 +282,719 @@ static char *trim(const char *s) {
     return buf;
 }
 
+static void replace_source_line(int idx, const char *value) {
+    if (idx < 0 || idx >= num_lines) return;
+    free(source_lines[idx]);
+    source_lines[idx] = strdup(value ? value : "");
+}
+
+static const char *env_or_empty(const char *key) {
+    const char *value = getenv(key);
+    return value ? value : "";
+}
+
+static void trim_copy(const char *src, char *out, int outsz) {
+    if (outsz <= 0) return;
+    strncpy(out, src ? src : "", outsz - 1);
+    out[outsz - 1] = '\0';
+    char *t = trim(out);
+    if (t != out) memmove(out, t, strlen(t) + 1);
+}
+
+static void ascii_lower_copy(const char *src, char *out, int outsz) {
+    if (outsz <= 0) return;
+    int i = 0;
+    for (; src && src[i] && i < outsz - 1; i++) {
+        char ch = src[i];
+        if (ch >= 'A' && ch <= 'Z') out[i] = (char)(ch - 'A' + 'a');
+        else out[i] = ch;
+    }
+    out[i] = '\0';
+}
+
+static void strip_quotes_copy(const char *raw, char *out, int outsz) {
+    char tmp[MAX_LINE];
+    trim_copy(raw, tmp, sizeof(tmp));
+    size_t len = strlen(tmp);
+    if (len >= 2) {
+        bool is_double = (tmp[0] == '"' && tmp[len - 1] == '"');
+        bool is_single = (tmp[0] == '\'' && tmp[len - 1] == '\'');
+        if (is_double || is_single) {
+            tmp[len - 1] = '\0';
+            memmove(tmp, tmp + 1, len - 1);
+        }
+    }
+    strncpy(out, tmp, outsz - 1);
+    out[outsz - 1] = '\0';
+}
+
+static void normalize_os_token(const char *raw, char *out, int outsz) {
+    out[0] = '\0';
+    char no_quotes[MAX_LINE];
+    strip_quotes_copy(raw, no_quotes, sizeof(no_quotes));
+    char value[MAX_LINE];
+    ascii_lower_copy(no_quotes, value, sizeof(value));
+    if (value[0] == '\0') return;
+
+    if (strcmp(value, "win") == 0 || strcmp(value, "windows") == 0 ||
+        strcmp(value, "windows_nt") == 0 || strstr(value, "windows")) {
+        strncpy(out, "windows", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "linux") == 0 || strstr(value, "linux")) {
+        strncpy(out, "linux", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "mac") == 0 || strcmp(value, "macos") == 0 ||
+        strcmp(value, "darwin") == 0 || strstr(value, "darwin") ||
+        strstr(value, "mac")) {
+        strncpy(out, "macos", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "freebsd") == 0 || strstr(value, "freebsd")) {
+        strncpy(out, "freebsd", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "openbsd") == 0 || strstr(value, "openbsd")) {
+        strncpy(out, "openbsd", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "netbsd") == 0 || strstr(value, "netbsd")) {
+        strncpy(out, "netbsd", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "android") == 0 || strstr(value, "android")) {
+        strncpy(out, "android", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "unix") == 0 || strstr(value, "unix")) {
+        strncpy(out, "unix", outsz - 1);
+        out[outsz - 1] = '\0';
+    }
+}
+
+static void normalize_arch_token(const char *raw, char *out, int outsz) {
+    out[0] = '\0';
+    char no_quotes[MAX_LINE];
+    strip_quotes_copy(raw, no_quotes, sizeof(no_quotes));
+    char value[MAX_LINE];
+    ascii_lower_copy(no_quotes, value, sizeof(value));
+    if (value[0] == '\0') return;
+
+    if (strcmp(value, "x86_64") == 0 || strcmp(value, "amd64") == 0 ||
+        strcmp(value, "x64") == 0 || strstr(value, "x86_64") ||
+        strstr(value, "amd64")) {
+        strncpy(out, "x86_64", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "x86") == 0 || strcmp(value, "i386") == 0 ||
+        strcmp(value, "i686") == 0 || strstr(value, "i386") ||
+        strstr(value, "i686")) {
+        strncpy(out, "x86", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "aarch64") == 0 || strcmp(value, "arm64") == 0 ||
+        strstr(value, "aarch64") || strstr(value, "arm64")) {
+        strncpy(out, "aarch64", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "arm") == 0 || strcmp(value, "armv7") == 0 ||
+        strcmp(value, "armv6") == 0 || strstr(value, "armv7") ||
+        strstr(value, "armv6")) {
+        strncpy(out, "arm", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "riscv64") == 0 || strstr(value, "riscv64")) {
+        strncpy(out, "riscv64", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    if (strcmp(value, "riscv32") == 0 || strstr(value, "riscv32")) {
+        strncpy(out, "riscv32", outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+}
+
+static void detect_target_os(char *out, int outsz) {
+    out[0] = '\0';
+    normalize_os_token(env_or_empty("SIMPLE_TARGET_OS"), out, outsz);
+    if (out[0]) return;
+
+    const char *env_keys[] = {"OS", "OSTYPE", "PLATFORM", "UNAME", nullptr};
+    for (int i = 0; env_keys[i]; i++) {
+        normalize_os_token(env_or_empty(env_keys[i]), out, outsz);
+        if (out[0]) return;
+    }
+
+#if defined(_WIN32)
+    strncpy(out, "windows", outsz - 1);
+#elif defined(__APPLE__) && defined(__MACH__)
+    strncpy(out, "macos", outsz - 1);
+#elif defined(__FreeBSD__)
+    strncpy(out, "freebsd", outsz - 1);
+#elif defined(__OpenBSD__)
+    strncpy(out, "openbsd", outsz - 1);
+#elif defined(__NetBSD__)
+    strncpy(out, "netbsd", outsz - 1);
+#elif defined(__linux__)
+    strncpy(out, "linux", outsz - 1);
+#else
+    strncpy(out, "unknown", outsz - 1);
+#endif
+    out[outsz - 1] = '\0';
+}
+
+static void detect_target_arch(char *out, int outsz) {
+    out[0] = '\0';
+    normalize_arch_token(env_or_empty("SIMPLE_TARGET_ARCH"), out, outsz);
+    if (out[0]) return;
+
+    const char *env_keys[] = {
+        "PROCESSOR_ARCHITECTURE",
+        "HOSTTYPE",
+        "MACHTYPE",
+        "CPU",
+        nullptr
+    };
+    for (int i = 0; env_keys[i]; i++) {
+        normalize_arch_token(env_or_empty(env_keys[i]), out, outsz);
+        if (out[0]) return;
+    }
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+    strncpy(out, "x86_64", outsz - 1);
+#elif defined(__i386__) || defined(_M_IX86)
+    strncpy(out, "x86", outsz - 1);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    strncpy(out, "aarch64", outsz - 1);
+#elif defined(__arm__) || defined(_M_ARM)
+    strncpy(out, "arm", outsz - 1);
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    strncpy(out, "riscv64", outsz - 1);
+#elif defined(__riscv) && (__riscv_xlen == 32)
+    strncpy(out, "riscv32", outsz - 1);
+#else
+    strncpy(out, "unknown", outsz - 1);
+#endif
+    out[outsz - 1] = '\0';
+}
+
+static void detect_target_cpu(char *out, int outsz) {
+    out[0] = '\0';
+    normalize_arch_token(env_or_empty("SIMPLE_TARGET_CPU"), out, outsz);
+    if (out[0]) return;
+
+    normalize_arch_token(env_or_empty("PROCESSOR_IDENTIFIER"), out, outsz);
+    if (out[0]) return;
+
+    detect_target_arch(out, outsz);
+}
+
+/* Global target info for asm match/assert (populated in preprocess_conditional_directives) */
+static char g_host_arch[64];
+static char g_host_os[64];
+
+#define MAX_COND_TOKENS 128
+#define MAX_COND_TOKEN_LEN 96
+
+typedef struct {
+    char tokens[MAX_COND_TOKENS][MAX_COND_TOKEN_LEN];
+    int count;
+    int pos;
+} CondParser;
+
+static void cond_push_token(CondParser *p, const char *token) {
+    if (p->count >= MAX_COND_TOKENS) return;
+    strncpy(p->tokens[p->count], token, MAX_COND_TOKEN_LEN - 1);
+    p->tokens[p->count][MAX_COND_TOKEN_LEN - 1] = '\0';
+    p->count++;
+}
+
+static void tokenize_condition(const char *condition, CondParser *parser) {
+    parser->count = 0;
+    parser->pos = 0;
+    char current[MAX_COND_TOKEN_LEN];
+    int cur_len = 0;
+
+    for (int i = 0; condition && condition[i];) {
+        char ch = condition[i];
+        bool is_ws = (ch == ' ' || ch == '\t' || ch == '\r');
+        if (is_ws) {
+            if (cur_len > 0) {
+                current[cur_len] = '\0';
+                cond_push_token(parser, current);
+                cur_len = 0;
+            }
+            i++;
+            continue;
+        }
+
+        bool is_paren = (ch == '(' || ch == ')');
+        if (is_paren) {
+            if (cur_len > 0) {
+                current[cur_len] = '\0';
+                cond_push_token(parser, current);
+                cur_len = 0;
+            }
+            char one[2] = {ch, '\0'};
+            cond_push_token(parser, one);
+            i++;
+            continue;
+        }
+
+        if (ch == '&' && condition[i + 1] == '&') {
+            if (cur_len > 0) {
+                current[cur_len] = '\0';
+                cond_push_token(parser, current);
+                cur_len = 0;
+            }
+            cond_push_token(parser, "&&");
+            i += 2;
+            continue;
+        }
+
+        if (ch == '|' && condition[i + 1] == '|') {
+            if (cur_len > 0) {
+                current[cur_len] = '\0';
+                cond_push_token(parser, current);
+                cur_len = 0;
+            }
+            cond_push_token(parser, "||");
+            i += 2;
+            continue;
+        }
+
+        if (ch == '!') {
+            if (cur_len > 0) {
+                current[cur_len] = '\0';
+                cond_push_token(parser, current);
+                cur_len = 0;
+            }
+            cond_push_token(parser, "!");
+            i++;
+            continue;
+        }
+
+        if (cur_len < MAX_COND_TOKEN_LEN - 1) {
+            current[cur_len++] = ch;
+        }
+        i++;
+    }
+
+    if (cur_len > 0) {
+        current[cur_len] = '\0';
+        cond_push_token(parser, current);
+    }
+}
+
+static const char *cond_peek(CondParser *p) {
+    if (p->pos >= p->count) return "";
+    return p->tokens[p->pos];
+}
+
+static const char *cond_take(CondParser *p) {
+    const char *token = cond_peek(p);
+    if (p->pos < p->count) p->pos++;
+    return token;
+}
+
+static bool eval_key_value_condition(
+    const char *key_raw,
+    const char *value_raw,
+    const char *host_os,
+    const char *host_arch,
+    const char *host_cpu
+) {
+    char key[MAX_COND_TOKEN_LEN];
+    char value[MAX_COND_TOKEN_LEN];
+    strip_quotes_copy(key_raw, key, sizeof(key));
+    strip_quotes_copy(value_raw, value, sizeof(value));
+
+    char key_lower[MAX_COND_TOKEN_LEN];
+    ascii_lower_copy(key, key_lower, sizeof(key_lower));
+
+    if (strcmp(key_lower, "feature") == 0) {
+        return false;
+    }
+    if (strcmp(key_lower, "os") == 0 || strcmp(key_lower, "platform") == 0) {
+        char norm[MAX_COND_TOKEN_LEN];
+        normalize_os_token(value, norm, sizeof(norm));
+        return norm[0] != '\0' && strcmp(host_os, norm) == 0;
+    }
+    if (strcmp(key_lower, "arch") == 0) {
+        char norm[MAX_COND_TOKEN_LEN];
+        normalize_arch_token(value, norm, sizeof(norm));
+        return norm[0] != '\0' && strcmp(host_arch, norm) == 0;
+    }
+    if (strcmp(key_lower, "cpu") == 0) {
+        char norm[MAX_COND_TOKEN_LEN];
+        normalize_arch_token(value, norm, sizeof(norm));
+        return norm[0] != '\0' && strcmp(host_cpu, norm) == 0;
+    }
+    return false;
+}
+
+static bool eval_atom_condition(
+    const char *atom_raw,
+    const char *host_os,
+    const char *host_arch,
+    const char *host_cpu
+) {
+    char atom[MAX_COND_TOKEN_LEN];
+    strip_quotes_copy(atom_raw, atom, sizeof(atom));
+    char token[MAX_COND_TOKEN_LEN];
+    ascii_lower_copy(atom, token, sizeof(token));
+    if (token[0] == '\0') return false;
+
+    if (strcmp(token, "true") == 0) return true;
+    if (strcmp(token, "false") == 0) return false;
+    if (strcmp(token, "debug") == 0) return true;
+    if (strcmp(token, "release") == 0) return false;
+    if (strcmp(token, "compiled") == 0) return true;
+    if (strcmp(token, "interpreter") == 0) return false;
+
+    if (strcmp(token, "win") == 0 || strcmp(token, "windows") == 0) return strcmp(host_os, "windows") == 0;
+    if (strcmp(token, "linux") == 0) return strcmp(host_os, "linux") == 0;
+    if (strcmp(token, "mac") == 0 || strcmp(token, "macos") == 0 || strcmp(token, "darwin") == 0) return strcmp(host_os, "macos") == 0;
+    if (strcmp(token, "freebsd") == 0) return strcmp(host_os, "freebsd") == 0;
+    if (strcmp(token, "openbsd") == 0) return strcmp(host_os, "openbsd") == 0;
+    if (strcmp(token, "netbsd") == 0) return strcmp(host_os, "netbsd") == 0;
+    if (strcmp(token, "unix") == 0) {
+        return strcmp(host_os, "linux") == 0 || strcmp(host_os, "macos") == 0 ||
+               strcmp(host_os, "freebsd") == 0 || strcmp(host_os, "openbsd") == 0 ||
+               strcmp(host_os, "netbsd") == 0 || strcmp(host_os, "android") == 0;
+    }
+
+    if (strcmp(token, "x86_64") == 0 || strcmp(token, "amd64") == 0 || strcmp(token, "x64") == 0) return strcmp(host_arch, "x86_64") == 0;
+    if (strcmp(token, "x86") == 0 || strcmp(token, "i386") == 0 || strcmp(token, "i686") == 0) return strcmp(host_arch, "x86") == 0;
+    if (strcmp(token, "aarch64") == 0 || strcmp(token, "arm64") == 0) return strcmp(host_arch, "aarch64") == 0;
+    if (strcmp(token, "arm") == 0 || strcmp(token, "armv7") == 0 || strcmp(token, "armv6") == 0) return strcmp(host_arch, "arm") == 0;
+    if (strcmp(token, "riscv64") == 0) return strcmp(host_arch, "riscv64") == 0;
+    if (strcmp(token, "riscv32") == 0) return strcmp(host_arch, "riscv32") == 0;
+
+    const char *eq2 = strstr(token, "==");
+    if (eq2) {
+        char key[MAX_COND_TOKEN_LEN];
+        char value[MAX_COND_TOKEN_LEN];
+        int klen = (int)(eq2 - token);
+        if (klen >= MAX_COND_TOKEN_LEN) klen = MAX_COND_TOKEN_LEN - 1;
+        strncpy(key, token, klen);
+        key[klen] = '\0';
+        strncpy(value, eq2 + 2, sizeof(value) - 1);
+        value[sizeof(value) - 1] = '\0';
+        return eval_key_value_condition(key, value, host_os, host_arch, host_cpu);
+    }
+
+    const char *eq1 = strchr(token, '=');
+    if (eq1) {
+        char key[MAX_COND_TOKEN_LEN];
+        char value[MAX_COND_TOKEN_LEN];
+        int klen = (int)(eq1 - token);
+        if (klen >= MAX_COND_TOKEN_LEN) klen = MAX_COND_TOKEN_LEN - 1;
+        strncpy(key, token, klen);
+        key[klen] = '\0';
+        strncpy(value, eq1 + 1, sizeof(value) - 1);
+        value[sizeof(value) - 1] = '\0';
+        return eval_key_value_condition(key, value, host_os, host_arch, host_cpu);
+    }
+
+    return false;
+}
+
+static bool eval_cond_or(CondParser *p, const char *host_os, const char *host_arch, const char *host_cpu);
+
+static bool eval_cond_primary(CondParser *p, const char *host_os, const char *host_arch, const char *host_cpu) {
+    const char *tok = cond_peek(p);
+    if (strcmp(tok, "(") == 0) {
+        cond_take(p);
+        bool value = eval_cond_or(p, host_os, host_arch, host_cpu);
+        if (strcmp(cond_peek(p), ")") == 0) cond_take(p);
+        return value;
+    }
+    return eval_atom_condition(cond_take(p), host_os, host_arch, host_cpu);
+}
+
+static bool eval_cond_not(CondParser *p, const char *host_os, const char *host_arch, const char *host_cpu) {
+    const char *tok = cond_peek(p);
+    if (strcmp(tok, "!") == 0 || strcmp(tok, "not") == 0) {
+        cond_take(p);
+        return !eval_cond_not(p, host_os, host_arch, host_cpu);
+    }
+    return eval_cond_primary(p, host_os, host_arch, host_cpu);
+}
+
+static bool eval_cond_and(CondParser *p, const char *host_os, const char *host_arch, const char *host_cpu) {
+    bool left = eval_cond_not(p, host_os, host_arch, host_cpu);
+    for (int i = 0; i < 1024; i++) {
+        const char *tok = cond_peek(p);
+        if (strcmp(tok, "&&") != 0 && strcmp(tok, "and") != 0) break;
+        cond_take(p);
+        bool right = eval_cond_not(p, host_os, host_arch, host_cpu);
+        left = left && right;
+    }
+    return left;
+}
+
+static bool eval_cond_or(CondParser *p, const char *host_os, const char *host_arch, const char *host_cpu) {
+    bool left = eval_cond_and(p, host_os, host_arch, host_cpu);
+    for (int i = 0; i < 1024; i++) {
+        const char *tok = cond_peek(p);
+        if (strcmp(tok, "||") != 0 && strcmp(tok, "or") != 0) break;
+        cond_take(p);
+        bool right = eval_cond_and(p, host_os, host_arch, host_cpu);
+        left = left || right;
+    }
+    return left;
+}
+
+static bool eval_condition(const char *condition, const char *host_os, const char *host_arch, const char *host_cpu) {
+    CondParser parser;
+    tokenize_condition(condition, &parser);
+    if (parser.count == 0) return false;
+    return eval_cond_or(&parser, host_os, host_arch, host_cpu);
+}
+
+static void extract_directive_condition(const char *trimmed_line, int prefix_len, char *out, int outsz) {
+    if (outsz <= 0) return;
+    out[0] = '\0';
+    const char *cond_start = trimmed_line + prefix_len;
+    while (*cond_start == ' ' || *cond_start == '\t') cond_start++;
+    strncpy(out, cond_start, outsz - 1);
+    out[outsz - 1] = '\0';
+    char *t = trim(out);
+    if (t != out) memmove(out, t, strlen(t) + 1);
+
+    int len = (int)strlen(out);
+    if (len >= 1 && out[len - 1] == ':') {
+        out[len - 1] = '\0';
+        char *t3 = trim(out);
+        if (t3 != out) memmove(out, t3, strlen(t3) + 1);
+    }
+
+    len = (int)strlen(out);
+    if (len >= 2 && out[0] == '(' && out[len - 1] == ')') {
+        out[len - 1] = '\0';
+        memmove(out, out + 1, len - 1);
+        char *t2 = trim(out);
+        if (t2 != out) memmove(out, t2, strlen(t2) + 1);
+    }
+}
+
+/* Extract condition from @when(condition): or @cfg(condition) syntax.
+   Finds the '(' after the prefix and reads until the matching ')'. */
+static void extract_paren_condition(const char *trimmed_line, char *out, int outsz) {
+    if (outsz <= 0) return;
+    out[0] = '\0';
+    const char *p = strchr(trimmed_line, '(');
+    if (!p) return;
+    p++; /* skip '(' */
+    int depth = 1;
+    int i = 0;
+    while (*p && depth > 0 && i < outsz - 1) {
+        if (*p == '(') depth++;
+        else if (*p == ')') { depth--; if (depth == 0) break; }
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    char *t = trim(out);
+    if (t != out) memmove(out, t, strlen(t) + 1);
+}
+
+static void preprocess_conditional_directives() {
+    char host_os[32];
+    char host_arch[32];
+    char host_cpu[32];
+    detect_target_os(host_os, sizeof(host_os));
+    detect_target_arch(host_arch, sizeof(host_arch));
+    detect_target_cpu(host_cpu, sizeof(host_cpu));
+
+    /* Populate global arch/os for asm match/assert */
+    strncpy(g_host_arch, host_arch, sizeof(g_host_arch)-1);
+    g_host_arch[sizeof(g_host_arch)-1] = '\0';
+    strncpy(g_host_os, host_os, sizeof(g_host_os)-1);
+    g_host_os[sizeof(g_host_os)-1] = '\0';
+
+    const int MAX_IF_DEPTH = 128;
+    bool stack_parent_active[MAX_IF_DEPTH];
+    bool stack_branch_taken[MAX_IF_DEPTH];
+    bool stack_branch_active[MAX_IF_DEPTH];
+    int depth = 0;
+    bool active = true;
+
+    for (int i = 0; i < num_lines; i++) {
+        char line_copy[MAX_LINE * 4];
+        strncpy(line_copy, source_lines[i], sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
+        char *t = trim(line_copy);
+
+        bool is_when = starts_with(t, "@when(");
+        bool is_if = starts_with(t, "#if ") || starts_with(t, "#if(");
+        if (is_when || is_if) {
+            char cond[MAX_LINE * 2];
+            if (is_when) extract_paren_condition(t, cond, sizeof(cond));
+            else extract_directive_condition(t, 3, cond, sizeof(cond));
+            bool parent = active;
+            bool cond_ok = eval_condition(cond, host_os, host_arch, host_cpu);
+            bool current = parent && cond_ok;
+
+            if (depth < MAX_IF_DEPTH) {
+                stack_parent_active[depth] = parent;
+                stack_branch_taken[depth] = current;
+                stack_branch_active[depth] = current;
+                depth++;
+            }
+            active = current;
+            replace_source_line(i, "");
+            continue;
+        }
+
+        bool is_elif = starts_with(t, "@elif(");
+        bool is_hash_elif = starts_with(t, "#elif ") || starts_with(t, "#elif(");
+        if (is_elif || is_hash_elif) {
+            if (depth > 0) {
+                int idx = depth - 1;
+                bool parent = stack_parent_active[idx];
+                bool taken = stack_branch_taken[idx];
+                bool current = false;
+                if (parent && !taken) {
+                    char cond[MAX_LINE * 2];
+                    if (is_elif) extract_paren_condition(t, cond, sizeof(cond));
+                    else extract_directive_condition(t, 5, cond, sizeof(cond));
+                    current = eval_condition(cond, host_os, host_arch, host_cpu);
+                    if (current) taken = true;
+                }
+                stack_branch_taken[idx] = taken;
+                stack_branch_active[idx] = current;
+                active = current;
+            }
+            replace_source_line(i, "");
+            continue;
+        }
+
+        if (strcmp(t, "@else") == 0 || starts_with(t, "@else:") || strcmp(t, "#else") == 0 || strcmp(t, "#else:") == 0) {
+            if (depth > 0) {
+                int idx = depth - 1;
+                bool parent = stack_parent_active[idx];
+                bool taken = stack_branch_taken[idx];
+                bool current = parent && !taken;
+                stack_branch_taken[idx] = taken || current;
+                stack_branch_active[idx] = current;
+                active = current;
+            }
+            replace_source_line(i, "");
+            continue;
+        }
+
+        if (strcmp(t, "@end") == 0 || strcmp(t, "#endif") == 0 || strcmp(t, "#endif:") == 0) {
+            if (depth > 0) depth--;
+            if (depth <= 0) active = true;
+            else active = stack_branch_active[depth - 1];
+            replace_source_line(i, "");
+            continue;
+        }
+
+        if (!active) {
+            replace_source_line(i, "");
+        }
+    }
+
+    /* Second pass: @cfg(condition) per-declaration conditionals */
+    for (int i = 0; i < num_lines; i++) {
+        char line_copy[MAX_LINE * 4];
+        strncpy(line_copy, source_lines[i], sizeof(line_copy) - 1);
+        line_copy[sizeof(line_copy) - 1] = '\0';
+        char *t = trim(line_copy);
+
+        if (!starts_with(t, "@cfg(")) continue;
+
+        char cond[MAX_LINE * 2];
+        extract_paren_condition(t, cond, sizeof(cond));
+
+        /* Convert @cfg("key", "value") to key=value form */
+        char *comma = NULL;
+        {
+            bool in_str = false;
+            for (char *p = cond; *p; p++) {
+                if (*p == '"') in_str = !in_str;
+                if (*p == ',' && !in_str) { comma = p; break; }
+            }
+        }
+        char eval_buf[MAX_LINE * 2];
+        if (comma) {
+            *comma = '\0';
+            char *key = trim(cond);
+            char *val = trim(comma + 1);
+            /* Strip quotes */
+            int klen = (int)strlen(key);
+            if (klen >= 2 && key[0] == '"' && key[klen-1] == '"') { key[klen-1] = '\0'; key++; }
+            int vlen = (int)strlen(val);
+            if (vlen >= 2 && val[0] == '"' && val[vlen-1] == '"') { val[vlen-1] = '\0'; val++; }
+            snprintf(eval_buf, sizeof(eval_buf), "%s=%s", key, val);
+        } else {
+            strncpy(eval_buf, cond, sizeof(eval_buf) - 1);
+            eval_buf[sizeof(eval_buf) - 1] = '\0';
+        }
+
+        bool cond_ok = eval_condition(eval_buf, host_os, host_arch, host_cpu);
+        if (cond_ok) {
+            /* Condition true: blank only the @cfg line, keep declaration */
+            replace_source_line(i, "");
+        } else {
+            /* Condition false: blank @cfg line + following declaration body */
+            replace_source_line(i, "");
+            /* Determine indentation of the @cfg line */
+            int cfg_indent = 0;
+            for (const char *p = source_lines[i]; *p == ' ' || *p == '\t'; p++) cfg_indent++;
+            /* Blank following lines that are part of the declaration */
+            for (int j = i + 1; j < num_lines; j++) {
+                const char *jline = source_lines[j];
+                if (!jline[0] || jline[0] == '\0') break; /* empty line = end */
+                /* Count leading indent */
+                int jindent = 0;
+                for (const char *p = jline; *p == ' ' || *p == '\t'; p++) jindent++;
+                /* If this line has content and deeper indent, or is the first decl line, blank it */
+                char *jtrim = trim(line_copy);
+                strncpy(line_copy, jline, sizeof(line_copy) - 1);
+                line_copy[sizeof(line_copy) - 1] = '\0';
+                jtrim = trim(line_copy);
+                if (j == i + 1) {
+                    /* Always blank the declaration line right after @cfg */
+                    replace_source_line(j, "");
+                    /* If the declaration line ends with ':', there's a body */
+                    int dlen = (int)strlen(jtrim);
+                    if (dlen > 0 && jtrim[dlen - 1] == ':') {
+                        /* Blank indented body lines */
+                        for (int k = j + 1; k < num_lines; k++) {
+                            const char *kline = source_lines[k];
+                            if (!kline[0]) break;
+                            int kindent = 0;
+                            for (const char *p = kline; *p == ' ' || *p == '\t'; p++) kindent++;
+                            if (kindent > jindent) {
+                                replace_source_line(k, "");
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /* Strip inline # comments (not inside strings) */
 static void strip_inline_comment(char *line) {
     bool in_str = false;
@@ -280,6 +1014,319 @@ static void strip_inline_comment(char *line) {
             }
         }
     }
+}
+
+/* Parse a full Simple string literal (or raw r"...") into plain text.
+ * Returns true on success, false if input is not exactly one literal. */
+static bool parse_simple_string_literal_full(const char *s, char *out, int outsz) {
+    const char *p = skip_spaces(s);
+    bool is_raw = false;
+    if (p[0] == 'r' && (p[1] == '"' || p[1] == '\'')) {
+        is_raw = true;
+        p++;
+    }
+    if (*p != '"' && *p != '\'') return false;
+    char quote = *p++;
+    int oi = 0;
+    while (*p && *p != quote) {
+        if (!is_raw && *p == '\\' && p[1]) {
+            p++;
+            char esc = *p++;
+            if (esc == 'n') out[oi++] = '\n';
+            else if (esc == 't') out[oi++] = '\t';
+            else if (esc == 'r') out[oi++] = '\r';
+            else if (esc == '0') {
+                if (oi < outsz - 2) {
+                    out[oi++] = '\\';
+                    out[oi++] = '0';
+                } else if (oi < outsz - 1) {
+                    out[oi++] = '0';
+                }
+            }
+            else out[oi++] = esc;
+        } else {
+            out[oi++] = *p++;
+        }
+        if (oi >= outsz - 1) break;
+    }
+    if (*p != quote) return false;
+    p++;
+    p = skip_spaces(p);
+    if (*p != '\0') return false;
+    out[oi] = '\0';
+    return true;
+}
+
+static void c_escape_string_text(const char *src, char *dst, int dstsz) {
+    int di = 0;
+    for (int si = 0; src[si] && di < dstsz - 1; si++) {
+        unsigned char ch = (unsigned char)src[si];
+        if (ch == '\\') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = '\\';
+        } else if (ch == '"') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = '"';
+        } else if (ch == '\n') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = 'n';
+        } else if (ch == '\t') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = 't';
+        } else if (ch == '\r') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = 'r';
+        } else if (ch == '\0') {
+            if (di + 2 >= dstsz) break;
+            dst[di++] = '\\';
+            dst[di++] = '0';
+        } else {
+            dst[di++] = (char)ch;
+        }
+    }
+    dst[di] = '\0';
+}
+
+static void normalize_asm_line(const char *src, char *out, int outsz) {
+    char parsed[MAX_LINE];
+    if (parse_simple_string_literal_full(src, parsed, sizeof(parsed))) {
+        strncpy(out, parsed, outsz - 1);
+        out[outsz - 1] = '\0';
+        return;
+    }
+    strncpy(out, trim(src), outsz - 1);
+    out[outsz - 1] = '\0';
+}
+
+static void asm_append_line(char *acc, int accsz, const char *line) {
+    if (!line || line[0] == '\0') return;
+    if (acc[0] != '\0') {
+        strncat(acc, "\n", accsz - strlen(acc) - 1);
+    }
+    strncat(acc, line, accsz - strlen(acc) - 1);
+}
+
+static void emit_asm_stmt(const char *asm_text, int c_indent) {
+    char escaped[MAX_ASM_TEXT];
+    c_escape_string_text(asm_text ? asm_text : "", escaped, sizeof(escaped));
+    emit_indent(c_indent);
+    emit("asm volatile(\"%s\");\n", escaped);
+}
+
+/* ===== Asm Match/Assert Support ===== */
+
+struct AsmTargetSpec {
+    char archs[8][64]; int num_archs;
+    char os[64]; bool has_os;
+    char abi[64]; bool has_abi;
+    char backend[64]; bool has_backend;
+    char ver_op[4][16]; int ver_val[4]; int num_ver; /* up to 4 version constraints */
+};
+
+/* Parse [arch | arch2, os, abi, backend >= ver] from a string.
+ * Input s should be the content between [ and ] (brackets already stripped). */
+static bool parse_asm_target_spec(const char *s, AsmTargetSpec *out) {
+    memset(out, 0, sizeof(*out));
+    if (!s || s[0] == '\0') return false;
+
+    /* Tokenize by comma first to get positional fields */
+    char buf[512];
+    strncpy(buf, s, sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
+
+    char *fields[4]; int nfields = 0;
+    char *p = buf;
+    while (*p && nfields < 4) {
+        while (*p == ' ') p++;
+        fields[nfields] = p;
+        /* find comma or end */
+        char *comma = strchr(p, ',');
+        if (comma) { *comma = '\0'; p = comma + 1; } else { p += strlen(p); }
+        nfields++;
+    }
+
+    /* Field 0: arch(es) with | grouping */
+    if (nfields < 1) return false;
+    {
+        char arch_buf[256];
+        strncpy(arch_buf, fields[0], sizeof(arch_buf)-1); arch_buf[sizeof(arch_buf)-1] = '\0';
+        char *ap = arch_buf;
+        while (*ap && out->num_archs < 8) {
+            while (*ap == ' ') ap++;
+            char *pipe = strchr(ap, '|');
+            char *end = pipe ? pipe : ap + strlen(ap);
+            /* trim trailing spaces */
+            char *te = end - 1;
+            while (te > ap && *te == ' ') { *te = '\0'; te--; }
+            if (pipe) *pipe = '\0';
+            if (*ap) {
+                strncpy(out->archs[out->num_archs], ap, 63);
+                out->archs[out->num_archs][63] = '\0';
+                out->num_archs++;
+            }
+            ap = pipe ? pipe + 1 : end;
+        }
+    }
+
+    /* Field 1: os */
+    if (nfields >= 2) {
+        const char *f = skip_spaces(fields[1]);
+        if (f[0] && strcmp(f, "_") != 0) {
+            strncpy(out->os, f, 63); out->os[63] = '\0';
+            out->has_os = true;
+        }
+    }
+
+    /* Field 2: abi */
+    if (nfields >= 3) {
+        const char *f = skip_spaces(fields[2]);
+        if (f[0] && strcmp(f, "_") != 0) {
+            strncpy(out->abi, f, 63); out->abi[63] = '\0';
+            out->has_abi = true;
+        }
+    }
+
+    /* Field 3: backend [version constraints] */
+    if (nfields >= 4) {
+        char be_buf[256];
+        strncpy(be_buf, fields[3], sizeof(be_buf)-1); be_buf[sizeof(be_buf)-1] = '\0';
+        char *bp = be_buf;
+            while (*bp == ' ') bp++;
+        if (*bp && strcmp(bp, "_") != 0) {
+            /* Extract backend name (first word) */
+            char *sp = bp;
+            while (*sp && *sp != ' ' && *sp != '>' && *sp != '<' && *sp != '=' && *sp != '~') sp++;
+            char saved = *sp; *sp = '\0';
+            strncpy(out->backend, bp, 63); out->backend[63] = '\0';
+            out->has_backend = true;
+            *sp = saved;
+
+            /* Parse version constraints */
+            char *vp = sp;
+            while (*vp && out->num_ver < 4) {
+                while (*vp == ' ') vp++;
+                if (!*vp) break;
+                if (vp[0] == '>' && vp[1] == '=') {
+                    strncpy(out->ver_op[out->num_ver], ">=", 15);
+                    vp += 2; while (*vp == ' ') vp++;
+                    out->ver_val[out->num_ver] = atoi(vp);
+                    while (*vp >= '0' && *vp <= '9') vp++;
+                    out->num_ver++;
+                } else if (vp[0] == '=' && vp[1] == '=') {
+                    strncpy(out->ver_op[out->num_ver], "==", 15);
+                    vp += 2; while (*vp == ' ') vp++;
+                    out->ver_val[out->num_ver] = atoi(vp);
+                    while (*vp >= '0' && *vp <= '9') vp++;
+                    out->num_ver++;
+                } else if (vp[0] == '<') {
+                    strncpy(out->ver_op[out->num_ver], "<", 15);
+                    vp += 1; while (*vp == ' ') vp++;
+                    out->ver_val[out->num_ver] = atoi(vp);
+                    while (*vp >= '0' && *vp <= '9') vp++;
+                    out->num_ver++;
+                } else if (vp[0] == '~' && vp[1] == '=') {
+                    strncpy(out->ver_op[out->num_ver], "~=", 15);
+                    vp += 2; while (*vp == ' ') vp++;
+                    out->ver_val[out->num_ver] = atoi(vp);
+                    while (*vp >= '0' && *vp <= '9') vp++;
+                    out->num_ver++;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    return out->num_archs > 0;
+}
+
+/* Normalize arch name for comparison */
+static void normalize_spec_arch(const char *in, char *out, int outsz) {
+    char lower[64];
+    int i = 0;
+    for (; in[i] && i < 63; i++) lower[i] = (char)tolower((unsigned char)in[i]);
+    lower[i] = '\0';
+
+    if (strcmp(lower, "x86-64") == 0 || strcmp(lower, "amd64") == 0 || strcmp(lower, "x64") == 0) {
+        strncpy(out, "x86_64", outsz-1);
+    } else if (strcmp(lower, "arm64") == 0) {
+        strncpy(out, "aarch64", outsz-1);
+    } else if (strcmp(lower, "armv7") == 0 || strcmp(lower, "arm32") == 0) {
+        strncpy(out, "arm", outsz-1);
+    } else if (strcmp(lower, "riscv32gc") == 0 || strcmp(lower, "rv32") == 0) {
+        strncpy(out, "riscv32", outsz-1);
+    } else if (strcmp(lower, "riscv64gc") == 0 || strcmp(lower, "rv64") == 0) {
+        strncpy(out, "riscv64", outsz-1);
+    } else if (strcmp(lower, "i686") == 0 || strcmp(lower, "i386") == 0) {
+        strncpy(out, "x86", outsz-1);
+    } else if (strcmp(lower, "wasm") == 0) {
+        strncpy(out, "wasm32", outsz-1);
+    } else {
+        strncpy(out, lower, outsz-1);
+    }
+    out[outsz-1] = '\0';
+}
+
+static bool match_asm_target_spec(const AsmTargetSpec *spec) {
+    /* Check arch */
+    bool arch_ok = false;
+    for (int i = 0; i < spec->num_archs; i++) {
+        char norm_spec[64], norm_host[64];
+        normalize_spec_arch(spec->archs[i], norm_spec, sizeof(norm_spec));
+        normalize_spec_arch(g_host_arch, norm_host, sizeof(norm_host));
+        if (strcmp(norm_spec, norm_host) == 0) { arch_ok = true; break; }
+    }
+    if (!arch_ok) return false;
+
+    /* Check os */
+    if (spec->has_os) {
+        char lower_spec[64], lower_host[64];
+        int si;
+        for (si = 0; spec->os[si] && si < 63; si++) lower_spec[si] = (char)tolower((unsigned char)spec->os[si]);
+        lower_spec[si] = '\0';
+        int hi;
+        for (hi = 0; g_host_os[hi] && hi < 63; hi++) lower_host[hi] = (char)tolower((unsigned char)g_host_os[hi]);
+        lower_host[hi] = '\0';
+        if (strcmp(lower_spec, lower_host) != 0) return false;
+    }
+
+    /* Version constraints — seed doesn't know backend version, skip */
+    return true;
+}
+
+/* Parse content between brackets from source line like "case [x86_64, linux]:" */
+static bool extract_bracket_content(const char *s, char *out, int outsz) {
+    const char *open = strchr(s, '[');
+    if (!open) return false;
+    const char *close = strchr(open, ']');
+    if (!close) return false;
+    int len = (int)(close - open - 1);
+    if (len < 0 || len >= outsz) return false;
+    strncpy(out, open + 1, len);
+    out[len] = '\0';
+    return true;
+}
+
+/* Parse compile_error("message") and extract the message */
+static bool parse_compile_error_msg(const char *s, char *out, int outsz) {
+    const char *p = skip_spaces(s);
+    if (!starts_with(p, "compile_error(")) return false;
+    p += 14; /* skip compile_error( */
+    while (*p == ' ') p++;
+    if (*p == '"' || *p == '\'') {
+        char quote = *p++;
+        int oi = 0;
+        while (*p && *p != quote && oi < outsz - 1) {
+            out[oi++] = *p++;
+        }
+        out[oi] = '\0';
+        return true;
+    }
+    return false;
 }
 
 /* Rename C++ keywords that can't be handled by #define (char, return, etc.) */
@@ -2603,6 +3650,209 @@ static void translate_block(int *line_idx, int base_indent, int c_indent) {
         if (trimmed[0] == '\0' || trimmed[0] == '#') { (*line_idx)++; continue; }
         if (ind <= base_indent) break;
 
+        /* asm match: — multi-target dispatch */
+        if (strcmp(trimmed, "asm match:") == 0) {
+            int match_base_indent = ind;
+            (*line_idx)++;
+            bool emitted = false;
+            while (*line_idx < num_lines) {
+                const char *aline = source_lines[*line_idx];
+                const char *atrim = trim(aline);
+                int aind = indent_level(aline);
+                if (atrim[0] == '\0' || atrim[0] == '#') { (*line_idx)++; continue; }
+                if (aind <= match_base_indent) break;
+
+                /* case _: */
+                if (strcmp(atrim, "case _:") == 0) {
+                    (*line_idx)++;
+                    /* Read body of wildcard arm */
+                    int arm_base = aind;
+                    if (!emitted) {
+                        /* Collect asm body or compile_error */
+                        while (*line_idx < num_lines) {
+                            const char *bline = source_lines[*line_idx];
+                            const char *btrim = trim(bline);
+                            int bind = indent_level(bline);
+                            if (btrim[0] == '\0' || btrim[0] == '#') { (*line_idx)++; continue; }
+                            if (bind <= arm_base) break;
+                            char ce_msg[256];
+                            if (parse_compile_error_msg(btrim, ce_msg, sizeof(ce_msg))) {
+                                emit_indent(c_indent);
+                                emit("/* asm match wildcard: compile_error */\n");
+                                emit_indent(c_indent);
+                                emit("static_assert(false, \"%s\");\n", ce_msg);
+                                emitted = true;
+                                (*line_idx)++;
+                                break;
+                            }
+                            /* Regular asm body */
+                            char line_text[MAX_LINE];
+                            normalize_asm_line(btrim, line_text, sizeof(line_text));
+                            emit_asm_stmt(line_text, c_indent);
+                            emitted = true;
+                            (*line_idx)++;
+                        }
+                    }
+                    /* Skip remaining body lines of this arm */
+                    while (*line_idx < num_lines) {
+                        const char *bline = source_lines[*line_idx];
+                        const char *btrim = trim(bline);
+                        int bind = indent_level(bline);
+                        if (btrim[0] == '\0' || btrim[0] == '#') { (*line_idx)++; continue; }
+                        if (bind <= arm_base) break;
+                        (*line_idx)++;
+                    }
+                    continue;
+                }
+
+                /* case [...]: */
+                if (starts_with(atrim, "case ") && strchr(atrim, '[')) {
+                    char bracket_content[256];
+                    AsmTargetSpec spec;
+                    bool has_spec = extract_bracket_content(atrim, bracket_content, sizeof(bracket_content))
+                                    && parse_asm_target_spec(bracket_content, &spec);
+
+                    bool matches = has_spec && match_asm_target_spec(&spec);
+
+                    (*line_idx)++;
+                    int arm_base = aind;
+
+                    if (matches && !emitted) {
+                        /* This arm matches — collect its body */
+                        while (*line_idx < num_lines) {
+                            const char *bline = source_lines[*line_idx];
+                            const char *btrim = trim(bline);
+                            int bind = indent_level(bline);
+                            if (btrim[0] == '\0' || btrim[0] == '#') { (*line_idx)++; continue; }
+                            if (bind <= arm_base) break;
+                            char ce_msg[256];
+                            if (parse_compile_error_msg(btrim, ce_msg, sizeof(ce_msg))) {
+                                emit_indent(c_indent);
+                                emit("static_assert(false, \"%s\");\n", ce_msg);
+                                emitted = true;
+                                (*line_idx)++;
+                                break;
+                            }
+                            char line_text[MAX_LINE];
+                            normalize_asm_line(btrim, line_text, sizeof(line_text));
+                            emit_asm_stmt(line_text, c_indent);
+                            emitted = true;
+                            (*line_idx)++;
+                        }
+                    }
+                    /* Skip remaining body lines of this arm */
+                    while (*line_idx < num_lines) {
+                        const char *bline = source_lines[*line_idx];
+                        const char *btrim = trim(bline);
+                        int bind = indent_level(bline);
+                        if (btrim[0] == '\0' || btrim[0] == '#') { (*line_idx)++; continue; }
+                        if (bind <= arm_base) break;
+                        (*line_idx)++;
+                    }
+                    continue;
+                }
+
+                /* Unknown line inside asm match */
+                (*line_idx)++;
+            }
+            if (!emitted) {
+                emit_indent(c_indent);
+                emit("static_assert(false, \"no asm match case for target\");\n");
+            }
+            continue;
+        }
+
+        /* asm assert [...] — compile-time target guard */
+        if (starts_with(trimmed, "asm assert ") && strchr(trimmed, '[')) {
+            char bracket_content[256];
+            AsmTargetSpec spec;
+            if (extract_bracket_content(trimmed, bracket_content, sizeof(bracket_content))
+                && parse_asm_target_spec(bracket_content, &spec)) {
+                if (!match_asm_target_spec(&spec)) {
+                    emit_indent(c_indent);
+                    emit("static_assert(false, \"asm assert: target does not match\");\n");
+                }
+            }
+            (*line_idx)++;
+            continue;
+        }
+
+        /* compile_error("msg") — standalone */
+        if (starts_with(trimmed, "compile_error(")) {
+            char ce_msg[256];
+            if (parse_compile_error_msg(trimmed, ce_msg, sizeof(ce_msg))) {
+                emit_indent(c_indent);
+                emit("static_assert(false, \"%s\");\n", ce_msg);
+            }
+            (*line_idx)++;
+            continue;
+        }
+
+        /* asm: block form */
+        if (strcmp(trimmed, "asm:") == 0) {
+            int asm_base_indent = ind;
+            char asm_text[MAX_ASM_TEXT];
+            asm_text[0] = '\0';
+            (*line_idx)++;
+            while (*line_idx < num_lines) {
+                const char *aline = source_lines[*line_idx];
+                const char *atrim = trim(aline);
+                int aind = indent_level(aline);
+                if (atrim[0] == '\0' || atrim[0] == '#') { (*line_idx)++; continue; }
+                if (aind <= asm_base_indent) break;
+                char line_text[MAX_LINE];
+                normalize_asm_line(atrim, line_text, sizeof(line_text));
+                asm_append_line(asm_text, sizeof(asm_text), line_text);
+                (*line_idx)++;
+            }
+            emit_asm_stmt(asm_text, c_indent);
+            continue;
+        }
+
+        /* asm { ... } block */
+        if (starts_with(trimmed, "asm {") || strcmp(trimmed, "asm{") == 0) {
+            char asm_text[MAX_ASM_TEXT];
+            asm_text[0] = '\0';
+            const char *open = strchr(trimmed, '{');
+            const char *close = open ? strrchr(open + 1, '}') : nullptr;
+            if (open && close && close > open) {
+                char inside[MAX_LINE];
+                int ilen = (int)(close - open - 1);
+                if (ilen >= (int)sizeof(inside)) ilen = (int)sizeof(inside) - 1;
+                if (ilen < 0) ilen = 0;
+                strncpy(inside, open + 1, ilen);
+                inside[ilen] = '\0';
+                char line_text[MAX_LINE];
+                normalize_asm_line(inside, line_text, sizeof(line_text));
+                asm_append_line(asm_text, sizeof(asm_text), line_text);
+                (*line_idx)++;
+            } else {
+                (*line_idx)++;
+                while (*line_idx < num_lines) {
+                    const char *aline = source_lines[*line_idx];
+                    const char *atrim = trim(aline);
+                    if (atrim[0] == '\0' || atrim[0] == '#') { (*line_idx)++; continue; }
+                    if (strcmp(atrim, "}") == 0) { (*line_idx)++; break; }
+                    char line_text[MAX_LINE];
+                    normalize_asm_line(atrim, line_text, sizeof(line_text));
+                    asm_append_line(asm_text, sizeof(asm_text), line_text);
+                    (*line_idx)++;
+                }
+            }
+            emit_asm_stmt(asm_text, c_indent);
+            continue;
+        }
+
+        /* asm "..." inline */
+        if (starts_with(trimmed, "asm ")) {
+            const char *payload = skip_spaces(trimmed + 3);
+            char asm_text[MAX_ASM_TEXT];
+            normalize_asm_line(payload, asm_text, sizeof(asm_text));
+            emit_asm_stmt(asm_text, c_indent);
+            (*line_idx)++;
+            continue;
+        }
+
         /* Single-line if */
         if (starts_with(trimmed, "if ") && !ends_with(trimmed, ":")) {
             const char *colon_pos = nullptr;
@@ -3291,6 +4541,34 @@ static void translate_statement(const char *trimmed, int c_indent) {
             emit_indent(c_indent);
             emit("%s %s = %s;\n", simple_type_to_cpp(stype), name, expr_c);
         }
+        return;
+    }
+
+    if (starts_with(trimmed, "asm {") || strcmp(trimmed, "asm{") == 0) {
+        char asm_text[MAX_ASM_TEXT];
+        asm_text[0] = '\0';
+        const char *open = strchr(trimmed, '{');
+        const char *close = open ? strrchr(open + 1, '}') : nullptr;
+        if (open && close && close > open) {
+            char inside[MAX_LINE];
+            int ilen = (int)(close - open - 1);
+            if (ilen >= (int)sizeof(inside)) ilen = (int)sizeof(inside) - 1;
+            if (ilen < 0) ilen = 0;
+            strncpy(inside, open + 1, ilen);
+            inside[ilen] = '\0';
+            char line_text[MAX_LINE];
+            normalize_asm_line(inside, line_text, sizeof(line_text));
+            asm_append_line(asm_text, sizeof(asm_text), line_text);
+        }
+        emit_asm_stmt(asm_text, c_indent);
+        return;
+    }
+
+    if (starts_with(trimmed, "asm ")) {
+        const char *payload = skip_spaces(trimmed + 3);
+        char asm_text[MAX_ASM_TEXT];
+        normalize_asm_line(payload, asm_text, sizeof(asm_text));
+        emit_asm_stmt(asm_text, c_indent);
         return;
     }
 
@@ -4578,6 +5856,68 @@ static void process_file(void) {
                 continue;
             }
 
+            if (strcmp(t, "asm:") == 0) {
+                int asm_base_indent = ind;
+                char asm_text[MAX_ASM_TEXT];
+                asm_text[0] = '\0';
+                init_idx++;
+                while (init_idx < num_lines) {
+                    const char *aline = source_lines[init_idx];
+                    const char *atrim = trim(aline);
+                    int aind = indent_level(aline);
+                    if (atrim[0] == '\0' || atrim[0] == '#') { init_idx++; continue; }
+                    if (aind <= asm_base_indent) break;
+                    char line_text[MAX_LINE];
+                    normalize_asm_line(atrim, line_text, sizeof(line_text));
+                    asm_append_line(asm_text, sizeof(asm_text), line_text);
+                    init_idx++;
+                }
+                emit_asm_stmt(asm_text, 1);
+                continue;
+            }
+
+            if (starts_with(t, "asm {") || strcmp(t, "asm{") == 0) {
+                char asm_text[MAX_ASM_TEXT];
+                asm_text[0] = '\0';
+                const char *open = strchr(t, '{');
+                const char *close = open ? strrchr(open + 1, '}') : nullptr;
+                if (open && close && close > open) {
+                    char inside[MAX_LINE];
+                    int ilen = (int)(close - open - 1);
+                    if (ilen >= (int)sizeof(inside)) ilen = (int)sizeof(inside) - 1;
+                    if (ilen < 0) ilen = 0;
+                    strncpy(inside, open + 1, ilen);
+                    inside[ilen] = '\0';
+                    char line_text[MAX_LINE];
+                    normalize_asm_line(inside, line_text, sizeof(line_text));
+                    asm_append_line(asm_text, sizeof(asm_text), line_text);
+                    init_idx++;
+                } else {
+                    init_idx++;
+                    while (init_idx < num_lines) {
+                        const char *aline = source_lines[init_idx];
+                        const char *atrim = trim(aline);
+                        if (atrim[0] == '\0' || atrim[0] == '#') { init_idx++; continue; }
+                        if (strcmp(atrim, "}") == 0) { init_idx++; break; }
+                        char line_text[MAX_LINE];
+                        normalize_asm_line(atrim, line_text, sizeof(line_text));
+                        asm_append_line(asm_text, sizeof(asm_text), line_text);
+                        init_idx++;
+                    }
+                }
+                emit_asm_stmt(asm_text, 1);
+                continue;
+            }
+
+            if (starts_with(t, "asm ")) {
+                const char *payload = skip_spaces(t + 3);
+                char asm_text[MAX_ASM_TEXT];
+                normalize_asm_line(payload, asm_text, sizeof(asm_text));
+                emit_asm_stmt(asm_text, 1);
+                init_idx++;
+                continue;
+            }
+
             /* Module-level control flow — handle inline (NOT translate_block with base=-1,
                because that would consume ALL remaining lines since indent is always >= 0) */
             if (starts_with(t, "if ") && ends_with(t, ":")) {
@@ -4828,6 +6168,8 @@ int main(int argc, char *argv[]) {
     }
 
     fprintf(stderr, "[seed_cpp] All files loaded (%d lines total). Starting processing...\n", num_lines);
+    fprintf(stderr, "[seed_cpp] Applying conditional compilation (@when/@cfg and #if/#elif/#else/#endif)...\n");
+    preprocess_conditional_directives();
     process_file();
     fprintf(stderr, "[seed_cpp] Processing complete. Output size: %d bytes\n", out_pos);
 

@@ -293,9 +293,9 @@ use simple_runtime::value::ffi::file_io::{
 
 ### File Metadata & Checks
 ```simple
-// Check if file exists
+# Check if file exists
 if rt_file_exists("config.json") {
-    // Get file metadata
+    # Get file metadata
     val exists, is_file, is_dir, readable, writable, size;
     rt_file_stat("config.json", &exists, &is_file, &is_dir, &readable, &writable, &size);
     print("File size: {size} bytes");
@@ -304,70 +304,70 @@ if rt_file_exists("config.json") {
 
 ### High-Level File Operations
 ```simple
-// Read configuration file
+# Read configuration file
 val content = rt_file_read_text("config.json");
 
-// Modify and write back
+# Modify and write back
 val new_content = modify_config(content);
 rt_file_write_text("config.json", new_content);
 
-// Backup the file
+# Backup the file
 rt_file_copy("config.json", "config.json.bak");
 
-// Remove old backup
+# Remove old backup
 rt_file_remove("config.json.old");
 
-// Rename file
+# Rename file
 rt_file_rename("temp.txt", "final.txt");
 ```
 
 ### Directory Operations
 ```simple
-// Create directory structure
+# Create directory structure
 rt_dir_create("data/logs", recursive=true);
 
-// List directory contents
+# List directory contents
 val entries = rt_dir_list("data/");
 for entry in entries {
     print(entry);
 }
 
-// Find all text files
+# Find all text files
 val text_files = rt_file_find("data/", "*.txt", recursive=true);
 
-// Remove directory
+# Remove directory
 rt_dir_remove("temp/", recursive=true);
 ```
 
 ### Path Manipulation
 ```simple
-// Extract path components
+# Extract path components
 val path = "/home/user/document.txt";
-val filename = rt_path_basename(path);  // "document.txt"
-val directory = rt_path_dirname(path);   // "/home/user"
-val extension = rt_path_ext(path);       // "txt"
+val filename = rt_path_basename(path);  # "document.txt"
+val directory = rt_path_dirname(path);   # "/home/user"
+val extension = rt_path_ext(path);       # "txt"
 
-// Get absolute path
+# Get absolute path
 val abs_path = rt_path_absolute("../data/file.txt");
 
-// Platform-specific separator
-val sep = rt_path_separator();  // "/" on Unix, "\\" on Windows
+# Platform-specific separator
+val sep = rt_path_separator();  # "/" on Unix, "\\" on Windows
 ```
 
 ### Memory-Mapped I/O
 ```simple
-// Open file for memory mapping
-val fd = rt_file_open("large_file.dat", mode=0);  // ReadOnly
+# Open file for memory mapping
+val fd = rt_file_open("large_file.dat", mode=0);  # ReadOnly
 
-// Memory map the file
+# Memory map the file
 val addr = rt_file_mmap(null, size, prot, flags, fd, offset=0);
 
-// Advise kernel on access pattern
+# Advise kernel on access pattern
 rt_file_madvise(addr, size, MADV_SEQUENTIAL);
 
-// Process data directly from memory...
+# Process data directly from memory...
 
-// Sync changes to disk
+# Sync changes to disk
 rt_file_msync(addr, size, MS_SYNC);
 
 // Unmap and close

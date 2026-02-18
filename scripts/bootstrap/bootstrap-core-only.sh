@@ -21,25 +21,25 @@ echo "✅ seed_cpp built"
 
 echo ""
 echo "[2/4] Preparing source files (CORE ONLY)..."
-find src/compiler_core -name '*.spl' -type f | \
+find src/compiler -name '*.spl' -type f | \
     grep -v '/test' | \
     grep -v '_test\.spl$' | \
     grep -v '_spec\.spl$' | \
     grep -v '_phase[0-9]' | \
     grep -v 'associated_types' | \
-    grep -v '^src/compiler_core/aop' | \
-    grep -v '^src/compiler_core/arch_rules' | \
-    grep -v '^src/compiler_core/async' | \
-    grep -v '^src/compiler_core/borrow' | \
-    grep -v '^src/compiler_core/backend' | \
-    grep -v '^src/compiler_core/linker' | \
-    grep -v '^src/compiler_core/loader' | \
-    grep -v '^src/compiler_core/effects' | \
-    grep -v '^src/compiler_core/trait' | \
+    grep -v '^src/compiler/aop' | \
+    grep -v '^src/compiler/arch_rules' | \
+    grep -v '^src/compiler/async' | \
+    grep -v '^src/compiler/borrow' | \
+    grep -v '^src/compiler/backend' | \
+    grep -v '^src/compiler/linker' | \
+    grep -v '^src/compiler/loader' | \
+    grep -v '^src/compiler/effects' | \
+    grep -v '^src/compiler/trait' | \
     grep -v '/main\.spl$' | \
     sort > /tmp/core_files_only.txt
 
-echo "src/compiler_core/bootstrap_main.spl" >> /tmp/core_files_only.txt
+echo "src/compiler/bootstrap_main.spl" >> /tmp/core_files_only.txt
 
 echo "✅ $(wc -l < /tmp/core_files_only.txt) files selected"
 

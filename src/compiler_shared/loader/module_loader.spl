@@ -15,8 +15,8 @@ use ..loader.compiler_ffi.*
 use ..linker.obj_taker.*
 use ..linker.smf_reader.*
 use ..loader.object_provider.{ObjectProvider, ObjectProviderConfig}
+use .object_mapper.{LoaderMapper, LoaderMapperConfig}
 use .jit_instantiator.*
-use ..loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_free_exec_memory}
 
 # ============================================================================
 # Loaded Module
@@ -101,6 +101,8 @@ struct ModuleLoader:
     provider: ObjectProvider
     # JIT instantiator
     jit: JitInstantiator
+    # Loader policy wrapper over shared exec mapper
+    loader_mapper: LoaderMapper
     # Loaded modules cache: path -> module
     modules: Dict<text, LoadedModule>
     # Global symbol table: name -> (module_path, symbol)
@@ -140,6 +142,9 @@ fn moduleloader_new(config: ModuleLoaderConfig) -> ModuleLoader:
             obj_taker: ObjTaker__with_compiler_context(compiler_ctx, obj_taker_config),
             provider: provider,
             jit: JitInstantiator__new(jit_config),
+            loader_mapper: LoaderMapper.new(LoaderMapperConfig(
+                allow_replace_on_reload: config.hot_reload
+            )),
             modules: {},
             global_symbols: {},
             config: config
@@ -168,21 +173,19 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         if self.config.verbose:
             print "[loader] Loading: {path}"
 
-        # Open SMF file (provider can still leverage SmfReaderImpl)
-        val reader_result = SmfReaderImpl__open(path)
+        # Prefer shared object provider so we work for .smf and .lsm inputs.
+        var reader_result = self.provider.get_reader(path)
         if reader_result_is_err(reader_result):
-            return loadresult_Error(message: reader_result.unwrap_err())
+            # Fallback to direct file reader (legacy path)
+            reader_result = SmfReaderImpl__open(path)
+            if reader_result_is_err(reader_result):
+                return loadresult_Error(message: reader_result.unwrap_err())
 
         val reader = reader_result_value
 
-        # Load metadata for JIT
-        val metadata_result = reader_read_note_sdn(reader)
-        if metadata_result_is_ok(metadata_result):
-            self.jit_load_smf_metadata(jit, path)
-
         # Build loaded module
         var symbols: Dict<text, LoadedSymbol> = {}
-        for smf_sym in reader_exported_symbols(reader):
+        for smf_sym in reader.exported_symbols():
             # Read code bytes for symbol
             val code_result = reader.read_code(smf_sym)
             if code_result_is_err(code_result):
@@ -190,7 +193,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
 
             val code = code_result_value
             # Allocate executable memory and write code
-            val exec_addr = moduleloader_allocate_exec(self, code)
+            val exec_addr = moduleloader_allocate_exec_module(self, path, smf_sym.name, code, false)
             if exec_addr == 0:
                 return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
 
@@ -232,9 +235,7 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
         # Check global symbol table
         if self.global_symbols_contains_key(global_symbols, name):
             val _destruct_0 = self.global_symbols[name]
-            val mod_path = _destruct_0[0]
             val symbol = _destruct_0[1]
-            val module = self.modules[mod_path]
 
             # Return already-installed executable symbol
             return symbolresult_Found(symbol: symbol, code: [])
@@ -244,10 +245,15 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
             val jit_result = self.jit_try_jit_instantiate(jit, name)
             match jit_result:
                 case Success(code, sym_name, address):
+                    var owner_id = "__jit__"
+                    val mapped_rec = self.jit.exec_mapper.get_record(sym_name)
+                    if mapped_rec.?:
+                        owner_id = mapped_rec.unwrap().owner_id
+
                     val exec_addr = if address.?:
                         address.unwrap()
                     else:
-                        moduleloader_allocate_exec(self, code)
+                        moduleloader_allocate_exec_jit(self, owner_id, sym_name, code)
                     if exec_addr == 0:
                         return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
                     val loaded_sym = LoadedSymbol(
@@ -259,7 +265,7 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                         is_jit: true,
                         file_offset: 0
                     )
-                    self.global_symbols[sym_name] = ("__jit__", loaded_sym)
+                    self.global_symbols[sym_name] = (owner_id, loaded_sym)
                     return symbolresult_JitCompiled(symbol: loaded_sym, code: code)
 
                 case NotFound(n):
@@ -297,7 +303,7 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                     )
                     match result:
                         case Code(bytes, sym, _):
-                            val exec_addr = moduleloader_allocate_exec(self, bytes)
+                            val exec_addr = moduleloader_allocate_exec_module(self, path, mangled, bytes, false)
                             if exec_addr == 0:
                                 return symbolresult_Error(message: "Failed to allocate executable memory for {mangled}")
                             val loaded_sym = LoadedSymbol(
@@ -354,37 +360,40 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
     if not self.modules_contains_key(modules, path):
         return
 
-    val module = self.modules[path]
-    for _item in module.symbols:
-        val sym = _item[1]
-        if sym.address != 0 and sym.size > 0:
-            native_free_exec_memory(sym.address, sym.size)
-        # Remove from global symbol table if present
-        if self.global_symbols_contains_key(global_symbols, sym.name):
-            self.global_symbols_remove(global_symbols, sym.name)
+    var owned_symbols: [text] = []
+    for _item in self.global_symbols:
+        val sym_name = _item[0]
+        val _destruct_3 = _item[1]
+        val owner = _destruct_3[0]
+        if owner == path:
+            owned_symbols = owned_symbols.push(sym_name)
+
+    for sym_name in owned_symbols:
+        # Remove all global table entries tied to module path, including
+        # generic/JIT-derived symbols that are not part of base exports.
+        self.global_symbols_remove(global_symbols, sym_name)
+        self.jit_drop_cached_symbol(jit, sym_name)
+
+    _ = self.loader_mapper.unmap_owner(self.jit.exec_mapper, path)
     self.modules_remove(modules, path)
 
-fn moduleloader_allocate_exec(self: ModuleLoader, code: [u8]) -> i64:
+fn moduleloader_allocate_exec_module(self: ModuleLoader, owner_id: text, symbol: text, code: [u8], allow_replace: bool) -> i64:
     """Allocate executable memory and copy code."""
-    val size = code_len(code) as i64
-    if size == 0:
+    val mapped = self.loader_mapper.map(self.jit.exec_mapper, owner_id, symbol, code, allow_replace)
+    if mapped.is_err():
+        if self.config.verbose:
+            print "[loader] map_symbol failed for {symbol}: {mapped.unwrap_err()}"
         return 0
+    mapped.unwrap()
 
-    val addr = native_alloc_exec_memory(size)
-    if addr == 0:
+fn moduleloader_allocate_exec_jit(self: ModuleLoader, owner_id: text, symbol: text, code: [u8]) -> i64:
+    """Allocate executable memory for JIT fallback path via JIT mapper policy."""
+    val mapped = self.jit.jit_mapper.map(self.jit.exec_mapper, owner_id, symbol, code)
+    if mapped.is_err():
+        if self.config.verbose:
+            print "[loader] jit map failed for {symbol}: {mapped.unwrap_err()}"
         return 0
-
-    val written = native_write_exec_memory(addr, code, 0)
-    if written != size:
-        native_free_exec_memory(addr, size)
-        return 0
-
-    val ok = native_make_executable(addr, size)
-    if not ok:
-        native_free_exec_memory(addr, size)
-        return 0
-
-    addr
+    mapped.unwrap()
 
 # ============================================================================
 # Exports

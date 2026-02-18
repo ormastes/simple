@@ -282,14 +282,14 @@ rt_atomic_int_free(counter);
 
 ### Lock-Free Flag
 ```simple
-// Create atomic flag for initialization check
+# Create atomic flag for initialization check
 val initialized = rt_atomic_bool_new(false);
 
-// Thread-safe initialization check
+# Thread-safe initialization check
 if !rt_atomic_bool_load(initialized) {
-    // First thread gets here
+    # First thread gets here
     if rt_atomic_bool_swap(initialized, true) == false {
-        // Actually initialize (only one thread succeeds)
+        # Actually initialize (only one thread succeeds)
         initialize_system();
     }
 }
@@ -299,18 +299,18 @@ rt_atomic_bool_free(initialized);
 
 ### Compare-And-Swap
 ```simple
-// Lock-free linked list node insertion
-val head = rt_atomic_int_new(0);  // Pointer to head node
+# Lock-free linked list node insertion
+val head = rt_atomic_int_new(0);  # Pointer to head node
 
 loop {
     val current_head = rt_atomic_int_load(head);
-    val new_node = create_node(current_head);  // Link to current head
+    val new_node = create_node(current_head);  # Link to current head
 
-    // Try to swap head pointer
+    # Try to swap head pointer
     if rt_atomic_int_compare_exchange(head, current_head, new_node) {
-        break;  // Success!
+        break;  # Success!
     }
-    // Retry if another thread changed head
+    # Retry if another thread changed head
 }
 
 rt_atomic_int_free(head);
@@ -318,18 +318,18 @@ rt_atomic_int_free(head);
 
 ### Simple Spinlock
 ```simple
-// Create atomic flag for spinlock
+# Create atomic flag for spinlock
 val lock = rt_atomic_flag_new();
 
-// Acquire lock
+# Acquire lock
 while rt_atomic_flag_test_and_set(lock) {
-    // Spin until lock is acquired
+    # Spin until lock is acquired
 }
 
-// Critical section
+# Critical section
 perform_critical_operation();
 
-// Release lock
+# Release lock
 rt_atomic_flag_clear(lock);
 
 rt_atomic_flag_free(lock);
@@ -337,10 +337,10 @@ rt_atomic_flag_free(lock);
 
 ### One-Time Initialization
 ```simple
-// Create once primitive
+# Create once primitive
 val once = rt_once_new();
 
-// Multiple threads can call this, but initialization happens once
+# Multiple threads can call this, but initialization happens once
 if !rt_once_is_completed(once) {
     rt_once_call(once, initialization_function);
 }
@@ -350,18 +350,18 @@ rt_once_free(once);
 
 ### Bitwise Operations
 ```simple
-// Create atomic bit flags
+# Create atomic bit flags
 val flags = rt_atomic_int_new(0);
 
-// Set bits (thread-safe)
-rt_atomic_int_fetch_or(flags, 0b0001);  // Set bit 0
-rt_atomic_int_fetch_or(flags, 0b0100);  // Set bit 2
+# Set bits (thread-safe)
+rt_atomic_int_fetch_or(flags, 0b0001);  # Set bit 0
+rt_atomic_int_fetch_or(flags, 0b0100);  # Set bit 2
 
-// Clear bits
-rt_atomic_int_fetch_and(flags, !0b0001);  // Clear bit 0
+# Clear bits
+rt_atomic_int_fetch_and(flags, !0b0001);  # Clear bit 0
 
-// Toggle bits
-rt_atomic_int_fetch_xor(flags, 0b0100);  // Toggle bit 2
+# Toggle bits
+rt_atomic_int_fetch_xor(flags, 0b0100);  # Toggle bit 2
 
 rt_atomic_int_free(flags);
 ```

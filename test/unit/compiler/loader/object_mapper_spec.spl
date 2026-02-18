@@ -1,0 +1,132 @@
+use compiler.loader.object_mapper.{
+    SharedExecMapper,
+    SharedExecMapperConfig,
+    LoaderMapper,
+    LoaderMapperConfig,
+    JitMapper,
+    JitMapperConfig
+}
+
+fn build_mapper() -> SharedExecMapper:
+    SharedExecMapper.new(SharedExecMapperConfig(verbose: false))
+
+fn tiny_code() -> [u8]:
+    # Single-byte RET; sufficient for map/write/protect tests without execution.
+    [195]
+
+describe "SharedExecMapper":
+    it "maps symbol and supports lookup/unmap":
+        var mapper = build_mapper()
+
+        val mapped = mapper.map_symbol("module_a.smf", "fn_a", tiny_code(), false)
+        expect(mapped.is_ok()).to_equal(true)
+
+        val addr = mapped.unwrap()
+        expect(addr > 0).to_equal(true)
+
+        val found = mapper.lookup("fn_a")
+        expect(found.?).to_equal(true)
+        expect(found.unwrap()).to_equal(addr)
+
+        val stats = mapper.stats()
+        expect(stats.mapped_symbols).to_equal(1)
+        expect(stats.owner_count).to_equal(1)
+
+        val removed = mapper.unmap_symbol("fn_a")
+        expect(removed).to_equal(true)
+
+    it "rejects duplicate map when replace disabled":
+        var mapper = build_mapper()
+
+        val first = mapper.map_symbol("module_a.smf", "dup_fn", tiny_code(), false)
+        expect(first.is_ok()).to_equal(true)
+
+        val second = mapper.map_symbol("module_a.smf", "dup_fn", tiny_code(), false)
+        expect(second.is_err()).to_equal(true)
+
+        _ = mapper.unmap_symbol("dup_fn")
+
+    it "replaces mapped symbol when replace enabled":
+        var mapper = build_mapper()
+
+        val first = mapper.map_symbol("module_a.smf", "replace_fn", tiny_code(), false)
+        expect(first.is_ok()).to_equal(true)
+
+        val second_code: [u8] = [144, 195]  # NOP; RET
+        val second = mapper.map_symbol("module_a.smf", "replace_fn", second_code, true)
+        expect(second.is_ok()).to_equal(true)
+
+        val record = mapper.get_record("replace_fn")
+        expect(record.?).to_equal(true)
+        expect(record.unwrap().generation).to_equal(2)
+
+        _ = mapper.unmap_symbol("replace_fn")
+
+    it "unmaps all symbols owned by module path":
+        var mapper = build_mapper()
+
+        val r1 = mapper.map_symbol("owner_a", "a1", tiny_code(), false)
+        val r2 = mapper.map_symbol("owner_a", "a2", tiny_code(), false)
+        val r3 = mapper.map_symbol("owner_b", "b1", tiny_code(), false)
+        expect(r1.is_ok()).to_equal(true)
+        expect(r2.is_ok()).to_equal(true)
+        expect(r3.is_ok()).to_equal(true)
+
+        val removed = mapper.unmap_owner("owner_a")
+        expect(removed).to_equal(2)
+
+        expect(mapper.lookup("a1").?).to_equal(false)
+        expect(mapper.lookup("a2").?).to_equal(false)
+        expect(mapper.lookup("b1").?).to_equal(true)
+
+        _ = mapper.unmap_symbol("b1")
+
+describe "LoaderMapper policy":
+    it "rejects replace when reload replace disabled":
+        var mapper = build_mapper()
+        val loader_mapper = LoaderMapper.new(LoaderMapperConfig(
+            allow_replace_on_reload: false
+        ))
+
+        val first = loader_mapper.map(mapper, "owner_mod", "fn_replace", tiny_code(), false)
+        expect(first.is_ok()).to_equal(true)
+
+        val second = loader_mapper.map(mapper, "owner_mod", "fn_replace", tiny_code(), true)
+        expect(second.is_err()).to_equal(true)
+
+        _ = mapper.unmap_symbol("fn_replace")
+
+    it "allows replace when reload replace enabled":
+        var mapper = build_mapper()
+        val loader_mapper = LoaderMapper.new(LoaderMapperConfig(
+            allow_replace_on_reload: true
+        ))
+
+        val first = loader_mapper.map(mapper, "owner_mod", "fn_hot", tiny_code(), false)
+        expect(first.is_ok()).to_equal(true)
+
+        val second = loader_mapper.map(mapper, "owner_mod", "fn_hot", [144, 195], true)
+        expect(second.is_ok()).to_equal(true)
+
+        val rec = mapper.get_record("fn_hot")
+        expect(rec.?).to_equal(true)
+        expect(rec.unwrap().generation).to_equal(2)
+
+        _ = mapper.unmap_symbol("fn_hot")
+
+describe "JitMapper policy":
+    it "uses default owner when owner id empty":
+        var mapper = build_mapper()
+        val jit_mapper = JitMapper.new(JitMapperConfig(
+            default_owner: "__jit_default__",
+            allow_replace: true
+        ))
+
+        val mapped = jit_mapper.map(mapper, "", "jit_fn", tiny_code())
+        expect(mapped.is_ok()).to_equal(true)
+
+        val rec = mapper.get_record("jit_fn")
+        expect(rec.?).to_equal(true)
+        expect(rec.unwrap().owner_id).to_equal("__jit_default__")
+
+        _ = mapper.unmap_symbol("jit_fn")

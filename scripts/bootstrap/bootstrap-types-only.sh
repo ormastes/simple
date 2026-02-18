@@ -27,9 +27,9 @@ echo ""
 echo "[2/4] Preparing type definition files..."
 
 cat > /tmp/core_files_types_only.txt <<'EOF'
-src/compiler_core/backend_types.spl
-src/compiler_core/backend/backend_types.spl
-src/compiler_core/bootstrap_types_main.spl
+src/compiler/backend_types.spl
+src/compiler/backend/backend_types.spl
+src/compiler/bootstrap_types_main.spl
 EOF
 
 echo "✅ $(wc -l < /tmp/core_files_types_only.txt) files selected"
@@ -37,7 +37,7 @@ echo "✅ $(wc -l < /tmp/core_files_types_only.txt) files selected"
 # Step 3: Create types-only bootstrap main
 echo ""
 echo "[2.5/4] Creating types-only bootstrap main..."
-cat > src/compiler_core/bootstrap_types_main.spl <<'MAIN'
+cat > src/compiler/bootstrap_types_main.spl <<'MAIN'
 # Types-Only Bootstrap Main
 # Purpose: Prove that backend enum/type definitions compile successfully
 
@@ -75,9 +75,9 @@ mkdir -p build/bootstrap
 
 ulimit -s 65536
 ./seed/build/seed_cpp \
-    src/compiler_core/backend_types.spl \
-    src/compiler_core/backend/backend_types.spl \
-    src/compiler_core/bootstrap_types_main.spl \
+    src/compiler/backend_types.spl \
+    src/compiler/backend/backend_types.spl \
+    src/compiler/bootstrap_types_main.spl \
     > build/bootstrap/types_only_raw.cpp 2>/dev/null
 
 # Fix seed_cpp bug: replace "return (int)spl_main();" with "spl_main(); return 0;"

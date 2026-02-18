@@ -780,5 +780,5 @@ This design keeps Simple fast, analyzable, and compiler-driven.
 
 - `doc/research/statistics_library.md` - Research findings
 - `doc/plan/statistics_library_implementation.md` - Implementation plan
-- `doc/spec/custom_blocks.md` - Full custom block specification
+- `doc/guide/custom_blocks_quick_reference.md` - Custom block API quick reference
 - `simple/std_lib/test/features/stats/table_statistics_spec.spl` - Test specification

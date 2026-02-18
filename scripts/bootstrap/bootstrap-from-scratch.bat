@@ -6,9 +6,9 @@ REM Only requires: cmake, clang++ (or MSVC cl.exe), and standard Windows tools.
 REM
 REM Bootstrap chain:
 REM   1. cmake builds seed_cpp from seed\seed.cpp (C++ transpiler)
-REM   2. seed_cpp transpiles src\compiler_core\*.spl -> C++
+REM   2. seed_cpp transpiles src\compiler\*.spl -> C++
 REM   3. clang++ compiles C++ + runtime -> Core1 (minimal native compiler)
-REM   4. Core1 compiles compiler_core -> Core2 (self-hosting check)
+REM   4. Core1 compiles compiler -> Core2 (self-hosting check)
 REM   5. Core2 compiles full compiler -> Full1
 REM   6. Full1 recompiles itself -> Full2 (reproducibility check)
 REM
@@ -46,7 +46,7 @@ set "KEEP_ARTIFACTS=false"
 set "VERBOSE=false"
 set "BUILD_DIR=build\bootstrap"
 set "SEED_DIR=seed"
-set "COMPILER_CORE_DIR=src\compiler_core"
+set "COMPILER_CORE_DIR=src\compiler"
 
 REM QEMU FreeBSD support
 set "QEMU_FREEBSD=false"
@@ -272,7 +272,7 @@ if not exist "%SEED_DIR%\seed.cpp" (
 )
 echo [bootstrap] Seed source: %SEED_DIR%\seed.cpp
 
-REM Count compiler_core files
+REM Count compiler files
 set "CORE_COUNT=0"
 for /r "%COMPILER_CORE_DIR%" %%f in (*.spl) do set /a CORE_COUNT+=1
 if !CORE_COUNT! equ 0 (
@@ -342,7 +342,7 @@ echo [bootstrap] Seed compiler built successfully
 echo.
 
 REM ============================================================================
-REM Step 2: Core1 — seed_cpp transpiles compiler_core
+REM Step 2: Core1 — seed_cpp transpiles compiler
 REM ============================================================================
 
 echo [bootstrap] ================================================================
@@ -430,11 +430,11 @@ echo [bootstrap] Core1 built successfully
 echo.
 
 REM ============================================================================
-REM Step 3: Core2 — Core1 recompiles compiler_core
+REM Step 3: Core2 — Core1 recompiles compiler
 REM ============================================================================
 
 echo [bootstrap] ================================================================
-echo [bootstrap] Step 3: Core2 (Core1 recompiles compiler_core)
+echo [bootstrap] Step 3: Core2 (Core1 recompiles compiler)
 echo [bootstrap] ================================================================
 echo.
 

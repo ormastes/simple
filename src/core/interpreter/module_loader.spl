@@ -14,6 +14,8 @@
 # 2. SIMPLE_LIB environment variable path
 # 3. Fallback to src/std/ (standard library)
 
+use core.frontend.{core_frontend_parse_isolated}
+
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_env_get(key: text) -> text
 extern fn rt_file_exists(path: text) -> i64
@@ -58,11 +60,68 @@ var loaded_module_exports: [[text]] = []
 # Dict for O(1) module loaded check
 var loaded_module_set = {}
 
+# ===== Deferred (Lazy) Module Tracking =====
+
+var deferred_module_names: [text] = []
+var deferred_module_files: [text] = []
+var deferred_module_imports: [[text]] = []
+var deferred_module_set = {}
+
+fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
+    if deferred_module_set.contains_key(name):
+        return
+    deferred_module_names.push(name)
+    deferred_module_files.push(current_file)
+    deferred_module_imports.push(imported_names)
+    deferred_module_set[name] = true
+
+fn is_deferred_module(name: text) -> i64:
+    if deferred_module_set.contains_key(name):
+        return 1
+    0
+
+fn force_deferred_module(name: text) -> i64:
+    # Find the deferred module entry and load it
+    var i: i64 = 0
+    for mod_name in deferred_module_names:
+        if mod_name == name:
+            val current_file = deferred_module_files[i]
+            val imported_names = deferred_module_imports[i]
+            var load_result: i64 = 0
+            if imported_names.len() == 0:
+                load_result = load_module(name, current_file)
+            else:
+                load_result = load_module_selective(name, imported_names, current_file)
+            # Remove from deferred set (mark as loaded)
+            deferred_module_set[name] = false
+            return load_result
+        i = i + 1
+    0
+
+fn try_force_any_deferred_for(symbol_name: text) -> i64:
+    # Try each deferred module until symbol is found
+    var i: i64 = 0
+    for mod_name in deferred_module_names:
+        val still_deferred = deferred_module_set[mod_name]
+        if still_deferred == true:
+            val ok = force_deferred_module(mod_name)
+            if ok == 1:
+                # Check if this module provided the symbol
+                val decl_id = func_table_lookup(symbol_name)
+                if decl_id >= 0:
+                    return 1
+        i = i + 1
+    0
+
 fn module_loader_init():
     loaded_module_paths = []
     loaded_module_file_paths = []
     loaded_module_exports = []
     loaded_module_set = {}
+    deferred_module_names = []
+    deferred_module_files = []
+    deferred_module_imports = []
+    deferred_module_set = {}
 
 fn module_is_loaded(module_path: text) -> i64:
     if loaded_module_set.contains_key(module_path):
@@ -129,9 +188,7 @@ fn resolve_module_path(module_name: text, current_file: text) -> text:
     val simple_lib = rt_env_get("SIMPLE_LIB")
     val has_simple_lib = simple_lib != ""
     val lib_not_nil = simple_lib != nil
-    (
-        val should_check_lib = has_simple_lib and lib_not_nil
-    )
+    val should_check_lib = has_simple_lib and lib_not_nil
     if should_check_lib:
         val lib_path = rt_path_join(simple_lib, relative_path)
         if rt_file_exists(lib_path) == 1:
@@ -157,24 +214,10 @@ fn load_module_source(file_path: text) -> text:
 fn parse_module_ast(source: text, path: text) -> i64:
     # Parse module into AST
     # Returns 1 on success, 0 on failure
-
-    # Save current parser state
-    val saved_had_error = par_had_error
-
-    # Initialize lexer and parser for module
-    lex_init(source)
-    parser_init(source)
-    parse_module(source, path)
-
-    # Check for errors
-    if par_had_error:
-        # Restore parser state and fail
-        par_had_error = saved_had_error
-        return 0
-
-    # Restore parser state
-    par_had_error = saved_had_error
-    1
+    # Uses isolated core frontend path to avoid clobbering caller parse state.
+    if core_frontend_parse_isolated(source, path):
+        return 1
+    0
 
 fn extract_module_exports() -> [text]:
     # Extract exported function names from parsed module
@@ -289,3 +332,5 @@ export module_loader_init
 export load_module, load_module_selective
 export resolve_module_path, module_get_file_path
 export loaded_module_paths, loaded_module_file_paths
+export register_deferred_module, is_deferred_module
+export force_deferred_module, try_force_any_deferred_for

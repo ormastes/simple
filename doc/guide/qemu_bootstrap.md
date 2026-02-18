@@ -12,31 +12,31 @@ All three bootstrap scripts now support building the Simple compiler in a QEMU F
 ### Linux/macOS
 ```bash
 # Auto-detect and use FreeBSD VM
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd
 
 # Specify VM path
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=/path/to/freebsd.qcow2
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=/path/to/freebsd.qcow2
 
 # Custom SSH port
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
 ```
 
 ### Windows
 ```batch
 REM Auto-detect and use FreeBSD VM
-script\bootstrap-from-scratch.bat --qemu-freebsd
+scripts\bootstrap\bootstrap-from-scratch.bat --qemu-freebsd
 
 REM Specify VM path
-script\bootstrap-from-scratch.bat --qemu-freebsd --qemu-vm=C:\VMs\freebsd.qcow2
+scripts\bootstrap\bootstrap-from-scratch.bat --qemu-freebsd --qemu-vm=C:\VMs\freebsd.qcow2
 ```
 
 ### Simple Language
 ```bash
 # Using the Simple script
-bin/release/simple scripts/bootstrap-multiphase.spl --qemu-freebsd
+bin/release/simple scripts/bootstrap/bootstrap-multiphase.spl --qemu-freebsd
 
 # With custom settings
-bin/release/simple scripts/bootstrap-multiphase.spl --qemu-freebsd --qemu-vm=/path/to/vm --qemu-port=10022
+bin/release/simple scripts/bootstrap/bootstrap-multiphase.spl --qemu-freebsd --qemu-vm=/path/to/vm --qemu-port=10022
 ```
 
 ## Prerequisites
@@ -131,7 +131,7 @@ Default SSH port: `10022` (host) → `22` (guest)
 
 Change with `--qemu-port=N`:
 ```bash
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --qemu-port=10023
 ```
 
 ### VM Resources
@@ -208,7 +208,7 @@ Default QEMU settings:
 ### Build Failures
 
 **Error**: `FreeBSD VM bootstrap failed`
-- **Fix**: Check FreeBSD script exists: `scripts/bootstrap-from-scratch-freebsd.sh`
+- **Fix**: Check FreeBSD script exists: `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
 - **Fix**: Ensure dependencies installed in VM: `cmake`, `gmake`, `clang`
 
 ## Performance
@@ -236,10 +236,10 @@ Default QEMU settings:
 Run multiple FreeBSD versions:
 ```bash
 # FreeBSD 14
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd14.qcow2 --qemu-port=10022
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd14.qcow2 --qemu-port=10022
 
 # FreeBSD 13
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd13.qcow2 --qemu-port=10023
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --qemu-vm=freebsd13.qcow2 --qemu-port=10023
 ```
 
 ### Headless Server
@@ -248,7 +248,7 @@ The scripts use QEMU's `-nographic` mode, suitable for headless servers:
 ```bash
 # Works over SSH
 ssh build-server
-./scripts/bootstrap-from-scratch.sh --qemu-freebsd
+./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd
 ```
 
 ### CI/CD Integration
@@ -266,7 +266,7 @@ Example GitHub Actions:
     mv FreeBSD-14.3-RELEASE-amd64.qcow2 build/freebsd/vm/
 
 - name: Bootstrap FreeBSD Build
-  run: ./scripts/bootstrap-from-scratch.sh --qemu-freebsd --skip-verify
+  run: ./scripts/bootstrap/bootstrap-from-scratch.sh --qemu-freebsd --skip-verify
 ```
 
 ## Architecture

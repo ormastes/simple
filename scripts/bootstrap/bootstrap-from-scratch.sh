@@ -12,9 +12,9 @@
 #
 # Bootstrap chain:
 #   1. cmake/ninja builds seed_cpp from seed/seed.cpp (C++ transpiler)
-#   2. seed_cpp transpiles src/compiler_core/*.spl → C++
+#   2. seed_cpp transpiles src/compiler/*.spl → C++
 #   3. clang++ compiles C++ + runtime → Core1 (minimal native compiler)
-#   4. Core1 compiles compiler_core → Core2 (self-hosting check)
+#   4. Core1 compiles compiler → Core2 (self-hosting check)
 #   5. Core2 compiles full compiler → Full1
 #   6. Full1 recompiles itself → Full2 (reproducibility check)
 #
@@ -52,7 +52,7 @@ KEEP_ARTIFACTS=false
 VERBOSE=false
 BUILD_DIR="build/bootstrap"
 SEED_DIR="seed"
-COMPILER_CORE_DIR="src/compiler_core"
+COMPILER_CORE_DIR="src/compiler"
 
 # QEMU FreeBSD support
 QEMU_FREEBSD=false
@@ -347,7 +347,7 @@ step0_prerequisites() {
     fi
     log "Seed source: $SEED_DIR/seed.cpp"
 
-    # Check compiler_core exists
+    # Check compiler exists
     local core_count
     core_count=$(find "$COMPILER_CORE_DIR" -name '*.spl' 2>/dev/null | wc -l)
     if [ "$core_count" -eq 0 ]; then
@@ -429,7 +429,7 @@ step1_build_seed() {
 }
 
 # ============================================================================
-# Step 2: Core1 — seed_cpp transpiles compiler_core to native
+# Step 2: Core1 — seed_cpp transpiles compiler to native
 # ============================================================================
 
 step2_core1() {
@@ -507,12 +507,12 @@ step2_core1() {
 }
 
 # ============================================================================
-# Step 3: Core2 — Core1 recompiles compiler_core
+# Step 3: Core2 — Core1 recompiles compiler
 # ============================================================================
 
 step3_core2() {
     log "================================================================"
-    log "Step 3: Core2 (Core1 recompiles compiler_core)"
+    log "Step 3: Core2 (Core1 recompiles compiler)"
     log "================================================================"
     echo ""
 

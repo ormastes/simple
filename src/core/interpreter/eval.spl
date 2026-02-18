@@ -11,6 +11,7 @@
 # ===== Coverage Instrumentation =====
 extern fn rt_coverage_enabled() -> bool
 extern fn rt_coverage_decision_probe(file: text, line: i64, decision_id: i64, taken: bool)
+extern fn rt_env_get(key: text) -> text
 
 var coverage_counter: i64 = 0
 
@@ -209,6 +210,10 @@ val EVAL_STMT_STATIC_FOR: i64 = 17
 val EVAL_STMT_COMPTIME: i64 = 18
 # STMT_BIND = 20 (from ast.spl, avoids import dependency)
 val EVAL_STMT_BIND: i64 = 20
+# STMT_LAZY_VAL_DECL = 21 (from ast.spl, avoids import dependency)
+val EVAL_STMT_LAZY_VAL_DECL: i64 = 21
+# DECL_LAZY_VAL = 12 (from ast.spl, avoids import dependency)
+val EVAL_DECL_LAZY_VAL: i64 = 12
 
 # ===== Control Flow Flags =====
 var eval_returning: bool = false
@@ -300,21 +305,236 @@ var teardown_functions: [text] = []
 # @when conditional compilation — skipped decl names
 var when_disabled_decls: [text] = []
 
+fn when_env(key: text) -> text:
+    val value = rt_env_get(key)
+    if value == nil:
+        return ""
+    value
+
+fn when_strip_quotes(value: text) -> text:
+    val trimmed = value.trim()
+    if trimmed.len() >= 2:
+        val first = trimmed[0:1]
+        val last = trimmed[trimmed.len() - 1:trimmed.len()]
+        val is_double = first == "\"" and last == "\""
+        val is_single = first == "'" and last == "'"
+        if is_double or is_single:
+            return trimmed[1:trimmed.len() - 1]
+    trimmed
+
+fn when_normalize_os(raw: text) -> text:
+    val value = when_strip_quotes(raw).trim()
+    if value == "":
+        return ""
+
+    if value == "win" or value == "windows" or value == "Windows" or value == "Windows_NT":
+        return "windows"
+    if value.contains("windows") or value.contains("Windows"):
+        return "windows"
+
+    if value == "linux" or value == "Linux":
+        return "linux"
+    if value.contains("linux") or value.contains("Linux"):
+        return "linux"
+
+    if value == "mac" or value == "macos" or value == "darwin" or value == "Darwin":
+        return "macos"
+    if value.contains("darwin") or value.contains("Darwin"):
+        return "macos"
+    if value.contains("macOS") or value.contains("Mac"):
+        return "macos"
+
+    if value == "freebsd" or value == "FreeBSD":
+        return "freebsd"
+    if value.contains("freebsd") or value.contains("FreeBSD"):
+        return "freebsd"
+
+    if value == "openbsd" or value == "OpenBSD":
+        return "openbsd"
+    if value.contains("openbsd") or value.contains("OpenBSD"):
+        return "openbsd"
+
+    if value == "netbsd" or value == "NetBSD":
+        return "netbsd"
+    if value.contains("netbsd") or value.contains("NetBSD"):
+        return "netbsd"
+
+    if value == "android" or value == "Android":
+        return "android"
+    if value.contains("android") or value.contains("Android"):
+        return "android"
+
+    ""
+
+fn when_normalize_arch(raw: text) -> text:
+    val value = when_strip_quotes(raw).trim()
+    if value == "":
+        return ""
+
+    val is_x64 = value == "x86_64" or value == "amd64" or value == "AMD64"
+    val is_x64_2 = value == "x64" or value == "X64"
+    val is_x64_3 = value.contains("x86_64") or value.contains("amd64") or value.contains("AMD64")
+    if is_x64 or is_x64_2 or is_x64_3:
+        return "x86_64"
+
+    val is_x86 = value == "x86" or value == "X86"
+    val is_x86_2 = value == "i386" or value == "i686"
+    val is_x86_3 = value.contains("i386") or value.contains("i686")
+    if is_x86 or is_x86_2 or is_x86_3:
+        return "x86"
+
+    val is_aarch64 = value == "aarch64" or value == "arm64" or value == "ARM64"
+    val is_aarch64_2 = value.contains("aarch64") or value.contains("arm64")
+    if is_aarch64 or is_aarch64_2:
+        return "aarch64"
+
+    val is_arm = value == "arm" or value == "ARM"
+    val is_arm2 = value == "armv7" or value == "armv6"
+    val is_arm3 = value.contains("armv7") or value.contains("armv6")
+    if is_arm or is_arm2 or is_arm3:
+        return "arm"
+
+    if value == "riscv64" or value.contains("riscv64"):
+        return "riscv64"
+    if value == "riscv32" or value.contains("riscv32"):
+        return "riscv32"
+
+    ""
+
+fn when_detect_os() -> text:
+    val forced = when_normalize_os(when_env("SIMPLE_TARGET_OS"))
+    if forced != "":
+        return forced
+
+    val from_os = when_normalize_os(when_env("OS"))
+    if from_os != "":
+        return from_os
+
+    val from_ostype = when_normalize_os(when_env("OSTYPE"))
+    if from_ostype != "":
+        return from_ostype
+
+    val from_platform = when_normalize_os(when_env("PLATFORM"))
+    if from_platform != "":
+        return from_platform
+
+    val from_uname = when_normalize_os(when_env("UNAME"))
+    if from_uname != "":
+        return from_uname
+
+    "unknown"
+
+fn when_detect_arch() -> text:
+    val forced = when_normalize_arch(when_env("SIMPLE_TARGET_ARCH"))
+    if forced != "":
+        return forced
+
+    val from_arch = when_normalize_arch(when_env("PROCESSOR_ARCHITECTURE"))
+    if from_arch != "":
+        return from_arch
+
+    val from_hosttype = when_normalize_arch(when_env("HOSTTYPE"))
+    if from_hosttype != "":
+        return from_hosttype
+
+    val from_machtype = when_normalize_arch(when_env("MACHTYPE"))
+    if from_machtype != "":
+        return from_machtype
+
+    val from_cpu = when_normalize_arch(when_env("CPU"))
+    if from_cpu != "":
+        return from_cpu
+
+    "unknown"
+
+fn when_detect_cpu() -> text:
+    val forced = when_normalize_arch(when_env("SIMPLE_TARGET_CPU"))
+    if forced != "":
+        return forced
+
+    val from_id = when_normalize_arch(when_env("PROCESSOR_IDENTIFIER"))
+    if from_id != "":
+        return from_id
+
+    when_detect_arch()
+
+fn when_eval_key_value(key_raw: text, value_raw: text) -> bool:
+    val key = when_strip_quotes(key_raw).trim()
+    val value = when_strip_quotes(value_raw).trim()
+
+    if key == "os":
+        val expected = when_normalize_os(value)
+        return expected != "" and when_detect_os() == expected
+    if key == "platform":
+        val expected = when_normalize_os(value)
+        return expected != "" and when_detect_os() == expected
+    if key == "arch":
+        val expected = when_normalize_arch(value)
+        return expected != "" and when_detect_arch() == expected
+    if key == "cpu":
+        val expected = when_normalize_arch(value)
+        return expected != "" and when_detect_cpu() == expected
+    if key == "feature":
+        return false
+
+    false
+
 fn when_check_condition(condition: text) -> bool:
-    # Evaluate @when condition: os=linux, os=windows, feature=X, debug, release
-    # Strip whitespace
-    var cond = condition
-    # Simple runtime checks
+    # Evaluate @when condition for build/profile and target predicates.
+    val cond = condition.trim()
+
     if cond == "true": return true
     if cond == "false": return false
     if cond == "debug": return true     # Always true in interpreter mode
     if cond == "release": return false  # False in interpreter mode
     if cond == "interpreter": return true
     if cond == "compiled": return false
-    # Feature flag: @when(feature=X) — always false (not set)
-    if cond.starts_with("feature="):
-        return false
-    # Unknown condition: default to true (don't skip)
+
+    # Platform shorthands
+    if cond == "win" or cond == "windows":
+        return when_detect_os() == "windows"
+    if cond == "linux":
+        return when_detect_os() == "linux"
+    if cond == "mac" or cond == "macos" or cond == "darwin":
+        return when_detect_os() == "macos"
+    if cond == "freebsd":
+        return when_detect_os() == "freebsd"
+    if cond == "openbsd":
+        return when_detect_os() == "openbsd"
+    if cond == "netbsd":
+        return when_detect_os() == "netbsd"
+    if cond == "unix":
+        val os = when_detect_os()
+        val is_unix = os == "linux" or os == "macos"
+        val is_unix2 = os == "freebsd" or os == "openbsd"
+        val is_unix3 = os == "netbsd" or os == "android"
+        return is_unix or is_unix2 or is_unix3
+
+    # CPU/arch shorthands
+    if cond == "x86_64" or cond == "amd64" or cond == "x64":
+        return when_detect_arch() == "x86_64"
+    if cond == "x86" or cond == "i386" or cond == "i686":
+        return when_detect_arch() == "x86"
+    if cond == "aarch64" or cond == "arm64":
+        return when_detect_arch() == "aarch64"
+    if cond == "arm" or cond == "armv7" or cond == "armv6":
+        return when_detect_arch() == "arm"
+    if cond == "riscv64":
+        return when_detect_arch() == "riscv64"
+    if cond == "riscv32":
+        return when_detect_arch() == "riscv32"
+
+    # Key-value forms: os=linux, os=="linux", arch=x86_64, cpu=arm64, feature=foo.
+    if cond.contains("=="):
+        val parts = cond.split("==")
+        if parts.len() >= 2:
+            return when_eval_key_value(parts[0], parts[1])
+    if cond.contains("="):
+        val parts = cond.split("=")
+        if parts.len() >= 2:
+            return when_eval_key_value(parts[0], parts[1])
+
+    # Unknown condition: default to true (don't skip existing code silently).
     true
 
 fn func_table_reset():
@@ -472,7 +692,7 @@ fn must_use_scan_source(source: text):
         # Check for @teardown annotation
         if trimmed.starts_with("# @teardown"):
             pending_teardown = true
-        # Check for @when(condition) conditional compilation
+        # Check for @when(condition) conditional compilation (comment form: backward compat)
         if trimmed.starts_with("# @when("):
             # Extract condition: "# @when(condition)"
             var when_cond_chars: [text] = []
@@ -485,6 +705,35 @@ fn must_use_scan_source(source: text):
                 wci = wci + 1
             val when_cond = when_cond_chars.join("")
             pending_when = when_cond
+        # Check for @cfg(condition) — new proper syntax (no # prefix)
+        if trimmed.starts_with("@cfg("):
+            var cfg_chars: [text] = []
+            var cci: i64 = 5
+            var cfg_depth: i64 = 1
+            for _cc in trimmed:
+                if cci >= trimmed.len(): break
+                val cch = trimmed[cci]
+                if cch == "(":
+                    cfg_depth = cfg_depth + 1
+                if cch == ")":
+                    cfg_depth = cfg_depth - 1
+                    if cfg_depth == 0: break
+                cfg_chars.push(cch)
+                cci = cci + 1
+            var cfg_cond = cfg_chars.join("").trim()
+            # Convert @cfg("key", "value") to key=value form
+            if cfg_cond.contains(","):
+                val cfg_parts = cfg_cond.split(",")
+                if cfg_parts.len() >= 2:
+                    var cfg_key = cfg_parts[0].trim()
+                    var cfg_val = cfg_parts[1].trim()
+                    # Strip quotes
+                    if cfg_key.len() >= 2 and cfg_key.starts_with("\"") and cfg_key.ends_with("\""):
+                        cfg_key = cfg_key[1:cfg_key.len() - 1]
+                    if cfg_val.len() >= 2 and cfg_val.starts_with("\"") and cfg_val.ends_with("\""):
+                        cfg_val = cfg_val[1:cfg_val.len() - 1]
+                    cfg_cond = "{cfg_key}={cfg_val}"
+            pending_when = cfg_cond
         # Check for @must_use
         if trimmed.starts_with("# @must_use"):
             pending_must_use = true
@@ -788,6 +1037,8 @@ fn eval_expr(eid: i64) -> i64:
     if tag == EXPR_PASS_TODO: return val_make_nil()
     if tag == EXPR_PASS_DO_NOTHING: return val_make_nil()
     if tag == EXPR_PASS_DN: return val_make_nil()
+    if tag == EXPR_ASM: return val_make_int(0)
+    if tag == EXPR_ASM_MATCH: return val_make_int(0)
 
     # Identifier
     if tag == EXPR_IDENT: return eval_ident(eid)
@@ -952,7 +1203,14 @@ fn eval_ident(eid: i64) -> i64:
     if local_idx >= 0:
         if env_has_frame():
             val fast_val = env_get_local(local_idx)
-            if fast_val >= 0: return fast_val
+            if fast_val >= 0:
+                if val_is_thunk(fast_val):
+                    val forced = eval_expr(val_thunk_get_expr(fast_val))
+                    if eval_had_error: return -1
+                    env_set_local(local_idx, forced)
+                    env_assign(expr_s_val[eid], forced)
+                    return forced
+                return fast_val
     # Slow path: hash map lookup
     val name = expr_get(eid).s_val
     # Annotation intrinsics: @file, @line, @function
@@ -984,11 +1242,25 @@ fn eval_ident(eid: i64) -> i64:
     if name == "@debug_mode":
         return val_make_bool(false)
     val vid = env_lookup(name)
-    if vid >= 0: return vid
+    if vid >= 0:
+        if val_is_thunk(vid):
+            val forced = eval_expr(val_thunk_get_expr(vid))
+            if eval_had_error: return -1
+            env_assign(name, forced)
+            return forced
+        return vid
     # Check function table
     val decl_id = func_table_lookup(name)
     if decl_id >= 0:
         return val_make_function(name, decl_id)
+    # Try deferred (lazy) modules before giving up
+    val forced_ok = try_force_any_deferred_for(name)
+    if forced_ok == 1:
+        val decl_id2 = func_table_lookup(name)
+        if decl_id2 >= 0:
+            return val_make_function(name, decl_id2)
+        val vid2 = env_lookup(name)
+        if vid2 >= 0: return vid2
     eval_set_error("undefined variable: " + name)
     -1
 
@@ -2001,7 +2273,7 @@ fn eval_builtin_call(name: text, arg_eids: [i64]) -> i64:
                 if eval_had_error: break
                 val mx_did2 = mx_all_decls[mx_i]
                 val mx_tag2 = decl_get(mx_did2).tag
-                if mx_tag2 == DECL_VAL or mx_tag2 == DECL_VAR or mx_tag2 == DECL_ENUM:
+                if mx_tag2 == DECL_VAL or mx_tag2 == DECL_VAR or mx_tag2 == DECL_ENUM or mx_tag2 == EVAL_DECL_LAZY_VAL:
                     eval_decl(mx_did2)
                 mx_i = mx_i + 1
             return val_make_nil()
@@ -2577,6 +2849,7 @@ fn eval_stmt(sid: i64) -> i64:
 
     if tag == STMT_EXPR: return eval_stmt_expr(sid)
     if tag == STMT_VAL_DECL: return eval_stmt_val_decl(sid)
+    if tag == EVAL_STMT_LAZY_VAL_DECL: return eval_stmt_lazy_val_decl(sid)
     if tag == STMT_VAR_DECL: return eval_stmt_var_decl(sid)
     if tag == STMT_ASSIGN: return eval_stmt_assign(sid)
     if tag == STMT_COMPOUND_ASSIGN: return eval_stmt_compound_assign(sid)
@@ -2699,6 +2972,21 @@ fn eval_stmt_val_decl(sid: i64) -> i64:
         if slot >= 0:
             env_set_local(slot, init_val)
     init_val
+
+fn eval_stmt_lazy_val_decl(sid: i64) -> i64:
+    val s_node = stmt_get(sid)
+    val name = s_node.name
+    val init_eid = s_node.expr_idx
+    var thunk_val = val_make_nil()
+    if init_eid >= 0:
+        thunk_val = val_make_thunk(init_eid)
+    env_define(name, thunk_val)
+    # LOAD_FAST: also set fast local slot with the thunk
+    if eval_current_decl_id >= 0:
+        val slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if slot >= 0:
+            env_set_local(slot, thunk_val)
+    thunk_val
 
 fn eval_stmt_var_decl(sid: i64) -> i64:
     val s_node = stmt_get(sid)
@@ -3093,6 +3381,15 @@ fn eval_decl(did: i64) -> i64:
         env_define_global(name, init_val)
         return init_val
 
+    if tag == EVAL_DECL_LAZY_VAL:
+        val lv_name = d_node.name
+        val lv_body = d_node.body_stmts
+        var thunk_val = val_make_nil()
+        if lv_body.len() > 0:
+            thunk_val = val_make_thunk(lv_body[0])
+        env_define_global(lv_name, thunk_val)
+        return thunk_val
+
     if tag == DECL_VAR:
         val name = d_node.name
         val body = d_node.body_stmts
@@ -3120,6 +3417,12 @@ fn eval_decl(did: i64) -> i64:
         val module_path = d_node.name
         val imported_names = d_node.imports
         val current_file = module_get_path()
+
+        # Check if this is a lazy import — defer loading
+        val is_lazy = decl_get_is_lazy(did)
+        if is_lazy == 1:
+            register_deferred_module(module_path, current_file, imported_names)
+            return val_make_nil()
 
         # If imports list is empty, load full module
         # Otherwise, load selective imports
@@ -3211,6 +3514,8 @@ fn eval_module() -> i64:
         if eval_had_error: break
         val tag = decl_get(did).tag
         if tag == DECL_VAL:
+            eval_decl(did)
+        if tag == EVAL_DECL_LAZY_VAL:
             eval_decl(did)
         if tag == DECL_VAR:
             eval_decl(did)

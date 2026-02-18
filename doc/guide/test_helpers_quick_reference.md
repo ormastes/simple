@@ -4,7 +4,7 @@
 ## Import
 
 ```simple
-import testing  // All helpers available
+import testing  # All helpers available
 ```
 
 ---
@@ -76,7 +76,7 @@ print "Took {elapsed} μs"
 
 val result = testing.assert_fast(
     \: query_db(),
-    100000,  // 100ms limit
+    100000,  # 100ms limit
     "Query too slow"
 )
 ```
@@ -143,9 +143,9 @@ testing.assert_len(results, 5, "Should have 5 results")
 
 ```simple
 testing.with_cleanup(
-    \: create_temp_file(),      // Setup
-    \f: delete_file(f),          // Teardown
-    \f: test_file_ops(f)         // Test
+    \: create_temp_file(),      # Setup
+    \f: delete_file(f),          # Teardown
+    \f: test_file_ops(f)         # Test
 )
 
 val result = testing.with_timeout(
@@ -197,7 +197,7 @@ val result = testing.assert_fast(
             sum = sum + i
         sum
     ,
-    10000,  // 10ms limit
+    10000,  # 10ms limit
     "Loop should be fast"
 )
 testing.assert_eq(result, 499500, "Sum should be correct")
@@ -256,18 +256,18 @@ testing.assert_eq(result.len(), data.len(), "All items should be present")
 All helpers provide informative error messages:
 
 ```simple
-// assert_eq failure shows:
-// "Custom message: expected 42, got 43"
+# assert_eq failure shows:
+# "Custom message: expected 42, got 43"
 
-// assert_some failure shows:
-// "Custom message: expected Some, got None"
+# assert_some failure shows:
+# "Custom message: expected Some, got None"
 
-// assert_called failure shows:
-// "Expected 3 calls, got 1"
-// [Call log with details]
+# assert_called failure shows:
+# "Expected 3 calls, got 1"
+# [Call log with details]
 
-// assert_fast failure shows:
-// "Custom message: took 150000μs, limit was 100000μs"
+# assert_fast failure shows:
+# "Custom message: took 150000μs, limit was 100000μs"
 ```
 
 ---
@@ -327,26 +327,26 @@ testing.assert_fast(\: operation(), 1000000, "1 second limit")
 ```simple
 import testing
 
-// Assertions
+# Assertions
 testing.assert_eq(a, b, "msg")
 testing.assert_true(cond, "msg")
 testing.assert_some(opt, "msg") -> T
 testing.assert_ok(res, "msg") -> T
 
-// Timing
+# Timing
 val (result, μs) = testing.measure_time(\: action())
 val result = testing.assert_fast(\: action(), max_μs, "msg")
 
-// Mocks
+# Mocks
 val spy = testing.create_spy("name")
 testing.assert_called(spy, count)
 testing.assert_called_with(spy, args)
 
-// Collections
+# Collections
 testing.assert_contains(list, item, "msg")
 testing.assert_len(list, n, "msg")
 
-// Fixtures
+# Fixtures
 testing.with_cleanup(\: setup(), \x: teardown(x), \x: test(x))
 ```
 

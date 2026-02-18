@@ -520,7 +520,7 @@ val my_block = BlockBuilder("myblock")
 ## Further Reading
 
 - **Full Documentation:** `doc/research/custom_blocks_user_friendly_api.md`
-- **SSpec Tests:** `test/compiler/custom_blocks_easy_api_spec.spl`
+- **SSpec Tests:** `test/unit/compiler/blocks/easy_api_spec.spl`
 - **Built-in Examples:** `src/compiler/blocks/builtin_blocks_defs.spl`
 - **Design Proposals:** `doc/design/custom_blocks_proposal.md`
 
@@ -544,4 +544,4 @@ Need custom block?
 
 ---
 
-**Questions?** See `/doc/guide/custom_blocks_tutorial.md` or ask in community forums.
+**Questions?** See `doc/research/custom_blocks_user_friendly_api.md` or ask in community forums.

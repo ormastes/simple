@@ -1,0 +1,261 @@
+# Object Emitter - turn raw code units into a relocatable object
+#
+# Shared between linker wrapper and loader object provider to avoid
+# duplicating the tiny assembly generation. Produces PIC objects by
+# default so they can be safely linked or mmap'ed as needed.
+
+use compiler_shared.linker.object_code_unit.{ObjectCodeUnit}
+use compiler_shared.ffi.{file_write_bytes}
+use app.io.mod (shell)
+use std.system.{host_arch}
+
+# Public API: assemble code units into relocatable object, preferring a pure
+# ELF64 writer and falling back to clang/cc assembly if something goes wrong.
+fn assemble_code_units(units: [ObjectCodeUnit], obj_path: text, verbose: bool) -> Result<text, text>:
+    if units.len() == 0:
+        return Err("No code units to assemble for {obj_path}")
+
+    val elf_res = write_simple_elf64(units, obj_path, verbose)
+    if elf_res.is_ok():
+        return elf_res
+
+    # Fallback to assembly + clang
+    val asm_res = assemble_via_clang(units, obj_path, verbose)
+    if asm_res.is_ok():
+        return asm_res
+
+    Err(asm_res.unwrap_err())
+
+# ============================================================================
+# ELF64 (relocatable) writer for x86_64 and aarch64 PIC code units
+# ============================================================================
+
+fn write_simple_elf64(units: [ObjectCodeUnit], obj_path: text, verbose: bool) -> Result<text, text>:
+    if units.len() == 0:
+        return Err("No units")
+
+    val arch = host_arch()
+    if arch != "x86_64" and arch != "aarch64":
+        return Err("Unsupported arch {arch} for pure ELF writer")
+
+    # Build .text (concatenate functions back-to-back)
+    var text: [u8] = []
+    var offsets: [i64] = []
+    var current = 0i64
+    for u in units:
+        offsets.push(current)
+        for b in u.bytes:
+            text.push(b)
+        current = current + u.bytes.len() as i64
+
+    val text_size = text.len() as i64
+
+    # Build shstrtab
+    val shstr_entries = ["", ".text", ".shstrtab", ".symtab", ".strtab"]
+    var shstr_bytes: [u8] = []
+    var shstr_offsets: [i32] = []
+    var shstr_cursor = 0i32
+    for name in shstr_entries:
+        shstr_offsets.push(shstr_cursor)
+        for ch in name:
+            shstr_bytes.push(ch as u8)
+            shstr_cursor = shstr_cursor + 1
+        shstr_bytes.push(0)
+        shstr_cursor = shstr_cursor + 1
+    val shstr_size = shstr_bytes.len() as i64
+
+    # Build strtab (symbol names)
+    var strtab: [u8] = [0]  # leading null
+    var str_offsets: [i32] = []
+    for u in units:
+        str_offsets.push(strtab.len() as i32)
+        for ch in u.name:
+            strtab.push(ch as u8)
+        strtab.push(0)
+    val strtab_size = strtab.len() as i64
+
+    # Build symtab
+    val sym_entry_size = 24i64
+    val sym_count = 1 + units.len() as i64
+    var symtab: [u8] = []
+
+    # Null symbol
+    append_u32(symtab, 0)
+    append_u8(symtab, 0)
+    append_u8(symtab, 0)
+    append_u16(symtab, 0)
+    append_u64(symtab, 0)
+    append_u64(symtab, 0)
+
+    var idx = 0
+    while idx < units.len():
+        val u = units[idx]
+        val name_off = str_offsets[idx]
+        val value = offsets[idx]
+        val size = u.bytes.len() as i64
+
+        append_u32(symtab, name_off as u32)
+        append_u8(symtab, 0x12)   # GLOBAL | FUNC
+        append_u8(symtab, 0)
+        append_u16(symtab, 1)     # shndx -> .text
+        append_u64(symtab, value)
+        append_u64(symtab, size)
+
+        idx = idx + 1
+
+    val symtab_size = symtab.len() as i64
+
+    # Layout offsets
+    val ehdr_size = 64i64
+    val text_off = align64(ehdr_size, 16)
+    val shstr_off = align64(text_off + text_size, 1)
+    val strtab_off = align64(shstr_off + shstr_size, 1)
+    val symtab_off = align64(strtab_off + strtab_size, 8)
+    val shoff = align64(symtab_off + symtab_size, 8)
+
+    val shentsize = 64i16
+    val shnum = 5i16
+    val shstrndx = 2i16
+
+    # Build ELF header
+    var elf: [u8] = []
+    # e_ident
+    elf.push(0x7F); elf.push(0x45); elf.push(0x4C); elf.push(0x46); # ELF
+    elf.push(2);    # 64-bit
+    elf.push(1);    # little endian
+    elf.push(1);    # version
+    elf.push(0);    # OS ABI
+    elf.push(0);    # ABI ver
+    var ident_pad = 0
+    while ident_pad < 7:
+        elf.push(0)
+        ident_pad = ident_pad + 1
+    append_u16(elf, 1)      # e_type = ET_REL
+    append_u16(elf, if arch == "x86_64": 62 else: 183)     # e_machine
+    append_u32(elf, 1)      # e_version
+    append_u64(elf, 0)      # e_entry
+    append_u64(elf, 0)      # e_phoff
+    append_u64(elf, shoff)  # e_shoff
+    append_u32(elf, 0)      # e_flags
+    append_u16(elf, 64)     # e_ehsize
+    append_u16(elf, 0)      # e_phentsize
+    append_u16(elf, 0)      # e_phnum
+    append_u16(elf, shentsize) # e_shentsize
+    append_u16(elf, shnum)     # e_shnum
+    append_u16(elf, shstrndx)  # e_shstrndx
+
+    # Pad to text_off
+    while elf.len() < text_off:
+        elf.push(0)
+
+    # Append sections
+    for b in text: elf.push(b)
+    while elf.len() < shstr_off: elf.push(0)
+    for b in shstr_bytes: elf.push(b)
+    while elf.len() < strtab_off: elf.push(0)
+    for b in strtab: elf.push(b)
+    while elf.len() < symtab_off: elf.push(0)
+    for b in symtab: elf.push(b)
+
+    # Section headers
+    while elf.len() < shoff: elf.push(0)
+
+    var sh: [u8] = []
+    # [0] NULL
+    sh_section(sh, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    # [1] .text
+    sh_section(sh, shstr_offsets[1], 1, 0x6, 0, text_off, text_size, 0, 0, 16, 0)
+    # [2] .shstrtab
+    sh_section(sh, shstr_offsets[2], 3, 0, 0, shstr_off, shstr_size, 0, 0, 1, 0)
+    # [3] .symtab
+    sh_section(sh, shstr_offsets[3], 2, 0, 0, symtab_off, symtab_size, 4, 1, 8, sym_entry_size)
+    # [4] .strtab
+    sh_section(sh, shstr_offsets[4], 3, 0, 0, strtab_off, strtab_size, 0, 0, 1, 0)
+
+    for b in sh: elf.push(b)
+
+    val ok = file_write_bytes(obj_path, elf)
+    if not ok:
+        return Err("Failed to write ELF to {obj_path}")
+
+    if verbose:
+        print "[object-emitter] Wrote ELF64 object {obj_path} ({elf.len()} bytes)"
+
+    Ok(obj_path)
+
+fn align64(val: i64, align: i64) -> i64:
+    if align <= 1: return val
+    val rem = val % align
+    if rem == 0: val else: val + (align - rem)
+
+fn sh_section(buf: [u8], name: i32, sh_type: i32, flags: i64, addr: i64, offset: i64, size: i64, link: i32, info: i32, addralign: i64, entsize: i64):
+    append_u32(buf, name as u32)
+    append_u32(buf, sh_type as u32)
+    append_u64(buf, flags)
+    append_u64(buf, addr)
+    append_u64(buf, offset)
+    append_u64(buf, size)
+    append_u32(buf, link as u32)
+    append_u32(buf, info as u32)
+    append_u64(buf, addralign)
+    append_u64(buf, entsize)
+
+fn append_u8(buf: [u8], v: i32):
+    buf.push(v as u8)
+
+fn append_u16(buf: [u8], v: i32):
+    buf.push(bitwise_and(v, 0xFF) as u8)
+    buf.push(bitwise_and(bit_shr(v, 8), 0xFF) as u8)
+
+fn append_u32(buf: [u8], v: i32):
+    buf.push(bitwise_and(v, 0xFF) as u8)
+    buf.push(bitwise_and(bit_shr(v, 8), 0xFF) as u8)
+    buf.push(bitwise_and(bit_shr(v, 16), 0xFF) as u8)
+    buf.push(bitwise_and(bit_shr(v, 24), 0xFF) as u8)
+
+fn append_u64(buf: [u8], v: i64):
+    var shift = 0
+    while shift < 64:
+        buf.push(bitwise_and(bit_shr(v, shift), 0xFF) as u8)
+        shift = shift + 8
+
+# ============================================================================
+# Fallback assembler (clang/cc)
+# ============================================================================
+
+fn assemble_via_clang(units: [ObjectCodeUnit], obj_path: text, verbose: bool) -> Result<text, text>:
+    val asm_path = obj_path + ".S"
+
+    var asm = ".text\n"
+    for code_unit in units:
+        asm = asm + ".globl " + code_unit.name + "\n"
+        asm = asm + ".type " + code_unit.name + ", @function\n"
+        asm = asm + code_unit.name + ":\n"
+        asm = asm + "    .byte "
+        var i = 0
+        while i < code_unit.bytes.len():
+            val b = code_unit.bytes[i]
+            asm = asm + "{b}"
+            if i + 1 < code_unit.bytes.len():
+                asm = asm + ","
+            i = i + 1
+        asm = asm + "\n"
+        asm = asm + "    .size " + code_unit.name + ", .-" + code_unit.name + "\n"
+
+    val asm_res = shell("printf '%s' \"{asm}\" > '{asm_path}'")
+    if asm_res.exit_code != 0:
+        return Err("Failed to write asm for {obj_path}")
+
+    val cc_res = shell("clang -fPIC -c '{asm_path}' -o '{obj_path}' 2>/dev/null || cc -fPIC -c '{asm_path}' -o '{obj_path}'")
+    if cc_res.exit_code != 0:
+        val msg = cc_res.stderr ?? "cc failed"
+        return Err(msg)
+
+    _ = shell("rm -f '{asm_path}'")
+
+    if verbose:
+        print "[object-emitter] Assembled {obj_path} from {units.len()} code units (clang fallback)"
+
+    Ok(obj_path)
+
+export assemble_code_units

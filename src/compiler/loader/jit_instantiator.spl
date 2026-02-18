@@ -6,13 +6,18 @@
 # Phase 5: Load-Time JIT Instantiation
 
 use std.text.{NL}
+use compiler_shared.loader.object_mapper.{
+    SharedExecMapper,
+    SharedExecMapperConfig,
+    JitMapper,
+    JitMapperConfig
+}
 
 # NOTE: compiler_ffi functions are registered as FFI in Rust runtime - no import needed
 # use compiler.loader.compiler_ffi.*
 # mmap functions not yet available in app.io.mod; SmfCache/MappedSmf stubbed locally
 # use compiler.loader.smf_cache (SmfCache, MappedSmf)
-# Executable memory functions not yet available in app.io.mod; stubs used below
-# use app.io.mod (alloc_exec_memory, write_exec_memory, flush_icache, get_function_pointer)
+# Executable memory mapping is handled via compiler_shared.loader.object_mapper
 
 # ============================================================================
 # Compiler Context FFI
@@ -207,30 +212,7 @@ fn type_from_string(type_str: text) -> text:
         "nil" | "Nil" | "()": "Nil"
         _: type_str
 
-# Executable memory stubs (requires platform mmap/VirtualAlloc FFI)
-
-fn alloc_exec_memory(size: i64) -> i64:
-    """Allocate executable memory region. Returns base address or 0 on failure."""
-    # When mmap FFI is available:
-    # mmap(nil, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)
-    eprint("Warning: alloc_exec_memory stub called; executable memory allocation not yet available")
-    0
-
-fn write_exec_memory(address: i64, data: [u8], offset: i64) -> i64:
-    """Write bytes to executable memory. Returns bytes written."""
-    # When available: memcpy(address + offset, data.ptr(), data.len())
-    eprint("Warning: write_exec_memory stub called")
-    0
-
-fn flush_icache(address: i64, size: i64):
-    """Flush instruction cache after writing code. Required on ARM/RISC-V."""
-    # When available: __builtin___clear_cache(address, address + size)
-    pass
-
-fn get_function_pointer(address: i64) -> i64:
-    """Get a callable function pointer from an executable memory address."""
-    # The address itself is the function pointer on most architectures
-    address
+# Executable memory now delegates to shared loader/object mapper.
 
 # ============================================================================
 # Note.sdn Metadata Structures (local stubs for JIT context)
@@ -321,6 +303,8 @@ struct JitInstantiator:
     depth: i32
     jit_cache: Dict<text, ([u8], i64)>
     symbol_table: Dict<text, i64>
+    exec_mapper: SharedExecMapper
+    jit_mapper: JitMapper
     smf_cache: SmfCache  # Memory-mapped SMF file cache
 
 impl JitInstantiator:
@@ -334,6 +318,11 @@ impl JitInstantiator:
             depth: 0,
             jit_cache: {},
             symbol_table: {},
+            exec_mapper: SharedExecMapper.new(SharedExecMapperConfig(verbose: config.verbose)),
+            jit_mapper: JitMapper.new(JitMapperConfig(
+                default_owner: "__jit__",
+                allow_replace: true
+            )),
             smf_cache: SmfCache(
                 cached_files: {},
                 enabled: true,
@@ -360,6 +349,13 @@ impl JitInstantiator:
         """Set cache entry directly (for testing only)."""
         self.jit_cache[symbol] = (code, address)
         self.symbol_table[symbol] = address
+
+    me drop_cached_symbol(symbol: text):
+        """Drop cached JIT bookkeeping for one symbol."""
+        if self.jit_cache.contains_key(symbol):
+            self.jit_cache = self.jit_cache.remove(symbol)
+        if self.symbol_table.contains_key(symbol):
+            self.symbol_table = self.symbol_table.remove(symbol)
 
     me read_note_sdn_from_file(smf_path: text) -> Result<LoadedMetadata, text>:
         """Read note.sdn section from SMF file using mmap cache."""
@@ -485,27 +481,12 @@ impl JitInstantiator:
 
         match code_result:
             case Ok(compiled_code):
-                # Allocate executable memory
-                val code_size = compiled_code.len() as i64
-                val exec_address = alloc_exec_memory(code_size)
-
-                if exec_address == 0:
+                val map_result = self.jit_mapper.map(self.exec_mapper, smf_path, entry.mangled_name, compiled_code)
+                if map_result.is_err():
                     return JitInstantiationResult.CompilationError(
-                        "Failed to allocate executable memory"
+                        "Failed to map executable memory: {map_result.unwrap_err()}"
                     )
-
-                # Write code to executable memory
-                val bytes_written = write_exec_memory(exec_address, compiled_code, 0)
-                if bytes_written != code_size:
-                    return JitInstantiationResult.CompilationError(
-                        "Failed to write code to executable memory"
-                    )
-
-                # Flush instruction cache (required on ARM/RISC-V)
-                flush_icache(exec_address, code_size)
-
-                # Get function pointer
-                val fn_pointer = get_function_pointer(exec_address)
+                val fn_pointer = map_result.unwrap()
 
                 # Cache the result
                 self.jit_cache[entry.mangled_name] = (compiled_code, fn_pointer)

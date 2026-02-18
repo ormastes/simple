@@ -10,6 +10,8 @@ use compiler.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.linker.linker_wrapper.{NativeLinkConfig, link_to_native}
 use compiler.linker.object_resolver.{ObjectFileResolver, resolve_objects_for_modules}
 use compiler_shared.loader.object_provider.{ObjectProvider as LoaderObjectProvider}
+use compiler_shared.linker.object_provider_adapter.{ObjectCodeUnit}
+use compiler_shared.linker.object_emitter.{assemble_code_units}
 use app.io.{file_exists, shell, cwd}
 use std.text.{NL}
 
@@ -115,11 +117,14 @@ struct ResolvedModule:
     smf_data: [u8]
     has_object: bool
     obj_data: [u8]
+    has_code_units: bool
+    code_units: [ObjectCodeUnit]
 
 fn resolve_symbols_from_libraries(
     undefined_symbols: [UndefinedSymbol],
     libraries: [LibraryInfo],
-    verbose: bool
+    verbose: bool,
+    provider: ObjectProvider
 ) -> text:
     """
     Resolve undefined symbols by checking library modules.
@@ -144,30 +149,29 @@ fn resolve_symbols_from_libraries(
             if found:
                 break
 
-            # Create getter for this library
-            var getter = smfgetter_new()
-            val add_result = getter_add_library(getter, lib.path)
-            if add_result_is_err(add_result):
+            # Ensure library indexed in shared provider
+            val add_result = provider.add_library(lib.path)
+            if add_result.is_err():
                 continue
 
             # Check each module in this library
             for module_name in lib.modules:
                 # Get module SMF data
-                val smf_result = getter_get(getter, module_name)
-                if smf_result_is_err(smf_result):
+                val smf_result = provider.get_module_bytes(module_name)
+                if smf_result.is_err():
                     continue
 
-                val smf_data = smf_result_value
+                val smf_data = smf_result.unwrap()
 
                 # Parse module to check for exported symbol
-                val reader_result = smfreadermemory_from_data(smf_data)
-                if reader_result_is_err(reader_result):
+                val reader_result = SmfReaderMemory.from_data(smf_data)
+                if reader_result.is_err():
                     continue
 
-                val reader = reader_result_value
+                val reader = reader_result.unwrap()
 
                 # Check if this module exports the symbol
-                val exported = reader_exported_symbols(reader)
+                val exported = reader.exported_symbols()
                 for exp_sym in exported:
                     if exp_sym.name == sym_name:
                         # Found it!
@@ -179,8 +183,7 @@ fn resolve_symbols_from_libraries(
                         for rm in resolved_modules:
                             val check1 = rm.module_name == module_name
                             val check2 = rm.library_path == lib.path
-                            if check1:
-                                if check2:
+                            if check1 and check2:
                                 already_added = true
                                 break
 
@@ -188,17 +191,26 @@ fn resolve_symbols_from_libraries(
                             # Try to get object file data
                             var obj_data: [u8] = []
                             var has_obj = false
-                            val obj_result = getter_get_object(getter, module_name)
-                            if obj_result_is_ok(obj_result):
-                                obj_data = obj_result_value
+                            var has_units = false
+                            var code_units: [ObjectCodeUnit] = []
+                            val obj_result = provider.get_object(module_name)
+                            if obj_result.is_ok():
+                                obj_data = obj_result.unwrap()
                                 has_obj = true
+                            else:
+                                val code_res = provider.get_exported_code(module_name)
+                                if code_res.is_ok():
+                                    code_units = code_res.unwrap()
+                                    has_units = true
 
                             val resolved = ResolvedModule(
                                 module_name: module_name,
                                 library_path: lib.path,
                                 smf_data: smf_data,
                                 has_object: has_obj,
-                                obj_data: obj_data
+                                obj_data: obj_data,
+                                has_code_units: has_units,
+                                code_units: code_units
                             )
                             resolved_modules_push(resolved_modules, resolved)
 
@@ -309,8 +321,16 @@ fn link_with_libraries(
         print "[linker-lib] Object files: {object_files.len()}"
         print "[linker-lib] Library paths: {config.library_paths.len()}"
 
+    val provider = ObjectProvider__new(ObjectProviderConfig(
+        search_paths: config.library_paths,
+        libraries: [],
+        enable_cache: true,
+        verbose: verbose,
+        prefer_backend: nil
+    ))
+
     # Step 1: Scan for libraries
-    val lib_result = scan_libraries(config.library_paths, verbose)
+    val lib_result = scan_libraries_with_provider(config.library_paths, verbose, provider)
     if lib_result_is_err(lib_result):
         return Err(lib_result_unwrap_err(lib_result))
 
@@ -341,7 +361,7 @@ fn link_with_libraries(
         return link_result
 
     # Step 3: Resolve symbols from libraries
-    val resolve_result = resolve_symbols_from_libraries(undefined, libraries, verbose)
+    val resolve_result = resolve_symbols_from_libraries(undefined, libraries, verbose, provider)
     if resolve_result_is_err(resolve_result):
         return Err(resolve_result_unwrap_err(resolve_result))
 
@@ -399,23 +419,29 @@ fn extract_objects_from_resolved(
     var temp_objects: [text] = []
 
     for module in resolved:
-        if not module.has_object:
-            return Err("Module {module.module_name} missing object file - recompile library with object files")
-
-        # Write object data to temp file
         val safe_name = module.module_name.replace("/", "_")
         val temp_path = "{temp_dir}/simple_lib_{safe_name}.o"
 
-        val write_ok = write_bytes_to_file(temp_path, module.obj_data)
-        if not write_ok:
-            return Err("Failed to write object file: {temp_path}")
+        if module.has_object:
+            val write_ok = write_bytes_to_file(temp_path, module.obj_data)
+            if not write_ok:
+                return Err("Failed to write object file: {temp_path}")
+            if verbose:
+                print "[linker-lib] Extracted {temp_path} ({module.obj_data.len()} bytes)"
+            temp_objects_push(temp_objects, temp_path)
+            continue
 
-        if verbose:
-            print "[linker-lib] Extracted {temp_path} ({module.obj_data.len()} bytes)"
+        if module.has_code_units:
+            val asm_res = assemble_code_units(module.code_units, temp_path, verbose)
+            if asm_res.is_err():
+                return Err(asm_res.unwrap_err())
+            temp_objects_push(temp_objects, temp_path)
+            continue
 
-        temp_objects_push(temp_objects, temp_path)
+        return Err("Module {module.module_name} missing object data")
 
     Ok(temp_objects)
+
 
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
     """Write binary data to file using xxd."""

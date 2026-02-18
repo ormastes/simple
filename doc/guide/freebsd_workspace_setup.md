@@ -42,7 +42,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Bootstrap from scratch (native FreeBSD build)
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
 
 # Verify
 bin/simple --version
@@ -209,12 +209,12 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # Run FreeBSD-specific bootstrap
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
 ```
 
 **Bootstrap steps:**
 1. **Build seed compiler** - cmake compiles `seed/seed.cpp` → `seed_cpp`
-2. **Transpile compiler_core** - `seed_cpp` transpiles `.spl` → `.cpp`
+2. **Transpile compiler** - `seed_cpp` transpiles `.spl` → `.cpp`
 3. **Compile Core1** - clang++ compiles C++ + runtime → minimal compiler
 4. **Self-host Core2** - Core1 recompiles itself (verification)
 5. **Build Full1** - Core2 compiles full Simple compiler
@@ -225,22 +225,22 @@ cd simple
 
 ```bash
 # Skip verification (faster)
-./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --skip-verify
 
 # Use specific compiler
-./scripts/bootstrap-from-scratch-freebsd.sh --cc=g++
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --cc=g++
 
 # Custom output location
-./scripts/bootstrap-from-scratch-freebsd.sh --output=/usr/local/bin/simple
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --output=/usr/local/bin/simple
 
 # Parallel jobs
-./scripts/bootstrap-from-scratch-freebsd.sh --jobs=8
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --jobs=8
 
 # Keep build artifacts
-./scripts/bootstrap-from-scratch-freebsd.sh --keep-artifacts
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --keep-artifacts
 
 # Verbose output
-./scripts/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 ### Verify Installation
@@ -289,7 +289,7 @@ This is expected if:
 
 Skip verification if acceptable:
 ```bash
-./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --skip-verify
 ```
 
 ---
@@ -702,7 +702,7 @@ gmake --version
 df -h
 
 # 4. Re-run with verbose
-./scripts/bootstrap-from-scratch-freebsd.sh --verbose
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose
 ```
 
 **Common errors:**
@@ -741,7 +741,7 @@ pkg install linux-c7
 
 - **VM Setup:** `scripts/setup_freebsd_vm.spl`
 - **FreeBSD Test:** `scripts/test_freebsd_qemu.spl`
-- **Bootstrap:** `scripts/bootstrap-from-scratch-freebsd.sh`
+- **Bootstrap:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
 - **VM Manager:** `src/app/vm/qemu_manager.spl`
 - **Toolchain:** `seed/cmake/toolchains/freebsd-x86_64.cmake`
 - **Platform Header:** `seed/platform/platform_freebsd.h`
@@ -774,7 +774,7 @@ bin/release/simple scripts/test_freebsd_qemu.spl
 pkg install cmake llvm gmake git
 
 # 2. Bootstrap
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
 
 # 3. Verify
 bin/simple --version

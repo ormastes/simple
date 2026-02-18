@@ -64,6 +64,7 @@ cd build/cmake && cmake ../../seed && make
 **Key modules:**
 - `ast.spl`, `ast_types.spl` — Abstract Syntax Tree
 - `parser.spl` — Parser
+- `frontend.spl` — Shared core frontend runner (compiler/interpreter parse entrypoints)
 - `lexer.spl`, `lexer_struct.spl`, `lexer_types.spl` — Lexer
 - `tokens.spl` — Token definitions
 - `types.spl` — Type system
@@ -93,6 +94,7 @@ clang++ -std=c++20 -o build/bootstrap/core_compiler \
 **Key modules:**
 - `lexer/` — Full lexical analysis
 - `parser/` — Full parser
+- `frontend.spl` — Shared full frontend runner (outline → blocks → parser → desugar)
 - `hir/` — High-level IR (extended)
 - `mir/` — Mid-level IR (extended)
 - `codegen/` — Code generation (C/LLVM/Cranelift)
@@ -130,7 +132,7 @@ sha256sum build/bootstrap/full1 build/bootstrap/full2  # Must match
 seed/seed.cpp ──g++──> build/bootstrap/seed_cpp.exe
 seed_cpp.exe + src/core/*.spl + build/bootstrap/shim_nl.spl ──> core1.cpp ──g++──> core1.exe
 core1.exe copied as core2_new.exe (core2 self-host hangs at runtime)
-core2_new.exe + src/compiler_core/*.spl ──build_win.py──> cc_v2_raw.cpp
+core2_new.exe + src/compiler/*.spl ──build_win.py──> cc_v2_raw.cpp
 fix_cpp.py ──> cc_v2_fixed.cpp (struct dedup, reserved words, type fixes, stubs)
 g++ -fpermissive ──> compiler_v2.exe (FAIL: many type errors)
 stub_broken.py ──> cc_v2_stubbed.cpp (stub 542 broken functions)
@@ -164,11 +166,11 @@ g++ -fpermissive ──> compiler_v2.exe (388KB, SUCCESS)
 | `src/core/parser.spl` | Parser (arena-based AST) |
 | `src/core/compiler/c_codegen.spl` | C++ code generation |
 | `src/core/compiler/driver.spl` | Main entry point |
-| `src/compiler_core/` | Full compiler source (~292 files) |
+| `src/compiler/` | Full compiler source (~292 files) |
 | `src/compiler_core_win/build_win.py` | Build orchestrator script |
 | `src/compiler_core_win/fix_cpp.py` | C++ post-processor (struct dedup, reserved words) |
 | `src/compiler_core_win/stub_broken.py` | Stubs functions with compilation errors |
-| `src/compiler_core_win/ffi_shim.spl` | FFI shim for compiler_core |
+| `src/compiler_core_win/ffi_shim.spl` | FFI shim for compiler |
 
 ### Build Command
 
@@ -220,7 +222,7 @@ python src/compiler_core_win/build_win.py
 ```
 seed/seed.cpp ──clang++/g++──> build/bootstrap/seed_cpp (ELF)
 seed_cpp + src/core/*.spl ──> core1.cpp ──clang++──> core1 (ELF)
-core1 + src/compiler_core/*.spl ──> core2 (ELF, self-host check)
+core1 + src/compiler/*.spl ──> core2 (ELF, self-host check)
 core2 + src/app/cli/*.spl ──> full1 (ELF, full compiler)
 full1 + src/app/cli/*.spl ──> full2 (ELF, reproducibility check)
 SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
@@ -325,7 +327,7 @@ clang++ -std=c++20 -O2 -o build/bootstrap/core1 \
     -Iseed -Lseed/build -lspl_runtime -lm -lpthread -ldl
 
 # 4. Self-host check (core2)
-build/bootstrap/core1 compile src/compiler_core/main.spl \
+build/bootstrap/core1 compile src/compiler/main.spl \
     -o build/bootstrap/core2
 
 # 5. Build full compiler (full1)
@@ -392,7 +394,7 @@ CC=riscv64-linux-gnu-gcc CXX=riscv64-linux-gnu-g++ \
 ```
 seed/seed.cpp ──clang++──> seed/build/seed_cpp (FreeBSD ELF)
 seed_cpp + src/core/*.spl ──> core1.cpp ──clang++──> core1 (FreeBSD ELF)
-core1 + src/compiler_core/*.spl ──> core2 (FreeBSD ELF, self-host check)
+core1 + src/compiler/*.spl ──> core2 (FreeBSD ELF, self-host check)
 core2 + src/app/cli/*.spl ──> full1 (FreeBSD ELF, full compiler)
 full1 + src/app/cli/*.spl ──> full2 (FreeBSD ELF, reproducibility check)
 SHA256(full1) == SHA256(full2) ──> bin/simple (verified binary)
@@ -521,7 +523,7 @@ clang++ -std=c++20 -O2 -DSPL_PLATFORM_FREEBSD \
     -Iseed/platform -lpthread -lm
 
 # 4. Self-host check (core2)
-build/bootstrap/core1/simple_core1 src/compiler_core \
+build/bootstrap/core1/simple_core1 src/compiler \
     -o build/bootstrap/core2/simple_core2
 
 # Verify hash match

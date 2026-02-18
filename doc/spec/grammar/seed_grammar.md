@@ -73,3 +73,52 @@
 ---
 
 **Summary:** 25 keywords, 18 operators, 5 constructs
+
+## Conditional Compilation (Platform/CPU)
+
+Seed supports C-style source conditional directives:
+
+- `#if <condition>`
+- `#elif <condition>`
+- `#else`
+- `#endif`
+
+Optional trailing `:` is accepted on hash directives (for example `#if linux:` and `#else:`).
+
+### Supported condition atoms
+
+- OS: `win`, `windows`, `linux`, `mac`, `macos`, `darwin`, `freebsd`, `openbsd`, `netbsd`, `unix`
+- CPU/arch: `x86_64`, `amd64`, `x64`, `aarch64`, `arm64`, `riscv64`, `riscv32`, `arm`
+- Key/value: `os=linux`, `platform=windows`, `arch=x86_64`, `cpu=arm64`
+- Boolean: `true`, `false`, `and`/`&&`, `or`/`||`, `not`/`!`
+- Build: `debug`, `release`, `compiled`, `interpreter`
+
+### Target override environment variables
+
+- `SIMPLE_TARGET_OS`
+- `SIMPLE_TARGET_ARCH`
+- `SIMPLE_TARGET_CPU`
+
+## Binary Completeness Gaps (2026-02-18)
+
+> Hand-maintained status notes. Generated tables above are unchanged.
+
+### Current Seed Limitations For "Generate Any Binary"
+
+| Capability needed for low-level complete binaries | Current seed behavior | Evidence |
+|---|---|---|
+| Bitfield declarations and exact bit layout | Not supported in seed subset | `tools/seed/seed.cpp:32`, `tools/seed/seed.cpp:35` |
+| Packed/representation/alignment controls (`@packed`, `@repr`, `@align`) | No seed-level parse/lowering path | Seed supported-subset list does not include attributes (`tools/seed/seed.cpp:14`) |
+| `union` declarations with C-style layout | No declaration support; only reserved-word rename in emitted C++ | `tools/seed/seed.cpp:3763` |
+| Inline assembly (`asm`) with constraints/clobbers | No asm translation path in seed (only keyword rename macro) | `tools/seed/seed.cpp:3755` |
+| Module/import/export semantics for linker-visible composition | Skipped during translation | `tools/seed/seed.cpp:2929` |
+| Trait/type-style declarations in codegen path | Trait blocks are dropped in parse/emission | `tools/seed/seed.cpp:3700`, `tools/seed/seed.cpp:4245` |
+| Arbitrary custom/raw blocks (including `asm{...}`-style payload workflows) | Translator uses whitelist and drops non-safe patterns in module init | `tools/seed/seed.cpp:4723` |
+
+### Minimum Additions Needed In Seed
+
+1. Add first-class AST+parser support for `bitfield`, `union`, inline `asm`, and custom payload blocks.
+2. Add attribute parsing/lowering for layout and ABI controls (`@repr`, `@packed`, `@align`, `@link_section`, `@addr_space`, `@callconv`, `@naked`, `@interrupt`).
+3. Preserve and lower `use`/`import`/`export`/`mod` semantics instead of skipping them.
+4. Emit deterministic data layout (`packed`, explicit alignment, explicit union storage) rather than dynamic fallbacks.
+5. Add inline asm lowering that carries template, inputs/outputs, clobbers, and volatility options to backend codegen.

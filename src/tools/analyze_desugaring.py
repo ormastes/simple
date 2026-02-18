@@ -50,12 +50,12 @@ def main():
     print("=" * 80)
     print()
     
-    # Analyze compiler_core (desugared)
-    print("📊 Analyzing desugared code (src/compiler_core/)...")
-    core_stats, core_issues = analyze_directory('src/compiler_core')
+    # Analyze compiler (desugared)
+    print("📊 Analyzing desugared code (src/compiler/)...")
+    core_stats, core_issues = analyze_directory('src/compiler')
     
     print()
-    print("DESUGARED CODE (src/compiler_core/)")
+    print("DESUGARED CODE (src/compiler/)")
     print("-" * 80)
     print(f"  Total files:              {core_stats['total_files']:>6}")
     print(f"  Total lines:              {core_stats['total_lines']:>6,}")

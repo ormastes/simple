@@ -6,9 +6,9 @@
 #
 # Bootstrap chain:
 #   1. cmake builds seed_cpp from seed/seed.cpp (C++ transpiler)
-#   2. seed_cpp transpiles src/compiler_core/*.spl → C++
+#   2. seed_cpp transpiles src/compiler/*.spl → C++
 #   3. clang++ compiles C++ + runtime → Core1 (minimal native compiler)
-#   4. Core1 compiles compiler_core → Core2 (self-hosting check)
+#   4. Core1 compiles compiler → Core2 (self-hosting check)
 #   5. Core2 compiles full compiler → Full1
 #   6. Full1 recompiles itself → Full2 (reproducibility check)
 #
@@ -38,7 +38,7 @@ KEEP_ARTIFACTS=false
 VERBOSE=false
 BUILD_DIR="build/bootstrap"
 SEED_DIR="seed"
-COMPILER_CORE_DIR="src/compiler_core"
+COMPILER_CORE_DIR="src/compiler"
 
 # ============================================================================
 # Argument parsing
@@ -191,7 +191,7 @@ step0_prerequisites() {
     fi
     log "Seed source: $SEED_DIR/seed.cpp"
 
-    # Check compiler_core exists
+    # Check compiler exists
     core_count=$(find "$COMPILER_CORE_DIR" -name '*.spl' 2>/dev/null | wc -l | tr -d ' ')
     if [ "$core_count" -eq 0 ]; then
         err "$COMPILER_CORE_DIR has no .spl files"
@@ -238,12 +238,12 @@ step1_build_seed() {
 }
 
 # ============================================================================
-# Step 2: Transpile compiler_core
+# Step 2: Transpile compiler
 # ============================================================================
 
 step2_transpile_core() {
     log "================================================================"
-    log "Step 2: Transpiling compiler_core to C++"
+    log "Step 2: Transpiling compiler to C++"
     log "================================================================"
     echo ""
 
@@ -314,7 +314,7 @@ step4_compile_core2() {
 
     mkdir -p "$BUILD_DIR/core2"
 
-    log "Core1 compiling compiler_core → Core2..."
+    log "Core1 compiling compiler → Core2..."
     run "$BUILD_DIR/core1/simple_core1" \
         "$COMPILER_CORE_DIR" \
         -o "$BUILD_DIR/core2/simple_core2"
