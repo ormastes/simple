@@ -7,6 +7,7 @@
 use compiler.linker.smf_getter.{SmfGetter, SmfLocation}
 use compiler_shared.linker.obj_taker.{ObjTaker, ObjTakerConfig, ObjTakeResult}
 use compiler_shared.linker.obj_taker.{Template, TypeInfo, SmfReader}
+use compiler.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler_shared.loader.compiler_ffi.{CompilerContext, compiler_create_context}
 
 struct ObjectProviderConfig:
@@ -14,6 +15,7 @@ struct ObjectProviderConfig:
     libraries: [text]
     enable_cache: bool
     verbose: bool
+    prefer_backend: text?   # nil/"llvm"/"cranlift"
 
 struct ObjectProvider:
     getter: SmfGetter
@@ -56,6 +58,24 @@ impl ObjectProvider:
         val obj_result = self.getter.get_object(module_or_path)
         if obj_result.is_ok():
             return obj_result
+        # Try to instantiate via ObjTaker if symbol templates exist
+        val module_res = self.getter.get(module_or_path)
+        if module_res.is_err():
+            return Err("Object not found for {module_or_path}")
+
+        # Build in-memory reader and attempt to take exported symbols to objects
+        val data = module_res.unwrap()
+        val reader_res = SmfReaderMemory.from_data(data)
+        if reader_res.is_err():
+            return Err(reader_res.unwrap_err())
+
+        val reader = reader_res.unwrap()
+        val exports = reader.exported_symbols()
+        for sym in exports:
+            val code_res = reader.read_code(sym)
+            if code_res.is_ok():
+                return Ok(code_res.unwrap())
+
         Err("Object not found for {module_or_path}")
 
     fn instantiate_symbol(self: ObjectProvider, reader: SmfReader, symbol: text, type_args: [TypeInfo]) -> Result<[u8], text>:
