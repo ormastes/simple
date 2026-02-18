@@ -17,6 +17,69 @@ bin/simple test --only-slow              # Run slow tests
 bin/simple test --tag=integration        # Filter by tag
 ```
 
+## Container Testing (Safe / Isolated)
+
+Prefer container testing to avoid side effects on the host environment.
+
+```bash
+# Build image (once)
+docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .
+
+# Run tests in container (read-only workspace mount)
+docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
+  simple-test-isolation:latest test                   # All tests
+docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
+  simple-test-isolation:latest test test/unit/        # Unit tests only
+
+# Docker Compose (easiest for local development)
+docker-compose -f config/docker-compose.yml up unit-tests         # Unit tests
+docker-compose -f config/docker-compose.yml up integration-tests  # Integration tests
+docker-compose -f config/docker-compose.yml up system-tests       # System tests
+docker-compose -f config/docker-compose.yml up all-tests          # All tests parallel
+docker-compose -f config/docker-compose.yml run dev-shell         # Interactive shell
+
+# Helper scripts
+scripts/local-container-test.sh unit                       # Unit tests in container
+scripts/local-container-test.sh quick path/to/spec.spl    # Single test
+scripts/local-container-test.sh shell                      # Interactive debugging
+scripts/ci-test.sh                                         # CI-style execution
+```
+
+### Container Testing Troubleshooting
+
+**Container not found:** `docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .`
+**Permission denied:** `chmod +x bin/release/simple` or `sudo usermod -aG docker $USER && newgrp docker`
+**Out of memory:** Increase `--memory=512m` to `--memory=1g` or `--memory=2g`
+**Timeout errors:** Use correct profile: `--profile=slow` (10 min) or `--profile=intensive` (30 min)
+**Tests pass locally, fail in CI:** Run exact CI command: `scripts/ci-test.sh test/unit/`
+
+**Volume mount not working (Windows):**
+- PowerShell: `docker run -v ${PWD}:/workspace:ro ...`
+- CMD: `docker run -v %cd%:/workspace:ro ...`
+
+**Container build fails:**
+- Check runtime exists: `ls -lh bin/release/simple` (should be ~33MB)
+- If missing: `scripts/install.sh` or download from releases
+
+**jq not installed (parse errors):**
+- Ubuntu: `sudo apt install jq`
+- macOS: `brew install jq`
+
+**Docker daemon not running:**
+- Linux: `sudo systemctl start docker`
+- macOS/Windows: Start Docker Desktop
+
+```bash
+# Docker Compose cleanup
+docker-compose -f config/docker-compose.yml run dev-shell
+# Inside: simple test test/unit/failing_spec.spl --verbose
+docker-compose build --no-cache     # Rebuild after Dockerfile changes
+docker-compose down                 # Stop services
+docker system prune -a              # Remove all containers/images
+```
+
+**Full Guide:** `doc/guide/container_testing.md` | **Resource Limits:** `doc/guide/resource_limits.md` | **Test Config:** `simple.test.sdn`
+
 ## Writing Simple BDD Tests
 
 Tests go in `test/` directory. Use `*_spec.spl` naming.

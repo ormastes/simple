@@ -36,3 +36,4 @@ Goal: make loader + linker actually load/execute SMFs by unifying module access 
 ## Immediate next steps (Phase 2 kickoff)
 - Implement real mmap FFI backing in `compiler_shared/loader/smf_mmap_native.spl` and wire an exec arena helper.
 - Add exec-memory integration test stub (to be enabled once FFI lands).
+- Add `--fixed-be` CLI toggle to force a fixed backend (alias to LLVM) when running builds/tests during this refactor so we can validate with a stable codegen path.

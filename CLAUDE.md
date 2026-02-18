@@ -38,7 +38,7 @@ Invoke with `/skill-name` for detailed guidance. Located in `.claude/skills/`.
 | Skill | Purpose |
 |-------|---------|
 | `versioning` | Jujutsu (jj) workflow - **NOT git!** |
-| `test` | Test writing and methodology |
+| `test` | Test writing, methodology, and container testing (safe/isolated runs) |
 | `sspec` | SSpec BDD framework - matchers, hooks, structure |
 | `coding` | Simple language rules, coding standards |
 | `design` | Design patterns, type system |
@@ -104,25 +104,10 @@ bin/simple test path/to/spec.spl   # Single file
 bin/simple test --list              # List tests
 bin/simple test --only-slow         # Slow tests
 
-# Container Testing (isolated, reproducible)
-docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .
-docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
-  simple-test-isolation:latest test                   # All tests in container
-docker run --rm -v $(pwd):/workspace:ro --memory=512m --cpus=1.0 \
-  simple-test-isolation:latest test test/unit/        # Unit tests only
-
-# Docker Compose (easiest for local development)
-docker-compose -f config/docker-compose.yml up unit-tests         # Unit tests
-docker-compose -f config/docker-compose.yml up integration-tests  # Integration tests
-docker-compose -f config/docker-compose.yml up system-tests       # System tests
-docker-compose -f config/docker-compose.yml up all-tests          # All tests parallel
-docker-compose -f config/docker-compose.yml run dev-shell         # Interactive shell
-
-# Helper Scripts
-scripts/local-container-test.sh unit        # Unit tests in container
+# Container Testing (safe/isolated) - see `/test` skill for full details
+scripts/local-container-test.sh unit                     # Unit tests in container
 scripts/local-container-test.sh quick path/to/spec.spl  # Single test
-scripts/local-container-test.sh shell       # Interactive debugging
-scripts/ci-test.sh                          # CI-style execution
+scripts/ci-test.sh                                       # CI-style execution
 
 # Quality
 bin/simple build lint               # Linter
@@ -270,58 +255,3 @@ See MEMORY.md and code agent for full list. Key issues:
 - **Chained methods broken** - use intermediate `var`
 - **Reserved keywords:** `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
 
----
-
-## Container Testing Troubleshooting
-
-### Quick Fixes
-
-**Container not found:** `docker build -t simple-test-isolation:latest -f tools/docker/Dockerfile.test-isolation .`
-**Permission denied:** `chmod +x bin/release/simple` or `sudo usermod -aG docker $USER && newgrp docker`
-**Out of memory:** Increase `--memory=512m` to `--memory=1g` or `--memory=2g`
-**Timeout errors:** Use correct profile: `--profile=slow` (10 min) or `--profile=intensive` (30 min)
-**Tests pass locally, fail in CI:** Run exact CI command: `scripts/ci-test.sh test/unit/`
-
-### Common Issues
-
-1. **Volume mount not working (Windows):**
-   - PowerShell: `docker run -v ${PWD}:/workspace:ro ...`
-   - CMD: `docker run -v %cd%:/workspace:ro ...`
-
-2. **Container build fails:**
-   - Check runtime exists: `ls -lh bin/release/simple` (should be ~33MB)
-   - If missing: `scripts/install.sh` or download from releases
-
-3. **jq not installed (parse errors):**
-   - Ubuntu: `sudo apt install jq`
-   - macOS: `brew install jq`
-
-4. **Docker daemon not running:**
-   - Linux: `sudo systemctl start docker`
-   - macOS/Windows: Start Docker Desktop
-
-### Docker Compose Quick Reference
-
-```bash
-# Run specific test tier
-docker-compose -f config/docker-compose.yml up unit-tests
-docker-compose -f config/docker-compose.yml up integration-tests
-docker-compose -f config/docker-compose.yml up system-tests
-
-# Interactive debugging
-docker-compose -f config/docker-compose.yml run dev-shell
-# Inside: simple test test/unit/failing_spec.spl --verbose
-
-# Rebuild after Dockerfile changes
-docker-compose build --no-cache
-
-# Clean up
-docker-compose down
-docker system prune -a  # Remove all containers/images
-```
-
-### See Also
-
-- **Full Guide:** `doc/guide/container_testing.md`
-- **Resource Limits:** `doc/guide/resource_limits.md`
-- **Test Config:** `simple.test.sdn`

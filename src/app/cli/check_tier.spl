@@ -1,0 +1,389 @@
+# Project-Wide Tier Checker
+#
+# Scans project for tier configuration at three levels (project, module, file)
+# and validates that all .spl files stay within their effective tier's grammar.
+#
+# Three-level resolution (highest to lowest priority):
+#   1. File directive: `# tier: X` in first 5 lines
+#   2. Module arch block: `arch { tier = "X" }` in nearest __init__.spl
+#   3. Project config: `tier: X` in simple.sdn
+#   4. Default: full
+#
+# Usage:
+#   simple check-tier              Check all .spl files in project
+#   simple check-tier src/compiler Check specific directory
+#   simple check-tier --verbose    Show per-file tier assignments
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+
+use app.io.mod (cwd, shell)
+use app.grammar_doc.tier_check (load_tier_keywords, is_allowed_in_tier, check_file_tier)
+use std.text.{NL}
+
+# ============================================================================
+# String helper (local, avoids import issues)
+# ============================================================================
+
+fn _trim(s: text) -> text:
+    var start = 0
+    var end = s.len()
+    while start < end:
+        val ch = s[start : start + 1]
+        if ch == " " or ch == "\t" or ch == "\r":
+            start = start + 1
+        else:
+            break
+    while end > start:
+        val ch = s[end - 1 : end]
+        if ch == " " or ch == "\t" or ch == "\r":
+            end = end - 1
+        else:
+            break
+    s[start : end]
+
+# ============================================================================
+# Tier reading functions
+# ============================================================================
+
+fn read_project_tier(root: text) -> text:
+    """Read tier from simple.sdn in the given root directory."""
+    val sdn_path = "{root}/simple.sdn"
+    if not rt_file_exists(sdn_path):
+        return ""
+    val content = rt_file_read_text(sdn_path) ?? ""
+    if content == "":
+        return ""
+
+    var in_project = false
+    val lines = content.split("\n")
+    for line in lines:
+        val trimmed = _trim(line)
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Detect indent level
+        var indent = 0
+        var i = 0
+        while i < line.len():
+            val ch = line[i : i + 1]
+            if ch == " ":
+                indent = indent + 1
+            elif ch == "\t":
+                indent = indent + 4
+            else:
+                break
+            i = i + 1
+
+        # Top-level section headers
+        if indent == 0 and trimmed.ends_with(":"):
+            in_project = trimmed == "project:"
+            continue
+
+        # Look for tier key under project section
+        if in_project and indent >= 2:
+            if trimmed.starts_with("tier:"):
+                val value = _trim(trimmed[5:])
+                # Strip quotes if present
+                if value.len() >= 2:
+                    if (value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'")):
+                        return value[1 : value.len() - 1]
+                return value
+    ""
+
+fn read_module_tier(init_path: text) -> text:
+    """Read tier from arch { tier = "X" } in an __init__.spl file."""
+    if not rt_file_exists(init_path):
+        return ""
+    val content = rt_file_read_text(init_path) ?? ""
+    if content == "":
+        return ""
+
+    if not content.contains("arch {"):
+        return ""
+
+    val lines = content.split("\n")
+    var in_arch = false
+    var brace_depth = 0
+
+    for line in lines:
+        val trimmed = _trim(line)
+        if trimmed.len() == 0:
+            continue
+
+        if trimmed == "arch {" or trimmed.starts_with("arch {"):
+            in_arch = true
+            brace_depth = 1
+            continue
+
+        if not in_arch:
+            continue
+
+        # Track brace depth
+        for ch in trimmed:
+            if ch == "{":
+                brace_depth = brace_depth + 1
+            elif ch == "}":
+                brace_depth = brace_depth - 1
+
+        if brace_depth <= 0:
+            in_arch = false
+            continue
+
+        # Look for tier = "X"
+        if trimmed.starts_with("tier"):
+            var eq_pos = -1
+            var j = 0
+            while j < trimmed.len():
+                val ch = trimmed[j : j + 1]
+                if ch == "=":
+                    eq_pos = j
+                    break
+                j = j + 1
+            if eq_pos >= 0:
+                val after = _trim(trimmed[eq_pos + 1:])
+                if after.len() >= 2:
+                    if (after.starts_with("\"") and after.ends_with("\"")) or (after.starts_with("'") and after.ends_with("'")):
+                        return after[1 : after.len() - 1]
+                return after
+    ""
+
+fn read_file_tier(file_path: text) -> text:
+    """Read tier from `# tier: X` directive in first 5 lines of a .spl file."""
+    val content = rt_file_read_text(file_path) ?? ""
+    if content == "":
+        return ""
+
+    val lines = content.split("\n")
+    var count = 0
+    for line in lines:
+        if count >= 5:
+            break
+        val trimmed = _trim(line)
+        if trimmed.starts_with("# tier:"):
+            val value = _trim(trimmed[7:])
+            return value
+        count = count + 1
+    ""
+
+# ============================================================================
+# Module tier scanning - find all __init__.spl with tier config
+# ============================================================================
+
+struct ModuleTier:
+    dir_path: text
+    tier: text
+
+fn scan_module_tiers(root: text) -> [ModuleTier]:
+    """Find all __init__.spl files and extract tier configurations."""
+    var result: [ModuleTier] = []
+
+    val find_result = shell("find '{root}' -name '__init__.spl' -type f 2>/dev/null | sort")
+    if find_result.exit_code != 0:
+        return result
+
+    val stdout = find_result.stdout
+    if stdout.len() == 0:
+        return result
+
+    val files = stdout.split("\n")
+    for file_path in files:
+        val trimmed = _trim(file_path)
+        if trimmed.len() == 0:
+            continue
+
+        val tier = read_module_tier(trimmed)
+        if tier != "":
+            # Extract directory path (remove /__init__.spl suffix)
+            val init_suffix = "/__init__.spl"
+            var dir_path = trimmed
+            if dir_path.ends_with(init_suffix):
+                dir_path = dir_path[0 : dir_path.len() - init_suffix.len()]
+            result = result + [ModuleTier(dir_path: dir_path, tier: tier)]
+
+    result
+
+# ============================================================================
+# Tier resolution
+# ============================================================================
+
+fn find_nearest_module_tier(file_path: text, module_tiers: [ModuleTier]) -> text:
+    """Find the nearest ancestor __init__.spl with a tier setting."""
+    var best_tier = ""
+    var best_len = 0
+
+    for mt in module_tiers:
+        val prefix = mt.dir_path + "/"
+        if file_path.starts_with(prefix):
+            if mt.dir_path.len() > best_len:
+                best_len = mt.dir_path.len()
+                best_tier = mt.tier
+    best_tier
+
+fn resolve_effective_tier(file_path: text, project_tier: text, module_tiers: [ModuleTier]) -> text:
+    """Resolve effective tier for a file using cascading priority."""
+    # 1. File-level directive (highest priority)
+    val file_tier = read_file_tier(file_path)
+    if file_tier != "":
+        return file_tier
+
+    # 2. Nearest module-level arch block
+    val mod_tier = find_nearest_module_tier(file_path, module_tiers)
+    if mod_tier != "":
+        return mod_tier
+
+    # 3. Project-level config
+    if project_tier != "":
+        return project_tier
+
+    # 4. Default
+    "full"
+
+# ============================================================================
+# Tier ordering for constraint checking
+# ============================================================================
+
+fn tier_level(tier: text) -> i64:
+    """Convert tier name to numeric level for comparison."""
+    if tier == "seed": return 0
+    if tier == "core": return 1
+    if tier == "full": return 2
+    2
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
+fn run_check_tier(args: [text]) -> i64:
+    """Run project-wide tier check. Returns 0 on success, 1 on failure."""
+    var root = cwd()
+    var verbose = false
+    var scan_dir = ""
+
+    for arg in args:
+        if arg == "--verbose" or arg == "-v":
+            verbose = true
+        elif arg == "-h" or arg == "--help":
+            print "Usage: simple check-tier [dir] [options]"
+            print ""
+            print "Check all .spl files against their effective tier grammar."
+            print ""
+            print "Tier resolution (highest to lowest priority):"
+            print "  1. File directive:  # tier: seed  (first 5 lines)"
+            print "  2. Module arch:     arch { tier = \"core\" }  (__init__.spl)"
+            print "  3. Project config:  tier: core  (simple.sdn)"
+            print "  4. Default:         full"
+            print ""
+            print "Options:"
+            print "  [dir]       Directory to check (default: project root)"
+            print "  --verbose   Show per-file tier assignments"
+            print "  -h, --help  Show this help"
+            return 0
+        elif not arg.starts_with("-"):
+            scan_dir = arg
+
+    # Load tier keyword definitions
+    val sdn_path = "doc/spec/grammar/tier_keywords.sdn"
+    if not load_tier_keywords(sdn_path):
+        print "Error: could not load {sdn_path}"
+        return 1
+
+    # Read project-level tier
+    val project_tier = read_project_tier(root)
+    if verbose and project_tier != "":
+        print "Project tier: {project_tier} (from simple.sdn)"
+
+    # Scan all module tiers
+    val module_tiers = scan_module_tiers(root)
+    if verbose and module_tiers.len() > 0:
+        print "Module tiers found: {module_tiers.len()}"
+        for mt in module_tiers:
+            var rel = mt.dir_path
+            val root_prefix = root + "/"
+            if rel.starts_with(root_prefix):
+                rel = rel[root_prefix.len():]
+            print "  {rel}: {mt.tier}"
+        print ""
+
+    # Determine which directory to scan
+    var search_root = root
+    if scan_dir != "":
+        if scan_dir.starts_with("/"):
+            search_root = scan_dir
+        else:
+            search_root = "{root}/{scan_dir}"
+
+    # Find all .spl files to check
+    val find_result = shell("find '{search_root}' -name '*.spl' -type f ! -name '__init__.spl' 2>/dev/null | sort")
+    if find_result.exit_code != 0:
+        print "Error: could not scan {search_root}"
+        return 1
+
+    val stdout = find_result.stdout
+    if stdout.len() == 0:
+        print "No .spl files found in {search_root}"
+        return 0
+
+    val files = stdout.split("\n")
+
+    # Group files by effective tier for efficient checking
+    var seed_files: [text] = []
+    var core_files: [text] = []
+    var full_files: [text] = []
+    var file_count = 0
+
+    for file_path in files:
+        val trimmed = _trim(file_path)
+        if trimmed.len() == 0:
+            continue
+
+        val effective = resolve_effective_tier(trimmed, project_tier, module_tiers)
+
+        if verbose:
+            var rel = trimmed
+            val root_prefix = root + "/"
+            if rel.starts_with(root_prefix):
+                rel = rel[root_prefix.len():]
+            if effective != "full":
+                print "  {rel} -> {effective}"
+
+        if effective == "seed":
+            seed_files = seed_files + [trimmed]
+        elif effective == "core":
+            core_files = core_files + [trimmed]
+        else:
+            full_files = full_files + [trimmed]
+        file_count = file_count + 1
+
+    if verbose:
+        print ""
+
+    print "Tier check: {file_count} files ({seed_files.len()} seed, {core_files.len()} core, {full_files.len()} full)"
+
+    # Check each tier group
+    var total_violations = 0
+
+    for f in seed_files:
+        val v = check_file_tier(f, "seed")
+        if v > 0:
+            total_violations = total_violations + v
+
+    for f in core_files:
+        val v = check_file_tier(f, "core")
+        if v > 0:
+            total_violations = total_violations + v
+
+    # full tier files need no checking (everything allowed)
+
+    print ""
+    if total_violations > 0:
+        print "Found {total_violations} tier violation(s)"
+        return 1
+    else:
+        print "All files pass their tier check"
+        return 0
+
+export run_check_tier
+export read_project_tier, read_module_tier, read_file_tier
+export resolve_effective_tier, scan_module_tiers
+export ModuleTier
