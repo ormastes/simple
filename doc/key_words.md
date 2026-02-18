@@ -41,3 +41,51 @@ Local interpeter is actually same except memory copyer
 ## Remote Smf Loader
 Not yet available. 
 However with Remote interpreter. it will easy impl.
+
+## Memory copyer
+It copy memory from source to destination. 
+In most location case, it do nothing.
+For remote basemetal, it coy memory from host to remote device by gdb or trace32 debugger.
+
+## Switchable backend
+Simple has 2 backends. LLVM and Cranlift.
+LLVM for release and native build.
+Cranlift for debugging and development and smf. 
+when it is release build smf is built with LLVM and it should tagged with compile options to distinguish Cranlift obj in smf.
+when release build Linker Wrapper request smf Getter to llvm gen obj buffer. So, during release build smf should compiled with LLVM rather default Cranlift.
+
+## Fully shared frontend
+Lexer, Treesitter, Parser. should share code without duplication.
+Lexer used by Treesitter and Treesitter used by parser in layered arch.
+Interpreter, Loader, compiler use same frontend.
+Common logic should applied to frontend or right after it to avoid code duplication.
+Intereter, loaader, compiler will be distinguished by configure.
+
+
+## Boostrap
+Bootstrap made by 5 step. 
+1. seed: which is written in C++ and can compile Seed Simple Grammar with clang/LLVM.
+It impled with C++20 Clang-20.
+2. core: Pure simple implementation of simple. It can compile core grammar simple code.
+  2-1. core1: it is compiled by seed.
+  2-2. core2: it is compiled by core1
+It impled with seed simple grammar.
+3. full: It is simple with all feature. It can compile full grammar simple code.
+  3-1. full1: it is compiler by core2
+  3-2. full2: it is compiled by full1
+It impled with core simple grammar.
+Development is cmake/ninja based.
+
+## Deployment Coverage check
+"@deplyment_coverage" is tagged testcase.
+It run 2 times.
+1. all selected deployment coverage testcases are run first.
+when it run callback coverage verifier to runner.
+actually it is logged as deployment coverage test loading step.
+2. when all none deployment coverage test are ran, it run callback coverage verifier.
+it will be showed deployment coverage test running step.
+will result by coverage verifier.
+Test runner to check file coverage which deployment coverage testcase monitoring to gen coverage on different directories.
+before to go 2. step, make link files to overall coverage directory and make each depoyment coverage tests directoy and make link on there.
+It can specify coverage listen target by file(however it not specify filename self but module path), and threashold by file or class.
+
