@@ -15,10 +15,12 @@
 #
 # Interpreter-safe: no generics (<>) used.
 
-use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, env_get, host_os, host_arch, process_run, cwd}
+use std.io_runtime.{ShellResult, shell, shell_output, file_exists, file_copy, file_delete, file_size_raw, file_read_bytes, env_get, host_os, host_arch, process_run, cwd}
 use std.text.{NL}
 
 use compiler.linker.mold.{MoldBackend, MoldConfig, find_linker, LinkerType, execute_linker, create_temp_dir, cleanup_temp_dir, linker_file_size}
+use compiler_shared.linker.object_provider_adapter.{ObjectProvider, ObjectProviderConfig}
+use compiler.linker.smf_getter.{SmfGetter}
 use compiler.linker.smf_enums.{Platform, Arch}
 
 # ============================================================================
@@ -83,6 +85,14 @@ val SMFE_VERSION: i64 = 1
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     if object_files_len(object_files) == 0:
         return Err("No object files to link")
+
+    # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
+    val smf_inputs = filter_smf_inputs(object_files)
+    if smf_inputs.len() > 0:
+        val mixed = smf_inputs.len() != object_files_len(object_files)
+        if mixed:
+            return Err("Cannot mix SMF and object inputs; convert all to SMF or all to objects")
+        return link_smf_bundle(smf_inputs, output, config)
 
     val os = host_os()
 
@@ -227,6 +237,104 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         print "[linker-wrapper] Native binary: {output} ({size} bytes)"
 
     Ok(output)
+
+# Build self-contained binary when given SMF inputs
+fn link_smf_bundle(smf_inputs: [text], output: text, config: NativeLinkConfig) -> Result:
+    # Currently support single SMF; libraries handled separately via lsm.
+    if smf_inputs.len() == 0:
+        return Err("No SMF inputs")
+    if smf_inputs.len() > 1:
+        return Err("Multiple SMF inputs not yet supported")
+
+    val path = smf_inputs[0]
+
+    # .lsm library: extract objects and link
+    if path.ends_with(".lsm"):
+        val getter = SmfGetter.new()
+        val add_res = getter.add_library(path)
+        if add_res.is_err():
+            return Err(add_res.unwrap_err())
+
+        val modules = getter.list_modules()
+        if modules.len() == 0:
+            return Err("No modules found in {path}")
+
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for library objects")
+
+        var objs: [text] = []
+        for m in modules:
+            val obj_res = getter.get_object(m)
+            if obj_res.is_err():
+                continue
+            val obj_bytes = obj_res.unwrap()
+            val safe = m.replace("/", "_")
+            val obj_path = "{tmp_dir}/{safe}.o"
+            if write_bytes_to_file(obj_path, obj_bytes):
+                objs.push(obj_path)
+
+        if objs.len() == 0:
+            cleanup_temp_dir(tmp_dir)
+            return Err("No object data available in {path}")
+
+        val link_res = link_native_unix(objs, output, config)
+        cleanup_temp_dir(tmp_dir)
+        return link_res
+
+    # Try to convert SMF to object via ObjectProvider when possible
+    val provider = create_default_provider(config.verbose)
+    val obj_result = provider.get_object(path)
+    if obj_result.is_ok():
+        val tmp_dir = create_temp_dir()
+        if tmp_dir == "":
+            return Err("Failed to create temp dir for SMF objects")
+        val obj_path = "{tmp_dir}/input.o"
+        val write_ok = write_bytes_to_file(obj_path, obj_result.unwrap())
+        if not write_ok:
+            cleanup_temp_dir(tmp_dir)
+            return Err("Failed to write object from SMF")
+        val link_res = link_native_unix([obj_path], output, config)
+        cleanup_temp_dir(tmp_dir)
+        return link_res
+
+    # Fallback: self-contained binary
+    val data = file_read_bytes(path)
+    if data_len(data) == 0:
+        return Err("Failed to read SMF data from {path}")
+
+    val sc_config = SelfContainedConfig(
+        runtime_binary: config.runtime_path,
+        verbose: config.verbose,
+        strip: false
+    )
+    link_to_self_contained(data, output, sc_config)
+
+fn create_default_provider(verbose: bool) -> ObjectProvider:
+    ObjectProvider__new(ObjectProviderConfig(
+        search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+        libraries: [],
+        enable_cache: true,
+        verbose: verbose
+    ))
+
+fn write_bytes_to_file(path: text, data: [u8]) -> bool:
+    if data.len() == 0:
+        return false
+    var hex = ""
+    for b in data:
+        val hi = "0123456789abcdef"[(bit_shr(bitwise_and(b, 0xFF), 4)):(bit_shr(bitwise_and(b, 0xFF), 4) + 1)]
+        val lo = "0123456789abcdef"[bitwise_and(b, 0xF):(bitwise_and(b, 0xF) + 1)]
+        hex = hex + hi + lo
+    val res = shell("echo '{hex}' | xxd -r -p > '{path}'")
+    res.exit_code == 0
+
+fn filter_smf_inputs(files: [text]) -> [text]:
+    var smfs: [text] = []
+    for f in files:
+        if f.ends_with(".smf") or f.ends_with(".lsm"):
+            smfs.push(f)
+    smfs
 
 fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     # Fallback: use cc (gcc/clang) for linking

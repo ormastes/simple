@@ -12,6 +12,7 @@
 # to a native binary using the Simple linker.
 
 use linker.*
+use compiler.linker.linker_wrapper.{NativeLinkConfig, NativeLinkConfig__default, link_to_native}
 use driver (compile_to_smf)
 use std.text.{NL}
 
@@ -94,38 +95,22 @@ fn linker_link(self: Linker, smf_files: [text]) -> LinkResult:
 
 
 fn link_native(smf_files: [text], output: text, config: LinkConfig) -> text:
-    """Link SMF files to a native binary."""
-    # For now, use the linker_wrapper's link_native_unix
-    var args: [text] = []
-    args.push("-o")
-    args_push(args, output)
+    """Link SMF files to a native binary via linker_wrapper (SMF-aware)."""
+    val native_cfg = NativeLinkConfig(
+        libraries: config.libraries,
+        library_paths: config.library_paths,
+        runtime_path: "",
+        pie: config.pie,
+        debug: config.debug,
+        verbose: config.verbose,
+        extra_flags: config.linker_flags
+    )
 
-    for lib in config.libraries:
-        args.push("-l{lib}")
-
-    for path in config.library_paths:
-        args.push("-L{path}")
-
-    if config.pie:
-        args.push("-pie")
-
-    for smf in smf_files:
-        args_push(args, smf)
-
-    for flag in config.linker_flags:
-        args_push(args, flag)
-
-    # Call mold/ld linker
-    if config.verbose:
-        val args_str = args.join(" ")
-        print "[linker] mold {args_str}"
-
-    # MOVED TO MODULE LEVEL: extern fn rt_process_run(cmd: text, args: [text]) -> text
-    val result = rt_process_run("mold", args)
-    if result.contains("error"):
-        Err("Link failed: {result}")
+    val result = link_to_native(smf_files, output, native_cfg)
+    if result.is_ok():
+        Ok(result.unwrap())
     else:
-        Ok(output)
+        Err(result.unwrap_err())
 
 # ============================================================================
 # Build Configuration

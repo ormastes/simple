@@ -13,6 +13,8 @@
 use lib.database.core
 use lib.database.query
 use lib.database.feature_utils
+use lib.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
+    check_empty_required, check_file_refs, check_enum_values}
 use app.io
 
 # ============================================================================
@@ -320,6 +322,71 @@ class FeatureDatabase:
     # Save database
     me save() -> bool:
         self.db.save()
+
+    # Unified validation returning DbIssue list
+    fn validate() -> [DbIssue]:
+        var issues: [DbIssue] = []
+        val db_name = "feature"
+
+        val table_opt = self.db.get_table("features")
+        if not table_opt.?:
+            issues.push(DbIssue(
+                db_name: db_name,
+                severity: "error",
+                issue_type: "missing_table",
+                message: "Expected 'features' table not found in feature database",
+                auto_fixable: false
+            ))
+            return issues
+
+        val table = table_opt.unwrap()
+
+        # Duplicate ID check
+        val dup_issues = check_duplicate_ids(table, "id", db_name)
+        for issue in dup_issues:
+            issues.push(issue)
+
+        # Valid column check
+        val valid_issues = check_valid_column(table, db_name)
+        for issue in valid_issues:
+            issues.push(issue)
+
+        # Status values check
+        val valid_statuses = ["done", "complete", "in_progress", "planned", "failed", "blocked"]
+        val status_issues = check_enum_values(table, "status", valid_statuses, db_name)
+        for issue in status_issues:
+            issues.push(issue)
+
+        # Empty required fields
+        val empty_name = check_empty_required(table, "name", db_name)
+        for issue in empty_name:
+            issues.push(issue)
+
+        val empty_cat = check_empty_required(table, "category", db_name)
+        for issue in empty_cat:
+            issues.push(issue)
+
+        val empty_id = check_empty_required(table, "id", db_name)
+        for issue in empty_id:
+            issues.push(issue)
+
+        # Spec file references exist
+        val file_issues = check_file_refs(table, "spec", db_name)
+        for issue in file_issues:
+            issues.push(issue)
+
+        # Use existing find_duplicates for cross-check
+        val dups = self.find_duplicates()
+        for dup in dups:
+            issues.push(DbIssue(
+                db_name: db_name,
+                severity: "warning",
+                issue_type: "feature_duplicate",
+                message: "Duplicate feature ID detected: {dup}",
+                auto_fixable: true
+            ))
+
+        issues
 
 # ============================================================================
 # Helper Functions

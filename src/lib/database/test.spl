@@ -12,6 +12,8 @@
 
 use lib.database.core
 use lib.database.query
+use lib.database.checker.{DbIssue, check_duplicate_ids, check_valid_column,
+    check_empty_required, check_enum_values, fix_stale_running}
 use app.io
 
 # ============================================================================
@@ -229,6 +231,99 @@ class TestDatabase:
     # Save database
     me save() -> bool:
         self.db.save()
+
+    # Unified validation returning DbIssue list
+    fn validate() -> [DbIssue]:
+        var issues: [DbIssue] = []
+        val db_name = "test"
+
+        # Validate test_runs table
+        val runs_table_opt = self.db.get_table("test_runs")
+        if not runs_table_opt.?:
+            issues.push(DbIssue(
+                db_name: db_name,
+                severity: "error",
+                issue_type: "missing_table",
+                message: "Expected 'test_runs' table not found in test database",
+                auto_fixable: false
+            ))
+        else:
+            val runs_table = runs_table_opt.unwrap()
+
+            # Duplicate run_id check
+            val dup_issues = check_duplicate_ids(runs_table, "run_id", db_name)
+            for issue in dup_issues:
+                issues.push(issue)
+
+            # Valid column check
+            val valid_issues = check_valid_column(runs_table, db_name)
+            for issue in valid_issues:
+                issues.push(issue)
+
+            # Status values check
+            val valid_statuses = ["running", "completed", "crashed", "timed_out", "interrupted"]
+            val status_issues = check_enum_values(runs_table, "status", valid_statuses, db_name)
+            for issue in status_issues:
+                issues.push(issue)
+
+            # Stale running runs
+            var stale_count = 0
+            for row in runs_table.valid_rows():
+                val status = row.get("status") ?? ""
+                if status == "running":
+                    stale_count = stale_count + 1
+            if stale_count > 0:
+                issues.push(DbIssue(
+                    db_name: db_name,
+                    severity: "warning",
+                    issue_type: "stale_running",
+                    message: "{stale_count} test run(s) still marked as 'running' — likely stale",
+                    auto_fixable: true
+                ))
+
+            # Count consistency check: passed + failed <= test_count
+            for row in runs_table.valid_rows():
+                val run_id = row.get("run_id") ?? "unknown"
+                val test_count = row.get_i64("test_count") ?? 0
+                val passed = row.get_i64("passed") ?? 0
+                val failed = row.get_i64("failed") ?? 0
+                val crashed = row.get_i64("crashed") ?? 0
+                val timed_out = row.get_i64("timed_out") ?? 0
+                val total_results = passed + failed + crashed + timed_out
+                if total_results > test_count and test_count > 0:
+                    issues.push(DbIssue(
+                        db_name: db_name,
+                        severity: "warning",
+                        issue_type: "count_inconsistency",
+                        message: "Run '{run_id}': result sum ({total_results}) exceeds test_count ({test_count})",
+                        auto_fixable: true
+                    ))
+
+        # Validate test_results table
+        val results_table_opt = self.db.get_table("test_results")
+        if not results_table_opt.?:
+            issues.push(DbIssue(
+                db_name: db_name,
+                severity: "error",
+                issue_type: "missing_table",
+                message: "Expected 'test_results' table not found in test database",
+                auto_fixable: false
+            ))
+        else:
+            val results_table = results_table_opt.unwrap()
+
+            # Valid column check
+            val valid_issues = check_valid_column(results_table, db_name)
+            for issue in valid_issues:
+                issues.push(issue)
+
+            # Status values check
+            val valid_test_statuses = ["passed", "failed", "crashed", "timed_out", "skipped"]
+            val status_issues = check_enum_values(results_table, "status", valid_test_statuses, db_name)
+            for issue in status_issues:
+                issues.push(issue)
+
+        issues
 
 # ============================================================================
 # Helper Functions
