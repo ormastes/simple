@@ -20,7 +20,7 @@ Goal: make loader + linker actually load/execute SMFs by unifying module access 
 - Tests: load+execute fixture function; generic instantiation; hot-reload changed return value.
 
 4) **SMF-Aware Linker Wrapper**
-- Prepass accepts SMF/LSM inputs → temp .o via provider, then native link (mold/cc).
+- Prepass accepts SMF/LSM inputs → temp .o via provider (ObjTaker-backed), then native link (mold/cc).
 - Library support reuses provider instance.
 - Build pipeline calls this instead of raw `mold` on .smf.
 - Tests: link/execute small SMF binary; library resolution case.
@@ -37,3 +37,4 @@ Goal: make loader + linker actually load/execute SMFs by unifying module access 
 - Implement real mmap FFI backing in `compiler_shared/loader/smf_mmap_native.spl` and wire an exec arena helper.
 - Add exec-memory integration test stub (to be enabled once FFI lands).
 - Add `--fixed-be` CLI toggle to force a fixed backend (alias to LLVM) when running builds/tests during this refactor so we can validate with a stable codegen path.
+- Next: replace temporary SMF-to-.o assembly shim with ObjTaker-backed object emission (one or more symbols), and thread provider through linker_wrapper_lib_support for library resolution.
