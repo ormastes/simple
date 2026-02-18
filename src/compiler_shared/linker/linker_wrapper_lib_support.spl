@@ -5,6 +5,7 @@
 # modules, and extracts needed modules for linking.
 
 use compiler.linker.smf_getter.{SmfGetter}
+use compiler_shared.linker.object_provider_adapter.{ObjectProvider, ObjectProviderConfig}
 use compiler.linker.smf_reader_memory.{SmfReaderMemory}
 use compiler.linker.linker_wrapper.{NativeLinkConfig, link_to_native}
 use compiler.linker.object_resolver.{ObjectFileResolver, resolve_objects_for_modules}
@@ -21,6 +22,16 @@ struct LibraryInfo:
     modules: [text]
 
 fn scan_libraries(library_paths: [text], verbose: bool) -> text:
+    # Backward-compatible wrapper with default provider
+    val provider = ObjectProvider__new(ObjectProviderConfig(
+        search_paths: ["/usr/lib/simple", "/usr/local/lib/simple"],
+        libraries: [],
+        enable_cache: true,
+        verbose: verbose
+    ))
+    scan_libraries_with_provider(library_paths, verbose, provider)
+
+fn scan_libraries_with_provider(library_paths: [text], verbose: bool, provider: ObjectProvider) -> text:
     """
     Scan library paths for .lsm files and build library information.
 
@@ -57,16 +68,16 @@ fn scan_libraries(library_paths: [text], verbose: bool) -> text:
             val lib_name = extract_basename(trimmed)
             var lib_info = LibraryInfo(path: trimmed, name: lib_name, modules: [])
 
-            # Use SmfGetter to open library
-            var getter = smfgetter_new()
-            val add_result = getter_add_library(getter, trimmed)
-            if add_result_is_err(add_result):
+            # Use shared provider's getter to open library
+            val add_result = provider.add_library(trimmed)
+            if add_result.is_err():
                 if verbose:
                     print "[linker-lib] Warning: Could not read library {trimmed}: {add_result.unwrap_err()}"
                 continue
 
-            # List modules in library
-            val modules = getter_list_modules(getter)
+            val getter_modules = SmfGetter.new()
+            _ = getter_modules.add_library(trimmed)
+            val modules = getter_modules.list_modules()
             lib_info = LibraryInfo(path: trimmed, name: lib_name, modules: modules)
             libraries_push(libraries, lib_info)
 
