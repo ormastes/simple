@@ -18,6 +18,7 @@ set -euo pipefail
 STEP="full2"
 STEP_RANK=5
 SKIP_VERIFY=false
+SKIP_TIER_CHECK=false
 JOBS=""
 CXX=""
 HOST_CXX_ARG=""
@@ -32,6 +33,7 @@ SEED_DIR="src/compiler_seed"
 SEED_BUILD_DIR="build/seed"
 COMPILER_CORE_DIR="src/compiler"
 COMPILER_SHARED_DIR="src/compiler_shared"
+ROOT_DIR="$(pwd -P)"
 
 HOST_OS=""
 HOST_ARCH=""
@@ -43,6 +45,11 @@ SEED_CPP=""
 TARGET_CXX=""
 TARGET_CXX_FLAGS=()
 HOST_CXX=""
+PROJECT_TIER=""
+FULL_TIER_KEYWORDS_CSV=""
+TIER_CACHE_READY=false
+MODULE_TIER_DIRS=()
+MODULE_TIER_VALUES=()
 
 log() { echo "[bootstrap] $*"; }
 warn() { echo "[bootstrap] WARN: $*" >&2; }
@@ -67,6 +74,7 @@ Options:
   --deploy                              Copy selected stage output to bin/release/simple
   --no-deploy                           Do not copy output
   --skip-verify                         Skip full2 reproducibility stage
+  --skip-tier-check                     Skip core-tier compatibility check before Core1
   --target=OS-ARCH                      Override target platform (default: host)
   --jobs=N                              Parallel build jobs (auto by default)
   --cc=PATH                             Clang-family C++ compiler for target stages
@@ -107,6 +115,7 @@ parse_target() {
 for arg in "$@"; do
     case "$arg" in
         --skip-verify)    SKIP_VERIFY=true ;;
+        --skip-tier-check) SKIP_TIER_CHECK=true ;;
         --keep-artifacts) KEEP_ARTIFACTS=true ;;
         --verbose)        VERBOSE=true ;;
         --deploy)         DEPLOY=true ;;
@@ -450,6 +459,449 @@ ordered_core_files() {
     done
 }
 
+normalize_tier_name() {
+    local raw="$1"
+    raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+    case "$raw" in
+        seed|core|full) printf '%s' "$raw" ;;
+        *) printf '' ;;
+    esac
+}
+
+tier_level() {
+    case "$(normalize_tier_name "$1")" in
+        seed) echo 0 ;;
+        core) echo 1 ;;
+        full) echo 2 ;;
+        *) echo 2 ;;
+    esac
+}
+
+read_project_tier() {
+    local sdn_path="$ROOT_DIR/simple.sdn"
+    if [ ! -f "$sdn_path" ]; then
+        printf ''
+        return 0
+    fi
+
+    awk '
+    function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+    BEGIN { in_project = 0 }
+    {
+        line = $0
+        t = trim(line)
+        match(line, /^[ \t]*/)
+        indent = RLENGTH
+
+        if (indent == 0 && t ~ /^[^#][^:]*:[ \t]*$/) {
+            in_project = (t == "project:")
+            next
+        }
+
+        if (in_project && indent >= 2 && t ~ /^tier[ \t]*:/) {
+            sub(/^tier[ \t]*:/, "", t)
+            t = trim(t)
+            gsub(/^["\047]|["\047]$/, "", t)
+            print t
+            exit
+        }
+    }' "$sdn_path"
+}
+
+read_module_tier_from_init() {
+    local init_path="$1"
+    if [ ! -f "$init_path" ]; then
+        printf ''
+        return 0
+    fi
+
+    awk '
+    function trim(s) { sub(/^[ \t\r\n]+/, "", s); sub(/[ \t\r\n]+$/, "", s); return s }
+    BEGIN { in_arch = 0; depth = 0 }
+    {
+        t = trim($0)
+        if (in_arch == 0) {
+            if (t ~ /^arch[ \t]*\{/) {
+                in_arch = 1
+                depth = 1
+                next
+            }
+            next
+        }
+
+        if (t ~ /^tier[ \t]*=/) {
+            s = t
+            sub(/^[^=]*=/, "", s)
+            s = trim(s)
+            gsub(/^["\047]|["\047]$/, "", s)
+            print s
+            exit
+        }
+
+        tmp = t
+        opens = gsub(/\{/, "{", tmp)
+        tmp = t
+        closes = gsub(/\}/, "}", tmp)
+        depth += opens - closes
+        if (depth <= 0) {
+            in_arch = 0
+            depth = 0
+        }
+    }' "$init_path"
+}
+
+read_file_tier_directive() {
+    local file_path="$1"
+    if [ ! -f "$file_path" ]; then
+        printf ''
+        return 0
+    fi
+
+    awk '
+    NR > 40 { exit }
+    {
+        if (match($0, /^[ \t]*#[ \t]*tier[ \t]*:[ \t]*([A-Za-z_][A-Za-z0-9_-]*)/, m)) {
+            print m[1]
+            exit
+        }
+    }' "$file_path"
+}
+
+init_tier_cache() {
+    if [ "$TIER_CACHE_READY" = true ]; then
+        return 0
+    fi
+
+    PROJECT_TIER="$(normalize_tier_name "$(read_project_tier)")"
+    MODULE_TIER_DIRS=()
+    MODULE_TIER_VALUES=()
+
+    while IFS= read -r init_file; do
+        local tier
+        tier="$(normalize_tier_name "$(read_module_tier_from_init "$init_file")")"
+        if [ -n "$tier" ]; then
+            MODULE_TIER_DIRS+=("${init_file%/__init__.spl}")
+            MODULE_TIER_VALUES+=("$tier")
+        fi
+    done < <(find "$ROOT_DIR/src" -name '__init__.spl' -type f | sort)
+
+    TIER_CACHE_READY=true
+}
+
+find_nearest_module_tier() {
+    local file_path="$1"
+    local abs_path="$file_path"
+    if [[ "$abs_path" != /* ]]; then
+        abs_path="$ROOT_DIR/$abs_path"
+    fi
+
+    local dir
+    dir="$(dirname "$abs_path")"
+
+    while :; do
+        local i
+        for i in "${!MODULE_TIER_DIRS[@]}"; do
+            if [ "${MODULE_TIER_DIRS[$i]}" = "$dir" ]; then
+                printf '%s' "${MODULE_TIER_VALUES[$i]}"
+                return 0
+            fi
+        done
+
+        if [ "$dir" = "$ROOT_DIR" ]; then
+            break
+        fi
+
+        local parent
+        parent="$(dirname "$dir")"
+        if [ "$parent" = "$dir" ]; then
+            break
+        fi
+        dir="$parent"
+    done
+
+    printf ''
+}
+
+resolve_effective_tier() {
+    local file_path="$1"
+    local file_tier module_tier
+    local abs_path="$file_path"
+    if [[ "$abs_path" != /* ]]; then
+        abs_path="$ROOT_DIR/$abs_path"
+    fi
+
+    file_tier="$(normalize_tier_name "$(read_file_tier_directive "$file_path")")"
+    if [ -n "$file_tier" ]; then
+        printf '%s' "$file_tier"
+        return 0
+    fi
+
+    # compiler_shared is part of the bootstrap core surface unless explicitly overridden
+    if [[ "$abs_path" == "$ROOT_DIR/$COMPILER_SHARED_DIR/"* ]]; then
+        module_tier="$(find_nearest_module_tier "$file_path")"
+        if [ -n "$module_tier" ]; then
+            printf '%s' "$module_tier"
+            return 0
+        fi
+        printf 'core'
+        return 0
+    fi
+
+    module_tier="$(find_nearest_module_tier "$file_path")"
+    if [ -n "$module_tier" ]; then
+        printf '%s' "$module_tier"
+        return 0
+    fi
+
+    if [ -n "$PROJECT_TIER" ]; then
+        printf '%s' "$PROJECT_TIER"
+        return 0
+    fi
+
+    printf 'full'
+}
+
+load_full_tier_keywords() {
+    if [ -n "$FULL_TIER_KEYWORDS_CSV" ]; then
+        return 0
+    fi
+
+    local sdn_path="$ROOT_DIR/doc/spec/grammar/tier_keywords.sdn"
+    if [ ! -f "$sdn_path" ]; then
+        err "Tier keyword spec not found: $sdn_path"
+        return 1
+    fi
+
+    local -a keywords=()
+    mapfile -t keywords < <(
+        awk '
+        BEGIN { in_keywords = 0 }
+        /^\[keywords\./ { in_keywords = 1; next }
+        /^\[/ { in_keywords = 0 }
+        {
+            if (!in_keywords) next
+            if (match($0, /^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*"full"/, m)) {
+                print m[1]
+            }
+        }' "$sdn_path"
+    )
+
+    if [ "${#keywords[@]}" -eq 0 ]; then
+        err "No full-tier keywords found in $sdn_path"
+        return 1
+    fi
+
+    FULL_TIER_KEYWORDS_CSV="$(IFS=,; printf '%s' "${keywords[*]}")"
+}
+
+scan_file_for_full_tier_syntax() {
+    local file_path="$1"
+
+    awk -v file="$file_path" -v keywords="$FULL_TIER_KEYWORDS_CSV" '
+    BEGIN {
+        n = split(keywords, arr, ",")
+        for (i = 1; i <= n; i++) {
+            if (arr[i] != "") full_kw[arr[i]] = 1
+        }
+        count = 0
+        in_string = 0
+        in_triple = 0
+    }
+
+    function report(line_no, col_no, msg) {
+        count++
+        if (count <= 50) {
+            printf "%s:%d:%d: %s\n", file, line_no, col_no, msg
+        }
+    }
+
+    function report_dot_op(op, msg,    scan, off, p, abs, prev, oplen) {
+        scan = code
+        off = 0
+        oplen = length(op)
+        while ((p = index(scan, op)) > 0) {
+            abs = off + p
+            prev = (abs > 1) ? substr(code, abs - 1, 1) : ""
+            if (prev != ".") {
+                report(NR, abs, msg)
+            }
+            scan = substr(scan, p + oplen)
+            off += p + oplen - 1
+        }
+    }
+
+    {
+        line = $0
+        code = ""
+        i = 1
+        n = length(line)
+
+        while (i <= n) {
+            ch = substr(line, i, 1)
+
+            if (in_triple) {
+                if (i <= n - 2 && substr(line, i, 3) == "\"\"\"") {
+                    code = code "   "
+                    in_triple = 0
+                    i += 3
+                } else {
+                    code = code " "
+                    i++
+                }
+                continue
+            }
+
+            if (in_string) {
+                if (ch == "\\") {
+                    code = code " "
+                    if (i < n) {
+                        code = code " "
+                        i += 2
+                    } else {
+                        i++
+                    }
+                    continue
+                }
+                if (ch == "\"") {
+                    code = code " "
+                    in_string = 0
+                    i++
+                } else {
+                    code = code " "
+                    i++
+                }
+                continue
+            }
+
+            if (ch == "#") {
+                break
+            }
+
+            if (i <= n - 2 && substr(line, i, 3) == "\"\"\"") {
+                code = code "   "
+                in_triple = 1
+                i += 3
+                continue
+            }
+
+            if (ch == "\"") {
+                code = code " "
+                in_string = 1
+                i++
+                continue
+            }
+
+            code = code ch
+            i++
+        }
+
+        trimmed = code
+        sub(/^[ \t]+/, "", trimmed)
+        is_import_like = (trimmed ~ /^(use|pub[ \t]+use|export|export[ \t]+use|common[ \t]+use)[ \t]+/)
+
+        if (!is_import_like) {
+            pos = index(code, "<<<"); if (pos > 0) report(NR, pos, "full-tier operator <<<")
+            pos = index(code, ">>>"); if (pos > 0) report(NR, pos, "full-tier operator >>>")
+            pos = index(code, "~>");  if (pos > 0) report(NR, pos, "full-tier operator ~>")
+            report_dot_op(".+", "full-tier operator .+")
+            report_dot_op(".-", "full-tier operator .-")
+            report_dot_op(".*", "full-tier operator .*")
+            report_dot_op("./", "full-tier operator ./")
+            report_dot_op(".^", "full-tier operator .^")
+        }
+
+        start = 1
+        while (start <= length(code) && match(substr(code, start), /[A-Za-z_][A-Za-z0-9_]*/)) {
+            token = substr(substr(code, start), RSTART, RLENGTH)
+            col = start + RSTART - 1
+            if (token in full_kw) {
+                report(NR, col, "full-tier keyword " token)
+            }
+            start += RSTART + RLENGTH - 1
+        }
+    }
+
+    END {
+        if (count > 50) {
+            printf "%s: ...and %d more tier violations\n", file, count - 50
+        }
+        if (count > 0) exit 1
+    }' "$file_path"
+}
+
+filter_files_for_core_tier() {
+    local -a files=("$@")
+    init_tier_cache
+
+    local core_level
+    core_level="$(tier_level core)"
+
+    local file effective level
+    for file in "${files[@]}"; do
+        [ -f "$file" ] || continue
+        effective="$(resolve_effective_tier "$file")"
+        level="$(tier_level "$effective")"
+        if [ "$level" -le "$core_level" ]; then
+            printf '%s\n' "$file"
+        fi
+    done
+}
+
+verify_core_tier_compatibility() {
+    local -a files=("$@")
+    if [ "${#files[@]}" -eq 0 ]; then
+        return 0
+    fi
+
+    if [ "$SKIP_TIER_CHECK" = true ]; then
+        warn "Skipping core-tier compatibility check (--skip-tier-check)."
+        return 0
+    fi
+
+    mkdir -p "$BUILD_DIR"
+    local report="$BUILD_DIR/core_tier_check.log"
+    : > "$report"
+
+    init_tier_cache
+    load_full_tier_keywords
+
+    local core_level
+    core_level="$(tier_level core)"
+    local total=0
+    local tier_failures=0
+    local syntax_failures=0
+    local file effective level
+
+    for file in "${files[@]}"; do
+        if [ ! -f "$file" ]; then
+            continue
+        fi
+        effective="$(resolve_effective_tier "$file")"
+        level="$(tier_level "$effective")"
+
+        total=$((total + 1))
+        if [ "$level" -gt "$core_level" ]; then
+            printf '%s: effective tier "%s" exceeds core\n' "$file" "$effective" >> "$report"
+            tier_failures=$((tier_failures + 1))
+            continue
+        fi
+
+        if ! scan_file_for_full_tier_syntax "$file" >> "$report"; then
+            syntax_failures=$((syntax_failures + 1))
+        fi
+    done
+
+    if [ "$tier_failures" -gt 0 ] || [ "$syntax_failures" -gt 0 ]; then
+        err "Core-tier compatibility check failed before Core1 transpilation."
+        err "Tier assignment issues: $tier_failures, syntax issues: $syntax_failures"
+        err "Details: $report"
+        sed -n '1,120p' "$report" >&2 || true
+        return 1
+    fi
+
+    log "Core-tier compatibility check passed ($total files)."
+}
+
 write_fallback_core1_source() {
     mkdir -p "$BUILD_DIR"
     cat > "$BUILD_DIR/fallback_core1.spl" <<'EOF'
@@ -474,6 +926,22 @@ copy_first_existing() {
     return 1
 }
 
+is_smf_artifact() {
+    local artifact="$1"
+    [ -f "$artifact" ] || return 1
+
+    local magic=""
+    if command -v xxd >/dev/null 2>&1; then
+        magic="$(dd if="$artifact" bs=1 count=4 2>/dev/null | xxd -p -c 4 | tr '[:upper:]' '[:lower:]')"
+    elif command -v od >/dev/null 2>&1; then
+        magic="$(dd if="$artifact" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n' | tr '[:upper:]' '[:lower:]')"
+    else
+        return 1
+    fi
+
+    [ "$magic" = "534d4600" ] || [ "$magic" = "534d46" ]
+}
+
 deploy_copy_atomic() {
     local src="$1"
     local dest="$2"
@@ -493,16 +961,28 @@ step2_core1() {
 
     mkdir -p "$BUILD_DIR"
 
-    mapfile -t core_files < <(ordered_core_files)
-    if [ "${#core_files[@]}" -eq 0 ]; then
+    local -a all_core_files=()
+    mapfile -t all_core_files < <(ordered_core_files)
+    if [ "${#all_core_files[@]}" -eq 0 ]; then
         err "No .spl files found in $COMPILER_CORE_DIR or $COMPILER_SHARED_DIR"
         exit 1
     fi
 
-    if ! run "$SEED_CPP" "${core_files[@]}" > "$BUILD_DIR/core1.cpp"; then
+    local -a core_files=()
+    mapfile -t core_files < <(filter_files_for_core_tier "${all_core_files[@]}")
+    if [ "${#core_files[@]}" -eq 0 ]; then
+        err "No core-tier files selected for Core1."
+        exit 1
+    fi
+
+    log "Core1 source set: ${#core_files[@]} files (from ${#all_core_files[@]} total)"
+
+    verify_core_tier_compatibility "${core_files[@]}"
+
+    if ! run env SIMPLE_TIER=core "$SEED_CPP" "${core_files[@]}" > "$BUILD_DIR/core1.cpp"; then
         warn "Primary core1 transpilation failed; retrying with fallback source."
         write_fallback_core1_source
-        run "$SEED_CPP" "$BUILD_DIR/fallback_core1.spl" > "$BUILD_DIR/core1.cpp"
+        run env SIMPLE_TIER=core "$SEED_CPP" "$BUILD_DIR/fallback_core1.spl" > "$BUILD_DIR/core1.cpp"
     fi
 
     local -a defs=()
@@ -557,7 +1037,7 @@ step2_core1() {
             warn "Saved failing Core1 C++ output to $BUILD_DIR/core1.failed.cpp"
         fi
         write_fallback_core1_source
-        run "$SEED_CPP" "$BUILD_DIR/fallback_core1.spl" > "$BUILD_DIR/core1.cpp"
+        run env SIMPLE_TIER=core "$SEED_CPP" "$BUILD_DIR/fallback_core1.spl" > "$BUILD_DIR/core1.cpp"
         run "$TARGET_CXX" -std=c++20 -O2 \
             "${TARGET_CXX_FLAGS[@]}" \
             -I"$SEED_DIR" -I"$SEED_DIR/platform" \
@@ -582,22 +1062,42 @@ step3_core2() {
     log "================================================================"
     echo
 
-    if run "$BUILD_DIR/core1$TARGET_EXE_EXT" compile "$COMPILER_CORE_DIR/main.spl" -o "$BUILD_DIR/core2$TARGET_EXE_EXT" \
-        && [ -f "$BUILD_DIR/core2$TARGET_EXE_EXT" ]; then
+    local core2_out="$BUILD_DIR/core2$TARGET_EXE_EXT"
+    run rm -f "$core2_out"
+
+    if run "$BUILD_DIR/core1$TARGET_EXE_EXT" compile "$COMPILER_CORE_DIR/main.spl" -o "$core2_out" \
+        && [ -f "$core2_out" ] \
+        && ! is_smf_artifact "$core2_out"; then
         :
     else
         warn "Core2 build failed; using fallback artifact copy."
+        local bootstrap_cli
+        for bootstrap_cli in "bin/release/simple$TARGET_EXE_EXT" "bin/release/simple"; do
+            if [ ! -f "$bootstrap_cli" ]; then
+                continue
+            fi
+            run rm -f "$core2_out"
+            if run env SIMPLE_COMPILE_RUST=1 "$bootstrap_cli" compile "$COMPILER_CORE_DIR/main.spl" --format=native -o "$core2_out" \
+                && [ -f "$core2_out" ] \
+                && ! is_smf_artifact "$core2_out"; then
+                log "Core2 rebuilt via $bootstrap_cli (SIMPLE_COMPILE_RUST=1)"
+                log "Core2: $core2_out"
+                echo
+                return
+            fi
+        done
+
         if ! copy_first_existing \
-            "$BUILD_DIR/core2$TARGET_EXE_EXT" \
-            "$BUILD_DIR/core1$TARGET_EXE_EXT" \
+            "$core2_out" \
             "bin/release/simple$TARGET_EXE_EXT" \
-            "bin/release/simple"; then
+            "bin/release/simple" \
+            "$BUILD_DIR/core1$TARGET_EXE_EXT"; then
             err "Core2 output missing and no fallback artifact available"
             exit 1
         fi
     fi
 
-    log "Core2: $BUILD_DIR/core2$TARGET_EXE_EXT"
+    log "Core2: $core2_out"
     echo
 }
 
@@ -607,23 +1107,27 @@ step4_full1() {
     log "================================================================"
     echo
 
-    if run "$BUILD_DIR/core2$TARGET_EXE_EXT" compile src/app/cli/main.spl -o "$BUILD_DIR/full1$TARGET_EXE_EXT" \
-        && [ -f "$BUILD_DIR/full1$TARGET_EXE_EXT" ]; then
+    local full1_out="$BUILD_DIR/full1$TARGET_EXE_EXT"
+    run rm -f "$full1_out"
+
+    if run env SIMPLE_COMPILE_RUST=1 "$BUILD_DIR/core2$TARGET_EXE_EXT" compile src/app/cli/main.spl --format=native -o "$full1_out" \
+        && [ -f "$full1_out" ] \
+        && ! is_smf_artifact "$full1_out"; then
         :
     else
         warn "Full1 build failed; using fallback artifact copy."
         if ! copy_first_existing \
-            "$BUILD_DIR/full1$TARGET_EXE_EXT" \
+            "$full1_out" \
             "$BUILD_DIR/core2$TARGET_EXE_EXT" \
-            "$BUILD_DIR/core1$TARGET_EXE_EXT" \
             "bin/release/simple$TARGET_EXE_EXT" \
-            "bin/release/simple"; then
+            "bin/release/simple" \
+            "$BUILD_DIR/core1$TARGET_EXE_EXT"; then
             err "Full1 output missing and no fallback artifact available"
             exit 1
         fi
     fi
 
-    log "Full1: $BUILD_DIR/full1$TARGET_EXE_EXT"
+    log "Full1: $full1_out"
     echo
 }
 
@@ -639,15 +1143,21 @@ step5_full2() {
     log "================================================================"
     echo
 
-    if run "$BUILD_DIR/full1$TARGET_EXE_EXT" compile src/app/cli/main.spl -o "$BUILD_DIR/full2$TARGET_EXE_EXT" \
-        && [ -f "$BUILD_DIR/full2$TARGET_EXE_EXT" ]; then
+    local full2_out="$BUILD_DIR/full2$TARGET_EXE_EXT"
+    run rm -f "$full2_out"
+
+    if run env SIMPLE_COMPILE_RUST=1 "$BUILD_DIR/full1$TARGET_EXE_EXT" compile src/app/cli/main.spl --format=native -o "$full2_out" \
+        && [ -f "$full2_out" ] \
+        && ! is_smf_artifact "$full2_out"; then
         :
     else
         warn "Full2 build failed; using fallback artifact copy."
         if ! copy_first_existing \
-            "$BUILD_DIR/full2$TARGET_EXE_EXT" \
+            "$full2_out" \
             "$BUILD_DIR/full1$TARGET_EXE_EXT" \
             "$BUILD_DIR/core2$TARGET_EXE_EXT" \
+            "bin/release/simple$TARGET_EXE_EXT" \
+            "bin/release/simple" \
             "$BUILD_DIR/core1$TARGET_EXE_EXT"; then
             err "Full2 output missing and no fallback artifact available"
             exit 1
@@ -656,7 +1166,7 @@ step5_full2() {
 
     local hash1 hash2
     hash1="$(file_hash "$BUILD_DIR/full1$TARGET_EXE_EXT")"
-    hash2="$(file_hash "$BUILD_DIR/full2$TARGET_EXE_EXT")"
+    hash2="$(file_hash "$full2_out")"
 
     if [ "$hash1" != "$hash2" ]; then
         err "Reproducibility mismatch"

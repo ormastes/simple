@@ -39,7 +39,7 @@ fn file_read(path: text) -> text:
 1. `extern fn` - Raw binding to runtime, prefixed with `rt_`
 2. Wrapper `fn` - Clean API for Simple users, handles type conversions
 
-**Location**: `src/app/io/mod.spl`
+**Location**: `src/lib/ffi/` (extern declarations), `src/app/io/mod.spl` (I/O wrappers)
 
 ## Three-Tier Pattern (External Libraries)
 
@@ -282,7 +282,7 @@ if value == "":
 
 ### Step 1: Add Extern Declaration
 
-In `src/app/io/mod.spl`:
+In `src/lib/ffi/` (appropriate submodule, e.g. `io.spl`, `system.spl`):
 
 ```simple
 # --- My new category ---
@@ -425,7 +425,8 @@ describe "MyLib":
 
 | File | Purpose |
 |------|---------|
-| `src/app/io/mod.spl` | Main SFFI wrapper module (two-tier) |
+| `src/lib/ffi/` | Centralized FFI extern declarations (two-tier) |
+| `src/app/io/mod.spl` | I/O SFFI wrapper module |
 | `src/app/io/*_ffi.spl` | Per-library SFFI modules (regex, http, gamepad, etc.) |
 | `src/app/wrapper_gen/mod.spl` | Wrapper generator main entry point |
 | `src/app/wrapper_gen/spec_parser.spl` | `.wrapper_spec` parser |
@@ -453,7 +454,8 @@ describe "MyLib":
 
 ## See Also
 
-- `src/app/io/mod.spl` - Complete SFFI wrapper implementations
+- `src/lib/ffi/` - Centralized FFI extern declarations
+- `src/app/io/mod.spl` - I/O SFFI wrapper implementations
 - `/coding` skill - Simple language coding standards
 - `doc/guide/sffi_gen_guide.md` - SFFI generation guide
 - `doc/design/sffi_external_library_pattern.md` - Three-tier design

@@ -152,21 +152,21 @@ STDLIB_FILES=("core.spl" "io.spl" "json.spl" "http.spl")
 STDLIB_COPIED=0
 
 for f in "${STDLIB_FILES[@]}"; do
-    if [ -f "src/std/$f" ]; then
-        cp "src/std/$f" "$TMP_DIR/lib/simple/stdlib/"
+    if [ -f "src/lib/$f" ]; then
+        cp "src/lib/$f" "$TMP_DIR/lib/simple/stdlib/"
         echo "  ✓ $f"
         STDLIB_COPIED=$((STDLIB_COPIED + 1))
-    elif [ -f "src/std/src/$f" ]; then
-        cp "src/std/src/$f" "$TMP_DIR/lib/simple/stdlib/"
+    elif [ -f "src/lib/src/$f" ]; then
+        cp "src/lib/src/$f" "$TMP_DIR/lib/simple/stdlib/"
         echo "  ✓ $f (from src/)"
         STDLIB_COPIED=$((STDLIB_COPIED + 1))
     fi
 done
 
 if [ $STDLIB_COPIED -eq 0 ]; then
-    if [ -d "src/std/src" ]; then
+    if [ -d "src/lib/src" ]; then
         echo "  ℹ Copying stdlib directory structure..."
-        cp -r src/std/src/. "$TMP_DIR/lib/simple/stdlib/"
+        cp -r src/lib/src/. "$TMP_DIR/lib/simple/stdlib/"
         echo -e "${GREEN}  ✓ Stdlib directory copied${NC}"
     else
         echo -e "${YELLOW}  ⚠ Note: Stdlib may be embedded in runtime binary${NC}"

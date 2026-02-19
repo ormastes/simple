@@ -383,7 +383,7 @@ simple debug --remote=192.168.1.100:4711 program.spl
 
 ### FFI Functions
 
-All debug FFI functions are in `src/ffi/debug.spl`:
+All debug FFI functions are in `src/lib/ffi/debug.spl`:
 
 **State Management:**
 - `debug_is_active() -> bool`

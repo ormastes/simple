@@ -198,10 +198,13 @@ See `doc/guide/syntax_quick_reference.md` for complete reference.
 ```
 src/
   app/              # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
-  lib/              # Libraries (database)
+  lib/              # Libraries (database, ffi, mcp, mcp_sdk, cuda, torch, etc.)
+    ffi/            # Centralized FFI declarations (io, system, codegen, cli, runtime, etc.)
+    mcp/            # MCP library (core types, helpers, schema, handler registry, protocol)
   std/              # Standard library (spec, text, math, path, array, platform)
   compiler_core/    # Core (seed-compilable: lexer, parser, AST, AOP, interpreter, C codegen)
   compiler_shared/  # Shared infra (treesitter, blocks, backend API, type system, MIR opt)
+    interpreter/    # Shared compiler/interpreter code (contracts, operators, pattern, llvm)
   compiler/         # Full compiler (backends, HIR/MIR lowering, linker, loader, MDSOC)
     mdsoc/          # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
     feature/        # MDSOC pipeline stages (typed port contracts)
@@ -244,7 +247,7 @@ fn file_read(path: text) -> text:
     rt_file_read_text(path)
 ```
 
-Main module: `src/app/io/mod.spl`. See `/sffi` skill.
+Main module: `src/lib/ffi/mod.spl`. See `/sffi` skill.
 
 ---
 

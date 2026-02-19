@@ -30,7 +30,7 @@
 | `src/compiler_core_legacy/` | 42 | 17,871 | 16.1% | Core Simple library (seed-compilable) |
 | `src/baremetal/` | 36 | 4,829 | 4.3% | Bare-metal runtime |
 | `src/remote/` | 15 | 3,964 | 3.6% | Remote execution |
-| `src/ffi/` | 11 | 1,808 | 1.6% | FFI bridge utilities |
+| `src/lib/ffi/` | 11 | 1,808 | 1.6% | FFI bridge utilities |
 | Other | 42 | 5,564 | 5.0% | Diagnostics, MCP lib, shared, test utils |
 
 **Note:** Percentages exceed 100% because std/ contains extensive utilities that serve the entire codebase.
