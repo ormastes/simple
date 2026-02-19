@@ -25,12 +25,12 @@ Successfully completed migration of hardcoded `"\n"` string literals to the `NL`
 ### 11 Agents Deployed
 
 1. **Agent 1** (src/compiler/backend/) - 16 files, ~155 occurrences ✅
-2. **Agent 2** (src/compiler_core/) - 46 files, ~140 occurrences ✅
+2. **Agent 2** (src/compiler_core_legacy/) - 46 files, ~140 occurrences ✅
 3. **Agent 3** (src/app/) - 244 files, 4,495 occurrences ✅ **100% coverage**
 4. **Agent 4** (src/std/) - 33 files, ~90 occurrences ✅
 5. **Agent 5** (test/compiler/ + test/unit/) - 110 files, ~350 occurrences ✅
 6. **Agent 6** (test/feature/ + test/integration/ + test/lib/) - 52 files, 367 occurrences ✅
-7. **Agent 7** (src/core/ + src/diagnostics/) - 6 files, 27 occurrences ✅
+7. **Agent 7** (src/compiler_core_legacy/ + src/diagnostics/) - 6 files, 27 occurrences ✅
 8. **Agent 8** (remaining src/compiler/) - 5 files, ~40 occurrences ✅
 9. **Agent 9** (remaining test/) - 2,008 files, ~2,000 occurrences ✅
 10. **Agent 10** (final cleanup) - 13 files, 50 occurrences ✅
@@ -121,8 +121,8 @@ elif ch == "\n": 10             # Instruction selection
 ```
 
 **Files:**
-- `src/core/lexer.spl`, `src/core/lexer_struct.spl`
-- `src/compiler/lexer.spl`, `src/compiler_core/lexer.spl`
+- `src/compiler_core_legacy/lexer.spl`, `src/compiler_core_legacy/lexer_struct.spl`
+- `src/compiler/lexer.spl`, `src/compiler_core_legacy/lexer.spl`
 - `src/compiler/backend/native/isel_*.spl` (x86_64, aarch64, riscv64)
 - `src/compiler/error_formatter.spl`
 
@@ -159,7 +159,7 @@ result = "{result}\\n"
 
 **Files:**
 - `src/compiler/baremetal/table_codegen.spl`
-- `src/compiler_core/baremetal/table_codegen.spl`
+- `src/compiler_core_legacy/baremetal/table_codegen.spl`
 - JSON/XML serializers, ASM generators
 
 **Reason:** Output needs to contain the literal two characters `\` and `n`
@@ -203,9 +203,9 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 ### Source Code (350 files)
 - `src/app/` - 244 files (**100% coverage**)
 - `src/compiler/` - 21 files
-- `src/compiler_core/` - 46 files
+- `src/compiler_core_legacy/` - 46 files
 - `src/std/` - 33 files (excluding text.spl)
-- `src/core/` - 3 files
+- `src/compiler_core_legacy/` - 3 files
 - `src/diagnostics/` - 3 files
 
 ### Test Code (2,041 files)

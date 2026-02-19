@@ -51,7 +51,7 @@ fix: Add EXPR_SLICE evaluation support to interpreter (Phase 1.1 partial)
 - Documentation: RUNTIME_PARSER_BUGS_FIX.md
 
 **Files:**
-- `src/core/interpreter/eval.spl` (+81 lines)
+- `src/compiler_core/interpreter/eval.spl` (+81 lines)
 - `RUNTIME_PARSER_BUGS_FIX.md` (new)
 
 ---
@@ -85,7 +85,7 @@ The interpreter's `eval_expr()` function did not handle `EXPR_SLICE` expressions
    - Bounds checking and empty slice handling
 
 **Caveat:**
-The fix is in Simple interpreter code (`src/core/interpreter/eval.spl`). The current `bin/simple` is a **pre-built Rust runtime**. Changes require:
+The fix is in Simple interpreter code (`src/compiler_core/interpreter/eval.spl`). The current `bin/simple` is a **pre-built Rust runtime**. Changes require:
 - Rebuilding the runtime with `scripts/build-bootstrap.sh` or equivalent
 - Incorporating Simple interpreter changes into the runtime build
 
@@ -134,13 +134,13 @@ All phases of the 7-phase implementation plan are now complete!
 
 ### Discovery: Two Parser Systems
 Just like with async/await, we found two complete parser implementations:
-- `src/core/parser.spl` - Interpreter (arena-based, 43KB)
+- `src/compiler_core/parser.spl` - Interpreter (arena-based, 43KB)
 - `src/compiler/parser.spl` - Compiler (struct-based, 89KB)
 
 ### Bootstrap Runtime Architecture
 - **bin/simple:** Pre-built Rust binary (interpreter)
-- **src/core/*.spl:** Simple language interpreter code
-- **seed/runtime.c:** C seed compiler
+- **src/compiler_core/*.spl:** Simple language interpreter code
+- **src/compiler_seed/runtime.c:** C seed compiler
 - Changes to Simple interpreter require runtime rebuild
 
 ### Slice Implementation

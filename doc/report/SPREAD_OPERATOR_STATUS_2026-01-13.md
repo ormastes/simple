@@ -171,7 +171,7 @@ All tests complete!
 | File | Status | Notes |
 |------|--------|-------|
 | `src/parser/src/expressions/helpers.rs` | ✅ Complete | Parser changes committed |
-| `simple/std_lib/src/core/decorators.spl` | ✅ Updated | Uses `args...` syntax |
+| `simple/std_lib/src/compiler_core/decorators.spl` | ✅ Updated | Uses `args...` syntax |
 | `src/compiler/src/interpreter_call/core.rs` | ⏳ Needs changes | Runtime support needed |
 | `doc/report/SPREAD_OPERATOR_FIX_2026-01-13.md` | ✅ Complete | Documents parser fix |
 

@@ -105,8 +105,8 @@ fn example():  # TODO: Refactor this
 ```bash
 $ simple_todo simple/std_lib/src/
 
-simple/std_lib/src/core/json.spl:45: TODO: Add streaming parser
-simple/std_lib/src/core/json.spl:123: FIXME: Handle escaped quotes
+simple/std_lib/src/compiler_core/json.spl:45: TODO: Add streaming parser
+simple/std_lib/src/compiler_core/json.spl:123: FIXME: Handle escaped quotes
 simple/std_lib/src/io/fs.spl:67: TODO: Add async file watching
 simple/std_lib/src/net/http.spl:89: HACK: Workaround for TLS
 

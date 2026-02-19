@@ -72,8 +72,8 @@ Average per file:
 ```
 File                          LOC  Blank  Comment  Fn  Class
 ------------------------------------------------------------
-src/core/json.spl             456     45       23  12      2
-src/core/collections.spl      312     32       18   8      3
+src/compiler_core/json.spl             456     45       23  12      2
+src/compiler_core/collections.spl      312     32       18   8      3
 src/parser/lexer.spl          234     28       15   6      1
 ...
 ------------------------------------------------------------
@@ -99,7 +99,7 @@ Total                        2891    342      223 156     23
   },
   "files": [
     {
-      "path": "src/core/json.spl",
+      "path": "src/compiler_core/json.spl",
       "loc": 456,
       "blank": 45,
       "comments": 23,

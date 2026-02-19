@@ -39,7 +39,7 @@ ld.lld: error: unable to find library -lsimple_compiler
 The `libsimple_compiler.so` library does not exist anywhere in the project.
 
 ### 4. Seed.cpp Bootstrap Path Also Broken
-Running `./scripts/bootstrap-minimal.sh` fails with:
+Running `./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` fails with:
 ```
 build/bootstrap/core1.cpp:7991:33: error: use of undeclared identifier 'BackendKind_Cranelift'
 build/bootstrap/core1.cpp:7995:9: error: use of undeclared identifier 'target_is_32bit'
@@ -47,7 +47,7 @@ build/bootstrap/core1.cpp:7996:16: error: use of undeclared identifier 'BackendK
 ...
 ```
 
-**Root cause:** Enum mismatch in `src/compiler_core/backend_types.spl` vs usage in `backend_factory.spl`:
+**Root cause:** Enum mismatch in `src/compiler_core_legacy/backend_types.spl` vs usage in `backend_factory.spl`:
 
 **Current enum definition** (`backend_types.spl`):
 ```simple
@@ -77,7 +77,7 @@ Also missing:
 ### 5. Bootstrap Script Changes Not Active
 Modified files:
 - `src/compiler/driver.spl` - Uses Pure Simple compiler
-- `src/compiler_core/driver.spl` - Fixed (removed Ok/Err)
+- `src/compiler_core_legacy/driver.spl` - Fixed (removed Ok/Err)
 - `src/app/io/cli_ops.spl` - Fallback to Pure Simple
 - `src/app/build/bootstrap.spl` - Build native executables
 
@@ -92,7 +92,7 @@ Current state:
 ┌─────────────────────────────────────────────┐
 │ seed.cpp (C++)                              │
 │   ↓ (transpile & compile)                   │
-│ compiler_core (Simple)                      │
+│ compiler_core_legacy (Simple)                      │
 │   ✗ BROKEN: enum mismatches                 │
 │   ✗ Can't build full compiler               │
 └─────────────────────────────────────────────┘
@@ -108,23 +108,23 @@ Current state:
 
 ## Solutions
 
-### Option A: Fix compiler_core Enum Mismatches (Recommended)
+### Option A: Fix compiler_core_legacy Enum Mismatches (Recommended)
 This addresses the original user request: "update full simple buildable by core simple"
 
 **Files to fix:**
-1. `src/compiler_core/backend/backend_factory.spl`
+1. `src/compiler_core_legacy/backend/backend_factory.spl`
    - Update `BackendKind.Cranelift` → `BackendKind.CraneliftJit`
    - Update `BackendKind.Llvm` → `BackendKind.LlvmJit`
    - Remove references to `BackendKind.Wasm`, `BackendKind.Lean`
    - Add stub implementations for `target_is_32bit()`, `target_is_64bit()`, `target_is_wasm()`
 
 2. Search for other files referencing old enum values
-3. Test with `./scripts/bootstrap-minimal.sh`
+3. Test with `./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1`
 
 **Benefits:**
 - Directly addresses user's request
-- Makes compiler_core self-sufficient
-- Enables bootstrap path: seed.cpp → compiler_core → full compiler
+- Makes compiler_core_legacy self-sufficient
+- Enables bootstrap path: seed.cpp → compiler_core_legacy → full compiler
 
 ### Option B: Restore Rust Source
 Not feasible - project goal is 100% Pure Simple.
@@ -142,12 +142,12 @@ Would need to implement direct import of `compiler.driver.compile_to_smf` and ac
 
 ## Recommended Action
 
-Fix the enum mismatches in compiler_core to enable the seed.cpp → compiler_core → full compiler bootstrap path.
+Fix the enum mismatches in compiler_core_legacy to enable the seed.cpp → compiler_core_legacy → full compiler bootstrap path.
 
 **Steps:**
 1. Update `backend_factory.spl` enum usage
 2. Add missing helper functions
-3. Test: `./scripts/bootstrap-minimal.sh`
+3. Test: `./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1`
 4. Use resulting `build/bootstrap/core1` to compile full compiler
 5. Verify reproducibility
 

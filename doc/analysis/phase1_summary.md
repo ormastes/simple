@@ -41,13 +41,13 @@
 **Root Cause:** Bootstrap constraints led to "lowest common denominator" copying
 
 **Files:**
-- `src/core/parser.spl` (2,136 lines) - **PRIMARY**
+- `src/compiler_core/parser.spl` (2,136 lines) - **PRIMARY**
 - `src/compiler/parser.spl` (2,161 lines) - Deprecated
-- `src/compiler_core/parser.spl` (2,164 lines) - Deprecated
-- `src/core/lexer.spl` (830 lines) - **PRIMARY**
+- `src/compiler_core_legacy/parser.spl` (2,164 lines) - Deprecated
+- `src/compiler_core/lexer.spl` (830 lines) - **PRIMARY**
 - `src/compiler/lexer.spl` (1,383 lines) - Deprecated
-- `src/compiler_core/lexer.spl` (1,492 lines) - Deprecated
-- `src/core/lexer_struct.spl` (721 lines) - Deprecated
+- `src/compiler_core_legacy/lexer.spl` (1,492 lines) - Deprecated
+- `src/compiler_core_legacy/lexer_struct.spl` (721 lines) - Deprecated
 
 **Major Duplicate Patterns:**
 1. Expression parsing (850 lines/parser, 85% duplication)
@@ -59,7 +59,7 @@
 7. Indentation handling (320 lines/lexer, 93% duplication)
 8. Operator scanning (420 lines/lexer, 95% duplication)
 
-**Recommendation:** DELETE `src/compiler/` and `src/compiler_core/` parser/lexer files immediately. Keep only `src/core/` implementations.
+**Recommendation:** DELETE `src/compiler/` and `src/compiler_core_legacy/` parser/lexer files immediately. Keep only `src/compiler_core/` implementations.
 
 ---
 
@@ -95,15 +95,15 @@
 ### 1.3 Code Generation Duplication (27% rate)
 
 **Status:** MEDIUM-HIGH PRIORITY - Intentional but refactorable
-**Primary Issue:** MIR lowering duplicated between `compiler/` and `compiler_core/`; parallel C codegen architectures
+**Primary Issue:** MIR lowering duplicated between `compiler/` and `compiler_core_legacy/`; parallel C codegen architectures
 **Root Cause:** Dual compilation strategy + historical evolution
 
 **Files:**
-- `src/core/compiler/c_codegen.spl` (2,339 lines) - AST-based
+- `src/compiler_core_legacy/compiler/c_codegen.spl` (2,339 lines) - AST-based
 - `src/app/compile/c_codegen.spl` (1,124 lines) - Text-based
 - `src/app/compile/c_translate.spl` (1,896 lines) - Text-based
 - `src/compiler/mir_lowering.spl` (1,503 lines) - Modern syntax
-- `src/compiler_core/mir_lowering.spl` (1,174 lines) - Desugared
+- `src/compiler_core_legacy/mir_lowering.spl` (1,174 lines) - Desugared
 
 **Major Duplicate Patterns:**
 1. MIR lowering logic (99% identical, ~1,200 lines)
@@ -174,7 +174,7 @@
 |------|---------|-------|-------|-------------|--------------|----------|
 | 1 | Parser expression parsing | 3 | 850 | 3 | 2,550 | Parser |
 | 2 | MCP tool schema builders | 7 | 116 | 75+ | 2,100 | App |
-| 3 | MIR lowering (compiler vs compiler_core) | 2 | 1,200 | 2 | 2,400 | Codegen |
+| 3 | MIR lowering (compiler vs compiler_core_legacy) | 2 | 1,200 | 2 | 2,400 | Codegen |
 | 4 | Lexer number scanning | 4 | 450 | 4 | 1,800 | Lexer |
 | 5 | Parser declaration parsing | 3 | 600 | 3 | 1,800 | Parser |
 | 6 | Lexer operator scanning | 4 | 420 | 4 | 1,680 | Lexer |
@@ -205,9 +205,9 @@
 
 1. **DELETE parser/lexer duplicates** (4,500 lines)
    - Delete `src/compiler/parser.spl` (2,161 lines)
-   - Delete `src/compiler_core/parser.spl` (2,164 lines)
+   - Delete `src/compiler_core_legacy/parser.spl` (2,164 lines)
    - Delete `src/compiler/lexer.spl` (1,383 lines)
-   - Delete `src/compiler_core/lexer.spl` (1,492 lines)
+   - Delete `src/compiler_core_legacy/lexer.spl` (1,492 lines)
    - Update imports in 3-5 files
    - Run full test suite (4,067 tests)
 
@@ -260,7 +260,7 @@
    - Estimated 6-8 hours
 
 10. **Create CLI parser module** (400 lines saved)
-    - `src/app/cli_parser.spl` (400 lines new)
+    - `src/lib/cli/cli_parser.spl` (400 lines new)
     - Migrate 4 CLI entry points
     - Estimated 4-6 hours
 
@@ -302,7 +302,7 @@
 
 18. **Implement MIR lowering desugar** (1,200 lines saved)
     - Extend `src/app/desugar/` to handle Option, generics, impl
-    - Generate `compiler_core/mir_lowering.spl` from `compiler/mir_lowering.spl`
+    - Generate `compiler_core_legacy/mir_lowering.spl` from `compiler/mir_lowering.spl`
     - Estimated 8-12 hours (includes testing)
 
 **Validation:**
@@ -403,9 +403,9 @@
 
 ```
 Parser Ecosystem (11,076 lines):
-├── src/core/parser.spl ────────┐
+├── src/compiler_core/parser.spl ────────┐
 ├── src/compiler/parser.spl ────┼─── 90% IDENTICAL
-└── src/compiler_core/parser.spl┘
+└── src/compiler_core_legacy/parser.spl┘
 
 Backend Ecosystem (6,250 lines):
 ├── isel_x86_64.spl ──┐
@@ -422,7 +422,7 @@ App Ecosystem (12,500 lines):
 
 ```
 Parser Ecosystem (2,136 lines, -81%):
-└── src/core/parser.spl (SINGLE SOURCE OF TRUTH)
+└── src/compiler_core/parser.spl (SINGLE SOURCE OF TRUTH)
 
 Backend Ecosystem (3,850 lines, -38%):
 ├── Shared utilities (850 lines):
@@ -549,7 +549,7 @@ Monitor no regressions:
 
 **Day 1-2: Parser/Lexer Consolidation**
 1. Search all imports referencing deleted files
-2. Update imports to use `src/core/` versions
+2. Update imports to use `src/compiler_core/` versions
 3. Delete 4 deprecated parser/lexer files
 4. Run full test suite (expect 4,067/4,067 passing)
 5. Commit with message: "refactor: Consolidate parser/lexer to core implementations"

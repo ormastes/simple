@@ -79,16 +79,7 @@ scripts/
 **Key scripts:**
 - `bootstrap-from-scratch.sh` - Complete bootstrap from C++
 - `bootstrap-from-scratch.bat` - Windows bootstrap
-- `bootstrap-from-scratch-freebsd.sh` - FreeBSD bootstrap
-- `bootstrap-fixed.sh` - Fixed bootstrap path
-- `bootstrap-core-only.sh` - Core library only
-- `bootstrap-full-core.sh` - Full core bootstrap
-- `bootstrap-minimal.sh` - Minimal bootstrap
-- `bootstrap-types-only.sh` - Type system only
-- `bootstrap-ultra-minimal.sh` - Ultra-minimal bootstrap
-- `bootstrap-multiphase.spl` - Multi-phase bootstrap (Simple)
-- `bootstrap-safe.spl` - Safe bootstrap with checks
-- `setup-bootstrap-binaries.sh` - Setup bootstrap artifacts
+- `bootstrap-from-scratch-qemu_freebsd.sh` - QEMU FreeBSD environment wrapper
 
 **When to use:** Building from source, self-hosting
 
@@ -231,8 +222,11 @@ scripts/
 # Complete bootstrap
 scripts/bootstrap/bootstrap-from-scratch.sh
 
-# Platform-specific
-scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+# FreeBSD target (native or cross)
+scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
+
+# QEMU FreeBSD wrapper
+scripts/bootstrap/bootstrap-from-scratch-qemu_freebsd.sh --step=full2
 ```
 
 ### Running Tests
@@ -371,7 +365,7 @@ main()
 **By Category:**
 - build/: 9 scripts (includes build-minimal-bootstrap.sh from bin/)
 - test/: 30+ scripts (includes verify-torch-ffi.sh from bin/)
-- bootstrap/: 11 scripts
+- bootstrap/: 3 scripts
 - migration/: 11 scripts
 - audit/: 3 scripts
 - setup/: 6 scripts

@@ -48,7 +48,7 @@ This roadmap provides complete implementation guides for activating Phase 1 feat
 
 **Guide:** `doc/guide/runtime_implementation_guide_cpp.md`
 **Language:** C++
-**Target File:** `seed/runtime.cpp`
+**Target File:** `src/compiler_seed/runtime.cpp`
 **Lines:** ~300 LOC
 
 **Functions:**
@@ -219,8 +219,8 @@ This roadmap provides complete implementation guides for activating Phase 1 feat
 ### Code Files to Modify/Create
 
 **Runtime (C++):**
-- `seed/runtime.cpp` - Add 7 functions
-- `seed/runtime.h` - Add declarations
+- `src/compiler_seed/runtime.cpp` - Add 7 functions
+- `src/compiler_seed/runtime.h` - Add declarations
 
 **Phase 2 (Simple):**
 - `src/compiler/linker/linker_wrapper.spl` - Direct ELF writing
@@ -318,7 +318,7 @@ file test.arm  # Should show "ELF 32-bit ARM"
 ## Next Steps (Immediate)
 
 ### Option A: Start Runtime Implementation (Recommended)
-1. Open `seed/runtime.cpp`
+1. Open `src/compiler_seed/runtime.cpp`
 2. Follow guide at `doc/guide/runtime_implementation_guide_cpp.md`
 3. Implement 7 functions (~300 LOC, 2-4 hours)
 4. Test: `bin/simple test --parallel=4`

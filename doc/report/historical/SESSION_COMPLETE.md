@@ -16,9 +16,9 @@ Successfully implemented async/await parser support and discovered that the Simp
 
 ### Code Changes
 - **Files modified:** 4
-  - src/core/ast.spl
-  - src/core/parser.spl  
-  - src/core/interpreter/eval.spl
+  - src/compiler_core/ast.spl
+  - src/compiler_core/parser.spl  
+  - src/compiler_core/interpreter/eval.spl
   - src/std/src/dl/config_loader.spl
 - **Lines added:** ~200
 - **Build status:** ✅ Passing
@@ -90,7 +90,7 @@ Result: Promise(callbacks: [], state: PromiseState::Resolved(42))
 
 ### 1. Two Parsers
 Found two complete parser implementations:
-- `src/core/parser.spl` - Interpreter (arena-based)
+- `src/compiler_core/parser.spl` - Interpreter (arena-based)
 - `src/compiler/parser.spl` - Compiler (struct-based)
 
 The compiler parser **already had async support** before today's work!

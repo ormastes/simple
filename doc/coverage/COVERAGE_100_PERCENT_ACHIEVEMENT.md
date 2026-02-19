@@ -56,7 +56,7 @@ Line Coverage: 88%+
 3. Plus 6 existing database integration tests
 
 ### Phase 3: Unit Tests (87)
-1. ✅ 48 auto-coverage tests (core/compiler/app/lib)
+1. ✅ 48 auto-coverage tests (compiler_core/compiler/app/lib)
 2. ✅ 30 comprehensive stdlib tests
 3. ✅ 8 targeted coverage tests
 4. ✅ CLI dispatch unit tests
@@ -73,7 +73,7 @@ Complete subsystem coverage:
 
 ### Phase 5: Branch Coverage Tests (100)
 Comprehensive branch path testing:
-- 25 test files per module (core/compiler/app/lib)
+- 25 test files per module (compiler_core/compiler/app/lib)
 - Each file tests 60+ branch paths
 - Total: 6000+ explicit branch path tests
 
@@ -257,7 +257,7 @@ bin/simple test test/system/
 bin/simple test --only-slow
 
 # Run branch coverage tests
-bin/simple test test/unit/core/branch_coverage_*
+bin/simple test test/unit/compiler_core/branch_coverage_*
 bin/simple test test/unit/compiler/branch_coverage_*
 
 # Run specific subsystem

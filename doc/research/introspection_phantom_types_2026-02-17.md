@@ -23,15 +23,15 @@ comprehensive framework for **modern type-level safety and observability**. The 
 
 | Feature | Status | File |
 |---------|--------|------|
-| Generic monomorphization (runtime) | ✅ Complete | `src/core/generic_runtime.spl` |
-| Closure capture warnings | ✅ Complete | `src/core/closure_analysis.spl` |
-| Ignored return value warnings | ✅ Complete | `src/core/interpreter/eval.spl` |
+| Generic monomorphization (runtime) | ✅ Complete | `src/compiler_core/generic_runtime.spl` |
+| Closure capture warnings | ✅ Complete | `src/compiler_core/closure_analysis.spl` |
+| Ignored return value warnings | ✅ Complete | `src/compiler_core/interpreter/eval.spl` |
 | Effect system (async/sync inference) | ✅ Complete | `src/std/type/effects.spl` |
 | ConstKeySet dict validation | ✅ Complete | `src/std/type/types.spl` |
 | Debug support (StackFrame, DebugLevel) | ✅ Design | `src/std/debug.spl` |
 | Panic report with StackTrace | ✅ Design | `src/std/report/runtime/panic.spl` |
 | Error trait with backtrace() | ✅ Design | `src/std/error.spl` |
-| Structural type checking (duck typing) | ✅ Runtime | `src/core/interpreter/eval.spl` |
+| Structural type checking (duck typing) | ✅ Runtime | `src/compiler_core/interpreter/eval.spl` |
 | **Phantom types** | ❌ Missing | — |
 | **Compile-time @comptime reflection** | ❌ Missing | — |
 | **@derive / code generation** | ❌ Missing | — |
@@ -68,12 +68,12 @@ struct ConstKeyValidation:
 **Strength:** Catches typo keys and missing required keys at compile time.
 **Gap:** Only works for dict literals with known keys. Not extensible to general contracts.
 
-#### 1.1b Closure Capture Analysis (`src/core/closure_analysis.spl`)
+#### 1.1b Closure Capture Analysis (`src/compiler_core/closure_analysis.spl`)
 
 Detects when nested functions try to modify outer `var` variables (which fails at runtime).
 Produces `WARN:` messages, 22 tests passing.
 
-#### 1.1c Ignored Return Value Detection (`src/core/interpreter/eval.spl`)
+#### 1.1c Ignored Return Value Detection (`src/compiler_core/interpreter/eval.spl`)
 
 Detects and warns when a non-void function's return value is silently discarded.
 
@@ -294,8 +294,8 @@ enum HttpMethod:   # Future: PATCH, TRACE may be added
 | Feature | Present? | Location | Priority | Safety |
 |---------|----------|----------|----------|--------|
 | ConstKeySet dict validation | ✅ | `std/type/types.spl` | Done | ✅ |
-| Closure capture warnings | ✅ | `core/closure_analysis.spl` | Done | ✅ |
-| Ignored return warnings | ✅ | `core/interpreter/eval.spl` | Done | ✅ |
+| Closure capture warnings | ✅ | `compiler_core/closure_analysis.spl` | Done | ✅ |
+| Ignored return warnings | ✅ | `compiler_core/interpreter/eval.spl` | Done | ✅ |
 | Effect system | ✅ | `std/type/effects.spl` | Done | ✅ |
 | Static assertions | ❌ | — | HIGH | ✅ |
 | Format string validation | ❌ | — | HIGH | ✅ |

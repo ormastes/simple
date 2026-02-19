@@ -25,14 +25,14 @@ All miscellaneous language features are now implemented, including context manag
 **Status:** COMPLETE - Stdlib implementation exists
 
 **Implementation:**
-- File: `simple/std_lib/src/core/context.spl`
+- File: `simple/std_lib/src/compiler_core/context.spl`
 - Trait: `ContextManager` with `__enter__()` and `__exit__()`
 - Fully documented with examples
 - Runtime support for context manager protocol
 
 **Evidence:**
 ```simple
-# simple/std_lib/src/core/context.spl
+# simple/std_lib/src/compiler_core/context.spl
 trait ContextManager:
     fn __enter__(self)
     fn __exit__(self, exc_type, exc_value, traceback)
@@ -55,7 +55,7 @@ trait ContextManager:
 **Status:** COMPLETE - Stdlib implementation exists
 
 **Implementation:**
-- File: `simple/std_lib/src/core/list.spl`
+- File: `simple/std_lib/src/compiler_core/list.spl`
 - Struct: `List[T]` with dynamic sizing
 - Full collection trait implementations
 - Supports `[]` syntax for creation
@@ -64,7 +64,7 @@ trait ContextManager:
 **Status:** COMPLETE - Stdlib implementation exists
 
 **Implementation:**
-- File: `simple/std_lib/src/core/array.spl`
+- File: `simple/std_lib/src/compiler_core/array.spl`
 - Struct: `Array[T, const N: usize]` with fixed size
 - Supports `[T; N]` syntax
 - Implements collection traits except Growable
@@ -73,7 +73,7 @@ trait ContextManager:
 **Status:** COMPLETE - Stdlib implementation exists
 
 **Implementation:**
-- File: `simple/std_lib/src/core/text.spl`
+- File: `simple/std_lib/src/compiler_core/text.spl`
 - Struct: `String` with UTF-8 support
 - Full string manipulation methods
 - Unifies `str` and `"..."` syntax
@@ -82,7 +82,7 @@ trait ContextManager:
 **Status:** COMPLETE - Implemented persistent list
 
 **Implementation:**
-- File: `simple/std_lib/src/core/persistent_list.spl` (4.5KB)
+- File: `simple/std_lib/src/compiler_core/persistent_list.spl` (4.5KB)
 - Type: `PList[T]` enum with Empty and Cons variants
 - O(1) prepend with structural sharing
 - Full functional programming support (map, filter, fold)
@@ -118,7 +118,7 @@ let list2 = list1.prepend(0)  # Shares tail with list1
 **Status:** COMPLETE - Extension methods implemented
 
 **Implementation:**
-- File: `simple/std_lib/src/core/primitives.spl` (6KB)
+- File: `simple/std_lib/src/compiler_core/primitives.spl` (6KB)
 - Methods on i64, f64, bool primitives
 - Math operations, comparisons, conversions
 - Constants (PI, E, INFINITY, etc.)
@@ -158,12 +158,12 @@ assert true.to_int() == 1
 - `src/parser/src/ast/enums.rs` - `MoveMode` enum
 
 **Stdlib:**
-- `simple/std_lib/src/core/context.spl` - ContextManager trait
-- `simple/std_lib/src/core/list.spl` - List[T] implementation
-- `simple/std_lib/src/core/array.spl` - Array[T, N] implementation
-- `simple/std_lib/src/core/text.spl` - String implementation
-- `simple/std_lib/src/core/persistent_list.spl` - PList[T] persistent list (NEW)
-- `simple/std_lib/src/core/primitives.spl` - Primitive extensions (NEW)
+- `simple/std_lib/src/compiler_core/context.spl` - ContextManager trait
+- `simple/std_lib/src/compiler_core/list.spl` - List[T] implementation
+- `simple/std_lib/src/compiler_core/array.spl` - Array[T, N] implementation
+- `simple/std_lib/src/compiler_core/text.spl` - String implementation
+- `simple/std_lib/src/compiler_core/persistent_list.spl` - PList[T] persistent list (NEW)
+- `simple/std_lib/src/compiler_core/primitives.spl` - Primitive extensions (NEW)
 
 **Documentation:**
 - `doc/design/structural_sharing.md` - Structural sharing guide (NEW)

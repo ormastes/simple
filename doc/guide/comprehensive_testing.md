@@ -174,7 +174,7 @@ testing.assert_false(user.is_deleted(), "User should not be deleted")
 #### Option Assertions
 
 ```simple
-val value = testing.assert_some(option, "message")  // Returns unwrapped value
+val value = testing.assert_some(option, "message")  # Returns unwrapped value
 testing.assert_none(option, "message")
 ```
 
@@ -188,8 +188,8 @@ testing.assert_eq(u.name, "Alice", "User name should be Alice")
 #### Result Assertions
 
 ```simple
-val value = testing.assert_ok(result, "message")  // Returns unwrapped value
-val error = testing.assert_err(result, "message") // Returns error value
+val value = testing.assert_ok(result, "message")  # Returns unwrapped value
+val error = testing.assert_err(result, "message") # Returns error value
 ```
 
 **Example:**
@@ -215,7 +215,7 @@ print "Took {elapsed_micros} microseconds"
 ```simple
 val result = testing.assert_fast(
     \: query_database(),
-    100000,  // 100ms limit
+    100000,  # 100ms limit
     "Query should complete in 100ms"
 )
 ```
@@ -229,7 +229,7 @@ val result = testing.assert_fast(
             sum = sum + i
         sum
     ,
-    50000,  // 50ms limit
+    50000,  # 50ms limit
     "Loop should be fast"
 )
 testing.assert_eq(result, 499500, "Sum should be correct")
@@ -243,7 +243,7 @@ testing.assert_eq(result, 499500, "Sum should be correct")
 val spy = testing.create_spy("function_name")
 spy.record_call(["arg1", "arg2"])
 
-testing.assert_called(spy, 3)  // Called exactly 3 times
+testing.assert_called(spy, 3)  # Called exactly 3 times
 testing.assert_called_with(spy, ["arg1", "arg2"])
 testing.assert_not_called(spy)
 ```
@@ -285,9 +285,9 @@ testing.assert_not_contains(users, "David", "Should not contain David")
 
 ```simple
 testing.with_cleanup(
-    \: create_temp_file(),    // Setup
-    \file: delete_file(file),  // Teardown
-    \file: test_operations(file) // Test
+    \: create_temp_file(),    # Setup
+    \file: delete_file(file),  # Teardown
+    \file: test_operations(file) # Test
 )
 ```
 
@@ -316,7 +316,7 @@ testing.with_cleanup(
 ```simple
 val result = testing.with_timeout(
     \: potentially_slow_operation(),
-    5.0,  // 5 second timeout
+    5.0,  # 5 second timeout
     "Operation timed out"
 )
 ```
@@ -369,7 +369,7 @@ describe "Sorting Performance":
 
             val result = testing.assert_fast(
                 \: quicksort(data),
-                500000,  // 500ms limit
+                500000,  # 500ms limit
                 "Quicksort should complete in 500ms"
             )
 
@@ -428,7 +428,7 @@ import testing.mock as mock
 describe "Optimized User Service":
     context "Performance with caching":
         skip "cache improves lookup speed":
-            // Setup mocks
+            # Setup mocks
             val db_mock = mock.create_mock("database")
             val cache_mock = mock.create_mock("cache")
 
@@ -437,22 +437,22 @@ describe "Optimized User Service":
                 cache: cache_mock
             )
 
-            // Benchmark without cache
-            cache_mock.set_return_values(["None"])  // Cache miss
+            # Benchmark without cache
+            cache_mock.set_return_values(["None"])  # Cache miss
             val (result1, time1) = testing.measure_time(\:
                 service.get_user("user123")
             )
 
-            // Benchmark with cache
-            cache_mock.set_return_values(["Alice"])  // Cache hit
+            # Benchmark with cache
+            cache_mock.set_return_values(["Alice"])  # Cache hit
             val (result2, time2) = testing.measure_time(\:
                 service.get_user("user123")
             )
 
-            // Verify cache is faster
+            # Verify cache is faster
             testing.assert_true(time2 < time1, "Cache should be faster")
 
-            // Verify cache was used
+            # Verify cache was used
             testing.assert_called(cache_mock, 2)
 ```
 
@@ -467,7 +467,7 @@ import testing.mock as mock
 describe "Order Service":
     context "Place order":
         skip "processes order correctly":
-            // Setup mocks
+            # Setup mocks
             val payment_mock = mock.create_mock("payment")
             val inventory_mock = mock.create_mock("inventory")
             val email_mock = mock.create_mock("email")
@@ -481,19 +481,19 @@ describe "Order Service":
                 email: email_mock
             )
 
-            // Place order
+            # Place order
             val order = Order.new("user123", ["item1", "item2"], 99.99)
             val result = service.place_order(order)
 
-            // Verify result
+            # Verify result
             val order_id = testing.assert_ok(result, "Order should succeed")
 
-            // Verify interactions
+            # Verify interactions
             testing.assert_called(inventory_mock, 1)
             testing.assert_called(payment_mock, 1)
             testing.assert_called(email_mock, 1)
 
-            // Verify call order and arguments
+            # Verify call order and arguments
             testing.assert_called_with(payment_mock, ["charge", "user123", "99.99"])
             testing.assert_called_with(email_mock, ["send_confirmation", "user123", order_id])
 ```
@@ -515,7 +515,7 @@ describe "API Performance":
 
             val results = bench.compare_default(endpoints)
 
-            // Verify all endpoints meet 100ms SLA
+            # Verify all endpoints meet 100ms SLA
             for (endpoint, stats) in results.entries():
                 val mean_ms = stats.mean_ns / 1_000_000.0
                 testing.assert_true(
@@ -533,40 +533,40 @@ describe "User Repository":
     context "CRUD operations":
         skip "saves and loads users":
             testing.with_cleanup(
-                // Setup: Create test database
+                # Setup: Create test database
                 \:
                     val db = Database.connect("test.db")
                     db.migrate()
                     db
                 ,
-                // Teardown: Clean up database
+                # Teardown: Clean up database
                 \db:
                     db.disconnect()
                     delete_file("test.db")
                 ,
-                // Test: Verify CRUD operations
+                # Test: Verify CRUD operations
                 \db:
                     val repo = UserRepository.new(db)
 
-                    // Create
+                    # Create
                     val user = User.new("alice@example.com", "Alice")
                     val id = testing.assert_ok(
                         repo.save(user),
                         "Save should succeed"
                     )
 
-                    // Read
+                    # Read
                     val loaded = testing.assert_some(
                         repo.find_by_id(id),
                         "User should be found"
                     )
                     testing.assert_eq(loaded.email, user.email, "Email should match")
 
-                    // Update
+                    # Update
                     loaded.name = "Alice Smith"
                     testing.assert_ok(repo.update(loaded), "Update should succeed")
 
-                    // Delete
+                    # Delete
                     testing.assert_ok(repo.delete(id), "Delete should succeed")
                     testing.assert_none(repo.find_by_id(id), "User should be deleted")
             )
@@ -582,39 +582,39 @@ describe "Production Deployment":
     context "Health checks":
         skip "all services are healthy":
             val suite = smoke.SmokeTestSuite.new_default()
-                // Web server
+                # Web server
                 .test("Web responds", \:
                     http.get("https://example.com").status == 200
                 )
 
-                // API
+                # API
                 .test("API health", \:
                     val resp = http.get("https://api.example.com/health")
                     resp.status == 200 and resp.body.contains("ok")
                 )
 
-                // Database
+                # Database
                 .test("Database connected", \:
                     db.connect("prod.db").ping()
                 )
 
-                // Cache
+                # Cache
                 .test("Redis responds", \:
                     redis.ping() == "PONG"
                 )
 
-                // Message queue
+                # Message queue
                 .test("Queue accessible", \:
                     queue.stats().is_some()
                 )
 
             val results = suite.run()
 
-            // Report results
+            # Report results
             for result in results:
                 print result.format()
 
-            // Rollback if any test failed
+            # Rollback if any test failed
             if not suite.all_passed(results):
                 print "❌ Deployment verification failed!"
                 rollback_deployment()
@@ -630,13 +630,13 @@ describe "Production Deployment":
 **Good:**
 ```simple
 skip "returns error when user not found":
-    // ...
+    # ...
 ```
 
 **Bad:**
 ```simple
 skip "test1":
-    // ...
+    # ...
 ```
 
 ### 2. One Assertion Per Concept
@@ -706,13 +706,13 @@ val service = UserService(db: db)
 
 **Good:**
 ```simple
-val data = load_production_dataset()  // Realistic data
+val data = load_production_dataset()  # Realistic data
 val stats = bench.benchmark_default("query", \: query(data))
 ```
 
 **Bad:**
 ```simple
-val data = [1, 2, 3]  // Trivial data
+val data = [1, 2, 3]  # Trivial data
 val stats = bench.benchmark_default("query", \: query(data))
 ```
 
@@ -724,7 +724,7 @@ val suite = smoke.SmokeTestSuite.new(
         timeout_secs: 5.0,
         retry_attempts: 2,
         retry_delay_secs: 1.0,
-        fail_fast: true  // Stop on first failure
+        fail_fast: true  # Stop on first failure
     )
 )
 ```
@@ -766,8 +766,8 @@ db_mock.set_return_values(["cached_result"])
 
 **Solution 3:** Skip slow tests during development
 ```simple
-skip "slow integration test":  // Will be skipped
-    // ...
+skip "slow integration test":  # Will be skipped
+    # ...
 ```
 
 ### Problem: Mocks not working as expected
@@ -775,22 +775,22 @@ skip "slow integration test":  // Will be skipped
 **Check 1:** Verify you're recording calls
 ```simple
 val mock_fn = mock.create_mock("test")
-mock_fn.record_call(["arg1"])  // Don't forget this!
+mock_fn.record_call(["arg1"])  # Don't forget this!
 ```
 
 **Check 2:** Check return value setup
 ```simple
 val mock_fn = mock.create_mock("test")
 mock_fn.set_return_values(["value1", "value2"])
-val v1 = mock_fn.next_return_value()  // Returns Some("value1")
-val v2 = mock_fn.next_return_value()  // Returns Some("value2")
-val v3 = mock_fn.next_return_value()  // Returns None (exhausted)
+val v1 = mock_fn.next_return_value()  # Returns Some("value1")
+val v2 = mock_fn.next_return_value()  # Returns Some("value2")
+val v3 = mock_fn.next_return_value()  # Returns None (exhausted)
 ```
 
 **Check 3:** Arguments are stored as strings
 ```simple
 // When recording:
-mock_fn.record_call(["123", "Alice"])  // Use strings
+mock_fn.record_call(["123", "Alice"])  # Use strings
 
 // When verifying:
 testing.assert_called_with(mock_fn, ["123", "Alice"])
@@ -803,7 +803,7 @@ testing.assert_called_with(mock_fn, ["123", "Alice"])
 val config = bench.BenchmarkConfig(
     warmup_iterations: 10,
     measurement_iterations: 100,
-    sample_size: 1000,  // More samples
+    sample_size: 1000,  # More samples
     outlier_threshold: 2.0
 )
 ```
@@ -811,7 +811,7 @@ val config = bench.BenchmarkConfig(
 **Solution 2:** Add warmup iterations
 ```simple
 val config = bench.BenchmarkConfig(
-    warmup_iterations: 50,  // More warmup
+    warmup_iterations: 50,  # More warmup
     measurement_iterations: 100,
     sample_size: 500,
     outlier_threshold: 2.0
@@ -823,7 +823,7 @@ val config = bench.BenchmarkConfig(
 **Solution 1:** Increase timeout
 ```simple
 val config = smoke.SmokeTestConfig(
-    timeout_secs: 30.0,  // Increase from default 10s
+    timeout_secs: 30.0,  # Increase from default 10s
     retry_attempts: 3,
     retry_delay_secs: 2.0,
     fail_fast: false
@@ -834,8 +834,8 @@ val config = smoke.SmokeTestConfig(
 ```simple
 val config = smoke.SmokeTestConfig(
     timeout_secs: 10.0,
-    retry_attempts: 5,  // Retry more times
-    retry_delay_secs: 3.0,  // Wait longer between retries
+    retry_attempts: 5,  # Retry more times
+    retry_delay_secs: 3.0,  # Wait longer between retries
     fail_fast: false
 )
 ```
@@ -847,7 +847,7 @@ val config = smoke.SmokeTestConfig(
 testing.with_cleanup(
     \: create_resource(),
     \r:
-        // Cleanup happens even if test fails
+        # Cleanup happens even if test fails
         cleanup_resource(r)
     ,
     \r: test_resource(r)

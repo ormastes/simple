@@ -183,7 +183,7 @@ ffi.call("function_name", arg1, arg2)
 
 ### What Works (Validated)
 
-Based on `simple/std_lib/test/unit/core/pattern_matching_spec.spl` which compiles and runs:
+Based on `simple/std_lib/test/unit/compiler_core/pattern_matching_spec.spl` which compiles and runs:
 
 ✅ **Function definitions**:
 ```simple

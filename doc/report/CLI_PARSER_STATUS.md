@@ -17,7 +17,7 @@ Created shared CLI argument parser module to eliminate duplicate manual argument
 ## Files Created
 
 ### 1. Core Module
-**File:** `src/app/cli_parser.spl` (400 lines)
+**File:** `src/lib/cli/cli_parser.spl` (400 lines)
 **Status:** ✅ Complete
 
 **Exports:**
@@ -119,7 +119,7 @@ Created shared CLI argument parser module to eliminate duplicate manual argument
 
 ### Basic Flag
 ```simple
-use app.cli_parser.*
+use lib.cli.cli_parser.*
 
 val spec = cli_spec()
 val spec2 = cli_spec_flag(spec, "verbose", "v", "Show verbose output")
@@ -153,7 +153,7 @@ val input = parsed_positional(parsed, 0)
 
 ### Complete Example
 ```simple
-use app.cli_parser.*
+use lib.cli.cli_parser.*
 
 val spec = cli_spec()
 val spec2 = cli_spec_program(spec, "myapp", "Process files")
@@ -249,7 +249,7 @@ val input = parsed_positional(parsed, 0)
 ## Migration Checklist
 
 ### Core Implementation
-- [x] Create `src/app/cli_parser.spl` (400 lines)
+- [x] Create `src/lib/cli/cli_parser.spl` (400 lines)
 - [x] Create unit tests (46 tests)
 - [x] Verify all tests pass
 - [x] Document API
@@ -317,7 +317,7 @@ The module doesn't automatically add `--help` because different tools have diffe
 
 ## Related Work
 
-- **CLI Util**: `src/app/cli_util.spl` - Basic helpers (get_cli_args, parse_csv_fields)
+- **CLI Util**: `src/lib/cli/cli_util.spl` - Basic helpers (get_cli_args, parse_csv_fields)
 - **Test Runner Args**: `src/app/test_runner_new/test_runner_args.spl` - Specialized test parsing (60+ arguments)
 - **Build Config**: `src/app/build/config.spl` - Build-specific parsing
 

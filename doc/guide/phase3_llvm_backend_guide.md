@@ -1181,7 +1181,7 @@ Use the task system to track milestones:
 
 - **MIR Specification:** `doc/design/mir_specification.md`
 - **Backend API:** `src/compiler/backend/backend_api.spl`
-- **Runtime FFI:** `seed/runtime.h` (C headers for rt_* functions)
+- **Runtime FFI:** `src/compiler_seed/runtime.h` (C headers for rt_* functions)
 
 ### Related Guides
 

@@ -123,7 +123,7 @@ fn run_refactoring(input_file: text) -> RefactorStats:
 ## Implementation Status
 
 ### ✅ Fully Implemented - String Manipulation
-All string operations are implemented and working in `simple/std_lib/src/core/string_ops.spl`:
+All string operations are implemented and working in `simple/std_lib/src/compiler_core/string_ops.spl`:
 - 450+ lines of fully implemented string operations
 - Full UTF-8 support
 - Memory-safe implementations using `danger` blocks
@@ -183,11 +183,11 @@ fn process_code(code: text) -> List<text>:
 ## Related Modules
 
 **String Implementation:**
-- `simple/std_lib/src/core/text.spl` - Module entry point
-- `simple/std_lib/src/core/string_core.spl` - Core type definition
-- `simple/std_lib/src/core/string_ops.spl` - Operations (450+ lines)
-- `simple/std_lib/src/core/string_traits.spl` - Trait implementations
-- `simple/std_lib/src/core/string_utils.spl` - Iterators and utilities
+- `simple/std_lib/src/compiler_core/text.spl` - Module entry point
+- `simple/std_lib/src/compiler_core/string_core.spl` - Core type definition
+- `simple/std_lib/src/compiler_core/string_ops.spl` - Operations (450+ lines)
+- `simple/std_lib/src/compiler_core/string_traits.spl` - Trait implementations
+- `simple/std_lib/src/compiler_core/string_utils.spl` - Iterators and utilities
 
 **Runtime Support:**
 - `src/runtime/src/value/collections.rs` - rt_string_* FFI functions

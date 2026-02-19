@@ -29,7 +29,7 @@
 **Solution:** Replaced all `abs()` calls with inline absolute value calculations
 
 **Files Modified:**
-- `src/lib/std/src/core/math.spl` (lines 128, 155, 194, 220, 351-352)
+- `src/lib/std/src/compiler_core/math.spl` (lines 128, 155, 194, 220, 351-352)
 
 **Example Fix:**
 ```simple
@@ -66,7 +66,7 @@ val diff = if next_guess > guess: next_guess - guess else: guess - next_guess
 **Solution:** Use proper variadic syntax throughout decorators
 
 **Files Modified:**
-- `src/lib/std/src/core/decorators.spl`
+- `src/lib/std/src/compiler_core/decorators.spl`
 
 **Example Fix:**
 ```simple
@@ -361,14 +361,14 @@ val abs_val = abs(x)  # May have overload resolution issues
 
 ### Source Code Changes
 
-1. **src/lib/std/src/core/math.spl**
+1. **src/lib/std/src/compiler_core/math.spl**
    - Line 128: sqrt() convergence check
    - Line 155: exp() term check
    - Line 194: sin() term check
    - Line 220: cos() term check
    - Lines 351-352: is_close() floating-point comparison
 
-2. **src/lib/std/src/core/decorators.spl**
+2. **src/lib/std/src/compiler_core/decorators.spl**
    - Line 30: CachedFunction.__call__() - variadic syntax
    - Line 89: LoggedFunction.__call__() - variadic syntax
    - Line 133: DeprecatedFunction.__call__() - variadic syntax

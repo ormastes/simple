@@ -12,7 +12,7 @@ for CORE Simple language components.
 ## Scope: CORE Simple (26 files)
 
 ```
-src/core/
+src/compiler_core/
 ├── tokens.spl              - Token definitions
 ├── types.spl               - Type system
 ├── error.spl               - Error handling
@@ -95,7 +95,7 @@ test/core_system/
 
 ### Existing Tests (56 files)
 ```
-test/unit/core/
+test/unit/compiler_core/
 ├── tokens_spec.spl
 ├── lexer_spec.spl
 ├── parser_spec.spl
@@ -212,7 +212,7 @@ All branch types covered:
 
 ```bash
 # Run all CORE tests
-bin/simple test test/core_complete/ test/core_integration/ test/core_system/ test/unit/core/
+bin/simple test test/core_complete/ test/core_integration/ test/core_system/ test/unit/compiler_core/
 
 # Run specific phases
 bin/simple test test/core_complete/      # Unit tests

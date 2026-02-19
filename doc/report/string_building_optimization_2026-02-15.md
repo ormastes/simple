@@ -10,7 +10,7 @@ Comprehensive optimization pass that eliminated **12+ O(n²) and O(n⁴) string 
 
 ## Critical Issue: O(n⁴) Interpreter Performance Bug
 
-### File: `src/core/interpreter/eval.spl`
+### File: `src/compiler_core/interpreter/eval.spl`
 
 **Function:** `must_use_scan_source()` (lines 309-399)
 
@@ -368,7 +368,7 @@ val str = chars.join("")  # Single allocation and copy - O(n)
 
 | File | Functions | Pattern | Lines Changed |
 |------|-----------|---------|---------------|
-| `src/core/interpreter/eval.spl` | `must_use_scan_source` | O(n⁴) → O(n) | 309-399 |
+| `src/compiler_core/interpreter/eval.spl` | `must_use_scan_source` | O(n⁴) → O(n) | 309-399 |
 | `src/std/sdn/lexer.spl` | `scan_string`, `scan_number`, `scan_identifier` | O(n²) → O(n) | 309-408 |
 | `src/compiler/predicate_parser.spl` | Selector + arg parsing | O(n²) → O(n) | 57-100 |
 | `src/compiler/const_keys_phase8a.spl` | `extract_keys` | O(n²) → O(n) | 26-57 |
@@ -453,7 +453,7 @@ This work builds on previous algorithmic optimization sessions:
 ## Future Work
 
 1. **Remaining opportunities:**
-   - Audit `src/core/closure_analysis.spl:47-58` scope reconstruction
+   - Audit `src/compiler_core/closure_analysis.spl:47-58` scope reconstruction
    - Check `src/app/perf/optimizer.spl` analysis loops (low priority - not production code)
    - Verify `src/std/compression/lz4.spl` count string building
 

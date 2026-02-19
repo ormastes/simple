@@ -35,7 +35,7 @@ Status: ✅ PASS
 
 #### 3. Unit Core Tests (Unchanged)
 ```
-./bin/simple test test/unit/core/
+./bin/simple test test/unit/compiler_core/
 
 Results: 55 total, 55 passed, 0 failed
 Time: ~250ms

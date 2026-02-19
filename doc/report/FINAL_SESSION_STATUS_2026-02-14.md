@@ -126,8 +126,8 @@
 ### Threading Startup Integration
 
 **Files Modified:**
-1. `seed/runtime_thread.h` - Added spl_thread_init() declaration (+8 lines)
-2. `seed/runtime_thread.c` - Implemented spl_thread_init() (+9 lines)
+1. `src/compiler_seed/runtime_thread.h` - Added spl_thread_init() declaration (+8 lines)
+2. `src/compiler_seed/runtime_thread.c` - Implemented spl_thread_init() (+9 lines)
 3. `seed/startup/common/crt_common.h` - Added threading init extern (+3 lines)
 4. `seed/startup/common/crt_common.c` - Call spl_thread_init() at startup (+3 lines)
 
@@ -140,10 +140,10 @@
 
 **Symbol Verification:**
 ```bash
-$ nm seed/build/libspl_runtime.a | grep spl_thread_init
+$ nm build/seed/libspl_runtime.a | grep spl_thread_init
 0000000000000000 T spl_thread_init  ✅
 
-$ nm seed/build/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
+$ nm build/seed/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
                  U spl_thread_init  ✅
 ```
 
@@ -152,8 +152,8 @@ $ nm seed/build/startup/libspl_crt_linux_x86_64.a | grep spl_thread_init
 ### Thread Pool Workers Implementation
 
 **Files Modified:**
-1. `seed/runtime_thread.h` - Added spl_thread_pool_spawn_worker() (+18 lines)
-2. `seed/runtime_thread.c` - Implemented worker spawn + wrappers (+76 lines)
+1. `src/compiler_seed/runtime_thread.h` - Added spl_thread_pool_spawn_worker() (+18 lines)
+2. `src/compiler_seed/runtime_thread.c` - Implemented worker spawn + wrappers (+76 lines)
 3. `src/std/thread_pool.spl` - Added extern + use helper function (+12 lines)
 
 **Architecture:**
@@ -197,7 +197,7 @@ if (!worker_loop_entry) {
 
 **Symbol Verification:**
 ```bash
-$ nm seed/build/libspl_runtime.a | grep -E "spl_thread_pool|worker_loop"
+$ nm build/seed/libspl_runtime.a | grep -E "spl_thread_pool|worker_loop"
 0000000000001010 T spl_thread_pool_spawn_worker  ✅
                  w worker_loop_entry              ✅
 ```
@@ -215,7 +215,7 @@ $ nm seed/build/libspl_runtime.a | grep -E "spl_thread_pool|worker_loop"
   - Member access on primitives: `options.backend` where options is i64
   - Type mismatches: returning void as int64_t
   - Syntax errors in generated code
-- **Workaround:** Wait for compiler_core fixes OR use pre-built binary
+- **Workaround:** Wait for compiler_core_legacy fixes OR use pre-built binary
 - **Impact:** Cannot run 976 new tests until binary rebuilt
 - **Alternative:** Use existing binary for partial testing (interpreter mode)
 
@@ -387,7 +387,7 @@ From multi-agent implementation session:
 - ✅ Comprehensive documentation complete
 
 **Blocked Work:**
-- ⚠️ Runtime binary rebuild (compiler_core transpilation bugs)
+- ⚠️ Runtime binary rebuild (compiler_core_legacy transpilation bugs)
 - ⚠️ 976 new tests validation (requires runtime binary)
 - ⚠️ Full integration testing (requires runtime binary)
 
@@ -433,7 +433,7 @@ From multi-agent implementation session:
    - Verify weak symbol behavior
    - Document results
 
-3. **Wait for compiler_core fixes** (Option 1)
+3. **Wait for compiler_core_legacy fixes** (Option 1)
    - Continue work on fixing transpilation bugs
    - Rebuild when ready
    - Run remaining 476 tests
@@ -483,12 +483,12 @@ All major components are now production-ready:
 - ✅ Standard library (50+ modules, 4,067 tests)
 
 **Testing Blockers:**
-- Runtime binary rebuild blocked by compiler_core bugs
+- Runtime binary rebuild blocked by compiler_core_legacy bugs
 - 976 new tests ready for validation
 - Alternative testing paths available
 
 **Time to Production:**
-- With compiler_core fixes: 1-2 weeks
+- With compiler_core_legacy fixes: 1-2 weeks
 - With current binary: Partial validation possible now
 
 ---

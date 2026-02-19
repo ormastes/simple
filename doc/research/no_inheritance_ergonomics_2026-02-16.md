@@ -916,6 +916,6 @@ If two items at the same priority level provide the same method name -> **compil
 - `src/app/desugar/static_methods.spl` -- Existing desugaring infrastructure (model for forwarding desugar)
 - `src/app/parser/def/function.spl:310-328` -- Existing `FunctionAliasDef` parser structure
 - `src/compiler_core/traits.spl` -- Trait definitions and solver
-- `src/core/parser.spl` -- Core parser (Phase 1-4 changes)
-- `src/core/ast_types.spl` -- AST node definitions (Phase 1 addition)
-- `src/core/interpreter/eval.spl` -- Evaluator (Phase 1 alias resolution)
+- `src/compiler_core/parser.spl` -- Core parser (Phase 1-4 changes)
+- `src/compiler_core/ast_types.spl` -- AST node definitions (Phase 1 addition)
+- `src/compiler_core/interpreter/eval.spl` -- Evaluator (Phase 1 alias resolution)

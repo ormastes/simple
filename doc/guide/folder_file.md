@@ -90,7 +90,7 @@ src/
 │   ├── mir_opt/                         # MIR optimizations
 │   └── type_system/                     # Type checking & inference
 │
-├── compiler_core/  # Core compiler subset (97,057 lines)
+├── compiler_core_legacy/  # Core compiler subset (97,057 lines)
 │   └── (Simplified version for bootstrapping)
 │
 ├── lib/            # Core libraries (30,993 lines)
@@ -106,7 +106,7 @@ src/
 
 **Go here when:**
 - Writing new features → `src/std/` or `src/app/`
-- Fixing compiler bugs → `src/compiler/` or `src/core/`
+- Fixing compiler bugs → `src/compiler/` or `src/compiler_core_legacy/`
 - Adding ML features → `src/std/ml/` or `src/lib/pure/`
 - Building tools → `src/app/`
 
@@ -351,7 +351,7 @@ Example programs and tutorials.
 → `src/std/`, create tests in `test/unit/std/`
 
 **...fix a compiler bug**
-→ `src/compiler/` or `src/core/`, tests in `test/unit/compiler/`
+→ `src/compiler/` or `src/compiler_core_legacy/`, tests in `test/unit/compiler/`
 
 **...understand the architecture**
 → `doc/architecture/overview.md`, `doc/architecture/file_class_structure.md`

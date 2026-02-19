@@ -23,8 +23,8 @@ val x = rt_file_exists("/tmp/test")
 
 Extern functions are **NOT registered** in the function table during module evaluation.
 
-**File:** `src/core/interpreter/eval.spl` (line 1769)
-**File:** `src/core/interpreter/module_loader.spl` (line 215)
+**File:** `src/compiler_core/interpreter/eval.spl` (line 1769)
+**File:** `src/compiler_core/interpreter/module_loader.spl` (line 215)
 
 ```simple
 # CURRENT (BROKEN):
@@ -140,8 +140,8 @@ describe "Extern Functions":
 
 ## Files to Modify
 
-1. `src/core/interpreter/eval.spl` - Line 1769
-2. `src/core/interpreter/module_loader.spl` - Line 215
+1. `src/compiler_core/interpreter/eval.spl` - Line 1769
+2. `src/compiler_core/interpreter/module_loader.spl` - Line 215
 
 ---
 

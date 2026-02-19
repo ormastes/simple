@@ -319,7 +319,7 @@ fn on_sigint():
     cleanup_and_exit(130, "SIGINT (Ctrl+C)")
 ```
 
-**Blocker:** Requires SFFI additions to `seed/runtime.c`
+**Blocker:** Requires SFFI additions to `src/compiler_seed/runtime.c`
 
 ### 2.5 I/O LIMIT ENFORCEMENT ❌
 
@@ -592,7 +592,7 @@ fn parse_test_metadata(file_path: text) -> TestMetadata:
 
 **SFFI Additions Needed:**
 ```c
-// In seed/runtime.c
+// In src/compiler_seed/runtime.c
 void rt_signal_handler_install(int64_t signal, void (*handler)(void));
 void rt_atexit_register(void (*handler)(void));
 ```
@@ -618,7 +618,7 @@ fn on_normal_exit():
 ```
 
 **Files to Modify:**
-- `seed/runtime.c` (SFFI additions)
+- `src/compiler_seed/runtime.c` (SFFI additions)
 - `src/app/test_runner_new/runner_lifecycle.spl`
 - `src/app/cli/main.spl` (call install_signal_handlers on startup)
 
@@ -798,7 +798,7 @@ test_config {
 8. `src/std/process_monitor.spl` (continuous monitoring)
 
 ### Files to Modify (Phase 4 - SFFI):
-1. `seed/runtime.c` (signal handler SFFI)
+1. `src/compiler_seed/runtime.c` (signal handler SFFI)
 2. `src/app/test_runner_new/runner_lifecycle.spl` (signal setup)
 3. `src/app/cli/main.spl` (install handlers on startup)
 

@@ -21,7 +21,7 @@ This document provides step-by-step implementation plans for the 7 major duplica
 ### Target Architecture
 
 ```
-src/core/backend_types.spl          # Canonical definitions (158 lines, KEEP)
+src/compiler_core/backend_types.spl          # Canonical definitions (158 lines, KEEP)
 src/compiler/backend/backend_types.spl  # DELETE (400 lines)
 src/compiler/backend/backend_extensions.spl  # NEW (optional helper functions)
 ```
@@ -383,7 +383,7 @@ Apply same pattern to:
 src/std/string_core.spl             # NEW (150-200 lines, canonical implementations)
 src/std/text.spl                  # KEEP (existing, imports from string_core)
 src/std/template/utilities.spl     # REFACTOR (remove duplicates)
-src/core/types.spl                  # REFACTOR (delegate to string_core)
+src/compiler_core/types.spl                  # REFACTOR (delegate to string_core)
 ```
 
 ### Implementation
@@ -556,7 +556,7 @@ export str_to_lower, str_to_upper
 
 **Phase 2: Update Core Types (15 min)**
 
-File: `src/core/types.spl`
+File: `src/compiler_core/types.spl`
 
 ```simple
 # Before: 35 lines of implementations
@@ -602,7 +602,7 @@ Keep template-specific utilities:
 ```
 src/std/error_core.spl              # NEW (base trait, formatting)
 src/std/error_format.spl            # NEW (formatting utilities)
-src/core/error.spl                  # REFACTOR (uses error_core)
+src/compiler_core/error.spl                  # REFACTOR (uses error_core)
 src/std/error.spl                   # REFACTOR (implements error_core)
 src/compiler/backend/codegen_errors.spl  # REFACTOR (implements error_core)
 ```
@@ -708,7 +708,7 @@ jj restore @-  # Return to previous state
 
 ```bash
 # Line counts
-wc -l src/core/backend_types.spl  # 158
+wc -l src/compiler_core/backend_types.spl  # 158
 wc -l src/compiler/backend/backend_types.spl  # 400+
 wc -l src/app/*/config.spl  # ~600
 wc -l src/std/text.spl src/std/template/utilities.spl  # 500+

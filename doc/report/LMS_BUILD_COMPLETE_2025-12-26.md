@@ -16,13 +16,13 @@ Successfully built the LMS (Language Model Server) implementation of Anthropic's
 **json.spl** - F-string literal brace handling
 - **Problem:** String literal `"{}"` treated as unclosed f-string interpolation
 - **Fix:** Changed to `"{{}}"` (double braces escape literal braces)
-- **File:** `simple/std_lib/src/core/json.spl`
+- **File:** `simple/std_lib/src/compiler_core/json.spl`
 - **Learning:** Simple treats `{` in strings as f-string markers; use `{{` for literal braces
 
 **text.spl** - Named enum variant fields
 - **Problem:** Enum variants used named field syntax `InvalidByte(position: usize, byte: u8)`
 - **Fix:** Removed unused import from transport.spl (advanced text.spl not needed)
-- **File:** `simple/std_lib/src/core/text.spl`
+- **File:** `simple/std_lib/src/compiler_core/text.spl`
 
 **session.spl** - Square bracket generic syntax
 - **Problem:** Used `Option[T]`, `Set[T]` instead of angle brackets
@@ -112,7 +112,7 @@ SIMPLE_LMS_DEBUG=1 ./simple/bin_simple/simple_lms
 
 ### Stdlib Modules Created
 - `simple/std_lib/src/lms/sys.spl` - System module with env access
-- `simple/std_lib/src/core/json.spl` - JSON parsing/serialization
+- `simple/std_lib/src/compiler_core/json.spl` - JSON parsing/serialization
 - `simple/std_lib/src/host/async_nogc_mut/io/stdio.spl` - Stdin/stdout operations
 
 ### Stdlib Modules Fixed

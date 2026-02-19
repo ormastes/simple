@@ -2,7 +2,7 @@
 
 **Purpose:** Enable Simple programs to register signal handlers for graceful shutdown
 
-**Status:** SFFI specification (requires implementation in `seed/runtime.c`)
+**Status:** SFFI specification (requires implementation in `src/compiler_seed/runtime.c`)
 
 ---
 
@@ -133,7 +133,7 @@ void rt_atexit_register(void (*handler)(void)) {
 
 ## Integration Points
 
-### seed/runtime.c
+### src/compiler_seed/runtime.c
 
 Add these functions to the runtime library:
 
@@ -144,7 +144,7 @@ void rt_signal_handler_install(int64_t signal, void (*handler)(void));
 void rt_atexit_register(void (*handler)(void));
 ```
 
-### seed/runtime.h
+### src/compiler_seed/runtime.h
 
 Add declarations:
 
@@ -339,7 +339,7 @@ if not installed:
 ## Implementation Checklist
 
 ### Minimal (Phase 2A):
-- [ ] Add `rt_signal_handler_available()` to seed/runtime.c
+- [ ] Add `rt_signal_handler_available()` to src/compiler_seed/runtime.c
 - [ ] Add `rt_signal_handler_install()` with basic sigaction
 - [ ] Add `rt_atexit_register()` with stdlib atexit
 - [ ] Test on Linux

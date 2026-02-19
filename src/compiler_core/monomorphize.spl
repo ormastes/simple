@@ -1,0 +1,55 @@
+# Core — AST-Level Monomorphization
+#
+# Shared cache and specialization logic for runtime generic monomorphization.
+# Extracts the portable parts of eval.spl's inline mono_* functions so they
+# can be reused without depending on interpreter internals (val_kind, hashmap).
+#
+# The interpreter still owns type inference from runtime values (val_kind).
+# This module handles: cache init/lookup/register and AST clone+substitute.
+#
+# Uses Dict for O(1) cache lookup (no dependency on interpreter/hashmap.spl).
+
+use compiler_core.ast_clone.{ast_clone_decl}
+use compiler_core.type_subst.{type_subst_reset, type_subst_add, subst_type_in_decl}
+
+# ===== Specialization Cache =====
+# Maps cache_key (text) -> specialized_decl_id (i64)
+var mono_cache = {}
+
+fn mono_cache_init():
+    mono_cache = {}
+
+fn mono_cache_lookup(key: text) -> i64:
+    """Look up a specialized decl by cache key.
+    Returns specialized decl_id if found, -1 otherwise."""
+    if mono_cache.contains_key(key):
+        return mono_cache[key]
+    -1
+
+fn mono_cache_register(key: text, decl_id: i64):
+    """Register a specialized decl in the cache."""
+    mono_cache[key] = decl_id
+
+# ===== Specialization =====
+
+fn mono_specialize(decl_id: i64, type_params: [text], type_tags: [i64]) -> i64:
+    """Create a specialized version of a generic declaration.
+
+    Clones the AST and substitutes type parameters with concrete types.
+    Returns specialized decl_id, or the original on clone failure.
+    """
+    val cloned_decl_id = ast_clone_decl(decl_id)
+    if cloned_decl_id < 0:
+        return decl_id
+
+    type_subst_reset()
+    var i: i64 = 0
+    for tparam in type_params:
+        if i < type_tags.len():
+            type_subst_add(tparam, type_tags[i])
+        i = i + 1
+    subst_type_in_decl(cloned_decl_id)
+
+    cloned_decl_id
+
+export mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize

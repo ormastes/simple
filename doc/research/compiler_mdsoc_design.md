@@ -169,7 +169,7 @@ src/
         ui/
           lexer_cli.spl          # CLI entry: lex-only mode
         app/
-          lexer.spl              # Lexer logic (was src/core/lexer.spl)
+          lexer.spl              # Lexer logic (was src/compiler_core/lexer.spl)
           lexer_struct.spl       # Lexer state struct
           ports.spl              # LexerInputPort, LexerOutputPort
         __init__.spl
@@ -177,7 +177,7 @@ src/
         ui/
           parser_cli.spl         # CLI entry: parse-only mode
         app/
-          parser.spl             # Parser logic (was src/core/parser.spl)
+          parser.spl             # Parser logic (was src/compiler_core/parser.spl)
           ports.spl              # ParserInputPort, ParserOutputPort
         __init__.spl
       desugaring/
@@ -196,7 +196,7 @@ src/
         ui/
           typecheck_cli.spl
         app/
-          type_checker.spl       # Type checking (was src/core/type_checker.spl)
+          type_checker.spl       # Type checking (was src/compiler_core/type_checker.spl)
           type_inference.spl     # Type inference
           ports.spl
         __init__.spl
@@ -326,13 +326,13 @@ and the HIR's explicit-typed, name-resolved nodes.
 """
 
 # Re-export AST types (what HIR lowering needs to read from)
-reexport core/entity/ast/expr.{Expr, EXPR_BINARY, EXPR_CALL, EXPR_IDENT}
-reexport core/entity/ast/stmt.{Stmt, STMT_VAL, STMT_IF, STMT_FOR}
-reexport core/entity/ast/decl.{Decl, DECL_FN, DECL_STRUCT}
+reexport compiler_core/entity/ast/expr.{Expr, EXPR_BINARY, EXPR_CALL, EXPR_IDENT}
+reexport compiler_core/entity/ast/stmt.{Stmt, STMT_VAL, STMT_IF, STMT_FOR}
+reexport compiler_core/entity/ast/decl.{Decl, DECL_FN, DECL_STRUCT}
 
 # Re-export HIR types (what HIR lowering produces)
-reexport core/entity/hir/types.{CoreHirType, HIR_TYPE_I64, HIR_TYPE_FN}
-reexport core/entity/hir/symbol_table.{CoreSymbolTable, CoreSymbolEntry}
+reexport compiler_core/entity/hir/types.{CoreHirType, HIR_TYPE_I64, HIR_TYPE_FN}
+reexport compiler_core/entity/hir/symbol_table.{CoreSymbolTable, CoreSymbolEntry}
 
 # Adapter: combined context for HIR lowering
 struct TypedAstContext:
@@ -381,13 +381,13 @@ and MIR's flat basic-block representation.
 """
 
 # Re-export HIR types (source)
-reexport core/entity/hir/node.{HirIf, HirFor, HirMatch, HirBlock, HirExpr}
-reexport core/entity/hir/types.{CoreHirType}
+reexport compiler_core/entity/hir/node.{HirIf, HirFor, HirMatch, HirBlock, HirExpr}
+reexport compiler_core/entity/hir/types.{CoreHirType}
 
 # Re-export MIR types (target)
-reexport core/entity/mir/block.{CoreBasicBlock}
-reexport core/entity/mir/inst.{CoreMirInst, MIR_JUMP, MIR_BRANCH, MIR_LABEL}
-reexport core/entity/mir/func.{CoreMirFunction}
+reexport compiler_core/entity/mir/block.{CoreBasicBlock}
+reexport compiler_core/entity/mir/inst.{CoreMirInst, MIR_JUMP, MIR_BRANCH, MIR_LABEL}
+reexport compiler_core/entity/mir/func.{CoreMirFunction}
 
 # Adapter: control flow shape
 struct CfgContext:
@@ -441,9 +441,9 @@ without coupling to MIR internals.
 """
 
 # Re-export MIR types (what backends read)
-reexport core/entity/mir/inst.{CoreMirInst, MIR_ADD, MIR_SUB, MIR_CALL, MIR_LOAD}
-reexport core/entity/mir/block.{CoreBasicBlock}
-reexport core/entity/mir/func.{CoreMirFunction}
+reexport compiler_core/entity/mir/inst.{CoreMirInst, MIR_ADD, MIR_SUB, MIR_CALL, MIR_LOAD}
+reexport compiler_core/entity/mir/block.{CoreBasicBlock}
+reexport compiler_core/entity/mir/func.{CoreMirFunction}
 
 # Adapter: backend-neutral view of MIR program
 struct MirProgram:
@@ -561,11 +561,11 @@ arch {
     allow = [
       "compiler/feature/hir_lowering/**",
       "compiler/transform/feature/typing_to_hir/**",  # Via transform only
-      "core/entity/hir/**",                           # HIR output types
+      "compiler_core/entity/hir/**",                           # HIR output types
       "shared/**"
     ]
     deny = [
-      "core/entity/ast/**",       # Must use transform view, not raw AST
+      "compiler_core/entity/ast/**",       # Must use transform view, not raw AST
       "compiler/feature/parsing/**",  # Stage isolation
       "compiler/backend/**"           # No backend in lowering
     ]
@@ -592,25 +592,25 @@ arch {
 
 ### Phase 1: Entity Dimension — Extract IR Types
 
-**Goal:** Move stable IR data types into `src/core/entity/` subdirectories.
+**Goal:** Move stable IR data types into `src/compiler_core/entity/` subdirectories.
 
 **Rationale:** IR types are the "domain" of the compiler. They must be
 isolated from pipeline logic.
 
 | Current File | New Location | Notes |
 |---|---|---|
-| `src/core/tokens.spl` | `src/core/entity/token/kinds.spl` | Token constants |
-| `src/core/lexer_struct.spl` | `src/core/entity/token/stream.spl` | Lexer state struct |
-| `src/core/ast.spl` (arena part) | `src/core/entity/ast/arena.spl` | Parallel arrays |
-| `src/core/ast_types.spl` | `src/core/entity/ast/nodes.spl` | CoreExpr/Stmt/Decl |
-| `src/core/hir_types.spl` | `src/core/entity/hir/types.spl` | CoreHirType + symbols |
-| `src/core/mir_types.spl` | `src/core/entity/mir/types.spl` | CoreMirInst + blocks |
-| `src/core/types.spl` | `src/core/entity/types/core_types.spl` | Type constants |
+| `src/compiler_core/tokens.spl` | `src/compiler_core/entity/token/kinds.spl` | Token constants |
+| `src/compiler_core/lexer_struct.spl` | `src/compiler_core/entity/token/stream.spl` | Lexer state struct |
+| `src/compiler_core/ast.spl` (arena part) | `src/compiler_core/entity/ast/arena.spl` | Parallel arrays |
+| `src/compiler_core/ast_types.spl` | `src/compiler_core/entity/ast/nodes.spl` | CoreExpr/Stmt/Decl |
+| `src/compiler_core/hir_types.spl` | `src/compiler_core/entity/hir/types.spl` | CoreHirType + symbols |
+| `src/compiler_core/mir_types.spl` | `src/compiler_core/entity/mir/types.spl` | CoreMirInst + blocks |
+| `src/compiler_core/types.spl` | `src/compiler_core/entity/types/core_types.spl` | Type constants |
 
 **Strategy:** Keep old paths as symlinks temporarily. Update imports incrementally.
 
 **Deliverables:**
-- `src/core/entity/` directory structure with `__init__.spl` configs
+- `src/compiler_core/entity/` directory structure with `__init__.spl` configs
 - All IR type tests passing
 - Migration report updated
 
@@ -630,13 +630,13 @@ independently testable with mock ports.
 ```
 src/compiler/feature/lexing/
   app/
-    lexer.spl           # Moved from src/core/lexer.spl
+    lexer.spl           # Moved from src/compiler_core/lexer.spl
     ports.spl           # LexerPort
   __init__.spl
 
 src/compiler/feature/parsing/
   app/
-    parser.spl          # Moved from src/core/parser.spl
+    parser.spl          # Moved from src/compiler_core/parser.spl
     ports.spl           # ParserPort
   __init__.spl
 ```
@@ -757,11 +757,11 @@ arch {
     allow = [
       "compiler/feature/hir_lowering/**",
       "compiler/transform/feature/typing_to_hir/**",
-      "core/entity/hir/**",
+      "compiler_core/entity/hir/**",
       "shared/**"
     ]
     deny = [
-      "core/entity/ast/**",             # Must use transform view
+      "compiler_core/entity/ast/**",             # Must use transform view
       "compiler/feature/type_checking/**"  # Stage isolation
     ]
   }
@@ -780,7 +780,7 @@ arch {
 **Goal:** Apply the same architecture to the module loader/runtime system.
 
 **Current state:**
-- Module loader lives in `src/core/interpreter/module_loader.spl`
+- Module loader lives in `src/compiler_core/interpreter/module_loader.spl`
 - No clear port definition separating "module resolution" from "execution"
 
 **Proposed:**
@@ -819,7 +819,7 @@ src/compiler/adapters/
 **Goal:** Treat the tree-walk interpreter as just another backend (outbound adapter).
 
 **Current state:**
-- Interpreter in `src/core/interpreter/eval.spl` is tightly coupled with runtime
+- Interpreter in `src/compiler_core/interpreter/eval.spl` is tightly coupled with runtime
 
 **Proposed:**
 
@@ -874,10 +874,10 @@ struct CompilationEventPort:
 
 ### Decision 1: Seed Compiler Compatibility
 
-**Issue:** `src/core/` is compiled by the seed C++ compiler, which has
+**Issue:** `src/compiler_core/` is compiled by the seed C++ compiler, which has
 limited Simple support (no generics in structs, no closures).
 
-**Decision:** Entity types in `src/core/entity/` MUST remain seed-compatible.
+**Decision:** Entity types in `src/compiler_core/entity/` MUST remain seed-compatible.
 This means:
 - Arena-based parallel arrays for AST nodes (not generic structs)
 - Integer-tagged unions, not enums
@@ -917,13 +917,13 @@ Backend implementations live in `feature/codegen/backends/` (adapters).
 ### 8.1 Entity Rules
 
 ```
-core/entity/** CANNOT import:
+compiler_core/entity/** CANNOT import:
   - compiler/feature/**   (no pipeline logic in IR types)
   - compiler/transform/** (no bridge logic in IR types)
   - adapters/**           (no IO in IR types)
 
-core/entity/** CAN import:
-  - core/entity/**        (IR types can reference other IR types)
+compiler_core/entity/** CAN import:
+  - compiler_core/entity/**        (IR types can reference other IR types)
   - shared/**             (Result, Option, etc.)
 ```
 
@@ -931,13 +931,13 @@ core/entity/** CAN import:
 
 ```
 compiler/feature/STAGE/** CANNOT import:
-  - core/entity/PRIOR_STAGE/**  (use transform instead)
+  - compiler_core/entity/PRIOR_STAGE/**  (use transform instead)
   - compiler/feature/OTHER_STAGE/** (stage isolation)
   - compiler/backend/**         (no backend knowledge in stages)
 
 compiler/feature/STAGE/** CAN import:
   - compiler/transform/feature/PRIOR_STAGE_to_STAGE/** (transform view)
-  - core/entity/THIS_STAGE/**   (own output types are OK)
+  - compiler_core/entity/THIS_STAGE/**   (own output types are OK)
   - shared/**
 ```
 
@@ -949,8 +949,8 @@ compiler/transform/feature/A_to_B/** CANNOT import:
   - compiler/transform/feature/OTHER/** (single-hop only)
 
 compiler/transform/feature/A_to_B/** CAN import:
-  - core/entity/A/**            (source dimension)
-  - core/entity/B/**            (target dimension)
+  - compiler_core/entity/A/**            (source dimension)
+  - compiler_core/entity/B/**            (target dimension)
   - shared/**
 ```
 
@@ -1025,11 +1025,11 @@ describe "Full compilation pipeline":
 
 | Aspect | Before | After |
 |--------|--------|-------|
-| IR types | Scattered in `src/core/*.spl` | `src/core/entity/*/` |
-| Stage logic | Mixed in `src/core/` and `src/compiler/` | `src/compiler/feature/*/` |
+| IR types | Scattered in `src/compiler_core/*.spl` | `src/compiler_core/entity/*/` |
+| Stage logic | Mixed in `src/compiler_core/` and `src/compiler/` | `src/compiler/feature/*/` |
 | Stage boundaries | Implicit (direct imports) | `src/compiler/transform/feature/*/` |
 | Backends | Mixed with driver | `src/compiler/feature/codegen/backends/*/` |
-| Interpreter | Standalone in `src/core/interpreter/` | Backend adapter |
+| Interpreter | Standalone in `src/compiler_core/interpreter/` | Backend adapter |
 | Test isolation | Hard (shared globals) | Easy (mock ports) |
 
 ### What Stays the Same
@@ -1059,6 +1059,6 @@ describe "Full compilation pipeline":
 - `doc/guide/standard_architecture.md` — Standard Simple architecture
 - `doc/guide/dimension_transform_examples.md` — Transform pattern examples
 - `doc/guide/transform_init_examples.md` — `__init__.spl` configuration examples
-- `src/core/ast.spl` — Current AST arena (entity source)
-- `src/core/interpreter/eval.spl` — Current interpreter (future backend adapter)
+- `src/compiler_core/ast.spl` — Current AST arena (entity source)
+- `src/compiler_core/interpreter/eval.spl` — Current interpreter (future backend adapter)
 - `src/app/desugar/` — Current desugaring pipeline (future feature stage)

@@ -164,8 +164,8 @@ class CachedFunction:
 ## Files Modified
 
 ### Source Code
-1. `src/lib/std/src/core/random.spl` - Import fixes
-2. `src/lib/std/src/core/decorators.spl` - Mutability fixes
+1. `src/lib/std/src/compiler_core/random.spl` - Import fixes
+2. `src/lib/std/src/compiler_core/decorators.spl` - Mutability fixes
 
 ### Test Code
 3. `test/lib/std/unit/core/time_spec.spl` - Matcher fixes (already done)

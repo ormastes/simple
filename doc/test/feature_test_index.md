@@ -188,7 +188,7 @@ A struct with all fields of another struct satisfies it without explicit declara
 
 ### Unit Tests
 
-- `test/unit/core/structural_subtyping_spec.spl` — 7 tests
+- `test/unit/compiler_core/structural_subtyping_spec.spl` — 7 tests
   - Basic compatibility: exact type match, struct with extra fields (2 tests)
   - Fn-field structs: port satisfaction with extended repo (2 tests)
   - Multiple fn-fields (1 test)
@@ -328,7 +328,7 @@ bin/simple test test/unit/compiler/compiler_services_phases_spec.spl # F2
 bin/simple test test/unit/app/desugar/struct_defaults_spec.spl       # F3
 bin/simple test test/unit/app/desugar/trait_desugar_spec.spl         # F4
 bin/simple test test/unit/compiler/extensions_phases_spec.spl        # F5
-bin/simple test test/unit/core/structural_subtyping_spec.spl         # F6
+bin/simple test test/unit/compiler_core/structural_subtyping_spec.spl         # F6
 bin/simple test test/unit/app/desugar/context_params_spec.spl        # F7
 bin/simple test test/unit/app/arch_check_spec.spl                    # F8
 bin/simple test test/unit/compiler/di_lock_phases_spec.spl           # F9
@@ -400,7 +400,7 @@ bin/simple test test/system/di_composition_system_spec.spl       # F1+F2+F5+F9
 
 | File | Type | Tests |
 |------|------|-------|
-| `test/unit/core/structural_subtyping_spec.spl` | Unit | 7 |
+| `test/unit/compiler_core/structural_subtyping_spec.spl` | Unit | 7 |
 | `test/system/structural_subtyping_system_spec.spl` | System | 11 |
 
 ### F7: Implicit Context Parameters

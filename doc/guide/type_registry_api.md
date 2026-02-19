@@ -2,7 +2,7 @@
 
 **Status:** ⚠️ PARTIAL IMPLEMENTATION - Registry functions exist, runtime checking NOT implemented
 
-**Location:** `src/core/types.spl` (lines 439-581)
+**Location:** `src/compiler_core/types.spl` (lines 439-581)
 
 **Implemented:** Type registration and storage
 **Not Implemented:** Runtime type checking, type erasure, type inference
@@ -297,8 +297,8 @@ type NonEmptyString = text where x.len() > 0
 
 ## See Also
 
-- `src/core/types.spl` - Implementation source
-- `test/unit/core/generic_syntax_spec.spl` - Parser tests (not yet passing)
+- `src/compiler_core/types.spl` - Implementation source
+- `test/unit/compiler_core/generic_syntax_spec.spl` - Parser tests (not yet passing)
 - `COMPREHENSIVE_IMPLEMENTATION_PLAN_2026-02-14.md` - Full implementation plan
 - `DOCUMENTATION_REALITY_CHECK_2026-02-14.md` - Implementation status
 

@@ -69,7 +69,7 @@
 ### File Analysis
 
 ```
-Advanced Types (src/core/types.spl):
+Advanced Types (src/compiler_core/types.spl):
 - Lines 439-581: Type registry functions (143 lines)
 - Missing: type_checker.spl, type_erasure.spl, type_inference.spl (~2,600 lines)
 
@@ -91,7 +91,7 @@ Thread Pool (src/std/):
 
 ```bash
 # Generic syntax tests fail to run
-$ bin/simple test test/unit/core/generic_syntax_spec.spl
+$ bin/simple test test/unit/compiler_core/generic_syntax_spec.spl
 Completed tests: 0
 
 # Thread pool tests crash

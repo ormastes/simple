@@ -324,7 +324,7 @@ Enable `<>` generic syntax in runtime parser and interpreter. Currently blocked 
 #### Subtasks for `test` agent
 
 ##### 2.6: Test Suite (10 hours)
-1. **Create `test/unit/core/generic_types_spec.spl`**
+1. **Create `test/unit/compiler_core/generic_types_spec.spl`**
    - 50+ tests covering all generic scenarios
 
 2. **Test categories**
@@ -482,11 +482,11 @@ If any task fails:
 - [ ] `MEMORY.md` - Fixed module closure claim
 
 ### Phase 2 Deliverables (Future)
-- [ ] `src/core/lexer.spl` - Generic-aware tokenization
-- [ ] `src/core/parser.spl` - Generic syntax parsing
-- [ ] `src/core/types.spl` - Generic type representation
-- [ ] `src/core/interpreter/eval.spl` - Generic evaluation
-- [ ] `test/unit/core/generic_types_spec.spl` - Comprehensive tests
+- [ ] `src/compiler_core/lexer.spl` - Generic-aware tokenization
+- [ ] `src/compiler_core/parser.spl` - Generic syntax parsing
+- [ ] `src/compiler_core/types.spl` - Generic type representation
+- [ ] `src/compiler_core/interpreter/eval.spl` - Generic evaluation
+- [ ] `test/unit/compiler_core/generic_types_spec.spl` - Comprehensive tests
 - [ ] `src/std/collections/vec.spl` - Generic vector example
 - [ ] `src/std/option.spl` - Generic option type
 - [ ] `doc/guide/generic_types.md` - User guide

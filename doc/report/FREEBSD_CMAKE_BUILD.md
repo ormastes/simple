@@ -29,7 +29,7 @@ ELF 64-bit LSB executable, x86-64, FreeBSD 14.1 ✅
 - ✅ Automatic file ordering (__init__.spl first, main.spl last)
 - ✅ Cross-compilation with FreeBSD toolchain
 - ✅ Proper include paths and linking
-- ✅ All 439 compiler_core files discovered
+- ✅ All 439 compiler_core_legacy files discovered
 - ✅ Single-pass transpilation to C++
 - ✅ Full dependency management
 
@@ -57,7 +57,7 @@ static const int64_t HirType_Int = 0;             // Redefinition!
 - seed_cpp is designed for **simple bootstrapping**
 - Not production-ready for **full compiler transpilation**
 - Works great for small programs
-- Fails on large, complex compiler_core (439 files)
+- Fails on large, complex compiler_core_legacy (439 files)
 
 **Errors encountered:**
 - Duplicate constant definitions
@@ -73,7 +73,7 @@ static const int64_t HirType_Int = 0;             // Redefinition!
 
 ### Native FreeBSD Bootstrap (Ready to Use!)
 
-**We created:** `scripts/bootstrap-from-scratch-freebsd.sh`
+**We created:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 
 **This works because:**
 1. Uses native FreeBSD tools (gmake, clang++)
@@ -93,7 +93,7 @@ static const int64_t HirType_Int = 0;             // Redefinition!
 # 2. SSH in and bootstrap
 ssh -p 2222 root@localhost
 cd simple
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # 3. Done!
 bin/simple --version  # ✅ Full FreeBSD Simple compiler
@@ -169,7 +169,7 @@ Complete FreeBSD infrastructure:
 ### Transpilation Output
 
 ```
-Input:  439 compiler_core/*.spl files
+Input:  439 compiler_core_legacy/*.spl files
 Output: 1 simple_core.cpp file (4,156,817 bytes)
 Time:   ~5 seconds
 ```
@@ -286,7 +286,7 @@ clang++ -o myprogram myprogram.cpp
 - `doc/guide/freebsd_quick_reference.md` - Cheat sheet
 
 **Scripts:**
-- `scripts/bootstrap-from-scratch-freebsd.sh` - Native bootstrap
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native bootstrap
 - `scripts/verify_freebsd_workspace.spl` - Verification
 
 ---

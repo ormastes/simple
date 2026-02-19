@@ -546,7 +546,7 @@ cargo test -p simple-driver async_tcp_echo_server
    - read_line(), write_line(), flush()
    - Error output and logging
 
-2. **Migrate Build Scripts**
+2. **Migrate Build Scripts** *(Resolved 2026-02-19: old scripts deleted, superseded by src/app/build/, src/app/task/, src/app/watch/)*
    - build.spl, task.spl, watch.spl
    - Update to use io.fs and io.stdio
    - Test build system integration

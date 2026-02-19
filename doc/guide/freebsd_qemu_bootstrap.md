@@ -152,7 +152,7 @@ This will:
 2. Start QEMU VM with KVM acceleration
 3. Wait for SSH connection
 4. Sync project files to VM (via rsync)
-5. Execute `bootstrap-from-scratch-freebsd.sh` inside VM
+5. Execute `bootstrap-from-scratch.sh --target=freebsd-x86_64` inside VM
 6. Retrieve compiled `bin/simple` binary from VM
 7. Verify binary is FreeBSD ELF
 
@@ -172,7 +172,7 @@ rsync -az --delete -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
     . freebsd@localhost:~/simple/
 
 # 3. Run bootstrap inside VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64"
 
 # 4. Retrieve binary
 mkdir -p bin
@@ -284,7 +284,7 @@ ssh -p 2222 freebsd@localhost "df -h"
 ssh -p 2222 freebsd@localhost "sysctl hw.physmem"  # Should be >= 4GB
 
 # Run with verbose output
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --verbose"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --verbose"
 ```
 
 ## Performance Tuning
@@ -317,7 +317,7 @@ sudo sysctl vm.nr_hugepages=2048
 **Parallel Builds:**
 ```bash
 # Use more parallel jobs inside VM
-ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh --jobs=8"
+ssh -p 2222 freebsd@localhost "cd ~/simple && ./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --jobs=8"
 ```
 
 ## Advanced: Native FreeBSD Bootstrap
@@ -333,7 +333,7 @@ cd simple
 pkg install cmake ninja
 
 # Run bootstrap
-./scripts/bootstrap/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Output: bin/simple (native FreeBSD binary)
 ```
@@ -441,7 +441,7 @@ jobs:
 - **QEMU Documentation:** https://www.qemu.org/docs/master/
 - **FreeBSD Handbook:** https://docs.freebsd.org/en/books/handbook/
 - **Simple Bootstrap Pipeline:** `doc/build/bootstrap_pipeline.md`
-- **FreeBSD Bootstrap Script:** `scripts/bootstrap/bootstrap-from-scratch-freebsd.sh`
+- **FreeBSD Bootstrap Script:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 
 ## Changelog
 

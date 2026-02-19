@@ -18,7 +18,7 @@
 
 ### Adding New Types
 
-1. Add variant to the type system in `src/core/types.spl`
+1. Add variant to the type system in `src/compiler_core/types.spl`
 2. Create separate module for complex types
 3. Update type substitution for new variants
 4. Update `contains_var()` if type can contain variables
@@ -26,12 +26,12 @@
 
 Example:
 ```simple
-# src/core/types.spl
+# src/compiler_core/types.spl
 enum Type:
     # ... existing variants
     NewType(name: text)   # Add new variant
 
-# src/core/new_type.spl
+# src/compiler_core/new_type.spl
 class NewType:
     name: text
     fields: [Field]

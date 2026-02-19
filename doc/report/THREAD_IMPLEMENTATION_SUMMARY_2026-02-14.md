@@ -71,7 +71,7 @@ target_link_libraries(spl_runtime PUBLIC pthread)
 
 **Files Modified:**
 - `seed/CMakeLists.txt` - runtime_thread.c added
-- `seed/build/libspl_runtime.a` - rebuilt ✅
+- `build/seed/libspl_runtime.a` - rebuilt ✅
 
 **Status:** Library rebuilt, but bin/release/simple not yet rebuilt
 
@@ -102,7 +102,7 @@ test/lib/std/async_host/thread_safe_queue.spl -> ../../../../src/std/async_host/
 bin/simple build --release
 
 # Option B: Manual rebuild with seed compiler
-cd seed/build
+cd build/seed
 make seed_cpp
 ./seed_cpp <compiler-source> -o new_simple
 # Link: -lpthread -ldl

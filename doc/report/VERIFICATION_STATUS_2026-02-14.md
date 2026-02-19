@@ -4,7 +4,7 @@
 ### ✅ FULLY IMPLEMENTED (100%)
 
 #### 1. Closure Capture Warnings ✅
-- **Implementation:** `src/core/closure_analysis.spl` (186 lines)
+- **Implementation:** `src/compiler_core/closure_analysis.spl` (186 lines)
   - `analyze_closure_capture()` - Full AST analysis
   - `closure_warnings_get()` - Returns [text] warnings (line 28)
   - `closure_warnings_clear()` - Resets warnings
@@ -15,22 +15,22 @@
 - **Integration:** ⚠️ NOT integrated into compiler pipeline yet
 
 #### 2. Ignored Return Warnings ✅
-- **Implementation:** `src/core/interpreter/eval.spl`
+- **Implementation:** `src/compiler_core/interpreter/eval.spl`
   - `var eval_warnings: [text] = []` (line 31)
   - `eval_get_warnings()` - Returns warnings (line 33-34)
   - `eval_reset()` - Clears warnings (line 43)
   - Warning emission at line 1220
   - Exported on line 1663
-- **Tests:** `test/unit/core/ignored_return_warning_spec.spl` (130 lines, 30 tests)
+- **Tests:** `test/unit/compiler_core/ignored_return_warning_spec.spl` (130 lines, 30 tests)
   - Status: PASSING
   - Uses real implementation, not stubs
 - **Integration:** ✅ ACTIVE in evaluator
 
 #### 3. Generic Syntax Support ✅
-- **Implementation:** `src/core/parser.spl`
+- **Implementation:** `src/compiler_core/parser.spl`
   - Parser handles `<>` syntax
   - Distinguishes from comparison operators
-- **Tests:** `test/unit/core/generic_syntax_spec.spl` (191 lines, 28 tests)
+- **Tests:** `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines, 28 tests)
   - Status: PASSING
 - **Runtime:** Works in compiled mode, runtime parser supports it
 
@@ -41,7 +41,7 @@
 - **Finding:** Module functions CAN access module state correctly
 
 #### 5. Multiline Boolean Expressions ✅
-- **Implementation:** `src/core/lexer.spl`
+- **Implementation:** `src/compiler_core/lexer.spl`
   - Suppresses newlines when `lex_paren_depth > 0`
 - **Tests:** `test/unit/parser/multiline_bool_spec.spl` (143 lines, 18 tests)
   - Status: PASSING
@@ -132,7 +132,7 @@ This is a display issue, not a failure.
 **Impact:** Helps developers avoid closure bugs
 **Files:**
 - `src/app/test_runner_new/test_runner_main.spl` (modify, +15 lines)
-- `src/core/parser.spl` (modify, +5 lines)
+- `src/compiler_core/parser.spl` (modify, +5 lines)
 
 **Benefits:**
 - Warnings appear during test runs
@@ -246,7 +246,7 @@ bin/simple test
 bin/simple test test/unit/compiler/closure_capture_warning_spec.spl --verbose
 
 # Test ignored return warnings
-bin/simple test test/unit/core/ignored_return_warning_spec.spl --verbose
+bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl --verbose
 
 # Test doc coverage (after CLI integration)
 bin/simple build doc-coverage --sdoctest-report

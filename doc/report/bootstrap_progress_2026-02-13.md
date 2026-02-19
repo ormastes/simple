@@ -9,13 +9,13 @@
 ## Bugs Fixed
 
 ### 1. Main Function Lookup Mismatch ✅
-- **File:** `seed/seed.cpp` lines 3648-3651
+- **File:** `src/compiler_seed/seed.cpp` lines 3648-3651
 - **Problem:** Second pass looks for "main" but function registered as "spl_main"
 - **Fix:** Added lookup name mapping: `"main"` → `"spl_main"`
 - **Test:** ✅ Verified working
 
 ### 2. Universal Stub Generation ✅
-- **File:** `seed/seed.cpp` line 833
+- **File:** `src/compiler_seed/seed.cpp` line 833
 - **Problem:** Hardcoded `return true;` in `output_has_problems()` stubbed ALL functions
 - **Fix:** Changed to `return false;` to allow real function bodies
 - **Test:** ✅ Verified working
@@ -24,8 +24,8 @@
 
 ### Minimal Bootstrap (bootstrap_main.spl)
 ```bash
-$ ./seed/build/seed_cpp src/compiler_core/bootstrap_main.spl > test.cpp
-$ clang++ -o test test.cpp -Iseed -Lseed/build -lspl_runtime -lm -lpthread -ldl
+$ ./build/seed/seed_cpp src/compiler_core_legacy/bootstrap_main.spl > test.cpp
+$ clang++ -o test test.cpp -Isrc/compiler_seed -Lbuild/seed -lspl_runtime -lm -lpthread -ldl
 $ ./test
 Simple Bootstrap Compiler v0.1
 Usage: core1 <file.spl>
@@ -73,11 +73,11 @@ When trying to bootstrap full compiler (300+ files):
 
 **Files Needed:**
 ```
-src/compiler_core/lexer.spl (simplified)
-src/compiler_core/parser.spl (simplified)
-src/compiler_core/ast.spl (simplified)
-src/compiler_core/codegen_simple.spl (new, basic C output)
-src/compiler_core/bootstrap_driver.spl (new, minimal driver)
+src/compiler_core_legacy/lexer.spl (simplified)
+src/compiler_core_legacy/parser.spl (simplified)
+src/compiler_core_legacy/ast.spl (simplified)
+src/compiler_core_legacy/codegen_simple.spl (new, basic C output)
+src/compiler_core_legacy/bootstrap_driver.spl (new, minimal driver)
 ```
 
 ### Option B: Improve seed_cpp
@@ -138,8 +138,8 @@ Switch from C codegen to native x86-64/ARM64:
 - `doc/report/seed_cpp_main_fix_2026-02-13.md` - Bug fix details
 - `doc/design/seed_cpp_translation_capabilities.md` - Feature matrix
 - `doc/report/bootstrap_progress_2026-02-13.md` - This file
-- `scripts/bootstrap-fixed.sh` - Updated bootstrap script
-- `scripts/bootstrap-minimal.sh` - Minimal bootstrap (excludes complex files)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Updated bootstrap script
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Minimal bootstrap (excludes complex files)
 
 ## Metrics
 

@@ -36,7 +36,7 @@
 - `doc/report/implementation_final_summary_2026-01-18.md` (this file)
 
 ### 4. Stdlib Partial Fixes
-**File:** `simple/std_lib/src/core/collections.spl`
+**File:** `simple/std_lib/src/compiler_core/collections.spl`
 
 **Status:** ⏳ **Partially Fixed**
 
@@ -222,7 +222,7 @@ Lean Regeneration
 ```
 src/compiler/src/interpreter_call/bdd.rs
 simple/std_lib/src/verification/lean/codegen.spl
-simple/std_lib/src/core/collections.spl
+simple/std_lib/src/compiler_core/collections.spl
 simple/std_lib/test/unit/verification/regeneration_spec.spl
 doc/report/test_todos_status_2026-01-18.md (new)
 doc/report/implementation_progress_2026-01-18.md (new)

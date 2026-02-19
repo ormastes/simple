@@ -46,7 +46,7 @@ Tested Simple interpreter with TUI library files to identify syntax issues. Foun
 let mut result_buffer = [0u8; 4096]
 ```
 
-**Correct** (from `simple/std_lib/src/core/text.spl:46`):
+**Correct** (from `simple/std_lib/src/compiler_core/text.spl:46`):
 ```simple
 let result_buffer = alloc[u8](4096)
 ```
@@ -170,9 +170,9 @@ fn show_help() -> String:
 ## Reference Examples
 
 Working Simple code that uses correct patterns:
-- `simple/std_lib/src/core/text.spl` - `alloc[u8](size)` pattern
-- `simple/std_lib/test/unit/core/arithmetic_spec.spl` - Working test structure
-- `simple/std_lib/test/unit/core/pattern_matching_spec.spl` - Working patterns
+- `simple/std_lib/src/compiler_core/text.spl` - `alloc[u8](size)` pattern
+- `simple/std_lib/test/unit/compiler_core/arithmetic_spec.spl` - Working test structure
+- `simple/std_lib/test/unit/compiler_core/pattern_matching_spec.spl` - Working patterns
 
 ## Estimated Effort
 

@@ -32,12 +32,12 @@ The Simple seed compiler now supports **two distinct Windows build toolchains**:
 
 ### 1. CMake Toolchain Files (2)
 
-**`seed/cmake/toolchains/windows-x86_64-clangcl.cmake`** (49 lines)
+**`src/compiler_seed/cmake/toolchains/windows-x86_64-clangcl.cmake`** (49 lines)
 - ClangCL toolchain configuration
 - MSVC-style compiler flags (`/MD`, `/O2`, `/EHsc`)
 - Defines `SPL_TOOLCHAIN_CLANGCL=1` for code detection
 
-**`seed/cmake/toolchains/windows-x86_64-mingw.cmake`** (64 lines)
+**`src/compiler_seed/cmake/toolchains/windows-x86_64-mingw.cmake`** (64 lines)
 - MinGW Clang toolchain configuration
 - GCC-style flags (`-static-libgcc`, `-static-libstdc++`)
 - Supports both native Windows and Linux cross-compile
@@ -83,7 +83,7 @@ The Simple seed compiler now supports **two distinct Windows build toolchains**:
 
 ### 1. Core Seed Compiler
 
-**`seed/seed.cpp`** (lines 53-60)
+**`src/compiler_seed/seed.cpp`** (lines 53-60)
 ```cpp
 /* ===== Windows Compatibility ===== */
 #ifdef _WIN32
@@ -132,7 +132,7 @@ endif()
 
 ### 3. Platform Abstraction
 
-**`seed/platform/platform_win.h`** (lines 1-25)
+**`src/compiler_seed/platform/platform_win.h`** (lines 1-25)
 ```c
 #if defined(_MSC_VER) || defined(SPL_TOOLCHAIN_CLANGCL)
     /* ClangCL or MSVC: Windows SDK headers */

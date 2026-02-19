@@ -55,7 +55,7 @@ Successfully eliminated **1,787 lines of semantically duplicate code** across 4 
 **Actual Results:** ~52 lines eliminated (Agent-Executed)
 
 #### Consolidations
-- Created `src/core/lexer_chars.spl` (75 lines)
+- Created `src/compiler_core_legacy/lexer_chars.spl` (75 lines)
 - Lexer character functions extracted (is_digit, is_hex_digit, is_alpha, is_ident_char, is_space)
 - Both `lexer.spl` and `lexer_struct.spl` import from shared module
 - Type tag constants consolidated to `types.spl`
@@ -145,7 +145,7 @@ Files with `*_lite.spl` suffix or explicit fast-startup requirements remain full
 
 | Duplication | Lines | Reason |
 |-------------|-------|--------|
-| `compiler/` vs `compiler_core/` | ~30,000 | Bootstrap chain requirement |
+| `compiler/` vs `compiler_core_legacy/` | ~30,000 | Bootstrap chain requirement |
 | `*_lite.spl` inlined helpers | ~400 | Zero-import startup (<50ms) |
 | `lexer.spl` vs `lexer_struct.spl` core | ~600 | Module-state vs struct-state for seed compiler |
 | `eval.spl` hashmap boilerplate | ~300 | No generic hashmap in seed-compilable code |

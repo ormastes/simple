@@ -1,6 +1,6 @@
 # Lexer Desugaring Example: Full → Core
 
-**File:** `src/compiler/lexer.spl` → `src/compiler_core/lexer.spl`  
+**File:** `src/compiler/lexer.spl` → `src/compiler_core_legacy/lexer.spl`  
 **Size:** 1,430 lines  
 **Date:** 2026-02-10
 
@@ -430,7 +430,7 @@ We use **Option 2** because it's simpler and doesn't require creating new types.
 
 1. ✅ **Compile with seed:**
    ```bash
-   seed_cpp src/compiler_core/lexer.spl --output build/lexer.cpp
+   seed_cpp src/compiler_core_legacy/lexer.spl --output build/lexer.cpp
    ```
 
 2. ✅ **Run lexer tests:**
@@ -454,7 +454,7 @@ We use **Option 2** because it's simpler and doesn't require creating new types.
 
 ## Next Steps
 
-1. **Manual conversion:** Create `src/compiler_core/lexer.spl`
+1. **Manual conversion:** Create `src/compiler_core_legacy/lexer.spl`
 2. **Test compilation:** Verify it compiles with seed
 3. **Document patterns:** Note all transformation rules
 4. **Automate:** Implement desugarer tool

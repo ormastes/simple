@@ -29,9 +29,9 @@
 
 ### 3. **Layered Architecture**
 ```
-Top-level __init__.spl (src/core/)
-    └─> Sub-module __init__.spl (src/core/compiler/)
-        └─> Leaf files (src/core/compiler/driver.spl)
+Top-level __init__.spl (src/compiler_core_legacy/)
+    └─> Sub-module __init__.spl (src/compiler_core_legacy/compiler/)
+        └─> Leaf files (src/compiler_core_legacy/compiler/driver.spl)
 ```
 
 ### 4. **Documentation Standards**
@@ -50,7 +50,7 @@ Every `__init__.spl` must include:
 **Estimated Files:** 3
 **Estimated Time:** 1 session
 
-#### 1.1 Create `src/core/__init__.spl`
+#### 1.1 Create `src/compiler_core_legacy/__init__.spl`
 **Purpose:** Core language types (AST, tokens, lexer, parser)
 
 **Exports to determine:**
@@ -65,7 +65,7 @@ Every `__init__.spl` must include:
 - `pub mod tokens` - public (used by lexer/parser consumers)
 - `pub mod types` - public (used by type checker)
 - `mod interpreter` - internal (only for REPL)
-- `mod compiler` - internal (wrapped by compiler_core)
+- `mod compiler` - internal (wrapped by compiler_core_legacy)
 - `mod hir` - internal
 - `mod mir` - internal
 - `mod wffi` - internal
@@ -343,12 +343,12 @@ mod template
 **Estimated Files:** 13 main + 4 sub-modules
 **Estimated Time:** 3-4 sessions
 
-#### 3.1 `src/compiler_core/backend/__init__.spl` (38 files)
+#### 3.1 `src/compiler_core_legacy/backend/__init__.spl` (38 files)
 **Current problem:** Largest uncontrolled module - 38 codegen files
 
 **Proposed structure:**
 ```simple
-# Module: compiler_core.backend
+# Module: compiler_core_legacy.backend
 # Purpose: Code generation backends for multiple targets
 # Public API: CodegenBackend trait + factory
 
@@ -377,12 +377,12 @@ mod type_mapper
 - `backend/cuda/__init__.spl` (2 files)
 - `backend/vulkan/__init__.spl` (2 files)
 
-#### 3.2 `src/compiler_core/linker/__init__.spl` (20 files)
+#### 3.2 `src/compiler_core_legacy/linker/__init__.spl` (20 files)
 **Purpose:** Object file linking and SMF format
 
 **Proposed structure:**
 ```simple
-# Module: compiler_core.linker
+# Module: compiler_core_legacy.linker
 # Purpose: Link compiled objects into executables
 # Public API: link_objects, SMF format
 
@@ -398,12 +398,12 @@ mod lib_smf
 mod mold
 ```
 
-#### 3.3 `src/compiler_core/monomorphize/__init__.spl` (19 files)
+#### 3.3 `src/compiler_core_legacy/monomorphize/__init__.spl` (19 files)
 **Purpose:** Generic type instantiation
 
 **Proposed structure:**
 ```simple
-# Module: compiler_core.monomorphize
+# Module: compiler_core_legacy.monomorphize
 # Purpose: Instantiate generic types and functions
 # Public API: monomorphize_module
 
@@ -419,22 +419,22 @@ mod table
 mod cycle_detector
 ```
 
-#### 3.4 `src/compiler_core/blocks/__init__.spl` (22 files)
+#### 3.4 `src/compiler_core_legacy/blocks/__init__.spl` (22 files)
 **Purpose:** Block system (macros/DSL)
 
-#### 3.5 `src/compiler_core/loader/__init__.spl` (8 files)
+#### 3.5 `src/compiler_core_legacy/loader/__init__.spl` (8 files)
 **Purpose:** Module loading and JIT
 
-#### 3.6 `src/compiler_core/mir_opt/__init__.spl` (7 files)
+#### 3.6 `src/compiler_core_legacy/mir_opt/__init__.spl` (7 files)
 **Purpose:** MIR optimizations
 
-#### 3.7 `src/compiler_core/hir_lowering/__init__.spl` (6 files)
+#### 3.7 `src/compiler_core_legacy/hir_lowering/__init__.spl` (6 files)
 **Purpose:** AST → HIR lowering
 
-#### 3.8 `src/compiler_core/parser/__init__.spl` (5 files)
+#### 3.8 `src/compiler_core_legacy/parser/__init__.spl` (5 files)
 **Purpose:** Parser infrastructure
 
-#### 3.9 `src/compiler_core/type_infer/__init__.spl` (5 files)
+#### 3.9 `src/compiler_core_legacy/type_infer/__init__.spl` (5 files)
 **Purpose:** Type inference helpers
 
 #### 3.10-3.13 Smaller modules (baremetal, borrow_check, desugar, etc.)
@@ -465,7 +465,7 @@ mod cycle_detector
 - All single-file modules in `app/` (can be batch-processed)
 - Test support modules
 - Internal utilities
-- Remaining compiler_core modules
+- Remaining compiler_core_legacy modules
 
 ---
 
@@ -600,7 +600,7 @@ bin/simple test
 ## Implementation Checklist
 
 ### Phase 1 (Critical) - Session 1
-- [ ] Create `src/core/__init__.spl`
+- [ ] Create `src/compiler_core_legacy/__init__.spl`
   - [ ] Analyze external imports
   - [ ] Design export list
   - [ ] Write __init__.spl
@@ -630,16 +630,16 @@ bin/simple test
 - [ ] Test and commit
 
 ### Phase 3 (Compiler Core) - Sessions 4-7
-- [ ] `src/compiler_core/backend/__init__.spl`
+- [ ] `src/compiler_core_legacy/backend/__init__.spl`
   - [ ] Sub-modules: common, native, cuda, vulkan
-- [ ] `src/compiler_core/linker/__init__.spl`
-- [ ] `src/compiler_core/monomorphize/__init__.spl`
-- [ ] `src/compiler_core/blocks/__init__.spl`
-- [ ] `src/compiler_core/loader/__init__.spl`
-- [ ] `src/compiler_core/mir_opt/__init__.spl`
-- [ ] `src/compiler_core/hir_lowering/__init__.spl`
-- [ ] `src/compiler_core/parser/__init__.spl`
-- [ ] `src/compiler_core/type_infer/__init__.spl`
+- [ ] `src/compiler_core_legacy/linker/__init__.spl`
+- [ ] `src/compiler_core_legacy/monomorphize/__init__.spl`
+- [ ] `src/compiler_core_legacy/blocks/__init__.spl`
+- [ ] `src/compiler_core_legacy/loader/__init__.spl`
+- [ ] `src/compiler_core_legacy/mir_opt/__init__.spl`
+- [ ] `src/compiler_core_legacy/hir_lowering/__init__.spl`
+- [ ] `src/compiler_core_legacy/parser/__init__.spl`
+- [ ] `src/compiler_core_legacy/type_infer/__init__.spl`
 - [ ] 4 smaller modules
 - [ ] Test and commit
 
@@ -683,7 +683,7 @@ bin/simple test
 
 **Immediate:** Start Phase 1
 1. Read `.claude/agents/code.md` for implementation guidelines
-2. Analyze `src/core/` external imports
+2. Analyze `src/compiler_core_legacy/` external imports
 3. Create first `__init__.spl` (core)
 4. Iterate through Phase 1 checklist
 

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-✅ **BREAKTHROUGH:** Successfully compiled `compiler_core/main.spl` using pre-built binary with Cranelift backend!
+✅ **BREAKTHROUGH:** Successfully compiled `compiler_core_legacy/main.spl` using pre-built binary with Cranelift backend!
 
 This represents major progress toward self-hosting compilation. While the seed_cpp path (Step 2 original) remains blocked, we've proven an alternative path works.
 
@@ -10,8 +10,8 @@ This represents major progress toward self-hosting compilation. While the seed_c
 
 **What works now:**
 ```bash
-bin/simple compile src/compiler_core/main.spl
-# → Compiled src/compiler_core/main.spl -> src/compiler_core/main.smf ✅
+bin/simple compile src/compiler_core_legacy/main.spl
+# → Compiled src/compiler_core_legacy/main.spl -> src/compiler_core_legacy/main.smf ✅
 ```
 
 **Significance:**
@@ -24,16 +24,16 @@ bin/simple compile src/compiler_core/main.spl
 ### 1. Backend Cleanup (4 files)
 - Removed problematic `interpreter.spl` dependencies
 - Files: `src/compiler/backend.spl`, `src/compiler/backend/jit_interpreter.spl`, 
-  `src/compiler_core/backend.spl`, `src/compiler_core/backend/jit_interpreter.spl`
+  `src/compiler_core_legacy/backend.spl`, `src/compiler_core_legacy/backend/jit_interpreter.spl`
 
 ### 2. Parse Error Fixes (4 files)
 - `src/compiler/mir_serialization.spl` - Inline if-else → helper function
-- `src/compiler_core/config.spl` - Indentation errors (2 fixes)
-- `src/compiler_core/driver_types.spl` - Doc comment placement
+- `src/compiler_core_legacy/config.spl` - Indentation errors (2 fixes)
+- `src/compiler_core_legacy/driver_types.spl` - Doc comment placement
 - `src/compiler/backend/interpreter.spl` - 15 tuple pattern fixes (earlier work)
 
 ### 3. Semantic Error Fixes (1 file)  
-- `src/compiler_core/main.spl` - Non-existent helper functions (7 fixes)
+- `src/compiler_core_legacy/main.spl` - Non-existent helper functions (7 fixes)
   - `args_slice()` → array slicing `[start:end]`
   - `*_len()` → `.len()` method calls
 
@@ -47,8 +47,8 @@ bin/simple compile src/compiler_core/main.spl
 
 ### New Alternative Path (NOW VIABLE)
 - **Step 1:** Seed compiler ✅
-- **Step 2-ALT:** Pre-built binary compiles compiler_core ✅ **← NEW**
-- **Step 3:** Use compiled compiler_core for full compilation?
+- **Step 2-ALT:** Pre-built binary compiles compiler_core_legacy ✅ **← NEW**
+- **Step 3:** Use compiled compiler_core_legacy for full compilation?
 - **Status:** Needs testing
 
 ## Cranelift Parser Differences
@@ -73,14 +73,14 @@ The Cranelift/Rust parser is **stricter** than runtime parser:
 
 ### Immediate
 1. ✅ Document all fixes (DONE)
-2. ✅ Verify compiler_core/main.smf exists (DONE - 219 bytes)
+2. ✅ Verify compiler_core_legacy/main.smf exists (DONE - 219 bytes)
 3. ⚠️ Test if main.smf runs correctly
 4. ⚠️ Investigate if we can use this for Step 3+
 
 ### Alternative Bootstrap Strategy
 Instead of: seed → seed_cpp → core1 → core2 → full1 → full2
 
-Try: seed → (pre-built binary compiles compiler_core) → use for full compilation?
+Try: seed → (pre-built binary compiles compiler_core_legacy) → use for full compilation?
 
 **Potential Issue:** The compiled .smf may still have runtime limitations or missing dependencies.
 
@@ -88,7 +88,7 @@ Try: seed → (pre-built binary compiles compiler_core) → use for full compila
 
 1. **Document Cranelift parser limitations** in MEMORY.md
 2. **Update CLAUDE.md** with parse error patterns to avoid
-3. **Test the compiled compiler_core** to verify it works
+3. **Test the compiled compiler_core_legacy** to verify it works
 4. **Consider hybrid approach:** Use pre-built binary to bootstrap, then switch to self-compiled version
 
 ## Files List
@@ -98,9 +98,9 @@ See /tmp/BOOTSTRAP_FIX_SUMMARY.md for detailed breakdown
 
 While the original bootstrap path (seed_cpp) remains blocked by C++ type errors, we've successfully demonstrated that:
 
-1. ✅ The pre-built binary CAN compile compiler_core with Cranelift backend
+1. ✅ The pre-built binary CAN compile compiler_core_legacy with Cranelift backend
 2. ✅ All parse errors can be fixed with source code changes
-3. ✅ compiler_core/main.spl → main.smf compilation works
+3. ✅ compiler_core_legacy/main.spl → main.smf compilation works
 
 This opens an alternative path to self-hosting that bypasses seed_cpp limitations.
 

@@ -389,6 +389,6 @@ These may require:
 ---
 
 ## Files Referenced
-- Source: `/home/ormastes/dev/pub/simple/seed/seed.cpp`
+- Source: `/home/ormastes/dev/pub/simple/src/compiler_seed/seed.cpp`
 - Coverage: 87.42% branch coverage (301 uncovered branches)
-- Test directory: `/home/ormastes/dev/pub/simple/test/unit/core/branch_coverage_*.spl`
+- Test directory: `/home/ormastes/dev/pub/simple/test/unit/compiler_core/branch_coverage_*.spl`

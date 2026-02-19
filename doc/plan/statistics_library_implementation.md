@@ -214,7 +214,7 @@ val city_stats = tql(users):
 **Goal:** Add statistics functions to Array and Vec types
 
 **Files to Create:**
-- `simple/std_lib/src/core/stats.spl` - Statistics trait and implementations
+- `simple/std_lib/src/compiler_core/stats.spl` - Statistics trait and implementations
 
 **API:**
 ```simple

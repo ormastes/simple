@@ -222,7 +222,7 @@ Simple Language v0.5.1
 
 **Fast-path Commands:**
 ```bash
-$ time bin/simple test test/unit/core/tokens_spec.spl
+$ time bin/simple test test/unit/compiler_core/tokens_spec.spl
 # Loads test_runner_main.spl directly
 # Skips ~160ms CLI overhead
 real	0m0.120s

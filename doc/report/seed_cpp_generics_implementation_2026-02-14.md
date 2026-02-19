@@ -21,7 +21,7 @@ Implemented **monomorphization** for generic types in seed_cpp transpiler. The t
 
 ## Changes Made
 
-### 1. Added Generic Parameter Extraction (`seed/seed.cpp:410-437`)
+### 1. Added Generic Parameter Extraction (`src/compiler_seed/seed.cpp:410-437`)
 
 ```cpp
 /* Extract type parameter from Option<T> → T */
@@ -37,7 +37,7 @@ static bool extract_two_generic_params(const char *stype,
 - Handles whitespace in type parameters
 - Extracts comma-separated parameters for Result
 
-### 2. Added Result Type Registry (`seed/seed.cpp:364-378`)
+### 2. Added Result Type Registry (`src/compiler_seed/seed.cpp:364-378`)
 
 ```cpp
 typedef struct {
@@ -54,7 +54,7 @@ static int num_result_types = 0;
 
 Mirrors the existing Option registry structure.
 
-### 3. Implemented Option<T> Monomorphization (`seed/seed.cpp:507-537`)
+### 3. Implemented Option<T> Monomorphization (`src/compiler_seed/seed.cpp:507-537`)
 
 **Location**: `simple_type_to_cpp()` function
 
@@ -81,7 +81,7 @@ struct Option_FunctionAttr {
 };
 ```
 
-### 4. Implemented Result<T, E> Monomorphization (`seed/seed.cpp:539-562`)
+### 4. Implemented Result<T, E> Monomorphization (`src/compiler_seed/seed.cpp:539-562`)
 
 **Location**: `simple_type_to_cpp()` function
 
@@ -109,7 +109,7 @@ struct Result_Token_ParseError {
 };
 ```
 
-### 5. Added Struct Generation (`seed/seed.cpp:3647-3721`)
+### 5. Added Struct Generation (`src/compiler_seed/seed.cpp:3647-3721`)
 
 **Phase A** (line 3647-3650): Forward declare Result structs
 ```cpp
@@ -215,7 +215,7 @@ These are separate transpiler bugs, not generic-related.
 
 **Lines added**: ~150 lines
 **Complexity**: Medium (recursive type resolution)
-**Testing**: Verified with full compiler_core transpilation
+**Testing**: Verified with full compiler_core_legacy transpilation
 
 **Design principles**:
 - Mirrors existing Option registry pattern
@@ -229,7 +229,7 @@ These are separate transpiler bugs, not generic-related.
 
 **Enabled**:
 - ✅ 80+ files with generic types can now compile
-- ✅ Full compiler_core bootstrap path unblocked
+- ✅ Full compiler_core_legacy bootstrap path unblocked
 - ✅ Option and Result types work correctly
 - ✅ Type-safe generic instantiation
 
@@ -257,7 +257,7 @@ These are separate transpiler bugs, not generic-related.
 
 ## Files Modified
 
-- `seed/seed.cpp` (+150 lines)
+- `src/compiler_seed/seed.cpp` (+150 lines)
   - Added generic parameter extraction functions
   - Added Result type registry
   - Implemented Option<T> monomorphization
@@ -270,13 +270,13 @@ These are separate transpiler bugs, not generic-related.
 
 **Compilation**: ✅ seed_cpp compiles successfully
 ```bash
-cd seed/build && cmake --build . --target seed_cpp
+cd build/seed && cmake --build . --target seed_cpp
 [100%] Built target seed_cpp
 ```
 
 **Bootstrap Test**: ✅ Generic structs generated
 ```bash
-bash scripts/bootstrap-fixed.sh
+bash scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 # Output includes:
 struct Option_FunctionAttr { ... };
 struct Option_MirType { ... };

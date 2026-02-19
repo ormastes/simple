@@ -313,7 +313,7 @@ Filed 5 improvement requests in `simple/improve_request.md`:
    - `write_file(path: String, content: String) -> Result[(), IoError]`
    - Wire to existing Rust runtime functions
 
-2. **Add string methods** to `simple/std_lib/src/core/text.spl`
+2. **Add string methods** to `simple/std_lib/src/compiler_core/text.spl`
    - `substring()`, `find()`, `char_at()`, `strip()` at minimum
    - Consider full Python/JS-like string API
 
@@ -322,7 +322,7 @@ Filed 5 improvement requests in `simple/improve_request.md`:
    - Run MCP test suite to verify implementation
 
 ### Short-term (Enhance MCP)
-4. **Add JSON library** to `simple/std_lib/src/core/json.spl`
+4. **Add JSON library** to `simple/std_lib/src/compiler_core/json.spl`
    - Replace manual string building in formatter
    - Provide builder pattern for structured output
 

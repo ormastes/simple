@@ -111,7 +111,7 @@ Ask Claude to use the MCP tools. Examples:
 #### Debug Code
 ```
 "Create a debug session for test/app/mcp/bugdb_spec.spl"
-"Set a breakpoint at line 42 in src/core/lexer.spl"
+"Set a breakpoint at line 42 in src/compiler_core/lexer.spl"
 ```
 
 #### Version Control

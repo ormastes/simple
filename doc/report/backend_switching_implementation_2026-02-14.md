@@ -10,7 +10,7 @@ Implemented full backend switching system allowing users to select between Crane
 
 ## Changes Made
 
-### 1. Backend Parsing Functions (`src/compiler_core/backend_types.spl`)
+### 1. Backend Parsing Functions (`src/compiler_core_legacy/backend_types.spl`)
 
 Added two new functions to BackendKind enum:
 
@@ -35,7 +35,7 @@ fn backendkind_to_text(kind: BackendKind) -> text:
 
 **Purpose:** Parse backend names from user input (CLI, config files, env vars)
 
-### 2. Backend Factory Selection (`src/compiler_core/backend/backend_factory.spl`)
+### 2. Backend Factory Selection (`src/compiler_core_legacy/backend/backend_factory.spl`)
 
 Updated `BackendFactory.create()` to use `options.backend` field:
 
@@ -148,7 +148,7 @@ struct CompileOptions:
     ...
 ```
 
-**Already present** in `src/compiler_core/driver_types.spl` (line 151)
+**Already present** in `src/compiler_core_legacy/driver_types.spl` (line 151)
 
 ### 2. CLI Parser
 
@@ -180,7 +180,7 @@ bin/simple compile --release examples/hello.spl  # Release → LLVM
 
 ### Unit Tests
 
-TODO: Add backend switching tests to `test/unit/compiler_core/backend/`:
+TODO: Add backend switching tests to `test/unit/compiler_core_legacy/backend/`:
 - Test `backendkind_from_text()` parsing
 - Test `BackendFactory.create()` selection logic
 - Test auto-selection rules
@@ -219,8 +219,8 @@ TODO: Add backend switching tests to `test/unit/compiler_core/backend/`:
 ## Files Modified
 
 ```
-src/compiler_core/backend_types.spl          # +50 lines (parsing functions)
-src/compiler_core/backend/backend_factory.spl  # Modified create() method
+src/compiler_core_legacy/backend_types.spl          # +50 lines (parsing functions)
+src/compiler_core_legacy/backend/backend_factory.spl  # Modified create() method
 ```
 
 ## Files Created
@@ -237,10 +237,10 @@ doc/report/backend_switching_implementation_2026-02-14.md  # This file
 
 ```bash
 # Verify parsing functions compile
-bin/simple compile src/compiler_core/backend_types.spl
+bin/simple compile src/compiler_core_legacy/backend_types.spl
 
 # Verify factory compiles
-bin/simple compile src/compiler_core/backend/backend_factory.spl
+bin/simple compile src/compiler_core_legacy/backend/backend_factory.spl
 ```
 
 ### 2. Integration Test
@@ -273,8 +273,8 @@ bin/simple compile --backend=llvm examples/hello.spl -o hello_llvm
 If issues arise, revert with:
 
 ```bash
-jj restore src/compiler_core/backend_types.spl
-jj restore src/compiler_core/backend/backend_factory.spl
+jj restore src/compiler_core_legacy/backend_types.spl
+jj restore src/compiler_core_legacy/backend/backend_factory.spl
 ```
 
 Original factory just returned `create_specific(BackendKind.Cranelift, ...)`.

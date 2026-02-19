@@ -165,7 +165,7 @@ includes an embedded runtime. There are two methods:
 
 ```bash
 # Generate C only (no compilation)
-bin/simple src/app/compile/native.spl src/core/tokens.spl /tmp/core_tokens --gen-c-only
+bin/simple src/app/compile/native.spl src/compiler_core/tokens.spl /tmp/core_tokens --gen-c-only
 
 # The generated file is at /tmp/core_tokens (no .c extension)
 # Verify with clang:
@@ -175,31 +175,31 @@ clang -fsyntax-only -x c /tmp/core_tokens
 ### Method 2: Using gen_c_only.spl
 
 ```bash
-bin/simple src/app/compile/gen_c_only.spl src/core/tokens.spl /tmp/core_tokens.c
+bin/simple src/app/compile/gen_c_only.spl src/compiler_core/tokens.spl /tmp/core_tokens.c
 ```
 
 ### Method 3: Full Native Compilation
 
 ```bash
 # Compile Simple source directly to native binary
-bin/simple src/app/compile/native.spl src/core/tokens.spl /tmp/tokens_binary --verbose
+bin/simple src/app/compile/native.spl src/compiler_core/tokens.spl /tmp/tokens_binary --verbose
 
 # With explicit clang:
-bin/simple src/app/compile/native.spl src/core/tokens.spl /tmp/tokens_binary --compiler clang
+bin/simple src/app/compile/native.spl src/compiler_core/tokens.spl /tmp/tokens_binary --compiler clang
 ```
 
 ---
 
 ## Building Core Simple Modules
 
-Core Simple (`src/core/`) contains 18 modules that form the compiler's core
+Core Simple (`src/compiler_core/`) contains 18 modules that form the compiler's core
 library. Each can be compiled individually to C.
 
 ### Individual Module Compilation
 
 ```bash
 # Generate C for a single module
-bin/simple src/app/compile/native.spl src/core/tokens.spl /tmp/core_tokens --gen-c-only
+bin/simple src/app/compile/native.spl src/compiler_core/tokens.spl /tmp/core_tokens --gen-c-only
 
 # Verify with clang
 clang -fsyntax-only -x c /tmp/core_tokens
@@ -211,7 +211,7 @@ clang -fsyntax-only -x c /tmp/core_tokens
 for f in tokens types error ast ast_types lexer_types hir_types mir_types \
          backend_types __init__ mir lexer lexer_struct parser test_core \
          aop aop_debug_log test_lang_basics; do
-    bin/simple src/app/compile/native.spl src/core/${f}.spl /tmp/core_${f} --gen-c-only 2>/dev/null
+    bin/simple src/app/compile/native.spl src/compiler_core/${f}.spl /tmp/core_${f} --gen-c-only 2>/dev/null
     errs=$(clang -fsyntax-only -x c /tmp/core_${f} 2>&1 | grep -c 'error:' || true)
     echo "${f}: ${errs} errors"
 done
@@ -316,7 +316,7 @@ multi-file compilation by collecting dependencies via BFS:
 
 ```bash
 # native.spl automatically discovers and merges dependencies
-bin/simple src/app/compile/native.spl src/core/__init__.spl /tmp/core_combined --gen-c-only --verbose
+bin/simple src/app/compile/native.spl src/compiler_core/__init__.spl /tmp/core_combined --gen-c-only --verbose
 ```
 
 The pipeline:

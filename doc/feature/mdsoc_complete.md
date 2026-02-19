@@ -188,7 +188,7 @@ layer.can_depend("app", "app")       # ✅ true (same layer)
 ```simple
 struct CaretId:
     name: text          # e.g., "core", "ui", "infra"
-    path: text          # e.g., "src/core/"
+    path: text          # e.g., "src/compiler_core/"
     is_default: bool    # ^main is implicit default
 
 struct CaretMapping:
@@ -387,7 +387,7 @@ capsule:
 
 roots:
   - name: core
-    path: src/core/
+    path: src/compiler_core/
 
 dimension:
   name: feature

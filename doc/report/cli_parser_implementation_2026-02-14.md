@@ -6,11 +6,11 @@
 
 ## Summary
 
-Created shared CLI argument parser module (`src/app/cli_parser.spl`) to eliminate 280+ lines of duplicate manual argument parsing across 4+ entry points.
+Created shared CLI argument parser module (`src/lib/cli/cli_parser.spl`) to eliminate 280+ lines of duplicate manual argument parsing across 4+ entry points.
 
 ## Implementation
 
-### Module: `src/app/cli_parser.spl` (400 lines)
+### Module: `src/lib/cli/cli_parser.spl` (400 lines)
 
 **Features:**
 - Declarative argument definitions
@@ -164,7 +164,7 @@ fn run_notify_test(args: [text]):
 
 **After (12 lines):**
 ```simple
-use app.cli_parser.{cli_spec, cli_spec_option, cli_spec_flag, parse_cli_args, parsed_option, parsed_flag}
+use lib.cli.cli_parser.{cli_spec, cli_spec_option, cli_spec_flag, parse_cli_args, parsed_option, parsed_flag}
 
 fn run_notify_test(args: [text]):
     val spec = cli_spec()
@@ -202,7 +202,7 @@ fn handle_rust_test(args: [text]) -> i64:
 
 **After (15 lines):**
 ```simple
-use app.cli_parser.*
+use lib.cli.cli_parser.*
 
 fn handle_rust_test(args: [text]) -> i64:
     val spec = cli_spec()
@@ -311,7 +311,7 @@ test/integration/cli/
 
 ## Migration Checklist
 
-- [x] Create `src/app/cli_parser.spl` (400 lines)
+- [x] Create `src/lib/cli/cli_parser.spl` (400 lines)
 - [ ] Create unit tests (3 spec files, ~150 tests)
 - [ ] Migrate dashboard commands (Phase 1)
 - [ ] Migrate build system (Phase 2)
@@ -338,7 +338,7 @@ test/integration/cli/
 
 ## Related Work
 
-- **CLI Util Module**: `src/app/cli_util.spl` - Basic helpers (get_cli_args, parse_csv_fields)
+- **CLI Util Module**: `src/lib/cli/cli_util.spl` - Basic helpers (get_cli_args, parse_csv_fields)
 - **Test Runner Args**: `src/app/test_runner_new/test_runner_args.spl` - Specialized test parsing
 - **Build Config**: `src/app/build/config.spl` - Build-specific parsing
 

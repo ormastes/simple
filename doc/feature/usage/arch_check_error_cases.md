@@ -90,11 +90,11 @@
 | 10 | pattern with /** matches direct child | pass |
 
 **Example:** empty pattern does not match non-empty import
-    Given val result = _match_pattern("core/lexer", "")
+    Given val result = _match_pattern("compiler_core/lexer", "")
     Then  expect(result).to_equal(false)
 
 **Example:** empty import does not match non-empty pattern
-    Given val result = _match_pattern("", "core/lexer")
+    Given val result = _match_pattern("", "compiler_core/lexer")
     Then  expect(result).to_equal(false)
 
 **Example:** empty import matches empty pattern exactly
@@ -106,15 +106,15 @@
     Then  expect(result).to_equal(true)
 
 **Example:** pattern exact does not match import with extra segment
-    Given val result = _match_pattern("core/lexer/extra", "core/lexer")
+    Given val result = _match_pattern("compiler_core/lexer/extra", "compiler_core/lexer")
     Then  expect(result).to_equal(true)
 
 **Example:** /* does not match two levels deep
-    Given val result = _match_pattern("core/lexer/submodule", "core/*")
+    Given val result = _match_pattern("compiler_core/lexer/submodule", "compiler_core/*")
     Then  expect(result).to_equal(false)
 
 **Example:** /* matches single level sub-path
-    Given val result = _match_pattern("core/lexer", "core/*")
+    Given val result = _match_pattern("compiler_core/lexer", "compiler_core/*")
     Then  expect(result).to_equal(true)
 
 **Example:** prefix match requires slash boundary
@@ -126,7 +126,7 @@
     Then  expect(result).to_equal(true)
 
 **Example:** pattern with /** matches direct child
-    Given val result = _match_pattern("core/ast", "core/**")
+    Given val result = _match_pattern("compiler_core/ast", "compiler_core/**")
     Then  expect(result).to_equal(true)
 
 ## Feature: Arch Check Error Cases: _is_import_allowed edge cases
@@ -151,15 +151,15 @@
 
 **Example:** import allowed when in allow list and deny list is empty
     Given val rule = ArchRule(
-    Then  expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+    Then  expect(_is_import_allowed("compiler_core/ast", rule)).to_equal(true)
 
 **Example:** import denied when matched by deny pattern even if in allow list
     Given val rule = ArchRule(
-    Then  expect(_is_import_allowed("core/compiler/backend", rule)).to_equal(false)
+    Then  expect(_is_import_allowed("compiler_core/compiler/backend", rule)).to_equal(false)
 
 **Example:** import allowed when in allow but not in deny
     Given val rule = ArchRule(
-    Then  expect(_is_import_allowed("core/ast", rule)).to_equal(true)
+    Then  expect(_is_import_allowed("compiler_core/ast", rule)).to_equal(true)
 
 ## Feature: Arch Check Error Cases: _parse_imports_from_content edge cases
 
@@ -236,7 +236,7 @@
     Then  expect(result).to_equal(true)
 
 **Example:** file at exact module boundary matches
-    Given val result = _file_is_under_module("/project/src/core/file.spl", "src/core", "/project")
+    Given val result = _file_is_under_module("/project/src/compiler_core/file.spl", "src/core", "/project")
     Then  expect(result).to_equal(true)
 
 **Example:** file outside module boundary does not match

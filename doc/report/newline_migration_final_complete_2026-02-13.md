@@ -22,12 +22,12 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 ### Agent 1: Error/Panic Messages (13 files, 46 conversions)
 **Files:**
 - src/compiler/blocks/testing.spl (6)
-- src/compiler_core/blocks/testing.spl (7)
+- src/compiler_core_legacy/blocks/testing.spl (7)
 - src/compiler/linker/object_resolver.spl (1)
 - src/compiler/loader/jit_instantiator.spl (5)
-- src/compiler_core/irdsl/validator.spl (3)
+- src/compiler_core_legacy/irdsl/validator.spl (3)
 - src/compiler/irdsl/validator.spl (3)
-- src/compiler_core/backend/codegen_errors.spl (1)
+- src/compiler_core_legacy/backend/codegen_errors.spl (1)
 - src/compiler/di_validator.spl (6)
 - src/lib/hooks/detectors/build.spl (7)
 - src/compiler/gc_analysis/mod.spl (3)
@@ -46,7 +46,7 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 - src/compiler/error.spl
 - src/compiler/layout_recorder.spl
 - src/compiler/text_diff.spl
-- src/compiler_core/monomorphize/hot_reload.spl
+- src/compiler_core_legacy/monomorphize/hot_reload.spl
 
 ### Agent 3: Compiler Messages (9 files, 140+ conversions)
 **Files:**
@@ -54,15 +54,15 @@ Successfully completed **comprehensive** newline migration converting ALL conver
 - src/compiler/pretty_printer.spl (2)
 - src/compiler/coverage.spl (1)
 - src/compiler/visibility_checker.spl (1)
-- src/compiler_core/backend/exhaustiveness_validator.spl (32)
-- src/compiler_core/interrupt.spl (20+)
-- src/compiler_core/main.spl (48)
+- src/compiler_core_legacy/backend/exhaustiveness_validator.spl (32)
+- src/compiler_core_legacy/interrupt.spl (20+)
+- src/compiler_core_legacy/main.spl (48)
 - src/compiler/driver.spl (1)
 - src/compiler/mir_opt/mod.spl (3)
 
 ### Agent 4: Test/Debug Files (22 files, 173+ conversions)
 **Files:**
-- src/compiler_core/test_*.spl (18 files)
+- src/compiler_core_legacy/test_*.spl (18 files)
 - src/test/compiler_tests.spl
 - src/test/integration/mod.spl
 - test/benchmarks/compiler_runtime.spl
@@ -176,9 +176,9 @@ rust_code = "fn main() {\n    println!(\"hello\");\n}"
 ### Files by Category
 - **src/app/** - 244 files (100%)
 - **src/compiler/** - 89 files
-- **src/compiler_core/** - 96 files
+- **src/compiler_core_legacy/** - 96 files
 - **src/std/** - 50 files
-- **src/core/** - 3 files
+- **src/compiler_core_legacy/** - 3 files
 - **src/diagnostics/** - 3 files
 - **src/lib/** - 4 files
 - **src/shared/** - 1 file

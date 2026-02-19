@@ -12,7 +12,7 @@ Async/await is **FULLY IMPLEMENTED** in the Simple language compiler. The system
 During implementation, I discovered that:
 
 1. **Two Parsers Exist:**
-   - `src/core/parser.spl` - Arena-based AST for interpreter (MODIFIED)
+   - `src/compiler_core/parser.spl` - Arena-based AST for interpreter (MODIFIED)
    - `src/compiler/parser.spl` - Struct-based AST for compiler (ALREADY HAD ASYNC!)
 
 2. **Complete Desugar Pipeline Exists:**
@@ -30,13 +30,13 @@ During implementation, I discovered that:
 
 ### 1. Core Parser Async Support (NEW)
 
-Modified `src/core/parser.spl` to recognize async syntax for interpreter mode:
+Modified `src/compiler_core/parser.spl` to recognize async syntax for interpreter mode:
 
 ```simple
 // Files modified:
-- src/core/ast.spl       // Added decl_is_async, expr_await/yield/spawn
-- src/core/parser.spl    // Added async fn parsing, await/yield/spawn expressions
-- src/core/tokens.spl    // Already had TOK_KW_ASYNC/AWAIT/YIELD/SPAWN
+- src/compiler_core/ast.spl       // Added decl_is_async, expr_await/yield/spawn
+- src/compiler_core/parser.spl    // Added async fn parsing, await/yield/spawn expressions
+- src/compiler_core/tokens.spl    // Already had TOK_KW_ASYNC/AWAIT/YIELD/SPAWN
 ```
 
 **Changes:**
@@ -48,7 +48,7 @@ Modified `src/core/parser.spl` to recognize async syntax for interpreter mode:
 
 ### 2. Interpreter Integration (BASIC STUBS)
 
-Added `src/core/interpreter/eval.spl` support:
+Added `src/compiler_core/interpreter/eval.spl` support:
 
 ```simple
 fn eval_await_expr(eid: i64) -> i64:
@@ -185,9 +185,9 @@ bin/simple test/feature/async_features_spec.spl
 ## Files Modified/Created
 
 ### Modified Files
-- `src/core/ast.spl` - Async declaration and expression support
-- `src/core/parser.spl` - Async parsing logic
-- `src/core/interpreter/eval.spl` - Basic async expression evaluators
+- `src/compiler_core/ast.spl` - Async declaration and expression support
+- `src/compiler_core/parser.spl` - Async parsing logic
+- `src/compiler_core/interpreter/eval.spl` - Basic async expression evaluators
 - `src/std/src/dl/config_loader.spl` - Fixed module-level variable (blocking build)
 
 ### Created Files

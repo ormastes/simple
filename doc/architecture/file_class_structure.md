@@ -25,9 +25,9 @@
 | `src/std/` | 909 | 192,427 | 173.3% | Standard library (utilities, data structures, protocols) |
 | `src/compiler/` | 436 | 140,341 | 126.4% | Full compiler (Full Simple) |
 | `src/app/` | 594 | 129,154 | 116.3% | Applications & tools (CLI, MCP, LSP, test runner) |
-| `src/compiler_core/` | 441 | 97,057 | 87.4% | Core compiler (Core Simple) |
+| `src/compiler_core_legacy/` | 441 | 97,057 | 87.4% | Core compiler (Core Simple) |
 | `src/lib/` | 123 | 30,993 | 27.9% | Database, actors, ML, parsers |
-| `src/core/` | 42 | 17,871 | 16.1% | Core Simple library (seed-compilable) |
+| `src/compiler_core_legacy/` | 42 | 17,871 | 16.1% | Core Simple library (seed-compilable) |
 | `src/baremetal/` | 36 | 4,829 | 4.3% | Bare-metal runtime |
 | `src/remote/` | 15 | 3,964 | 3.6% | Remote execution |
 | `src/ffi/` | 11 | 1,808 | 1.6% | FFI bridge utilities |
@@ -48,7 +48,7 @@
 
 ## 1. Complete Directory Tree
 
-### 1.1 Core Simple Library (`src/core/` - 42 files, 17,871 lines)
+### 1.1 Core Simple Library (`src/compiler_core_legacy/` - 42 files, 17,871 lines)
 
 **Purpose:** Seed-compilable core library for bootstrapping. Minimal dependencies, can compile through C seed compiler.
 
@@ -312,7 +312,7 @@
 
 ---
 
-### 1.5 Core Compiler (`src/compiler_core/` - 441 files, 97,057 lines)
+### 1.5 Core Compiler (`src/compiler_core_legacy/` - 441 files, 97,057 lines)
 
 **Purpose:** Core Simple version of compiler (subset). Can run on seed compiler.
 
@@ -326,7 +326,7 @@
 
 **Documented in:**
 - `src/compiler/README.md`
-- `src/compiler_core/README.md`
+- `src/compiler_core_legacy/README.md`
 - `doc/report/duplication_phase3_summary.md`
 
 ---
@@ -396,8 +396,7 @@
 | `shared/` | 5 | 571 | Shared utilities |
 | `diagnostics_minimal/` | 5 | 328 | Minimal diagnostics |
 | `test/` | 4 | 1,728 | Test utilities |
-| `llvm_shared/` | 3 | 369 | LLVM shared code |
-| `runtime/` | 1 | 548 | Runtime support |
+| `shared/llvm/` | 3 | 369 | LLVM shared code |
 
 ---
 
@@ -505,9 +504,9 @@ val json = json_object([
 - `backend/vhdl_type_mapper.spl` (213 lines)
 - `backend/lean_type_mapper.spl` (~150 lines)
 
-**Plus duplicates in `compiler_core/` (7 files, ~800 lines)**
+**Plus duplicates in `compiler_core_legacy/` (7 files, ~800 lines)**
 
-**Total:** ~2,774 lines (compiler/) + ~800 lines (compiler_core/) = **~3,574 lines**
+**Total:** ~2,774 lines (compiler/) + ~800 lines (compiler_core_legacy/) = **~3,574 lines**
 **Estimated structural overlap:** 30-40% (~1,070-1,430 lines)
 
 **Common pattern:**
@@ -534,7 +533,7 @@ fn map_type(ty: TypeKind) -> BackendType:
 #### 5. Parser (3 implementations)
 
 **Files involved:**
-- `src/core/parser.spl` (2,135 lines) - Seed-compilable
+- `src/compiler_core_legacy/parser.spl` (2,135 lines) - Seed-compilable
 - `src/lib/parser/parser.spl` (1,071 lines) - Library parser
 - `src/lib/pure/parser.spl` (1,056 lines) - Functional parser
 - `src/lib/pure/parser_old.spl` (858 lines) - Legacy
@@ -543,7 +542,7 @@ fn map_type(ty: TypeKind) -> BackendType:
 **Estimated structural overlap:** 40-50% (~2,000-2,500 lines)
 
 **Why it exists:**
-- `core/parser.spl` - Bootstrap (seed-compilable, minimal deps)
+- `compiler_core_legacy/parser.spl` - Bootstrap (seed-compilable, minimal deps)
 - `lib/parser/parser.spl` - General-purpose library parser
 - `lib/pure/parser.spl` - Functional parser (combinator-based)
 - `lib/pure/parser_old.spl` - Legacy (should be removed)
@@ -634,9 +633,9 @@ fn select_inst(mir: MirInst) -> MachInst:
 #### 8. Lexer (3 implementations)
 
 **Files involved:**
-- `src/core/lexer.spl` (829 lines) + `lexer_struct.spl` (720 lines) = 1,549 lines
+- `src/compiler_core_legacy/lexer.spl` (829 lines) + `lexer_struct.spl` (720 lines) = 1,549 lines
 - `src/compiler/lexer.spl` (1,382 lines)
-- `src/compiler_core/lexer.spl` (~1,200 lines estimated)
+- `src/compiler_core_legacy/lexer.spl` (~1,200 lines estimated)
 
 **Total:** ~4,131 lines
 **Estimated overlap:** 70-80% (~2,890-3,305 lines)
@@ -1144,7 +1143,7 @@ src/std/
 
 #### 1. Lexer/Parser Bootstrap Duplication
 
-**Files:** `core/lexer.spl`, `compiler/lexer.spl`, `compiler_core/lexer.spl`
+**Files:** `compiler_core_legacy/lexer.spl`, `compiler/lexer.spl`, `compiler_core_legacy/lexer.spl`
 
 **Reason:** Required for self-hosting bootstrap
 **Status:** Documented in `src/compiler/README.md`
@@ -1327,7 +1326,7 @@ src/std/
 
 | Category | Lines | % of Codebase | Status | Priority |
 |----------|-------|---------------|--------|----------|
-| **Bootstrap (compiler_core/)** | ~15,000 | 13.5% | Documented | N/A |
+| **Bootstrap (compiler_core_legacy/)** | ~15,000 | 13.5% | Documented | N/A |
 | **String/Array utilities** | ~3,000 | 2.7% | Addressable | P1 |
 | **Phase files** | ~8,000 | 7.2% | Addressable | P2 |
 | **Type mappers** | ~3,500 | 3.2% | Backend-specific | P3 |
@@ -1356,7 +1355,7 @@ src/std/
 ### Architectural Insights
 
 1. **Bootstrap Complexity is Acceptable**
-   - 3 compiler implementations (core, compiler_core, compiler)
+   - 3 compiler implementations (core, compiler_core_legacy, compiler)
    - ~15,000 lines duplicated for self-hosting
    - Well-documented, intentional
    - **Recommendation:** Keep until desugaring pipeline complete
@@ -1399,7 +1398,7 @@ src/std/
 ### Maintenance Burden
 
 **High-Maintenance Areas:**
-1. compiler/ ↔ compiler_core/ synchronization (~15,000 lines)
+1. compiler/ ↔ compiler_core_legacy/ synchronization (~15,000 lines)
 2. Phase files (27 files, manual tracking)
 3. Backend type mappers (16 files, backend-specific changes)
 4. ISA encoders (8 files, architecture-specific)
@@ -1494,11 +1493,11 @@ find src/compiler/backend/native -name "isel_*.spl" -o -name "encode_*.spl"
 **Documentation:**
 - `CLAUDE.md` - Development guide (this document)
 - `src/compiler/README.md` - Compiler bootstrap duplication
-- `src/compiler_core/README.md` - Core compiler documentation
+- `src/compiler_core_legacy/README.md` - Core compiler documentation
 - `doc/guide/syntax_quick_reference.md` - Language syntax
 
 **Core Implementation:**
-- `src/core/parser.spl` (2,135 lines) - Bootstrap parser
+- `src/compiler_core_legacy/parser.spl` (2,135 lines) - Bootstrap parser
 - `src/std/spec.spl` (694 lines) - SSpec testing framework
 - `src/app/cli/main.spl` (756 lines) - CLI entry point
 - `src/compiler/driver.spl` (856 lines) - Compiler driver

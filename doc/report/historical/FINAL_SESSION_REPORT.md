@@ -23,7 +23,7 @@ Successfully continued from async/await implementation, completed all 21 phases,
    - Async/await, debugger, C compiler improvements, monomorphization
 
 2. **fix: Add EXPR_SLICE evaluation support to interpreter (Phase 1.1 partial)**
-   - 81 lines in src/core/interpreter/eval.spl
+   - 81 lines in src/compiler_core/interpreter/eval.spl
    - Slice expression evaluation implementation
 
 3. **docs: Document runtime parser bug root cause and rebuild limitations**
@@ -134,7 +134,7 @@ This is a **release distribution** containing:
 
 ### 1. Dual Parser Discovery
 Like async/await, found two parser implementations:
-- src/core/parser.spl (Runtime, 43KB)
+- src/compiler_core/parser.spl (Runtime, 43KB)
 - src/compiler/parser.spl (Native, 89KB)
 
 ### 2. Bootstrap Architecture

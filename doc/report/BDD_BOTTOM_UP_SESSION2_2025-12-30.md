@@ -17,8 +17,8 @@ Continued BDD test-first implementation from bottom categories, adding **Regex**
 
 **Status:** 🔄 In Progress (5 features)
 **Files:**
-- Implementation: `simple/std_lib/src/core/regex.spl` (270 lines)
-- Tests: `simple/std_lib/test/unit/core/regex_spec.spl` (320 lines)
+- Implementation: `simple/std_lib/src/compiler_core/regex.spl` (270 lines)
+- Tests: `simple/std_lib/test/unit/compiler_core/regex_spec.spl` (320 lines)
 
 **Features:**
 | ID | Feature | Status | Tests |
@@ -73,8 +73,8 @@ describe("Regex module"):
 
 **Status:** ✅ Complete
 **Files:**
-- Implementation: `simple/std_lib/src/core/random.spl` (220 lines)
-- Tests: `simple/std_lib/test/unit/core/random_spec.spl` (240 lines)
+- Implementation: `simple/std_lib/src/compiler_core/random.spl` (220 lines)
+- Tests: `simple/std_lib/test/unit/compiler_core/random_spec.spl` (240 lines)
 
 **Features:**
 | ID | Feature | Status | Tests |
@@ -136,8 +136,8 @@ let test_features = [
         status: "🔄 In Progress",
         impl_type: "Simple",
         spec_ref: "doc/spec/stdlib.md",
-        files: ["simple/std_lib/src/core/regex.spl"],
-        tests: ["simple/std_lib/test/unit/core/regex_spec.spl"],
+        files: ["simple/std_lib/src/compiler_core/regex.spl"],
+        tests: ["simple/std_lib/test/unit/compiler_core/regex_spec.spl"],
         description: "...",
         code_examples: ['...'],
         dependencies: [],
@@ -165,10 +165,10 @@ for meta in test_features:
 
 **Files Demonstrating Compatibility:**
 - `simple/std_lib/test/unit/host/datetime_spec.spl` - 4 features registered
-- `simple/std_lib/test/unit/core/math_spec.spl` - 2 features registered
-- `simple/std_lib/test/unit/core/json_spec.spl` - 1 feature registered
-- `simple/std_lib/test/unit/core/regex_spec.spl` - 5 features registered
-- `simple/std_lib/test/unit/core/random_spec.spl` - 1 feature registered
+- `simple/std_lib/test/unit/compiler_core/math_spec.spl` - 2 features registered
+- `simple/std_lib/test/unit/compiler_core/json_spec.spl` - 1 feature registered
+- `simple/std_lib/test/unit/compiler_core/regex_spec.spl` - 5 features registered
+- `simple/std_lib/test/unit/compiler_core/random_spec.spl` - 1 feature registered
 
 **Total:** 13 features self-registered from BDD tests
 
@@ -220,12 +220,12 @@ The feature documentation system works with:
 ## Files Created/Modified
 
 ### New Implementation Files (Session 2)
-1. `simple/std_lib/src/core/regex.spl` - 270 lines
-2. `simple/std_lib/src/core/random.spl` - 220 lines
+1. `simple/std_lib/src/compiler_core/regex.spl` - 270 lines
+2. `simple/std_lib/src/compiler_core/random.spl` - 220 lines
 
 ### New Test Files (Session 2)
-1. `simple/std_lib/test/unit/core/regex_spec.spl` - 320 lines
-2. `simple/std_lib/test/unit/core/random_spec.spl` - 240 lines
+1. `simple/std_lib/test/unit/compiler_core/regex_spec.spl` - 320 lines
+2. `simple/std_lib/test/unit/compiler_core/random_spec.spl` - 240 lines
 
 ### Files Needing Update
 1. `simple/examples/regex_features.spl` - Update features #230-235

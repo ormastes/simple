@@ -95,7 +95,7 @@ fn run_build() {
   build_impact: {
     causes_errors: true
     error_codes: ["E0308", "E0425"]
-    affected_files: ["src/lib/std/src/core/net/http_client.spl"]
+    affected_files: ["src/lib/std/src/compiler_core/net/http_client.spl"]
   }
 }
 ```
@@ -219,7 +219,7 @@ simple test test/lib/std/unit/core/net/http_client_spec.spl
 # → Bug status: confirmed (has failing test)
 
 # Fix the bug
-vim src/lib/std/src/core/net/http_client.spl
+vim src/lib/std/src/compiler_core/net/http_client.spl
 
 # Build to check for new errors
 simple build

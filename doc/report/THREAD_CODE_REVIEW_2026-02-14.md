@@ -38,7 +38,7 @@ The thread pool and thread SFFI implementations are well-designed and have compr
 - Good error handling (invalid handle checks)
 
 **C Runtime Verification:**
-- ✅ All extern functions implemented in `seed/runtime_thread.c`
+- ✅ All extern functions implemented in `src/compiler_seed/runtime_thread.c`
 - ✅ Cross-platform (pthread/Windows)
 - ✅ Thread-safe handle management (MAX_HANDLES=4096)
 - ✅ Proper resource cleanup
@@ -119,7 +119,7 @@ me try_pop() -> Option<usize>:
 
 **Memory.md Verification:**
 > **✅ Generic SYNTAX supported:** Parser accepts `<>` syntax for generics (e.g., `class Foo<T>:`,
-> `fn identity<T>(x: T) -> T:`). Verified by `test/unit/core/generic_syntax_spec.spl` (30/30 tests passing).
+> `fn identity<T>(x: T) -> T:`). Verified by `test/unit/compiler_core/generic_syntax_spec.spl` (30/30 tests passing).
 > **Limitation:** Type checking/instantiation not yet implemented - generics parse but don't generate code.
 > Full generic system is future work.
 
@@ -217,7 +217,7 @@ me try_pop() -> (bool, usize):
 
 ## 4. C Runtime Implementation Review
 
-### 4.1 seed/runtime_thread.h (215 lines)
+### 4.1 src/compiler_seed/runtime_thread.h (215 lines)
 **Status:** ✅ PRODUCTION READY
 
 **Design:**
@@ -234,7 +234,7 @@ me try_pop() -> (bool, usize):
 
 ---
 
-### 4.2 seed/runtime_thread.c (545 lines)
+### 4.2 src/compiler_seed/runtime_thread.c (545 lines)
 **Status:** ✅ PRODUCTION READY
 
 **Platform Support:**
@@ -266,7 +266,7 @@ thread_safe_queue.spl  ← BROKEN (Option<usize>)
     ↓ imports
 thread_sffi.spl  ← OK
     ↓ extern calls
-seed/runtime_thread.c  ← OK
+src/compiler_seed/runtime_thread.c  ← OK
 ```
 
 **Impact:** ThreadSafeQueue blocks the entire chain.

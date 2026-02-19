@@ -10,21 +10,21 @@
 ## Completed Fixes
 
 ### ✅ Fix #1: Main Function Lookup
-**File:** `seed/seed.cpp:3648-3651`
+**File:** `src/compiler_seed/seed.cpp:3648-3651`
 **Problem:** Second pass looked for "main" but function registered as "spl_main"
 **Solution:** Added conditional lookup name mapping
 **Impact:** Main functions work correctly
 **Lines Changed:** +3
 
 ### ✅ Fix #2: Universal Stub Generation
-**File:** `seed/seed.cpp:833`
+**File:** `src/compiler_seed/seed.cpp:833`
 **Problem:** Hardcoded `return true` stubbed ALL functions
 **Solution:** Changed to `return false` to allow real function bodies
 **Impact:** Enabled code generation for all files
 **Lines Changed:** +1
 
 ### ✅ Fix #3: Implicit Returns
-**File:** `seed/seed.cpp:2814-2840`
+**File:** `src/compiler_seed/seed.cpp:2814-2840`
 **Problem:** Struct constructors as last expression missing `return` statement
 **Solution:** Added implicit return detection - peeks ahead to see if expression is last in block
 **Impact:** ~100 files now generate correct code
@@ -42,7 +42,7 @@ Point point_origin() {
 ```
 
 ### ✅ Fix #4: Enum Dot Notation
-**File:** `seed/seed.cpp:2518-2570`
+**File:** `src/compiler_seed/seed.cpp:2518-2570`
 **Problem:** Match statements with `case EnumName.Variant:` not translated
 **Solution:** Detect and split dot notation in case values
 **Impact:** ~60 files with enum matching now work
@@ -61,7 +61,7 @@ switch (mode) {
 ```
 
 ### ✅ Fix #5: Optional Chaining (`.?` Operator)
-**File:** `seed/seed.cpp:1269-1305`
+**File:** `src/compiler_seed/seed.cpp:1269-1305`
 **Problem:** `.?` operator not recognized, caused parse errors
 **Solution:** Added detection and translation:
 - `x.?` → `x.has_value` (for Option) or `spl_array_len(x) > 0` (for arrays)
@@ -221,9 +221,9 @@ $ ./seed_cpp test.spl | grep "spl_array_len"
 
 ## Files Modified
 
-- `seed/seed.cpp` - **5 fixes applied, 79 lines added**
-- `scripts/bootstrap-minimal.sh` - Test file exclusions
-- `scripts/bootstrap-core-only.sh` - Core-only build (230 files)
+- `src/compiler_seed/seed.cpp` - **5 fixes applied, 79 lines added**
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Test file exclusions
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Core-only build (230 files)
 
 ## Code Quality
 

@@ -11,9 +11,9 @@ Cross-module duplication analysis reveals **7 major architectural patterns** req
 
 ### Key Findings
 
-1. **Backend Type Definitions:** Duplicated across `src/core/backend_types.spl` (158 lines) and `src/compiler/backend/backend_types.spl` (~400 lines)
-2. **String Utilities:** 3-way duplication across `src/core/types.spl`, `src/std/text.spl`, `src/std/template/utilities.spl`
-3. **Error Handling:** 3 separate hierarchies in `src/core/error.spl`, `src/std/error.spl`, `src/compiler/backend/codegen_errors.spl`
+1. **Backend Type Definitions:** Duplicated across `src/compiler_core/backend_types.spl` (158 lines) and `src/compiler/backend/backend_types.spl` (~400 lines)
+2. **String Utilities:** 3-way duplication across `src/compiler_core/types.spl`, `src/std/text.spl`, `src/std/template/utilities.spl`
+3. **Error Handling:** 3 separate hierarchies in `src/compiler_core/error.spl`, `src/std/error.spl`, `src/compiler/backend/codegen_errors.spl`
 4. **Loop Patterns:** 955 occurrences of `while i < arr.len()` manual iteration across 244 files
 5. **Integer-to-String Conversion:** Repeated 70+ line implementation in multiple locations
 6. **Configuration Parsing:** 20+ implementations of line-based config parsers with similar structure
@@ -25,7 +25,7 @@ Cross-module duplication analysis reveals **7 major architectural patterns** req
 
 ### Problem: Dual Definitions
 
-**Location A:** `src/core/backend_types.spl` (158 lines)
+**Location A:** `src/compiler_core/backend_types.spl` (158 lines)
 - Seed-compatible (simple enums, no payloads)
 - Integer tag constants (`BACKEND_CRANELIFT = 0`, etc.)
 - Free function converters (`backend_kind_name()`)
@@ -38,7 +38,7 @@ Cross-module duplication analysis reveals **7 major architectural patterns** req
 ### Duplication
 
 ```simple
-# src/core/backend_types.spl
+# src/compiler_core/backend_types.spl
 enum BackendKind:
     Cranelift
     Llvm
@@ -75,13 +75,13 @@ enum BackendKind:
 ### Solution
 
 **Option A: Single Source (Recommended)**
-1. Keep `src/core/backend_types.spl` as canonical (seed-compatible)
+1. Keep `src/compiler_core/backend_types.spl` as canonical (seed-compatible)
 2. Delete duplicates from `src/compiler/backend/backend_types.spl`
 3. Add free functions for rich operations (avoid impl blocks)
 4. All modules import from `core.backend_types`
 
 **Option B: Layered Approach**
-1. Core definitions in `src/core/backend_types.spl`
+1. Core definitions in `src/compiler_core/backend_types.spl`
 2. Extension functions in `src/compiler/backend/backend_extensions.spl`
 3. Use pattern: `import core.backend_types, compiler.backend.backend_extensions`
 
@@ -93,7 +93,7 @@ enum BackendKind:
 
 ### Locations
 
-1. **Core Simple:** `src/core/types.spl` (lines 14-48)
+1. **Core Simple:** `src/compiler_core/types.spl` (lines 14-48)
 2. **Standard Library:** `src/std/text.spl` (char_code lookup, 387+)
 3. **Template Engine:** `src/std/template/utilities.spl` (lines 40-180)
 4. **Legacy Concatenated:** `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
@@ -120,7 +120,7 @@ enum BackendKind:
 ### Example Duplication
 
 ```simple
-# src/core/types.spl (lines 32-36)
+# src/compiler_core/types.spl (lines 32-36)
 fn str_starts_with(s: text, prefix: text) -> bool:
     s.starts_with(prefix)
 
@@ -181,7 +181,7 @@ fn str_to_lower(s: text) -> text:
 
 ### Locations
 
-1. **Core Errors:** `src/core/error.spl` (easyfix suggestions, 158 lines)
+1. **Core Errors:** `src/compiler_core/error.spl` (easyfix suggestions, 158 lines)
 2. **Standard Errors:** `src/std/error.spl` (trait hierarchy, backtrace, 100+ lines)
 3. **Codegen Errors:** `src/compiler/backend/codegen_errors.spl` (CodegenErrorKind enum, 100+ lines)
 
@@ -197,7 +197,7 @@ fn str_to_lower(s: text) -> text:
 ### Example - Error Formatting
 
 ```simple
-# src/core/error.spl
+# src/compiler_core/error.spl
 fn core_error(line: i64, col: i64, message: text):
     print "error[E:core]: line " + int_to_str(line) + ":" + int_to_str(col) + ": " + message
 
@@ -242,7 +242,7 @@ fn format_error(severity: ErrorSeverity, code: text, loc: (i64, i64), msg: text)
     val (line, col) = loc
     "{severity_str}[{code}]: line {line}:{col}: {msg}"
 
-# src/core/error.spl - Uses error_core + error_format
+# src/compiler_core/error.spl - Uses error_core + error_format
 use std.error_core.{ErrorBase, ErrorSeverity}
 use std.error_format.{format_error}
 
@@ -360,7 +360,7 @@ iter_with_index(items, fn(idx, item):
 
 ### Locations
 
-1. **Core:** `src/core/types.spl` (lines 52-79, 70 lines)
+1. **Core:** `src/compiler_core/types.spl` (lines 52-79, 70 lines)
 2. **Possible duplicates in:** template utilities, legacy stdlib
 
 ### Implementation
@@ -694,7 +694,7 @@ class Nanos:
 
 1. **Backend Types Unification** → 400 lines saved
    - Action: Delete `src/compiler/backend/backend_types.spl` duplicates
-   - Keep: `src/core/backend_types.spl` as canonical
+   - Keep: `src/compiler_core/backend_types.spl` as canonical
    - Timeline: 1-2 hours
 
 2. **Configuration Parser Consolidation** → 1,200-1,500 lines saved

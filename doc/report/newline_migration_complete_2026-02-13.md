@@ -27,7 +27,7 @@ Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` 
 - **Key files:** llvm_backend.spl (69), entry_point.spl (32), wasm_backend.spl (25)
 - **Preserved:** Escape sequence tables in isel files
 
-### Agent 2: src/compiler_core/ ✅
+### Agent 2: src/compiler_core_legacy/ ✅
 - **Files:** 46 files (19 initial + 27 follow-up)
 - **Occurrences:** ~140 replacements
 - **Key files:** baremetal/table_codegen.spl, backend/matrix_builder.spl, lexer.spl
@@ -55,7 +55,7 @@ Successfully migrated **95.5%** of hardcoded `"\n"` string literals to the `NL` 
 - **Occurrences:** 367 replacements
 - **Skipped:** test_newline*.spl files
 
-### Agent 7: src/core/ + src/diagnostics/ ✅
+### Agent 7: src/compiler_core_legacy/ + src/diagnostics/ ✅
 - **Files:** 6 files
 - **Occurrences:** 27 replacements
 - **Preserved:** Escape sequence definitions in lexer
@@ -215,10 +215,10 @@ grep -r '{NL}' --include="*.spl" src/ test/ | wc -l
 
 ### Source Directories
 - **src/compiler/** - 21 files
-- **src/compiler_core/** - 46 files
+- **src/compiler_core_legacy/** - 46 files
 - **src/app/** - 244 files (100% coverage)
 - **src/std/** - 33 files
-- **src/core/** - 3 files
+- **src/compiler_core_legacy/** - 3 files
 - **src/diagnostics/** - 3 files
 
 ### Test Directories

@@ -82,7 +82,7 @@ Modified `src/std/text.spl` to clearly distinguish:
 
 ### Lexer Module Changes
 
-Updated `src/core/lexer_struct.spl` and `src/core/lexer.spl`:
+Updated `src/compiler_core/lexer_struct.spl` and `src/compiler_core/lexer.spl`:
 - Changed `use std.text.{NL}` → `use std.text.{_NL}`
 - Replaced all `NL` references with `_NL` (28 occurrences total)
 - Lexer now uses explicit LF for token comparison

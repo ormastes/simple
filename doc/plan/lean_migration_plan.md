@@ -116,8 +116,8 @@ These projects verify standalone concepts and can be migrated first:
 | Project | Target Location | Approach |
 |---------|-----------------|----------|
 | `memory_capabilities` | `simple/std_lib/src/memory/capabilities.lean` | Direct move |
-| `visibility_export` | `simple/std_lib/src/core/visibility.lean` | Direct move |
-| `module_resolution` | `simple/std_lib/src/core/module.lean` | Direct move |
+| `visibility_export` | `simple/std_lib/src/compiler_core/visibility.lean` | Direct move |
+| `module_resolution` | `simple/std_lib/src/compiler_core/module.lean` | Direct move |
 | `macro_auto_import` | `simple/std_lib/src/macro/import.lean` | Direct move |
 
 #### 3.2 Medium-Complexity Migrations (Multi-File)
@@ -226,8 +226,8 @@ Before migration is considered complete:
 - [x] Phase 2: Set up colocation model
 - [x] Phase 3.1: Migrate low-complexity projects (4 projects)
   - `memory_capabilities` → `simple/std_lib/src/memory/proofs/capabilities.lean`
-  - `visibility_export` → `simple/std_lib/src/core/proofs/visibility.lean`
-  - `module_resolution` → `simple/std_lib/src/core/proofs/module_resolution.lean`
+  - `visibility_export` → `simple/std_lib/src/compiler_core/proofs/visibility.lean`
+  - `module_resolution` → `simple/std_lib/src/compiler_core/proofs/module_resolution.lean`
   - `macro_auto_import` → `simple/std_lib/src/macro/proofs/auto_import.lean`
 - [x] Phase 3.2: Migrate medium-complexity projects (3 projects)
   - `pattern_matching` → `simple/std_lib/src/compiler/proofs/pattern_exhaustiveness.lean`

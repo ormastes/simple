@@ -17,9 +17,9 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 - **Expression Constructors:** `expr_await()`, `expr_yield()`, `expr_spawn()`
 
 **Files Modified:**
-- `src/core/tokens.spl` - Added async tokens
-- `src/core/ast.spl` - Added async AST support
-- `src/core/parser.spl` - Added async parsing logic
+- `src/compiler_core/tokens.spl` - Added async tokens
+- `src/compiler_core/ast.spl` - Added async AST support
+- `src/compiler_core/parser.spl` - Added async parsing logic
 
 ### 2. Basic Interpreter Integration (STUBS)
 - **Evaluators:** `eval_await_expr()`, `eval_yield_expr()`, `eval_spawn_expr()`
@@ -27,7 +27,7 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 - **Purpose:** Prevent crashes, allow code to run
 
 **Files Modified:**
-- `src/core/interpreter/eval.spl` - Added async expression evaluators
+- `src/compiler_core/interpreter/eval.spl` - Added async expression evaluators
 
 ### 3. Testing
 - ✅ Parser accepts async syntax without errors
@@ -86,7 +86,7 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 1. **Parser Layer** (✅ DONE)
    - Recognizes syntax
    - Builds AST
-   - Located: `src/core/parser.spl`, `src/core/ast.spl`
+   - Located: `src/compiler_core/parser.spl`, `src/compiler_core/ast.spl`
 
 2. **Transform Layer** (⏳ TODO)
    - Converts async functions to state machines
@@ -96,7 +96,7 @@ Async/await syntax is now fully parseable and has basic interpreter support. The
 
 3. **Runtime Layer** (⚠️ PARTIAL)
    - Executes async code
-   - Located: `src/std/async/`, `src/core/interpreter/eval.spl`
+   - Located: `src/std/async/`, `src/compiler_core/interpreter/eval.spl`
    - Issue: Uses generics (interpreter limitation)
 
 ### Why Await Fails
@@ -158,12 +158,12 @@ val result = await get_value()  # Fails here
 ## Files Reference
 
 **Parser & AST:**
-- `src/core/tokens.spl`
-- `src/core/ast.spl`
-- `src/core/parser.spl`
+- `src/compiler_core/tokens.spl`
+- `src/compiler_core/ast.spl`
+- `src/compiler_core/parser.spl`
 
 **Interpreter:**
-- `src/core/interpreter/eval.spl`
+- `src/compiler_core/interpreter/eval.spl`
 
 **Desugar Pipeline:**
 - `src/compiler/desugar/mod.spl`

@@ -82,7 +82,7 @@ The Simple language compiler already has **extensive documentation coverage infr
 - **Ready for:** `simple build --warn-docs`
 
 #### 8. **Closure Capture Warnings** ✅
-- **Location:** `src/core/closure_analysis.spl`
+- **Location:** `src/compiler_core/closure_analysis.spl`
 - **Status:** Fully implemented with tests
 - **Test Coverage:** 177 lines in `test/unit/compiler/closure_capture_warning_spec.spl`
 - **Features:**
@@ -93,7 +93,7 @@ The Simple language compiler already has **extensive documentation coverage infr
 
 #### 9. **Ignored Return Value Warnings** ✅
 - **Status:** Tests exist (130 lines)
-- **Test File:** `test/unit/core/ignored_return_warning_spec.spl`
+- **Test File:** `test/unit/compiler_core/ignored_return_warning_spec.spl`
 - **Coverage:**
   - Detects when function returning value is called without using result
   - No false positives (void functions, unit returns, used values)
@@ -172,7 +172,7 @@ The Simple language compiler already has **extensive documentation coverage infr
 4. `test/unit/app/doc_coverage/compiler_integration_spec.spl`
 5. `test/unit/app/doc_coverage/export_parser_spec.spl`
 6. `test/unit/compiler/closure_capture_warning_spec.spl` (177 lines)
-7. `test/unit/core/ignored_return_warning_spec.spl` (130 lines)
+7. `test/unit/compiler_core/ignored_return_warning_spec.spl` (130 lines)
 8. `test/unit/parser/multiline_bool_spec.spl`
 9. `test/unit/parser/multiline_bool_parens_spec.spl`
 10. `test/unit/runtime/module_closure_spec.spl`
@@ -332,13 +332,13 @@ The Simple language compiler has a **robust and comprehensive documentation cove
 - `src/app/doc_coverage/` - 12 modules, ~2,500 lines
 - `src/app/stats/dynamic.spl` - 260 lines
 - `src/app/stats/json_formatter.spl` - 73 lines
-- `src/core/closure_analysis.spl` - Analysis engine
-- `src/core/interpreter/eval.spl` - Warning emission
+- `src/compiler_core/closure_analysis.spl` - Analysis engine
+- `src/compiler_core/interpreter/eval.spl` - Warning emission
 
 ### Test Files
 - `test/unit/app/doc_coverage/` - 6 test specs
 - `test/unit/compiler/closure_capture_warning_spec.spl` - 177 lines
-- `test/unit/core/ignored_return_warning_spec.spl` - 130 lines
+- `test/unit/compiler_core/ignored_return_warning_spec.spl` - 130 lines
 - `test/unit/parser/multiline_bool_*_spec.spl` - 2 files
 - `test/unit/runtime/module_closure_spec.spl` - Module closure proof
 

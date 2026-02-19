@@ -93,7 +93,7 @@ error[parse]: main.spl:42:15: unexpected token
 
 **Found 12 `format_error` implementations across:**
 - `src/std/error.spl` - Full trait-based error system (565 lines)
-- `src/core/error.spl` - Core parser errors (166 lines)
+- `src/compiler_core/error.spl` - Core parser errors (166 lines)
 - `src/compiler/backend/codegen_errors.spl` - Codegen errors (247 lines)
 - `src/compiler/error_formatter.spl` - Type inference errors
 - `src/compiler/blocks/error_helpers.spl` - Block errors
@@ -142,7 +142,7 @@ error[parse]: main.spl:42:15: unexpected token
 
 3. **High complexity (defer):**
    - `src/std/error.spl` (trait-based system)
-   - `src/core/error.spl` (easyfix suggestions)
+   - `src/compiler_core/error.spl` (easyfix suggestions)
 
 **Migration pattern for each module:**
 ```simple

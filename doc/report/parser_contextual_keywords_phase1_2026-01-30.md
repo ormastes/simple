@@ -22,7 +22,7 @@ error: parse error: Unexpected token: expected identifier, found Skip
 ```
 
 **Affected Code:**
-- `src/lib/std/src/core/dsl.spl:612` - Contains `fn skip(n):` method
+- `src/lib/std/src/compiler_core/dsl.spl:612` - Contains `fn skip(n):` method
 - Multiple test files using these names as identifiers
 
 **Impact:**

@@ -17,12 +17,12 @@ Based on user requirements and existing implementation analysis, here's the comp
    - ✅ Test suite (3 spec files, all passing)
 
 2. **Closure Capture Warning** - Complete
-   - ✅ Implementation (`src/core/closure_analysis.spl`)
+   - ✅ Implementation (`src/compiler_core/closure_analysis.spl`)
    - ✅ Test suite (`test/unit/compiler/closure_capture_warning_spec.spl` - 1 passed)
    - Detects when closures modify outer variables (runtime limitation)
 
 3. **Ignored Return Warning** - Tests ready, implementation likely exists
-   - ✅ Test suite (`test/unit/core/ignored_return_warning_spec.spl` - 1 passed)
+   - ✅ Test suite (`test/unit/compiler_core/ignored_return_warning_spec.spl` - 1 passed)
    - ✅ Warning format and detection logic defined
    - Need to verify integration with eval.spl
 
@@ -31,7 +31,7 @@ Based on user requirements and existing implementation analysis, here's the comp
    - Module functions CAN access their module's state (contrary to MEMORY.md)
 
 5. **Generic Syntax Tests** - Passing
-   - ✅ Test suite (`test/unit/core/generic_syntax_spec.spl` - 1 passed)
+   - ✅ Test suite (`test/unit/compiler_core/generic_syntax_spec.spl` - 1 passed)
    - Runtime parser still limited, but tests verify expected behavior
 
 ### ⚠️ **PARTIALLY IMPLEMENTED** (2/11 features)
@@ -180,7 +180,7 @@ simple doc-coverage src/std/           # Analyze specific directory
 
 **Status:** ✅ **FULLY IMPLEMENTED**
 
-**Location:** `src/core/closure_analysis.spl`
+**Location:** `src/compiler_core/closure_analysis.spl`
 
 **Runtime Limitation:**
 Closures can READ outer variables but CANNOT MODIFY them. Changes made inside nested functions don't persist to outer scope.
@@ -237,9 +237,9 @@ WARN: Closure in 'increment' modifies outer variable 'count'
 
 **Status:** ✅ **TESTS READY** - Implementation verification needed
 
-**Location:** Implementation likely in `src/core/interpreter/eval.spl`
+**Location:** Implementation likely in `src/compiler_core/interpreter/eval.spl`
 
-**Test Location:** `test/unit/core/ignored_return_warning_spec.spl`
+**Test Location:** `test/unit/compiler_core/ignored_return_warning_spec.spl`
 
 **What it should detect:**
 ```simple
@@ -261,7 +261,7 @@ warning: function 'get_value' returns i64 but value is ignored
 ```
 
 **Test Coverage:**
-- ✅ `test/unit/core/ignored_return_warning_spec.spl` - 1 test passing
+- ✅ `test/unit/compiler_core/ignored_return_warning_spec.spl` - 1 test passing
 - Tests: Warnings for i64/text/bool/f64 returns, no warnings for used values, multiple warnings, external functions, warning format
 
 **TODO:** Verify implementation exists in eval.spl (tests pass, so likely implemented)
@@ -303,7 +303,7 @@ fn get_state() -> i64:
 
 **Status:** ⚠️ **RUNTIME LIMITED** (Compiled mode works)
 
-**Test Location:** `test/unit/core/generic_syntax_spec.spl`
+**Test Location:** `test/unit/compiler_core/generic_syntax_spec.spl`
 
 **Test Results:** ✅ 1 test passing
 
@@ -367,8 +367,8 @@ if (a and
 4. Add tests for various parenthesis patterns
 
 **Files to Modify:**
-- `src/core/lexer.spl` - Track paren depth, suppress newline tokens inside parens
-- `src/core/parser.spl` - Parse parenthesized boolean expressions
+- `src/compiler_core/lexer.spl` - Track paren depth, suppress newline tokens inside parens
+- `src/compiler_core/parser.spl` - Parse parenthesized boolean expressions
 - `test/unit/parser/multiline_bool_spec.spl` - Add comprehensive tests
 
 ---
@@ -395,7 +395,7 @@ simple build src/std/text.spl
 **Implementation Plan:**
 
 1. **Phase 1:** Add warning hook to compiler driver
-   - File: `src/core/compiler/driver.spl`
+   - File: `src/compiler_core/compiler/driver.spl`
    - Hook: After parsing, before code generation
    - Call: `check_documentation_coverage(ast, file_path)`
 
@@ -412,7 +412,7 @@ simple build src/std/text.spl
 
 **Integration Points:**
 ```simple
-# In src/core/compiler/driver.spl
+# In src/compiler_core/compiler/driver.spl
 
 fn compile_file(file_path: text, options: CompileOptions):
     val ast = parse_file(file_path)
@@ -506,7 +506,7 @@ simple stats
 
 **Valid Categories:**
 - `stdlib` - Standard library modules (src/std/)
-- `core` - Core compiler modules (src/core/)
+- `core` - Core compiler modules (src/compiler_core/)
 - `compiler` - Compiler subsystems (src/compiler/)
 - `feature` - Application features (src/app/)
 - `example` - Example code
@@ -517,7 +517,7 @@ simple stats
 suggest_missing_tags("src/std/text.spl")
 # → ["stdlib:string"]
 
-suggest_missing_tags("src/core/parser.spl")
+suggest_missing_tags("src/compiler_core/parser.spl")
 # → ["core:parser"]
 
 suggest_missing_tags("src/app/io/mod.spl")
@@ -567,7 +567,7 @@ bin/simple test test/unit/app/doc_coverage/group_comment_detection_spec.spl
 bin/simple test test/unit/compiler/closure_capture_warning_spec.spl
 # ✅ 1 passed, 6ms
 
-bin/simple test test/unit/core/ignored_return_warning_spec.spl
+bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
 # ✅ 1 passed, 6ms
 
 # Runtime Tests
@@ -575,7 +575,7 @@ bin/simple test test/unit/runtime/module_closure_spec.spl
 # ✅ 1 passed, 6ms
 
 # Generic Syntax Tests
-bin/simple test test/unit/core/generic_syntax_spec.spl
+bin/simple test test/unit/compiler_core/generic_syntax_spec.spl
 # ✅ 1 passed, 4ms
 ```
 
@@ -639,7 +639,7 @@ bin/simple test test/unit/core/generic_syntax_spec.spl
 1. **Verify ignored return implementation** (test agent)
    ```bash
    # Search for implementation in eval.spl
-   grep -n "ignored.*return\|return.*ignored" src/core/interpreter/eval.spl
+   grep -n "ignored.*return\|return.*ignored" src/compiler_core/interpreter/eval.spl
    ```
 
 2. **Update MEMORY.md** (docs agent)
@@ -650,7 +650,7 @@ bin/simple test test/unit/core/generic_syntax_spec.spl
    ```bash
    bin/simple test test/unit/app/doc_coverage/
    bin/simple test test/unit/compiler/
-   bin/simple test test/unit/core/
+   bin/simple test test/unit/compiler_core/
    bin/simple test test/unit/runtime/
    ```
 

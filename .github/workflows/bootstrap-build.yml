@@ -1,411 +1,94 @@
-name: Bootstrap Multi-Platform Build
+name: Bootstrap Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
     paths:
       - 'src/**'
+      - 'scripts/bootstrap/**'
       - '.github/workflows/bootstrap-build.yml'
   pull_request:
-    branches: [ main ]
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/bootstrap/**'
+      - '.github/workflows/bootstrap-build.yml'
   workflow_dispatch:
 
 jobs:
-  download-bootstrap:
-    name: Download Bootstrap Binaries
+  bootstrap-linux-full2:
+    name: Linux bootstrap full2
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Download pre-built binaries from v0.5.0
-        run: |
-          # Create bootstrap directories
-          mkdir -p bin/release/{linux-x86_64,linux-arm64,linux-riscv64,macos-x86_64,macos-arm64,windows-x86_64,windows-arm64}
-
-          # Download linux-x86_64
-          gh release download v0.5.0 \
-            -p "simple-bootstrap-0.5.0-linux-x86_64.spk" \
-            -D /tmp
-          # Extract .spk and get binary (format: simple-bootstrap-VERSION-PLATFORM/bin/simple)
-          tar xzf /tmp/simple-bootstrap-0.5.0-linux-x86_64.spk -C /tmp
-          cp /tmp/simple-bootstrap-0.5.0-linux-x86_64/bin/simple bin/release/linux-x86_64/simple
-          chmod +x bin/release/linux-x86_64/simple
-
-          # Download macos-arm64
-          gh release download v0.5.0 \
-            -p "simple-bootstrap-0.5.0-darwin-arm64.spk" \
-            -D /tmp
-          # Extract .spk and get binary
-          tar xzf /tmp/simple-bootstrap-0.5.0-darwin-arm64.spk -C /tmp
-          cp /tmp/simple-bootstrap-0.5.0-darwin-arm64/bin/simple bin/release/macos-arm64/simple
-          chmod +x bin/release/macos-arm64/simple
-
-          # Download macos-x86_64
-          gh release download v0.5.0 \
-            -p "simple-bootstrap-0.5.0-darwin-x86_64.spk" \
-            -D /tmp
-          # Extract .spk and get binary
-          tar xzf /tmp/simple-bootstrap-0.5.0-darwin-x86_64.spk -C /tmp
-          cp /tmp/simple-bootstrap-0.5.0-darwin-x86_64/bin/simple bin/release/macos-x86_64/simple
-          chmod +x bin/release/macos-x86_64/simple
-
-          # For missing platforms, use linux-x86_64 as placeholder
-          for platform in linux-arm64 linux-riscv64 windows-x86_64 windows-arm64; do
-            if [ "$platform" = "windows-x86_64" ] || [ "$platform" = "windows-arm64" ]; then
-              cp bin/release/linux-x86_64/simple bin/release/$platform/simple.exe
-            else
-              cp bin/release/linux-x86_64/simple bin/release/$platform/simple
-              chmod +x bin/release/$platform/simple
-            fi
-          done
-
-          # Show sizes
-          ls -lh bin/release/*/simple*
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Create release package
-        run: |
-          # Create tarball with all binaries
-          tar czf simple-bootstrap-multi-platform.tar.gz \
-            bin/release/ \
-            bin/simple \
-            README.md \
-            PLATFORMS.md
-
-          ls -lh simple-bootstrap-multi-platform.tar.gz
-
-      - name: Upload bootstrap binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: bootstrap-multi-platform
-          path: |
-            bin/release/
-            simple-bootstrap-multi-platform.tar.gz
-          retention-days: 90
-
-  test-linux-x86_64:
-    name: Test Linux x86_64 Bootstrap
-    runs-on: ubuntu-latest
-    needs: download-bootstrap
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download bootstrap artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: bootstrap-multi-platform
-          path: .
-
-      - name: Setup bootstrap binary
-        run: |
-          # Remove any checked-in binary first
-          rm -f bin/release/simple
-          mkdir -p bin/release
-          cp bin/release/linux-x86_64/simple bin/release/simple
-          chmod +x bin/release/simple
-          ls -lh bin/release/simple
-          file bin/release/simple
-
-      - name: Verify bootstrap works
-        run: |
-          bin/release/simple --version
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang llvm
+          sudo apt-get install -y cmake ninja-build clang
 
-      - name: Create hello world test
+      - name: Run bootstrap-from-scratch.sh
         run: |
-          cat > hello.spl <<'EOF'
-          #!/usr/bin/env simple
-          fn main():
-              print "Hello from Simple on Linux x86_64!"
-              print "Native compilation successful."
-          EOF
+          chmod +x scripts/bootstrap/bootstrap-from-scratch.sh
+          scripts/bootstrap/bootstrap-from-scratch.sh \
+            --step=full2 \
+            --deploy \
+            --keep-artifacts \
+            --jobs=2
 
-      - name: Test interpreter mode
+      - name: Verify deployed runtime
         run: |
-          bin/release/simple hello.spl
+          test -f bin/release/simple
+          chmod +x bin/release/simple
+          bin/release/simple --version
 
-      - name: Test native compilation (GCC route)
-        run: |
-          bin/simple compile --native -o hello.native hello.spl
-          ls -lh hello.native
-          file hello.native
-          ./hello.native
-
-      - name: Test native compilation (LLVM route)
-        run: |
-          bin/release/simple src/app/compile/llvm_direct.spl hello.spl hello.llvm --verbose -O2
-          ls -lh hello.llvm
-          file hello.llvm
-          ./hello.llvm
-
-      - name: Report success
-        run: |
-          echo "✅ Linux x86_64 bootstrap build and native compilation verified!"
-
-  # test-macos-x86_64:
-  #   name: Test macOS x86_64 Self-Hosting
-  #   runs-on: macos-13  # Intel Mac (not available on free GitHub accounts)
-  #   needs: download-bootstrap
-  #   # NOTE: Disabled because macos-13 runner requires GitHub Teams/Enterprise
-  #   # For x86_64 testing, use local testing or paid GitHub Actions minutes
-
-  # test-macos-arm64:
-  #   name: Test macOS ARM64 Self-Hosting (Apple Silicon)
-  #   runs-on: macos-latest  # M1/M2 Mac (macos-14+)
-  #   needs: download-bootstrap
-  #   # NOTE: Disabled because v0.5.0 release has incorrect binaries
-  #   # darwin-arm64.spk contains Linux x86-64 ELF instead of macOS ARM64 Mach-O
-  #   # Need to rebuild v0.5.1 release with correct platform binaries
-  #
-  #   steps:
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Download bootstrap artifacts
-  #       uses: actions/download-artifact@v4
-  #       with:
-  #         name: bootstrap-multi-platform
-  #         path: .
-  #
-  #     - name: Setup bootstrap binary
-  #       run: |
-  #         # Remove any checked-in binary first
-  #         rm -f bin/release/simple
-  #         mkdir -p bin/release
-  #         cp bin/release/macos-arm64/simple bin/release/simple
-  #         chmod +x bin/release/simple
-  #         ls -lh bin/release/simple
-  #         file bin/release/simple
-  #
-  #     - name: Verify Xcode Command Line Tools
-  #       run: |
-  #         # Ensure clang is available
-  #         xcode-select -p || xcode-select --install
-  #         clang --version
-  #
-  #     - name: Install LLVM (optional)
-  #       run: |
-  #         # Try to install LLVM, but don't fail if unavailable
-  #         brew install llvm || echo "⚠️  LLVM installation skipped"
-  #
-  #     - name: Run comprehensive self-hosting test
-  #       run: |
-  #         ./scripts/test-macos-self-hosting.sh
-  #
-  #     - name: Upload test artifacts
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: macos-arm64-test-results
-  #         path: |
-  #           hello_*.spl
-  #           hello_native
-  #           hello_llvm
-  #         retention-days: 7
-  #         if-no-files-found: ignore
-
-  test-windows-x86_64:
-    name: Test Windows x86_64 Native Compilation
-    runs-on: windows-latest
-    needs: download-bootstrap
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download bootstrap artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: bootstrap-multi-platform
-          path: .
-
-      - name: Create hello world test
-        shell: bash
-        run: |
-          cat > hello.spl <<'EOF'
-          fn main():
-              print "Hello from Simple on Windows x86_64!"
-              print "Native compilation successful."
-          EOF
-
-      - name: Create bootstrap test
-        shell: bash
-        run: |
-          cat > bootstrap_test.spl <<'EOF'
-          fn add(a: i64, b: i64) -> i64:
-              return a + b
-
-          fn main():
-              print "=== Simple Bootstrap Test for Windows ==="
-              val sum = add(10, 32)
-              print "Function call: add(10, 32) = {sum}"
-              for i in range(1, 6):
-                  print "  iteration {i}"
-              val x = 42
-              if x > 40:
-                  print "Conditional: OK"
-              var total = 0
-              total += 10
-              total += 32
-              print "Compound assign: {total}"
-              print "=== All tests passed! ==="
-          EOF
-
-      - name: Generate C code (cross-platform via Linux bootstrap)
-        shell: bash
-        run: |
-          # Use Linux bootstrap in WSL or generate C on Linux runner
-          # For now, use the gen_c_only.spl tool
-          chmod +x bin/release/linux-x86_64/simple || true
-
-          # If running on Windows, we need to generate C differently
-          # Use the pre-generated C approach
-          cat > hello_win.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-
-          int main(void) {
-              puts("Hello from Simple on Windows x86_64!");
-              puts("Native compilation successful.");
-              return 0;
-          }
-          EOF
-
-          cat > bootstrap_test_win.c <<'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-
-          long add(long a, long b);
-
-          long add(long a, long b) {
-              return a + b;
-          }
-
-          int main(void) {
-              puts("=== Simple Bootstrap Test for Windows ===");
-              long sum = add(10, 32);
-              printf("Function call: add(10, 32) = %ld\n", (long)sum);
-              for (long i = 1; i < 6; i++) {
-                  printf("  iteration %ld\n", (long)i);
-              }
-              long x = 42;
-              if (x > 40) {
-                  puts("Conditional: OK");
-              }
-              long total = 0;
-              total += 10;
-              total += 32;
-              printf("Compound assign: %ld\n", (long)total);
-              puts("=== All tests passed! ===");
-              return 0;
-          }
-          EOF
-
-      - name: Compile with MSVC
-        shell: cmd
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          cl /Fe:hello_win.exe hello_win.c
-          cl /Fe:bootstrap_test_win.exe bootstrap_test_win.c
-
-      - name: Run hello world
-        shell: cmd
-        run: |
-          hello_win.exe
-
-      - name: Run bootstrap test
-        shell: cmd
-        run: |
-          bootstrap_test_win.exe
-
-      - name: Verify PE format
-        shell: bash
-        run: |
-          file hello_win.exe
-          file bootstrap_test_win.exe
-          ls -lh hello_win.exe bootstrap_test_win.exe
-
-      - name: Report success
-        shell: bash
-        run: |
-          echo "Windows x86_64 native compilation verified!"
-
-      - name: Upload Windows artifacts
-        if: always()
+      - name: Upload Linux bootstrap artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-x86_64-test-results
+          name: bootstrap-linux-full2
           path: |
-            hello_win.exe
-            bootstrap_test_win.exe
+            bin/release/simple
+            build/bootstrap/
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: error
 
-  test-windows-cross-compile:
-    name: Test Windows Cross-Compilation (from Linux)
-    runs-on: ubuntu-latest
-    needs: download-bootstrap
+  bootstrap-windows-stages:
+    name: Windows bootstrap ${{ matrix.step }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        step: [seed, core1, core2, full1, full2]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download bootstrap artifacts
-        uses: actions/download-artifact@v4
+      - name: Setup MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Run bootstrap-from-scratch.bat
+        shell: cmd
+        run: |
+          scripts\bootstrap\bootstrap-from-scratch.bat --cc=clang-cl --step=${{ matrix.step }} --deploy --keep-artifacts --jobs=2
+
+      - name: Verify deployment output exists
+        shell: cmd
+        run: |
+          if not exist bin\release\simple (
+            echo ERROR: Missing deployment output bin\release\simple
+            exit /b 1
+          )
+
+      - name: Upload Windows bootstrap artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: bootstrap-multi-platform
-          path: .
-
-      - name: Setup bootstrap binary
-        run: |
-          # Remove any checked-in binary first
-          rm -f bin/release/simple
-          mkdir -p bin/release
-          cp bin/release/linux-x86_64/simple bin/release/simple
-          chmod +x bin/release/simple
-          ls -lh bin/release/simple
-          file bin/release/simple
-
-      - name: Install cross-compilation tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 wine64
-
-      - name: Create test program
-        run: |
-          cat > hello.spl <<'EOF'
-          fn main():
-              print "Hello from Simple cross-compiled to Windows!"
-              print "Native compilation successful."
-          EOF
-
-      - name: Generate C code via Simple codegen
-        run: |
-          bin/release/simple src/app/compile/gen_c_only.spl hello.spl hello_win.c
-          echo "Generated C code:"
-          cat hello_win.c
-
-      - name: Cross-compile to Windows .exe
-        run: |
-          x86_64-w64-mingw32-gcc -o hello_win.exe hello_win.c
-          file hello_win.exe
-          ls -lh hello_win.exe
-
-      - name: Test with Wine
-        run: |
-          wine hello_win.exe
-
-      - name: Report success
-        run: |
-          echo "Windows cross-compilation from Linux verified!"
+          name: bootstrap-windows-${{ matrix.step }}
+          path: |
+            bin/release/simple
+            bin/release/simple.exe
+            build/bootstrap/
+          retention-days: 7
+          if-no-files-found: ignore

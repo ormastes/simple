@@ -85,10 +85,10 @@ file bin/freebsd/simple
 
 ## Understanding the Build Plan
 
-The original plan suggested using `native.spl` to generate C code for compiler_core.
+The original plan suggested using `native.spl` to generate C code for compiler_core_legacy.
 After investigation:
 
-- ❌ **Won't work**: native.spl is designed for simple programs, not the 439-file compiler_core
+- ❌ **Won't work**: native.spl is designed for simple programs, not the 439-file compiler_core_legacy
 - ✅ **Better approach**: Use existing FreeBSD seed_cpp (already cross-compiled)
 - ✅ **Full compiler**: Build incrementally (core 31 files → full 411 files)
 

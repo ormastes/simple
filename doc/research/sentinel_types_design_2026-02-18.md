@@ -110,7 +110,7 @@ For **string literals**, the compiler guarantees the sentinel — no runtime che
 
 ### 3.1 The `text` Type
 
-Simple's `text` type is the primary string type. From examining `src/core/types.spl` and `src/app/io/mod.spl`:
+Simple's `text` type is the primary string type. From examining `src/compiler_core/types.spl` and `src/app/io/mod.spl`:
 
 ```simple
 # text is a built-in opaque type
@@ -246,7 +246,7 @@ This means `[:0]` in a *value context* already fails. In a *type context*, the s
 
 ### 4.4 Current Slice Type Production
 
-The current type grammar (from examining `src/core/parser.spl` implicitly via docs) handles:
+The current type grammar (from examining `src/compiler_core/parser.spl` implicitly via docs) handles:
 
 ```
 type_expr  ::= "[" type_expr "]"           # slice type: [T]
@@ -444,7 +444,7 @@ type_slice ::= "[" type_expr "]"              # plain slice [T]
 - Visually similar to Zig's `[:0]T` but rearranged to avoid conflicts.
 
 **Cons:**
-- New grammar production required — parser change in `src/core/parser.spl`.
+- New grammar production required — parser change in `src/compiler_core/parser.spl`.
 - Risk of conflict: `[ident:expr]` could be parsed as a single-element dict literal `{ident: expr}`. The parser must distinguish `[i64:0]` (sentinel type) from `["key": 0]` (dict literal). This requires lookahead: if the first token after `[` is a type name (uppercase or primitive keyword), treat as type; if it is a string literal or lowercase identifier, treat as dict/array.
 - In expression context, `arr[i64:0]` would be ambiguous with indexing. Sentinel types should only appear in *type positions*, not expression positions, but the parser would need to know which context it is in.
 - The `0` in `[i64:0]` is a value in a type position — requires the type checker to evaluate it as a compile-time constant.
@@ -727,13 +727,13 @@ fn newline_terminated(data: [i64]) -> SentinelSlice:
 ### Phase 3 — Long-Term: Grammar-Level `[T:N]` Syntax
 
 **Effort:** Medium-High. Requires changes to:
-- `src/core/parser.spl` — add sentinel slice to `parse_type()`
-- `src/core/ast.spl` — add `EXPR_SENTINEL_SLICE_TYPE` AST node
-- `src/core/entity/ast/arena.spl` — storage for sentinel AST nodes
-- `src/core/interpreter/eval.spl` — evaluate `[T:N]` types
-- `src/core/types.spl` — sentinel type representation
+- `src/compiler_core/parser.spl` — add sentinel slice to `parse_type()`
+- `src/compiler_core/ast.spl` — add `EXPR_SENTINEL_SLICE_TYPE` AST node
+- `src/compiler_core/entity/ast/arena.spl` — storage for sentinel AST nodes
+- `src/compiler_core/interpreter/eval.spl` — evaluate `[T:N]` types
+- `src/compiler_core/types.spl` — sentinel type representation
 
-**Grammar addition to `parse_type()` in `src/core/parser.spl`:**
+**Grammar addition to `parse_type()` in `src/compiler_core/parser.spl`:**
 
 ```
 parse_type_slice():
@@ -757,7 +757,7 @@ parse_type_slice():
 
 **AST node addition:**
 ```simple
-# In src/core/ast.spl
+# In src/compiler_core/ast.spl
 val EXPR_SENTINEL_SLICE_TYPE = 47   # [T:N] sentinel-terminated slice type node
 ```
 

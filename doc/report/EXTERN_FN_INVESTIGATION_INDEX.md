@@ -118,8 +118,8 @@
 **Problem:** All extern function calls fail with "undefined function" error
 
 **Root Cause:** Two locations fail to register extern functions in the function table:
-1. `src/core/interpreter/eval.spl` line 1769
-2. `src/core/interpreter/module_loader.spl` line 215
+1. `src/compiler_core/interpreter/eval.spl` line 1769
+2. `src/compiler_core/interpreter/module_loader.spl` line 215
 
 **The Bug:** Missing call to `func_table_register(name, did)`
 
@@ -176,8 +176,8 @@
 ### For Developer Applying Fix
 
 1. Read `EXTERN_FN_FIX.txt` (1 min)
-2. Edit `src/core/interpreter/eval.spl` (add 1 line)
-3. Edit `src/core/interpreter/module_loader.spl` (add 1 line)
+2. Edit `src/compiler_core/interpreter/eval.spl` (add 1 line)
+3. Edit `src/compiler_core/interpreter/module_loader.spl` (add 1 line)
 4. Run `bin/simple build` (30 sec)
 5. Run `bin/simple test` (2 min)
 6. Commit with message from `extern_fn_fix_locations.md`

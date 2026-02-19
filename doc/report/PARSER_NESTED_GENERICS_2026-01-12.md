@@ -37,7 +37,7 @@ fn test() -> Option<Guard<i32>>:
 
 ### Affected Files
 
-**`simple/std_lib/src/core/sync.spl`**:
+**`simple/std_lib/src/compiler_core/sync.spl`**:
 - Line 147: `fn try_lock() -> Option<MutexGuard<T>>:`
 - Line 223: `fn try_read() -> Option<RwLockReadGuard<T>>:`
 - Line 243: `fn try_write() -> Option<RwLockWriteGuard<T>>:`

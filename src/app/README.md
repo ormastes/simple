@@ -1,408 +1,224 @@
-# Simple Self-Hosted Development Tools
+# Application Layer (`src/app/`)
 
-Implementation of development tools for Simple language, written in Simple itself (dogfooding).
+All applications and libraries are written in pure Simple (`.spl` files). They run as subcommands of the single `bin/simple` binary via the CLI dispatch table (`src/app/cli/dispatch/table.spl`).
 
-## Overview
+## Usage
 
-All tools in this directory are:
-- ✅ Written in Simple language (`.spl` files)
-- ✅ Self-hosted (the language builds its own tools)
-- ✅ Compiled to native binaries via `build_tools.sh`
-- ✅ Zero external dependencies (except Simple stdlib)
-
-**Tools:**
-1. **Formatter** (`simple_fmt`) - ✅ Implemented
-2. **Linter** (`simple_lint`) - ✅ Implemented
-3. **Language Server** (`simple_lsp`) - 🔄 In Progress
-4. **Debug Adapter** (`simple_dap`) - 🔄 In Progress
-5. **Dependency Graph Generator** (`simple_depgraph`) - ✅ Implemented
-
-## Structure
-
-```
-simple/
-├── app/
-│   ├── formatter/
-│   │   └── main.spl          # Formatter implementation ✅
-│   ├── lint/
-│   │   └── main.spl          # Linter implementation ✅
-│   ├── lsp/
-│   │   ├── main.spl          # LSP server 🔄
-│   │   ├── protocol.spl      # LSP protocol types 🔄
-│   │   ├── transport.spl     # JSON-RPC transport 🔄
-│   │   └── server.spl        # Server handlers 🔄
-│   ├── dap/
-│   │   ├── main.spl          # DAP server 🔄
-│   │   ├── protocol.spl      # DAP protocol types 🔄
-│   │   ├── transport.spl     # JSON-RPC transport 🔄
-│   │   ├── server.spl        # Server handlers 🔄
-│   │   └── breakpoints.spl   # Breakpoint management 🔄
-│   └── depgraph/
-│       ├── __init__.spl      # Module manifest ✅
-│       ├── main.spl          # Entry point with AOP logging ✅
-│       ├── scanner.spl       # Directory/file scanning ✅
-│       ├── parser.spl        # Import extraction ✅
-│       ├── analyzer.spl      # Dependency analysis ✅
-│       └── generator.spl     # .__init__.spl generation ✅
-├── bin_simple/               # Compiled executables
-│   ├── simple_fmt           # Formatter binary ✅
-│   ├── simple_lint          # Linter binary ✅
-│   ├── simple_lsp           # LSP server binary 🔄
-│   ├── simple_dap           # DAP server binary 🔄
-│   └── simple_depgraph      # Depgraph binary ✅
-├── build/                    # Intermediate build files
-│   ├── formatter/           # Formatter .smf files
-│   ├── lint/                # Linter .smf files
-│   ├── lsp/                 # LSP .smf files 🔄
-│   ├── dap/                 # DAP .smf files 🔄
-│   └── depgraph/            # Depgraph .smf files ✅
-└── build_tools.sh           # Build script for all tools
-```
-
-## Features
-
-### Formatter (`simple_fmt`)
-
-Canonical, zero-configuration formatter based on `doc/spec/formatting_lints.md`.
-
-**Features:**
-- ✅ Deterministic formatting (no configuration)
-- ✅ 4-space indentation (always)
-- ✅ Idempotent (format(format(x)) == format(x))
-- ✅ Check mode (`--check`) for CI
-- ✅ In-place formatting (`--write`)
-- ⚠️ Basic line-by-line formatter (TODO: AST-based)
-
-**Usage:**
 ```bash
-# Print formatted output
-./simple/bin_simple/simple_fmt file.spl
-
-# Check if file is formatted (CI mode)
-./simple/bin_simple/simple_fmt file.spl --check
-
-# Format file in place
-./simple/bin_simple/simple_fmt file.spl --write
+bin/simple <command> [options]
 ```
 
-### Linter (`simple_lint`)
+## CLI Subcommands
 
-Semantic linter with multiple lint categories based on `doc/spec/formatting_lints.md`.
+Registered in the dispatch table. Each maps to `src/app/<module>/main.spl`.
 
-**Lint Categories:**
-- **Safety (S)**: Memory safety, null checks
-- **Correctness (C)**: Logic errors, type mismatches
-- **Warning (W)**: Potential issues, unused code
-- **Style (ST)**: Naming conventions (allow by default)
-- **Concurrency (CC)**: Thread safety issues
+### Compilation
 
-**Features:**
-- ✅ Multiple lint levels (Allow/Warn/Deny)
-- ✅ Fix-it hints in output
-- ✅ Category-based organization
-- ✅ Deny-all mode for strict checking
-- ⚠️ Pattern-based linting (TODO: AST-based semantic analysis)
+| Command | Module | Description |
+|---------|--------|-------------|
+| `compile` | `compile/` | Compile `.spl` source files |
+| `targets` | `targets/` | List supported compilation targets |
+| `linkers` | `linkers/` | List available linkers |
 
-**Usage:**
-```bash
-# Run linter
-./simple/bin_simple/simple_lint file.spl
+### Build & Run
 
-# Treat warnings as errors
-./simple/bin_simple/simple_lint file.spl --deny-all
+| Command | Module | Description |
+|---------|--------|-------------|
+| `build` | `build/` | Build orchestration (compile, test, lint, fmt) |
+| `run` | `run/` | Build and run a program |
+| `bench` | — | Benchmark runner |
+| `clean` | — | Clean build artifacts |
 
-# Enable all lints including style
-./simple/bin_simple/simple_lint file.spl --warn-all
+### Testing
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `test` | `test/` | Test runner (delegates to runtime) |
+
+### Code Quality
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `lint` | `lint/` | Linter |
+| `fix` | `fix/` | Auto-fix code issues |
+| `fmt` | `formatter/` | Code formatter |
+| `check` | `check/` | Run all quality checks |
+| `check-capsule` | `cli/` | Capsule visibility checks |
+| `check-dbs` | `cli/` | Validate databases |
+| `fix-dbs` | `cli/` | Repair databases |
+| `check-tier` | `cli/` | Tier compliance checks |
+| `duplicate-check` | `duplicate_check/` | Detect code duplication |
+| `verify` | `verify/` | Code verification |
+| `qualify-ignore` | `qualify_ignore/` | Qualification ignore rules |
+
+### Analysis & Query
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `query` | `query/` | Query the codebase |
+| `info` | `info/` | Show project/module info |
+| `spec-coverage` | `spec_coverage/` | Spec coverage analysis |
+| `replay` | `replay/` | Replay execution traces |
+| `diff` | `diff/` | Diff tool |
+| `context` | `context/` | Context/scope inspection |
+| `constr` | `constr/` | Constraint checking |
+
+### Code Generation & Docs
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `gen-lean` | `gen_lean/` | Generate Lean proofs |
+| `feature-gen` | `feature_gen/` | Generate feature docs from tests |
+| `feature-doc` | `feature_doc/` | Feature documentation |
+| `spec-gen` | `spec_gen/` | Generate spec files |
+| `sspec-docgen` | `sspec_docgen/` | Generate docs from SSpec tests |
+| `todo-scan` | `todo_scan/` | Scan TODOs in codebase |
+| `todo-gen` | `todo_gen/` | Generate TODO report |
+| `wrapper-gen` | `wrapper_gen/` | Generate FFI wrappers |
+| `ffi-gen` | `ffi_gen/` | Generate FFI bindings |
+
+### Package Management
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `init` | `init/` | Initialize a new project |
+| `install` | `install/` | Install dependencies |
+| `publish` | `publish/` | Publish a package |
+| `add` | `add/` | Add a dependency |
+| `remove` | `remove/` | Remove a dependency |
+| `search` | `search/` | Search package registry |
+| `list` | `list/` | List installed packages |
+| `tree` | `tree/` | Show dependency tree |
+
+### Documentation & Dashboard
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `brief` | `brief/` | Brief project summary |
+| `dashboard` | `dashboard/` | Terminal dashboard |
+
+### Bug Tracking
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `bug-add` | — | Add a bug report |
+| `bug-gen` | — | Generate bug report |
+
+### Other
+
+| Command | Module | Description |
+|---------|--------|-------------|
+| `repl` | `repl/` | Interactive REPL |
+| `watch` | `watch/` | File watcher with rebuild |
+| `mcp` | `mcp/` | MCP server for AI integration |
+| `web` | `web/` | Web framework server |
+| `i18n` | `i18n/` | Internationalization |
+| `migrate` | `migrate/` | Code migration tool |
+
+## Libraries (not direct subcommands)
+
+These modules provide shared infrastructure used by the subcommands above.
+
+> **Note:** CLI argument parsing (`cli_parser`), CLI utilities (`cli_util`), and package helpers (`package_utils`) have moved to `src/lib/cli/`. Import via `lib.cli.*`.
+
+| Module | Purpose |
+|--------|---------|
+| `io/` | SFFI I/O wrappers (file, process, env) |
+| `cli/` | CLI dispatch, arg parsing, entrypoints |
+| `desugar/` | AST desugaring transforms |
+| `test_runner_new/` | SSpec test framework runner |
+| `test_analysis/` | Test result analysis |
+| `package/` | Package management core (semver, manifest, lockfile) |
+| `package.registry/` | Package registry client |
+| `parser/` | Parser loading infrastructure |
+| `depgraph/` | Dependency graph analysis |
+| `stats/` | Codebase statistics |
+| `cache/` | Caching layer |
+| `env/` | Environment abstraction |
+| `gc/` | Garbage collection interface |
+| `lock/` | Lock file handling |
+| `profiling/` | Profiling support |
+| `perf/` | Performance utilities |
+| `debug/` | Debugging support |
+| `protocol/` | Protocol abstractions (JSON-RPC) |
+| `utils/` | General utilities |
+| `src/` | Source file utilities |
+| `sdn/` | SDN format parser/writer |
+| `coverage/` | Code coverage |
+| `spl_coverage/` | Simple-level coverage |
+| `audit/` | Security/dependency audit |
+| `grammar_doc/` | Grammar documentation |
+| `linker_gen/` | Linker script generation |
+| `stub/` | Stub generation |
+| `tooling/` | Shared tooling infra |
+| `exp/` | Experimental features |
+| `leak_finder/` | Memory leak detection |
+
+### Dev Tool Servers (separate processes, same binary)
+
+| Module | Purpose |
+|--------|---------|
+| `lsp/` + `lsp.handlers/` | Language Server Protocol |
+| `dap/` | Debug Adapter Protocol |
+| `mcp/` | MCP server for Simple |
+| `mcp_jj/` | MCP server for jj VCS |
+
+### Editor & Platform Integration
+
+| Module | Purpose |
+|--------|---------|
+| `nvim_plugin/` | Neovim plugin |
+| `vscode_extension/` | VS Code extension |
+| `unreal_cli/` | Unreal Engine integration |
+
+### LLM Integration
+
+| Module | Purpose |
+|--------|---------|
+| `llm_caret/` | LLM caret (`^`) integration |
+| `lms/` | LLM service layer |
+| `lms_simple/` | Simple-specific LLM support |
+
+### Dashboard (web)
+
+| Module | Purpose |
+|--------|---------|
+| `dashboard/` | Terminal dashboard |
+| `dashboard.render/` | Dashboard rendering |
+| `dashboard.views/` | Dashboard view components |
+| `web_dashboard/` | Web-based dashboard |
+| `web_dashboard.api/` | Web dashboard API |
+| `web_dashboard.static/` | Web dashboard static assets |
+
+### Infrastructure
+
+| Module | Purpose |
+|--------|---------|
+| `vm/` | QEMU VM management |
+| `semihost/` | Semihosting support |
+| `ci/` | CI integration |
+| `release/` | Release process automation |
+| `setup/` | Project setup |
+| `update/` | Self-update mechanism |
+| `vcs/` + `jj/` | Version control integration |
+| `diagram/` | Diagram generation |
+| `doc/` | Documentation utilities |
+| `task/` + `task_gen/` | Task management |
+
+## Architecture
+
+All subcommands are dispatched through a single entry point:
+
+```
+bin/simple <cmd> [args...]
+    -> src/app/cli/main.spl
+    -> src/app/cli/dispatch.spl (find_command + dispatch_command)
+    -> src/app/cli/dispatch/table.spl (50 command entries)
+    -> src/app/<module>/main.spl
 ```
 
-**Example Output:**
-```
-file.spl:10:0: warning[W001]: Unused variable (prefix with _ to silence)
-  hint: Remove declaration or assign a value
-
-file.spl:25:0: error[S001]: Unused Result type (must use .unwrap(), .expect(), or match)
-
-Found 1 error(s) and 1 warning(s)
-```
-
-### Dependency Graph Generator (`simple_depgraph`)
-
-Analyzes module dependencies and generates `.__init__.spl` (dot-prefixed) files with dependency information.
-
-**Features:**
-- ✅ Scans directories for .spl files and child modules
-- ✅ Extracts imports (use, export use, common use)
-- ✅ Identifies external dependencies (std.*, core.*, etc.)
-- ✅ Enforces child module visibility rules
-- ✅ AOP logging for all operations
-- ✅ Recursive directory analysis
-- ✅ Dry-run mode for preview
-
-**Usage:**
-```bash
-# Analyze single directory
-./simple/bin_simple/simple_depgraph ./src/mymodule
-
-# Recursive analysis with verbose logging
-./simple/bin_simple/simple_depgraph ./src --recursive --verbose
-
-# Dry run (print without writing)
-./simple/bin_simple/simple_depgraph ./src/api --dry-run --summary
-```
-
-**Options:**
-| Option | Description |
-|--------|-------------|
-| `--recursive` | Analyze subdirectories recursively |
-| `--verbose` | Enable verbose AOP logging |
-| `--no-comments` | Omit comments from output |
-| `--summary` | Print summary report |
-| `--dry-run` | Print analysis without writing files |
-
-**Example Output (`.__init__.spl`):**
-```simple
-# Auto-generated dependency analysis
-# DO NOT EDIT - regenerate with: simple_depgraph ./src/mymodule
-
-# External dependencies
-# external: std.io
-# external: core.json
-
-# Child modules
-pub mod api       # externally visible
-mod internal      # BLOCKED: no export use
-
-# Visibility Summary
-# Externally visible: api
-# Blocked (need export use): internal
-```
-
-**Child Visibility Rules:**
-A child module's exports are blocked unless:
-1. Parent's `__init__.spl` has `pub mod child`
-2. Parent's `__init__.spl` has `export use child.symbol`
-
-## Building
-
-### Prerequisites
-
-1. Simple compiler must be built:
-   ```bash
-   cargo build
-   ```
-
-2. Compiler should be available at `./simple/bin/simple`
-
-### Build Tools
-
-Run the build script:
-```bash
-./simple/build_tools.sh
-```
-
-This will compile all implemented tools:
-1. Compile `formatter/main.spl` → `bin_simple/simple_fmt` ✅
-2. Compile `lint/main.spl` → `bin_simple/simple_lint` ✅
-3. Compile `lsp/main.spl` → `bin_simple/simple_lsp` 🔄 (when ready)
-4. Compile `dap/main.spl` → `bin_simple/simple_dap` 🔄 (when ready)
-5. Compile `depgraph/main.spl` → `bin_simple/simple_depgraph` ✅
-6. Place intermediate files in `build/`
-
-### Manual Build
-
-If you need to build manually:
-```bash
-# Build formatter
-./simple/bin/simple compile simple/app/formatter/main.spl \
-    --output simple/bin_simple/simple_fmt \
-    --build-dir simple/build/formatter
-
-# Build linter
-./simple/bin/simple compile simple/app/lint/main.spl \
-    --output simple/bin_simple/simple_lint \
-    --build-dir simple/build/lint
-```
-
-## Implementation Status
-
-### Formatter
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Basic indentation | ✅ | 4-space indent |
-| Line-by-line formatting | ✅ | Simple implementation |
-| Check mode | ✅ | Exit 1 if not formatted |
-| Write mode | ✅ | Format in place |
-| AST-based formatting | ⚠️ TODO | Requires parser integration |
-| Comment preservation | ⚠️ TODO | Requires parser |
-| Max line length | ⚠️ TODO | Requires smart wrapping |
-
-### Linter
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Safety lints | ✅ | Basic pattern matching |
-| Correctness lints | ✅ | Basic pattern matching |
-| Warning lints | ✅ | Unused variables |
-| Style lints | ✅ | Naming conventions |
-| Concurrency lints | ⚠️ Partial | Needs semantic analysis |
-| Fix-it hints | ✅ | Text suggestions |
-| AST-based analysis | ⚠️ TODO | Requires compiler integration |
-| Control flow analysis | ⚠️ TODO | Requires compiler integration |
-
-## Language Server (`simple_lsp`) - 🔄 In Progress
-
-**Status:** Reimplementing in Simple (was Rust prototype at `src/lsp/`)
-
-Self-hosted LSP server for editor integration (VS Code, Neovim, etc.).
-
-**Planned Features:**
-- ⏳ JSON-RPC 2.0 transport over stdio
-- ⏳ Document synchronization (didOpen, didChange)
-- ⏳ Real-time diagnostics (parse errors, type errors)
-- ⏳ Code completion (context-aware)
-- ⏳ Go to definition
-- ⏳ Hover documentation
-- ⏳ Find references
-- ⏳ Syntax highlighting (semantic tokens)
-
-**Usage (when complete):**
-```bash
-# Start LSP server (communicates via stdin/stdout)
-./simple/bin_simple/simple_lsp
-
-# VS Code: Configure in settings.json
-# Neovim: Configure with nvim-lspconfig
-```
-
-**See:** `doc/status/lsp_implementation.md` for detailed status
-
----
-
-## Debug Adapter (`simple_dap`) - 🔄 In Progress
-
-**Status:** Reimplementing in Simple (was Rust prototype at `src/dap/`)
-
-Self-hosted DAP server for debugging Simple programs.
-
-**Planned Features:**
-- ⏳ DAP protocol over stdio
-- ⏳ Breakpoint management (line, conditional, function)
-- ⏳ Execution control (continue, step over, step in, step out)
-- ⏳ Stack trace inspection
-- ⏳ Variable viewing and evaluation
-- ⏳ Watch expressions
-- ⏳ Exception breakpoints
-- ⏳ Interpreter integration (actual debugging)
-
-**Usage (when complete):**
-```bash
-# Start DAP server
-./simple/bin_simple/simple_dap
-
-# VS Code: Configure launch.json
-# Neovim: Use nvim-dap
-```
-
-**See:** `doc/status/dap_implementation.md` for detailed status
-
----
-
-## Roadmap
-
-### Phase 1: Formatter & Linter (Done)
-- ✅ Line-by-line formatter
-- ✅ Pattern-based linter
-- ✅ Command-line interface
-- ✅ Build infrastructure
-
-### Phase 2: Essential Utilities (Planned)
-- ⏳ `simple_doc` - Generate markdown from docstrings
-- ⏳ `simple_todo` - Extract TODO/FIXME comments
-- ⏳ `simple_stats` - Code statistics (LOC, functions, classes)
-- ⏳ `simple_new` - Project scaffolding
-
-### Phase 3: Quality Tools (Planned)
-- ⏳ `simple_test` - BDD test runner with nice output
-- ⏳ `simple_grep` - AST-aware code search
-- ⏳ `simple_deps` - Import dependency graph
-- ⏳ `simple_dead` - Dead code detector
-
-### Phase 4: LSP & DAP Implementation (In Progress)
-- 🔄 LSP: JSON-RPC transport
-- 🔄 LSP: Document sync and diagnostics
-- 🔄 DAP: Protocol handling
-- 🔄 DAP: Breakpoint management
-
-### Phase 5: Advanced Tools (Future)
-- ⏳ `simple_repl` - Interactive shell
-- ⏳ `simple_bench` - Benchmark runner
-- ⏳ `simple_cov` - Code coverage
-- ⏳ `simple_refactor` - Rename/extract/inline
-- ⏳ `simple_security` - SAST scanner
-
-## Tool Specifications
-
-See `spec/` directory for detailed specifications.
-
-## Testing
-
-Create a test file:
-
-```simple
-# test.spl
-fn  example( ):
-let x=1
-if x>0:
-print("hello")
-```
-
-Format it:
-```bash
-./simple/bin_simple/simple_fmt test.spl --write
-```
-
-Result:
-```simple
-# test.spl
-fn example():
-    let x = 1
-    if x > 0:
-        print("hello")
-```
-
-Lint it:
-```bash
-./simple/bin_simple/simple_lint test.spl
-```
-
-## Contributing
-
-When implementing new lints or formatting rules:
-
-1. Update `doc/spec/formatting_lints.md` with specification
-2. Add feature to `doc/features/feature.md`
-3. Implement in `simple/app/formatter/` or `simple/app/lint/`
-4. Add tests
-5. Update this README
-
-## References
-
-- **Formatter/Linter Spec**: `doc/spec/formatting_lints.md`
-- **LSP Status**: `doc/status/lsp_implementation.md`
-- **DAP Status**: `doc/status/dap_implementation.md`
-- **Features**:
-  - Formatter/Linter: `doc/features/feature.md` (#1131-#1145)
-  - LSP: `doc/features/postponed_feature.md` (#1359-#1365)
-  - DAP: `doc/features/postponed_feature.md` (#1366-#1368)
-- **Examples**: `simple/test/` directory
-
-## Why Self-Hosted?
-
-Writing Simple's development tools in Simple itself provides:
-
-1. **Dogfooding**: We use our own language daily, finding bugs and UX issues
-2. **Proof of Capability**: Shows Simple can build real-world tools
-3. **Performance Testing**: Exercises the compiler on substantial codebases
-4. **Community Example**: Demonstrates best practices for Simple development
-5. **Zero Dependencies**: No Rust/Python/etc needed for tooling once bootstrapped
+Each `CommandEntry` has:
+- `name` — CLI command name
+- `app_path` — path to the Simple implementation
+- `env_override` — env var to force Rust fallback (legacy, unused)
+- `needs_rust_flags` — flags that require Rust fallback (legacy)

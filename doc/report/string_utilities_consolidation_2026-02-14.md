@@ -50,7 +50,7 @@ Successfully consolidated duplicate string utility functions into a canonical `s
 - `url_encode`, `url_decode` - URL percent encoding
 - `js_escape`, `css_escape` - JavaScript/CSS escaping
 
-### 3. Left Unchanged: `src/core/types.spl`
+### 3. Left Unchanged: `src/compiler_core/types.spl`
 
 **Reason:** Circular dependency risk
 

@@ -73,7 +73,7 @@ Categories:
 
 ### 2. Closure Capture Warnings ✅ **COMPLETE**
 
-**File:** `src/core/closure_analysis.spl` (186 lines)
+**File:** `src/compiler_core/closure_analysis.spl` (186 lines)
 
 **Features:**
 - ✅ Detects when nested functions modify outer variables
@@ -121,7 +121,7 @@ warning: closure modifies outer variable `count` in function `increment`
 
 ### 4. Multiline Boolean Expressions with Parentheses ✅ **COMPLETE**
 
-**Implementation:** `src/core/lexer.spl`
+**Implementation:** `src/compiler_core/lexer.spl`
 - Suppresses newline tokens when `lex_paren_depth > 0`
 
 **Test:** `test/unit/parser/multiline_bool_spec.spl`
@@ -147,7 +147,7 @@ if (condition_a and
 
 ### 5. Generic Syntax Support ✅ **TESTS PASSING**
 
-**Test:** `test/unit/core/generic_syntax_spec.spl`
+**Test:** `test/unit/compiler_core/generic_syntax_spec.spl`
 ```bash
 ✅ 1 passed
 ```
@@ -163,7 +163,7 @@ if (condition_a and
 
 ### 6. Ignored Return Value Warnings ⚠️ **90% Complete**
 
-**Test File:** `test/unit/core/ignored_return_warning_spec.spl`
+**Test File:** `test/unit/compiler_core/ignored_return_warning_spec.spl`
 **Status:** Semantic error during test execution
 
 **Error:**
@@ -172,7 +172,7 @@ error: semantic: method `split` not found on type `enum`
 ```
 
 **Issue:** Test file has runtime compatibility issues
-**Implementation:** Likely exists in `src/core/interpreter/eval.spl`
+**Implementation:** Likely exists in `src/compiler_core/interpreter/eval.spl`
 
 **TODO:**
 1. Fix test runtime compatibility
@@ -222,7 +222,7 @@ simple stats --doc-coverage
 # Should work:
 simple build --warn-docs
   warning[doc-missing]: missing documentation for function `parse_expr`
-    --> src/core/parser.spl:145
+    --> src/compiler_core/parser.spl:145
     |
   145| fn parse_expr():
     |    ^^^^^^^^^^
@@ -266,7 +266,7 @@ threshold_system_spec.spl - error: semantic: unknown extern function: rt_file_wr
 
 **Issue:** Missing SFFI function `rt_file_write`
 **Impact:** Threshold enforcement features not testable
-**TODO:** Add `rt_file_write` to `seed/runtime.c`
+**TODO:** Add `rt_file_write` to `src/compiler_seed/runtime.c`
 
 **Estimated Work:** 1 hour
 
@@ -300,7 +300,7 @@ threshold_system_spec.spl - error: semantic: unknown extern function: rt_file_wr
 
 **Tasks:**
 1. **Add rt_file_write SFFI** (1 hour)
-   - Implement in `seed/runtime.c`
+   - Implement in `src/compiler_seed/runtime.c`
    - Test threshold system
 2. **Fix test runtime issues** (1 hour)
    - Fix compatibility issues in 3 failing tests
@@ -357,7 +357,7 @@ threshold_system_spec.spl - error: semantic: unknown extern function: rt_file_wr
 ```
 Agent: code
 Task: Fix ignored return warning tests + verify implementation
-Files: test/unit/core/ignored_return_warning_spec.spl, src/core/interpreter/eval.spl
+Files: test/unit/compiler_core/ignored_return_warning_spec.spl, src/compiler_core/interpreter/eval.spl
 
 Agent: infra
 Task: Integrate doc coverage into stats command
@@ -376,7 +376,7 @@ Files: src/app/build/orchestrator.spl, src/app/build/config.spl
 
 Agent: code
 Task: Add rt_file_write SFFI
-Files: seed/runtime.c, seed/runtime.h
+Files: src/compiler_seed/runtime.c, src/compiler_seed/runtime.h
 
 Agent: test
 Task: Verify all doc coverage tests
@@ -402,7 +402,7 @@ After implementation:
 # 1. Verify all tests pass
 bin/simple test test/unit/app/doc_coverage/
 bin/simple test test/unit/compiler/closure_capture_warning_spec.spl
-bin/simple test test/unit/core/ignored_return_warning_spec.spl
+bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
 bin/simple test test/unit/runtime/module_closure_spec.spl
 
 # 2. Verify new CLI commands

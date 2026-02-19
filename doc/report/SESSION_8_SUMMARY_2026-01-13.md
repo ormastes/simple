@@ -242,7 +242,7 @@ trait Container:
 **Parser Tests:** 110/110 passing ✅
 
 **Stdlib Testing:**
-- Attempted: `simple/std_lib/src/core/traits.spl`
+- Attempted: `simple/std_lib/src/compiler_core/traits.spl`
 - Result: New error - "expected identifier, found Not"
 - Cause: `trait Not:` uses reserved keyword "Not"
 - Status: Different limitation (keyword names for traits)

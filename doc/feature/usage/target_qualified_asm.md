@@ -14,7 +14,7 @@ Relies on existing types:
 - `TargetArch` — `src/std/common/target.spl`
 - `TargetOS` — `src/std/common/target.spl`
 - `TargetPreset.abi` — `src/compiler/target_presets.spl`
-- `BackendKind` — `src/core/backend_types.spl`
+- `BackendKind` — `src/compiler_core/backend_types.spl`
 - `CallingConvention` — `src/compiler_shared/calling_convention.spl`
 
 ---
@@ -351,7 +351,7 @@ sets the default for plain `asm` blocks. `asm match` overrides this per-case.
 - Inline assembly design: `doc/design/inline_assembly_design.md`
 - Target types: `src/std/common/target.spl` (TargetArch, TargetOS, Target)
 - Target presets: `src/compiler/target_presets.spl` (TargetPreset with abi field)
-- Backend types: `src/core/backend_types.spl` (BackendKind, CodegenTarget)
+- Backend types: `src/compiler_core/backend_types.spl` (BackendKind, CodegenTarget)
 - Calling conventions: `src/compiler_shared/calling_convention.spl`
 - LLVM target config: `src/compiler/backend/llvm_target.spl`
 - Existing asm backends: `src/compiler/backend/x86_asm.spl`, `arm_asm.spl`, `riscv_asm.spl`

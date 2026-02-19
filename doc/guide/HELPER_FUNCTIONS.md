@@ -82,7 +82,7 @@ else:
 
 ### `lexer_create_internal(source, block_registry)`
 
-**Location**: `src/compiler_core/lexer.spl`  
+**Location**: `src/compiler_core_legacy/lexer.spl`  
 **Purpose**: Create Lexer with common initialization
 
 **Usage**:
@@ -100,7 +100,7 @@ fn lexer_with_registry(source: text, registry: BlockRegistry) -> Lexer:
 
 ### `make_match_arm(pattern, body_stmts)`
 
-**Location**: `src/compiler_core/desugar/poll_generator.spl`  
+**Location**: `src/compiler_core_legacy/desugar/poll_generator.spl`  
 **Purpose**: Create MatchArm from pattern and statements
 
 **Usage**:
@@ -124,7 +124,7 @@ MatchArm(
 
 ### `make_expr_stmt(expr)`
 
-**Location**: `src/compiler_core/desugar/poll_generator.spl`  
+**Location**: `src/compiler_core_legacy/desugar/poll_generator.spl`  
 **Purpose**: Create statement from expression
 
 **Usage**:
@@ -168,23 +168,23 @@ use compiler.treesitter.*
 
 ---
 
-### `compiler_core/test_common.spl`
+### `compiler_core_legacy/test_common.spl`
 
-**Location**: `src/compiler_core/test_common.spl`  
-**Purpose**: Shared imports for compiler_core test files
+**Location**: `src/compiler_core_legacy/test_common.spl`  
+**Purpose**: Shared imports for compiler_core_legacy test files
 
 **Usage**:
 ```simple
-use compiler_core.test_common.*
+use compiler_core_legacy.test_common.*
 ```
 
 **Replaces**:
 ```simple
-use compiler_core.parser.*
-use compiler_core.parser_types.*
-use compiler_core.lexer.*
-use compiler_core.blocks.*
-use compiler_core.treesitter.*
+use compiler_core_legacy.parser.*
+use compiler_core_legacy.parser_types.*
+use compiler_core_legacy.lexer.*
+use compiler_core_legacy.blocks.*
+use compiler_core_legacy.treesitter.*
 ```
 
 **Exports**: parser, parser_types, lexer, blocks, treesitter
@@ -198,11 +198,11 @@ use compiler_core.treesitter.*
 | `handle_jj_result` | mcp_jj/helpers.spl | 63 |
 | `handle_jj_result_stdout` | mcp_jj/helpers.spl | 33 |
 | `handle_git_result_simple` | mcp_jj/warning.spl | 14 |
-| `lexer_create_internal` | compiler_core/lexer.spl | 4 |
-| `make_match_arm` | compiler_core/desugar/poll_generator.spl | 4 |
-| `make_expr_stmt` | compiler_core/desugar/poll_generator.spl | 2 |
+| `lexer_create_internal` | compiler_core_legacy/lexer.spl | 4 |
+| `make_match_arm` | compiler_core_legacy/desugar/poll_generator.spl | 4 |
+| `make_expr_stmt` | compiler_core_legacy/desugar/poll_generator.spl | 2 |
 | `compiler/test_common` | compiler/test_common.spl | 11 |
-| `compiler_core/test_common` | compiler_core/test_common.spl | 11 |
+| `compiler_core_legacy/test_common` | compiler_core_legacy/test_common.spl | 11 |
 | **Total** | | **142** |
 
 ---

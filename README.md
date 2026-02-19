@@ -545,103 +545,52 @@ print("Server port: {config.server.port}")
 
 ### Doctest
 
-Executable examples in docstrings - tests that serve as documentation:
+Executable examples in docstrings — tests that serve as documentation:
 
-> **Note:** The doctest feature is under active development. The examples below are skipped in automated testing until implementation is complete.
-
-<!--sdoctest:skip-begin-->
 ```simple
-"""
-Computes factorial of n
+## Computes factorial of n
+##
+## Example: factorial(5) returns 120
+## Example: factorial(0) returns 1
+fn factorial(n: i64) -> i64:
+    if n <= 1: return 1
+    n * factorial(n - 1)
 
-Examples:
-```sdoctest
+print factorial(5)   # 120
+print factorial(0)   # 1
+```
+
+**Data structures with doc comments:**
+
+```simple
+## Stack data structure with LIFO semantics
+##
+## Usage:
+##     var s = Stack(items: [])
+##     s.items.push(1)
+##     s.items.push(2)
+##     print s.items.len()  # 2
+struct Stack:
+    items: [i64]
+
+var s = Stack(items: [])
+s.items.push(1)
+s.items.push(2)
+s.items.push(3)
+print s.items.len()  # 3
+```
+
+**Planned interactive doctest syntax** (under development):
+
+```text
+# Future syntax — not yet implemented:
+"""
 >>> factorial(5)
 120
->>> factorial(0)
-1
->>> factorial(-1)
-Error: ValueError
-```
-"""
-fn factorial(n: Int) -> Int:
-    if n < 0: raise ValueError("negative input")
-    if n <= 1: return 1
-    return n * factorial(n - 1)
-```
-
-**Multi-line examples and setup/teardown:**
-
-```simple
-"""
-Stack data structure with LIFO semantics
-
-Setup:
-```sdoctest
->>> stack = Stack.new()
-```
-
-Examples:
-```sdoctest
->>> stack.push(1)
->>> stack.push(2)
->>> stack.push(3)
->>> stack.pop()
-3
->>> stack.pop()
-2
->>> stack.size()
-1
-```
-
-Error handling:
-```sdoctest
->>> empty = Stack.new()
->>> empty.pop()
-Error: EmptyStackError
-```
-"""
-class Stack:
-    # ...
-```
-
-**Wildcard matching for non-deterministic output:**
-
-```simple
-"""
-Generate unique identifiers
-
-```sdoctest
 >>> generate_uuid()
 "........-....-....-....-............"
->>> get_timestamp()
-1702......
->>> random_int(1, 100)
-..
-```
 """
-fn generate_uuid() -> String:
-    # ...
 ```
-
-**Doctest in Markdown files:**
-
-````markdown
-# Tutorial: Getting Started
-
-Create your first Simple program:
-
-```sdoctest
->>> x = 10
->>> y = 20
->>> x + y
-30
->>> "Result: {x + y}"
-"Result: 30"
-```
-````
-
-<!--sdoctest:skip-end-->
 
 Run doctests:
 ```bash

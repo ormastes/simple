@@ -17,7 +17,7 @@ Completed **real implementations** to fix failing tests:
 
 ## 1. Decorators Module - Mutability Fixes
 
-**File:** `src/std/src/core/decorators.spl`
+**File:** `src/std/src/compiler_core/decorators.spl`
 
 **Problem:** Methods modifying `self` fields were declared as `fn` (immutable) instead of `me` (mutable)
 
@@ -58,7 +58,7 @@ me __call__(*args):
 
 ## 2. Context Manager - Missing API
 
-**File:** `src/std/src/core/context_manager.spl`
+**File:** `src/std/src/compiler_core/context_manager.spl`
 
 **Problem:** Tests call `TimerContext.new()` but only `.create()` existed
 
@@ -227,8 +227,8 @@ Warnings present are pre-existing (undefined exports for MAX_LOOP_ITERATIONS, Le
 ## Files Modified
 
 ### Core Implementations
-1. `src/std/src/core/decorators.spl` - Fixed mutability (2 methods)
-2. `src/std/src/core/context_manager.spl` - Added .new() API
+1. `src/std/src/compiler_core/decorators.spl` - Fixed mutability (2 methods)
+2. `src/std/src/compiler_core/context_manager.spl` - Added .new() API
 3. `src/app/io/mod.spl` - Added rt_time_now_seconds()
 
 ### LSP/Treesitter (Pure Simple)

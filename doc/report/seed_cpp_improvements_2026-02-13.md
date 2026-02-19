@@ -9,26 +9,26 @@
 ## Completed Fixes
 
 ### ✅ Fix #1: Main Function Lookup
-**File:** `seed/seed.cpp:3648-3651`
+**File:** `src/compiler_seed/seed.cpp:3648-3651`
 **Issue:** Second pass looked for "main" but function registered as "spl_main"
 **Fix:** Added lookup name mapping
 **Impact:** Main functions now work correctly
 
 ### ✅ Fix #2: Universal Stub Generation
-**File:** `seed/seed.cpp:833`
+**File:** `src/compiler_seed/seed.cpp:833`
 **Issue:** Hardcoded `return true` stubbed all functions
 **Fix:** Changed to `return false`
 **Impact:** Real function bodies generated
 
 ### ✅ Fix #3: Implicit Returns
-**File:** `seed/seed.cpp:2814-2840`
+**File:** `src/compiler_seed/seed.cpp:2814-2840`
 **Issue:** Struct constructors as last expression didn't generate `return`
 **Fix:** Added implicit return detection in translate_block
 **Impact:** ~100 files benefit
 **Test:** `Point point_origin() { return Point{...}; }` ✅
 
 ### ✅ Fix #4: Enum Dot Notation
-**File:** `seed/seed.cpp:2518-2570`
+**File:** `src/compiler_seed/seed.cpp:2518-2570`
 **Issue:** `case BuildMode.Debug:` not converted to `BuildMode_Debug`
 **Fix:** Detect and translate `EnumName.Variant` syntax in case statements
 **Impact:** ~60 files with enum matches now work
@@ -129,8 +129,8 @@ switch (mode) {
 
 ## Files Modified
 
-- `seed/seed.cpp` (4 fixes applied)
-- `scripts/bootstrap-minimal.sh` (test file exclusions)
+- `src/compiler_seed/seed.cpp` (4 fixes applied)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` (test file exclusions)
 
 ## Technical Details
 

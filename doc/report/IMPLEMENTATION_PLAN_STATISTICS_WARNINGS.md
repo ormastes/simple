@@ -24,21 +24,21 @@ Comprehensive plan to enhance Simple language compiler with:
 - **Finding:** Module closures WORK correctly (was documentation error)
 
 ### 3. Closure Capture Warning Infrastructure ✅
-- **Implementation:** `src/core/closure_analysis.spl` (186 lines)
+- **Implementation:** `src/compiler_core/closure_analysis.spl` (186 lines)
 - **Tests:** `test/unit/compiler/closure_capture_warning_spec.spl` (177 lines, 25 tests)
 - **Status:** PASSING (implementation complete)
 - **Integration:** ⚠️ NOT integrated into compiler pipeline yet
 
 ### 4. Ignored Return Warning Infrastructure ✅
-- **Implementation:** `src/core/interpreter/eval.spl` (has `eval_get_warnings()`)
-- **Tests:** `test/unit/core/ignored_return_warning_spec.spl` (130 lines, 30 tests)
+- **Implementation:** `src/compiler_core/interpreter/eval.spl` (has `eval_get_warnings()`)
+- **Tests:** `test/unit/compiler_core/ignored_return_warning_spec.spl` (130 lines, 30 tests)
 - **Status:** PASSING (implementation complete)
 - **Integration:** ⚠️ NOT integrated into compiler pipeline yet
 
 ### 5. Generic Syntax Support ✅
-- **Tests:** `test/unit/core/generic_syntax_spec.spl` (191 lines, 28 tests)
+- **Tests:** `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines, 28 tests)
 - **Status:** PASSING (parser supports `<>` syntax)
-- **Parser:** `src/core/parser.spl` handles generics correctly
+- **Parser:** `src/compiler_core/parser.spl` handles generics correctly
 
 ### 6. SDoctest Coverage Analysis ✅
 - **Implementation:** `src/app/doc_coverage/analysis/sdoctest_coverage.spl` (544 lines)
@@ -109,7 +109,7 @@ fn generate_coverage_report(results: [InlineCommentResult]) -> text:
 **Example Warnings:**
 ```
 warning: function 'compute_result' at src/std/math.spl:42 has no inline comment
-info: class 'Parser' at src/core/parser.spl:89 has sdoctest but no inline comment
+info: class 'Parser' at src/compiler_core/parser.spl:89 has sdoctest but no inline comment
 error: public function 'api_call' at src/std/http.spl:156 has no documentation
 ```
 
@@ -241,7 +241,7 @@ core:lexer:lex_token
 
 **Integration Points:**
 
-1. **Parser Integration** (`src/core/parser.spl`):
+1. **Parser Integration** (`src/compiler_core/parser.spl`):
 ```simple
 # After parse_module() completes:
 use core.closure_analysis.{analyze_closure_capture, closure_warnings_get}
@@ -289,7 +289,7 @@ fn run_test_file(path: text):
 
 **Integration Points:**
 
-1. **Evaluator** (`src/core/interpreter/eval.spl`):
+1. **Evaluator** (`src/compiler_core/interpreter/eval.spl`):
 ```simple
 # Already has eval_get_warnings() - just needs activation in eval_function_call()
 
@@ -477,8 +477,8 @@ bin/simple build doc-coverage --sdoctest-report --tag-file=missing_tags.txt
 
 1. **Existing (Verify):**
    - `test/unit/compiler/closure_capture_warning_spec.spl` (177 lines) ✅
-   - `test/unit/core/ignored_return_warning_spec.spl` (130 lines) ✅
-   - `test/unit/core/generic_syntax_spec.spl` (191 lines) ✅
+   - `test/unit/compiler_core/ignored_return_warning_spec.spl` (130 lines) ✅
+   - `test/unit/compiler_core/generic_syntax_spec.spl` (191 lines) ✅
    - `test/unit/runtime/module_closure_spec.spl` (85 lines) ✅
    - `test/unit/parser/multiline_bool_spec.spl` (143 lines) ✅
 
@@ -549,7 +549,7 @@ describe "doc coverage CLI integration":
 - Task: Integrate closure warnings into parser
 - Task: Integrate ignored return warnings into eval
 - Task: Update test runner for warning display
-- Files: `src/core/parser.spl`, `src/core/interpreter/eval.spl`, `src/app/test_runner_new/test_runner_main.spl`
+- Files: `src/compiler_core/parser.spl`, `src/compiler_core/interpreter/eval.spl`, `src/app/test_runner_new/test_runner_main.spl`
 
 **Agent 2: Doc Coverage Specialist** (infra agent)
 - Task: Implement inline comment coverage

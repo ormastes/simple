@@ -1425,7 +1425,7 @@
 - ❌ `gpu/backend/rocm` → `rust/gpu/src/backend/rocm.rs`
 - ❌ `gpu/backend/software` → `rust/gpu/src/backend/software.rs`
 - ✅ `lib/build` → `rust/lib/build.rs`
-  - Simple: `src/build.spl`
+  - Simple: `src/app/build/main.spl` *(old `src/build.spl` deleted 2026-02-19)*
 - ✅ `lib/io/mod` → `rust/lib/src/io/mod.rs`
   - Simple: `src/app/io/mod.spl`
 - ❌ `lib/io/term/mod` → `rust/lib/src/io/term/mod.rs`

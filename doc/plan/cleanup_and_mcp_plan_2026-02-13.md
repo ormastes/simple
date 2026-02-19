@@ -95,7 +95,7 @@ grep -r "src/app/interpreter\|app.interpreter" test/ --include="*.spl"
 
 1. **TODOs referencing old interpreter** → Mark as obsolete
 2. **Import statements** → Check if broken, remove if so
-3. **Documentation** → Update to point to `src/core/interpreter/`
+3. **Documentation** → Update to point to `src/compiler_core/interpreter/`
 4. **Comments** → Remove or update
 5. **Test files** → Update imports or remove
 
@@ -131,7 +131,7 @@ use core.interpreter.eval.{core_eval}
 See `src/app/interpreter/eval.spl` for details.
 
 # After
-See `src/core/interpreter/eval.spl` for details.
+See `src/compiler_core/interpreter/eval.spl` for details.
 ```
 
 ### Verification Phase (30 minutes)

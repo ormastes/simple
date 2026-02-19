@@ -43,8 +43,8 @@ The Simple language metaprogramming system (#1300-1324) has 20 of 25 features co
 | ID | Feature | Status | Implementation |
 |----|---------|--------|----------------|
 | #1305 | `context obj:` blocks (implicit receiver) | ✅ | `interpreter_control.rs` |
-| #1306 | `method_missing` handler | ✅ | `simple/std_lib/src/core/dsl.spl` |
-| #1307 | Fluent interface support | ✅ | `simple/std_lib/src/core/dsl.spl` |
+| #1306 | `method_missing` handler | ✅ | `simple/std_lib/src/compiler_core/dsl.spl` |
+| #1307 | Fluent interface support | ✅ | `simple/std_lib/src/compiler_core/dsl.spl` |
 
 ### Built-in Decorators (#1308-1311) ✅ 4/4 Complete
 
@@ -52,10 +52,10 @@ The Simple language metaprogramming system (#1300-1324) has 20 of 25 features co
 
 | ID | Feature | Status | Implementation |
 |----|---------|--------|----------------|
-| #1308 | @cached decorator | ✅ | `simple/std_lib/src/core/decorators.spl` |
-| #1309 | @logged decorator | ✅ | `simple/std_lib/src/core/decorators.spl` |
-| #1310 | @deprecated decorator | ✅ | `simple/std_lib/src/core/decorators.spl` |
-| #1311 | @timeout decorator | ✅ | `simple/std_lib/src/core/decorators.spl` |
+| #1308 | @cached decorator | ✅ | `simple/std_lib/src/compiler_core/decorators.spl` |
+| #1309 | @logged decorator | ✅ | `simple/std_lib/src/compiler_core/decorators.spl` |
+| #1310 | @deprecated decorator | ✅ | `simple/std_lib/src/compiler_core/decorators.spl` |
+| #1311 | @timeout decorator | ✅ | `simple/std_lib/src/compiler_core/decorators.spl` |
 
 ### Comprehensions (#1312-1313) ✅ 2/2 Complete
 
@@ -266,7 +266,7 @@ src/compiler/tests/
 ├── macro_validation_test.rs      # NEW: Integration tests (240 lines)
 └── context_blocks_test.rs       # DSL tests (125 lines)
 
-simple/std_lib/test/unit/core/
+simple/std_lib/test/unit/compiler_core/
 └── decorators_spec.spl          # Decorator tests (blocked)
 ```
 

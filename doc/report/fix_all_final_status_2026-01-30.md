@@ -30,7 +30,7 @@
 **Solution:** Replace all `abs()` calls with inline absolute value calculations
 
 **Files Modified:**
-- `src/lib/std/src/core/math.spl`
+- `src/lib/std/src/compiler_core/math.spl`
 
 **Changes:**
 ```simple
@@ -144,11 +144,11 @@ val diff = if next_guess > guess: next_guess - guess else: guess - next_guess
 ## Files Modified
 
 ### Source Code
-1. **src/lib/std/src/core/math.spl**
+1. **src/lib/std/src/compiler_core/math.spl**
    - Lines 128, 155, 194, 220: Replaced abs() calls with inline calculations
    - Lines 351-352: Fixed is_close() to avoid abs()
 
-2. **src/lib/std/src/core/decorators.spl**
+2. **src/lib/std/src/compiler_core/decorators.spl**
    - Changed method signatures from `fn` to `me` for stateful methods
    - Attempted variadic → explicit arity conversion
    - Added local variable workaround for function calls

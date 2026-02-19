@@ -117,7 +117,7 @@ fn run_with_timeout(
 
 **Available Alternatives:**
 ```simple
-// Result<T, E> exists at src/lib/std/src/core/result.spl ✅
+// Result<T, E> exists at src/lib/std/src/compiler_core/result.spl ✅
 enum Result<T, E>:
     Ok(T)
     Err(E)
@@ -141,10 +141,10 @@ match risky_operation():
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| **Result<T, E>** | ✅ Available | `src/lib/std/src/core/result.spl` | Full implementation |
-| **Option<T>** | ✅ Available | `src/lib/std/src/core/option.spl` | Full implementation |
-| **List<T>** | ✅ Available | `src/lib/std/src/core/list.spl` | Full implementation |
-| **math.sqrt()** | ✅ Available | `src/lib/std/src/core/math.spl` | Full math library |
+| **Result<T, E>** | ✅ Available | `src/lib/std/src/compiler_core/result.spl` | Full implementation |
+| **Option<T>** | ✅ Available | `src/lib/std/src/compiler_core/option.spl` | Full implementation |
+| **List<T>** | ✅ Available | `src/lib/std/src/compiler_core/list.spl` | Full implementation |
+| **math.sqrt()** | ✅ Available | `src/lib/std/src/compiler_core/math.spl` | Full math library |
 | **Map<K, V>** | ❌ Missing | N/A | Referenced but not defined |
 | **std.time** | ❌ Missing | N/A | Module doesn't exist |
 | **time.now_nanos()** | ❌ Missing | N/A | Only microseconds available |
@@ -305,7 +305,7 @@ export sleep
 
 #### 2. Create Map<K,V> type
 ```simple
-# simple/std_lib/src/core/map.spl
+# simple/std_lib/src/compiler_core/map.spl
 # Basic hash map implementation
 struct Map<K, V>:
     buckets: List<List<(K, V)>>

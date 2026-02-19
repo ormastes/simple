@@ -37,9 +37,9 @@
 
 #### 1. Advanced Type System (75% complete)
 **Delivered:**
-- ✅ `src/core/type_checker.spl` (575 lines) - Runtime validation
-- ✅ `src/core/type_erasure.spl` (348 lines) - Generic monomorphization
-- ✅ `src/core/type_inference.spl` (513 lines) - Hindley-Milner unification
+- ✅ `src/compiler_core/type_checker.spl` (575 lines) - Runtime validation
+- ✅ `src/compiler_core/type_erasure.spl` (348 lines) - Generic monomorphization
+- ✅ `src/compiler_core/type_inference.spl` (513 lines) - Hindley-Milner unification
 - ✅ 84 tests written (blocked by test runner, now fixed)
 - ✅ 1,630 lines of documentation
 
@@ -337,7 +337,7 @@ If continuing work on any component, resume these agents:
 
 **Focus on integration** to unlock the advanced type system (1-2 days):
 
-1. Hook `type_checker.spl` into `src/core/interpreter/eval.spl`
+1. Hook `type_checker.spl` into `src/compiler_core/interpreter/eval.spl`
    - Add type checking in `eval_function_call` (line 645)
    - Validate parameter types before call
 

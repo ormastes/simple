@@ -60,7 +60,7 @@ The release workflow was too strict:
    - Build fails only if these fail
 
 2. **Core Unit Tests (INFORMATIONAL):**
-   - `test/unit/core/` with 60s timeout
+   - `test/unit/compiler_core/` with 60s timeout
    - Failures show warnings
    - Build continues regardless of result
 
@@ -84,7 +84,7 @@ The release workflow was too strict:
     fi
 
     # Unit tests are informational
-    if $SIMPLE_RUNTIME test test/unit/core/ --timeout=60; then
+    if $SIMPLE_RUNTIME test test/unit/compiler_core/ --timeout=60; then
       echo "✓ Core unit tests passed"
     else
       echo "⚠ Expected when using older bootstrap runtime"

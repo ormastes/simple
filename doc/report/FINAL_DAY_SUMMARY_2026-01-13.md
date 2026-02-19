@@ -51,7 +51,7 @@ Extraordinarily productive day with **four continuation sessions** resulting in:
 
 **Code Changes:**
 - src/parser/src/expressions/helpers.rs (+10 lines)
-- simple/std_lib/src/core/decorators.spl (8 changes)
+- simple/std_lib/src/compiler_core/decorators.spl (8 changes)
 
 **Documentation:**
 - SPREAD_OPERATOR_FIX_2026-01-13.md

@@ -110,7 +110,7 @@ The module export system works correctly:
 
 `core/traits.spl` has a parse error with the interpreter parser:
 ```
-ERROR: Failed to parse module path="src/lib/std/src/core/traits.spl"
+ERROR: Failed to parse module path="src/lib/std/src/compiler_core/traits.spl"
 error=Unexpected token: expected identifier, found Underscore
 ```
 
@@ -188,13 +188,13 @@ Tree module loaded
 **Test 3: Lexer Usage**
 ```bash
 $ ./target/release/simple test_lexer.spl
-ERROR: Failed to parse module path="src/lib/std/src/core/traits.spl"
+ERROR: Failed to parse module path="src/lib/std/src/compiler_core/traits.spl"
 ```
 
 **Test 4: Grammar Usage**
 ```bash
 $ ./target/release/simple test_grammar.spl
-ERROR: Failed to parse module path="src/lib/std/src/core/traits.spl"
+ERROR: Failed to parse module path="src/lib/std/src/compiler_core/traits.spl"
 ```
 
 ## Next Steps (For Core Library Team)

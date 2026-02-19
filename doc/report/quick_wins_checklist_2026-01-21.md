@@ -153,7 +153,7 @@ src/rust/
 
 ### Decorators (4-6 hours → 10 tests) 🔴
 
-**File:** `src/lib/std/src/core/decorators.spl`
+**File:** `src/lib/std/src/compiler_core/decorators.spl`
 **Blocker:** Parsing error + missing implementations
 
 **Steps:**
@@ -243,7 +243,7 @@ sed -i 's/skip "/it "/g' math_spec.spl
 ### Step 4: Fix any failures (2 hours buffer)
 If tests fail:
 1. Check error message
-2. Verify implementation in `src/lib/std/src/core/math.spl`
+2. Verify implementation in `src/lib/std/src/compiler_core/math.spl`
 3. Fix test expectations or implementation
 4. Re-run tests
 
@@ -260,7 +260,7 @@ If tests fail:
 
 Same as math module, but:
 - File: `test/lib/std/unit/core/random_spec.spl`
-- Implementation: `src/lib/std/src/core/random.spl`
+- Implementation: `src/lib/std/src/compiler_core/random.spl`
 - Expected: 12 tests pass
 
 ---
@@ -270,7 +270,7 @@ Same as math module, but:
 ### Step 1: Check implementation (5 min)
 ```bash
 # Read regex.spl findall implementation
-grep -A 20 "fn findall" src/lib/std/src/core/regex.spl
+grep -A 20 "fn findall" src/lib/std/src/compiler_core/regex.spl
 ```
 
 ### Step 2: Define behavior (2 min)
@@ -363,7 +363,7 @@ cargo test --doc --workspace 2>&1 | grep " ... ignored" | wc -l
 ### Issue: Tests fail with "function not found"
 **Solution:** Check exports in implementation file
 ```bash
-grep "^export" src/lib/std/src/core/math.spl
+grep "^export" src/lib/std/src/compiler_core/math.spl
 ```
 
 ### Issue: Tests fail with type errors

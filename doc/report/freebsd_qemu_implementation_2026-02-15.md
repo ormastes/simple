@@ -60,8 +60,8 @@ Complete FreeBSD bootstrap infrastructure implemented with QEMU integration, ena
 ### 3. Infrastructure Integration
 
 **Existing Infrastructure Documented:**
-- `scripts/bootstrap-from-scratch.sh` - QEMU functions (detect_qemu_vm, start_qemu_vm, sync_to/from_freebsd_vm, bootstrap_in_freebsd_vm)
-- `scripts/bootstrap-from-scratch-freebsd.sh` - Native FreeBSD bootstrap (521 lines)
+- `scripts/bootstrap/bootstrap-from-scratch.sh` - QEMU functions (detect_qemu_vm, start_qemu_vm, sync_to/from_freebsd_vm, bootstrap_in_freebsd_vm)
+- `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` - Native FreeBSD bootstrap (521 lines)
 - `scripts/configure_freebsd_vm_ssh.sh` - SSH setup helper
 - `scripts/setup_freebsd_vm.spl` - VM provisioning
 - `scripts/test_freebsd_qemu.spl` - QEMU tests
@@ -108,8 +108,8 @@ Complete FreeBSD bootstrap infrastructure implemented with QEMU integration, ena
 Linux Host
   └─> QEMU FreeBSD 14.3 VM
       └─> CMake + Clang 19+ + C++20
-          └─> seed/seed.cpp → seed_cpp (FreeBSD ELF)
-              └─> src/core/*.spl → core1.cpp → core1 (FreeBSD ELF, ~326K)
+          └─> src/compiler_seed/seed.cpp → seed_cpp (FreeBSD ELF)
+              └─> src/compiler_core/*.spl → core1.cpp → core1 (FreeBSD ELF, ~326K)
                   └─> core1 → core2 (self-hosting check, SHA256 match)
                       └─> core2 → full1 (complete compiler, ~33M)
                           └─> full1 → full2 (reproducibility, SHA256 match)
@@ -249,7 +249,7 @@ qemu-system-x86_64 -m 8G ...  # For 16GB+ hosts
 **Parallel Builds:**
 ```bash
 # Use more CPU cores
-./scripts/bootstrap-from-scratch-freebsd.sh --jobs=8
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --jobs=8
 ```
 
 **VM Snapshots (quick restarts):**
@@ -301,7 +301,7 @@ jobs:
         run: ./scripts/test-freebsd-qemu-setup.sh --quick
 
       - name: Run Bootstrap
-        run: ./scripts/bootstrap-from-scratch.sh --platform=freebsd
+        run: ./scripts/bootstrap/bootstrap-from-scratch.sh --platform=freebsd
 
       - name: Verify Binary
         run: |
@@ -452,7 +452,7 @@ rsync -az --no-perms -e "ssh -p 2222 -o StrictHostKeyChecking=no" \
 - **QEMU Guide:** `doc/guide/freebsd_qemu_bootstrap.md`
 - **Quick Start:** `README_FREEBSD_QEMU.md`
 - **Test Script:** `scripts/test-freebsd-qemu-setup.sh`
-- **Native Bootstrap:** `scripts/bootstrap-from-scratch-freebsd.sh`
+- **Native Bootstrap:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - **FreeBSD Downloads:** https://download.freebsd.org/releases/
 
 ## Changelog

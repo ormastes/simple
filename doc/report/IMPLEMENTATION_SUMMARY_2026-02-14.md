@@ -297,7 +297,7 @@ test/unit/app/test_runner_new/
 
 ### 1. Signal Handlers (HIGH PRIORITY - BLOCKED)
 
-**Blocker:** Requires SFFI additions to `seed/runtime.c`
+**Blocker:** Requires SFFI additions to `src/compiler_seed/runtime.c`
 
 **Needed:**
 ```c

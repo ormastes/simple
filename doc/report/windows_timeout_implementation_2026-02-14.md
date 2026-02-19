@@ -104,7 +104,7 @@ All tests passed!
 
 Windows timeout support was already implemented in the C runtime:
 
-**File:** `seed/platform/platform_win.h` lines 441-462
+**File:** `src/compiler_seed/platform/platform_win.h` lines 441-462
 
 ```c
 // WaitForSingleObject() with timeout

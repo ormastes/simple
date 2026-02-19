@@ -10,9 +10,9 @@
 
 Implemented a complete advanced type system for the Simple language, consisting of three major components:
 
-1. **Runtime Type Checking** (`src/core/type_checker.spl` - 575 lines)
-2. **Type Erasure/Monomorphization** (`src/core/type_erasure.spl` - 348 lines)
-3. **Type Inference Engine** (`src/core/type_inference.spl` - 513 lines)
+1. **Runtime Type Checking** (`src/compiler_core/type_checker.spl` - 575 lines)
+2. **Type Erasure/Monomorphization** (`src/compiler_core/type_erasure.spl` - 348 lines)
+3. **Type Inference Engine** (`src/compiler_core/type_inference.spl` - 513 lines)
 
 **Total Implementation:** 1,436 lines of production code
 **Architecture:** Pure arena-based design (parallel arrays, no generics, seed-compilable)
@@ -23,7 +23,7 @@ Implemented a complete advanced type system for the Simple language, consisting 
 ## Phase 1: Runtime Type Checking
 
 ### File
-`src/core/type_checker.spl` (575 lines)
+`src/compiler_core/type_checker.spl` (575 lines)
 
 ### Features Implemented
 
@@ -86,7 +86,7 @@ fn type_check_named(value_id: i64, type_name: text) -> bool
 ## Phase 2: Type Erasure & Monomorphization
 
 ### File
-`src/core/type_erasure.spl` (348 lines)
+`src/compiler_core/type_erasure.spl` (348 lines)
 
 ### Features Implemented
 
@@ -159,7 +159,7 @@ fn infer_type_arguments(fn_name: text, arg_types: [i64]) -> [i64]
 ## Phase 3: Type Inference Engine
 
 ### File
-`src/core/type_inference.spl` (513 lines)
+`src/compiler_core/type_inference.spl` (513 lines)
 
 ### Features Implemented
 
@@ -264,16 +264,16 @@ type_inference.spl (Hindley-Milner)
 
 ### Integration Points
 
-1. **Parser** (`src/core/parser.spl`)
+1. **Parser** (`src/compiler_core/parser.spl`)
    - Register generic functions/classes during parsing
    - Collect type annotations
 
-2. **Interpreter** (`src/core/interpreter/eval.spl`)
+2. **Interpreter** (`src/compiler_core/interpreter/eval.spl`)
    - Call `type_check_*` for runtime validation
    - Use `monomorphize_generic_call` for generic function calls
    - Apply `infer_function_types` for unannotated functions
 
-3. **Compiler** (`src/core/compiler/`)
+3. **Compiler** (`src/compiler_core/compiler/`)
    - Generate monomorphic instances during compilation
    - Apply type inference for optimization
 

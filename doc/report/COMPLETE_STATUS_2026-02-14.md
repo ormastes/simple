@@ -94,7 +94,7 @@ Standard Tags:
 
 Auto-Generated:
 - stdlib:string        (from file path src/std/text.spl)
-- core:parser          (from file path src/core/parser.spl)
+- core:parser          (from file path src/compiler_core/parser.spl)
 - compiler:backend     (from file path src/compiler/backend/)
 - feature:testing      (from file path src/app/test_runner_new/)
 ```
@@ -145,7 +145,7 @@ bin/simple build --warn-docs <file>
 
 # Output:
 warning: missing documentation for function `parse_expr`
-  --> src/core/parser.spl:145
+  --> src/compiler_core/parser.spl:145
 ```
 
 **Note:** Requires runtime rebuild to activate (see "Activation Steps" below)
@@ -154,7 +154,7 @@ warning: missing documentation for function `parse_expr`
 
 ### 6. **Multiline Boolean Expressions** ✅ **WORKS WITH PARENTHESES**
 
-**Implementation:** `src/core/lexer.spl` (suppresses newlines when `lex_paren_depth > 0`)
+**Implementation:** `src/compiler_core/lexer.spl` (suppresses newlines when `lex_paren_depth > 0`)
 
 **Usage:**
 ```simple
@@ -184,7 +184,7 @@ while (count < 10 and
 
 ### 7. **Closure Capture Warnings** ✅ **COMPLETE**
 
-**Implementation:** `src/core/closure_analysis.spl` (186 lines)
+**Implementation:** `src/compiler_core/closure_analysis.spl` (186 lines)
 
 **Features:**
 - ✅ Detects when nested functions modify outer variables
@@ -209,7 +209,7 @@ warning: closure modifies outer variable `count` in function `increment`
 
 **Status:** Runtime compatibility FIXED
 
-**Test:** `test/unit/core/ignored_return_warning_spec.spl` (1 passed, 4ms) ✅
+**Test:** `test/unit/compiler_core/ignored_return_warning_spec.spl` (1 passed, 4ms) ✅
 
 **Fix Applied:**
 - Changed from `.to_contain()` matcher → `.contains()` method
@@ -266,7 +266,7 @@ fn outer():
 
 **Implementation:**
 ```c
-// seed/runtime.c
+// src/compiler_seed/runtime.c
 void rt_file_write(const char* path, const char* content) {
     FILE* f = fopen(path, "w");
     if (f) {
@@ -336,7 +336,7 @@ bin/simple build --release
 # Step 3: Verify all features work
 bin/simple test test/unit/app/doc_coverage/
 bin/simple test test/unit/compiler/closure_capture_warning_spec.spl
-bin/simple test test/unit/core/ignored_return_warning_spec.spl
+bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
 bin/simple test test/unit/runtime/module_closure_spec.spl
 bin/simple build --warn-docs test_hello.spl
 bin/simple stats
@@ -354,7 +354,7 @@ bin/simple test test/unit/app/doc_coverage/
 
 # All warning tests (2 tests)
 bin/simple test test/unit/compiler/closure_capture_warning_spec.spl
-bin/simple test test/unit/core/ignored_return_warning_spec.spl
+bin/simple test test/unit/compiler_core/ignored_return_warning_spec.spl
 # Expected: 2/2 passing
 
 # Module/parser tests (2 tests)

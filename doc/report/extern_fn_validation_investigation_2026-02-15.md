@@ -12,7 +12,7 @@ The runtime interpreter **does NOT have a whitelist** for extern functions. The 
 
 ### 1. The Problem Location
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 **Lines:** 1769-1770
 
 ```simple
@@ -43,7 +43,7 @@ The extern function never gets a chance to execute because it's not in the funct
 
 ### 3. Module Loader Has Same Bug
 
-**File:** `src/core/interpreter/module_loader.spl`
+**File:** `src/compiler_core/interpreter/module_loader.spl`
 **Lines:** 215-218
 
 ```simple
@@ -67,7 +67,7 @@ if tag == DECL_FN:
 
 ## Available Runtime Functions
 
-The C runtime (`seed/runtime.h`) provides 33+ extern functions:
+The C runtime (`src/compiler_seed/runtime.h`) provides 33+ extern functions:
 
 **Core I/O:**
 - `rt_file_exists`, `rt_file_read_text`, `rt_file_write`, `rt_file_delete`
@@ -114,13 +114,13 @@ known_safe_externs: [
 
 **Purpose:** This list is used by `CompilabilityAnalyzer` to determine if a function can be **compiled** vs must fall back to interpreter. It's a compile-time optimization hint, NOT a runtime security check.
 
-**Evidence:** Only 2 files reference this: `src/compiler/compilability.spl` and `src/compiler_core/compilability.spl`. Neither is imported by the interpreter.
+**Evidence:** Only 2 files reference this: `src/compiler/compilability.spl` and `src/compiler_core_legacy/compilability.spl`. Neither is imported by the interpreter.
 
 ## The Fix
 
 **Two locations need fixing:**
 
-### Fix 1: `src/core/interpreter/eval.spl` (line 1769)
+### Fix 1: `src/compiler_core/interpreter/eval.spl` (line 1769)
 
 ```simple
 # BEFORE:
@@ -133,7 +133,7 @@ if tag == DECL_EXTERN_FN:
     func_register_return_type(d_node.name, d_node.ret_type)
 ```
 
-### Fix 2: `src/core/interpreter/module_loader.spl` (line 215)
+### Fix 2: `src/compiler_core/interpreter/module_loader.spl` (line 215)
 
 ```simple
 # BEFORE:
@@ -188,8 +188,8 @@ val x = rt_nonexistent_function()  # Should fail at link time or runtime dispatc
 
 ## Files to Modify
 
-1. `src/core/interpreter/eval.spl` - Add `func_table_register` call at line 1769
-2. `src/core/interpreter/module_loader.spl` - Add `func_table_register` call at line 215
+1. `src/compiler_core/interpreter/eval.spl` - Add `func_table_register` call at line 1769
+2. `src/compiler_core/interpreter/module_loader.spl` - Add `func_table_register` call at line 215
 
 ## Expected Results
 

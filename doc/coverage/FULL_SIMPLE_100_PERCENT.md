@@ -14,7 +14,7 @@ system test coverage.
 
 ```
 Total Source Files: 1305
-├── src/core/          26 files (2%)   - Language core
+├── src/compiler_core/          26 files (2%)   - Language core
 ├── src/compiler/     413 files (32%)  - Compilation pipeline
 ├── src/app/          557 files (43%)  - Application tools
 ├── src/lib/           92 files (7%)   - Libraries

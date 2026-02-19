@@ -31,7 +31,7 @@
 
 **1. Backend Types Unification** (2-3 hours)
 ```bash
-# Keep: src/core/backend_types.spl
+# Keep: src/compiler_core/backend_types.spl
 # Delete: src/compiler/backend/backend_types.spl
 # Update all imports: compiler.backend.backend_types → core.backend_types
 ```
@@ -50,7 +50,7 @@
 **3. String Utilities** (3-4 hours)
 ```bash
 # Create: src/std/string_core.spl (canonical implementations)
-# Update: src/core/types.spl to re-export
+# Update: src/compiler_core/types.spl to re-export
 # Cleanup: src/std/template/utilities.spl duplicates
 ```
 **Saves:** 250-300 lines
@@ -80,11 +80,11 @@
 ## File Inventory
 
 ### Duplicated Backend Types
-- `src/core/backend_types.spl` (158 lines) ← KEEP
+- `src/compiler_core/backend_types.spl` (158 lines) ← KEEP
 - `src/compiler/backend/backend_types.spl` (~400 lines) ← DELETE
 
 ### Duplicated String Functions
-- `src/core/types.spl` (lines 14-48)
+- `src/compiler_core/types.spl` (lines 14-48)
 - `src/std/text.spl` (char_code lookup)
 - `src/std/template/utilities.spl` (lines 40-180)
 - `doc/analysis/stdlib_utils_concatenated.spl` (11,917+)
@@ -99,7 +99,7 @@
 7. `src/std/src/dl/config_loader.spl` (~70 lines)
 
 ### Duplicated Error Handlers
-- `src/core/error.spl` (easyfix suggestions, 158 lines)
+- `src/compiler_core/error.spl` (easyfix suggestions, 158 lines)
 - `src/std/error.spl` (trait hierarchy, 100+ lines)
 - `src/compiler/backend/codegen_errors.spl` (enum + struct, 100+ lines)
 
@@ -128,7 +128,7 @@ jj new -m "wip: refactoring [item]"
 bin/simple test > /tmp/baseline.txt
 
 # Line counts
-wc -l src/core/backend_types.spl
+wc -l src/compiler_core/backend_types.spl
 wc -l src/compiler/backend/backend_types.spl
 ```
 

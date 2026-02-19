@@ -80,7 +80,7 @@ Implement async-by-default function semantics where `fn` can suspend and `sync f
 **Goal:** Implement Promise[T] in standard library
 
 1. **Promise class**
-   - File: `simple/std_lib/src/core/promise.spl` (new)
+   - File: `simple/std_lib/src/compiler_core/promise.spl` (new)
    - Implement Promise[T] class
    - Add resolve/reject/then/catch methods
    - Implement Promise.all/race/any/allSettled
@@ -91,7 +91,7 @@ Implement async-by-default function semantics where `fn` can suspend and `sync f
    - Add Promise-related FFI functions
 
 3. **Tests**
-   - File: `simple/std_lib/test/unit/core/promise_spec.spl`
+   - File: `simple/std_lib/test/unit/compiler_core/promise_spec.spl`
    - Test Promise creation and chaining
    - Test combinator methods
    - Test error handling
@@ -243,7 +243,7 @@ fn fixed_point_inference(fns: &[Function], env: &mut TypeEnv) {
 ### Promise Type Implementation
 
 ```simple
-# File: simple/std_lib/src/core/promise.spl
+# File: simple/std_lib/src/compiler_core/promise.spl
 
 enum PromiseState:
     Pending

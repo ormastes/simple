@@ -173,7 +173,7 @@ fn test_list_option_string_actually_parses() {
   - Replaced token before advancing
 
 ### Stdlib
-- `simple/std_lib/src/core/sync.spl`
+- `simple/std_lib/src/compiler_core/sync.spl`
   - Uncommented `try_lock()` (line 147)
   - Uncommented `try_read()` (line 223)
   - Uncommented `try_write()` (line 243)

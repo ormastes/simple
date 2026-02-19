@@ -4,15 +4,15 @@
 
 ## 1. Problem Statement
 
-Currently, Core Simple (`src/core/`, ~8.8K lines) and Full Simple (`src/compiler/`, ~123K lines)
+Currently, Core Simple (`src/compiler_core/`, ~8.8K lines) and Full Simple (`src/compiler/`, ~123K lines)
 are completely separate implementations with duplicated lexer, parser, AST, HIR types, and MIR types.
 Core has no codegen. Full cannot reuse core.
 
 **Duplication map:**
-- Lexer: `src/core/lexer_struct.spl` (719 lines) vs `src/compiler/lexer.spl` (~2K lines)
-- Parser: `src/core/parser.spl` (1,188 lines) vs `src/compiler/parser.spl` (~1.8K lines)
-- AST: `src/core/ast.spl` + `ast_types.spl` (~940 lines) vs `src/compiler/ast.spl` (~1.5K lines)
-- Types: `src/core/types.spl` (367 lines) vs `src/compiler/types/` (~2K lines)
+- Lexer: `src/compiler_core/lexer_struct.spl` (719 lines) vs `src/compiler/lexer.spl` (~2K lines)
+- Parser: `src/compiler_core/parser.spl` (1,188 lines) vs `src/compiler/parser.spl` (~1.8K lines)
+- AST: `src/compiler_core/ast.spl` + `ast_types.spl` (~940 lines) vs `src/compiler/ast.spl` (~1.5K lines)
+- Types: `src/compiler_core/types.spl` (367 lines) vs `src/compiler/types/` (~2K lines)
 
 ## 2. Target Architecture
 
@@ -21,7 +21,7 @@ Core has no codegen. Full cannot reuse core.
       | builds                       |
       v                              v
 +===================================================================+
-|                    src/core/ (Seed-Compilable)                     |
+|                    src/compiler_core/ (Seed-Compilable)                     |
 |                                                                   |
 |  tokens --> lexer --> parser --> ast (struct pools, int tags)      |
 |                                  |                                |
@@ -58,7 +58,7 @@ Core has no codegen. Full cannot reuse core.
 ## 3. Module Boundaries
 
 ### Core (Seed-Compilable)
-Everything in `src/core/` must compile through `seed_cpp`. Constraints:
+Everything in `src/compiler_core/` must compile through `seed_cpp`. Constraints:
 - No generics (`<T>` syntax)
 - No closures/lambdas
 - No traits or impl blocks with dynamic dispatch
@@ -141,9 +141,9 @@ Simple API: `wffi_load`, `wffi_get`, `wffi_call_i64`, `wffi_call_text`, `wffi_fr
 
 ## 8. Key Files
 
-- `src/core/compiler/c_codegen.spl` — AST-direct C codegen (Phase 2)
-- `src/core/compiler/driver.spl` — Compiler driver
-- `src/core/hir/lowering.spl` — HIR lowering (Phase 3)
-- `src/core/mir/lowering.spl` — MIR lowering (Phase 4)
-- `src/core/compiler/mir_codegen.spl` — MIR-to-C codegen (Phase 5)
-- `src/core/wffi/mod.spl` — WFFI module (Phase 6)
+- `src/compiler_core/compiler/c_codegen.spl` — AST-direct C codegen (Phase 2)
+- `src/compiler_core/compiler/driver.spl` — Compiler driver
+- `src/compiler_core/hir/lowering.spl` — HIR lowering (Phase 3)
+- `src/compiler_core/mir/lowering.spl` — MIR lowering (Phase 4)
+- `src/compiler_core/compiler/mir_codegen.spl` — MIR-to-C codegen (Phase 5)
+- `src/compiler_core/wffi/mod.spl` — WFFI module (Phase 6)

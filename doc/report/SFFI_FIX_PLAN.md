@@ -7,7 +7,7 @@
 
 ## Executive Summary
 
-**Gap Analysis:** 580 `extern fn` declarations in `src/app/io/*.spl`, but only 22 `rt_*` functions in C runtime (`seed/runtime.h`).
+**Gap Analysis:** 580 `extern fn` declarations in `src/app/io/*.spl`, but only 22 `rt_*` functions in C runtime (`src/compiler_seed/runtime.h`).
 
 **Reality:** Most "SFFI wrappers" are actually **stubs** calling external Rust crates (regex, http, gamepad, vulkan, etc.) via three-tier pattern. The C runtime only provides **core syscalls**.
 
@@ -20,7 +20,7 @@
 ## Current State
 
 ### ✅ Working (Two-Tier Pattern)
-Runtime functions fully implemented in `seed/runtime.h`:
+Runtime functions fully implemented in `src/compiler_seed/runtime.h`:
 
 | Category | Functions | Status |
 |----------|-----------|--------|
@@ -110,7 +110,7 @@ fn dir_create(path: text, recursive: bool) -> bool:
 **Goal:** Replace shell fallbacks with native runtime calls
 
 **Actions:**
-1. Add missing `rt_dir_*` functions to `seed/runtime.h`/`seed/platform/unix_common.h`
+1. Add missing `rt_dir_*` functions to `src/compiler_seed/runtime.h`/`src/compiler_seed/platform/unix_common.h`
 2. Add missing `rt_file_copy` to runtime
 3. Update `src/app/io/dir_ops.spl` to use native calls
 4. Update `src/app/io/file_ops.spl` to use native calls
@@ -167,13 +167,13 @@ fn dir_create(path: text, recursive: bool) -> bool:
 
 ### Change 1: Add `rt_dir_create` to Runtime
 
-**File:** `seed/runtime.h`
+**File:** `src/compiler_seed/runtime.h`
 ```c
 // After rt_dir_remove_all
 bool rt_dir_create(const char* path, bool recursive);
 ```
 
-**File:** `seed/platform/unix_common.h`
+**File:** `src/compiler_seed/platform/unix_common.h`
 ```c
 bool rt_dir_create(const char* path, bool recursive) {
     if (!path) return false;
@@ -194,7 +194,7 @@ bool rt_dir_create(const char* path, bool recursive) {
 }
 ```
 
-**File:** `seed/platform/platform_win.h`
+**File:** `src/compiler_seed/platform/platform_win.h`
 ```c
 bool rt_dir_create(const char* path, bool recursive) {
     // Windows CreateDirectory implementation
@@ -204,14 +204,14 @@ bool rt_dir_create(const char* path, bool recursive) {
 
 ### Change 2: Add `rt_dir_list` to Runtime
 
-**File:** `seed/runtime.h`
+**File:** `src/compiler_seed/runtime.h`
 ```c
 // Returns null-terminated array of strings (caller must free)
 const char** rt_dir_list(const char* path, int64_t* out_count);
 void rt_dir_list_free(const char** entries, int64_t count);
 ```
 
-**File:** `seed/platform/unix_common.h`
+**File:** `src/compiler_seed/platform/unix_common.h`
 ```c
 const char** rt_dir_list(const char* path, int64_t* out_count) {
     DIR* dir = opendir(path);
@@ -295,7 +295,7 @@ fn file_exists(path: text) -> bool:
 ## Testing Strategy
 
 ### Unit Tests (C Runtime)
-**File:** `seed/runtime_test.c`
+**File:** `src/compiler_seed/runtime_test.c`
 
 Add tests:
 ```c
@@ -451,8 +451,8 @@ it "directory list native":
 - `/sffi` skill - SFFI patterns and guidelines
 - `doc/guide/sffi_gen_guide.md` - Wrapper generation
 - `doc/design/sffi_external_library_pattern.md` - Three-tier design
-- `seed/runtime.h` - Runtime function declarations
-- `seed/platform/unix_common.h` - Unix implementations
+- `src/compiler_seed/runtime.h` - Runtime function declarations
+- `src/compiler_seed/platform/unix_common.h` - Unix implementations
 - `src/app/io/mod.spl` - Main SFFI module
 
 ---

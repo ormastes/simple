@@ -12,7 +12,7 @@ is correctly wired across all three compiler modules:
 ```
 src/compiler_shared/<path>.spl    ← canonical shared implementation
 src/compiler/<path>.spl           ← thin delegation wrapper (uses impl blocks, modern syntax)
-src/compiler_core/<path>.spl      ← thin delegation wrapper (free functions, seed-compatible)
+src/compiler_core_legacy/<path>.spl      ← thin delegation wrapper (free functions, seed-compatible)
 ```
 
 The check ensures every migrated file has both wrappers, and each wrapper properly
@@ -57,10 +57,10 @@ impl MirJson:
 export MirJson
 ```
 
-### compiler_core/ wrapper (seed-compatible)
+### compiler_core_legacy/ wrapper (seed-compatible)
 
 ```simple
-# src/compiler_core/blocks/error_helpers.spl
+# src/compiler_core_legacy/blocks/error_helpers.spl
 use compiler_shared.blocks.error_helpers.{error_at, error_span, errors_from_strings}
 export error_at, error_span, errors_from_strings
 ```
@@ -105,22 +105,22 @@ fn _wrapper_ok(compiler_path: text) -> bool:
 The spec is organized into 9 describe groups:
 - Batch 1 shared sources exist (9 tests)
 - Batch 1 compiler/ wrappers (9 tests)
-- Batch 1 compiler_core/ wrappers (9 tests)
+- Batch 1 compiler_core_legacy/ wrappers (9 tests)
 - Batch 2 shared sources exist (15 tests)
 - Batch 2 compiler/ wrappers (15 tests)
-- Batch 2 compiler_core/ wrappers (15 tests)
+- Batch 2 compiler_core_legacy/ wrappers (15 tests)
 - Batch 3 partial shared sources exist (4 tests)
 - Batch 3 partial compiler/ wrappers (4 tests)
-- Batch 3 partial compiler_core/ wrappers (4 tests)
+- Batch 3 partial compiler_core_legacy/ wrappers (4 tests)
 
-**Total: 75 tests** covering 25 fully-migrated non-test files × 3 checks (shared + compiler/ + compiler_core/).
+**Total: 75 tests** covering 25 fully-migrated non-test files × 3 checks (shared + compiler/ + compiler_core_legacy/).
 (9 Batch 1 + 8 Batch 2 + 4 Batch 3 = 21 files × 3 groups + 12 "exists" checks = 75 tests)
 
 ## Current Migration Status
 
 ### Batch 1: Identical Files (13 files, COMPLETE)
 
-| File | compiler_shared | compiler/ | compiler_core/ |
+| File | compiler_shared | compiler/ | compiler_core_legacy/ |
 |------|:-:|:-:|:-:|
 | `backend/backend_ffi.spl` | ✅ | ✅ | ✅ |
 | `blocks/builtin_blocks_defs.spl` | ✅ | ✅ | ✅ |
@@ -138,7 +138,7 @@ The spec is organized into 9 describe groups:
 
 ### Batch 2: Near-Identical Files (16 files, PARTIAL — 8/16 wrappers complete)
 
-| File | compiler_shared | compiler/ | compiler_core/ |
+| File | compiler_shared | compiler/ | compiler_core_legacy/ |
 |------|:-:|:-:|:-:|
 | `error_codes.spl` | ✅ | ⏳ | ✅ |
 | `visibility.spl` | ✅ | ⏳ | ⏳ |
@@ -159,7 +159,7 @@ The spec is organized into 9 describe groups:
 
 ### Batch 3: Mostly-Same Files (38 files, IN PROGRESS — 4/38 done)
 
-| File | compiler_shared | compiler/ | compiler_core/ |
+| File | compiler_shared | compiler/ | compiler_core_legacy/ |
 |------|:-:|:-:|:-:|
 | `backend/native/encode_aarch64.spl` | ✅ | ✅ | ✅ |
 | `blocks/error_helpers.spl` | ✅ | ✅ | ✅ |
@@ -188,9 +188,9 @@ it "backend/native/elf_writer.spl exists in compiler_shared":
 it "compiler/backend/native/elf_writer.spl delegates":
     expect(_wrapper_ok("src/compiler/backend/native/elf_writer.spl")).to_equal(true)
 
-# In "DI Check - Batch 3 compiler_core/ wrappers":
-it "compiler_core/backend/native/elf_writer.spl delegates":
-    expect(_wrapper_ok("src/compiler_core/backend/native/elf_writer.spl")).to_equal(true)
+# In "DI Check - Batch 3 compiler_core_legacy/ wrappers":
+it "compiler_core_legacy/backend/native/elf_writer.spl delegates":
+    expect(_wrapper_ok("src/compiler_core_legacy/backend/native/elf_writer.spl")).to_equal(true)
 ```
 
 ## Running the Check
@@ -207,6 +207,6 @@ bin/simple test test/unit/compiler/
 
 ## Import Resolution Note
 
-The `compiler_shared` module resolves via `src/` directory structure (same as `llvm_shared/`).
+The `compiler_shared` module resolves via `src/` directory structure (same as `shared/llvm/`).
 No symlinks are needed — the runtime resolves `use compiler_shared.x.{y}` by looking for
 `src/compiler_shared/x.spl` relative to the project root.

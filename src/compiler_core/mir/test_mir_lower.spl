@@ -1,0 +1,107 @@
+# Core Simple — MIR Lowering Tests
+#
+# Seed-compiled test: parse → HIR → MIR, check basic blocks.
+
+use compiler_core.lexer.{lex_init}
+use compiler_core.parser.{parser_init, parse_module}
+use compiler_core.ast.{ast_reset}
+use compiler_core.types.{reset_all_pools}
+use compiler_core.mir.{mir_fn_count, mir_fn_get_name, mir_fn_get_bbs}
+use compiler_core.mir.{bb_get_instructions, bb_get_terminator, bb_get_label}
+use compiler_core.mir.{inst_get_kind, inst_get_dest, inst_get_src1}
+use compiler_core.mir.{term_get_kind}
+use compiler_core.mir.{mir_module_get_fns, mir_module_struct_count}
+use compiler_core.mir.{MIR_CONST_INT, MIR_ADD, MIR_CALL}
+use compiler_core.mir.{TERM_GOTO, TERM_RETURN, TERM_RETURN_VOID, TERM_IF}
+use compiler_core.mir.lowering.{mlr_lower_module}
+
+var test_pass_count: i64 = 0
+var test_fail_count: i64 = 0
+
+fn check_true_mlr(label: text, cond: bool):
+    if cond:
+        test_pass_count = test_pass_count + 1
+    else:
+        print "FAIL: {label}"
+        test_fail_count = test_fail_count + 1
+
+fn lower_and_check(source: text):
+    reset_all_pools()
+    ast_reset()
+    parse_module(source, "test")
+    mlr_lower_module()
+
+# === Test 1: Simple function creates MIR fn ===
+print "--- Test 1: Simple function ---"
+lower_and_check("fn foo() -> i64:\n    42")
+val fns1 = mir_module_get_fns()
+check_true_mlr("has fn", fns1.len() >= 1)
+if fns1.len() >= 1:
+    val fn_name = mir_fn_get_name(fns1[0])
+    check_true_mlr("fn name", fn_name == "foo")
+    val bbs = mir_fn_get_bbs(fns1[0])
+    check_true_mlr("has entry bb", bbs.len() >= 1)
+
+# === Test 2: Arithmetic generates instructions ===
+print "--- Test 2: Arithmetic ---"
+lower_and_check("fn add(a: i64, b: i64) -> i64:\n    a + b")
+val fns2 = mir_module_get_fns()
+if fns2.len() >= 1:
+    val bbs = mir_fn_get_bbs(fns2[0])
+    if bbs.len() >= 1:
+        val insts = bb_get_instructions(bbs[0])
+        check_true_mlr("has instructions", insts.len() >= 1)
+
+# === Test 3: If creates multiple BBs ===
+print "--- Test 3: If branches ---"
+lower_and_check("fn test_if(x: i64) -> i64:\n    if x > 0:\n        return 1\n    return 0")
+val fns3 = mir_module_get_fns()
+if fns3.len() >= 1:
+    val bbs = mir_fn_get_bbs(fns3[0])
+    check_true_mlr("if creates BBs", bbs.len() >= 3)
+
+# === Test 4: While loop creates BBs ===
+print "--- Test 4: While loop ---"
+lower_and_check("fn test_while() -> i64:\n    var i = 0\n    while i < 10:\n        i = i + 1\n    i")
+val fns4 = mir_module_get_fns()
+if fns4.len() >= 1:
+    val bbs = mir_fn_get_bbs(fns4[0])
+    check_true_mlr("while creates BBs", bbs.len() >= 3)
+
+# === Test 5: Struct creates MIR struct ===
+print "--- Test 5: Struct ---"
+lower_and_check("struct Point:\n    x: i64\n    y: i64")
+val sc = mir_module_struct_count()
+check_true_mlr("struct registered", sc >= 1)
+
+# === Test 6: Extern fn ===
+print "--- Test 6: Extern fn ---"
+lower_and_check("extern fn rt_test(x: i64) -> i64")
+val fns6 = mir_module_get_fns()
+check_true_mlr("extern fn registered", fns6.len() >= 1)
+
+# === Test 7: For loop ===
+print "--- Test 7: For loop ---"
+lower_and_check("fn test_for():\n    for i in [1, 2, 3]:\n        print i")
+val fns7 = mir_module_get_fns()
+if fns7.len() >= 1:
+    val bbs = mir_fn_get_bbs(fns7[0])
+    check_true_mlr("for creates BBs", bbs.len() >= 4)
+
+# === Test 8: Module init ===
+print "--- Test 8: Module init ---"
+lower_and_check("val x = 42\nfn foo() -> i64:\n    x")
+val fns8 = mir_module_get_fns()
+var has_init: bool = false
+for i in range(0, fns8.len()):
+    val n = mir_fn_get_name(fns8[i])
+    if n == "__module_init":
+        has_init = true
+check_true_mlr("has __module_init", has_init)
+
+# === Summary ===
+print ""
+val total = test_pass_count + test_fail_count
+print "=== MIR Lowering Tests: {test_pass_count}/{total} passed ==="
+if test_fail_count > 0:
+    print "FAILURES: {test_fail_count}"

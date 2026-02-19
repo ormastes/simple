@@ -27,7 +27,7 @@ When you write `s[:end]`:
 
 ### Why My Fix Didn't Work
 
-I implemented `eval_slice_expr()` in `src/core/interpreter/eval.spl`, which is correct for the Simple interpreter layer. However:
+I implemented `eval_slice_expr()` in `src/compiler_core/interpreter/eval.spl`, which is correct for the Simple interpreter layer. However:
 
 - The Rust runtime's built-in checks run FIRST
 - The Rust code rejects the expression before Simple code can handle it
@@ -44,7 +44,7 @@ User Code: s[:end]
     - Type Checker: Validate types ← BUG IS HERE
     - [ERROR: "cannot index string with type 'symbol'"]
      ↓
-[2] Simple Interpreter (src/core/interpreter/eval.spl)
+[2] Simple Interpreter (src/compiler_core/interpreter/eval.spl)
     - eval_expr(): Dispatch by expression type
     - eval_slice_expr(): Handle EXPR_SLICE ← MY FIX IS HERE
     - [Never reached because Rust layer fails first]
@@ -59,7 +59,7 @@ User Code: s[:end]
 **OR:** Modify type checker to allow symbol-to-int coercion in slice context
 
 ### Fix 2: Simple Interpreter (DONE ✅)
-**Location:** `src/core/interpreter/eval.spl`
+**Location:** `src/compiler_core/interpreter/eval.spl`
 **Change:** Add EXPR_SLICE handling
 **Status:** Implemented and committed
 
@@ -126,7 +126,7 @@ bin/simple -c 'val s = "test"; val n = 2; print s[:n]'
 2. **Simple interpreter gap** (secondary) - Missing EXPR_SLICE evaluation
 
 **Status:**
-- Component 2: ✅ FIXED in `src/core/interpreter/eval.spl`
+- Component 2: ✅ FIXED in `src/compiler_core/interpreter/eval.spl`
 - Component 1: ⏸️ REQUIRES Rust source code (not available in this distribution)
 
 **Complete fix requires:** Access to Rust source code to modify the runtime's lexer/parser/type checker.

@@ -2,11 +2,11 @@
 
 ## Summary
 
-Fixed the enum mismatches in `compiler_core/backend_types.spl` and `backend_factory.spl` to match seed.cpp's expectations. The bootstrap now progresses much further but still has errors in other unrelated modules.
+Fixed the enum mismatches in `compiler_core_legacy/backend_types.spl` and `backend_factory.spl` to match seed.cpp's expectations. The bootstrap now progresses much further but still has errors in other unrelated modules.
 
 ## Files Modified
 
-### 1. src/compiler_core/backend_types.spl
+### 1. src/compiler_core_legacy/backend_types.spl
 **Changed enum definition to match seed.cpp:**
 ```simple
 # BEFORE (didn't match seed.cpp):
@@ -31,7 +31,7 @@ enum BackendKind:
     Vulkan
 ```
 
-### 2. src/compiler_core/backend/backend_factory.spl
+### 2. src/compiler_core_legacy/backend/backend_factory.spl
 **Multiple fixes:**
 
 a) **Removed target helper function calls** (they don't exist in seed.cpp):
@@ -47,11 +47,11 @@ b) **Fixed static method calls for seed_cpp**:
 
 c) **Updated match statements** to handle all enum values:
    - `create_specific()`: Added cases for Native, Wasm, Lean, Cuda, Vulkan
-   - `supports_target()`: Simplified to return `true` for all (compiler_core limitation)
+   - `supports_target()`: Simplified to return `true` for all (compiler_core_legacy limitation)
    - `available_backends()`: Updated list to match new enum
    - `get_description()`: Updated descriptions for all backends
 
-### 3. src/compiler_core/driver.spl
+### 3. src/compiler_core_legacy/driver.spl
 **Fixed Ok/Err usage** (from earlier fix):
    - Changed `Ok(output)` → `output` (line 839)
    - Changed `Err(error_msg)` → `error_msg` (line 846)
@@ -82,7 +82,7 @@ build/bootstrap/core1.cpp:8132:12: error: use of undeclared identifier 'value_In
 
 ## Remaining Issues
 
-The remaining compilation errors are NOT in backend_factory.spl. They're in other compiler_core modules:
+The remaining compilation errors are NOT in backend_factory.spl. They're in other compiler_core_legacy modules:
 
 1. **CodegenTarget enums:**
    - `codegentarget_CudaPtx` - doesn't exist in seed.cpp
@@ -107,7 +107,7 @@ These errors are in different modules (possibly MIR, codegen, or type system mod
 - ❌ C++ compilation still fails (errors in other modules)
 
 **Lines of generated C++:** 17,947 (previously failed at transpilation)
-**Files processed:** 298 compiler_core files
+**Files processed:** 298 compiler_core_legacy files
 **Errors remaining:** ~20 (down from 50+, all in different modules)
 
 ## Next Steps to Complete Bootstrap
@@ -120,20 +120,20 @@ Continue fixing enum/type mismatches in other modules:
 4. Test each fix iteratively
 
 ### Option B: Regenerate seed.cpp (Recommended)
-The root cause is that seed.cpp is outdated. Regenerating it from current compiler_core would fix all enum mismatches at once:
+The root cause is that seed.cpp is outdated. Regenerating it from current compiler_core_legacy would fix all enum mismatches at once:
 1. Use existing working compiler to generate new seed.cpp
 2. Replace old seed.cpp with new one
 3. Bootstrap should then work cleanly
 
 ### Option C: Use Pre-built Binary Path
 The original user request was "update full simple buildable by core simple."
-- Current state: compiler_core has enum mismatches preventing seed.cpp bootstrap
+- Current state: compiler_core_legacy has enum mismatches preventing seed.cpp bootstrap
 - Alternative: Use pre-built `bin/release/simple` to compile full compiler
 - Issue: Binary only produces SMF stubs, not full executables
 
 ## Success Criteria Met
 
-✅ Identified root cause (enum mismatches between compiler_core and seed.cpp)
+✅ Identified root cause (enum mismatches between compiler_core_legacy and seed.cpp)
 ✅ Fixed backend_types.spl enum to match seed.cpp
 ✅ Fixed backend_factory.spl to use correct enums
 ✅ Transpilation now succeeds (huge progress!)

@@ -33,9 +33,9 @@ This document analyzes the current Simple language implementation against a prop
 | Lexer support | ✅ Complete | `src/parser/src/lexer/identifiers.rs:225-325` |
 | Parser AST | ✅ Complete | `src/parser/src/ast/nodes/core.rs:528-535` |
 | Block handler | ✅ Complete | `src/compiler/src/blocks/regex.rs` |
-| Stdlib NFA engine | ✅ Complete | `simple/std_lib/src/core/regex.spl` (44KB, 1,401 lines) |
+| Stdlib NFA engine | ✅ Complete | `simple/std_lib/src/compiler_core/regex.spl` (44KB, 1,401 lines) |
 | String regex methods | ✅ Correct | No regex on String (per spec) |
-| Unit tests | ❌ Skipped | `simple/std_lib/test/unit/core/regex_spec.spl` (all 21 tests skipped) |
+| Unit tests | ❌ Skipped | `simple/std_lib/test/unit/compiler_core/regex_spec.spl` (all 21 tests skipped) |
 
 **Lexer Syntax:**
 ```simple
@@ -91,7 +91,7 @@ Checked arithmetic: checked_add(), etc.
 | Multiple int types | ⚠️ Partial | Lexer supports, stdlib only implements `i64` |
 | Unsigned types | ❌ Missing | No `u32`, `u64` extension methods |
 
-**Current i64 Methods** (`simple/std_lib/src/core/primitives.spl`):
+**Current i64 Methods** (`simple/std_lib/src/compiler_core/primitives.spl`):
 ```simple
 impl i64:
     fn abs() -> i64
@@ -170,7 +170,7 @@ Str methods:
 | Regex methods | ✅ Correct | None (per spec) |
 | `in` operator | ❌ Missing | Use `.contains(substr)` |
 
-**Current String Methods** (`simple/std_lib/src/core/string_core.spl`, `string_ops.spl`):
+**Current String Methods** (`simple/std_lib/src/compiler_core/string_core.spl`, `string_ops.spl`):
 ```simple
 impl text:
     fn len() -> usize
@@ -240,7 +240,7 @@ x in xs
 | `sort_by()` | ❌ Missing | Not implemented |
 | `in` operator | ❌ Missing | Use `.contains()` |
 
-**Current List Methods** (`simple/std_lib/src/core/list.spl`):
+**Current List Methods** (`simple/std_lib/src/compiler_core/list.spl`):
 ```simple
 impl List<T>:
     fn len() -> usize
@@ -395,13 +395,13 @@ substr in text
 |-----------|------|
 | Regex lexer | `src/parser/src/lexer/identifiers.rs:225-325` |
 | Regex block handler | `src/compiler/src/blocks/regex.rs` |
-| Regex stdlib | `simple/std_lib/src/core/regex.spl` |
-| Regex tests (skipped) | `simple/std_lib/test/unit/core/regex_spec.spl` |
-| Primitives | `simple/std_lib/src/core/primitives.spl` |
-| String | `simple/std_lib/src/core/string_core.spl`, `string_ops.spl` |
-| List | `simple/std_lib/src/core/list.spl` |
-| Array | `simple/std_lib/src/core/array.spl` |
-| Collections traits | `simple/std_lib/src/core/collections.spl` |
+| Regex stdlib | `simple/std_lib/src/compiler_core/regex.spl` |
+| Regex tests (skipped) | `simple/std_lib/test/unit/compiler_core/regex_spec.spl` |
+| Primitives | `simple/std_lib/src/compiler_core/primitives.spl` |
+| String | `simple/std_lib/src/compiler_core/string_core.spl`, `string_ops.spl` |
+| List | `simple/std_lib/src/compiler_core/list.spl` |
+| Array | `simple/std_lib/src/compiler_core/array.spl` |
+| Collections traits | `simple/std_lib/src/compiler_core/collections.spl` |
 | Range tests | `simple/std_lib/test/features/data_structures/ranges_spec.spl` |
 
 ---

@@ -40,7 +40,7 @@ fn compile_to_smf(path: text, output: text) -> Result<text, text>:
     # ... handle result ...
 ```
 
-### 2. Fixed `compile_to_smf()` in `src/compiler_core/driver.spl`
+### 2. Fixed `compile_to_smf()` in `src/compiler_core_legacy/driver.spl`
 Same fix, but in desugared form for the core compiler.
 
 ### 3. Updated `cli_compile()` in `src/app/io/cli_ops.spl`
@@ -81,7 +81,7 @@ bin/simple build --release
 
 # Option B: Manual bootstrap
 cd /home/ormastes/dev/pub/simple
-./scripts/bootstrap-minimal.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --step=core1
 ```
 
 ### Issue 2: Pure Simple Compiler Not Fully Integrated
@@ -120,12 +120,12 @@ When compiling `src/app/cli/main.spl`, the compiler needs to resolve all imports
 1. Build the CLI in two stages (stub first, then full)
 2. Use conditional compilation to exclude compiler functionality during bootstrap
 3. Make the compiler functionality lazy-loaded
-4. Build directly to native using seed.cpp → compiler_core → compiler
+4. Build directly to native using seed.cpp → compiler_core_legacy → compiler
 
 ## Recommended Fix Path
 
 ### Option A: Use Seed Compiler Path (Fastest)
-1. Use `seed.cpp` to compile `src/compiler_core/` → produces `core_compiler`
+1. Use `seed.cpp` to compile `src/compiler_core_legacy/` → produces `core_compiler`
 2. Use `core_compiler` to compile `src/compiler/` → produces `full_compiler`
 3. Use `full_compiler` to compile itself → verify reproducibility
 
@@ -172,22 +172,22 @@ This is what I already implemented in the bootstrap script changes, but needs `b
 ### If That Doesn't Work
 1. **Use seed.cpp path:**
    ```bash
-   cd seed/build
+   cd build/seed
    cmake .. && make seed_cpp
    cd ../..
-   ./scripts/bootstrap-from-scratch.sh
+   ./scripts/bootstrap/bootstrap-from-scratch.sh
    ```
 
 2. **Or manually test compilation:**
    ```bash
-   # Build compiler from compiler_core
+   # Build compiler from compiler_core_legacy
    build/bootstrap/simple_new1 compile src/compiler/main.spl -o /tmp/test_compiler
    ```
 
 ## Files Modified
 
 1. `src/compiler/driver.spl` - Fixed `compile_to_smf()` to use Pure Simple
-2. `src/compiler_core/driver.spl` - Same fix, desugared form
+2. `src/compiler_core_legacy/driver.spl` - Same fix, desugared form
 3. `src/app/io/cli_ops.spl` - Added Pure Simple fallback in `cli_compile()`
 4. `src/app/build/bootstrap.spl` - Changed to build native executables
 

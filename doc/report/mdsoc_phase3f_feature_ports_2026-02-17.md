@@ -58,7 +58,7 @@ Three pipeline stages that had no D_feature ports:
 
 All planned MDSOC dimensions are now fully populated:
 
-- **D_entity:** 12 entity files in `src/core/entity/` (token, ast, hir, mir, types)
+- **D_entity:** 12 entity files in `src/compiler_core/entity/` (token, ast, hir, mir, types)
 - **D_feature:** 12 pipeline stage port files in `src/compiler/feature/`
 - **D_transform:** 6 stage boundary views in `src/compiler/transform/feature/`
 - **D_adapters:** inbound (language server, profiler) and outbound (file, memory) adapters
@@ -67,13 +67,13 @@ All planned MDSOC dimensions are now fully populated:
 
 All 4 future-work items implemented:
 
-1. `src/core/entity/span/Span.spl` — `SourceLocation` (line, col, to_text, at) + `Span` (start, end_loc, is_single_line, contains_line, line_count, single_line, empty)
+1. `src/compiler_core/entity/span/Span.spl` — `SourceLocation` (line, col, to_text, at) + `Span` (start, end_loc, is_single_line, contains_line, line_count, single_line, empty)
 2. `src/compiler/transform/feature/mir_to_optimizer/entity_view/MirOptView.spl` — bridges MIR lowering → optimizer; has_functions, is_optimized, average_insts_per_fn
 3. `src/compiler/transform/feature/backend_to_linker/entity_view/ObjectFileView.spl` — bridges codegen output → linker; is_empty, has_symbols, from_codegen, failed
 4. `src/compiler/transform/feature/loading_to_parsing/entity_view/LoadedModuleView.spl` — bridges module loader → parser; has_source, is_empty, from_source, empty
 
 Tests added:
-- `test/unit/core/entity/entity_span_spec.spl` — 16 tests for SourceLocation + Span
+- `test/unit/compiler_core/entity/entity_span_spec.spl` — 16 tests for SourceLocation + Span
 - `test/unit/compiler/transform_adapters_spec.spl` — +24 tests (8 each for MirOptView, ObjectFileView, LoadedModuleView)
 
 All 9 D_transform boundaries now complete (was 6/9 after phase 3f, now 9/9).

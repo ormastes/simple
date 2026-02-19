@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
 
 ## Bootstrap Script Fixes
 
-Also updated `scripts/bootstrap-fixed.sh` to exclude test/demo files that have duplicate `fn main()` functions:
+Also updated `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` to exclude test/demo files that have duplicate `fn main()` functions:
 
 **Excluded patterns:**
 - `_phase[0-9]` - Phase demo files (phase4a, phase4b, etc.)
@@ -115,8 +115,8 @@ The bootstrap still fails to compile due to source code bugs (unrelated to seed_
 2. Wrong usage: `spl_i64_to_str(NL)` where NL is already a string
 3. Syntax error: `backend: CompilerBackend.Interpreted`
 
-These are Simple source code issues in compiler_core, NOT seed_cpp problems.
+These are Simple source code issues in compiler_core_legacy, NOT seed_cpp problems.
 
 ## Impact
 
-**seed_cpp can now generate working executables!** The Pure Simple bootstrap path (seed.cpp → compiler_core → full compiler) is architecturally sound. Only source code fixes remain.
+**seed_cpp can now generate working executables!** The Pure Simple bootstrap path (seed.cpp → compiler_core_legacy → full compiler) is architecturally sound. Only source code fixes remain.

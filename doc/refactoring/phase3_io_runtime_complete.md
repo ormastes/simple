@@ -332,12 +332,12 @@ use simple_runtime::value::ffi::{
 
 ### Interpreter Bridge: Hybrid Execution
 ```simple
-// Set handler during initialization (in compiler crate)
+# Set handler during initialization (in compiler crate)
 unsafe {
     set_interp_call_handler(my_interpreter_call_handler);
 }
 
-// Call from compiled code
+# Call from compiled code
 val result = rt_interp_call("my_function", 2, [arg1, arg2]);
 ```
 

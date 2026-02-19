@@ -85,7 +85,7 @@ From `test/feature/async_features_spec.spl`:
 
 ### Missing Constants (FIXED)
 
-Added to `/home/ormastes/dev/pub/simple/src/core/types.spl`:
+Added to `/home/ormastes/dev/pub/simple/src/compiler_core/types.spl`:
 
 ```simple
 val TYPE_FUTURE = 20
@@ -101,7 +101,7 @@ These constants are now:
 
 ### What Still Needs Implementation
 
-1. **Runtime C types** - `SplFuture`, `SplPoll`, `SplTask` structs in `seed/runtime.h`
+1. **Runtime C types** - `SplFuture`, `SplPoll`, `SplTask` structs in `src/compiler_seed/runtime.h`
 2. **Runtime functions** - Future polling, task scheduling, etc.
 3. **Type checking** - Validate `Future<T>` generic instantiation
 4. **HIR integration** - Connect HIR async types to core type tags
@@ -124,7 +124,7 @@ Supports:
 
 Located in:
 - `src/compiler/desugar_async.spl`
-- `src/compiler_core/desugar_async.spl`
+- `src/compiler_core_legacy/desugar_async.spl`
 
 Generates:
 - State enums (`FunctionNameState`)
@@ -190,7 +190,7 @@ Key types:
 
 **Status:** DONE (2026-02-14)
 
-Added three type constants to `src/core/types.spl`:
+Added three type constants to `src/compiler_core/types.spl`:
 - `TYPE_FUTURE = 20` - For Future<T> types
 - `TYPE_POLL = 21` - For Poll<T> types
 - `TYPE_TASK = 22` - For Task types
@@ -203,7 +203,7 @@ Updated:
 
 ### Step 2: Runtime C Type Definitions (TODO)
 
-**File:** `seed/runtime.h`
+**File:** `src/compiler_seed/runtime.h`
 
 Add C struct definitions:
 
@@ -233,7 +233,7 @@ typedef struct {
 
 ### Step 3: Runtime C Function Stubs (TODO)
 
-**File:** `seed/runtime.c`
+**File:** `src/compiler_seed/runtime.c`
 
 Add basic runtime functions:
 
@@ -259,7 +259,7 @@ Implement:
 Create minimal test:
 
 ```simple
-# test/unit/core/future_type_spec.spl
+# test/unit/compiler_core_legacy/future_type_spec.spl
 describe "Future type integration":
     it "recognizes Future<i64> type tag":
         val tag = TYPE_FUTURE
@@ -342,7 +342,7 @@ Type constants (✅) → Runtime C types (⏳) → Type checking (⏳) → Execu
 
 ### Immediate (This Session)
 
-1. ✅ Add TYPE_FUTURE, TYPE_POLL, TYPE_TASK to core/types.spl
+1. ✅ Add TYPE_FUTURE, TYPE_POLL, TYPE_TASK to compiler_core/types.spl
 2. ✅ Update type_tag_name() and type_tag_to_c()
 3. ✅ Export new constants
 4. ✅ Create this status document
@@ -350,8 +350,8 @@ Type constants (✅) → Runtime C types (⏳) → Type checking (⏳) → Execu
 
 ### Next Session
 
-1. Add C struct definitions to seed/runtime.h
-2. Add C function stubs to seed/runtime.c
+1. Add C struct definitions to src/compiler_seed/runtime.h
+2. Add C function stubs to src/compiler_seed/runtime.c
 3. Test basic type system integration
 4. Start implementing type checking for Future<T>
 
@@ -368,7 +368,7 @@ Type constants (✅) → Runtime C types (⏳) → Type checking (⏳) → Execu
 
 ### Phase 1.3 Complete When:
 
-- ✅ TYPE_FUTURE, TYPE_POLL, TYPE_TASK defined in core/types.spl
+- ✅ TYPE_FUTURE, TYPE_POLL, TYPE_TASK defined in compiler_core/types.spl
 - ⏳ SplFuture, SplPoll, SplTask defined in runtime.h
 - ⏳ Type checker validates Future<T> generics
 - ⏳ At least 1 async test passing (not skipped)

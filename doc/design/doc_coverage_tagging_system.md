@@ -137,7 +137,7 @@ Auto-generated from file path to indicate which part of the codebase the item be
 | Tag | Path Pattern | Description |
 |-----|--------------|-------------|
 | `scope:stdlib` | `src/std/**` | Standard library (highest priority for docs) |
-| `scope:core` | `src/core/**` | Core compiler library (high priority) |
+| `scope:core` | `src/compiler_core/**` | Core compiler library (high priority) |
 | `scope:lib` | `src/lib/**` | Internal libraries (medium priority) |
 | `scope:app` | `src/app/**` | Applications/tools (lower priority) |
 | `scope:compiler` | `src/compiler/**` | Compiler backend (medium priority) |
@@ -149,7 +149,7 @@ Auto-generated from file path to indicate which part of the codebase the item be
 fn generate_scope_tag(file_path: text) -> text:
     if file_path.starts_with("src/std/"):
         return "scope:stdlib"
-    elif file_path.starts_with("src/core/"):
+    elif file_path.starts_with("src/compiler_core/"):
         return "scope:core"
     elif file_path.starts_with("src/lib/"):
         return "scope:lib"

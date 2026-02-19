@@ -20,7 +20,7 @@ Both clusters build on a solid existing foundation and require careful but bound
 
 ## Status: What Already Exists
 
-### Parser / AST Foundation (verified in `src/core/`)
+### Parser / AST Foundation (verified in `src/compiler_core/`)
 
 | Feature | Token | AST Tag | File | Status |
 |---------|-------|---------|------|--------|
@@ -186,7 +186,7 @@ Current highest: `TOK_KW_MIXIN = 203`
 | TOK_KW_RECEIVE | 206 | `receive:` Erlang mailbox receive block |
 | TOK_KW_AFTER | 207 | `after TIMEOUT:` timeout arm inside `receive:` |
 
-These follow the `200+` keyword range convention consistent with `src/core/tokens.spl`.
+These follow the `200+` keyword range convention consistent with `src/compiler_core/tokens.spl`.
 
 ## AST Node Plan
 
@@ -207,11 +207,11 @@ Current highest STMT tag: `STMT_STATIC_FOR = 17` (inferred from existing STMT_ER
 **Priority:** HIGH — enables all downstream work
 
 **Files to modify:**
-- `src/core/tokens.spl` — add TOK_KW_BIND (204), TOK_KW_CE (205), TOK_KW_RECEIVE (206), TOK_KW_AFTER (207)
-- `src/core/lexer.spl` — add keyword recognition for `bind`, `ce`, `receive`, `after`
-- `src/core/ast.spl` — add STMT_RECEIVE = 18, STMT_BIND = 19, DECL_CE = 11
-- `src/core/parser.spl` — add productions for `receive:`, `bind x = expr`, `ce NAME:`
-- `src/core/entity/token/kinds.spl` — sync new token constants
+- `src/compiler_core/tokens.spl` — add TOK_KW_BIND (204), TOK_KW_CE (205), TOK_KW_RECEIVE (206), TOK_KW_AFTER (207)
+- `src/compiler_core/lexer.spl` — add keyword recognition for `bind`, `ce`, `receive`, `after`
+- `src/compiler_core/ast.spl` — add STMT_RECEIVE = 18, STMT_BIND = 19, DECL_CE = 11
+- `src/compiler_core/parser.spl` — add productions for `receive:`, `bind x = expr`, `ce NAME:`
+- `src/compiler_core/entity/token/kinds.spl` — sync new token constants
 
 **Parser production for `receive:`:**
 ```
@@ -255,9 +255,9 @@ parse_ce_block():
 ```
 
 **Tests to create:**
-- `test/unit/core/receive_spec.spl` — receive parsing, after arm, timeout variants
-- `test/unit/core/bind_stmt_spec.spl` — bind statement parsing, CE context
-- `test/unit/core/ce_block_spec.spl` — named CE block parsing, desugaring output
+- `test/unit/compiler_core/receive_spec.spl` — receive parsing, after arm, timeout variants
+- `test/unit/compiler_core/bind_stmt_spec.spl` — bind statement parsing, CE context
+- `test/unit/compiler_core/ce_block_spec.spl` — named CE block parsing, desugaring output
 
 ### Phase 2 — Mailbox + Monitor Library
 
@@ -430,8 +430,8 @@ val config = result_ce_bind(file_read("config.sdn"), fn(raw):
 **Priority:** MEDIUM — makes `receive:` and `ce:` actually execute
 
 **Files to modify:**
-- `src/core/interpreter/eval.spl` — add handlers for STMT_RECEIVE, STMT_BIND; CE desugaring pass
-- `src/core/entity/token/kinds.spl` — add new token constants
+- `src/compiler_core/interpreter/eval.spl` — add handlers for STMT_RECEIVE, STMT_BIND; CE desugaring pass
+- `src/compiler_core/entity/token/kinds.spl` — add new token constants
 
 **`receive:` eval sketch:**
 ```simple
@@ -605,9 +605,9 @@ All new features respect the JSF AV C++ / NASA Power of Ten constraints from `do
 | `src/std/result_ce.spl` | 4 | ResultCE builder (Result monad) |
 | `src/std/option_ce.spl` | 4 | OptionCE builder (Option monad) |
 | `src/std/seq_ce.spl` | 4 | SeqCE builder (sequence/generator) |
-| `test/unit/core/receive_spec.spl` | 1 | receive: parser tests |
-| `test/unit/core/bind_stmt_spec.spl` | 1 | bind statement parser tests |
-| `test/unit/core/ce_block_spec.spl` | 1 | ce NAME: parser tests |
+| `test/unit/compiler_core/receive_spec.spl` | 1 | receive: parser tests |
+| `test/unit/compiler_core/bind_stmt_spec.spl` | 1 | bind statement parser tests |
+| `test/unit/compiler_core/ce_block_spec.spl` | 1 | ce NAME: parser tests |
 | `test/unit/std/mailbox_spec.spl` | 2 | Mailbox library tests |
 | `test/unit/std/monitor_spec.spl` | 2 | Monitor library tests |
 | `test/unit/std/gen_server_spec.spl` | 3 | GenServer behaviour tests |
@@ -619,12 +619,12 @@ All new features respect the JSF AV C++ / NASA Power of Ten constraints from `do
 
 | File | Phase | Change |
 |------|-------|--------|
-| `src/core/tokens.spl` | 1 | Add TOK_KW_BIND=204, TOK_KW_CE=205, TOK_KW_RECEIVE=206, TOK_KW_AFTER=207 |
-| `src/core/lexer.spl` | 1 | Recognize `bind`, `ce`, `receive`, `after` as keywords |
-| `src/core/ast.spl` | 1 | Add STMT_RECEIVE=18, STMT_BIND=19, DECL_CE=11 |
-| `src/core/parser.spl` | 1 | Add productions for receive:, bind x = expr, ce NAME: |
-| `src/core/interpreter/eval.spl` | 5 | Handlers for STMT_RECEIVE, STMT_BIND, DECL_CE desugaring |
-| `src/core/entity/token/kinds.spl` | 5 | Sync new token constants |
+| `src/compiler_core/tokens.spl` | 1 | Add TOK_KW_BIND=204, TOK_KW_CE=205, TOK_KW_RECEIVE=206, TOK_KW_AFTER=207 |
+| `src/compiler_core/lexer.spl` | 1 | Recognize `bind`, `ce`, `receive`, `after` as keywords |
+| `src/compiler_core/ast.spl` | 1 | Add STMT_RECEIVE=18, STMT_BIND=19, DECL_CE=11 |
+| `src/compiler_core/parser.spl` | 1 | Add productions for receive:, bind x = expr, ce NAME: |
+| `src/compiler_core/interpreter/eval.spl` | 5 | Handlers for STMT_RECEIVE, STMT_BIND, DECL_CE desugaring |
+| `src/compiler_core/entity/token/kinds.spl` | 5 | Sync new token constants |
 
 ---
 
@@ -640,15 +640,15 @@ The safety profile notes are consistent with the baseline constraints in the res
 
 ## Next Steps (Checklist)
 
-- [x] Phase 1: Add four new tokens to `src/core/tokens.spl`
-- [x] Phase 1: Update `src/core/lexer.spl` keyword table
-- [x] Phase 1: Add STMT_RECEIVE, STMT_BIND, DECL_CE to `src/core/ast.spl`
+- [x] Phase 1: Add four new tokens to `src/compiler_core/tokens.spl`
+- [x] Phase 1: Update `src/compiler_core/lexer.spl` keyword table
+- [x] Phase 1: Add STMT_RECEIVE, STMT_BIND, DECL_CE to `src/compiler_core/ast.spl`
 - [x] Phase 1: Add parser productions for `receive:`, `bind`, `ce NAME:`
 - [x] Phase 1: Write tests — receive_spec, bind_stmt_spec, ce_block_spec
 - [x] Phase 2: Implement `src/std/mailbox.spl` + tests
 - [x] Phase 2: Implement `src/std/monitor.spl` + tests
 - [x] Phase 3: Implement `src/std/gen_server.spl`, `gen_statem.spl`, `gen_event.spl` + tests
 - [x] Phase 4: Implement CE builder protocol + result_ce, option_ce, seq_ce
-- [x] Phase 5: Add eval handlers in `src/core/interpreter/eval.spl`
-- [x] Phase 5: Sync `src/core/entity/token/kinds.spl`
+- [x] Phase 5: Add eval handlers in `src/compiler_core/interpreter/eval.spl`
+- [x] Phase 5: Sync `src/compiler_core/entity/token/kinds.spl`
 - [x] Run full test suite after each phase — zero regressions required

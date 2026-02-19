@@ -16,9 +16,9 @@ Successfully unblocked the type system test suite by fixing critical parse error
 ### 1. Core Library Fixes (Phase 1) ✅
 **Files Fixed:**
 - `src/lib/std/src/prelude.spl` - Added `panic` export from `bare.startup`
-- `src/lib/std/src/core/error.spl` - Fixed impl syntax (3 occurrences)
+- `src/lib/std/src/compiler_core/error.spl` - Fixed impl syntax (3 occurrences)
   - Changed `impl GenericError: Error:` → `impl Error for GenericError:`
-- `src/lib/std/src/core/result.spl` - Fixed `nil` → `None` (3 occurrences)
+- `src/lib/std/src/compiler_core/result.spl` - Fixed `nil` → `None` (3 occurrences)
 - `src/lib/std/src/units/` - Disabled directory (unit family syntax not supported)
 
 **Impact:** Core type system infrastructure (Option, Result, Error) now parses correctly.
@@ -189,8 +189,8 @@ Success rate: 88.3%
 
 ### Core Library (3 files)
 - `src/lib/std/src/prelude.spl` - Added panic export
-- `src/lib/std/src/core/error.spl` - Fixed impl syntax
-- `src/lib/std/src/core/result.spl` - Fixed nil → None
+- `src/lib/std/src/compiler_core/error.spl` - Fixed impl syntax
+- `src/lib/std/src/compiler_core/result.spl` - Fixed nil → None
 
 ### Directories Disabled (9 directories)
 - `src/lib/std/src/units.disabled/`

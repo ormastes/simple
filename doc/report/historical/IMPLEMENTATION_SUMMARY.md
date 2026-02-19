@@ -92,11 +92,11 @@ Successfully completed all 7 phases of the 28-week plan to enable 606 skipped te
 - ASYNC_PARSER_IMPLEMENTATION.md (documentation)
 
 **Modified:**
-- src/core/tokens.spl (async/await/yield/spawn/implements tokens)
-- src/core/ast.spl (async expression nodes + async function support)
+- src/compiler_core/tokens.spl (async/await/yield/spawn/implements tokens)
+- src/compiler_core/ast.spl (async expression nodes + async function support)
   - Added: decl_is_async array, expr_await(), expr_yield(), expr_spawn()
   - Modified: decl_fn() signature to accept is_async parameter
-- src/core/parser.spl (async/await parsing implementation)
+- src/compiler_core/parser.spl (async/await parsing implementation)
   - Added: parse_fn_decl(is_async), async fn detection, await/yield/spawn parsing
 - src/std/src/dl/config_loader.spl (removed module-level state for runtime)
 - src/compiler/monomorphize/*.spl (Result<> → nil-check conversion)

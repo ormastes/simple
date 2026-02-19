@@ -30,7 +30,7 @@ git clone https://github.com/yourorg/simple.git
 cd simple
 
 # 3. Bootstrap from scratch
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # 4. Verify
 bin/simple --version
@@ -79,18 +79,18 @@ kill $(cat /tmp/freebsd-qemu.pid)
 
 | Script | Platform |
 |--------|----------|
-| `scripts/bootstrap-from-scratch-freebsd.sh` | **FreeBSD native** (this file!) |
-| `scripts/bootstrap-from-scratch.sh` | Linux/macOS |
-| `scripts/bootstrap-from-scratch.bat` | Windows |
+| `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64` | **FreeBSD native** (this file!) |
+| `scripts/bootstrap/bootstrap-from-scratch.sh` | Linux/macOS |
+| `scripts/bootstrap/bootstrap-from-scratch.bat` | Windows |
 
 **Usage:**
 
 ```bash
 # FreeBSD (native)
-./scripts/bootstrap-from-scratch-freebsd.sh
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64
 
 # Options
-./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify --jobs=8
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --skip-verify --jobs=8
 ```
 
 ### Testing Scripts
@@ -198,7 +198,7 @@ bin/simple test test/std/array_spec.spl
 
 ### Native FreeBSD Bootstrap
 
-**Script:** `scripts/bootstrap-from-scratch-freebsd.sh`
+**Script:** `scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 
 **Steps:**
 
@@ -243,7 +243,7 @@ sudo tar -xzf ~/freebsd-sysroot.tar.gz --strip-components=1
 
 ```bash
 cmake seed/ \
-    -DCMAKE_TOOLCHAIN_FILE=seed/cmake/toolchains/freebsd-x86_64.cmake \
+    -DCMAKE_TOOLCHAIN_FILE=src/compiler_seed/cmake/toolchains/freebsd-x86_64.cmake \
     -DCMAKE_BUILD_TYPE=Release
 
 make -j$(nproc)
@@ -338,7 +338,7 @@ pkg install llvm
 This is sometimes expected. Skip verification:
 
 ```bash
-./scripts/bootstrap-from-scratch-freebsd.sh --skip-verify
+./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64 --skip-verify
 ```
 
 ### Linuxulator Issues
@@ -449,7 +449,7 @@ bin/release/simple scripts/test_windows_vm.spl
 ```
 simple/
 ├── scripts/
-│   ├── bootstrap-from-scratch-freebsd.sh  # FreeBSD native bootstrap (NEW!)
+│   ├── bootstrap-from-scratch.sh --target=freebsd-x86_64  # FreeBSD native bootstrap (NEW!)
 │   ├── setup_freebsd_vm.spl               # VM setup script
 │   └── test_freebsd_qemu.spl              # FreeBSD testing script
 ├── seed/
@@ -538,7 +538,7 @@ pkg install linux-c7
 - [ ] SSH into FreeBSD VM
 - [ ] Install: `pkg install cmake llvm gmake git`
 - [ ] Clone Simple repository
-- [ ] Run: `./scripts/bootstrap-from-scratch-freebsd.sh`
+- [ ] Run: `./scripts/bootstrap/bootstrap-from-scratch.sh --target=freebsd-x86_64`
 - [ ] Verify: `bin/simple --version`
 
 ### Testing

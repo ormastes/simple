@@ -7,24 +7,24 @@
 
 ## Executive Summary
 
-Extract **67 files (~15,000 lines)** of shared code from `src/compiler/` and `src/compiler_core/` into a new `src/compiler_shared/` module. Both compilers delegate to the shared module using import + re-export pattern (proven by existing `src/llvm_shared/`). Estimated **~11,780 lines of duplication eliminated**, reducing codebase duplication from 5.1% to ~3.2%.
+Extract **67 files (~15,000 lines)** of shared code from `src/compiler/` and `src/compiler_core_legacy/` into a new `src/compiler_shared/` module. Both compilers delegate to the shared module using import + re-export pattern (proven by existing `src/shared/llvm/`). Estimated **~11,780 lines of duplication eliminated**, reducing codebase duplication from 5.1% to ~3.2%.
 
 ## Background
 
 ### Bootstrap Chain
 ```
-seed.cpp → compiler_core/ → compiler/ → production
+seed.cpp → compiler_core_legacy/ → compiler/ → production
 ```
 
-- **compiler_core/** (441 files, 97K lines): Seed-compilable, desugared free functions, manual Option handling (`has_X: bool + X: type`)
+- **compiler_core_legacy/** (441 files, 97K lines): Seed-compilable, desugared free functions, manual Option handling (`has_X: bool + X: type`)
 - **compiler/** (436 files, 140K lines): Full-featured, `impl` blocks, modern Option (`type?`), lambdas, tuple destructuring
 - **Shared filenames:** 398 files (90%), of which 98% differ
 
 ### Systematic Differences
 
-The differences between compiler/ and compiler_core/ are mechanical desugaring transforms:
+The differences between compiler/ and compiler_core_legacy/ are mechanical desugaring transforms:
 
-| Pattern | compiler/ (modern) | compiler_core/ (seed) |
+| Pattern | compiler/ (modern) | compiler_core_legacy/ (seed) |
 |---------|-------------------|----------------------|
 | Methods | `impl Struct: fn method()` | `fn struct_method(self: Struct)` |
 | Options | `field: Type?` | `has_field: bool` + `field: Type` |
@@ -36,10 +36,10 @@ The differences between compiler/ and compiler_core/ are mechanical desugaring t
 
 ### Import Pattern (Proven)
 
-`src/llvm_shared/` already demonstrates cross-compiler sharing:
+`src/shared/llvm/` already demonstrates cross-compiler sharing:
 ```simple
-# src/compiler_core/backend/llvm_backend.spl
-use llvm_shared.tools (find_llc, find_opt, llc_available, opt_available)
+# src/compiler_core_legacy/backend/llvm_backend.spl
+use shared.llvm.tools (find_llc, find_opt, llc_available, opt_available)
 ```
 No symlinks needed — resolves via `src/` directory structure.
 
@@ -99,7 +99,7 @@ All `compiler_shared/` code must compile through seed.cpp:
 use compiler_shared.error_explanations.{all_exported_symbols}
 export all_exported_symbols
 
-# src/compiler_core/error_explanations.spl (delegation wrapper)
+# src/compiler_core_legacy/error_explanations.spl (delegation wrapper)
 use compiler_shared.error_explanations.{all_exported_symbols}
 export all_exported_symbols
 ```
@@ -107,12 +107,12 @@ export all_exported_symbols
 ### Steps
 
 1. Create `src/compiler_shared/` directory structure
-2. Create `src/compiler_shared/mod.spl` (re-export hub, following `llvm_shared/mod.spl` pattern)
+2. Create `src/compiler_shared/mod.spl` (re-export hub, following `shared/llvm/mod.spl` pattern)
 3. For each of the 13 files:
    a. Read the identical file to identify all exports
    b. Copy to `src/compiler_shared/<same-relative-path>.spl`
    c. Replace `src/compiler/<path>.spl` with import+re-export delegation
-   d. Replace `src/compiler_core/<path>.spl` with import+re-export delegation
+   d. Replace `src/compiler_core_legacy/<path>.spl` with import+re-export delegation
 4. Run `bin/release/simple test` — verify all tests pass
 
 ---
@@ -120,7 +120,7 @@ export all_exported_symbols
 ## Batch 2: Near-Identical Files (16 files, ~4,863 lines)
 
 **Risk:** LOW — differences are <15%, all mechanical
-**Strategy:** Use `compiler_core/` version as shared base (already seed-compatible), thin wrappers in both compilers
+**Strategy:** Use `compiler_core_legacy/` version as shared base (already seed-compatible), thin wrappers in both compilers
 
 ### Files
 
@@ -145,10 +145,10 @@ export all_exported_symbols
 
 ### Delegation Pattern (Batch 2)
 
-For files where compiler/ has `impl` blocks that compiler_core/ desugars to free functions:
+For files where compiler/ has `impl` blocks that compiler_core_legacy/ desugars to free functions:
 
 ```simple
-# src/compiler_shared/mir_json.spl (seed-compatible base from compiler_core/)
+# src/compiler_shared/mir_json.spl (seed-compatible base from compiler_core_legacy/)
 # All functions as free functions, no impl blocks
 fn mirjson_serialize(self: MirJson, ...) -> text:
     ...
@@ -165,7 +165,7 @@ impl MirJson:
         mirjson_serialize_block(self, ...)
 export MirJson
 
-# src/compiler_core/mir_json.spl (direct re-export)
+# src/compiler_core_legacy/mir_json.spl (direct re-export)
 use compiler_shared.mir_json.{mirjson_serialize, mirjson_serialize_block, ...}
 export mirjson_serialize, mirjson_serialize_block, ...
 ```
@@ -174,11 +174,11 @@ export mirjson_serialize, mirjson_serialize_block, ...
 
 1. For each of the 16 files:
    a. Diff both versions to confirm <15% mechanical differences
-   b. Take `compiler_core/` version as shared base (already free functions)
+   b. Take `compiler_core_legacy/` version as shared base (already free functions)
    c. Fix any seed-incompatible patterns (verify no `type?`, no lambdas)
    d. Move to `src/compiler_shared/<path>.spl`
    e. Create compiler/ wrapper with `impl` delegation (where applicable)
-   f. Create compiler_core/ wrapper as re-export
+   f. Create compiler_core_legacy/ wrapper as re-export
 2. Run `bin/release/simple test` after each sub-batch (4 files at a time)
 
 ---
@@ -235,7 +235,7 @@ impl ElfWriter:
     fn write_debug_info(...):  # compiler-only extension
         ...
 
-# src/compiler_core/backend/native/elf_writer.spl
+# src/compiler_core_legacy/backend/native/elf_writer.spl
 # Imports shared + keeps any core-specific extensions
 use compiler_shared.backend.native.elf_writer.{elf_write_header, elf_write_section, ...}
 fn elfwriter_write_header(self: ElfWriter) -> [i64]:
@@ -248,7 +248,7 @@ fn elfwriter_write_header(self: ElfWriter) -> [i64]:
    a. Diff both versions to identify shared vs diverged sections
    b. Extract shared functions into `compiler_shared/` (seed-compatible free functions)
    c. compiler/ keeps `impl` wrappers delegating to shared + its unique extensions
-   d. compiler_core/ keeps free-function wrappers delegating to shared + its unique extensions
+   d. compiler_core_legacy/ keeps free-function wrappers delegating to shared + its unique extensions
 2. Run tests after each file group (native backend: 7 files, blocks: 5 files, etc.)
 
 ---
@@ -357,7 +357,7 @@ Each batch is independently verifiable. If a batch introduces failures:
 |--------|--------|-------|
 | Intentional duplication | 31,700 lines | ~19,920 lines |
 | Duplication rate | 5.1% | ~3.2% |
-| compiler_core/ size | 97,057 lines | ~85,277 lines |
+| compiler_core_legacy/ size | 97,057 lines | ~85,277 lines |
 | compiler/ size | 140,315 lines | ~135,815 lines |
 | compiler_shared/ size (new) | 0 lines | ~14,990 lines |
 
@@ -367,6 +367,6 @@ Each batch is independently verifiable. If a batch introduces failures:
 
 - **Prerequisite analysis:** `doc/report/duplication_status_full_2026-02-16.md`
 - **Previous dedup work:** `doc/report/semantic_deduplication_complete_2026-02-16.md`
-- **Import pattern precedent:** `src/llvm_shared/mod.spl`
+- **Import pattern precedent:** `src/shared/llvm/mod.spl`
 - **Delegation pattern:** `src/app/desugar/forwarding.spl` (alias-based forwarding sugar)
 - **No-inheritance research:** `doc/research/no_inheritance_ergonomics_2026-02-16.md`

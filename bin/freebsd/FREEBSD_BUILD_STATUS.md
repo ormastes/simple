@@ -48,7 +48,7 @@ This will:
 
 | Approach | Plan Suggestion | Actual Status |
 |----------|----------------|---------------|
-| Native C backend (native.spl) | Generate C from compiler_core | ❌ Won't work - native.spl designed for simple programs, not 439-file compiler |
+| Native C backend (native.spl) | Generate C from compiler_core_legacy | ❌ Won't work - native.spl designed for simple programs, not 439-file compiler |
 | FreeBSD seed_cpp | Not mentioned | ✓ **Already exists**, works for <50 file programs |
 | Cross-compilation | Mentioned as fallback | ✓ **Already done**, binaries at build/freebsd/ |
 | SSH + VM compilation | Required for plan | ⏳ **Waiting for manual SSH config** |
@@ -98,7 +98,7 @@ ls -lh bin/freebsd/simple  # 79KB, FreeBSD x86-64, ready to use
 
 ## ⚠️ Known Limitations
 
-1. **seed_cpp SEGFAULT with 439 files**: seed_cpp cannot handle the full compiler_core
+1. **seed_cpp SEGFAULT with 439 files**: seed_cpp cannot handle the full compiler_core_legacy
    in one go (design limitation, not bug)
 2. **native.spl not suitable**: Designed for simple programs, lacks features needed
    for full compiler
@@ -114,7 +114,7 @@ ls -lh bin/freebsd/simple  # 79KB, FreeBSD x86-64, ready to use
 
 ## 📝 Notes
 
-- The plan's approach of using native.spl to compile compiler_core won't work
+- The plan's approach of using native.spl to compile compiler_core_legacy won't work
   because native.spl is designed for simple programs, not the complex 439-file compiler
 - The FreeBSD seed_cpp was already built via cross-compilation and is ready to use
 - Incremental building (core → full) is the correct approach for full compiler

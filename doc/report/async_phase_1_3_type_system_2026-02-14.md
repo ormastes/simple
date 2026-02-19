@@ -89,7 +89,7 @@ val add = \x, y: x + y
 
 ### Step 1: Core Type Constants (✅ COMPLETE)
 
-**File:** `src/core/types.spl`
+**File:** `src/compiler_core/types.spl`
 
 #### Added Type Constants
 
@@ -140,7 +140,7 @@ export TYPE_FUTURE, TYPE_POLL, TYPE_TASK
 
 ### Test Integration
 
-**File:** `test/unit/core/types_spec.spl`
+**File:** `test/unit/compiler_core/types_spec.spl`
 
 Added two new test cases to existing "type tags" describe block:
 
@@ -207,13 +207,13 @@ bin/simple build
 
 ## Files Modified
 
-1. **src/core/types.spl** (+15 lines)
+1. **src/compiler_core/types.spl** (+15 lines)
    - Added TYPE_FUTURE, TYPE_POLL, TYPE_TASK constants
    - Updated type_tag_name() with async types
    - Updated type_tag_to_c() with C type mappings
    - Exported new constants
 
-2. **test/unit/core/types_spec.spl** (+12 lines)
+2. **test/unit/compiler_core/types_spec.spl** (+12 lines)
    - Added async type tag name tests
    - Added async type C mapping tests
 
@@ -231,7 +231,7 @@ bin/simple build
 ## Changes Summary
 
 ```diff
-# src/core/types.spl
+# src/compiler_core/types.spl
 +val TYPE_FUTURE = 20
 +val TYPE_POLL = 21
 +val TYPE_TASK = 22
@@ -254,7 +254,7 @@ bin/simple build
 ```
 
 ```diff
-# test/unit/core/types_spec.spl
+# test/unit/compiler_core/types_spec.spl
 +        it "maps async type tag names":
 +            expect(type_tag_name(TYPE_FUTURE)).to_equal("Future")
 +            expect(type_tag_name(TYPE_POLL)).to_equal("Poll")
@@ -274,7 +274,7 @@ bin/simple build
 
 **Step 2: Runtime C Type Definitions**
 
-File: `seed/runtime.h`
+File: `src/compiler_seed/runtime.h`
 
 Add C struct definitions:
 ```c
@@ -300,7 +300,7 @@ typedef struct {
 
 **Step 3: Runtime C Function Stubs**
 
-File: `seed/runtime.c`
+File: `src/compiler_seed/runtime.c`
 
 Add basic functions:
 ```c
@@ -371,5 +371,5 @@ Successfully integrated async type constants into the core type system. This fou
 - `doc/feature/async_implementation_status.md` - Comprehensive status (NEW)
 - `doc/plan/async_await_implementation_plan.md` - Full roadmap
 - `doc/design/async_validation_status.md` - Validation design
-- `src/core/types.spl` - Type system (MODIFIED)
-- `test/unit/core/types_spec.spl` - Type tests (MODIFIED)
+- `src/compiler_core/types.spl` - Type system (MODIFIED)
+- `test/unit/compiler_core/types_spec.spl` - Type tests (MODIFIED)

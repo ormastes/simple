@@ -1,7 +1,7 @@
 # Phase 2: Core Duplication Analysis
 
 **Date:** 2026-02-14
-**Scope:** src/core/ directory (36 files, 15,691 lines)
+**Scope:** src/compiler_core/ directory (36 files, 15,691 lines)
 **Analysis Method:** Manual pattern analysis + grep patterns (tool-based scanning not applicable)
 **Status:** Completed
 
@@ -13,7 +13,7 @@ Found **6 major duplication groups** affecting ~1,200 lines (7.7% of core):
 
 | Group | Type | Impact | Files | Recommendation |
 |-------|------|--------|-------|-----------------|
-| Test Helpers | Function | 25 lines | 2 | Consolidate to `src/core/test_helpers.spl` |
+| Test Helpers | Function | 25 lines | 2 | Consolidate to `src/compiler_core/test_helpers.spl` |
 | Value Bridge APIs | Function | 28 lines | 1 | Rename `core_val_*` → `val_*` (duplicate wrappers) |
 | Error State Tracking | Pattern | 27 lines | 3 | Consolidate to shared error module |
 | Operator Type Checks | Code | 120 lines | 1 (ops.spl) | Extract pattern to macro-like utility |
@@ -28,7 +28,7 @@ Found **6 major duplication groups** affecting ~1,200 lines (7.7% of core):
 
 ### Group 1: Test Helper Functions (MEDIUM - Easy Fix)
 
-**Files:** `src/core/test_core.spl`, `src/core/test_lang_basics.spl`
+**Files:** `src/compiler_core/test_core.spl`, `src/compiler_core/test_lang_basics.spl`
 
 **Pattern:** Identical test assertion functions
 
@@ -69,7 +69,7 @@ fn check_eq_float(label: text, actual: f64, expected: f64):
 
 **Refactoring Recommendation:**
 
-1. Create `src/core/test_helpers.spl` with all 5 functions
+1. Create `src/compiler_core/test_helpers.spl` with all 5 functions
 2. Update both test files to import: `use core.test_helpers.{check_eq_int, check_eq_str, check_eq_bool, check_eq_float, check_true}`
 3. **Difficulty:** Low (no dependencies, only printing)
 4. **Savings:** 25 lines per file (50 lines consolidated to 30)
@@ -78,7 +78,7 @@ fn check_eq_float(label: text, actual: f64, expected: f64):
 
 ### Group 2: Value Bridge API Wrappers (TRIVIAL - Zero-Cost Fix)
 
-**Files:** `src/core/interpreter/value.spl` (lines 278-300)
+**Files:** `src/compiler_core/interpreter/value.spl` (lines 278-300)
 
 **Pattern:** Simple pass-through wrappers with `core_val_*` prefix
 
@@ -128,7 +128,7 @@ fn core_val_is_truthy_i(vid: i64) -> i64:
 
 ### Group 3: Error State Tracking (LOW - Pattern Consolidation)
 
-**Files:** `src/core/interpreter/eval.spl`, `src/core/interpreter/ops.spl`, `src/core/error.spl`
+**Files:** `src/compiler_core/interpreter/eval.spl`, `src/compiler_core/interpreter/ops.spl`, `src/compiler_core/error.spl`
 
 **Pattern:** Module-level error state with `*_set_error`, `*_get_error`, `*_clear_error` functions
 
@@ -181,7 +181,7 @@ fn ops_set_error(msg: text):
 1. Decide on unified error strategy:
    - **Option A:** Single module-level error (easier for seed compilation, but loses per-module context)
    - **Option B:** Keep module-local errors, extract to error template documentation
-   - **Option C:** Create `src/core/error_state.spl` with reusable functions (advanced)
+   - **Option C:** Create `src/compiler_core/error_state.spl` with reusable functions (advanced)
 
 2. **For Phase 2:** Document pattern consistency
 3. **For Phase 3:** Consider consolidation after resolving seed compilation constraints
@@ -189,13 +189,13 @@ fn ops_set_error(msg: text):
 **Difficulty:** Medium (affects module boundaries, JIT bridge state)
 **Savings:** 10-15 lines if fully consolidated
 
-**Related:** See `src/core/error.spl` (8 lines) for error reporting
+**Related:** See `src/compiler_core/error.spl` (8 lines) for error reporting
 
 ---
 
 ### Group 4: Operator Type Checking Pattern (MEDIUM - Extract Utility)
 
-**Files:** `src/core/interpreter/ops.spl` (100+ lines)
+**Files:** `src/compiler_core/interpreter/ops.spl` (100+ lines)
 
 **Pattern:** Repetitive type checking in binary operations
 
@@ -256,7 +256,7 @@ fn val_sub(a: i64, b: i64) -> i64:
 1. **Extract type-check utility:**
 
 ```simple
-# Create src/core/interpreter/type_checks.spl
+# Create src/compiler_core/interpreter/type_checks.spl
 fn check_int_int(a: i64, b: i64) -> bool:
     val_get_kind(a) == VAL_INT and val_get_kind(b) == VAL_INT
 
@@ -277,7 +277,7 @@ fn check_float_float(a: i64, b: i64) -> bool:
 
 ### Group 5: Constructor Pattern (STRUCT - Consolidation Candidate)
 
-**Files:** `src/core/ast_types.spl`, `src/core/hir_types.spl`, `src/core/mir_types.spl`
+**Files:** `src/compiler_core/ast_types.spl`, `src/compiler_core/hir_types.spl`, `src/compiler_core/mir_types.spl`
 
 **Pattern:** Struct + factory function in each *_types.spl file
 
@@ -343,7 +343,7 @@ fn make_core_mir_inst(kind: i64) -> CoreMirInst:
 
 ### Group 6: Comparison Operations (ALGORITHM - Pattern Consolidation)
 
-**Files:** `src/core/interpreter/ops.spl` (lines 116-168)
+**Files:** `src/compiler_core/interpreter/ops.spl` (lines 116-168)
 
 **Pattern:** Comparison operations with identical structure
 
@@ -450,7 +450,7 @@ fn val_lt(a: i64, b: i64) -> i64:
 Let me verify:
 
 ```bash
-wc -l src/core/compiler/c_codegen.spl src/core/compiler/driver.spl
+wc -l src/compiler_core/compiler/c_codegen.spl src/compiler_core/compiler/driver.spl
 ```
 
 Result: ~500 lines combined.
@@ -494,13 +494,13 @@ Result: ~500 lines combined.
 
 ### Phase 2 (Current)
 
-1. **Test Helpers:** Extract to `src/core/test_helpers.spl` (Low effort, high clarity)
+1. **Test Helpers:** Extract to `src/compiler_core/test_helpers.spl` (Low effort, high clarity)
 2. **Error Pattern Documentation:** Add to `doc/architecture/interpreter_design.md`
 3. **Bridge API Documentation:** Mark `core_val_*` functions with `@tag:internal` comments
 
 ### Phase 3 (Future)
 
-1. **Operator Type Checks:** Extract type-checking utilities to `src/core/interpreter/type_checks.spl`
+1. **Operator Type Checks:** Extract type-checking utilities to `src/compiler_core/interpreter/type_checks.spl`
 2. **Error State Consolidation:** Consider unified error tracking if interpreter/ops/eval become intertwined
 3. **Comparison Dispatch:** Consolidate comparison ops under single dispatch table
 
@@ -526,18 +526,18 @@ Result: ~500 lines combined.
 
 **High-Priority Review:**
 
-- `/home/ormastes/dev/pub/simple/src/core/test_core.spl`
-- `/home/ormastes/dev/pub/simple/src/core/test_lang_basics.spl`
-- `/home/ormastes/dev/pub/simple/src/core/interpreter/value.spl`
-- `/home/ormastes/dev/pub/simple/src/core/interpreter/ops.spl`
-- `/home/ormastes/dev/pub/simple/src/core/interpreter/eval.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/test_core.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/test_lang_basics.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/value.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/ops.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/interpreter/eval.spl`
 
 **Well-Designed (No Changes):**
 
-- `/home/ormastes/dev/pub/simple/src/core/ast_types.spl`
-- `/home/ormastes/dev/pub/simple/src/core/hir_types.spl`
-- `/home/ormastes/dev/pub/simple/src/core/mir_types.spl`
-- `/home/ormastes/dev/pub/simple/src/core/lexer.spl` + `lexer_struct.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/ast_types.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/hir_types.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/mir_types.spl`
+- `/home/ormastes/dev/pub/simple/src/compiler_core/lexer.spl` + `lexer_struct.spl`
 
 ---
 

@@ -6,7 +6,7 @@
 
 ## Location 1: Main Interpreter
 
-**File:** `src/core/interpreter/eval.spl`
+**File:** `src/compiler_core/interpreter/eval.spl`
 **Line:** 1769
 **Function:** `eval_module()`
 
@@ -55,7 +55,7 @@ fn eval_module() -> i64:
 
 ## Location 2: Module Loader
 
-**File:** `src/core/interpreter/module_loader.spl`
+**File:** `src/compiler_core/interpreter/module_loader.spl`
 **Line:** 215
 **Function:** `register_module_functions()`
 
@@ -122,7 +122,7 @@ fn register_module_functions():
 ### `func_table_register(name: text, decl_id: i64)`
 
 **Purpose:** Registers a function in the global function lookup table
-**Location:** `src/core/interpreter/env.spl` (or similar)
+**Location:** `src/compiler_core/interpreter/env.spl` (or similar)
 **Effect:** Makes function callable via `name(...)`
 
 ### `func_register_return_type(name: text, type_id: i64)`

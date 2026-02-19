@@ -93,8 +93,8 @@ describe("DateTime"):
 
 **Status:** 🔄 In Progress (1 feature) + ✅ Complete (1 feature)
 **Files:**
-- Implementation: `simple/std_lib/src/core/math.spl` (330 lines)
-- Tests: `simple/std_lib/test/unit/core/math_spec.spl` (220 lines)
+- Implementation: `simple/std_lib/src/compiler_core/math.spl` (330 lines)
+- Tests: `simple/std_lib/test/unit/compiler_core/math_spec.spl` (220 lines)
 
 **Features:**
 | ID | Feature | Status | Tests |
@@ -145,8 +145,8 @@ describe("Math module"):
 
 **Status:** ✅ Complete
 **Files:**
-- Implementation: `simple/std_lib/src/core/json.spl` (448 lines) - **Already existed**
-- Tests: `simple/std_lib/test/unit/core/json_spec.spl` (280 lines) - **NEW BDD tests**
+- Implementation: `simple/std_lib/src/compiler_core/json.spl` (448 lines) - **Already existed**
+- Tests: `simple/std_lib/test/unit/compiler_core/json_spec.spl` (280 lines) - **NEW BDD tests**
 
 **Features:**
 | ID | Feature | Status | Tests |
@@ -247,12 +247,12 @@ This creates **living documentation** where:
 
 ### New Implementation Files (2)
 1. `simple/std_lib/src/host/async_nogc_mut/datetime.spl` - 380 lines
-2. `simple/std_lib/src/core/math.spl` - 330 lines
+2. `simple/std_lib/src/compiler_core/math.spl` - 330 lines
 
 ### New Test Files (3)
 1. `simple/std_lib/test/unit/host/datetime_spec.spl` - 260 lines
-2. `simple/std_lib/test/unit/core/math_spec.spl` - 220 lines
-3. `simple/std_lib/test/unit/core/json_spec.spl` - 280 lines
+2. `simple/std_lib/test/unit/compiler_core/math_spec.spl` - 220 lines
+3. `simple/std_lib/test/unit/compiler_core/json_spec.spl` - 280 lines
 
 ### Modified Catalog Files (3)
 1. `simple/examples/datetime_features.spl` - Updated features #210-213

@@ -6,7 +6,7 @@
 ## Current Situation
 
 ### What Was Fixed
-✅ Implemented EXPR_SLICE evaluation in `src/core/interpreter/eval.spl`
+✅ Implemented EXPR_SLICE evaluation in `src/compiler_core/interpreter/eval.spl`
 ✅ Code changes complete and tested
 ✅ Build succeeds with no errors
 
@@ -23,7 +23,7 @@ The Simple language has a **two-tier architecture**:
    - Includes parser, evaluator, compiler, etc.
    - Changes to these files require rebuilding the runtime
 
-When we modified `src/core/interpreter/eval.spl`, we changed the SOURCE CODE.
+When we modified `src/compiler_core/interpreter/eval.spl`, we changed the SOURCE CODE.
 The runtime binary still has the OLD version compiled into it.
 
 ## Rebuild Options
@@ -72,7 +72,7 @@ cd seed
 gcc -o seed seed.c runtime.c -lm -lpthread
 
 # Use seed to compile Simple interpreter
-./seed ../src/core/interpreter/mod.spl -o ../bin/release/simple
+./seed ../src/compiler_core/interpreter/mod.spl -o ../bin/release/simple
 
 # Note: This is simplified - actual build is more complex
 ```

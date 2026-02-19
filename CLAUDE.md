@@ -197,18 +197,21 @@ See `doc/guide/syntax_quick_reference.md` for complete reference.
 
 ```
 src/
-  app/          # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
-  lib/          # Libraries (database)
-  std/          # Standard library (spec, text, math, path, array, platform)
-  core/         # Core Simple library (tokens, types, ast, mir, lexer, parser)
-  compiler/     # Compiler source (seed, native, mdsoc)
-    mdsoc/      # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
-test/           # Test files (std, lib, app, compiler, benchmarks)
-doc/            # Documentation (report, design, guide, research, feature, test, bug)
-bin/            # Binaries (simple, release/simple)
-tools/          # Development tools (seed bootstrap compiler, docker containers)
-scripts/        # Bootstrap bash scripts (3 only)
-.claude/        # Agents, skills, templates
+  app/              # Applications (cli, build, mcp, mcp_jj, io, test_runner_new, desugar)
+  lib/              # Libraries (database)
+  std/              # Standard library (spec, text, math, path, array, platform)
+  compiler_core/    # Core (seed-compilable: lexer, parser, AST, AOP, interpreter, C codegen)
+  compiler_shared/  # Shared infra (treesitter, blocks, backend API, type system, MIR opt)
+  compiler/         # Full compiler (backends, HIR/MIR lowering, linker, loader, MDSOC)
+    mdsoc/          # Multi-Dimensional Separation of Concerns (virtual capsules, 3-tier visibility)
+    feature/        # MDSOC pipeline stages (typed port contracts)
+    transform/      # MDSOC stage boundary adapters (entity views)
+test/               # Test files (std, lib, app, compiler, benchmarks)
+doc/                # Documentation (report, design, guide, research, feature, test, bug)
+bin/                # Binaries (simple, release/simple)
+tools/              # Development tools (seed bootstrap compiler, docker containers)
+scripts/            # Bootstrap bash scripts (3 only)
+.claude/            # Agents, skills, templates
 ```
 
 **Detailed Structure:** See [`doc/architecture/file_class_structure.md`](doc/architecture/file_class_structure.md) for comprehensive codebase inventory (2,649 files, 623K lines, duplication analysis, refactoring recommendations).

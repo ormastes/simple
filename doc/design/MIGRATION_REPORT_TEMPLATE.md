@@ -121,7 +121,7 @@ Result: [N] passed; [N] failed; [N] ignored
 
 List any particularly important files that were modified:
 
-1. `src/core/types.spl` - [N] changes
+1. `src/compiler_core/types.spl` - [N] changes
    - Function generics: [N]
    - Type annotations: [N]
 
@@ -136,7 +136,7 @@ List any particularly important files that were modified:
 <summary>View all modified files ([N] total)</summary>
 
 ```
-src/core/types.spl
+src/compiler_core/types.spl
 src/api/handlers.spl
 src/utils/collections.spl
 [... full list ...]

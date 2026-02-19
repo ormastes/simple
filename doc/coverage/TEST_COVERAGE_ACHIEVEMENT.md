@@ -41,7 +41,7 @@ Successfully expanded test suite from **503 to 604 tests** (+101 tests, +20% inc
 7. Plus 2 more integration tests
 
 ### Phase 3: Unit Tests (87+ new)
-1. ✅ 48 auto-coverage tests (core/compiler/app/lib)
+1. ✅ 48 auto-coverage tests (compiler_core/compiler/app/lib)
 2. ✅ 30 comprehensive stdlib tests
 3. ✅ 8 targeted coverage tests
 4. ✅ CLI dispatch unit tests
@@ -147,7 +147,7 @@ bin/simple test
 bin/simple test --only-slow
 
 # Run specific category
-bin/simple test test/unit/core/
+bin/simple test test/unit/compiler_core/
 bin/simple test test/integration/
 bin/simple test test/unit/std/
 

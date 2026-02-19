@@ -5,35 +5,35 @@
 
 ## Executive Summary
 
-After eliminating 1,787 lines through semantic deduplication (Phases 1-4), the codebase contains **~31,700 lines** of intentional duplication across several categories. The largest category is the compiler/ vs compiler_core/ split (~30,000 lines), which serves a critical bootstrap purpose.
+After eliminating 1,787 lines through semantic deduplication (Phases 1-4), the codebase contains **~31,700 lines** of intentional duplication across several categories. The largest category is the compiler/ vs compiler_core_legacy/ split (~30,000 lines), which serves a critical bootstrap purpose.
 
 ## Duplication Categories
 
-### 1. Compiler Bootstrap Split (compiler/ vs compiler_core/)
+### 1. Compiler Bootstrap Split (compiler/ vs compiler_core_legacy/)
 
 **Status:** 🟡 ARCHITECTURAL (Partially Consolidatable)
 
 #### Statistics
-- **compiler_core/**: 441 files, 97,057 lines
+- **compiler_core_legacy/**: 441 files, 97,057 lines
 - **compiler/**: 436 files, 140,315 lines
 - **Shared filenames**: 398 files (90%)
-- **Unique to compiler_core**: 43 files
+- **Unique to compiler_core_legacy**: 43 files
 - **Unique to compiler**: 38 files
 - **Files that differ**: ~390 (98% of shared files)
 
 #### Purpose: Bootstrap Chain
 ```
-seed.cpp → compiler_core/ → compiler/ → production
+seed.cpp → compiler_core_legacy/ → compiler/ → production
 ```
 
-1. **Phase 0 (seed.cpp):** C++ seed compiler compiles compiler_core/
-2. **Phase 1 (compiler_core/):** Produces simple-v1 compiler
+1. **Phase 0 (seed.cpp):** C++ seed compiler compiles compiler_core_legacy/
+2. **Phase 1 (compiler_core_legacy/):** Produces simple-v1 compiler
 3. **Phase 2 (compiler/):** simple-v1 compiles full compiler
 4. **Phase 3 (production):** Full-featured compiler
 
 #### Key Differences
 
-**compiler_core/ (Seed-Compilable)**
+**compiler_core_legacy/ (Seed-Compilable)**
 ```simple
 # Manual Option handling (no ? syntax)
 struct FunctionDef:
@@ -83,7 +83,7 @@ src/
     utilities/         # String, math, collections
     patterns/          # Common patterns
 
-  compiler_core/       # Keep: 82,000 lines (reduced from 97K)
+  compiler_core_legacy/       # Keep: 82,000 lines (reduced from 97K)
     ast_core.spl       # Seed-compatible AST
     parser_core.spl    # Basic parser
     (imports from compiler_shared/)
@@ -154,8 +154,8 @@ Lazy loading architecture requires minimal dependencies. The 200-line duplicatio
 **Status:** 🟡 ARCHITECTURAL (Should Not Consolidate)
 
 #### Files
-- `src/core/lexer.spl` (module-state based) - ~300 lines
-- `src/core/lexer_struct.spl` (struct-state based) - ~300 lines
+- `src/compiler_core_legacy/lexer.spl` (module-state based) - ~300 lines
+- `src/compiler_core_legacy/lexer_struct.spl` (struct-state based) - ~300 lines
 
 **Total duplication:** ~600 lines
 
@@ -165,7 +165,7 @@ Lazy loading architecture requires minimal dependencies. The 200-line duplicatio
 - **Seed compatibility:** Both needed for bootstrap process
 
 #### Shared Logic Extracted
-- Character classification → `src/core/lexer_chars.spl` (Phase 3) ✅
+- Character classification → `src/compiler_core_legacy/lexer_chars.spl` (Phase 3) ✅
 
 #### Remaining Duplication
 - Tokenization loops (different state management)
@@ -182,7 +182,7 @@ The architectural difference (module vs struct state) makes full consolidation i
 **Status:** 🔴 LANGUAGE LIMITATION (Cannot Consolidate)
 
 #### Location
-- `src/core/interpreter/eval.spl` (11 instances)
+- `src/compiler_core_legacy/interpreter/eval.spl` (11 instances)
 
 **Total:** ~300 lines
 
@@ -217,7 +217,7 @@ Once generic collections are available, this can be consolidated to ~30 lines wi
 **Status:** 🟢 SEMANTIC (Should Not Consolidate)
 
 #### Location
-- `src/core/interpreter/eval.spl`
+- `src/compiler_core_legacy/interpreter/eval.spl`
 
 **Total:** ~200 lines
 

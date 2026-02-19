@@ -411,8 +411,8 @@ All path operations delegate to the file I/O module's runtime functions, ensurin
   - rt_path_separator
 
 **Core Types:**
-- `simple/std_lib/src/core/option.spl` - Option<T> for parent() and strip_prefix()
-- `simple/std_lib/src/core/result.spl` - Result<T, E> for error handling
+- `simple/std_lib/src/compiler_core/option.spl` - Option<T> for parent() and strip_prefix()
+- `simple/std_lib/src/compiler_core/result.spl` - Result<T, E> for error handling
 
 ## Impact
 

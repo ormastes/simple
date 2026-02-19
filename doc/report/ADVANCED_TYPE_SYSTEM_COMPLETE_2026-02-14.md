@@ -23,7 +23,7 @@ Successfully implemented a complete advanced type system for the Simple language
 
 ### ✅ Phase 1: Runtime Type Checking (COMPLETE)
 
-**File:** `src/core/type_checker.spl` (575 lines)
+**File:** `src/compiler_core/type_checker.spl` (575 lines)
 
 #### Features Implemented
 - ✅ Basic type checking (nil, bool, i64, f64, text, array, struct, function)
@@ -49,7 +49,7 @@ fn type_check_named(value_id: i64, type_name: text) -> bool
 
 ### ✅ Phase 2: Type Erasure/Monomorphization (COMPLETE)
 
-**File:** `src/core/type_erasure.spl` (348 lines)
+**File:** `src/compiler_core/type_erasure.spl` (348 lines)
 
 #### Features Implemented
 - ✅ Monomorphization cache with signature matching
@@ -82,7 +82,7 @@ fn type_subst_lookup(param_name: text) -> i64
 
 ### ✅ Phase 3: Type Inference Engine (COMPLETE)
 
-**File:** `src/core/type_inference.spl` (513 lines)
+**File:** `src/compiler_core/type_inference.spl` (513 lines)
 
 #### Features Implemented
 - ✅ Type variable generation (fresh vars)
@@ -158,9 +158,9 @@ fn instantiate_function_type(fn_idx: i64) -> ([i64], i64)
 ### Line Count Breakdown
 
 ```
-src/core/type_checker.spl       575 lines (40%)
-src/core/type_erasure.spl       348 lines (24%)
-src/core/type_inference.spl     513 lines (36%)
+src/compiler_core/type_checker.spl       575 lines (40%)
+src/compiler_core/type_erasure.spl       348 lines (24%)
+src/compiler_core/type_inference.spl     513 lines (36%)
 ─────────────────────────────────────────────
 TOTAL                          1,436 lines
 ```
@@ -270,8 +270,8 @@ TOTAL                72 functions
 4. Update `parser.spl` to register generic definitions
 
 **Files to Modify:**
-- `src/core/interpreter/eval.spl`
-- `src/core/parser.spl`
+- `src/compiler_core/interpreter/eval.spl`
+- `src/compiler_core/parser.spl`
 
 **Estimated Lines:** ~200 new lines
 
@@ -414,7 +414,7 @@ The advanced type system implementation represents a **significant milestone** f
 ### A. File Manifest
 
 ```
-src/core/
+src/compiler_core/
   type_checker.spl          575 lines (runtime validation)
   type_erasure.spl          348 lines (monomorphization)
   type_inference.spl        513 lines (Hindley-Milner)

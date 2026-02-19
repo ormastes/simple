@@ -88,7 +88,7 @@ simple/std_lib/src/testing/
 
 ### 2. regex.spl (1408 lines → 3 files)
 
-**Location**: `src/lib/std/src/core/regex.spl`
+**Location**: `src/lib/std/src/compiler_core/regex.spl`
 
 **Current Structure**:
 - AST Nodes (RegexNode subclasses) - lines 10-104
@@ -104,7 +104,7 @@ simple/std_lib/src/testing/
 **Proposed Split**:
 
 ```
-src/lib/std/src/core/
+src/lib/std/src/compiler_core/
 ├── regex_parser.spl          (~540 lines)
 │   - RegexNode and subclasses (AST)
 │   - RegexParser

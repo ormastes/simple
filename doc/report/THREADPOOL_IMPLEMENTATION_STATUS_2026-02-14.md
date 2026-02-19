@@ -151,7 +151,7 @@ val addr = 0x12345678  # FAILS: Don't know actual address
 One of the following approaches is needed:
 
 **Option A: C Helper Function** (Recommended)
-Add to `seed/runtime_thread.c`:
+Add to `src/compiler_seed/runtime_thread.c`:
 ```c
 // Worker entry point wrapper
 static void* thread_pool_worker_entry(void* arg) {
@@ -208,7 +208,7 @@ error: semantic: unknown extern function: spl_thread_cpu_count
 ### Required Before Testing
 ```bash
 # Rebuild runtime with threading support
-cd seed/build
+cd build/seed
 make clean
 make
 # This builds libspl_runtime.a with runtime_thread.c
@@ -257,7 +257,7 @@ bin/simple build --release  # Requires 8GB+ RAM
 
 ### Immediate (Required for Testing)
 1. **Runtime Rebuild** - Link threading support into binary
-   - `cd seed/build && make clean && make`
+   - `cd build/seed && make clean && make`
    - `bin/simple build --release` (or use CI)
    - Estimated time: 2-4 hours (depending on RAM)
 

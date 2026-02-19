@@ -84,8 +84,8 @@ Results: 1 total, 1 passed, 0 failed ✅
 | File | Change | Status |
 |------|--------|--------|
 | `src/std/text.spl` | Distinguished `_NL` (explicit LF) from `NL` (default) | ✅ Working |
-| `src/core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
-| `src/core/lexer.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
+| `src/compiler_core/lexer_struct.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
+| `src/compiler_core/lexer.spl` | `NL` → `_NL` (9 occurrences) | ✅ Verified |
 
 **Total changes:** 23 lines across 3 files, all verified working.
 

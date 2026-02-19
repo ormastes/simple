@@ -511,7 +511,7 @@ let msg = i18n.get_message("parser", "E0002", &ctx);
 
 ### 2. Mirrors Simple's Module System
 ```
-Simple module:     src/core/__init__.spl
+Simple module:     src/compiler_core/__init__.spl
 I18n catalog:      src/i18n/__init__.spl       (default)
 I18n catalog (ko): src/i18n/__init__.ko.spl    (locale variant)
 ```

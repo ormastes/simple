@@ -148,7 +148,7 @@ grep -r "//" . --include="*.spl" | grep -v "^.*#"  # Exclude comments
 
 **⚠️ NOTE:** The `.fdiv()` method is **not yet implemented**. Need to add:
 
-**File to create:** `src/lib/std/src/core/int.spl`
+**File to create:** `src/lib/std/src/compiler_core/int.spl`
 
 ```simple
 impl Int:
@@ -172,7 +172,7 @@ impl Int:
                 quotient - 1
 ```
 
-**File to create:** `src/lib/std/src/core/float.spl`
+**File to create:** `src/lib/std/src/compiler_core/float.spl`
 
 ```simple
 impl Float:
@@ -259,8 +259,8 @@ Results: 7436 total, 6717 passed, 719 failed
 ### Immediate (P0)
 
 1. **Implement `.fdiv()` method**
-   - Add to `src/lib/std/src/core/int.spl`
-   - Add to `src/lib/std/src/core/float.spl`
+   - Add to `src/lib/std/src/compiler_core/int.spl`
+   - Add to `src/lib/std/src/compiler_core/float.spl`
    - Register methods in interpreter
 
 2. **Update failing tests**

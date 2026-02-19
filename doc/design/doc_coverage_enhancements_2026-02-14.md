@@ -72,7 +72,7 @@ Documentation Coverage:
 Top functions needing examples:
   - src/std/text.spl:split_lines
   - src/std/array.spl:flatten
-  - src/core/parser.spl:parse_expression
+  - src/compiler_core/parser.spl:parse_expression
 ```
 
 ---
@@ -116,7 +116,7 @@ priority:<urgency>
 
 module:<category>
 ├─ module:stdlib          # src/std/*
-├─ module:core            # src/core/*
+├─ module:core            # src/compiler_core/*
 ├─ module:compiler        # src/compiler/*
 ├─ module:app             # src/app/*
 └─ module:lib             # src/lib/*
@@ -260,7 +260,7 @@ enum DocWarningLevel:
 **Output Format:**
 ```
 warning[doc-missing]: missing documentation for function `parse_expr`
-  --> src/core/parser.spl:145
+  --> src/compiler_core/parser.spl:145
   |
 145| fn parse_expr():
   |    ^^^^^^^^^^

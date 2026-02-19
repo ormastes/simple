@@ -313,7 +313,7 @@ fn wrapper(args...):
     # ERROR: expected Comma, found Ellipsis
 
 # Decorators completely blocked:
-simple/std_lib/src/core/decorators.spl
+simple/std_lib/src/compiler_core/decorators.spl
 # ERROR: expected identifier, found Star (on *args)
 ```
 
@@ -327,7 +327,7 @@ fn wrapper(args...):
     return func(args...)  # ✅ Works!
 
 # Decorators fully functional:
-simple/std_lib/src/core/decorators.spl
+simple/std_lib/src/compiler_core/decorators.spl
 # Compiled successfully ✅
 # Runs correctly ✅
 ```
@@ -421,7 +421,7 @@ simple/std_lib/src/core/decorators.spl
 
 ### Session 3 (Parser)
 - `src/parser/src/expressions/helpers.rs` (+10 lines)
-- `simple/std_lib/src/core/decorators.spl` (8 changes)
+- `simple/std_lib/src/compiler_core/decorators.spl` (8 changes)
 
 ### Session 4 (Runtime)
 - `src/compiler/src/interpreter_call/core.rs` (+137 lines)

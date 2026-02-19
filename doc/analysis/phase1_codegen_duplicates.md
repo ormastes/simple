@@ -5,11 +5,11 @@
 Manual analysis of code generation and compilation files to identify duplication patterns using structural and semantic comparison.
 
 **Files Analyzed:**
-1. `/home/ormastes/dev/pub/simple/src/core/compiler/c_codegen.spl` (2,339 lines)
+1. `/home/ormastes/dev/pub/simple/src/compiler_core_legacy/compiler/c_codegen.spl` (2,339 lines)
 2. `/home/ormastes/dev/pub/simple/src/app/compile/c_codegen.spl` (1,124 lines)
 3. `/home/ormastes/dev/pub/simple/src/app/compile/c_translate.spl` (1,896 lines)
 4. `/home/ormastes/dev/pub/simple/src/compiler/mir_lowering.spl` (1,503 lines)
-5. `/home/ormastes/dev/pub/simple/src/compiler_core/mir_lowering.spl` (1,174 lines)
+5. `/home/ormastes/dev/pub/simple/src/compiler_core_legacy/mir_lowering.spl` (1,174 lines)
 
 **Total Lines:** 8,036 lines
 
@@ -21,7 +21,7 @@ Manual analysis of code generation and compilation files to identify duplication
 
 ### 1. **MIR Lowering - Complete File Duplication (99% Similarity)**
 
-**Files:** `src/compiler/mir_lowering.spl` vs `src/compiler_core/mir_lowering.spl`
+**Files:** `src/compiler/mir_lowering.spl` vs `src/compiler_core_legacy/mir_lowering.spl`
 
 **Impact Score:** ~1,200 duplicated lines × 2 files = **2,400 total impact**
 
@@ -29,7 +29,7 @@ Manual analysis of code generation and compilation files to identify duplication
 
 **Key Differences:**
 - **compiler/mir_lowering.spl** (1,503 lines): Uses modern Simple syntax with `impl`, `me`, Option (`?`), generics
-- **compiler_core/mir_lowering.spl** (1,174 lines): Desugared to runtime-compatible syntax (no generics, no `impl`, function-based methods)
+- **compiler_core_legacy/mir_lowering.spl** (1,174 lines): Desugared to runtime-compatible syntax (no generics, no `impl`, function-based methods)
 
 **Example Duplication:**
 
@@ -56,7 +56,7 @@ impl MirLowering:
 ```
 
 ```simple
-# src/compiler_core/mir_lowering.spl (lines 19-46)
+# src/compiler_core_legacy/mir_lowering.spl (lines 19-46)
 struct MirLowering:
     builder: MirBuilder
     symbols: SymbolTable
@@ -74,10 +74,10 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
         )
 ```
 
-**Root Cause:** Dual compilation strategy - `compiler/` uses full Simple features, `compiler_core/` is desugared for bootstrap runtime compatibility.
+**Root Cause:** Dual compilation strategy - `compiler/` uses full Simple features, `compiler_core_legacy/` is desugared for bootstrap runtime compatibility.
 
 **Recommendation:**
-- **Option A:** Generate `compiler_core/mir_lowering.spl` from `compiler/mir_lowering.spl` via automated desugar pass
+- **Option A:** Generate `compiler_core_legacy/mir_lowering.spl` from `compiler/mir_lowering.spl` via automated desugar pass
 - **Option B:** Create shared MIR lowering logic in a common module, with thin wrappers for syntax differences
 - **Option C:** Accept duplication as intentional versioning (document as parallel implementations)
 
@@ -85,7 +85,7 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 
 ### 2. **C Codegen - Divergent Architectures (60% Overlap)**
 
-**Files:** `src/core/compiler/c_codegen.spl` vs `src/app/compile/c_codegen.spl` + `c_translate.spl`
+**Files:** `src/compiler_core_legacy/compiler/c_codegen.spl` vs `src/app/compile/c_codegen.spl` + `c_translate.spl`
 
 **Impact Score:** ~800 duplicated lines × 2 systems = **1,600 total impact**
 
@@ -93,7 +93,7 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 
 #### Architecture Comparison:
 
-| Feature | core/compiler/c_codegen.spl | app/compile/c_codegen.spl + c_translate.spl |
+| Feature | compiler_core_legacy/compiler/c_codegen.spl | app/compile/c_codegen.spl + c_translate.spl |
 |---------|------------------------------|---------------------------------------------|
 | **Input** | Core AST (struct pools) | Simple source text (line-based parsing) |
 | **Output** | C++ (spl_runtime.h compatible) | C (generic runtime) |
@@ -109,7 +109,7 @@ fn mirlowering_new(symbols: SymbolTable) -> MirLowering:
 Both implement variable type tracking with scoping:
 
 ```simple
-# src/core/compiler/c_codegen.spl (lines 72-115)
+# src/compiler_core_legacy/compiler/c_codegen.spl (lines 72-115)
 var vt_names: [text] = []
 var vt_types: [i64] = []
 var vt_depths: [i64] = []
@@ -140,7 +140,7 @@ types = types + "text:name;arr:name;fn_text:funcname;"
 **B. Struct Array Tracking (~80 lines each)**
 
 ```simple
-# src/core/compiler/c_codegen.spl (lines 141-163)
+# src/compiler_core_legacy/compiler/c_codegen.spl (lines 141-163)
 var sa_var_names: [text] = []
 var sa_struct_names: [text] = []
 
@@ -172,7 +172,7 @@ if pf_ftype.starts_with("[") and pf_ftype.ends_with("]"):
 Both map Simple operators to C operators:
 
 ```simple
-# src/core/compiler/c_codegen.spl (lines 371-398)
+# src/compiler_core_legacy/compiler/c_codegen.spl (lines 371-398)
 fn cg_binary_op_to_cpp(op_tok: i64, left_type: i64, right_type: i64) -> text:
     if op_tok == TOK_PLUS: return "+"
     if op_tok == TOK_MINUS: return "-"
@@ -187,7 +187,7 @@ if op == "+" and is_int: return "(" + left + " + " + right + ")"
 # ... similar logic
 ```
 
-**Root Cause:** Historical split - `core/compiler/` written for bootstrap (seed-compilable), `app/compile/` written for rapid prototyping with string parsing.
+**Root Cause:** Historical split - `compiler_core_legacy/compiler/` written for bootstrap (seed-compilable), `app/compile/` written for rapid prototyping with string parsing.
 
 **Recommendation:**
 - **Extract common type tracking** into `src/shared/type_tracker.spl`
@@ -199,7 +199,7 @@ if op == "+" and is_int: return "(" + left + " + " + right + ")"
 
 ### 3. **Expression Translation Patterns (~400 lines)**
 
-**Files:** `src/core/compiler/c_codegen.spl` (cg_expr functions) vs `src/app/compile/c_translate.spl` (translate_expr)
+**Files:** `src/compiler_core_legacy/compiler/c_codegen.spl` (cg_expr functions) vs `src/app/compile/c_translate.spl` (translate_expr)
 
 **Pattern:** Both recursively translate Simple expressions to C, with similar patterns for:
 - String literals (escape handling)
@@ -211,7 +211,7 @@ if op == "+" and is_int: return "(" + left + " + " + right + ")"
 **Example - String Escaping:**
 
 ```simple
-# src/core/compiler/c_codegen.spl (lines 358-369)
+# src/compiler_core_legacy/compiler/c_codegen.spl (lines 358-369)
 fn cg_escape_cpp_string(s: text) -> text:
     var result = ""
     for i in range(0, s.len()):
@@ -238,7 +238,7 @@ escaped = escaped.replace(NL, "\\n")
 
 | Pattern | Files | Duplicate Lines | Impact Score | Extractable? |
 |---------|-------|-----------------|--------------|--------------|
-| **MIR Lowering (compiler vs compiler_core)** | 2 | ~1,200 | 2,400 | Yes (auto-desugar) |
+| **MIR Lowering (compiler vs compiler_core_legacy)** | 2 | ~1,200 | 2,400 | Yes (auto-desugar) |
 | **Type Tracking (vt_*, sa_*, st_*)** | 2 | ~230 | 460 | Yes (shared module) |
 | **Operator Mapping** | 2 | ~60 | 120 | Yes (shared enum/map) |
 | **String Escaping** | 2 | ~50 | 100 | Yes (shared util) |
@@ -253,7 +253,7 @@ escaped = escaped.replace(NL, "\\n")
 ### High Priority (700+ line reduction)
 
 1. **Unified MIR Lowering**
-   - **Action:** Implement automated desugar pass: `compiler/mir_lowering.spl` → `compiler_core/mir_lowering.spl`
+   - **Action:** Implement automated desugar pass: `compiler/mir_lowering.spl` → `compiler_core_legacy/mir_lowering.spl`
    - **Tool:** Extend `src/app/desugar/` to handle Option types, generics, impl blocks
    - **Reduction:** ~1,200 lines
    - **Effort:** 2-3 days (desugar rules already exist for static methods)
@@ -262,7 +262,7 @@ escaped = escaped.replace(NL, "\\n")
    - **Action:** Create `src/shared/type_tracker.spl` with:
      - `TypeRegistry` struct (replaces vt_*, st_*, sa_* arrays)
      - `add_variable()`, `find_type()`, `push_scope()`, `pop_scope()` methods
-   - **Used by:** `core/compiler/c_codegen.spl`, `app/compile/c_codegen.spl`
+   - **Used by:** `compiler_core_legacy/compiler/c_codegen.spl`, `app/compile/c_codegen.spl`
    - **Reduction:** ~230 lines
    - **Effort:** 1 day
 
@@ -301,17 +301,17 @@ escaped = escaped.replace(NL, "\\n")
 ### Why Does This Duplication Exist?
 
 1. **Bootstrap Requirements**
-   - `src/core/` must compile with seed compiler (limited Simple subset)
-   - `src/compiler_core/` is desugared version for runtime compatibility
+   - `src/compiler_core_legacy/` must compile with seed compiler (limited Simple subset)
+   - `src/compiler_core_legacy/` is desugared version for runtime compatibility
    - `src/compiler/` uses full Simple features for development
 
 2. **Historical Evolution**
    - `app/compile/` created first (rapid prototyping, text-based)
-   - `core/compiler/` created later (structured AST-based, seed-compatible)
+   - `compiler_core_legacy/compiler/` created later (structured AST-based, seed-compatible)
    - No unified abstraction layer between them
 
 3. **Intentional Versioning**
-   - `compiler/` vs `compiler_core/` is dual-compilation strategy
+   - `compiler/` vs `compiler_core_legacy/` is dual-compilation strategy
    - Similar to how C compilers have "stage1" and "stage2" builds
 
 ---
@@ -372,10 +372,10 @@ tokens = tokenize(content, config)
 
 ```
 Lines  File
-2,339  src/core/compiler/c_codegen.spl
+2,339  src/compiler_core_legacy/compiler/c_codegen.spl
 1,503  src/compiler/mir_lowering.spl
 1,896  src/app/compile/c_translate.spl
-1,174  src/compiler_core/mir_lowering.spl
+1,174  src/compiler_core_legacy/mir_lowering.spl
 1,124  src/app/compile/c_codegen.spl
 ─────
 8,036  Total

@@ -29,7 +29,7 @@ These limitations prevented developers from writing type-safe, reusable code tha
 
 ### High-Level Design
 
-The type system is implemented as a monomorphized arena-based registry in `src/core/types.spl`. All type operations use free functions (no generics, no `me` methods, no closures) to ensure runtime parser compatibility.
+The type system is implemented as a monomorphized arena-based registry in `src/compiler_core/types.spl`. All type operations use free functions (no generics, no `me` methods, no closures) to ensure runtime parser compatibility.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -70,7 +70,7 @@ The type system is implemented as a monomorphized arena-based registry in `src/c
 
 #### Core Type System
 
-**`src/core/types.spl`** (560+ lines)
+**`src/compiler_core/types.spl`** (560+ lines)
 - Added type constants: `TYPE_GENERIC_ERASED`, `TYPE_UNION`, `TYPE_INTERSECTION`, `TYPE_REFINEMENT`
 - Generic parameter registry: parallel arrays for names, contexts, IDs
 - Union type registry: stores member type arrays
@@ -479,9 +479,9 @@ fn process(obj: any, obj_type: i64):
 ### Related Files
 
 **Core Implementation:**
-- `src/core/types.spl` - Type system registry
-- `src/core/interpreter/eval.spl` - Type erasure interpreter
-- `src/core/type_inference.spl` - Constraint solving (planned)
+- `src/compiler_core/types.spl` - Type system registry
+- `src/compiler_core/interpreter/eval.spl` - Type erasure interpreter
+- `src/compiler_core/type_inference.spl` - Constraint solving (planned)
 
 **Tests:**
 - `test/unit/type/runtime_generics_spec.spl` - Generic tests (planned)
@@ -499,7 +499,7 @@ fn process(obj: any, obj_type: i64):
 - **Platform Library** (`src/std/platform/`) - Platform-aware type conversions
 - **Effect System** (`src/std/effects.spl`) - Effect tracking in type system
 - **SFFI System** (`src/app/io/mod.spl`) - Foreign function types
-- **Parser** (`src/core/parser.spl`) - Type syntax parsing
+- **Parser** (`src/compiler_core/parser.spl`) - Type syntax parsing
 
 ### See Also
 

@@ -244,7 +244,7 @@ These are interpreter bugs, NOT FFI needs:
 
 ### HIGH PRIORITY: Remove Unnecessary C Runtime
 
-**File**: `seed/runtime.h`, `seed/platform/unix_common.h`, `seed/platform/platform_win.h`
+**File**: `src/compiler_seed/runtime.h`, `src/compiler_seed/platform/unix_common.h`, `src/compiler_seed/platform/platform_win.h`
 
 **Remove (use SFFI instead)**:
 ```c

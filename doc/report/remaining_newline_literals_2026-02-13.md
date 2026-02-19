@@ -47,7 +47,7 @@ code: "loss\{\n    logits = model(x)\n    cross_entropy(logits, y)\n}"
 - `src/compiler/blocks/testing.spl` (8 occurrences)
 - `src/compiler/linker/object_resolver.spl`
 - `src/compiler/loader/jit_instantiator.spl`
-- `src/compiler_core/blocks/testing.spl`
+- `src/compiler_core_legacy/blocks/testing.spl`
 
 **Example:**
 ```simple
@@ -108,7 +108,7 @@ shell("... | tr -d ' \\n'")  # Remove newlines in shell
 
 **Files:**
 - `src/compiler/lexer.spl`
-- `src/compiler_core/lexer.spl`
+- `src/compiler_core_legacy/lexer.spl`
 - `src/compiler/error_formatter.spl`
 - `src/compiler/baremetal/table_codegen.spl`
 
@@ -130,7 +130,7 @@ case 'n': "\n"  # Escape handler
 
 **Files:**
 - `src/compiler/baremetal/table_codegen.spl`
-- `src/compiler_core/baremetal/table_codegen.spl`
+- `src/compiler_core_legacy/baremetal/table_codegen.spl`
 - `src/compiler/baremetal/string_extractor.spl`
 
 **Example:**
@@ -207,7 +207,7 @@ val NOTE_SDN_TERMINATOR = "\n# END_NOTE\n"
 
 ### Medium Priority (Structured Output)
 
-**src/compiler_core/blocks/testing.spl** - Same patterns as compiler version
+**src/compiler_core_legacy/blocks/testing.spl** - Same patterns as compiler version
 
 **Various parser/error files** - Multi-line error formatting
 

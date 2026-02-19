@@ -81,7 +81,7 @@ context qb:
 ```
 
 **Standard library:**
-- DSL helpers in `simple/std_lib/src/core/dsl.spl`
+- DSL helpers in `simple/std_lib/src/compiler_core/dsl.spl`
 - `ContextBuilder` class for common DSL patterns
 - Examples and documentation
 
@@ -101,7 +101,7 @@ context qb:
   - Multiple context objects
 
 ### Standard Library Examples
-- ✅ `simple/std_lib/src/core/dsl.spl` - DSL building blocks with examples
+- ✅ `simple/std_lib/src/compiler_core/dsl.spl` - DSL building blocks with examples
 
 ## Documentation
 

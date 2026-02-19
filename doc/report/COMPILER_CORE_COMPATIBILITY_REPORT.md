@@ -13,7 +13,7 @@
 - AutoJit
 - Custom(name: text)
 
-**compiler_core/backend_types.spl:**
+**compiler_core_legacy/backend_types.spl:**
 - Cranelift
 - Llvm
 - Native
@@ -43,7 +43,7 @@
 - VulkanSpirv(version)
 - Host ✓
 
-**compiler_core/backend/backend_types.spl:**
+**compiler_core_legacy/backend/backend_types.spl:**
 - X86_64 ✓
 - AArch64 ✓
 - Riscv64 ✓
@@ -63,7 +63,7 @@
 - **Targets:** All architectures (32/64-bit, Wasm, GPU)
 - **Use case:** Full-featured compiler with runtime
 
-### compiler_core/ (Bootstrap)
+### compiler_core_legacy/ (Bootstrap)
 - **Focus:** AOT compilation, bootstrapping
 - **Backends:** AOT backends (Cranelift, LLVM, Native)
 - **Targets:** Simplified (64-bit only, seed.cpp compatible)
@@ -74,7 +74,7 @@
 ## Can They Interoperate?
 
 ### ❌ Direct Type Sharing: NO
-The enum types are fundamentally incompatible. You cannot pass a `compiler::BackendKind` to code expecting `compiler_core::BackendKind`.
+The enum types are fundamentally incompatible. You cannot pass a `compiler::BackendKind` to code expecting `compiler_core_legacy::BackendKind`.
 
 ### ✓ Code Reuse: YES (with adaptation)
 Individual algorithms and utilities could be shared if they don't depend on the specific backend enums.
@@ -82,11 +82,11 @@ Individual algorithms and utilities could be shared if they don't depend on the 
 ### ⚠️ Conversion Layer: POSSIBLE
 Could create a translation layer:
 ```simple
-fn compiler_to_core(kind: compiler.BackendKind) -> compiler_core.BackendKind?:
+fn compiler_to_core(kind: compiler.BackendKind) -> compiler_core_legacy.BackendKind?:
     match kind:
-        case Interpreter: Some(compiler_core.BackendKind.Interpreter)
-        case CraneliftJit: Some(compiler_core.BackendKind.Cranelift)
-        case LlvmJit: Some(compiler_core.BackendKind.Llvm)
+        case Interpreter: Some(compiler_core_legacy.BackendKind.Interpreter)
+        case CraneliftJit: Some(compiler_core_legacy.BackendKind.Cranelift)
+        case LlvmJit: Some(compiler_core_legacy.BackendKind.Llvm)
         case _: nil  # No equivalent
 ```
 
@@ -97,12 +97,12 @@ fn compiler_to_core(kind: compiler.BackendKind) -> compiler_core.BackendKind?:
 ### Option 1: Keep Separate (Recommended)
 - Maintain both as independent implementations
 - compiler/ = production runtime compiler
-- compiler_core/ = bootstrap/AOT compiler
+- compiler_core_legacy/ = bootstrap/AOT compiler
 - No mixing of types between them
 
 ### Option 2: Unify Types
 - Merge enum definitions
-- Make compiler_core a subset of compiler
+- Make compiler_core_legacy a subset of compiler
 - Requires significant refactoring
 - **Effort:** High
 
@@ -128,6 +128,6 @@ fn compiler_to_core(kind: compiler.BackendKind) -> compiler_core.BackendKind?:
 
 The two implementations serve different purposes:
 - **compiler/**: Full-featured production compiler
-- **compiler_core/**: Simplified bootstrap compiler
+- **compiler_core_legacy/**: Simplified bootstrap compiler
 
 They cannot share backend types but can exist in the same codebase for different use cases.

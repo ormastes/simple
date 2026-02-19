@@ -64,7 +64,7 @@ This document catalogs all remaining work items across the Simple language compi
 
 | Module | Stub Count | Percentage |
 |--------|------------|------------|
-| `src/compiler_core/` | ~850 | 40% |
+| `src/compiler_core_legacy/` | ~850 | 40% |
 | `src/compiler/` | ~420 | 20% |
 | `src/ffi/` | ~280 | 13% |
 | `src/app/` | ~210 | 10% |
@@ -74,15 +74,15 @@ This document catalogs all remaining work items across the Simple language compi
 
 ### High-Concentration Files
 
-1. **`src/compiler_core/variance_phase6a.spl`** - 41 stubs
+1. **`src/compiler_core_legacy/variance_phase6a.spl`** - 41 stubs
    - Variance checking infrastructure
    - Planned feature, not critical for bootstrap
 
-2. **`src/compiler_core/higher_rank_poly_phase5*.spl`** - 44 stubs
+2. **`src/compiler_core_legacy/higher_rank_poly_phase5*.spl`** - 44 stubs
    - Higher-rank polymorphism (advanced type system)
    - Future enhancement
 
-3. **`src/compiler_core/trait_*.spl`** - 73 stubs
+3. **`src/compiler_core_legacy/trait_*.spl`** - 73 stubs
    - Trait solver, validation, implementation
    - Type system feature in progress
 
@@ -90,7 +90,7 @@ This document catalogs all remaining work items across the Simple language compi
    - FFI specification files
    - Templates for future FFI generation
 
-5. **`src/compiler_core/simd_phase9*.spl`** - 18 stubs
+5. **`src/compiler_core_legacy/simd_phase9*.spl`** - 18 stubs
    - SIMD optimization phases
    - Performance enhancement (non-critical)
 
@@ -173,7 +173,7 @@ This document catalogs all remaining work items across the Simple language compi
 ### Key Locations
 
 - **Test files:** 42 uses (mainly `test_pass_walrus*.spl`, `pass_variants_spec.spl`)
-- **Core parser:** 7 uses (`src/core/parser.spl`, `src/core/ast.spl`, `src/core/tokens.spl`)
+- **Core parser:** 7 uses (`src/compiler_core_legacy/parser.spl`, `src/compiler_core_legacy/ast.spl`, `src/compiler_core_legacy/tokens.spl`)
 - **Compiler:** 6 uses (desugar, parser extensions)
 - **Standard library:** 4 uses (minimal placeholders)
 
@@ -245,14 +245,14 @@ All 269 TODO items are P3 - general maintenance / future features:
 
 | Module | Implementation % | Notes |
 |--------|-----------------|-------|
-| `src/core/` | 95% | Core interpreter/parser complete |
+| `src/compiler_core_legacy/` | 95% | Core interpreter/parser complete |
 | `src/std/` | 90% | Platform lib, spec framework done |
 | `src/lib/database/` | 85% | Core functionality production-ready |
 | `src/app/io/` | 92% | File/process/FFI working |
 | `src/app/cli/` | 88% | Main commands functional |
 | `src/app/test_runner_new/` | 100% | Full test suite working |
 | `src/compiler/` | 60% | Many backends stubbed |
-| `src/compiler_core/` | 55% | Advanced features planned |
+| `src/compiler_core_legacy/` | 55% | Advanced features planned |
 | `test/` | 87% | 4,067/~4,664 tests active |
 
 ### Overall Project Status

@@ -129,7 +129,7 @@ error: `comptime` expression calls non-const function `load_config` at line 42
 4. Emit `WARN: comptime expression will be evaluated at runtime` if CT eval not possible
 
 **Phase B — CT evaluation engine (high effort, future):**
-1. Simple interpreter subset that runs at compile time (reuse `src/core/interpreter/eval.spl`)
+1. Simple interpreter subset that runs at compile time (reuse `src/compiler_core/interpreter/eval.spl`)
 2. CT values stored in compiler symbol table
 3. CT results embedded in generated binary as `.rodata` constants
 
@@ -485,7 +485,7 @@ Simple's existing atomics (`src/std/atomic.spl`) cover the synchronization case.
 Simple has MORE than the earlier doc stated, but differently than expected:
 - **Two-Tier (Runtime):** `extern fn rt_*` → Simple wrapper `fn` — ✅ working
 - **Three-Tier (External):** C++/Rust FFI → `extern fn` → Simple API — ✅ working
-- **WFFI runtime library:** `src/core/wffi/mod.spl` (72 lines) — `wffi_load(path)`, `wffi_get(handle, name)`, `wffi_call_0/1/2/3/4(fptr, args)` — dynamically loads `.so`/`.dll` at **runtime** (dlopen/dlsym pattern). This is a RUNTIME dynamic FFI, not a compile-time header importer.
+- **WFFI runtime library:** `src/compiler_core/wffi/mod.spl` (72 lines) — `wffi_load(path)`, `wffi_get(handle, name)`, `wffi_call_0/1/2/3/4(fptr, args)` — dynamically loads `.so`/`.dll` at **runtime** (dlopen/dlsym pattern). This is a RUNTIME dynamic FFI, not a compile-time header importer.
 - **`@wffi` annotation:** ❌ Does NOT exist — no annotation syntax for auto-generating wrappers
 - **`simple-bindgen` tool:** ❌ Does not exist
 
@@ -997,7 +997,7 @@ All 10 Zig embedded features have been implemented or researched:
 | 5 | volatile SFFI builtins | ✅ IMPL | `src/app/io/volatile_ops.spl` |
 | 6 | @wffi bindgen annotation | ✅ IMPL | `src/compiler_core/wffi_bindgen.spl` |
 | 7 | cross-compilation presets | ✅ IMPL | `src/compiler_core/target_presets.spl` |
-| 8 | @test/@debug blocks | ✅ IMPL | `src/core/interpreter/eval.spl` |
+| 8 | @test/@debug blocks | ✅ IMPL | `src/compiler_core/interpreter/eval.spl` |
 | 9 | error return traces | ✅ IMPL | `src/std/error_trace.spl` |
 | 10 | sentinel types | 📄 RESEARCH | `doc/research/sentinel_types_design_2026-02-18.md` |
 

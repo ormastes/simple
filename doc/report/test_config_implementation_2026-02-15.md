@@ -173,7 +173,7 @@ $ timeout 5 bin/simple test /tmp/minimal.spl
 
 ## Next Steps
 
-1. **Debug test runner hang:** Investigate module loading in `src/core/interpreter/module_loader.spl`
+1. **Debug test runner hang:** Investigate module loading in `src/compiler_core/interpreter/module_loader.spl`
 2. **Complete integration:** Activate test_runner_main.spl logic once hang is fixed
 3. **Test full flow:** Verify spec + sdoctest combined execution
 4. **CI verification:** Test --ci flag and CI env var detection

@@ -150,7 +150,7 @@ testing.with_cleanup(
 
 val result = testing.with_timeout(
     \: slow_operation(),
-    5.0,  // 5 second timeout
+    5.0,  # 5 second timeout
     "Operation timed out"
 )
 ```

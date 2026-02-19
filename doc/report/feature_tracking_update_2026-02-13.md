@@ -32,7 +32,7 @@ Updated feature tracking documentation (`doc/feature/feature_db.sdn`) to reflect
 - **Spec reference**: Updated from `doc/codegen_technical.md` to `LLVM_BACKEND_UNIFICATION_PLAN.md`
 - **Evidence**:
   - 3,475 lines of LLVM backend code across 10 files
-  - Two complete implementations (compiler/ and compiler_core/)
+  - Two complete implementations (compiler/ and compiler_core_legacy/)
   - Multi-architecture support (x86_64, i686, aarch64, arm32, riscv32/64)
   - Active development per recent commits:
     ```

@@ -9,7 +9,7 @@
 ## What Was Accomplished
 
 ### 1. Decorator Fix
-✅ Simplified `src/std/src/core/decorators.spl` to work within Pure Simple limitations
+✅ Simplified `src/std/src/compiler_core/decorators.spl` to work within Pure Simple limitations
 - Removed variadic function syntax (`*args`) which isn't supported
 - Simplified to name-based tracking instead of function wrapping
 - Still compiles and provides basic decorator patterns

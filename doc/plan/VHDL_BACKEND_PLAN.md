@@ -7,7 +7,7 @@
 
 | # | Milestone | Duration | Dependencies | Key Deliverables |
 |---|-----------|----------|-------------|-----------------|
-| 1 | Backend scaffolding (enums, factory, CLI) | 1 week | -- | `src/core/backend_types.spl`, `src/compiler/backend/backend_types.spl`, `backend_helpers.spl`, `backend_factory.spl` |
+| 1 | Backend scaffolding (enums, factory, CLI) | 1 week | -- | `src/compiler_core/backend_types.spl`, `src/compiler/backend/backend_types.spl`, `backend_helpers.spl`, `backend_factory.spl` |
 | 2 | Type mapping + basic entity emission | 1 week | M1 | `vhdl_type_mapper.spl`, `vhdl/vhdl_builder.spl`, `vhdl_backend.spl` |
 | 3 | Process model + signal assignment | 1 week | M2 | `VhdlProcess` MIR lowering, combinational + clocked process emission |
 | 4 | Width/loop verification (DimSolver) | 1 week | M3 | `dim_constraints_types.spl` (WidthMatch, WidthSafe, BoundedLoop, ValidRange), `dim_constraints.spl` solving logic |
@@ -18,7 +18,7 @@
 ## File Location Deliverables
 
 ### M1: Backend Scaffolding (DONE)
-- `src/core/backend_types.spl` — `Vhdl` in `CoreBackendKind`, `BACKEND_VHDL = 7`
+- `src/compiler_core/backend_types.spl` — `Vhdl` in `CoreBackendKind`, `BACKEND_VHDL = 7`
 - `src/compiler/backend/backend_types.spl` — `Vhdl` in `BackendKind`, `is_vhdl_backend()`
 - `src/compiler/backend/backend_helpers.spl` — `"vhdl"` in `backend_for_name()`, `available_backends()`
 - `src/compiler/backend/backend_factory.spl` — `Vhdl` case in `create_specific()`, `get_description()`

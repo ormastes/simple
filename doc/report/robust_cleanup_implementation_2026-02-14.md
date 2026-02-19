@@ -415,7 +415,7 @@ extern fn rt_atexit_register(handler: fn())
 ```
 
 **Tasks:**
-- [ ] Add signal handling SFFI to `seed/runtime.c`
+- [ ] Add signal handling SFFI to `src/compiler_seed/runtime.c`
 - [ ] Implement `install_signal_handlers()` in `runner_lifecycle.spl`
 - [ ] Register handlers on runner startup
 - [ ] Test Ctrl+C cleanup

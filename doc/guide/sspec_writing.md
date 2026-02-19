@@ -547,7 +547,7 @@ cargo test -p simple-driver simple_stdlib_integration
 cargo test -p simple-driver simple_stdlib_system
 
 # Specific test
-./target/debug/simple simple/std_lib/test/unit/core/stack_spec.spl
+./target/debug/simple simple/std_lib/test/unit/compiler_core/stack_spec.spl
 
 # With options
 simple test --tag slow

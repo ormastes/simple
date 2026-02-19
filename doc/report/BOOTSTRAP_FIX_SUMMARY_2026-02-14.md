@@ -2,19 +2,19 @@
 
 ## Executive Summary
 
-✅ **MAJOR MILESTONE:** compiler_core/main.spl now compiles successfully with Cranelift backend!
+✅ **MAJOR MILESTONE:** compiler_core_legacy/main.spl now compiles successfully with Cranelift backend!
 
 ## All Fixes Applied
 
 ### 1. Removed interpreter.spl Dependencies (4 files)
-**Problem:** interpreter.spl had parse errors, blocking entire compiler_core
+**Problem:** interpreter.spl had parse errors, blocking entire compiler_core_legacy
 **Solution:** Commented out all imports/exports of InterpreterBackendImpl
 
 **Files modified:**
 - `src/compiler/backend.spl` - Line 25 (import), Line 66 (export)
 - `src/compiler/backend/jit_interpreter.spl` - Line 18 (import)
-- `src/compiler_core/backend.spl` - Line 52 (import), Line 88 (export)
-- `src/compiler_core/backend/jit_interpreter.spl` - Line 18 (import)
+- `src/compiler_core_legacy/backend.spl` - Line 52 (import), Line 88 (export)
+- `src/compiler_core_legacy/backend/jit_interpreter.spl` - Line 18 (import)
 
 ### 2. Fixed mir_serialization.spl (3 issues)
 **Problem:** Inline if-else expressions in match case arms not supported by Cranelift parser
@@ -104,12 +104,12 @@ BlockResolver(
 
 **Compilation result:**
 ```
-Compiled src/compiler_core/main.spl -> src/compiler_core/main.smf
+Compiled src/compiler_core_legacy/main.spl -> src/compiler_core_legacy/main.smf
 ```
 
 ## Next Steps
 
-1. ✅ Test if compiler_core/main.smf runs correctly
+1. ✅ Test if compiler_core_legacy/main.smf runs correctly
 2. ✅ Attempt bootstrap Step 2 (core1) using pre-built binary
 3. ⚠️ May encounter more issues in Step 3+ (depends on what core1 imports)
 
@@ -127,12 +127,12 @@ Compiled src/compiler_core/main.spl -> src/compiler_core/main.smf
 ## Files Modified List
 1. src/compiler/backend.spl
 2. src/compiler/backend/jit_interpreter.spl
-3. src/compiler_core/backend.spl
-4. src/compiler_core/backend/jit_interpreter.spl
+3. src/compiler_core_legacy/backend.spl
+4. src/compiler_core_legacy/backend/jit_interpreter.spl
 5. src/compiler/mir_serialization.spl
-6. src/compiler_core/config.spl
-7. src/compiler_core/driver_types.spl
-8. src/compiler_core/main.spl
+6. src/compiler_core_legacy/config.spl
+7. src/compiler_core_legacy/driver_types.spl
+8. src/compiler_core_legacy/main.spl
 9. src/compiler/backend/interpreter.spl (earlier fixes - 15 tuple patterns)
 
 Total: 9 files, 22+ individual fixes

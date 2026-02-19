@@ -34,7 +34,7 @@
 ### 🚀 Phase 2: Manual Prototype (STARTED)
 
 **Files Created:**
-1. **[src/compiler_core/lexer_desugared.spl](src/compiler_core/lexer_desugared.spl)** (5.4 KB)
+1. **[src/compiler_core_legacy/lexer_desugared.spl](src/compiler_core_legacy/lexer_desugared.spl)** (5.4 KB)
    - Partial manual conversion of lexer.spl
    - Shows concrete transformation patterns:
      - ✅ `impl Lexer:` → module functions (`lexer_*`)
@@ -43,7 +43,7 @@
      - ✅ Method calls → function calls
    - ~150 lines of Core-compatible code
 
-2. **[src/tools/DESUGARER_README.md](src/tools/DESUGARER_README.md)**
+2. **[scripts/tools/DESUGARER_README.md](scripts/tools/DESUGARER_README.md)**
    - Tool architecture overview
    - 6 transformation passes described
    - Status tracking
@@ -77,7 +77,7 @@ fn lexer_next(self: Lexer) -> Token:
 ├── src/
 │   ├── compiler/                         # Original Full Simple (52K lines)
 │   │   └── lexer.spl                     # 1,430 lines (target for conversion)
-│   ├── compiler_core/                    # NEW: Desugared Core-compatible
+│   ├── compiler_core_legacy/                    # NEW: Desugared Core-compatible
 │   │   └── lexer_desugared.spl           # ✅ 150 lines prototype
 │   ├── core/                              # Core Simple subset (8.8K lines)
 │   └── tools/                             # NEW: Desugarer tool
@@ -214,10 +214,10 @@ Full Simple (original)
 ### View Current Progress
 ```bash
 # See the manual prototype
-cat src/compiler_core/lexer_desugared.spl
+cat src/compiler_core_legacy/lexer_desugared.spl
 
 # Compare with original
-diff src/compiler/lexer.spl src/compiler_core/lexer_desugared.spl
+diff src/compiler/lexer.spl src/compiler_core_legacy/lexer_desugared.spl
 
 # View planning documents
 ls -lh DESUGARING_PLAN.md LEXER_DESUGARING_EXAMPLE.md CORE_FULL_COMPILATION_PLAN.md
@@ -226,13 +226,13 @@ ls -lh DESUGARING_PLAN.md LEXER_DESUGARING_EXAMPLE.md CORE_FULL_COMPILATION_PLAN
 ### Next Steps to Continue
 ```bash
 # 1. Complete manual lexer conversion
-vim src/compiler_core/lexer_desugared.spl
+vim src/compiler_core_legacy/lexer_desugared.spl
 
 # 2. Test compilation (when ready)
-seed_cpp src/compiler_core/lexer_desugared.spl --output build/lexer.cpp
+seed_cpp src/compiler_core_legacy/lexer_desugared.spl --output build/lexer.cpp
 
 # 3. Start building automated tool
-vim src/tools/desugarer.spl
+vim scripts/tools/desugarer.spl
 ```
 
 ---
@@ -315,14 +315,14 @@ vim src/tools/desugarer.spl
 - [CORE_FULL_COMPILATION_PLAN.md](CORE_FULL_COMPILATION_PLAN.md) - Quick reference
 
 **Code:**
-- [src/compiler_core/lexer_desugared.spl](src/compiler_core/lexer_desugared.spl) - Prototype
-- [src/tools/DESUGARER_README.md](src/tools/DESUGARER_README.md) - Tool docs
+- [src/compiler_core_legacy/lexer_desugared.spl](src/compiler_core_legacy/lexer_desugared.spl) - Prototype
+- [scripts/tools/DESUGARER_README.md](scripts/tools/DESUGARER_README.md) - Tool docs
 
 **Architecture:**
 - [doc/design/core_full_unified_architecture.md](doc/design/core_full_unified_architecture.md) - System design
 
 **Source Files:**
-- `src/core/` - Core Simple (8.8K lines, seed-compilable)
+- `src/compiler_core_legacy/` - Core Simple (8.8K lines, seed-compilable)
 - `src/compiler/` - Full Simple (52K lines, needs desugaring)
 - `bootstrap/seed.cpp` - C++ bootstrap (143K lines)
 
@@ -334,7 +334,7 @@ vim src/tools/desugarer.spl
 - ✅ Complete research and planning (3 documents, ~34KB)
 - ✅ Manual prototype started (150 lines of Core-compatible code)
 - ✅ Transformation patterns proven and documented
-- ✅ Project structure created (compiler_core/, tools/)
+- ✅ Project structure created (compiler_core_legacy/, tools/)
 
 **What's next:**
 1. Complete manual lexer.spl conversion (~6-8 hours)

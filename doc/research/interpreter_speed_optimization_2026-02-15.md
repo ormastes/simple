@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-Analysis of Go and Python interpreter optimization techniques, cross-referenced with a thorough audit of the Simple interpreter source code (`src/core/interpreter/`). Found **8 critical algorithmic complexity issues** and **12 applicable optimization techniques** from Go/Python.
+Analysis of Go and Python interpreter optimization techniques, cross-referenced with a thorough audit of the Simple interpreter source code (`src/compiler_core/interpreter/`). Found **8 critical algorithmic complexity issues** and **12 applicable optimization techniques** from Go/Python.
 
 ### Key Findings
 
@@ -182,7 +182,7 @@ fn eval_bool_literal(b: bool) -> i64:
 
 ### 3.1 CRITICAL: Variable Lookup is O(depth * vars_per_scope)
 
-**File:** `src/core/interpreter/env.spl` lines 112-134
+**File:** `src/compiler_core/interpreter/env.spl` lines 112-134
 
 ```simple
 fn env_lookup(name: text) -> i64:
@@ -224,7 +224,7 @@ fn env_lookup_fast(index: i64) -> i64:
 
 ### 3.2 CRITICAL: Function Table Lookup is O(n)
 
-**File:** `src/core/interpreter/eval.spl` lines 211-217
+**File:** `src/compiler_core/interpreter/eval.spl` lines 211-217
 
 ```simple
 fn func_table_lookup(name: text) -> i64:
@@ -244,7 +244,7 @@ fn func_table_lookup(name: text) -> i64:
 
 ### 3.3 HIGH: String Concatenation in Loops is O(n^2)
 
-**File:** `src/core/interpreter/eval.spl` lines 251-269 (source scanning) and lines 1362-1369 (string interpolation)
+**File:** `src/compiler_core/interpreter/eval.spl` lines 251-269 (source scanning) and lines 1362-1369 (string interpolation)
 
 ```simple
 # Source scanning - builds lines by appending chars
@@ -266,7 +266,7 @@ val result = text_join(parts, "")  # Single O(n) concatenation
 
 ### 3.4 MEDIUM: Scope Pop Rebuilds Entire Stack
 
-**File:** `src/core/interpreter/env.spl` lines 45-57
+**File:** `src/compiler_core/interpreter/env.spl` lines 45-57
 
 ```simple
 fn env_pop_scope():
@@ -293,7 +293,7 @@ fn env_pop_scope():
 
 ### 3.5 MEDIUM: JIT Call Tracking is O(n)
 
-**File:** `src/core/interpreter/jit.spl` lines 60-71
+**File:** `src/compiler_core/interpreter/jit.spl` lines 60-71
 
 ```simple
 fn jit_record_call(fn_name: text):
@@ -311,7 +311,7 @@ fn jit_record_call(fn_name: text):
 
 ### 3.6 MEDIUM: Struct Field Access is O(fields)
 
-**File:** `src/core/interpreter/value.spl` lines 149-157
+**File:** `src/compiler_core/interpreter/value.spl` lines 149-157
 
 ```simple
 fn val_struct_get_field(vid: i64, field_name: text) -> i64:
@@ -330,7 +330,7 @@ fn val_struct_get_field(vid: i64, field_name: text) -> i64:
 
 ### 3.7 MEDIUM: Range Allocates Full Array
 
-**File:** `src/core/interpreter/eval.spl` lines 708-733
+**File:** `src/compiler_core/interpreter/eval.spl` lines 708-733
 
 ```simple
 fn eval_range(eid: i64) -> i64:
@@ -357,7 +357,7 @@ All should use hash maps.
 
 ### 3.9 ADDITIONAL: Lexer Character Classification
 
-**File:** `src/core/lexer.spl` lines 40-56
+**File:** `src/compiler_core/lexer.spl` lines 40-56
 
 ```simple
 fn is_digit(c: text) -> bool:
@@ -383,7 +383,7 @@ fn is_digit(c: text) -> bool:
 | Return type table | eval.spl | O(n) -> O(1) hash | DONE |
 | Scope pop | env.spl | O(depth) rebuild -> O(1) decrement | DONE |
 
-Shared hash utility: `src/core/interpreter/hashmap.spl` (64 lines)
+Shared hash utility: `src/compiler_core/interpreter/hashmap.spl` (64 lines)
 
 ### Phase 2: String Optimization -- IMPLEMENTED
 

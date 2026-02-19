@@ -21,13 +21,13 @@ These files have large impl blocks that cannot be split in Simple:
 | File | Lines | Reason |
 |------|-------|--------|
 | `compiler/parser.spl` | 2,453 | Large impl Parser block |
-| `compiler_core/parser.spl` | 2,322 | Large impl Parser block |
-| `core/compiler/c_codegen.spl` | 2,267 | Large impl CCodegen block |
+| `compiler_core_legacy/parser.spl` | 2,322 | Large impl Parser block |
+| `compiler_core_legacy/compiler/c_codegen.spl` | 2,267 | Large impl CCodegen block |
 | `app/compile/c_translate.spl` | 1,871 | Large impl CTranslator block |
-| `core/parser.spl` | 1,862 | Large impl Parser block |
+| `compiler_core_legacy/parser.spl` | 1,862 | Large impl Parser block |
 | `app/mcp/main.spl` | 1,854 | Complex MCP server orchestration |
 | `compiler/treesitter/outline.spl` | 1,823 | Large impl TreeSitter block |
-| `core/interpreter/eval.spl` | 1,619 | Large impl Interpreter block |
+| `compiler_core_legacy/interpreter/eval.spl` | 1,619 | Large impl Interpreter block |
 | `compiler/mir_lowering.spl` | 1,503 | Large impl MirLowering block |
 | `compiler/lexer.spl` | 1,430 | Large impl Lexer block |
 
@@ -384,8 +384,8 @@ Document these in `doc/technical_debt/large_impl_blocks.md`:
 | File | Lines | Reason | Recommendation |
 |------|-------|--------|----------------|
 | compiler/parser.spl | 2,453 | Large impl Parser | Wait for language support |
-| compiler_core/parser.spl | 2,322 | Large impl Parser | Wait for language support |
-| core/compiler/c_codegen.spl | 2,267 | Large impl CCodegen | Wait for language support |
+| compiler_core_legacy/parser.spl | 2,322 | Large impl Parser | Wait for language support |
+| compiler_core_legacy/compiler/c_codegen.spl | 2,267 | Large impl CCodegen | Wait for language support |
 
 **Mitigation strategies:**
 1. Extract helper functions where possible (5-10% reduction)

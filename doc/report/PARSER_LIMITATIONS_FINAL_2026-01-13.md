@@ -380,7 +380,7 @@ fn wrapper(args...):
 **Files:**
 - src/parser/src/expressions/helpers.rs
 - src/compiler/src/interpreter_call/core.rs
-- simple/std_lib/src/core/decorators.spl
+- simple/std_lib/src/compiler_core/decorators.spl
 
 **Performance:** Negligible overhead (~15ns per variadic call)
 **Documentation:** SPREAD_OPERATOR_COMPLETE_2026-01-13.md
@@ -551,16 +551,16 @@ Track progress:
 
 ### Session 2026-01-12:
 - `src/parser/` - Variadic parameters (6 files)
-- `simple/std_lib/src/core/option.spl` - Reserved keywords
-- `simple/std_lib/src/core/result.spl` - Reserved keywords
-- `simple/std_lib/src/core/traits.spl` - Multiple limitations
-- `simple/std_lib/src/core/list.spl` - Variadic enabled
-- `simple/std_lib/src/core/array.spl` - Const generics
-- `simple/std_lib/src/core/primitives.spl` - Impl docstrings
+- `simple/std_lib/src/compiler_core/option.spl` - Reserved keywords
+- `simple/std_lib/src/compiler_core/result.spl` - Reserved keywords
+- `simple/std_lib/src/compiler_core/traits.spl` - Multiple limitations
+- `simple/std_lib/src/compiler_core/list.spl` - Variadic enabled
+- `simple/std_lib/src/compiler_core/array.spl` - Const generics
+- `simple/std_lib/src/compiler_core/primitives.spl` - Impl docstrings
 
 ### Session 2026-01-13:
-- `simple/std_lib/src/core/graph.spl` - Nested generics
-- `simple/std_lib/src/core/collections.spl` - Trait system issues
+- `simple/std_lib/src/compiler_core/graph.spl` - Nested generics
+- `simple/std_lib/src/compiler_core/collections.spl` - Trait system issues
 
 ---
 

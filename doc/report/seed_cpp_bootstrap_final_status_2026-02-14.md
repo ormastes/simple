@@ -28,7 +28,7 @@ After extensive work on seed_cpp generics support, **all transpiler-related bloc
 
 #### 1. Invalid Parameter Syntax (Line 8671, 8916)
 
-**File**: `src/compiler_core/backend/vulkan_backend.spl:187-190`
+**File**: `src/compiler_core_legacy/backend/vulkan_backend.spl:187-190`
 
 **Bad Code**:
 ```simple
@@ -49,7 +49,7 @@ types: (i64, i64, i64, i64, i64, i64, i64, i64, i64)
 ```
 
 **Affected Files**:
-- `src/compiler_core/backend/vulkan_backend.spl` (line 190)
+- `src/compiler_core_legacy/backend/vulkan_backend.spl` (line 190)
 - Similar pattern in other functions
 
 #### 2. Missing Function Return Type Typedefs
@@ -68,7 +68,7 @@ emit("typedef bool (*FnPtr_bool)();\n");
 
 #### 3. AOP/Contract Framework Bugs (Lines 10939-10971)
 
-**File**: `src/core/aop.spl`
+**File**: `src/compiler_core_legacy/aop.spl`
 
 **Issues**:
 - Undeclared variables: `proceed_ctx`, `base_ctx`, `error`
@@ -122,11 +122,11 @@ build/bootstrap/core1.cpp:10980:5: error: no matching function for call to 'Logg
 
 ### High Priority (Syntax Errors)
 
-1. **`src/compiler_core/backend/vulkan_backend.spl`**
+1. **`src/compiler_core_legacy/backend/vulkan_backend.spl`**
    - Line 190: Invalid parameter syntax `val _tv_3 = [i64, ...]`
    - Fix: Use tuple syntax like the newer `src/compiler/backend/` version
 
-2. **`src/compiler_core/aop.spl`** (if exists)
+2. **`src/compiler_core_legacy/aop.spl`** (if exists)
    - Multiple undeclared variables and functions
    - Pattern matching with data extraction (not supported)
    - Struct field access confusion (pointer vs value)
@@ -146,7 +146,7 @@ build/bootstrap/core1.cpp:10980:5: error: no matching function for call to 'Logg
 1. **Fix vulkan_backend.spl parameter syntax** (5 minutes)
    ```bash
    # Copy correct version from src/compiler/backend/vulkan_backend.spl
-   # to src/compiler_core/backend/vulkan_backend.spl
+   # to src/compiler_core_legacy/backend/vulkan_backend.spl
    ```
 
 2. **Add FnPtr_bool typedef** (2 minutes)
@@ -170,14 +170,14 @@ build/bootstrap/core1.cpp:10980:5: error: no matching function for call to 'Logg
 3. Bootstrap with reduced feature set
 4. Add features back incrementally
 
-### Option C: Skip compiler_core, Use compiler
+### Option C: Skip compiler_core_legacy, Use compiler
 
 The `src/compiler/` directory has newer, cleaner code:
 - Fixed vulkan_backend.spl parameter syntax
 - Possibly fewer AOP dependencies
 - Better maintained
 
-Try bootstrapping with `src/compiler/` instead of `src/compiler_core/`
+Try bootstrapping with `src/compiler/` instead of `src/compiler_core_legacy/`
 
 ---
 
@@ -217,7 +217,7 @@ Try bootstrapping with `src/compiler/` instead of `src/compiler_core/`
 
 ## Conclusion
 
-**The seed_cpp transpiler is COMPLETE and READY for bootstrap**. All generic type issues are resolved. The remaining work is to fix Simple source code bugs in `src/compiler_core/` or switch to `src/compiler/`.
+**The seed_cpp transpiler is COMPLETE and READY for bootstrap**. All generic type issues are resolved. The remaining work is to fix Simple source code bugs in `src/compiler_core_legacy/` or switch to `src/compiler/`.
 
 **Recommendation**: Fix the 3 simple issues in Option A (40-70 minutes) and proceed to Phase 1 bootstrap completion.
 

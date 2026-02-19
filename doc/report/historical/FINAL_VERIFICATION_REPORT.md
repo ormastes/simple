@@ -291,7 +291,7 @@ STATUS:                 ✅ PRODUCTION READY
 1. **Immediate:** Test with seed compiler
    ```bash
    cd bootstrap/build
-   ./seed ../../src/compiler_core/lexer.spl
+   ./seed ../../src/compiler_core_legacy/lexer.spl
    ```
 
 2. **Short-term:** Fix any compilation issues found
@@ -303,8 +303,8 @@ STATUS:                 ✅ PRODUCTION READY
 ## 📁 Documentation
 
 **Files created during intensive testing:**
-- `src/tools/intensive_validation.py` - Comprehensive test suite
-- `src/tools/fix_struct_init.py` - Syntax fix tool
+- `scripts/tools/intensive_validation.py` - Comprehensive test suite
+- `scripts/tools/fix_struct_init.py` - Syntax fix tool
 - `INTENSIVE_TESTING_REPORT.md` - Detailed test results
 - `FINAL_VERIFICATION_REPORT.md` - This document
 

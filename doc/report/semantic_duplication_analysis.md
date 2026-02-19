@@ -206,9 +206,9 @@ Updated callsites in:
 ### 3.1 Trait Implementations (200+ lines)
 
 **Files:**
-- `simple/std_lib/src/core/string_traits.spl:9-56`
-- `simple/std_lib/src/core/array.spl:276-319`
-- `simple/std_lib/src/core/persistent_list.spl:378-381`
+- `simple/std_lib/src/compiler_core/string_traits.spl:9-56`
+- `simple/std_lib/src/compiler_core/array.spl:276-319`
+- `simple/std_lib/src/compiler_core/persistent_list.spl:378-381`
 
 **Duplicated traits:** Clone, Eq, Ord, Hash, Display with identical loop structures.
 
@@ -235,9 +235,9 @@ helper functions in `vector_ops.spl`. Reduced ~150 lines of duplicated predicate
 ### 3.4 Collection Methods (150+ lines)
 
 **Files:**
-- `simple/std_lib/src/core/array.spl:612-696`
-- `simple/std_lib/src/core/persistent_list.spl:242-300`
-- `simple/std_lib/src/core/list.spl`
+- `simple/std_lib/src/compiler_core/array.spl:612-696`
+- `simple/std_lib/src/compiler_core/persistent_list.spl:242-300`
+- `simple/std_lib/src/compiler_core/list.spl`
 
 **Duplicated methods:** `all()`, `any()`, `find()`, `count()`, `position()`
 
@@ -245,7 +245,7 @@ helper functions in `vector_ops.spl`. Reduced ~150 lines of duplicated predicate
 
 ### 3.5 Primitive Type Extensions (100+ lines)
 
-**File:** `simple/std_lib/src/core/primitives.spl`
+**File:** `simple/std_lib/src/compiler_core/primitives.spl`
 
 **Duplicated between i64 and f64:**
 - `is_zero()`, `is_positive()`, `is_negative()`
@@ -332,7 +332,7 @@ meaningfully reduced further. This is inherent to having both concrete methods a
 ### 6.4 Iterable Defaults Created (Simple)
 
 **File created:**
-- `simple/std_lib/src/core/iterable_defaults.spl`
+- `simple/std_lib/src/compiler_core/iterable_defaults.spl`
 
 **Default implementations:** 20+ reusable iteration functions
 
@@ -655,6 +655,6 @@ src/driver/src/cli/help.rs                    # 189 lines → Simple ✅ DONE
 ```
 simple/std_lib/src/ml/torch/nn/               # ✅ Resolved with FFIModule
 simple/std_lib/src/graphics/math/vector.spl   # ✅ Resolved with VectorOps trait delegation
-simple/std_lib/src/core/array.spl             # ✅ Resolved with iterable_defaults
-simple/std_lib/src/core/primitives.spl        # ✅ Reviewed - Number trait already used
+simple/std_lib/src/compiler_core/array.spl             # ✅ Resolved with iterable_defaults
+simple/std_lib/src/compiler_core/primitives.spl        # ✅ Reviewed - Number trait already used
 ```

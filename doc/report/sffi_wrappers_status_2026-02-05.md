@@ -19,7 +19,7 @@
 
 ### 1. Core Modules - FIXED ✅
 
-#### Decorators (`src/std/src/core/decorators.spl`)
+#### Decorators (`src/std/src/compiler_core/decorators.spl`)
 - **Status:** ✅ Complete (Pure Simple, no FFI)
 - **Fixed:** Mutability errors (`fn` → `me` for methods that modify self)
 - **Tests:** 7 tests (ready to run)
@@ -31,7 +31,7 @@
 
 **No FFI used** - 100% Pure Simple ✅
 
-#### Context Manager (`src/std/src/core/context_manager.spl`)
+#### Context Manager (`src/std/src/compiler_core/context_manager.spl`)
 - **Status:** ✅ Complete (Pure Simple, no FFI)
 - **Fixed:**
   - Removed `extern fn rt_time_now_seconds()`
@@ -240,8 +240,8 @@ No compilation errors. All extern declarations accepted.
 12. `doc/report/pure_simple_lsp_treesitter_2026-02-05.md` - LSP summary
 
 ### Modified Files (4 files)
-1. `src/std/src/core/decorators.spl` - Fixed mutability
-2. `src/std/src/core/context_manager.spl` - Removed FFI, added .new()
+1. `src/std/src/compiler_core/decorators.spl` - Fixed mutability
+2. `src/std/src/compiler_core/context_manager.spl` - Removed FFI, added .new()
 3. `src/app/io/mod.spl` - Added 30 collection exports
 4. `src/std/src/parser/treesitter.spl` - Pure Simple implementation
 5. `src/app/lsp/server.spl` - Updated API

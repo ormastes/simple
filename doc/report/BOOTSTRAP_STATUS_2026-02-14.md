@@ -27,9 +27,9 @@
 - Parallel jobs: 32
 
 **Artifacts:**
-- seed/build/seed_cpp: 135 KB ✅
-- seed/build/libspl_runtime.a: 63 KB ✅  
-- seed/build/runtime_test: 135 KB ✅
+- build/seed/seed_cpp: 135 KB ✅
+- build/seed/libspl_runtime.a: 63 KB ✅  
+- build/src/compiler_seed/runtime_test: 135 KB ✅
 
 **Test Results:**
 ```
@@ -39,7 +39,7 @@
 ### ❌ Step 2: Core1 Build (BLOCKED - Dual Failure)
 
 **Attempt 1: seed_cpp Transpilation**
-- Files: 439 compiler_core .spl files
+- Files: 439 compiler_core_legacy .spl files
 - Transpilation: ✅ SUCCESS (642 KB C++ generated in 3.7s)
 - Compilation: ❌ FAILED (20+ type errors)
 
@@ -58,7 +58,7 @@ error: expected '(' after 'if'
 
 **Attempt 2: Pre-Built Bootstrap Binary**
 - Binary: bin/release/simple (27 MB, v0.4.0-alpha.1)
-- Command: `simple compile src/compiler_core/main.spl`
+- Command: `simple compile src/compiler_core_legacy/main.spl`
 - Result: ❌ FAILED (parse error)
 
 **Error:**
@@ -81,7 +81,7 @@ Unexpected token: expected -> or => or :, found Comma
 
 ## Changes Made
 
-### 1. Bootstrap Script (scripts/bootstrap-from-scratch.sh)
+### 1. Bootstrap Script (scripts/bootstrap/bootstrap-from-scratch.sh)
 
 **Bug Fix:**
 - Line 349: Fixed "clangcc" bug
@@ -144,7 +144,7 @@ Unexpected token: expected -> or => or :, found Comma
 ### Blocked Components ❌
 
 1. **Self-Hosting Compilation**
-   - Cannot compile compiler_core from source
+   - Cannot compile compiler_core_legacy from source
    - seed_cpp: Limited language support
    - Pre-built binary: Source parse errors
    - Requires source code fixes
@@ -167,7 +167,7 @@ Unexpected token: expected -> or => or :, found Comma
 - Full pattern matching
 - Trait system
 
-**Impact:** Cannot transpile 439 compiler_core files
+**Impact:** Cannot transpile 439 compiler_core_legacy files
 
 **Evidence:** 20+ compilation errors in generated C++
 
@@ -215,7 +215,7 @@ Unexpected token: expected -> or => or :, found Comma
    - Improve pattern matching
    - Better error messages
 
-3. **Simplify compiler_core**
+3. **Simplify compiler_core_legacy**
    - Reduce complexity where possible
    - Factor out advanced features
    - Make seed_cpp-compatible subset
@@ -247,7 +247,7 @@ Unexpected token: expected -> or => or :, found Comma
 ### Seed Transpilation: ⚠️ Partial
 - Simple programs: ✅ Works
 - Complex programs: ❌ Fails
-- compiler_core: ❌ Cannot handle
+- compiler_core_legacy: ❌ Cannot handle
 
 ### Pre-Built Binary: ✅ 2,709/4,761 (56.9%)
 - Stdlib tests passing

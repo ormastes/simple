@@ -139,14 +139,14 @@ Test 5: Consistency         ✅ PASSED
 1. **Fix Struct Initialization**
    ```bash
    # Update desugarer.py pass3 to better handle struct literals
-   python3 src/tools/fix_struct_init.py src/compiler_core/
+   python3 scripts/tools/fix_struct_init.py src/compiler_core_legacy/
    ```
 
 2. **Manual Review of 10 Syntax Errors**
    ```bash
    # Check and manually fix the 10 files
-   vim src/compiler_core/lexer_auto_desugared.spl
-   vim src/compiler_core/predicate_parser.spl
+   vim src/compiler_core_legacy/lexer_auto_desugared.spl
+   vim src/compiler_core_legacy/predicate_parser.spl
    # ... etc
    ```
 
@@ -294,7 +294,7 @@ The desugared codebase is production-ready after fixing the 10 syntax errors. Th
 
 ## 📁 Files Generated
 
-- `src/tools/intensive_validation.py` - Comprehensive test suite
+- `scripts/tools/intensive_validation.py` - Comprehensive test suite
 - Test results logged to console
 - Statistics available via `analyze_desugaring.py`
 

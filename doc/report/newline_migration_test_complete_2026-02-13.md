@@ -60,7 +60,7 @@ Added after existing use statements or at the top of each file requiring the NL 
 | test/unit/compiler/blocks/pre_lex_info_spec.spl | 2 | Testing lexer escape handling |
 | test/unit/compiler/mir_serialization_spec.spl | 2 | Testing MIR serialization escaping |
 | test/unit/compiler/compilation_context_spec.spl | 1 | Testing context escaping |
-| test/unit/core/lexer_intensive_spec.spl | 1 | Testing core lexer escapes |
+| test/unit/compiler_core_legacy/lexer_intensive_spec.spl | 1 | Testing core lexer escapes |
 
 **Total:** 18 occurrences across 13 files
 
@@ -211,7 +211,7 @@ grep -r '\\n' test/unit/ test/compiler/ --include="*.spl" --exclude="newline_con
 - type_checker/type_inference_executable_spec.spl
 - verification/unified_attrs_spec.spl
 
-### test/unit/core/ (10 files)
+### test/unit/compiler_core_legacy/ (10 files)
 - branch_coverage_26_spec.spl
 - branch_coverage_27_spec.spl
 - branch_coverage_29_spec.spl
@@ -291,7 +291,7 @@ A Python script (`migrate_nl_complete.py`) was created to automate the migration
 As per the migration plan (doc/report/newline_migration_plan_2026-02-13.md):
 1. ✅ **COMPLETE:** test/compiler/ and test/unit/ (this report)
 2. **Remaining:** test/feature/ and test/integration/
-3. **Remaining:** src/compiler/, src/compiler_core/, src/app/, src/std/
+3. **Remaining:** src/compiler/, src/compiler_core_legacy/, src/app/, src/std/
 
 ## Conclusion
 

@@ -39,7 +39,7 @@ Successfully fixed all three requested parser issues and systematically correcte
 5. `src/lib/std/src/ml/torch/transforms.spl` - 2 instances
 6. `src/lib/std/src/ml/torch/distributed/collective.spl` - 1 instance
 7. `src/lib/std/src/ml/torch/validation/__init__.spl` - 1 instance
-8. `src/lib/std/src/core/persistent_list.spl` - 1 instance
+8. `src/lib/std/src/compiler_core/persistent_list.spl` - 1 instance
 9. `src/lib/std/src/spec/property/generators.spl` - 2 instances
 10. `src/lib/std/src/spec/property/shrinking.spl` - 1 instance
 11. `src/lib/std/src/spec/snapshot/comparison.spl` - 2 instances

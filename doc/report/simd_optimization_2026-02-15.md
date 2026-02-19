@@ -125,7 +125,7 @@ fn vector_scale(data: [f32], scale: f32) -> [f32]:
 
 #### Phase 2: MIR SIMD Operations
 
-**`src/core/mir_types.spl`** (Modified)
+**`src/compiler_core/mir_types.spl`** (Modified)
 - Added SIMD operation tags to MIR enum
 - Vector load/store operations
 - Vector arithmetic operations
@@ -728,7 +728,7 @@ fn array_add_simd(a: [f32], b: [f32]) -> [f32]:
 
 **Core Implementation:**
 - `src/std/simd.spl` - SIMD intrinsics API
-- `src/core/mir_types.spl` - MIR SIMD opcodes
+- `src/compiler_core/mir_types.spl` - MIR SIMD opcodes
 - `src/compiler/backend/x86_64_simd.spl` - x86_64 codegen
 - `src/compiler/backend/arm_neon.spl` - ARM codegen
 - `src/compiler/mir_opt/vectorize.spl` - Auto-vectorizer

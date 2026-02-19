@@ -2,7 +2,7 @@
 
 ## Overview
 
-`seed/seed.cpp` is a C++ transpiler for Simple language, designed for bootstrapping. It translates `.spl` → `.cpp` with runtime library calls.
+`src/compiler_seed/seed.cpp` is a C++ transpiler for Simple language, designed for bootstrapping. It translates `.spl` → `.cpp` with runtime library calls.
 
 **Status:** Minimal bootstrap (simple main functions) ✅ | Full compiler bootstrap ⚠️
 
@@ -168,7 +168,7 @@ Don't use seed_cpp - use native Simple compiler once available.
 
 ## Related Files
 
-- `seed/seed.cpp` - Main transpiler (C++)
-- `seed/runtime.c/h` - Runtime library
-- `scripts/bootstrap-fixed.sh` - Bootstrap script using seed_cpp
+- `src/compiler_seed/seed.cpp` - Main transpiler (C++)
+- `src/compiler_seed/runtime.c/h` - Runtime library
+- `scripts/bootstrap/bootstrap-from-scratch.sh --step=core1` - Bootstrap script using seed_cpp
 - `doc/report/seed_cpp_main_fix_2026-02-13.md` - Bug fix report
