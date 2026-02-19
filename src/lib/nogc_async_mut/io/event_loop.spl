@@ -1,0 +1,259 @@
+"""
+# Event Loop
+
+Abstracts epoll (Linux) / kqueue (BSD/macOS) for async I/O.
+Manages fd registration, interest tracking, and event polling.
+
+## Components
+
+| Type | Description |
+|------|-------------|
+| EventLoop | Core event loop (epoll/kqueue) |
+| Waker | Callback to wake a pending future |
+
+## Creating an Event Loop
+
+```simple
+val loop = EventLoop.new()?
+expect loop.epoll_fd >= 0
+```
+
+## Registering and Polling
+
+```simple
+val loop = EventLoop.new()?
+val waker = Waker.new(1, \\id: pass)
+
+# Register fd for read interest:
+# loop.register(socket_fd, Interest.Read, waker)?
+
+# Poll for events:
+# val events = loop.poll(100)?
+# for event in events:
+#     if event.ready == Interest.Read:
+#         handle_read(event.fd)
+```
+
+## Waker Callback
+
+```simple
+var woken_id = -1
+val waker = Waker.new(42, \\id: woken_id = id)
+waker.wake()
+expect woken_id == 42
+```
+"""
+
+use std.common.io.error.{IoError, IoErrorKind}
+use std.common.io.types.{Interest, IoEvent}
+
+# ============================================================================
+# Waker - Future Wake Callback
+# ============================================================================
+
+class Waker:
+    """Wakes a pending future when I/O is ready.
+
+    Stored by EventLoop and invoked when a registered fd
+    becomes ready.
+
+    Example:
+        val waker = Waker.new(task_id, \id: scheduler.wake(id))
+    """
+    id: i64
+    wake_fn: fn(i64)
+
+    static fn new(id: i64, wake_fn: fn(i64)) -> Waker:
+        """Create waker.
+
+        Args:
+            id: Associated task/future ID
+            wake_fn: Callback to invoke on wake
+
+        Returns:
+            Waker
+        """
+        Waker(id: id, wake_fn: wake_fn)
+
+    fn wake():
+        """Invoke the wake callback."""
+        self.wake_fn(self.id)
+
+# ============================================================================
+# EventLoop - epoll/kqueue Abstraction
+# ============================================================================
+
+class EventLoop:
+    """Event loop using epoll (Linux) or kqueue (BSD/macOS).
+
+    Manages registration of file descriptors and polling for readiness.
+
+    Example:
+        val loop = EventLoop.new()?
+        loop.register(socket_fd, Interest.ReadWrite, waker)?
+
+        while running:
+            val events = loop.poll(100)?
+            for event in events:
+                dispatch(event)
+    """
+    epoll_fd: i64
+    wakers: [WakerEntry]
+
+    static fn new() -> Result<EventLoop, IoError>:
+        """Create event loop (calls epoll_create / kqueue).
+
+        Returns:
+            Result with EventLoop or error
+        """
+        val epfd = rt_epoll_create()
+        if epfd < 0:
+            return Err(IoError.new(IoErrorKind.Other, "epoll_create failed"))
+        Ok(EventLoop(epoll_fd: epfd, wakers: []))
+
+    me register(fd: i64, interest: Interest, waker: Waker) -> Result<(), IoError>:
+        """Register fd for interest monitoring.
+
+        Args:
+            fd: File descriptor to monitor
+            interest: Read, Write, or ReadWrite
+            waker: Waker to invoke when ready
+
+        Returns:
+            Result or error
+        """
+        val events = interest_to_epoll(interest)
+        val rc = rt_epoll_ctl(self.epoll_fd, 1, fd, events)  # 1 = EPOLL_CTL_ADD
+        if rc < 0:
+            return Err(IoError.new(IoErrorKind.Other, "epoll_ctl add failed for fd {fd}"))
+        self.wakers = self.wakers + [WakerEntry(fd: fd, waker: waker)]
+        Ok(())
+
+    me deregister(fd: i64) -> Result<(), IoError>:
+        """Remove fd from monitoring.
+
+        Args:
+            fd: File descriptor to remove
+
+        Returns:
+            Result or error
+        """
+        val rc = rt_epoll_ctl(self.epoll_fd, 2, fd, 0)  # 2 = EPOLL_CTL_DEL
+        if rc < 0:
+            return Err(IoError.new(IoErrorKind.Other, "epoll_ctl del failed for fd {fd}"))
+        self.wakers = self.wakers.filter(\e: e.fd != fd)
+        Ok(())
+
+    me modify(fd: i64, interest: Interest) -> Result<(), IoError>:
+        """Modify interest for an already-registered fd.
+
+        Args:
+            fd: File descriptor
+            interest: New interest flags
+
+        Returns:
+            Result or error
+        """
+        val events = interest_to_epoll(interest)
+        val rc = rt_epoll_ctl(self.epoll_fd, 3, fd, events)  # 3 = EPOLL_CTL_MOD
+        if rc < 0:
+            return Err(IoError.new(IoErrorKind.Other, "epoll_ctl mod failed for fd {fd}"))
+        Ok(())
+
+    fn poll(timeout_ms: i64) -> Result<[IoEvent], IoError>:
+        """Poll for ready events.
+
+        Args:
+            timeout_ms: Max wait time in ms (-1 for infinite)
+
+        Returns:
+            Result with array of ready IoEvents
+        """
+        val raw_events = rt_epoll_wait(self.epoll_fd, 64, timeout_ms)
+        var events: [IoEvent] = []
+        # raw_events is [i64] with pairs: [fd, event_mask, fd, event_mask, ...]
+        var i = 0
+        while i + 1 < raw_events.len():
+            val fd = raw_events[i]
+            val mask = raw_events[i + 1]
+            val ready = epoll_to_interest(mask)
+            events = events + [IoEvent(fd: fd, ready: ready)]
+            i = i + 2
+        Ok(events)
+
+    fn poll_one(timeout_ms: i64) -> Result<IoEvent?, IoError>:
+        """Poll for a single event.
+
+        Args:
+            timeout_ms: Max wait time in ms
+
+        Returns:
+            Result with Some(event) or nil if timeout
+        """
+        val events = self.poll(timeout_ms)?
+        if events.len() > 0:
+            Ok(Some(events[0]))
+        else:
+            Ok(nil)
+
+    me run() -> Result<(), IoError>:
+        """Run event loop, dispatching wakers until no fds registered.
+
+        Returns:
+            Result or error
+        """
+        while self.wakers.len() > 0:
+            val events = self.poll(100)?
+            for event in events:
+                # Find and wake matching waker
+                for entry in self.wakers:
+                    if entry.fd == event.fd:
+                        entry.waker.wake()
+        Ok(())
+
+# ============================================================================
+# Internal Types
+# ============================================================================
+
+struct WakerEntry:
+    """Internal: maps fd to waker."""
+    fd: i64
+    waker: Waker
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+fn interest_to_epoll(interest: Interest) -> i64:
+    """Convert Interest to epoll event flags."""
+    match interest:
+        case Interest.Read: 1       # EPOLLIN
+        case Interest.Write: 4      # EPOLLOUT
+        case Interest.ReadWrite: 5  # EPOLLIN | EPOLLOUT
+
+fn epoll_to_interest(mask: i64) -> Interest:
+    """Convert epoll event mask to Interest."""
+    val has_read = (mask & 1) != 0   # EPOLLIN
+    val has_write = (mask & 4) != 0  # EPOLLOUT
+    if has_read and has_write:
+        Interest.ReadWrite
+    elif has_write:
+        Interest.Write
+    else:
+        Interest.Read
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+extern fn rt_epoll_create() -> i64
+extern fn rt_epoll_ctl(epfd: i64, op: i64, fd: i64, events: i64) -> i64
+extern fn rt_epoll_wait(epfd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+extern fn rt_socket_set_nonblocking(fd: i64, enabled: bool) -> bool
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Waker
+export EventLoop

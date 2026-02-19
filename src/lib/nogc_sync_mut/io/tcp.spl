@@ -1,0 +1,477 @@
+"""
+# Sync TCP I/O
+
+TCP listener and stream implementing Read, Write, Close traits.
+Provides reliable, connection-oriented network I/O.
+
+## Components
+
+| Type | Traits | Description |
+|------|--------|-------------|
+| TcpListener | Close | Server socket — accept connections |
+| TcpStream | Read, Write, Close | Bidirectional connection |
+| Shutdown | — | Shutdown direction enum |
+
+## Echo Server
+
+```simple
+val listener = TcpListener.bind("127.0.0.1:0")?
+val addr = listener.local_addr()?
+
+# In real code, accept() blocks until a client connects:
+# val stream = listener.accept()?
+# val request = stream.read_text()?
+# stream.write_text(request)?
+# stream.close()?
+
+listener.close()?
+```
+
+## Client Connection
+
+```simple
+# val stream = TcpStream.connect("127.0.0.1:8080")?
+# stream.write_text("GET / HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n")?
+# val response = stream.read_text()?
+# stream.close()?
+```
+
+## Shutdown Direction
+
+```simple
+val read_shutdown = Shutdown.Read
+val write_shutdown = Shutdown.Write
+val both_shutdown = Shutdown.Both
+```
+"""
+
+use std.common.io.traits.{Read, Write, Close}
+use std.common.io.error.{IoError, IoErrorKind}
+
+# ============================================================================
+# Shutdown - Shutdown Direction
+# ============================================================================
+
+enum Shutdown:
+    """Direction for TCP shutdown.
+
+    Example:
+        stream.shutdown(Shutdown.Write)?  # done sending
+    """
+    Read
+    Write
+    Both
+
+# ============================================================================
+# TcpListener - TCP Server Socket
+# ============================================================================
+
+class TcpListener with Close:
+    """TCP server socket.
+
+    Listens for incoming connections and produces TcpStream handles.
+
+    Example:
+        val listener = TcpListener.bind("127.0.0.1:8080")?
+        while true:
+            val stream = listener.accept()?
+            handle_client(stream)
+    """
+    fd: i64
+    open: bool
+
+    static fn bind(addr: text) -> Result<TcpListener, IoError>:
+        """Bind to address and start listening.
+
+        Args:
+            addr: Address in format "host:port"
+
+        Returns:
+            Result with TcpListener or error
+        """
+        val fd = rt_io_tcp_bind(addr)
+        if fd < 0:
+            return Err(IoError.new(IoErrorKind.AddrInUse, "bind failed: {addr}"))
+        Ok(TcpListener(fd: fd, open: true))
+
+    fn accept() -> Result<TcpStream, IoError>:
+        """Accept incoming connection (blocks).
+
+        Returns:
+            Result with connected TcpStream
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "listener is closed"))
+        val client_fd = rt_io_tcp_accept(self.fd)
+        if client_fd < 0:
+            return Err(IoError.new(IoErrorKind.Other, "accept failed"))
+        Ok(TcpStream(fd: client_fd, open: true))
+
+    fn accept_timeout(ms: i64) -> Result<TcpStream, IoError>:
+        """Accept with timeout.
+
+        Args:
+            ms: Timeout in milliseconds
+
+        Returns:
+            Result with TcpStream or TimedOut error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "listener is closed"))
+        val client_fd = rt_io_tcp_accept_timeout(self.fd, ms)
+        if client_fd < 0:
+            return Err(IoError.new(IoErrorKind.TimedOut, "accept timed out"))
+        Ok(TcpStream(fd: client_fd, open: true))
+
+    fn local_addr() -> Result<text, IoError>:
+        """Get local bound address.
+
+        Returns:
+            Result with address string
+        """
+        val addr = rt_io_tcp_local_addr(self.fd)
+        if addr == nil:
+            return Err(IoError.new(IoErrorKind.Other, "local_addr failed"))
+        Ok(addr)
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Close listener."""
+        if not self.open:
+            return Ok(())
+        val ok = rt_io_tcp_close(self.fd)
+        self.open = false
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "close failed"))
+        Ok(())
+
+    fn is_open() -> bool:
+        """Check if listener is open."""
+        self.open
+
+# ============================================================================
+# TcpStream - TCP Connection
+# ============================================================================
+
+class TcpStream with Read, Write, Close:
+    """Bidirectional TCP connection.
+
+    Implements Read, Write, Close for stream-oriented I/O.
+
+    Example:
+        val stream = TcpStream.connect("example.com:80")?
+        stream.write_text("GET / HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n")?
+        val response = stream.read_text()?
+        stream.close()?
+    """
+    fd: i64
+    open: bool
+
+    static fn connect(addr: text) -> Result<TcpStream, IoError>:
+        """Connect to remote address.
+
+        Args:
+            addr: Address in "host:port" format
+
+        Returns:
+            Result with connected TcpStream
+        """
+        val fd = rt_io_tcp_connect(addr)
+        if fd < 0:
+            return Err(IoError.new(IoErrorKind.ConnectionRefused, "connect failed: {addr}"))
+        Ok(TcpStream(fd: fd, open: true))
+
+    static fn connect_timeout(addr: text, ms: i64) -> Result<TcpStream, IoError>:
+        """Connect with timeout.
+
+        Args:
+            addr: Address in "host:port" format
+            ms: Timeout in milliseconds
+
+        Returns:
+            Result with TcpStream or TimedOut error
+        """
+        val fd = rt_io_tcp_connect_timeout(addr, ms)
+        if fd < 0:
+            return Err(IoError.new(IoErrorKind.TimedOut, "connect timed out: {addr}"))
+        Ok(TcpStream(fd: fd, open: true))
+
+    # --- Read trait ---
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        """Read up to size bytes from stream.
+
+        Args:
+            size: Maximum bytes to read
+
+        Returns:
+            Result with bytes read (may be fewer than size)
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        val data = rt_io_tcp_read(self.fd, size)
+        if data.len() < 0:
+            return Err(IoError.new(IoErrorKind.ConnectionReset, "read failed"))
+        Ok(data)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        """Read exactly size bytes.
+
+        Args:
+            size: Exact bytes to read
+
+        Returns:
+            Result with bytes, or error if stream ends early
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        var buf: [u8] = []
+        var remaining = size
+        while remaining > 0:
+            val chunk = rt_io_tcp_read(self.fd, remaining)
+            if chunk.len() == 0:
+                return Err(IoError.new(IoErrorKind.UnexpectedEof, "read_exact: got {buf.len()} of {size} bytes"))
+            buf = buf + chunk
+            remaining = remaining - chunk.len()
+        Ok(buf)
+
+    fn read_all() -> Result<[u8], IoError>:
+        """Read all available bytes until EOF.
+
+        Returns:
+            Result with all bytes
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        var buf: [u8] = []
+        while true:
+            val chunk = rt_io_tcp_read(self.fd, 8192)
+            if chunk.len() == 0:
+                break
+            buf = buf + chunk
+        Ok(buf)
+
+    fn read_text() -> Result<text, IoError>:
+        """Read all available content as text.
+
+        Returns:
+            Result with text
+        """
+        val bytes = self.read_all()?
+        val s = rt_bytes_to_text(bytes)
+        Ok(s)
+
+    fn read_line() -> Result<text, IoError>:
+        """Read a single line from stream.
+
+        Returns:
+            Result with line including newline
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        val line = rt_io_tcp_read_line(self.fd)
+        if line == nil:
+            return Err(IoError.new(IoErrorKind.UnexpectedEof, "end of stream"))
+        Ok(line)
+
+    # --- Write trait ---
+
+    fn write(data: [u8]) -> Result<i64, IoError>:
+        """Write bytes, returning number written.
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result with bytes written count
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        val written = rt_io_tcp_write(self.fd, data)
+        if written < 0:
+            return Err(IoError.new(IoErrorKind.BrokenPipe, "write failed"))
+        Ok(written)
+
+    fn write_all(data: [u8]) -> Result<(), IoError>:
+        """Write all bytes.
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        var offset = 0
+        while offset < data.len():
+            val remaining = data.slice(offset, data.len())
+            val written = rt_io_tcp_write(self.fd, remaining)
+            if written <= 0:
+                return Err(IoError.new(IoErrorKind.BrokenPipe, "write_all failed"))
+            offset = offset + written
+        Ok(())
+
+    fn write_text(s: text) -> Result<(), IoError>:
+        """Write text string.
+
+        Args:
+            s: Text to write
+
+        Returns:
+            Result or error
+        """
+        val bytes = rt_text_to_bytes(s)
+        self.write_all(bytes)
+
+    fn flush() -> Result<(), IoError>:
+        """Flush write buffer.
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "stream is closed"))
+        val ok = rt_io_tcp_flush(self.fd)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "flush failed"))
+        Ok(())
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Close stream."""
+        if not self.open:
+            return Ok(())
+        val ok = rt_io_tcp_close(self.fd)
+        self.open = false
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "close failed"))
+        Ok(())
+
+    fn is_open() -> bool:
+        """Check if stream is open."""
+        self.open
+
+    # --- TCP-specific ---
+
+    fn peer_addr() -> Result<text, IoError>:
+        """Get remote peer address.
+
+        Returns:
+            Result with address string
+        """
+        val addr = rt_io_tcp_peer_addr(self.fd)
+        if addr == nil:
+            return Err(IoError.new(IoErrorKind.Other, "peer_addr failed"))
+        Ok(addr)
+
+    fn local_addr() -> Result<text, IoError>:
+        """Get local address.
+
+        Returns:
+            Result with address string
+        """
+        val addr = rt_io_tcp_local_addr(self.fd)
+        if addr == nil:
+            return Err(IoError.new(IoErrorKind.Other, "local_addr failed"))
+        Ok(addr)
+
+    fn set_nodelay(enabled: bool) -> Result<(), IoError>:
+        """Set TCP_NODELAY (disable Nagle's algorithm).
+
+        Args:
+            enabled: true to disable Nagle
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_tcp_set_nodelay(self.fd, enabled)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_nodelay failed"))
+        Ok(())
+
+    fn set_read_timeout(ms: i64?) -> Result<(), IoError>:
+        """Set read timeout.
+
+        Args:
+            ms: Timeout in ms, or nil for no timeout
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_tcp_set_read_timeout(self.fd, ms)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_read_timeout failed"))
+        Ok(())
+
+    fn set_write_timeout(ms: i64?) -> Result<(), IoError>:
+        """Set write timeout.
+
+        Args:
+            ms: Timeout in ms, or nil for no timeout
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_tcp_set_write_timeout(self.fd, ms)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_write_timeout failed"))
+        Ok(())
+
+    fn shutdown(how: Shutdown) -> Result<(), IoError>:
+        """Shutdown one or both directions.
+
+        Args:
+            how: Read, Write, or Both
+
+        Returns:
+            Result or error
+        """
+        val how_int = match how:
+            case Shutdown.Read: 0
+            case Shutdown.Write: 1
+            case Shutdown.Both: 2
+        val ok = rt_io_tcp_shutdown(self.fd, how_int)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "shutdown failed"))
+        Ok(())
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+# TCP listener
+extern fn rt_io_tcp_bind(addr: text) -> i64
+extern fn rt_io_tcp_accept(fd: i64) -> i64
+extern fn rt_io_tcp_accept_timeout(fd: i64, ms: i64) -> i64
+
+# TCP stream
+extern fn rt_io_tcp_connect(addr: text) -> i64
+extern fn rt_io_tcp_connect_timeout(addr: text, ms: i64) -> i64
+extern fn rt_io_tcp_read(fd: i64, size: i64) -> [u8]
+extern fn rt_io_tcp_read_line(fd: i64) -> text?
+extern fn rt_io_tcp_write(fd: i64, data: [u8]) -> i64
+extern fn rt_io_tcp_flush(fd: i64) -> bool
+extern fn rt_io_tcp_close(fd: i64) -> bool
+
+# TCP metadata / options
+extern fn rt_io_tcp_local_addr(fd: i64) -> text?
+extern fn rt_io_tcp_peer_addr(fd: i64) -> text?
+extern fn rt_io_tcp_set_nodelay(fd: i64, enabled: bool) -> bool
+extern fn rt_io_tcp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_set_write_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_tcp_shutdown(fd: i64, how: i64) -> bool
+
+# Text/bytes conversion
+extern fn rt_bytes_to_text(data: [u8]) -> text
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Shutdown
+export TcpListener
+export TcpStream

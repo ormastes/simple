@@ -1,0 +1,237 @@
+"""
+# Sync UDP I/O
+
+UDP datagram socket implementing Close trait.
+Connectionless, message-oriented network I/O.
+
+## Components
+
+| Type | Traits | Description |
+|------|--------|-------------|
+| UdpSocket | Close | Datagram socket for send/recv |
+
+## Send and Receive
+
+```simple
+val socket = UdpSocket.bind("127.0.0.1:0")?
+val addr = socket.local_addr()?
+
+# In real code with two sockets:
+# socket.send_to([72, 105], "127.0.0.1:9001")?
+# val (data, sender) = socket.recv_from(1024)?
+
+socket.close()?
+```
+
+## Connected Mode
+
+```simple
+val socket = UdpSocket.bind("127.0.0.1:0")?
+# socket.connect("127.0.0.1:9001")?
+# socket.send([72, 105])?
+# val data = socket.recv(1024)?
+socket.close()?
+```
+"""
+
+use std.common.io.traits.{Close}
+use std.common.io.error.{IoError, IoErrorKind}
+
+# ============================================================================
+# UdpSocket - UDP Datagram Socket
+# ============================================================================
+
+class UdpSocket with Close:
+    """UDP datagram socket.
+
+    Connectionless socket for sending/receiving datagrams.
+    Does not implement Read/Write since UDP is message-oriented,
+    not stream-oriented.
+
+    Example:
+        val socket = UdpSocket.bind("127.0.0.1:9000")?
+        socket.send_to([72, 105], "127.0.0.1:9001")?
+        val (data, sender) = socket.recv_from(1024)?
+        socket.close()?
+    """
+    fd: i64
+    open: bool
+
+    static fn bind(addr: text) -> Result<UdpSocket, IoError>:
+        """Bind to address.
+
+        Args:
+            addr: Address in "host:port" format
+
+        Returns:
+            Result with UdpSocket or error
+        """
+        val fd = rt_io_udp_bind(addr)
+        if fd < 0:
+            return Err(IoError.new(IoErrorKind.AddrInUse, "udp bind failed: {addr}"))
+        Ok(UdpSocket(fd: fd, open: true))
+
+    # --- Datagram operations ---
+
+    fn recv_from(size: i64) -> Result<([u8], text), IoError>:
+        """Receive datagram with sender address.
+
+        Args:
+            size: Maximum bytes to receive
+
+        Returns:
+            Result with (data, sender_address) tuple
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "socket is closed"))
+        val result = rt_io_udp_recv_from(self.fd, size)
+        if result == nil:
+            return Err(IoError.new(IoErrorKind.Other, "recv_from failed"))
+        Ok(result)
+
+    fn send_to(data: [u8], addr: text) -> Result<i64, IoError>:
+        """Send datagram to address.
+
+        Args:
+            data: Bytes to send
+            addr: Destination address
+
+        Returns:
+            Result with bytes sent
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "socket is closed"))
+        val sent = rt_io_udp_send_to(self.fd, data, addr)
+        if sent < 0:
+            return Err(IoError.new(IoErrorKind.Other, "send_to failed"))
+        Ok(sent)
+
+    fn connect(addr: text) -> Result<(), IoError>:
+        """Set default peer address.
+
+        After connect(), use send/recv instead of send_to/recv_from.
+
+        Args:
+            addr: Remote address
+
+        Returns:
+            Result or error
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "socket is closed"))
+        val ok = rt_io_udp_connect(self.fd, addr)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "udp connect failed: {addr}"))
+        Ok(())
+
+    fn send(data: [u8]) -> Result<i64, IoError>:
+        """Send to connected peer.
+
+        Requires prior connect().
+
+        Args:
+            data: Bytes to send
+
+        Returns:
+            Result with bytes sent
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "socket is closed"))
+        val sent = rt_io_udp_send(self.fd, data)
+        if sent < 0:
+            return Err(IoError.new(IoErrorKind.Other, "send failed"))
+        Ok(sent)
+
+    fn recv(size: i64) -> Result<[u8], IoError>:
+        """Receive from connected peer.
+
+        Requires prior connect().
+
+        Args:
+            size: Maximum bytes to receive
+
+        Returns:
+            Result with bytes received
+        """
+        if not self.open:
+            return Err(IoError.new(IoErrorKind.Other, "socket is closed"))
+        val data = rt_io_udp_recv(self.fd, size)
+        if data.len() < 0:
+            return Err(IoError.new(IoErrorKind.Other, "recv failed"))
+        Ok(data)
+
+    fn local_addr() -> Result<text, IoError>:
+        """Get local bound address.
+
+        Returns:
+            Result with address string
+        """
+        val addr = rt_io_udp_local_addr(self.fd)
+        if addr == nil:
+            return Err(IoError.new(IoErrorKind.Other, "local_addr failed"))
+        Ok(addr)
+
+    fn set_broadcast(enabled: bool) -> Result<(), IoError>:
+        """Enable/disable broadcast.
+
+        Args:
+            enabled: true to enable broadcast
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_udp_set_broadcast(self.fd, enabled)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_broadcast failed"))
+        Ok(())
+
+    fn set_read_timeout(ms: i64?) -> Result<(), IoError>:
+        """Set read timeout.
+
+        Args:
+            ms: Timeout in ms, or nil for no timeout
+
+        Returns:
+            Result or error
+        """
+        val ok = rt_io_udp_set_read_timeout(self.fd, ms)
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "set_read_timeout failed"))
+        Ok(())
+
+    # --- Close trait ---
+
+    me close() -> Result<(), IoError>:
+        """Close socket."""
+        if not self.open:
+            return Ok(())
+        val ok = rt_io_udp_close(self.fd)
+        self.open = false
+        if not ok:
+            return Err(IoError.new(IoErrorKind.Other, "close failed"))
+        Ok(())
+
+    fn is_open() -> bool:
+        """Check if socket is open."""
+        self.open
+
+# ============================================================================
+# FFI Functions
+# ============================================================================
+
+extern fn rt_io_udp_bind(addr: text) -> i64
+extern fn rt_io_udp_recv_from(fd: i64, size: i64) -> ([u8], text)?
+extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+extern fn rt_io_udp_connect(fd: i64, addr: text) -> bool
+extern fn rt_io_udp_send(fd: i64, data: [u8]) -> i64
+extern fn rt_io_udp_recv(fd: i64, size: i64) -> [u8]
+extern fn rt_io_udp_local_addr(fd: i64) -> text?
+extern fn rt_io_udp_set_broadcast(fd: i64, enabled: bool) -> bool
+extern fn rt_io_udp_set_read_timeout(fd: i64, ms: i64?) -> bool
+extern fn rt_io_udp_close(fd: i64) -> bool
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export UdpSocket

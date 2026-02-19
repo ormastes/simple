@@ -1,0 +1,249 @@
+# MathJax SFFI Wrapper
+#
+# Two-tier SFFI pattern for MathJax rendering.
+# Calls Node.js mathjax_bridge script to convert LaTeX to SVG/HTML.
+# Falls back gracefully when Node.js or the bridge script is unavailable.
+#
+# Usage:
+#   use std.mathjax.{mathjax_render, mathjax_render_svg, mathjax_render_math}
+#   val result = mathjax_render("x^{2} + 1", "svg")
+#   val svg = mathjax_render_svg("x^{2} + 1")
+#   val full = mathjax_render_math("x^2 + 1")  # parse + LaTeX + MathJax
+
+use std.math_repr.{render_latex_raw, to_pretty}
+
+# ============================================================================
+# Tier 1: Extern Declarations (Raw FFI)
+# ============================================================================
+
+extern fn rt_process_run_capture(command: text, args: [text]) -> (i64, text, text)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+
+# ============================================================================
+# Tier 2: Simple-Friendly Wrapper Functions
+# ============================================================================
+
+struct MathJaxResult:
+    svg: text
+    html: text
+    error_msg: text
+    success: bool
+
+fn mathjax_result(svg_val: text, html_val: text, err: text, ok: bool) -> MathJaxResult:
+    MathJaxResult(
+        svg: svg_val,
+        html: html_val,
+        error_msg: err,
+        success: ok
+    )
+
+# Module-level state for bridge path caching
+var _bridge_path: text = ""
+var _bridge_checked: bool = false
+
+fn _find_bridge_path() -> text:
+    if _bridge_checked:
+        return _bridge_path
+
+    _bridge_checked = true
+
+    # Check SIMPLE_HOME environment variable first
+    val simple_home = rt_env_get("SIMPLE_HOME") ?? ""
+    if simple_home != "":
+        val candidate = simple_home + "/scripts/mathjax_bridge/index.js"
+        if rt_file_exists(candidate):
+            _bridge_path = candidate
+            return _bridge_path
+
+    # Check relative to current working directory
+    val local = "scripts/mathjax_bridge/index.js"
+    if rt_file_exists(local):
+        _bridge_path = local
+        return _bridge_path
+
+    # Check common install locations
+    val home = rt_env_get("HOME") ?? ""
+    if home != "":
+        val home_candidate = home + "/.simple/scripts/mathjax_bridge/index.js"
+        if rt_file_exists(home_candidate):
+            _bridge_path = home_candidate
+            return _bridge_path
+
+    _bridge_path = ""
+    _bridge_path
+
+fn _percent_decode(encoded: text) -> text:
+    var result = ""
+    var i = 0
+    val slen = encoded.len()
+    for _loop in 0..100000:
+        if i >= slen:
+            break
+        val ch = encoded.substring(i, i + 1)
+        if ch == "%" and i + 2 < slen:
+            val hex = encoded.substring(i + 1, i + 3)
+            val high = _hex_val(hex.substring(0, 1))
+            val low = _hex_val(hex.substring(1, 2))
+            if high >= 0 and low >= 0:
+                val code = high * 16 + low
+                val decoded_char = _char_from_code(code)
+                result = result + decoded_char
+                i = i + 3
+            else:
+                result = result + ch
+                i = i + 1
+        else:
+            result = result + ch
+            i = i + 1
+    result
+
+fn _hex_val(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    if ch == "A" or ch == "a": return 10
+    if ch == "B" or ch == "b": return 11
+    if ch == "C" or ch == "c": return 12
+    if ch == "D" or ch == "d": return 13
+    if ch == "E" or ch == "e": return 14
+    if ch == "F" or ch == "f": return 15
+    -1
+
+extern fn rt_char_from_code(code: i64) -> text
+
+fn _char_from_code(code: i64) -> text:
+    rt_char_from_code(code)
+
+fn _parse_bridge_output(stdout: text) -> MathJaxResult:
+    # Output format: 3 lines
+    # SVG:<percent-encoded>
+    # HTML:<percent-encoded>
+    # ERROR:<percent-encoded>
+    var svg_val = ""
+    var html_val = ""
+    var err_val = ""
+
+    # Split by newlines manually
+    var current_line = ""
+    var line_num = 0
+    val slen = stdout.len()
+    var i = 0
+    for _loop in 0..1000000:
+        if i >= slen:
+            # Process last line
+            if line_num == 0 and current_line.starts_with("SVG:"):
+                svg_val = _percent_decode(current_line.substring(4, current_line.len()))
+            elif line_num == 1 and current_line.starts_with("HTML:"):
+                html_val = _percent_decode(current_line.substring(5, current_line.len()))
+            elif line_num == 2 and current_line.starts_with("ERROR:"):
+                err_val = _percent_decode(current_line.substring(6, current_line.len()))
+            break
+        val ch = stdout.substring(i, i + 1)
+        if ch == "\n":
+            if line_num == 0 and current_line.starts_with("SVG:"):
+                svg_val = _percent_decode(current_line.substring(4, current_line.len()))
+            elif line_num == 1 and current_line.starts_with("HTML:"):
+                html_val = _percent_decode(current_line.substring(5, current_line.len()))
+            elif line_num == 2 and current_line.starts_with("ERROR:"):
+                err_val = _percent_decode(current_line.substring(6, current_line.len()))
+            line_num = line_num + 1
+            current_line = ""
+            i = i + 1
+        else:
+            current_line = current_line + ch
+            i = i + 1
+
+    val ok = err_val == ""
+    mathjax_result(svg_val, html_val, err_val, ok)
+
+# === Public API ===
+
+fn mathjax_available() -> bool:
+    """Check if MathJax bridge is available (node + bridge script)."""
+    val bridge = _find_bridge_path()
+    if bridge == "":
+        return false
+    # Check that node is available
+    val result = rt_process_run_capture("node", ["--version"])
+    result.0 == 0
+
+fn mathjax_render(latex: text, format: text) -> MathJaxResult:
+    """Render LaTeX to SVG and/or HTML via MathJax.
+
+    Args:
+        latex - LaTeX string (e.g. "x^{2} + 1")
+        format - Output format: "svg", "html", or "both"
+
+    Returns:
+        MathJaxResult with svg, html, error_msg, success fields
+    """
+    val bridge = _find_bridge_path()
+    if bridge == "":
+        return mathjax_result("", "", "MathJax bridge not found", false)
+
+    val args = [bridge, "--format=" + format, "--latex", latex]
+    val result = rt_process_run_capture("node", args)
+    val exit_code = result.0
+    val stdout = result.1
+    val stderr = result.2
+
+    if exit_code != 0 and stdout == "":
+        return mathjax_result("", "", "Bridge process failed: " + stderr, false)
+
+    _parse_bridge_output(stdout)
+
+fn mathjax_render_svg(latex: text) -> text:
+    """Render LaTeX to SVG string. Returns empty string on error."""
+    val result = mathjax_render(latex, "svg")
+    result.svg
+
+fn mathjax_render_html(latex: text) -> text:
+    """Render LaTeX to HTML string. Returns empty string on error."""
+    val result = mathjax_render(latex, "html")
+    result.html
+
+fn mathjax_render_math(source: text) -> MathJaxResult:
+    """Full pipeline: parse math source, convert to LaTeX, render via MathJax.
+
+    Args:
+        source - Math expression source (e.g. "x^2 + 1")
+
+    Returns:
+        MathJaxResult with rendered SVG and HTML
+    """
+    val latex = render_latex_raw(source)
+    mathjax_render(latex, "both")
+
+fn mathjax_latex(source: text) -> text:
+    """Convert math source to LaTeX without rendering.
+
+    Args:
+        source - Math expression source (e.g. "x^2 + 1")
+
+    Returns:
+        LaTeX string (e.g. "x^{2} + 1")
+    """
+    render_latex_raw(source)
+
+fn mathjax_pretty(source: text) -> text:
+    """Convert math source to Unicode pretty text.
+
+    Args:
+        source - Math expression source (e.g. "x^2 + 1")
+
+    Returns:
+        Unicode pretty string (e.g. "x² + 1")
+    """
+    to_pretty(source)
+
+export MathJaxResult
+export mathjax_available, mathjax_render, mathjax_render_svg, mathjax_render_html
+export mathjax_render_math, mathjax_latex, mathjax_pretty

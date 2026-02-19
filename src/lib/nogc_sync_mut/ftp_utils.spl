@@ -1,0 +1,517 @@
+# FTP File Transfer Protocol Module
+# Comprehensive FTP client implementation with command support, response parsing,
+# and file transfer operations.
+#
+# Connection format: (host, port, username, mode, current_dir)
+# - host: text (server hostname/IP)
+# - port: i64 (server port, typically 21)
+# - username: text (authenticated username)
+# - mode: text ("ascii" or "binary")
+# - current_dir: text (current working directory)
+
+use std.platform.{normalize_path, is_absolute_path, join_path}
+
+# FTP Response Codes
+fn response_code_125() -> i64: 125  # Data connection already open; transfer starting
+fn response_code_150() -> i64: 150  # File status okay; about to open data connection
+fn response_code_200() -> i64: 200  # Command okay
+fn response_code_213() -> i64: 213  # File status
+fn response_code_214() -> i64: 214  # Help message
+fn response_code_220() -> i64: 220  # Service ready for new user
+fn response_code_221() -> i64: 221  # Service closing control connection
+fn response_code_226() -> i64: 226  # Closing data connection; requested action successful
+fn response_code_227() -> i64: 227  # Entering Passive Mode
+fn response_code_230() -> i64: 230  # User logged in, proceed
+fn response_code_250() -> i64: 250  # Requested file action okay, completed
+fn response_code_257() -> i64: 257  # Pathname created
+fn response_code_331() -> i64: 331  # User name okay, need password
+fn response_code_425() -> i64: 425  # Can't open data connection
+fn response_code_426() -> i64: 426  # Connection closed; transfer aborted
+fn response_code_450() -> i64: 450  # Requested file action not taken
+fn response_code_500() -> i64: 500  # Syntax error, command unrecognized
+fn response_code_501() -> i64: 501  # Syntax error in parameters or arguments
+fn response_code_502() -> i64: 502  # Command not implemented
+fn response_code_530() -> i64: 530  # Not logged in
+fn response_code_550() -> i64: 550  # Requested action not taken
+
+# Response Code Classification
+fn is_positive_preliminary(code: i64) -> bool:
+    code >= 100 and code < 200
+
+fn is_positive_completion(code: i64) -> bool:
+    code >= 200 and code < 300
+
+fn is_positive_intermediate(code: i64) -> bool:
+    code >= 300 and code < 400
+
+fn is_transient_negative(code: i64) -> bool:
+    code >= 400 and code < 500
+
+fn is_permanent_negative(code: i64) -> bool:
+    code >= 500 and code < 600
+
+fn is_success_response(code: i64) -> bool:
+    is_positive_completion(code) or is_positive_preliminary(code)
+
+fn is_error_response(code: i64) -> bool:
+    is_transient_negative(code) or is_permanent_negative(code)
+
+# Response Parsing
+fn parse_response_code(response: text) -> i64:
+    # Extract first 3 digits from response
+    if response.length() < 3:
+        return 0
+    val code_str = response.substring(0, 3)
+    val code = code_str.to_i64()
+    if code.?:
+        return code
+    return 0
+
+fn parse_response_message(response: text) -> text:
+    # Extract message after response code
+    if response.length() < 4:
+        return ""
+    return response.substring(4, response.length()).trim()
+
+fn parse_response(response: text) -> (i64, text):
+    # Parse response into (code, message) tuple
+    val code = parse_response_code(response)
+    val message = parse_response_message(response)
+    return (code, message)
+
+fn is_multiline_response(response: text) -> bool:
+    # Check if response is multiline (has dash after code)
+    if response.length() < 4:
+        return false
+    return response.substring(3, 4) == "-"
+
+# FTP Commands
+fn cmd_user(username: text) -> text:
+    "USER {username}\r\n"
+
+fn cmd_pass(password: text) -> text:
+    "PASS {password}\r\n"
+
+fn cmd_cwd(directory: text) -> text:
+    "CWD {directory}\r\n"
+
+fn cmd_pwd() -> text:
+    "PWD\r\n"
+
+fn cmd_list(path: text) -> text:
+    if path == "":
+        return "LIST\r\n"
+    "LIST {path}\r\n"
+
+fn cmd_retr(filename: text) -> text:
+    "RETR {filename}\r\n"
+
+fn cmd_stor(filename: text) -> text:
+    "STOR {filename}\r\n"
+
+fn cmd_dele(filename: text) -> text:
+    "DELE {filename}\r\n"
+
+fn cmd_mkd(directory: text) -> text:
+    "MKD {directory}\r\n"
+
+fn cmd_rmd(directory: text) -> text:
+    "RMD {directory}\r\n"
+
+fn cmd_rnfr(old_name: text) -> text:
+    "RNFR {old_name}\r\n"
+
+fn cmd_rnto(new_name: text) -> text:
+    "RNTO {new_name}\r\n"
+
+fn cmd_type_ascii() -> text:
+    "TYPE A\r\n"
+
+fn cmd_type_binary() -> text:
+    "TYPE I\r\n"
+
+fn cmd_mode_stream() -> text:
+    "MODE S\r\n"
+
+fn cmd_pasv() -> text:
+    "PASV\r\n"
+
+fn cmd_port(ip: text, port: i64) -> text:
+    # Convert IP and port to PORT command format
+    val port_high = port / 256
+    val port_low = port % 256
+    val ip_formatted = ip.replace(".", ",")
+    "PORT {ip_formatted},{port_high},{port_low}\r\n"
+
+fn cmd_quit() -> text:
+    "QUIT\r\n"
+
+fn cmd_noop() -> text:
+    "NOOP\r\n"
+
+fn cmd_syst() -> text:
+    "SYST\r\n"
+
+fn cmd_help() -> text:
+    "HELP\r\n"
+
+fn cmd_stat(path: text) -> text:
+    if path == "":
+        return "STAT\r\n"
+    "STAT {path}\r\n"
+
+# PASV Response Parsing
+fn parse_pasv_response(response: text) -> (text, i64):
+    # Extract IP and port from PASV response
+    # Format: "227 Entering Passive Mode (h1,h2,h3,h4,p1,p2)"
+    val start_idx = response.index_of("(")
+    if not start_idx.?:
+        return ("", 0)
+    val end_idx = response.index_of(")")
+    if not end_idx.?:
+        return ("", 0)
+
+    val start_pos = start_idx + 1
+    val end_pos = end_idx
+    val params = response.substring(start_pos, end_pos)
+    val parts = params.split(",")
+
+    if parts.length() != 6:
+        return ("", 0)
+
+    val h1 = parts[0].trim().to_i64()
+    val h2 = parts[1].trim().to_i64()
+    val h3 = parts[2].trim().to_i64()
+    val h4 = parts[3].trim().to_i64()
+    val p1 = parts[4].trim().to_i64()
+    val p2 = parts[5].trim().to_i64()
+
+    if not h1.? or not h2.? or not h3.? or not h4.? or not p1.? or not p2.?:
+        return ("", 0)
+
+    val ip = "{h1}.{h2}.{h3}.{h4}"
+    val port = p1 * 256 + p2
+
+    return (ip, port)
+
+fn extract_pasv_ip(response: text) -> text:
+    val result = parse_pasv_response(response)
+    return result[0]
+
+fn extract_pasv_port(response: text) -> i64:
+    val result = parse_pasv_response(response)
+    return result[1]
+
+# Path Operations
+# normalize_path, is_absolute_path imported from std.platform
+
+fn is_relative_path(path: text) -> bool:
+    not is_absolute_path(path)
+
+# Compatibility alias for join_path (platform.spl uses singular)
+fn join_paths(base: text, relative: text) -> text:
+    join_path(base, relative)
+
+fn get_parent_directory(path: text) -> text:
+    # Get parent directory of a path
+    val normalized = normalize_path(path)
+    if normalized == "/":
+        return "/"
+
+    val last_slash = normalized.last_index_of("/")
+    if not last_slash.?:
+        return "/"
+
+    if last_slash == 0:
+        return "/"
+
+    return normalized.substring(0, last_slash)
+
+fn get_filename(path: text) -> text:
+    # Extract filename from path
+    val normalized = normalize_path(path)
+    val last_slash = normalized.last_index_of("/")
+    if not last_slash.?:
+        return normalized
+
+    return normalized.substring(last_slash + 1, normalized.length())
+
+fn get_directory(path: text) -> text:
+    # Extract directory from path
+    return get_parent_directory(path)
+
+# File Listing Parsing
+fn parse_unix_listing_line(line: text) -> (text, i64, text, text):
+    # Parse Unix-style listing line
+    # Format: "drwxr-xr-x 2 user group 4096 Jan 1 12:00 filename"
+    # Returns: (permissions, size, date, name)
+    val parts = line.split_whitespace()
+    if parts.length() < 9:
+        return ("", 0, "", "")
+
+    val permissions = parts[0]
+    val size_str = parts[4]
+    val size = size_str.to_i64()
+    val month = parts[5]
+    val day = parts[6]
+    val time = parts[7]
+    val date = "{month} {day} {time}"
+
+    # Filename may contain spaces, so join remaining parts
+    var name = parts[8]
+    var i = 9
+    while i < parts.length():
+        name = name + " " + parts[i]
+        i = i + 1
+
+    val size_val = size ?? 0
+    return (permissions, size_val, date, name)
+
+fn parse_listing_permissions(line: text) -> text:
+    val result = parse_unix_listing_line(line)
+    return result[0]
+
+fn parse_listing_size(line: text) -> i64:
+    val result = parse_unix_listing_line(line)
+    return result[1]
+
+fn parse_listing_date(line: text) -> text:
+    val result = parse_unix_listing_line(line)
+    return result[2]
+
+fn parse_listing_name(line: text) -> text:
+    val result = parse_unix_listing_line(line)
+    return result[3]
+
+fn is_directory_listing(line: text) -> bool:
+    # Check if listing line represents a directory
+    val permissions = parse_listing_permissions(line)
+    if permissions.length() == 0:
+        return false
+    return permissions.starts_with("d")
+
+fn is_file_listing(line: text) -> bool:
+    # Check if listing line represents a file
+    val permissions = parse_listing_permissions(line)
+    if permissions.length() == 0:
+        return false
+    return permissions.starts_with("-")
+
+fn is_link_listing(line: text) -> bool:
+    # Check if listing line represents a symbolic link
+    val permissions = parse_listing_permissions(line)
+    if permissions.length() == 0:
+        return false
+    return permissions.starts_with("l")
+
+# Connection Management
+fn create_connection(host: text, port: i64, username: text) -> (text, i64, text, text, text):
+    # Create new connection tuple
+    # Returns: (host, port, username, mode, current_dir)
+    return (host, port, username, "binary", "/")
+
+fn get_connection_host(conn: (text, i64, text, text, text)) -> text:
+    return conn[0]
+
+fn get_connection_port(conn: (text, i64, text, text, text)) -> i64:
+    return conn[1]
+
+fn get_connection_username(conn: (text, i64, text, text, text)) -> text:
+    return conn[2]
+
+fn get_connection_mode(conn: (text, i64, text, text, text)) -> text:
+    return conn[3]
+
+fn get_connection_current_dir(conn: (text, i64, text, text, text)) -> text:
+    return conn[4]
+
+fn set_connection_mode(conn: (text, i64, text, text, text), mode: text) -> (text, i64, text, text, text):
+    # Update connection mode
+    val host = get_connection_host(conn)
+    val port = get_connection_port(conn)
+    val username = get_connection_username(conn)
+    val current_dir = get_connection_current_dir(conn)
+    return (host, port, username, mode, current_dir)
+
+fn set_connection_current_dir(conn: (text, i64, text, text, text), directory: text) -> (text, i64, text, text, text):
+    # Update current directory
+    val host = get_connection_host(conn)
+    val port = get_connection_port(conn)
+    val username = get_connection_username(conn)
+    val mode = get_connection_mode(conn)
+    return (host, port, username, mode, directory)
+
+fn is_ascii_mode(conn: (text, i64, text, text, text)) -> bool:
+    val mode = get_connection_mode(conn)
+    return mode == "ascii"
+
+fn is_binary_mode(conn: (text, i64, text, text, text)) -> bool:
+    val mode = get_connection_mode(conn)
+    return mode == "binary"
+
+# Transfer Mode Helpers
+fn transfer_mode_to_command(mode: text) -> text:
+    # Convert mode string to TYPE command
+    if mode == "ascii":
+        return cmd_type_ascii()
+    if mode == "binary":
+        return cmd_type_binary()
+    return cmd_type_binary()
+
+fn get_transfer_mode_ascii() -> text:
+    return "ascii"
+
+fn get_transfer_mode_binary() -> text:
+    return "binary"
+
+# Path Resolution
+fn resolve_path(conn: (text, i64, text, text, text), path: text) -> text:
+    # Resolve path relative to current directory
+    if is_absolute_path(path):
+        return normalize_path(path)
+
+    val current_dir = get_connection_current_dir(conn)
+    return join_paths(current_dir, path)
+
+# Response Validation
+fn validate_response_code(response: text, expected_code: i64) -> bool:
+    val code = parse_response_code(response)
+    return code == expected_code
+
+fn validate_response_range(response: text, min_code: i64, max_code: i64) -> bool:
+    val code = parse_response_code(response)
+    return code >= min_code and code <= max_code
+
+fn validate_success_response(response: text) -> bool:
+    val code = parse_response_code(response)
+    return is_success_response(code)
+
+fn validate_error_response(response: text) -> bool:
+    val code = parse_response_code(response)
+    return is_error_response(code)
+
+# Command Builders
+fn build_rename_command(old_name: text, new_name: text) -> text:
+    # Build RNFR + RNTO command sequence
+    val cmd1 = cmd_rnfr(old_name)
+    val cmd2 = cmd_rnto(new_name)
+    return "{cmd1}{cmd2}"
+
+fn build_upload_command(local_path: text, remote_path: text) -> text:
+    # Build STOR command for upload
+    val filename = get_filename(remote_path)
+    return cmd_stor(filename)
+
+fn build_download_command(remote_path: text) -> text:
+    # Build RETR command for download
+    val filename = get_filename(remote_path)
+    return cmd_retr(filename)
+
+fn build_delete_command(remote_path: text) -> text:
+    # Build DELE command for delete
+    val filename = get_filename(remote_path)
+    return cmd_dele(filename)
+
+# Directory Navigation
+fn change_directory_absolute(conn: (text, i64, text, text, text), directory: text) -> (text, i64, text, text, text):
+    # Change to absolute directory
+    val normalized = normalize_path(directory)
+    return set_connection_current_dir(conn, normalized)
+
+fn change_directory_relative(conn: (text, i64, text, text, text), directory: text) -> (text, i64, text, text, text):
+    # Change to relative directory
+    val current_dir = get_connection_current_dir(conn)
+    val new_dir = join_paths(current_dir, directory)
+    return set_connection_current_dir(conn, new_dir)
+
+fn change_directory_parent(conn: (text, i64, text, text, text)) -> (text, i64, text, text, text):
+    # Change to parent directory
+    val current_dir = get_connection_current_dir(conn)
+    val parent_dir = get_parent_directory(current_dir)
+    return set_connection_current_dir(conn, parent_dir)
+
+fn change_directory_root(conn: (text, i64, text, text, text)) -> (text, i64, text, text, text):
+    # Change to root directory
+    return set_connection_current_dir(conn, "/")
+
+# Utility Functions
+fn format_response(code: i64, message: text) -> text:
+    # Format response code and message
+    return "{code} {message}"
+
+fn is_valid_response(response: text) -> bool:
+    # Check if response has valid format
+    if response.length() < 3:
+        return false
+    val code = parse_response_code(response)
+    return code > 0
+
+fn extract_pwd_path(response: text) -> text:
+    # Extract path from PWD response
+    # Format: "257 "/path/to/dir" is current directory"
+    val start_idx = response.index_of("\"")
+    if not start_idx.?:
+        return ""
+    val end_idx = response.index_of("\"", start_idx + 1)
+    if not end_idx.?:
+        return ""
+
+    val path = response.substring(start_idx + 1, end_idx)
+    return path
+
+fn extract_mkd_path(response: text) -> text:
+    # Extract path from MKD response
+    # Format: "257 "/path/to/dir" created"
+    return extract_pwd_path(response)
+
+# File Type Detection
+fn is_text_file(filename: text) -> bool:
+    # Check if filename represents a text file
+    val lower = filename.to_lower()
+    val result = lower.ends_with(".txt") or lower.ends_with(".log") or lower.ends_with(".md") or lower.ends_with(".html") or lower.ends_with(".xml") or lower.ends_with(".json")
+    return result
+
+fn is_binary_file(filename: text) -> bool:
+    # Check if filename represents a binary file
+    return not is_text_file(filename)
+
+fn recommend_transfer_mode(filename: text) -> text:
+    # Recommend transfer mode based on filename
+    if is_text_file(filename):
+        return get_transfer_mode_ascii()
+    return get_transfer_mode_binary()
+
+# Connection String Helpers
+fn format_connection_string(host: text, port: i64, username: text) -> text:
+    # Format connection string for display
+    return "ftp://{username}@{host}:{port}"
+
+fn parse_connection_string(conn_str: text) -> (text, i64, text):
+    # Parse connection string into components
+    # Format: "ftp://username@host:port"
+    var working = conn_str
+
+    # Remove protocol
+    if working.starts_with("ftp://"):
+        working = working.substring(6, working.length())
+
+    # Extract username
+    val at_idx = working.index_of("@")
+    var username = "anonymous"
+    if at_idx.?:
+        username = working.substring(0, at_idx)
+        working = working.substring(at_idx + 1, working.length())
+
+    # Extract host and port
+    val colon_idx = working.index_of(":")
+    var host = working
+    var port = 21
+
+    if colon_idx.?:
+        host = working.substring(0, colon_idx)
+        val port_str = working.substring(colon_idx + 1, working.length())
+        val port_val = port_str.to_i64()
+        if port_val.?:
+            port = port_val
+
+    return (host, port, username)

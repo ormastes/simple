@@ -1,0 +1,185 @@
+"""
+# I/O Traits - Sync
+
+Fine-grained sync I/O traits: Read, Write, Seek, Close.
+These form the core abstraction for all synchronous I/O in Simple.
+
+## Design
+
+- Each trait is independent and composable
+- Implementors mix in only what they support
+- BufferedReader/Writer accept any Read/Write implementor
+
+## Trait Summary
+
+| Trait | Methods | Use Case |
+|-------|---------|----------|
+| Read | read, read_exact, read_all, read_text, read_line | Byte/text input |
+| Write | write, write_all, write_text, flush | Byte/text output |
+| Seek | seek, position, rewind | Random access |
+| Close | close, is_open | Resource cleanup |
+
+## Implementing a Custom Reader
+
+```simple
+class StringReader with Read:
+    data: [u8]
+    pos: i64
+
+    static fn new(s: text) -> StringReader:
+        StringReader(data: rt_text_to_bytes(s), pos: 0)
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        val end = if self.pos + size > self.data.len(): self.data.len() else: self.pos + size
+        val chunk = self.data.slice(self.pos, end)
+        self.pos = end
+        Ok(chunk)
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        self.read(size)
+
+    fn read_all() -> Result<[u8], IoError>:
+        self.read(self.data.len() - self.pos)
+
+    fn read_text() -> Result<text, IoError>:
+        val bytes = self.read_all()?
+        Ok(rt_bytes_to_text(bytes))
+
+    fn read_line() -> Result<text, IoError>:
+        self.read_text()
+```
+
+## Composing Traits
+
+```simple
+class FileStream with Read, Write, Close:
+    open: bool
+
+    fn read(size: i64) -> Result<[u8], IoError>:
+        Ok([])
+
+    fn read_exact(size: i64) -> Result<[u8], IoError>:
+        Ok([])
+
+    fn read_all() -> Result<[u8], IoError>:
+        Ok([])
+
+    fn read_text() -> Result<text, IoError>:
+        Ok("")
+
+    fn read_line() -> Result<text, IoError>:
+        Ok("")
+
+    fn write(data: [u8]) -> Result<i64, IoError>:
+        Ok(data.len())
+
+    fn write_all(data: [u8]) -> Result<(), IoError>:
+        Ok(())
+
+    fn write_text(s: text) -> Result<(), IoError>:
+        Ok(())
+
+    fn flush() -> Result<(), IoError>:
+        Ok(())
+
+    me close() -> Result<(), IoError>:
+        self.open = false
+        Ok(())
+
+    fn is_open() -> bool:
+        self.open
+```
+"""
+
+use std.common.io.error.{IoError, SeekFrom}
+
+# ============================================================================
+# Read - Sync Read Trait
+# ============================================================================
+
+trait Read:
+    """Read bytes from a source.
+
+    Implementors provide byte-level reading with various convenience methods.
+
+    ```simple
+    fn process(reader: Read) -> Result<text, IoError>:
+        val data = reader.read(1024)?
+        val all = reader.read_text()?
+        Ok(all)
+    ```
+    """
+    fn read(size: i64) -> Result<[u8], IoError>
+    fn read_exact(size: i64) -> Result<[u8], IoError>
+    fn read_all() -> Result<[u8], IoError>
+    fn read_text() -> Result<text, IoError>
+    fn read_line() -> Result<text, IoError>
+
+# ============================================================================
+# Write - Sync Write Trait
+# ============================================================================
+
+trait Write:
+    """Write bytes to a destination.
+
+    Implementors provide byte-level writing with flush support.
+
+    ```simple
+    fn emit(writer: Write) -> Result<(), IoError>:
+        writer.write_text("hello")?
+        writer.flush()?
+        Ok(())
+    ```
+    """
+    fn write(data: [u8]) -> Result<i64, IoError>
+    fn write_all(data: [u8]) -> Result<(), IoError>
+    fn write_text(s: text) -> Result<(), IoError>
+    fn flush() -> Result<(), IoError>
+
+# ============================================================================
+# Seek - Sync Seek Trait
+# ============================================================================
+
+trait Seek:
+    """Seek to a position in a stream.
+
+    Supports absolute, relative, and end-relative positioning.
+
+    ```simple
+    fn reread(seekable: Seek) -> Result<(), IoError>:
+        seekable.rewind()?
+        val pos = seekable.position()?
+        Ok(())
+    ```
+    """
+    fn seek(pos: SeekFrom) -> Result<i64, IoError>
+    fn position() -> Result<i64, IoError>
+    fn rewind() -> Result<(), IoError>
+
+# ============================================================================
+# Close - Sync Close Trait
+# ============================================================================
+
+trait Close:
+    """Close a resource and release underlying handles.
+
+    Uses `me` (mutable self) for close since it transitions state.
+
+    ```simple
+    fn done(resource: Close) -> Result<(), IoError>:
+        if resource.is_open():
+            resource.close()?
+        Ok(())
+    ```
+    """
+    me close() -> Result<(), IoError>
+    fn is_open() -> bool
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export Read
+export Write
+export Seek
+export Close
